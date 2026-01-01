@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 const SCHEMA: &str = r#"
 -- Roots: scanned folder roots
@@ -73,6 +74,14 @@ pub fn open(path: &Path) -> Result<Connection> {
 
     let conn = Connection::open(path)
         .with_context(|| format!("Failed to open database: {}", path.display()))?;
+
+    // Enable WAL mode for concurrent read/write access
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .context("Failed to enable WAL mode")?;
+
+    // Set busy timeout to 30 seconds (retry instead of failing immediately)
+    conn.busy_timeout(Duration::from_secs(30))
+        .context("Failed to set busy timeout")?;
 
     conn.execute_batch(SCHEMA)
         .context("Failed to initialize database schema")?;
