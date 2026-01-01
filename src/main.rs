@@ -4,6 +4,7 @@ use std::path::PathBuf;
 mod apply;
 mod cluster;
 mod db;
+mod facts;
 mod filter;
 mod import_facts;
 mod scan;
@@ -40,6 +41,16 @@ enum Commands {
     },
     /// Import facts from JSONL on stdin
     ImportFacts,
+    /// Show fact coverage and value distribution
+    Facts {
+        /// Specific fact key to show value distribution
+        key: Option<String>,
+        /// Directory path to scope the query (resolved to realpath)
+        path: Option<PathBuf>,
+        /// Filter expressions (e.g., "ext=jpg" or "content_hash.sha256?")
+        #[arg(long = "where")]
+        filters: Vec<String>,
+    },
     /// Generate a cluster manifest from matching sources
     Cluster {
         #[command(subcommand)]
@@ -99,6 +110,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::ImportFacts => {
             import_facts::run(&db_path)?;
+        }
+        Commands::Facts { key, path, filters } => {
+            facts::run(&db_path, key.as_deref(), path.as_deref(), &filters)?;
         }
         Commands::Cluster { action } => match action {
             ClusterAction::Generate {
