@@ -19,6 +19,11 @@ struct WorklistEntry {
     basis_rev: i64,
 }
 
+struct FetchResult {
+    entries: Vec<WorklistEntry>,
+    max_id_seen: Option<i64>,
+}
+
 pub fn run(db_path: &Path, filter_strs: &[String]) -> Result<()> {
     // Parse filters upfront
     let filters: Vec<Filter> = filter_strs
@@ -33,25 +38,27 @@ pub fn run(db_path: &Path, filter_strs: &[String]) -> Result<()> {
     loop {
         // Open connection for each batch to avoid holding locks
         let conn = db::open(db_path)?;
-        let batch = fetch_batch(&conn, last_id, &filters)?;
+        let result = fetch_batch(&conn, last_id, &filters)?;
 
-        if batch.is_empty() {
-            break;
-        }
+        // If we didn't see any source IDs, we're done
+        let max_id = match result.max_id_seen {
+            Some(id) => id,
+            None => break,
+        };
 
-        for entry in &batch {
+        for entry in &result.entries {
             let json = serde_json::to_string(entry)?;
             writeln!(handle, "{}", json)?;
         }
 
-        last_id = batch.last().unwrap().source_id;
+        last_id = max_id;
         // Connection dropped here, releasing any locks
     }
 
     Ok(())
 }
 
-fn fetch_batch(conn: &Connection, after_id: i64, filters: &[Filter]) -> Result<Vec<WorklistEntry>> {
+fn fetch_batch(conn: &Connection, after_id: i64, filters: &[Filter]) -> Result<FetchResult> {
     // First, get source IDs in this batch
     let source_ids: Vec<i64> = conn
         .prepare(
@@ -66,8 +73,14 @@ fn fetch_batch(conn: &Connection, after_id: i64, filters: &[Filter]) -> Result<V
         .collect::<Result<Vec<_>, _>>()?;
 
     if source_ids.is_empty() {
-        return Ok(Vec::new());
+        return Ok(FetchResult {
+            entries: Vec::new(),
+            max_id_seen: None,
+        });
     }
+
+    // Track the max ID we fetched (for pagination), before filtering
+    let max_id_seen = source_ids.last().copied();
 
     // Apply filters
     let filtered_ids = if filters.is_empty() {
@@ -84,7 +97,10 @@ fn fetch_batch(conn: &Connection, after_id: i64, filters: &[Filter]) -> Result<V
         }
     }
 
-    Ok(entries)
+    Ok(FetchResult {
+        entries,
+        max_id_seen,
+    })
 }
 
 fn fetch_entry(conn: &Connection, source_id: i64) -> Result<Option<WorklistEntry>> {
