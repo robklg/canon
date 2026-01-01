@@ -14,7 +14,7 @@ struct FactImport {
     source_id: i64,
     basis_rev: i64,
     #[serde(default = "current_timestamp")]
-    fetched_at: i64,
+    observed_at: i64,
     facts: HashMap<String, Value>,
 }
 
@@ -134,7 +134,7 @@ fn process_import(conn: &Connection, import: &FactImport, stats: &mut ImportStat
                 object_id.unwrap(),
                 key,
                 value,
-                import.fetched_at,
+                import.observed_at,
                 None, // object facts don't have observed_basis_rev
             )?;
             stats.facts_imported += 1;
@@ -147,7 +147,7 @@ fn process_import(conn: &Connection, import: &FactImport, stats: &mut ImportStat
                 import.source_id,
                 key,
                 value,
-                import.fetched_at,
+                import.observed_at,
                 Some(import.basis_rev),
             )?;
             stats.facts_imported += 1;
@@ -159,7 +159,7 @@ fn process_import(conn: &Connection, import: &FactImport, stats: &mut ImportStat
                 import.source_id,
                 key,
                 value,
-                import.fetched_at,
+                import.observed_at,
                 Some(import.basis_rev),
             )?;
             stats.facts_imported += 1;

@@ -76,7 +76,7 @@ while IFS= read -r line; do
         '{
             source_id: $source_id,
             basis_rev: $basis_rev,
-            fetched_at: (now | floor),
+            observed_at: (now | floor),
             facts: $facts
         }'
 done

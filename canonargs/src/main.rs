@@ -38,7 +38,7 @@ struct WorklistEntry {
 struct FactOutput {
     source_id: i64,
     basis_rev: i64,
-    fetched_at: i64,
+    observed_at: i64,
     facts: HashMap<String, serde_json::Value>,
 }
 
@@ -142,7 +142,7 @@ fn process_entry(
     Ok(FactOutput {
         source_id: entry.source_id,
         basis_rev: entry.basis_rev,
-        fetched_at: current_timestamp(),
+        observed_at: current_timestamp(),
         facts,
     })
 }
