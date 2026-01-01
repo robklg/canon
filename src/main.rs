@@ -50,6 +50,9 @@ enum Commands {
         /// Filter expressions (e.g., "ext=jpg" or "content_hash.sha256?")
         #[arg(long = "where")]
         filters: Vec<String>,
+        /// Maximum number of values to show (0 for unlimited, default 50)
+        #[arg(long, default_value = "50")]
+        limit: usize,
     },
     /// Generate a cluster manifest from matching sources
     Cluster {
@@ -111,8 +114,8 @@ fn main() -> anyhow::Result<()> {
         Commands::ImportFacts => {
             import_facts::run(&db_path)?;
         }
-        Commands::Facts { key, path, filters } => {
-            facts::run(&db_path, key.as_deref(), path.as_deref(), &filters)?;
+        Commands::Facts { key, path, filters, limit } => {
+            facts::run(&db_path, key.as_deref(), path.as_deref(), &filters, limit)?;
         }
         Commands::Cluster { action } => match action {
             ClusterAction::Generate {
