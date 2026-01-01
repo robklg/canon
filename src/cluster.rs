@@ -1,5 +1,5 @@
-use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use anyhow::{Context, Result};
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -7,27 +7,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db;
-
-#[derive(Debug, Clone)]
-pub enum Filter {
-    Exists { key: String },
-    Equals { key: String, value: String },
-}
-
-impl Filter {
-    pub fn parse(s: &str) -> Result<Self> {
-        if let Some(key) = s.strip_suffix('?') {
-            Ok(Filter::Exists { key: key.to_string() })
-        } else if let Some((key, value)) = s.split_once('=') {
-            Ok(Filter::Equals {
-                key: key.to_string(),
-                value: value.to_string(),
-            })
-        } else {
-            bail!("Invalid filter syntax: {}. Use 'key?' for existence or 'key=value' for equality", s);
-        }
-    }
-}
+use crate::filter::{self, Filter};
 
 #[derive(Serialize, Deserialize)]
 pub struct Manifest {
@@ -145,9 +125,7 @@ fn query_sources(
         .collect::<Result<Vec<_>, _>>()?;
 
     // Apply filters
-    for filter in filters {
-        source_ids = apply_filter(conn, &source_ids, filter)?;
-    }
+    source_ids = filter::apply_filters(conn, &source_ids, filters)?;
 
     // Check which sources are already archived (same object_id exists in an archive root)
     let mut sources = Vec::new();
@@ -199,128 +177,6 @@ fn find_in_archive(conn: &Connection, hash_value: &str) -> Result<Option<String>
             format!("{}/{}", root, rel)
         }
     }))
-}
-
-fn apply_filter(conn: &Connection, source_ids: &[i64], filter: &Filter) -> Result<Vec<i64>> {
-    let mut result = Vec::new();
-
-    for &source_id in source_ids {
-        let matches = match filter {
-            Filter::Exists { key } => check_fact_exists(conn, source_id, key)?,
-            Filter::Equals { key, value } => check_fact_equals(conn, source_id, key, value)?,
-        };
-        if matches {
-            result.push(source_id);
-        }
-    }
-
-    Ok(result)
-}
-
-fn check_fact_exists(conn: &Connection, source_id: i64, key: &str) -> Result<bool> {
-    // Check source facts
-    let source_exists: bool = conn
-        .query_row(
-            "SELECT 1 FROM facts WHERE entity_type = 'source' AND entity_id = ? AND key = ?",
-            params![source_id, key],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-
-    if source_exists {
-        return Ok(true);
-    }
-
-    // Check object facts if source has an object
-    let object_id: Option<i64> = conn
-        .query_row(
-            "SELECT object_id FROM sources WHERE id = ?",
-            [source_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(None);
-
-    if let Some(obj_id) = object_id {
-        let object_exists: bool = conn
-            .query_row(
-                "SELECT 1 FROM facts WHERE entity_type = 'object' AND entity_id = ? AND key = ?",
-                params![obj_id, key],
-                |_| Ok(true),
-            )
-            .unwrap_or(false);
-
-        if object_exists {
-            return Ok(true);
-        }
-    }
-
-    // Special case: check for built-in fields
-    match key {
-        "root_id" | "size" | "mtime" | "basis_rev" | "object_id" => Ok(true),
-        "hash" | "content_hash" => Ok(object_id.is_some()),
-        _ => Ok(false),
-    }
-}
-
-fn check_fact_equals(conn: &Connection, source_id: i64, key: &str, value: &str) -> Result<bool> {
-    // Handle built-in fields first
-    match key {
-        "root_id" => {
-            let v: i64 = conn.query_row(
-                "SELECT root_id FROM sources WHERE id = ?",
-                [source_id],
-                |row| row.get(0),
-            )?;
-            return Ok(v.to_string() == value);
-        }
-        "size" => {
-            let v: i64 = conn.query_row(
-                "SELECT size FROM sources WHERE id = ?",
-                [source_id],
-                |row| row.get(0),
-            )?;
-            return Ok(v.to_string() == value);
-        }
-        _ => {}
-    }
-
-    // Check source facts
-    let source_match: bool = conn
-        .query_row(
-            "SELECT 1 FROM facts WHERE entity_type = 'source' AND entity_id = ? AND key = ? AND value_text = ?",
-            params![source_id, key, value],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-
-    if source_match {
-        return Ok(true);
-    }
-
-    // Check object facts
-    let object_id: Option<i64> = conn
-        .query_row(
-            "SELECT object_id FROM sources WHERE id = ?",
-            [source_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(None);
-
-    if let Some(obj_id) = object_id {
-        let object_match: bool = conn
-            .query_row(
-                "SELECT 1 FROM facts WHERE entity_type = 'object' AND entity_id = ? AND key = ? AND value_text = ?",
-                params![obj_id, key, value],
-                |_| Ok(true),
-            )
-            .unwrap_or(false);
-
-        if object_match {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
 }
 
 fn fetch_source(conn: &Connection, source_id: i64) -> Result<Option<ManifestSource>> {

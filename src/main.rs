@@ -4,6 +4,7 @@ use std::path::PathBuf;
 mod apply;
 mod cluster;
 mod db;
+mod filter;
 mod import_facts;
 mod scan;
 mod worklist;
@@ -31,8 +32,12 @@ enum Commands {
         #[arg(long, default_value = "source")]
         role: String,
     },
-    /// Output all sources as JSONL worklist
-    Worklist,
+    /// Output sources as JSONL worklist
+    Worklist {
+        /// Filter expressions (e.g., "!content_hash.sha256?" or "ext=jpg")
+        #[arg(long = "where")]
+        filters: Vec<String>,
+    },
     /// Import facts from JSONL on stdin
     ImportFacts,
     /// Generate a cluster manifest from matching sources
@@ -89,8 +94,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Scan { paths, role } => {
             scan::run(&db_path, &paths, &role)?;
         }
-        Commands::Worklist => {
-            worklist::run(&db_path)?;
+        Commands::Worklist { filters } => {
+            worklist::run(&db_path, &filters)?;
         }
         Commands::ImportFacts => {
             import_facts::run(&db_path)?;
