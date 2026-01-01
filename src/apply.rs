@@ -1,9 +1,11 @@
 use anyhow::{bail, Context, Result};
+use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cluster::{Manifest, ManifestSource};
+use crate::db;
 
 #[derive(Default)]
 struct ApplyStats {
@@ -13,18 +15,57 @@ struct ApplyStats {
     errors: u64,
 }
 
-pub fn run(manifest_path: &Path, dry_run: bool) -> Result<()> {
+pub struct ApplyOptions {
+    pub dry_run: bool,
+    pub force: bool,
+    pub allow_cross_archive_duplicates: bool,
+}
+
+pub fn run(db_path: &Path, manifest_path: &Path, options: &ApplyOptions) -> Result<()> {
     let content = fs::read_to_string(manifest_path)
         .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
 
     let manifest: Manifest = toml::from_str(&content)
         .with_context(|| format!("Failed to parse manifest: {}", manifest_path.display()))?;
 
-    let base_dir = PathBuf::from(&manifest.output.base_dir);
+    let base_dir = fs::canonicalize(&manifest.output.base_dir).unwrap_or_else(|_| {
+        PathBuf::from(&manifest.output.base_dir)
+    });
+
+    // Pre-flight archive check
+    if !options.force {
+        let conn = db::open(db_path)?;
+        let conflicts = check_archive_conflicts(&conn, &manifest, &base_dir)?;
+
+        if !conflicts.in_dest_archive.is_empty() {
+            eprintln!(
+                "Error: {} files already exist in destination archive:",
+                conflicts.in_dest_archive.len()
+            );
+            for (src, dst) in &conflicts.in_dest_archive {
+                eprintln!("  {} -> {}", src, dst);
+            }
+            eprintln!("\nUse --force to copy anyway");
+            bail!("Aborting due to files already in destination archive");
+        }
+
+        if !conflicts.in_other_archives.is_empty() && !options.allow_cross_archive_duplicates {
+            eprintln!(
+                "Error: {} files already exist in other archive(s):",
+                conflicts.in_other_archives.len()
+            );
+            for (src, dst) in &conflicts.in_other_archives {
+                eprintln!("  {} -> {}", src, dst);
+            }
+            eprintln!("\nUse --allow-cross-archive-duplicates to copy anyway, or --force to skip all checks");
+            bail!("Aborting due to files already in other archives");
+        }
+    }
+
     let mut stats = ApplyStats::default();
 
     for source in &manifest.sources {
-        match process_source(source, &manifest.output.pattern, &base_dir, dry_run) {
+        match process_source(source, &manifest.output.pattern, &base_dir, options.dry_run) {
             Ok(action) => match action {
                 ApplyAction::Copied => stats.copied += 1,
                 ApplyAction::SkippedExists => stats.skipped_exists += 1,
@@ -37,13 +78,84 @@ pub fn run(manifest_path: &Path, dry_run: bool) -> Result<()> {
         }
     }
 
-    let mode = if dry_run { " (dry-run)" } else { "" };
+    let mode = if options.dry_run { " (dry-run)" } else { "" };
     println!(
         "Applied{}: {} copied, {} skipped (exists), {} skipped (missing), {} errors",
         mode, stats.copied, stats.skipped_exists, stats.skipped_missing, stats.errors
     );
 
     Ok(())
+}
+
+struct ArchiveConflicts {
+    in_dest_archive: Vec<(String, String)>,   // (source_path, archive_path)
+    in_other_archives: Vec<(String, String)>, // (source_path, archive_path)
+}
+
+fn check_archive_conflicts(
+    conn: &Connection,
+    manifest: &Manifest,
+    base_dir: &Path,
+) -> Result<ArchiveConflicts> {
+    let mut conflicts = ArchiveConflicts {
+        in_dest_archive: Vec::new(),
+        in_other_archives: Vec::new(),
+    };
+
+    // Find if base_dir is inside an archive root
+    let dest_archive_id: Option<i64> = find_archive_for_path(conn, base_dir)?;
+
+    for source in &manifest.sources {
+        if let Some(ref hash) = source.hash_value {
+            // Check if this hash exists in any archive
+            let archive_match: Option<(i64, String, String)> = conn
+                .query_row(
+                    "SELECT r.id, r.path, s.rel_path
+                     FROM sources s
+                     JOIN roots r ON s.root_id = r.id
+                     JOIN objects o ON s.object_id = o.id
+                     WHERE r.role = 'archive' AND o.hash_value = ? AND s.present = 1
+                     LIMIT 1",
+                    [hash],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+
+            if let Some((archive_id, root_path, rel_path)) = archive_match {
+                let archive_path = if rel_path.is_empty() {
+                    root_path
+                } else {
+                    format!("{}/{}", root_path, rel_path)
+                };
+
+                if Some(archive_id) == dest_archive_id {
+                    conflicts.in_dest_archive.push((source.path.clone(), archive_path));
+                } else {
+                    conflicts.in_other_archives.push((source.path.clone(), archive_path));
+                }
+            }
+        }
+    }
+
+    Ok(conflicts)
+}
+
+fn find_archive_for_path(conn: &Connection, path: &Path) -> Result<Option<i64>> {
+    let path_str = path.to_str().unwrap_or("");
+
+    // Find archive roots and check if path is inside any of them
+    let mut stmt = conn.prepare("SELECT id, path FROM roots WHERE role = 'archive'")?;
+    let archives: Vec<(i64, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (id, archive_path) in archives {
+        if path_str.starts_with(&archive_path) || path_str == archive_path {
+            return Ok(Some(id));
+        }
+    }
+
+    Ok(None)
 }
 
 enum ApplyAction {

@@ -27,6 +27,9 @@ enum Commands {
         /// Paths to scan
         #[arg(required = true)]
         paths: Vec<PathBuf>,
+        /// Role for new roots: 'source' (default) or 'archive'
+        #[arg(long, default_value = "source")]
+        role: String,
     },
     /// Output all sources as JSONL worklist
     Worklist,
@@ -44,6 +47,12 @@ enum Commands {
         /// Show what would be done without making changes
         #[arg(long)]
         dry_run: bool,
+        /// Skip all archive conflict checks
+        #[arg(long)]
+        force: bool,
+        /// Allow copying files that exist in other archives (but not destination archive)
+        #[arg(long)]
+        allow_cross_archive_duplicates: bool,
     },
 }
 
@@ -57,6 +66,12 @@ enum ClusterAction {
         /// Output manifest file
         #[arg(short, long, default_value = "manifest.toml")]
         output: PathBuf,
+        /// Include files already in an archive (by default they are excluded)
+        #[arg(long)]
+        include_archived: bool,
+        /// Show which files were excluded because they're already archived
+        #[arg(long)]
+        show_archived: bool,
     },
 }
 
@@ -71,8 +86,8 @@ fn main() -> anyhow::Result<()> {
     });
 
     match cli.command {
-        Commands::Scan { paths } => {
-            scan::run(&db_path, &paths)?;
+        Commands::Scan { paths, role } => {
+            scan::run(&db_path, &paths, &role)?;
         }
         Commands::Worklist => {
             worklist::run(&db_path)?;
@@ -81,12 +96,31 @@ fn main() -> anyhow::Result<()> {
             import_facts::run(&db_path)?;
         }
         Commands::Cluster { action } => match action {
-            ClusterAction::Generate { filters, output } => {
-                cluster::generate(&db_path, &filters, &output)?;
+            ClusterAction::Generate {
+                filters,
+                output,
+                include_archived,
+                show_archived,
+            } => {
+                let options = cluster::GenerateOptions {
+                    include_archived,
+                    show_archived,
+                };
+                cluster::generate(&db_path, &filters, &output, &options)?;
             }
         },
-        Commands::Apply { manifest, dry_run } => {
-            apply::run(&manifest, dry_run)?;
+        Commands::Apply {
+            manifest,
+            dry_run,
+            force,
+            allow_cross_archive_duplicates,
+        } => {
+            let options = apply::ApplyOptions {
+                dry_run,
+                force,
+                allow_cross_archive_duplicates,
+            };
+            apply::run(&db_path, &manifest, &options)?;
         }
     }
 

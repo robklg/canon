@@ -19,7 +19,12 @@ struct ScanStats {
     missing: u64,
 }
 
-pub fn run(db_path: &Path, paths: &[PathBuf]) -> Result<()> {
+pub fn run(db_path: &Path, paths: &[PathBuf], role: &str) -> Result<()> {
+    // Validate role
+    if role != "source" && role != "archive" {
+        bail!("Invalid role '{}'. Must be 'source' or 'archive'", role);
+    }
+
     let conn = db::open(db_path)?;
     let now = current_timestamp();
 
@@ -29,7 +34,7 @@ pub fn run(db_path: &Path, paths: &[PathBuf]) -> Result<()> {
         let canonical = fs::canonicalize(path)
             .with_context(|| format!("Failed to canonicalize path: {}", path.display()))?;
 
-        let root_id = get_or_create_root(&conn, &canonical)?;
+        let root_id = get_or_create_root(&conn, &canonical, role)?;
         check_overlapping_roots(&conn, &canonical)?;
 
         let stats = scan_root(&conn, root_id, &canonical, now)?;
@@ -55,22 +60,35 @@ pub fn run(db_path: &Path, paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn get_or_create_root(conn: &Connection, path: &Path) -> Result<i64> {
+fn get_or_create_root(conn: &Connection, path: &Path, role: &str) -> Result<i64> {
     let path_str = path.to_str().context("Path is not valid UTF-8")?;
 
     // Try to find existing root
-    let existing: Option<i64> = conn
-        .query_row("SELECT id FROM roots WHERE path = ?", [path_str], |row| {
-            row.get(0)
-        })
+    let existing: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, role FROM roots WHERE path = ?",
+            [path_str],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
         .optional()?;
 
-    if let Some(id) = existing {
+    if let Some((id, existing_role)) = existing {
+        if existing_role != role {
+            bail!(
+                "Root {} already exists with role '{}', cannot change to '{}'",
+                path.display(),
+                existing_role,
+                role
+            );
+        }
         return Ok(id);
     }
 
     // Create new root
-    conn.execute("INSERT INTO roots (path) VALUES (?)", [path_str])?;
+    conn.execute(
+        "INSERT INTO roots (path, role) VALUES (?, ?)",
+        params![path_str, role],
+    )?;
     Ok(conn.last_insert_rowid())
 }
 

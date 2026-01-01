@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -58,7 +58,17 @@ pub struct ManifestSource {
     pub facts: HashMap<String, serde_json::Value>,
 }
 
-pub fn generate(db_path: &Path, filters: &[String], output_path: &Path) -> Result<()> {
+pub struct GenerateOptions {
+    pub include_archived: bool,
+    pub show_archived: bool,
+}
+
+pub fn generate(
+    db_path: &Path,
+    filters: &[String],
+    output_path: &Path,
+    options: &GenerateOptions,
+) -> Result<()> {
     let conn = db::open(db_path)?;
 
     let parsed_filters: Vec<Filter> = filters
@@ -66,7 +76,23 @@ pub fn generate(db_path: &Path, filters: &[String], output_path: &Path) -> Resul
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    let sources = query_sources(&conn, &parsed_filters)?;
+    let (sources, archived) = query_sources(&conn, &parsed_filters, options.include_archived)?;
+
+    // Report archived files
+    if !archived.is_empty() {
+        eprintln!(
+            "Excluded {} files already in archive(s)",
+            archived.len()
+        );
+        if options.show_archived {
+            eprintln!("Archived files:");
+            for (source_path, archive_path) in &archived {
+                eprintln!("  {} -> {}", source_path, archive_path);
+            }
+        } else {
+            eprintln!("Use --show-archived to list them");
+        }
+    }
 
     if sources.is_empty() {
         println!("No sources matched the query");
@@ -100,11 +126,21 @@ pub fn generate(db_path: &Path, filters: &[String], output_path: &Path) -> Resul
     Ok(())
 }
 
-fn query_sources(conn: &Connection, filters: &[Filter]) -> Result<Vec<ManifestSource>> {
+/// Returns (included_sources, archived_sources)
+/// archived_sources is a list of (source_path, archive_path) for files already in an archive
+fn query_sources(
+    conn: &Connection,
+    filters: &[Filter],
+    include_archived: bool,
+) -> Result<(Vec<ManifestSource>, Vec<(String, String)>)> {
     // Build query based on filters
-    // Start with base query for all present sources
+    // Start with base query for all present sources from 'source' roots only
     let mut source_ids: Vec<i64> = conn
-        .prepare("SELECT id FROM sources WHERE present = 1")?
+        .prepare(
+            "SELECT s.id FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             WHERE s.present = 1 AND r.role = 'source'"
+        )?
         .query_map([], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -113,15 +149,56 @@ fn query_sources(conn: &Connection, filters: &[Filter]) -> Result<Vec<ManifestSo
         source_ids = apply_filter(conn, &source_ids, filter)?;
     }
 
-    // Fetch full source info
+    // Check which sources are already archived (same object_id exists in an archive root)
     let mut sources = Vec::new();
+    let mut archived = Vec::new();
+
     for source_id in source_ids {
         if let Some(source) = fetch_source(conn, source_id)? {
-            sources.push(source);
+            // Check if this content is already in an archive
+            let archive_path = if let Some(ref hash) = source.hash_value {
+                find_in_archive(conn, hash)?
+            } else {
+                None
+            };
+
+            if let Some(arch_path) = archive_path {
+                if include_archived {
+                    sources.push(source);
+                } else {
+                    archived.push((source.path.clone(), arch_path));
+                }
+            } else {
+                sources.push(source);
+            }
         }
     }
 
-    Ok(sources)
+    Ok((sources, archived))
+}
+
+/// Find if a hash exists in any archive root, return the path if found
+fn find_in_archive(conn: &Connection, hash_value: &str) -> Result<Option<String>> {
+    let result: Option<(String, String)> = conn
+        .query_row(
+            "SELECT r.path, s.rel_path
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             JOIN objects o ON s.object_id = o.id
+             WHERE r.role = 'archive' AND o.hash_value = ? AND s.present = 1
+             LIMIT 1",
+            [hash_value],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+
+    Ok(result.map(|(root, rel)| {
+        if rel.is_empty() {
+            root
+        } else {
+            format!("{}/{}", root, rel)
+        }
+    }))
 }
 
 fn apply_filter(conn: &Connection, source_ids: &[i64], filter: &Filter) -> Result<Vec<i64>> {
