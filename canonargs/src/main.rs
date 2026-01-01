@@ -27,16 +27,22 @@ struct Cli {
     command: Vec<String>,
 }
 
+/// Input format - accepts both worklist entries and enriched entries (for chaining)
 #[derive(Deserialize)]
-struct WorklistEntry {
+struct InputEntry {
     source_id: i64,
     path: String,
     basis_rev: i64,
+    // Optional fields from enriched input (for chaining)
+    #[serde(default)]
+    facts: HashMap<String, serde_json::Value>,
+    // observed_at is ignored on input - we always use current time
 }
 
 #[derive(Serialize)]
 struct FactOutput {
     source_id: i64,
+    path: String,  // Include path to enable chaining
     basis_rev: i64,
     observed_at: i64,
     facts: HashMap<String, serde_json::Value>,
@@ -66,10 +72,10 @@ fn main() -> Result<()> {
             continue;
         }
 
-        let entry: WorklistEntry = match serde_json::from_str(&line) {
+        let entry: InputEntry = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("Warning: Failed to parse worklist entry: {}", e);
+                eprintln!("Warning: Failed to parse input entry: {}", e);
                 continue;
             }
         };
@@ -95,7 +101,7 @@ enum OutputMode {
 }
 
 fn process_entry(
-    entry: &WorklistEntry,
+    entry: &InputEntry,
     command_template: &[String],
     mode: &OutputMode,
 ) -> Result<FactOutput> {
@@ -133,14 +139,19 @@ fn process_entry(
         .context("Command output is not valid UTF-8")?;
 
     // Parse output based on mode
-    let facts = parse_output(&stdout, mode)?;
+    let new_facts = parse_output(&stdout, mode)?;
 
-    if facts.is_empty() {
+    if new_facts.is_empty() {
         bail!("No facts produced");
     }
 
+    // Merge with existing facts from input (new facts override existing)
+    let mut facts = entry.facts.clone();
+    facts.extend(new_facts);
+
     Ok(FactOutput {
         source_id: entry.source_id,
+        path: entry.path.clone(),
         basis_rev: entry.basis_rev,
         observed_at: current_timestamp(),
         facts,
