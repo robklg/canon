@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 mod apply;
 mod cluster;
+mod coverage;
 mod db;
 mod facts;
 mod filter;
@@ -69,6 +70,20 @@ enum Commands {
         #[arg(long)]
         include_archived: bool,
     },
+    /// Show archive coverage statistics
+    Coverage {
+        /// Directory path to scope the query (resolved to realpath)
+        path: Option<PathBuf>,
+        /// Filter expressions (e.g., "source.ext=jpg" or "content.hash.sha256?")
+        #[arg(long = "where")]
+        filters: Vec<String>,
+        /// Filter coverage relative to a specific archive (can be archive root or sub-path)
+        #[arg(long)]
+        archive: Option<PathBuf>,
+        /// Include sources from archive roots (by default only source roots)
+        #[arg(long)]
+        include_archived: bool,
+    },
     /// Generate a cluster manifest from matching sources
     Cluster {
         #[command(subcommand)]
@@ -131,6 +146,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Facts { key, path, filters, limit, all, include_archived } => {
             facts::run(&db_path, key.as_deref(), path.as_deref(), &filters, limit, all, include_archived)?;
+        }
+        Commands::Coverage { path, filters, archive, include_archived } => {
+            coverage::run(&db_path, path.as_deref(), &filters, archive.as_deref(), include_archived)?;
         }
         Commands::Cluster { action } => match action {
             ClusterAction::Generate {
