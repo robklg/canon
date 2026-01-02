@@ -14,6 +14,10 @@ The binary will be at `./target/release/canon`.
 
 ## Quick Start
 
+Canon is designed to be used iteratively and incrementally.
+Instead of a single destructive run, you gradually build up metadata, apply policies, and converge on a canonical archive over time.
+Typical workflows involve scanning, extracting metadata, organizing a subset of files, and repeating as coverage improves.
+
 ```bash
 # 1. Scan your files
 canon scan /path/to/photos
@@ -23,6 +27,7 @@ canon worklist --where '!content.hash.sha256?' | ./scripts/hash-worklist.sh | ca
 
 # 3. See what you have
 canon facts
+canon coverage
 
 # 4. Generate a manifest for organizing files
 canon cluster generate --where 'content.hash.sha256?'
