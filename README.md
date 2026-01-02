@@ -245,34 +245,58 @@ Available pattern variables:
 
 ## Filter Syntax
 
-Filters select sources based on facts:
+Filters select sources based on facts using a boolean expression language.
+
+### Basic Operators
 
 | Syntax | Meaning |
 |--------|---------|
 | `key?` | Fact exists |
-| `!key?` | Fact doesn't exist |
 | `key=value` | Fact equals value |
 | `key!=value` | Fact doesn't equal value |
 | `key>value` | Greater than (numbers/dates) |
 | `key>=value` | Greater or equal |
 | `key<value` | Less than |
 | `key<=value` | Less or equal |
+| `key IN (v1, v2, ...)` | Fact matches any value in list |
 
-Date values can be ISO format (`2024-01-15`) or with time (`2024-01-15T12:00:00`).
+### Boolean Operators
 
-Examples:
+| Syntax | Meaning |
+|--------|---------|
+| `expr AND expr` | Both conditions must match |
+| `expr OR expr` | Either condition matches |
+| `NOT expr` | Negates the condition |
+| `(expr)` | Grouping for precedence |
+
+Operator precedence (highest to lowest): NOT, AND, OR. Use parentheses to override.
+
+### Values
+
+- Numbers: `1000000`, `-5`, `3.14`
+- Dates: `2024-01-15` or `2024-01-15T12:00:00`
+- Strings: `jpg`, `Apple`, or quoted `"value with spaces"`
+
+### Examples
+
 ```bash
 # Files with a content hash
 --where 'content.hash.sha256?'
 
 # Files missing a content hash
---where '!content.hash.sha256?'
+--where 'NOT content.hash.sha256?'
 
 # JPG files only
 --where 'source.ext=jpg'
 
-# Not PNG files
---where 'source.ext!=png'
+# JPG or PNG files
+--where 'source.ext=jpg OR source.ext=png'
+
+# Common image formats
+--where 'source.ext IN (jpg, png, gif, webp)'
+
+# Not temporary files
+--where 'NOT source.ext=tmp'
 
 # iPhone photos
 --where 'content.Make=Apple'
@@ -283,7 +307,10 @@ Examples:
 # Files modified in 2024 or later
 --where 'source.mtime>=2024-01-01'
 
-# Combine filters (AND logic)
+# Large images (combining with parentheses)
+--where '(source.ext=jpg OR source.ext=png) AND source.size>1000000'
+
+# Multiple --where flags combine with AND
 --where 'source.ext=jpg' --where 'content.Make=Apple'
 ```
 
