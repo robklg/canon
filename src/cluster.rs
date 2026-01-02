@@ -114,13 +114,20 @@ fn query_sources(
     include_archived: bool,
 ) -> Result<(Vec<ManifestSource>, Vec<(String, String)>)> {
     // Build query based on filters
-    // Start with base query for all present sources from 'source' roots only
+    // By default only source roots, with --include-archived also include archive roots
+    let role_clause = if include_archived {
+        "1=1" // Include all roles
+    } else {
+        "r.role = 'source'"
+    };
+
     let mut source_ids: Vec<i64> = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT s.id FROM sources s
              JOIN roots r ON s.root_id = r.id
-             WHERE s.present = 1 AND r.role = 'source'"
-        )?
+             WHERE s.present = 1 AND {}",
+            role_clause
+        ))?
         .query_map([], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
 

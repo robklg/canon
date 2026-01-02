@@ -27,7 +27,7 @@ fn is_builtin_fact(key: &str) -> bool {
     BUILTIN_FACTS_DEFAULT.contains(&key) || BUILTIN_FACTS_HIDDEN.contains(&key)
 }
 
-pub fn run(db_path: &Path, key_arg: Option<&str>, path_arg: Option<&Path>, filter_strs: &[String], limit: usize, show_all: bool) -> Result<()> {
+pub fn run(db_path: &Path, key_arg: Option<&str>, path_arg: Option<&Path>, filter_strs: &[String], limit: usize, show_all: bool, include_archived: bool) -> Result<()> {
     let conn = db::open(db_path)?;
 
     // Parse filters
@@ -53,7 +53,7 @@ pub fn run(db_path: &Path, key_arg: Option<&str>, path_arg: Option<&Path>, filte
     };
 
     // Get all matching source IDs
-    let source_ids = get_matching_sources(&conn, scope_prefix.as_deref(), &filters)?;
+    let source_ids = get_matching_sources(&conn, scope_prefix.as_deref(), &filters, include_archived)?;
     let total_sources = source_ids.len();
 
     if total_sources == 0 {
@@ -80,33 +80,43 @@ fn get_matching_sources(
     conn: &Connection,
     scope_prefix: Option<&str>,
     filters: &[Filter],
+    include_archived: bool,
 ) -> Result<Vec<i64>> {
     let mut all_ids = Vec::new();
     let mut last_id: i64 = 0;
+
+    let role_clause = if include_archived {
+        "1=1" // Include all roles
+    } else {
+        "r.role = 'source'"
+    };
 
     loop {
         // Fetch batch of source IDs
         let batch: Vec<i64> = if let Some(prefix) = scope_prefix {
             // Filter by path prefix
-            conn.prepare(
+            conn.prepare(&format!(
                 "SELECT s.id
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
-                 WHERE s.present = 1 AND s.id > ?
+                 WHERE s.present = 1 AND {} AND s.id > ?
                    AND (r.path || '/' || s.rel_path) LIKE ? || '%'
                  ORDER BY s.id
-                 LIMIT ?"
-            )?
+                 LIMIT ?",
+                role_clause
+            ))?
             .query_map(rusqlite::params![last_id, prefix, BATCH_SIZE], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?
         } else {
-            conn.prepare(
+            conn.prepare(&format!(
                 "SELECT s.id
                  FROM sources s
-                 WHERE s.present = 1 AND s.id > ?
+                 JOIN roots r ON s.root_id = r.id
+                 WHERE s.present = 1 AND {} AND s.id > ?
                  ORDER BY s.id
-                 LIMIT ?"
-            )?
+                 LIMIT ?",
+                role_clause
+            ))?
             .query_map(rusqlite::params![last_id, BATCH_SIZE], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?
         };

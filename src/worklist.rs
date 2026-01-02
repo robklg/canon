@@ -24,12 +24,19 @@ struct FetchResult {
     max_id_seen: Option<i64>,
 }
 
-pub fn run(db_path: &Path, filter_strs: &[String]) -> Result<()> {
+pub fn run(db_path: &Path, scope_path: Option<&Path>, filter_strs: &[String], include_archived: bool) -> Result<()> {
     // Parse filters upfront
     let filters: Vec<Filter> = filter_strs
         .iter()
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
+
+    // Resolve scope path to realpath if provided
+    let scope_prefix = if let Some(p) = scope_path {
+        Some(std::fs::canonicalize(p)?.to_string_lossy().to_string())
+    } else {
+        None
+    };
 
     let stdout = io::stdout();
     let mut handle = stdout.lock();
@@ -38,7 +45,7 @@ pub fn run(db_path: &Path, filter_strs: &[String]) -> Result<()> {
     loop {
         // Open connection for each batch to avoid holding locks
         let conn = db::open(db_path)?;
-        let result = fetch_batch(&conn, last_id, &filters)?;
+        let result = fetch_batch(&conn, last_id, scope_prefix.as_deref(), &filters, include_archived)?;
 
         // If we didn't see any source IDs, we're done
         let max_id = match result.max_id_seen {
@@ -58,19 +65,47 @@ pub fn run(db_path: &Path, filter_strs: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn fetch_batch(conn: &Connection, after_id: i64, filters: &[Filter]) -> Result<FetchResult> {
-    // First, get source IDs in this batch
-    let source_ids: Vec<i64> = conn
-        .prepare(
+fn fetch_batch(
+    conn: &Connection,
+    after_id: i64,
+    scope_prefix: Option<&str>,
+    filters: &[Filter],
+    include_archived: bool,
+) -> Result<FetchResult> {
+    // Build the query based on options
+    let role_clause = if include_archived {
+        "1=1" // Include all roles
+    } else {
+        "r.role = 'source'"
+    };
+
+    let source_ids: Vec<i64> = if let Some(prefix) = scope_prefix {
+        // Filter by path prefix
+        conn.prepare(&format!(
             "SELECT s.id
              FROM sources s
              JOIN roots r ON s.root_id = r.id
-             WHERE s.present = 1 AND r.role = 'source' AND s.id > ?
+             WHERE s.present = 1 AND {} AND s.id > ?
+               AND (r.path || '/' || s.rel_path) LIKE ? || '%'
              ORDER BY s.id
-             LIMIT ?"
-        )?
-        .query_map([after_id, BATCH_SIZE], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+             LIMIT ?",
+            role_clause
+        ))?
+        .query_map(rusqlite::params![after_id, prefix, BATCH_SIZE], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?
+    } else {
+        conn.prepare(&format!(
+            "SELECT s.id
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             WHERE s.present = 1 AND {} AND s.id > ?
+             ORDER BY s.id
+             LIMIT ?",
+            role_clause
+        ))?
+        .query_map(rusqlite::params![after_id, BATCH_SIZE], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     if source_ids.is_empty() {
         return Ok(FetchResult {

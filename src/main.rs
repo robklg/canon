@@ -35,12 +35,21 @@ enum Commands {
     },
     /// Output sources as JSONL worklist
     Worklist {
+        /// Directory path to scope the query (resolved to realpath)
+        path: Option<PathBuf>,
         /// Filter expressions (e.g., "!content_hash.sha256?" or "ext=jpg")
         #[arg(long = "where")]
         filters: Vec<String>,
+        /// Include sources from archive roots (by default only source roots)
+        #[arg(long)]
+        include_archived: bool,
     },
     /// Import facts from JSONL on stdin
-    ImportFacts,
+    ImportFacts {
+        /// Allow importing facts for sources in archive roots
+        #[arg(long)]
+        allow_archived: bool,
+    },
     /// Show fact coverage and value distribution
     Facts {
         /// Specific fact key to show value distribution
@@ -56,6 +65,9 @@ enum Commands {
         /// Show all built-in facts (including hidden ones like source.device, source.inode)
         #[arg(long)]
         all: bool,
+        /// Include sources from archive roots (by default only source roots)
+        #[arg(long)]
+        include_archived: bool,
     },
     /// Generate a cluster manifest from matching sources
     Cluster {
@@ -111,14 +123,14 @@ fn main() -> anyhow::Result<()> {
         Commands::Scan { paths, role } => {
             scan::run(&db_path, &paths, &role)?;
         }
-        Commands::Worklist { filters } => {
-            worklist::run(&db_path, &filters)?;
+        Commands::Worklist { path, filters, include_archived } => {
+            worklist::run(&db_path, path.as_deref(), &filters, include_archived)?;
         }
-        Commands::ImportFacts => {
-            import_facts::run(&db_path)?;
+        Commands::ImportFacts { allow_archived } => {
+            import_facts::run(&db_path, allow_archived)?;
         }
-        Commands::Facts { key, path, filters, limit, all } => {
-            facts::run(&db_path, key.as_deref(), path.as_deref(), &filters, limit, all)?;
+        Commands::Facts { key, path, filters, limit, all, include_archived } => {
+            facts::run(&db_path, key.as_deref(), path.as_deref(), &filters, limit, all, include_archived)?;
         }
         Commands::Cluster { action } => match action {
             ClusterAction::Generate {

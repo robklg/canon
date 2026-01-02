@@ -93,7 +93,7 @@ Output sources as JSONL for processing by external tools.
 A worklist is a snapshot of sources at a point in time. If files change, fact imports may be skipped.
 
 ```bash
-# All sources
+# All sources (from source roots only)
 canon worklist
 
 # Only sources missing a content hash
@@ -101,6 +101,12 @@ canon worklist --where '!content.hash.sha256?'
 
 # Only JPG files
 canon worklist --where 'source.ext=jpg'
+
+# Scope to a specific directory
+canon worklist /path/to/photos
+
+# Include sources from archive roots (for backfilling facts)
+canon worklist --include-archived
 ```
 
 Output format (one JSON object per line):
@@ -115,6 +121,9 @@ Import facts from JSONL on stdin.
 ```bash
 # Import facts from a processor
 some-processor | canon import-facts
+
+# Allow importing facts for sources in archive roots
+some-processor | canon import-facts --allow-archived
 ```
 
 Input format:
@@ -126,12 +135,14 @@ Facts are automatically namespaced under `content.*`. The special key `hash.sha2
 
 If `basis_rev` doesn't match the source's current value, the import is skipped (the file changed since the worklist was generated).
 
+By default, importing facts for sources in archive roots is skipped. Use `--allow-archived` to enable this (useful for backfilling metadata on already-archived files).
+
 ### canon facts
 
 Discover what metadata you have and check coverage.
 
 ```bash
-# Overview of all facts
+# Overview of all facts (source roots only by default)
 canon facts
 
 # Scoped to a directory
@@ -148,6 +159,9 @@ canon facts --all
 
 # Unlimited results (default is 50)
 canon facts content.hash.sha256 --limit 0
+
+# Include sources from archive roots
+canon facts --include-archived
 ```
 
 Example output:
@@ -172,13 +186,13 @@ content.Make                        7935      22.9%
 Generate a manifest of files matching filters.
 
 ```bash
-# All files with content hashes
+# All files with content hashes (source roots only by default)
 canon cluster generate --where 'content.hash.sha256?'
 
 # Custom output file
 canon cluster generate --where 'content.hash.sha256?' -o my-manifest.toml
 
-# Include files already in an archive
+# Include sources from archive roots
 canon cluster generate --where 'content.hash.sha256?' --include-archived
 
 # Show which files were excluded (already archived)

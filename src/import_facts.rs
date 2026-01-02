@@ -31,6 +31,7 @@ struct ImportStats {
     facts_imported: u64,
     skipped_stale: u64,
     skipped_reserved: u64,
+    skipped_archived: u64,
     objects_created: u64,
     facts_promoted: u64,
 }
@@ -49,7 +50,7 @@ fn normalize_fact_key(key: &str) -> Result<String, &'static str> {
     Ok(format!("content.{}", key))
 }
 
-pub fn run(db_path: &Path) -> Result<()> {
+pub fn run(db_path: &Path, allow_archived: bool) -> Result<()> {
     let conn = db::open(db_path)?;
     let stdin = io::stdin();
     let mut stats = ImportStats::default();
@@ -70,7 +71,7 @@ pub fn run(db_path: &Path) -> Result<()> {
             }
         };
 
-        match process_import(&conn, &import, &mut stats) {
+        match process_import(&conn, &import, &mut stats, allow_archived) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!(
@@ -82,11 +83,12 @@ pub fn run(db_path: &Path) -> Result<()> {
     }
 
     println!(
-        "Processed {} lines: {} facts imported, {} skipped (stale), {} skipped (reserved), {} objects created, {} facts promoted",
+        "Processed {} lines: {} facts imported, {} skipped (stale), {} skipped (reserved), {} skipped (archived), {} objects created, {} facts promoted",
         stats.lines_processed,
         stats.facts_imported,
         stats.skipped_stale,
         stats.skipped_reserved,
+        stats.skipped_archived,
         stats.objects_created,
         stats.facts_promoted
     );
@@ -94,23 +96,32 @@ pub fn run(db_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn process_import(conn: &Connection, import: &FactImport, stats: &mut ImportStats) -> Result<()> {
-    // Validate basis_rev
-    let current: Option<(i64, Option<i64>)> = conn
+fn process_import(conn: &Connection, import: &FactImport, stats: &mut ImportStats, allow_archived: bool) -> Result<()> {
+    // Check if source exists and get its basis_rev and role
+    let current: Option<(i64, Option<i64>, String)> = conn
         .query_row(
-            "SELECT basis_rev, object_id FROM sources WHERE id = ?",
+            "SELECT s.basis_rev, s.object_id, r.role
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             WHERE s.id = ?",
             [import.source_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
 
-    let (current_basis_rev, current_object_id) = match current {
+    let (current_basis_rev, current_object_id, role) = match current {
         Some(c) => c,
         None => {
             eprintln!("Warning: source_id {} not found", import.source_id);
             return Ok(());
         }
     };
+
+    // Check if source is in an archive root
+    if role == "archive" && !allow_archived {
+        stats.skipped_archived += 1;
+        return Ok(());
+    }
 
     if current_basis_rev != import.basis_rev {
         eprintln!(
