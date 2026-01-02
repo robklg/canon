@@ -253,6 +253,12 @@ Filters select sources based on facts:
 | `!key?` | Fact doesn't exist |
 | `key=value` | Fact equals value |
 | `key!=value` | Fact doesn't equal value |
+| `key>value` | Greater than (numbers/dates) |
+| `key>=value` | Greater or equal |
+| `key<value` | Less than |
+| `key<=value` | Less or equal |
+
+Date values can be ISO format (`2024-01-15`) or with time (`2024-01-15T12:00:00`).
 
 Examples:
 ```bash
@@ -270,6 +276,12 @@ Examples:
 
 # iPhone photos
 --where 'content.Make=Apple'
+
+# Files larger than 1MB
+--where 'source.size>1000000'
+
+# Files modified in 2024 or later
+--where 'source.mtime>=2024-01-01'
 
 # Combine filters (AND logic)
 --where 'source.ext=jpg' --where 'content.Make=Apple'
