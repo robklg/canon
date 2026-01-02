@@ -1,13 +1,12 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{self, BufRead};
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db;
+use crate::db::{Connection, Db};
 
 #[derive(Deserialize)]
 struct FactImport {
@@ -50,8 +49,8 @@ fn normalize_fact_key(key: &str) -> Result<String, &'static str> {
     Ok(format!("content.{}", key))
 }
 
-pub fn run(db_path: &Path, allow_archived: bool) -> Result<()> {
-    let conn = db::open(db_path)?;
+pub fn run(db: &Db, allow_archived: bool) -> Result<()> {
+    let conn = db.conn();
     let stdin = io::stdin();
     let mut stats = ImportStats::default();
 

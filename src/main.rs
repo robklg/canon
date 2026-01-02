@@ -20,6 +20,10 @@ struct Cli {
     #[arg(long, global = true)]
     db: Option<PathBuf>,
 
+    /// Print SQL queries with timing for debugging
+    #[arg(long, global = true)]
+    debug_sql: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -216,15 +220,17 @@ fn main() -> anyhow::Result<()> {
         path
     });
 
+    let db = db::open(&db_path, cli.debug_sql)?;
+
     match cli.command {
         Commands::Scan { paths, role } => {
-            scan::run(&db_path, &paths, &role)?;
+            scan::run(&db, &paths, &role)?;
         }
         Commands::Worklist { path, filters, include_archived, include_excluded } => {
-            worklist::run(&db_path, path.as_deref(), &filters, include_archived, include_excluded)?;
+            worklist::run(&db, path.as_deref(), &filters, include_archived, include_excluded)?;
         }
         Commands::ImportFacts { allow_archived } => {
-            import_facts::run(&db_path, allow_archived)?;
+            import_facts::run(&db, allow_archived)?;
         }
         Commands::Facts { action, key, path, filters, limit, all, include_archived, include_excluded } => {
             match action {
@@ -233,23 +239,23 @@ fn main() -> anyhow::Result<()> {
                         entity_type: on,
                         dry_run: !yes,
                     };
-                    facts::delete_facts(&db_path, &key, path.as_deref(), &filters, &options)?;
+                    facts::delete_facts(&db, &key, path.as_deref(), &filters, &options)?;
                 }
                 Some(FactsAction::Prune { stale, yes }) => {
                     if stale {
-                        facts::prune_stale(&db_path, !yes)?;
+                        facts::prune_stale(&db, !yes)?;
                     } else {
                         eprintln!("Error: --stale flag is required for prune command");
                         std::process::exit(1);
                     }
                 }
                 None => {
-                    facts::run(&db_path, key.as_deref(), path.as_deref(), &filters, limit, all, include_archived, include_excluded)?;
+                    facts::run(&db, key.as_deref(), path.as_deref(), &filters, limit, all, include_archived, include_excluded)?;
                 }
             }
         }
         Commands::Coverage { path, filters, archive, include_archived, include_excluded } => {
-            coverage::run(&db_path, path.as_deref(), &filters, archive.as_deref(), include_archived, include_excluded)?;
+            coverage::run(&db, path.as_deref(), &filters, archive.as_deref(), include_archived, include_excluded)?;
         }
         Commands::Cluster { action } => match action {
             ClusterAction::Generate {
@@ -262,7 +268,7 @@ fn main() -> anyhow::Result<()> {
                     include_archived,
                     show_archived,
                 };
-                cluster::generate(&db_path, &filters, &output, &options)?;
+                cluster::generate(&db, &filters, &output, &options)?;
             }
         },
         Commands::Apply {
@@ -276,19 +282,19 @@ fn main() -> anyhow::Result<()> {
                 force,
                 allow_cross_archive_duplicates,
             };
-            apply::run(&db_path, &manifest, &options)?;
+            apply::run(&db, &manifest, &options)?;
         }
         Commands::Exclude { action } => match action {
             ExcludeAction::Set { path, filters, dry_run } => {
                 let options = exclude::SetOptions { dry_run };
-                exclude::set(&db_path, path.as_deref(), &filters, &options)?;
+                exclude::set(&db, path.as_deref(), &filters, &options)?;
             }
             ExcludeAction::Clear { path, filters, dry_run } => {
                 let options = exclude::ClearOptions { dry_run };
-                exclude::clear(&db_path, path.as_deref(), &filters, &options)?;
+                exclude::clear(&db, path.as_deref(), &filters, &options)?;
             }
             ExcludeAction::List { path, filters } => {
-                exclude::list(&db_path, path.as_deref(), &filters)?;
+                exclude::list(&db, path.as_deref(), &filters)?;
             }
         },
     }

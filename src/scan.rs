@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
 use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
-use crate::db;
+use crate::db::{Connection, Db};
 
 #[derive(Default)]
 struct ScanStats {
@@ -19,13 +19,13 @@ struct ScanStats {
     missing: u64,
 }
 
-pub fn run(db_path: &Path, paths: &[PathBuf], role: &str) -> Result<()> {
+pub fn run(db: &Db, paths: &[PathBuf], role: &str) -> Result<()> {
     // Validate role
     if role != "source" && role != "archive" {
         bail!("Invalid role '{}'. Must be 'source' or 'archive'", role);
     }
 
-    let conn = db::open(db_path)?;
+    let conn = db.conn();
     let now = current_timestamp();
 
     let mut total_stats = ScanStats::default();

@@ -1,9 +1,8 @@
 use anyhow::{bail, Result};
-use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::db;
+use crate::db::{Connection, Db};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -66,14 +65,14 @@ impl CoverageStats {
 }
 
 pub fn run(
-    db_path: &Path,
+    db: &Db,
     scope_path: Option<&Path>,
     filter_strs: &[String],
     archive_path: Option<&Path>,
     include_archived: bool,
     include_excluded: bool,
 ) -> Result<()> {
-    let conn = db::open(db_path)?;
+    let conn = db.conn();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs

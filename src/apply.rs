@@ -1,11 +1,11 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cluster::{Manifest, ManifestSource};
-use crate::db;
+use crate::db::{Connection, Db};
 use crate::exclude;
 
 #[derive(Default)]
@@ -22,7 +22,7 @@ pub struct ApplyOptions {
     pub allow_cross_archive_duplicates: bool,
 }
 
-pub fn run(db_path: &Path, manifest_path: &Path, options: &ApplyOptions) -> Result<()> {
+pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> {
     let content = fs::read_to_string(manifest_path)
         .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
 
@@ -32,6 +32,8 @@ pub fn run(db_path: &Path, manifest_path: &Path, options: &ApplyOptions) -> Resu
     let base_dir = fs::canonicalize(&manifest.output.base_dir).unwrap_or_else(|_| {
         PathBuf::from(&manifest.output.base_dir)
     });
+
+    let conn = db.conn();
 
     // Pre-flight checks
     if !options.force {
@@ -53,8 +55,7 @@ pub fn run(db_path: &Path, manifest_path: &Path, options: &ApplyOptions) -> Resu
         }
 
         // Check archive conflicts
-        let conn = db::open(db_path)?;
-        let conflicts = check_archive_conflicts(&conn, &manifest, &base_dir)?;
+        let conflicts = check_archive_conflicts(conn, &manifest, &base_dir)?;
 
         if !conflicts.in_dest_archive.is_empty() {
             eprintln!(
@@ -85,8 +86,7 @@ pub fn run(db_path: &Path, manifest_path: &Path, options: &ApplyOptions) -> Resu
     // This should never happen if the manifest was generated correctly,
     // but we check anyway to prevent accidentally copying excluded files
     {
-        let conn = db::open(db_path)?;
-        let excluded_sources = check_excluded_sources(&conn, &manifest)?;
+        let excluded_sources = check_excluded_sources(conn, &manifest)?;
         if !excluded_sources.is_empty() {
             eprintln!(
                 "Error: {} sources in manifest are marked as excluded:",

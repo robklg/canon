@@ -1,10 +1,9 @@
 use anyhow::Result;
-use rusqlite::Connection;
 use serde::Serialize;
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::db;
+use crate::db::{Connection, Db};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -25,7 +24,7 @@ struct FetchResult {
     max_id_seen: Option<i64>,
 }
 
-pub fn run(db_path: &Path, scope_path: Option<&Path>, filter_strs: &[String], include_archived: bool, include_excluded: bool) -> Result<()> {
+pub fn run(db: &Db, scope_path: Option<&Path>, filter_strs: &[String], include_archived: bool, include_excluded: bool) -> Result<()> {
     // Parse filters upfront
     let filters: Vec<Filter> = filter_strs
         .iter()
@@ -40,23 +39,19 @@ pub fn run(db_path: &Path, scope_path: Option<&Path>, filter_strs: &[String], in
     };
 
     // Check excluded count if we're skipping them
-    let conn = db::open(db_path)?;
+    let conn = db.conn();
     let excluded_count = if !include_excluded {
-        exclude::count_excluded(&conn, scope_prefix.as_deref(), include_archived)?
+        exclude::count_excluded(conn, scope_prefix.as_deref(), include_archived)?
     } else {
         0
     };
-    drop(conn);
 
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let mut last_id: i64 = 0;
-    let mut output_count: i64 = 0;
 
     loop {
-        // Open connection for each batch to avoid holding locks
-        let conn = db::open(db_path)?;
-        let result = fetch_batch(&conn, last_id, scope_prefix.as_deref(), &filters, include_archived, include_excluded)?;
+        let result = fetch_batch(conn, last_id, scope_prefix.as_deref(), &filters, include_archived, include_excluded)?;
 
         // If we didn't see any source IDs, we're done
         let max_id = match result.max_id_seen {
@@ -67,11 +62,9 @@ pub fn run(db_path: &Path, scope_path: Option<&Path>, filter_strs: &[String], in
         for entry in &result.entries {
             let json = serde_json::to_string(entry)?;
             writeln!(handle, "{}", json)?;
-            output_count += 1;
         }
 
         last_id = max_id;
-        // Connection dropped here, releasing any locks
     }
 
     // Report stats to stderr

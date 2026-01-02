@@ -1,9 +1,9 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::params;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db;
+use crate::db::{Connection, Db};
 use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;
@@ -26,12 +26,12 @@ pub struct ClearOptions {
 // ============================================================================
 
 pub fn set(
-    db_path: &Path,
+    db: &Db,
     scope_path: Option<&Path>,
     filter_strs: &[String],
     options: &SetOptions,
 ) -> Result<()> {
-    let conn = db::open(db_path)?;
+    let conn = db.conn();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs
@@ -102,12 +102,12 @@ pub fn set(
 // ============================================================================
 
 pub fn clear(
-    db_path: &Path,
+    db: &Db,
     scope_path: Option<&Path>,
     filter_strs: &[String],
     options: &ClearOptions,
 ) -> Result<()> {
-    let conn = db::open(db_path)?;
+    let conn = db.conn();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs
@@ -162,11 +162,11 @@ pub fn clear(
 // ============================================================================
 
 pub fn list(
-    db_path: &Path,
+    db: &Db,
     scope_path: Option<&Path>,
     filter_strs: &[String],
 ) -> Result<()> {
-    let conn = db::open(db_path)?;
+    let conn = db.conn();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs

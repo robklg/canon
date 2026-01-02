@@ -1,8 +1,29 @@
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+pub use rusqlite::Connection;
 use std::fs;
+use std::ops::Deref;
 use std::path::Path;
 use std::time::Duration;
+
+/// Database context that wraps a Connection with optional SQL debug logging
+pub struct Db {
+    conn: Connection,
+}
+
+impl Db {
+    /// Get a reference to the underlying connection
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl Deref for Db {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.conn
+    }
+}
 
 const SCHEMA: &str = r#"
 -- Roots: scanned folder roots
@@ -66,14 +87,24 @@ CREATE INDEX IF NOT EXISTS facts_key ON facts(key);
 CREATE INDEX IF NOT EXISTS facts_key_entity ON facts(key, entity_type, entity_id);
 "#;
 
-pub fn open(path: &Path) -> Result<Connection> {
+/// Profile callback for SQL debug logging
+fn sql_profile_callback(sql: &str, duration: Duration) {
+    eprintln!("[SQL {:.1}ms] {}", duration.as_secs_f64() * 1000.0, sql);
+}
+
+pub fn open(path: &Path, debug_sql: bool) -> Result<Db> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
     }
 
-    let conn = Connection::open(path)
+    let mut conn = Connection::open(path)
         .with_context(|| format!("Failed to open database: {}", path.display()))?;
+
+    // Enable SQL profiling if debug flag is set
+    if debug_sql {
+        conn.profile(Some(sql_profile_callback));
+    }
 
     // Enable WAL mode for concurrent read/write access
     conn.pragma_update(None, "journal_mode", "WAL")
@@ -86,5 +117,5 @@ pub fn open(path: &Path) -> Result<Connection> {
     conn.execute_batch(SCHEMA)
         .context("Failed to initialize database schema")?;
 
-    Ok(conn)
+    Ok(Db { conn })
 }

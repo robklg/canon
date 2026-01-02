@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db;
+use crate::db::{Connection, Db};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -45,12 +45,12 @@ pub struct GenerateOptions {
 }
 
 pub fn generate(
-    db_path: &Path,
+    db: &Db,
     filters: &[String],
     output_path: &Path,
     options: &GenerateOptions,
 ) -> Result<()> {
-    let conn = db::open(db_path)?;
+    let conn = db.conn();
 
     let parsed_filters: Vec<Filter> = filters
         .iter()

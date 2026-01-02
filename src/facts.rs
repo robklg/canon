@@ -1,8 +1,7 @@
 use anyhow::{bail, Result};
-use rusqlite::Connection;
 use std::path::Path;
 
-use crate::db;
+use crate::db::{Connection, Db};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -28,8 +27,8 @@ fn is_builtin_fact(key: &str) -> bool {
     BUILTIN_FACTS_DEFAULT.contains(&key) || BUILTIN_FACTS_HIDDEN.contains(&key)
 }
 
-pub fn run(db_path: &Path, key_arg: Option<&str>, path_arg: Option<&Path>, filter_strs: &[String], limit: usize, show_all: bool, include_archived: bool, include_excluded: bool) -> Result<()> {
-    let conn = db::open(db_path)?;
+pub fn run(db: &Db, key_arg: Option<&str>, path_arg: Option<&Path>, filter_strs: &[String], limit: usize, show_all: bool, include_archived: bool, include_excluded: bool) -> Result<()> {
+    let conn = db.conn();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs
@@ -557,7 +556,7 @@ fn is_protected_fact(key: &str) -> bool {
 }
 
 pub fn delete_facts(
-    db_path: &Path,
+    db: &Db,
     key: &str,
     scope_path: Option<&Path>,
     filter_strs: &[String],
@@ -579,7 +578,7 @@ pub fn delete_facts(
         );
     }
 
-    let conn = db::open(db_path)?;
+    let conn = db.conn();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs
@@ -730,8 +729,8 @@ pub fn delete_facts(
 // Prune Stale Facts
 // ============================================================================
 
-pub fn prune_stale(db_path: &Path, dry_run: bool) -> Result<()> {
-    let conn = db::open(db_path)?;
+pub fn prune_stale(db: &Db, dry_run: bool) -> Result<()> {
+    let conn = db.conn();
 
     // Find stale source facts: where observed_basis_rev doesn't match current basis_rev
     let stale_count: i64 = conn.query_row(
