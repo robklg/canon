@@ -160,12 +160,18 @@ fn show_all_keys(conn: &Connection, source_ids: &[i64], total_sources: usize, sh
     )?;
 
     // Query fact keys from both source and object facts
+    // Count sources (not entities) - multiple sources can share an object
     let mut results: Vec<(String, i64, bool)> = conn
         .prepare(
-            "SELECT key, COUNT(DISTINCT entity_id) as cnt
-             FROM facts
-             WHERE (entity_type = 'source' AND entity_id IN (SELECT id FROM temp_sources))
-                OR (entity_type = 'object' AND entity_id IN (SELECT id FROM temp_objects))
+            "SELECT key, COUNT(*) as cnt
+             FROM (
+                 SELECT DISTINCT ts.id, f.key
+                 FROM temp_sources ts
+                 JOIN sources s ON s.id = ts.id
+                 JOIN facts f ON
+                     (f.entity_type = 'source' AND f.entity_id = s.id)
+                     OR (f.entity_type = 'object' AND f.entity_id = s.object_id)
+             )
              GROUP BY key
              ORDER BY cnt DESC"
         )?
@@ -243,26 +249,33 @@ fn show_value_distribution(
     )?;
 
     // Query value distribution
+    // Count sources (not entities) - multiple sources can share an object
     // Use COALESCE to get a displayable value from the typed columns
     let query = if limit == 0 {
-        "SELECT
-            COALESCE(value_text, CAST(value_num AS TEXT), datetime(value_time, 'unixepoch'), value_json) as val,
-            COUNT(*) as cnt
-         FROM facts
-         WHERE key = ?
-           AND ((entity_type = 'source' AND entity_id IN (SELECT id FROM temp_sources))
-                OR (entity_type = 'object' AND entity_id IN (SELECT id FROM temp_objects)))
+        "SELECT val, COUNT(*) as cnt
+         FROM (
+             SELECT DISTINCT ts.id,
+                 COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch'), f.value_json) as val
+             FROM temp_sources ts
+             JOIN sources s ON s.id = ts.id
+             JOIN facts f ON
+                 (f.entity_type = 'source' AND f.entity_id = s.id AND f.key = ?1)
+                 OR (f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1)
+         )
          GROUP BY val
          ORDER BY cnt DESC".to_string()
     } else {
         format!(
-            "SELECT
-                COALESCE(value_text, CAST(value_num AS TEXT), datetime(value_time, 'unixepoch'), value_json) as val,
-                COUNT(*) as cnt
-             FROM facts
-             WHERE key = ?
-               AND ((entity_type = 'source' AND entity_id IN (SELECT id FROM temp_sources))
-                    OR (entity_type = 'object' AND entity_id IN (SELECT id FROM temp_objects)))
+            "SELECT val, COUNT(*) as cnt
+             FROM (
+                 SELECT DISTINCT ts.id,
+                     COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch'), f.value_json) as val
+                 FROM temp_sources ts
+                 JOIN sources s ON s.id = ts.id
+                 JOIN facts f ON
+                     (f.entity_type = 'source' AND f.entity_id = s.id AND f.key = ?1)
+                     OR (f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1)
+             )
              GROUP BY val
              ORDER BY cnt DESC
              LIMIT {}",
@@ -279,16 +292,17 @@ fn show_value_distribution(
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Count sources with this fact
+    // Count sources that have this fact (either directly or via their object)
     let sources_with_fact: i64 = conn.query_row(
-        "SELECT COUNT(DISTINCT CASE
-            WHEN entity_type = 'source' THEN entity_id
-            ELSE (SELECT s.id FROM sources s WHERE s.object_id = facts.entity_id LIMIT 1)
-         END)
-         FROM facts
-         WHERE key = ?
-           AND ((entity_type = 'source' AND entity_id IN (SELECT id FROM temp_sources))
-                OR (entity_type = 'object' AND entity_id IN (SELECT id FROM temp_objects)))",
+        "SELECT COUNT(*)
+         FROM temp_sources ts
+         JOIN sources s ON s.id = ts.id
+         WHERE EXISTS (
+             SELECT 1 FROM facts
+             WHERE key = ?
+               AND ((entity_type = 'source' AND entity_id = s.id)
+                    OR (entity_type = 'object' AND entity_id = s.object_id))
+         )",
         [key],
         |row| row.get(0),
     )?;
