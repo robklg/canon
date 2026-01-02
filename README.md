@@ -300,6 +300,57 @@ Available pattern variables:
 - `{year}`, `{month}`, `{day}`, `{date}` - From EXIF DateTimeOriginal
 - Any fact key with dots replaced by underscores (e.g., `{content_Make}`)
 
+### canon exclude
+
+Manage source exclusions. Excluded sources are skipped by most commands.
+
+```bash
+# Mark sources as excluded (e.g., small files, temp files)
+canon exclude set --where 'source.size<1000'
+canon exclude set /path/to/photos --where 'source.ext=tmp'
+
+# Preview what would be excluded
+canon exclude set --where 'source.ext=bak' --dry-run
+
+# List currently excluded sources
+canon exclude list
+canon exclude list /path/to/photos
+
+# Remove exclusions
+canon exclude clear
+canon exclude clear --where 'source.ext=tmp'
+
+# Preview what would be cleared
+canon exclude clear --where 'source.ext=tmp' --dry-run
+```
+
+**How exclusions affect other commands:**
+
+| Command | Default behavior | Override |
+|---------|------------------|----------|
+| `worklist` | Skips excluded | `--include-excluded` |
+| `facts` | Skips excluded, shows count | `--include-excluded` |
+| `coverage` | Stats on included only | `--include-excluded` shows excluded dimension |
+| `cluster generate` | Always skips excluded | No override (hard gate) |
+| `apply` | Blocks if manifest has excluded | No override (hard gate) |
+
+Example output with `--include-excluded`:
+```
+canon coverage --include-excluded
+
+Archive Coverage Report
+
+Root: /path/to/backup (source)
+  Total sources:     1,234
+  Excluded:             50 (4.1%)
+  Included:          1,184
+  Hashed:            1,050 (88.7% of included)
+  Archived:            800 (76.2% of hashed)
+  Unarchived:          250
+```
+
+Exclusions are stored as `policy.exclude` facts on sources. Use `canon facts policy.exclude` to see them.
+
 ## Filter Syntax
 
 Filters select sources based on facts using a boolean expression language.
@@ -460,3 +511,4 @@ Canon uses SQLite in WAL mode with busy timeout, so multiple commands can run si
 | `source.device` | Device ID (--all only) |
 | `source.inode` | Inode number (--all only) |
 | `content.hash.sha256` | SHA-256 content hash |
+| `policy.exclude` | Source is excluded (set via `canon exclude set`) |
