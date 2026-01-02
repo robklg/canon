@@ -32,8 +32,26 @@ pub fn run(db_path: &Path, manifest_path: &Path, options: &ApplyOptions) -> Resu
         PathBuf::from(&manifest.output.base_dir)
     });
 
-    // Pre-flight archive check
+    // Pre-flight checks
     if !options.force {
+        // Check destination uniqueness first
+        let collisions = check_destination_collisions(&manifest, &base_dir)?;
+        if !collisions.is_empty() {
+            eprintln!(
+                "Error: {} destination paths have multiple sources:",
+                collisions.len()
+            );
+            for (dest, sources) in &collisions {
+                eprintln!("  {} <- {} files:", dest.display(), sources.len());
+                for src in sources {
+                    eprintln!("    {}", src);
+                }
+            }
+            eprintln!("\nUse --force to copy anyway (first source wins)");
+            bail!("Aborting due to destination collisions");
+        }
+
+        // Check archive conflicts
         let conn = db::open(db_path)?;
         let conflicts = check_archive_conflicts(&conn, &manifest, &base_dir)?;
 
@@ -85,6 +103,42 @@ pub fn run(db_path: &Path, manifest_path: &Path, options: &ApplyOptions) -> Resu
     );
 
     Ok(())
+}
+
+fn check_destination_collisions(
+    manifest: &Manifest,
+    base_dir: &Path,
+) -> Result<Vec<(PathBuf, Vec<String>)>> {
+    let mut dest_to_sources: HashMap<PathBuf, Vec<String>> = HashMap::new();
+
+    for source in &manifest.sources {
+        let src_path = Path::new(&source.path);
+
+        // Skip sources that don't exist (they'll be skipped during copy anyway)
+        if !src_path.exists() {
+            continue;
+        }
+
+        // Expand pattern to get destination path
+        let dest_rel = expand_pattern(&manifest.output.pattern, source, src_path)?;
+        let dest_path = base_dir.join(&dest_rel);
+
+        dest_to_sources
+            .entry(dest_path)
+            .or_default()
+            .push(source.path.clone());
+    }
+
+    // Filter to only collisions (more than one source per destination)
+    let mut collisions: Vec<(PathBuf, Vec<String>)> = dest_to_sources
+        .into_iter()
+        .filter(|(_, sources)| sources.len() > 1)
+        .collect();
+
+    // Sort for consistent output
+    collisions.sort_by(|a, b| a.0.cmp(&b.0));
+
+    Ok(collisions)
 }
 
 struct ArchiveConflicts {
