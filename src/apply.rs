@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cluster::{Manifest, ManifestSource};
 use crate::db;
+use crate::exclude;
 
 #[derive(Default)]
 struct ApplyStats {
@@ -77,6 +78,25 @@ pub fn run(db_path: &Path, manifest_path: &Path, options: &ApplyOptions) -> Resu
             }
             eprintln!("\nUse --allow-cross-archive-duplicates to copy anyway, or --force to skip all checks");
             bail!("Aborting due to files already in other archives");
+        }
+    }
+
+    // Defense-in-depth: Check for excluded sources in manifest (hard gate, no override)
+    // This should never happen if the manifest was generated correctly,
+    // but we check anyway to prevent accidentally copying excluded files
+    {
+        let conn = db::open(db_path)?;
+        let excluded_sources = check_excluded_sources(&conn, &manifest)?;
+        if !excluded_sources.is_empty() {
+            eprintln!(
+                "Error: {} sources in manifest are marked as excluded:",
+                excluded_sources.len()
+            );
+            for (id, path) in &excluded_sources {
+                eprintln!("  {} (id: {})", path, id);
+            }
+            eprintln!("\nExcluded sources cannot be applied. Regenerate the manifest after clearing exclusions.");
+            bail!("Aborting due to excluded sources in manifest");
         }
     }
 
@@ -210,6 +230,19 @@ fn find_archive_for_path(conn: &Connection, path: &Path) -> Result<Option<i64>> 
     }
 
     Ok(None)
+}
+
+/// Check if any sources in the manifest are marked as excluded
+fn check_excluded_sources(conn: &Connection, manifest: &Manifest) -> Result<Vec<(i64, String)>> {
+    let mut excluded = Vec::new();
+
+    for source in &manifest.sources {
+        if exclude::is_excluded(conn, source.id)? {
+            excluded.push((source.id, source.path.clone()));
+        }
+    }
+
+    Ok(excluded)
 }
 
 enum ApplyAction {

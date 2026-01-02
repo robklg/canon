@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db;
+use crate::exclude;
 use crate::filter::{self, Filter};
 
 #[derive(Serialize, Deserialize)]
@@ -56,7 +57,12 @@ pub fn generate(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    let (sources, archived) = query_sources(&conn, &parsed_filters, options.include_archived)?;
+    let (sources, archived, excluded_count) = query_sources(&conn, &parsed_filters, options.include_archived)?;
+
+    // Report excluded files (hard gate - always skipped)
+    if excluded_count > 0 {
+        eprintln!("Skipped {} excluded sources", excluded_count);
+    }
 
     // Report archived files
     if !archived.is_empty() {
@@ -106,13 +112,14 @@ pub fn generate(
     Ok(())
 }
 
-/// Returns (included_sources, archived_sources)
+/// Returns (included_sources, archived_sources, excluded_count)
 /// archived_sources is a list of (source_path, archive_path) for files already in an archive
+/// excluded_count is the number of sources skipped due to policy.exclude (hard gate)
 fn query_sources(
     conn: &Connection,
     filters: &[Filter],
     include_archived: bool,
-) -> Result<(Vec<ManifestSource>, Vec<(String, String)>)> {
+) -> Result<(Vec<ManifestSource>, Vec<(String, String)>, usize)> {
     // Build query based on filters
     // By default only source roots, with --include-archived also include archive roots
     let role_clause = if include_archived {
@@ -135,10 +142,18 @@ fn query_sources(
     source_ids = filter::apply_filters(conn, &source_ids, filters)?;
 
     // Check which sources are already archived (same object_id exists in an archive root)
+    // Also apply hard gate for excluded sources
     let mut sources = Vec::new();
     let mut archived = Vec::new();
+    let mut excluded_count = 0;
 
     for source_id in source_ids {
+        // HARD GATE: Skip excluded sources (no override flag)
+        if exclude::is_excluded(conn, source_id)? {
+            excluded_count += 1;
+            continue;
+        }
+
         if let Some(source) = fetch_source(conn, source_id)? {
             // Check if this content is already in an archive
             let archive_path = if let Some(ref hash) = source.hash_value {
@@ -159,7 +174,7 @@ fn query_sources(
         }
     }
 
-    Ok((sources, archived))
+    Ok((sources, archived, excluded_count))
 }
 
 /// Find if a hash exists in any archive root, return the path if found

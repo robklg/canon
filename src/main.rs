@@ -5,6 +5,7 @@ mod apply;
 mod cluster;
 mod coverage;
 mod db;
+mod exclude;
 mod facts;
 mod filter;
 mod import_facts;
@@ -44,6 +45,9 @@ enum Commands {
         /// Include sources from archive roots (by default only source roots)
         #[arg(long)]
         include_archived: bool,
+        /// Include excluded sources (by default they are skipped)
+        #[arg(long)]
+        include_excluded: bool,
     },
     /// Import facts from JSONL on stdin
     ImportFacts {
@@ -69,6 +73,9 @@ enum Commands {
         /// Include sources from archive roots (by default only source roots)
         #[arg(long)]
         include_archived: bool,
+        /// Include excluded sources (by default they are skipped)
+        #[arg(long)]
+        include_excluded: bool,
     },
     /// Show archive coverage statistics
     Coverage {
@@ -83,6 +90,9 @@ enum Commands {
         /// Include sources from archive roots (by default only source roots)
         #[arg(long)]
         include_archived: bool,
+        /// Include excluded sources (by default they are skipped)
+        #[arg(long)]
+        include_excluded: bool,
     },
     /// Generate a cluster manifest from matching sources
     Cluster {
@@ -102,6 +112,45 @@ enum Commands {
         /// Allow copying files that exist in other archives (but not destination archive)
         #[arg(long)]
         allow_cross_archive_duplicates: bool,
+    },
+    /// Manage source exclusions
+    Exclude {
+        #[command(subcommand)]
+        action: ExcludeAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExcludeAction {
+    /// Mark sources as excluded
+    Set {
+        /// Directory path to scope the operation (resolved to realpath)
+        path: Option<PathBuf>,
+        /// Filter expressions (e.g., "source.size<1000" or "source.ext=tmp")
+        #[arg(long = "where")]
+        filters: Vec<String>,
+        /// Show what would be excluded without making changes
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove exclusions from sources
+    Clear {
+        /// Directory path to scope the operation (resolved to realpath)
+        path: Option<PathBuf>,
+        /// Filter expressions to match excluded sources
+        #[arg(long = "where")]
+        filters: Vec<String>,
+        /// Show what would be cleared without making changes
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List excluded sources
+    List {
+        /// Directory path to scope the query (resolved to realpath)
+        path: Option<PathBuf>,
+        /// Filter expressions to match excluded sources
+        #[arg(long = "where")]
+        filters: Vec<String>,
     },
 }
 
@@ -138,17 +187,17 @@ fn main() -> anyhow::Result<()> {
         Commands::Scan { paths, role } => {
             scan::run(&db_path, &paths, &role)?;
         }
-        Commands::Worklist { path, filters, include_archived } => {
-            worklist::run(&db_path, path.as_deref(), &filters, include_archived)?;
+        Commands::Worklist { path, filters, include_archived, include_excluded } => {
+            worklist::run(&db_path, path.as_deref(), &filters, include_archived, include_excluded)?;
         }
         Commands::ImportFacts { allow_archived } => {
             import_facts::run(&db_path, allow_archived)?;
         }
-        Commands::Facts { key, path, filters, limit, all, include_archived } => {
-            facts::run(&db_path, key.as_deref(), path.as_deref(), &filters, limit, all, include_archived)?;
+        Commands::Facts { key, path, filters, limit, all, include_archived, include_excluded } => {
+            facts::run(&db_path, key.as_deref(), path.as_deref(), &filters, limit, all, include_archived, include_excluded)?;
         }
-        Commands::Coverage { path, filters, archive, include_archived } => {
-            coverage::run(&db_path, path.as_deref(), &filters, archive.as_deref(), include_archived)?;
+        Commands::Coverage { path, filters, archive, include_archived, include_excluded } => {
+            coverage::run(&db_path, path.as_deref(), &filters, archive.as_deref(), include_archived, include_excluded)?;
         }
         Commands::Cluster { action } => match action {
             ClusterAction::Generate {
@@ -177,6 +226,19 @@ fn main() -> anyhow::Result<()> {
             };
             apply::run(&db_path, &manifest, &options)?;
         }
+        Commands::Exclude { action } => match action {
+            ExcludeAction::Set { path, filters, dry_run } => {
+                let options = exclude::SetOptions { dry_run };
+                exclude::set(&db_path, path.as_deref(), &filters, &options)?;
+            }
+            ExcludeAction::Clear { path, filters, dry_run } => {
+                let options = exclude::ClearOptions { dry_run };
+                exclude::clear(&db_path, path.as_deref(), &filters, &options)?;
+            }
+            ExcludeAction::List { path, filters } => {
+                exclude::list(&db_path, path.as_deref(), &filters)?;
+            }
+        },
     }
 
     Ok(())

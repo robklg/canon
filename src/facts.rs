@@ -3,6 +3,7 @@ use rusqlite::Connection;
 use std::path::Path;
 
 use crate::db;
+use crate::exclude;
 use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;
@@ -27,7 +28,7 @@ fn is_builtin_fact(key: &str) -> bool {
     BUILTIN_FACTS_DEFAULT.contains(&key) || BUILTIN_FACTS_HIDDEN.contains(&key)
 }
 
-pub fn run(db_path: &Path, key_arg: Option<&str>, path_arg: Option<&Path>, filter_strs: &[String], limit: usize, show_all: bool, include_archived: bool) -> Result<()> {
+pub fn run(db_path: &Path, key_arg: Option<&str>, path_arg: Option<&Path>, filter_strs: &[String], limit: usize, show_all: bool, include_archived: bool, include_excluded: bool) -> Result<()> {
     let conn = db::open(db_path)?;
 
     // Parse filters
@@ -52,12 +53,22 @@ pub fn run(db_path: &Path, key_arg: Option<&str>, path_arg: Option<&Path>, filte
         None
     };
 
+    // Get excluded count for reporting
+    let excluded_count = if !include_excluded {
+        exclude::count_excluded(&conn, scope_prefix.as_deref(), include_archived)?
+    } else {
+        0
+    };
+
     // Get all matching source IDs
-    let source_ids = get_matching_sources(&conn, scope_prefix.as_deref(), &filters, include_archived)?;
+    let source_ids = get_matching_sources(&conn, scope_prefix.as_deref(), &filters, include_archived, include_excluded)?;
     let total_sources = source_ids.len();
 
     if total_sources == 0 {
         println!("No sources match the given filters.");
+        if !include_excluded && excluded_count > 0 {
+            println!("\n({} excluded sources hidden, use --include-excluded to show)", excluded_count);
+        }
         return Ok(());
     }
 
@@ -73,6 +84,11 @@ pub fn run(db_path: &Path, key_arg: Option<&str>, path_arg: Option<&Path>, filte
         show_all_keys(&conn, &source_ids, total_sources, show_all)?;
     }
 
+    // Report excluded count
+    if !include_excluded && excluded_count > 0 {
+        println!("\n({} excluded sources hidden, use --include-excluded to show)", excluded_count);
+    }
+
     Ok(())
 }
 
@@ -81,6 +97,7 @@ fn get_matching_sources(
     scope_prefix: Option<&str>,
     filters: &[Filter],
     include_archived: bool,
+    include_excluded: bool,
 ) -> Result<Vec<i64>> {
     let mut all_ids = Vec::new();
     let mut last_id: i64 = 0;
@@ -91,6 +108,8 @@ fn get_matching_sources(
         "r.role = 'source'"
     };
 
+    let exclude_clause = exclude::exclude_clause(include_excluded);
+
     loop {
         // Fetch batch of source IDs
         let batch: Vec<i64> = if let Some(prefix) = scope_prefix {
@@ -99,11 +118,11 @@ fn get_matching_sources(
                 "SELECT s.id
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
-                 WHERE s.present = 1 AND {} AND s.id > ?
+                 WHERE s.present = 1 AND {} AND {} AND s.id > ?
                    AND (r.path || '/' || s.rel_path) LIKE ? || '%'
                  ORDER BY s.id
                  LIMIT ?",
-                role_clause
+                role_clause, exclude_clause
             ))?
             .query_map(rusqlite::params![last_id, prefix, BATCH_SIZE], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?
@@ -112,10 +131,10 @@ fn get_matching_sources(
                 "SELECT s.id
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
-                 WHERE s.present = 1 AND {} AND s.id > ?
+                 WHERE s.present = 1 AND {} AND {} AND s.id > ?
                  ORDER BY s.id
                  LIMIT ?",
-                role_clause
+                role_clause, exclude_clause
             ))?
             .query_map(rusqlite::params![last_id, BATCH_SIZE], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?

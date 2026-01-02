@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use crate::db;
+use crate::exclude;
 use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;
@@ -24,7 +25,7 @@ struct FetchResult {
     max_id_seen: Option<i64>,
 }
 
-pub fn run(db_path: &Path, scope_path: Option<&Path>, filter_strs: &[String], include_archived: bool) -> Result<()> {
+pub fn run(db_path: &Path, scope_path: Option<&Path>, filter_strs: &[String], include_archived: bool, include_excluded: bool) -> Result<()> {
     // Parse filters upfront
     let filters: Vec<Filter> = filter_strs
         .iter()
@@ -38,14 +39,24 @@ pub fn run(db_path: &Path, scope_path: Option<&Path>, filter_strs: &[String], in
         None
     };
 
+    // Check excluded count if we're skipping them
+    let conn = db::open(db_path)?;
+    let excluded_count = if !include_excluded {
+        exclude::count_excluded(&conn, scope_prefix.as_deref(), include_archived)?
+    } else {
+        0
+    };
+    drop(conn);
+
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let mut last_id: i64 = 0;
+    let mut output_count: i64 = 0;
 
     loop {
         // Open connection for each batch to avoid holding locks
         let conn = db::open(db_path)?;
-        let result = fetch_batch(&conn, last_id, scope_prefix.as_deref(), &filters, include_archived)?;
+        let result = fetch_batch(&conn, last_id, scope_prefix.as_deref(), &filters, include_archived, include_excluded)?;
 
         // If we didn't see any source IDs, we're done
         let max_id = match result.max_id_seen {
@@ -56,10 +67,18 @@ pub fn run(db_path: &Path, scope_path: Option<&Path>, filter_strs: &[String], in
         for entry in &result.entries {
             let json = serde_json::to_string(entry)?;
             writeln!(handle, "{}", json)?;
+            output_count += 1;
         }
 
         last_id = max_id;
         // Connection dropped here, releasing any locks
+    }
+
+    // Report stats to stderr
+    if include_excluded && excluded_count > 0 {
+        eprintln!("Included {} excluded sources", excluded_count);
+    } else if !include_excluded && excluded_count > 0 {
+        eprintln!("Skipped {} excluded sources", excluded_count);
     }
 
     Ok(())
@@ -71,6 +90,7 @@ fn fetch_batch(
     scope_prefix: Option<&str>,
     filters: &[Filter],
     include_archived: bool,
+    include_excluded: bool,
 ) -> Result<FetchResult> {
     // Build the query based on options
     let role_clause = if include_archived {
@@ -79,17 +99,19 @@ fn fetch_batch(
         "r.role = 'source'"
     };
 
+    let exclude_clause = exclude::exclude_clause(include_excluded);
+
     let source_ids: Vec<i64> = if let Some(prefix) = scope_prefix {
         // Filter by path prefix
         conn.prepare(&format!(
             "SELECT s.id
              FROM sources s
              JOIN roots r ON s.root_id = r.id
-             WHERE s.present = 1 AND {} AND s.id > ?
+             WHERE s.present = 1 AND {} AND {} AND s.id > ?
                AND (r.path || '/' || s.rel_path) LIKE ? || '%'
              ORDER BY s.id
              LIMIT ?",
-            role_clause
+            role_clause, exclude_clause
         ))?
         .query_map(rusqlite::params![after_id, prefix, BATCH_SIZE], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?
@@ -98,10 +120,10 @@ fn fetch_batch(
             "SELECT s.id
              FROM sources s
              JOIN roots r ON s.root_id = r.id
-             WHERE s.present = 1 AND {} AND s.id > ?
+             WHERE s.present = 1 AND {} AND {} AND s.id > ?
              ORDER BY s.id
              LIMIT ?",
-            role_clause
+            role_clause, exclude_clause
         ))?
         .query_map(rusqlite::params![after_id, BATCH_SIZE], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?
