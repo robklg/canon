@@ -198,12 +198,18 @@ canon apply manifest.toml --dry-run
 # Actually copy files
 canon apply manifest.toml
 
-# Skip archive conflict checks
+# Skip all pre-flight checks
 canon apply manifest.toml --force
 
 # Allow duplicates across archives (but not within destination)
 canon apply manifest.toml --allow-cross-archive-duplicates
 ```
+
+**Pre-flight checks** (skipped with `--force`):
+
+1. **Destination collisions** - If multiple sources would map to the same destination path (e.g., using `{filename}` when sources have duplicate names), apply aborts with an error showing which files conflict. This prevents silent data loss.
+
+2. **Archive conflicts** - Checks if files already exist in the destination archive or other archives.
 
 Edit the manifest's `[output]` section to customize the destination:
 
