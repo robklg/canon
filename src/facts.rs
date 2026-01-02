@@ -7,10 +7,27 @@ use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;
 
-// Built-in facts derived from source data
-const BUILTIN_FACTS: &[&str] = &["ext", "size", "mtime"];
+// Built-in source facts - default visible
+const BUILTIN_FACTS_DEFAULT: &[&str] = &[
+    "source.ext",
+    "source.size",
+    "source.mtime",
+    "source.path",
+];
 
-pub fn run(db_path: &Path, key_arg: Option<&str>, path_arg: Option<&Path>, filter_strs: &[String], limit: usize) -> Result<()> {
+// Built-in source facts - only shown with --all
+const BUILTIN_FACTS_HIDDEN: &[&str] = &[
+    "source.root",
+    "source.rel_path",
+    "source.device",
+    "source.inode",
+];
+
+fn is_builtin_fact(key: &str) -> bool {
+    BUILTIN_FACTS_DEFAULT.contains(&key) || BUILTIN_FACTS_HIDDEN.contains(&key)
+}
+
+pub fn run(db_path: &Path, key_arg: Option<&str>, path_arg: Option<&Path>, filter_strs: &[String], limit: usize, show_all: bool) -> Result<()> {
     let conn = db::open(db_path)?;
 
     // Parse filters
@@ -47,13 +64,13 @@ pub fn run(db_path: &Path, key_arg: Option<&str>, path_arg: Option<&Path>, filte
     println!("Sources matching filters: {}\n", total_sources);
 
     if let Some(fact_key) = key {
-        if BUILTIN_FACTS.contains(&fact_key) {
+        if is_builtin_fact(fact_key) {
             show_builtin_distribution(&conn, &source_ids, fact_key, total_sources, limit)?;
         } else {
             show_value_distribution(&conn, &source_ids, fact_key, total_sources, limit)?;
         }
     } else {
-        show_all_keys(&conn, &source_ids, total_sources)?;
+        show_all_keys(&conn, &source_ids, total_sources, show_all)?;
     }
 
     Ok(())
@@ -114,7 +131,7 @@ fn get_matching_sources(
     Ok(all_ids)
 }
 
-fn show_all_keys(conn: &Connection, source_ids: &[i64], total_sources: usize) -> Result<()> {
+fn show_all_keys(conn: &Connection, source_ids: &[i64], total_sources: usize, show_all: bool) -> Result<()> {
     if source_ids.is_empty() {
         return Ok(());
     }
@@ -160,10 +177,18 @@ fn show_all_keys(conn: &Connection, source_ids: &[i64], total_sources: usize) ->
     conn.execute("DROP TABLE IF EXISTS temp_objects", [])?;
 
     // Add built-in facts at the top (they always have 100% coverage)
-    let mut all_results: Vec<(String, i64, bool)> = BUILTIN_FACTS
+    let mut all_results: Vec<(String, i64, bool)> = BUILTIN_FACTS_DEFAULT
         .iter()
         .map(|&name| (name.to_string(), total_sources as i64, true))
         .collect();
+
+    // Add hidden built-ins if --all flag is set
+    if show_all {
+        for &name in BUILTIN_FACTS_HIDDEN {
+            all_results.push((name.to_string(), total_sources as i64, true));
+        }
+    }
+
     all_results.append(&mut results);
 
     // Print header
@@ -174,6 +199,11 @@ fn show_all_keys(conn: &Connection, source_ids: &[i64], total_sources: usize) ->
         let coverage = (*count as f64 / total_sources as f64) * 100.0;
         let suffix = if *is_builtin { "  (built-in)" } else { "" };
         println!("{:<30} {:>10} {:>9.1}%{}", key, count, coverage, suffix);
+    }
+
+    if !show_all {
+        let hidden_count = BUILTIN_FACTS_HIDDEN.len();
+        println!("\n({} built-in facts hidden, use --all to show)", hidden_count);
     }
 
     Ok(())
@@ -316,11 +346,10 @@ fn show_builtin_distribution(
 
     let label = format!("{} (built-in)", key);
 
-    // For ext, we need to compute in Rust since SQLite can't easily extract extensions
     let mut counts: HashMap<String, i64> = HashMap::new();
 
     match key {
-        "ext" => {
+        "source.ext" => {
             let rows: Vec<String> = conn
                 .prepare("SELECT rel_path FROM sources WHERE id IN (SELECT id FROM temp_sources)")?
                 .query_map([], |row| row.get(0))?
@@ -335,7 +364,7 @@ fn show_builtin_distribution(
                 *counts.entry(ext).or_insert(0) += 1;
             }
         }
-        "size" => {
+        "source.size" => {
             let rows: Vec<i64> = conn
                 .prepare("SELECT size FROM sources WHERE id IN (SELECT id FROM temp_sources)")?
                 .query_map([], |row| row.get(0))?
@@ -358,7 +387,7 @@ fn show_builtin_distribution(
                 *counts.entry(bucket.to_string()).or_insert(0) += 1;
             }
         }
-        "mtime" => {
+        "source.mtime" => {
             let rows: Vec<i64> = conn
                 .prepare("SELECT mtime FROM sources WHERE id IN (SELECT id FROM temp_sources)")?
                 .query_map([], |row| row.get(0))?
@@ -369,6 +398,71 @@ fn show_builtin_distribution(
                     .map(|dt| dt.format("%Y").to_string())
                     .unwrap_or_else(|| "(unknown)".to_string());
                 *counts.entry(year).or_insert(0) += 1;
+            }
+        }
+        "source.path" => {
+            let rows: Vec<(String, String)> = conn
+                .prepare(
+                    "SELECT r.path, s.rel_path FROM sources s
+                     JOIN roots r ON s.root_id = r.id
+                     WHERE s.id IN (SELECT id FROM temp_sources)"
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            for (root_path, rel_path) in rows {
+                let full_path = if rel_path.is_empty() {
+                    root_path
+                } else {
+                    format!("{}/{}", root_path, rel_path)
+                };
+                *counts.entry(full_path).or_insert(0) += 1;
+            }
+        }
+        "source.root" => {
+            let rows: Vec<String> = conn
+                .prepare(
+                    "SELECT r.path FROM sources s
+                     JOIN roots r ON s.root_id = r.id
+                     WHERE s.id IN (SELECT id FROM temp_sources)"
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            for root_path in rows {
+                *counts.entry(root_path).or_insert(0) += 1;
+            }
+        }
+        "source.rel_path" => {
+            let rows: Vec<String> = conn
+                .prepare("SELECT rel_path FROM sources WHERE id IN (SELECT id FROM temp_sources)")?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            for rel_path in rows {
+                *counts.entry(rel_path).or_insert(0) += 1;
+            }
+        }
+        "source.device" => {
+            let rows: Vec<Option<i64>> = conn
+                .prepare("SELECT device FROM sources WHERE id IN (SELECT id FROM temp_sources)")?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            for device in rows {
+                let val = device.map(|d| d.to_string()).unwrap_or_else(|| "(null)".to_string());
+                *counts.entry(val).or_insert(0) += 1;
+            }
+        }
+        "source.inode" => {
+            let rows: Vec<Option<i64>> = conn
+                .prepare("SELECT inode FROM sources WHERE id IN (SELECT id FROM temp_sources)")?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            for inode in rows {
+                let val = inode.map(|i| i.to_string()).unwrap_or_else(|| "(null)".to_string());
+                *counts.entry(val).or_insert(0) += 1;
             }
         }
         _ => return Ok(()),

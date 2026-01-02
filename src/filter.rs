@@ -118,35 +118,25 @@ fn check_fact_exists(conn: &Connection, source_id: i64, key: &str) -> Result<boo
         }
     }
 
-    // Special case: check for built-in fields
+    // Special case: check for built-in source.* fields
     match key {
-        "root_id" | "size" | "mtime" | "basis_rev" | "object_id" => Ok(true),
+        // New source.* namespace
+        "source.ext" | "source.size" | "source.mtime" | "source.path" |
+        "source.root" | "source.rel_path" | "source.device" | "source.inode" => Ok(true),
+        // New content.* namespace - hash existence means object exists
+        "content.hash.sha256" => Ok(object_id.is_some()),
+        // Legacy names (backwards compatibility)
+        "ext" | "size" | "mtime" | "root_id" | "basis_rev" | "object_id" => Ok(true),
         "hash" | "content_hash" | "content_hash.sha256" => Ok(object_id.is_some()),
         _ => Ok(false),
     }
 }
 
 fn check_fact_equals(conn: &Connection, source_id: i64, key: &str, value: &str) -> Result<bool> {
-    // Handle built-in fields first
+    // Handle built-in source.* fields first
     match key {
-        "root_id" => {
-            let v: i64 = conn.query_row(
-                "SELECT root_id FROM sources WHERE id = ?",
-                [source_id],
-                |row| row.get(0),
-            )?;
-            return Ok(v.to_string() == value);
-        }
-        "size" => {
-            let v: i64 = conn.query_row(
-                "SELECT size FROM sources WHERE id = ?",
-                [source_id],
-                |row| row.get(0),
-            )?;
-            return Ok(v.to_string() == value);
-        }
-        // Handle extension matching
-        "ext" => {
+        // New source.* namespace
+        "source.ext" | "ext" => {
             let rel_path: String = conn.query_row(
                 "SELECT rel_path FROM sources WHERE id = ?",
                 [source_id],
@@ -157,6 +147,76 @@ fn check_fact_equals(conn: &Connection, source_id: i64, key: &str, value: &str) 
                 .and_then(|e| e.to_str())
                 .unwrap_or("");
             return Ok(ext.eq_ignore_ascii_case(value));
+        }
+        "source.size" | "size" => {
+            let v: i64 = conn.query_row(
+                "SELECT size FROM sources WHERE id = ?",
+                [source_id],
+                |row| row.get(0),
+            )?;
+            return Ok(v.to_string() == value);
+        }
+        "source.mtime" | "mtime" => {
+            let v: i64 = conn.query_row(
+                "SELECT mtime FROM sources WHERE id = ?",
+                [source_id],
+                |row| row.get(0),
+            )?;
+            return Ok(v.to_string() == value);
+        }
+        "source.root" => {
+            let root_path: String = conn.query_row(
+                "SELECT r.path FROM sources s JOIN roots r ON s.root_id = r.id WHERE s.id = ?",
+                [source_id],
+                |row| row.get(0),
+            )?;
+            return Ok(root_path == value);
+        }
+        "source.path" => {
+            let (root_path, rel_path): (String, String) = conn.query_row(
+                "SELECT r.path, s.rel_path FROM sources s JOIN roots r ON s.root_id = r.id WHERE s.id = ?",
+                [source_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let full_path = if rel_path.is_empty() {
+                root_path
+            } else {
+                format!("{}/{}", root_path, rel_path)
+            };
+            return Ok(full_path == value);
+        }
+        "source.rel_path" => {
+            let rel_path: String = conn.query_row(
+                "SELECT rel_path FROM sources WHERE id = ?",
+                [source_id],
+                |row| row.get(0),
+            )?;
+            return Ok(rel_path == value);
+        }
+        "source.device" => {
+            let device: Option<i64> = conn.query_row(
+                "SELECT device FROM sources WHERE id = ?",
+                [source_id],
+                |row| row.get(0),
+            )?;
+            return Ok(device.map(|d| d.to_string()).unwrap_or_default() == value);
+        }
+        "source.inode" => {
+            let inode: Option<i64> = conn.query_row(
+                "SELECT inode FROM sources WHERE id = ?",
+                [source_id],
+                |row| row.get(0),
+            )?;
+            return Ok(inode.map(|i| i.to_string()).unwrap_or_default() == value);
+        }
+        // Legacy
+        "root_id" => {
+            let v: i64 = conn.query_row(
+                "SELECT root_id FROM sources WHERE id = ?",
+                [source_id],
+                |row| row.get(0),
+            )?;
+            return Ok(v.to_string() == value);
         }
         _ => {}
     }

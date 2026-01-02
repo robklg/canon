@@ -33,6 +33,6 @@ while IFS= read -r line; do
             source_id: $source_id,
             basis_rev: $basis_rev,
             observed_at: (now | floor),
-            facts: {"content_hash.sha256": $hash}
+            facts: {"hash.sha256": $hash}
         }'
 done

@@ -47,12 +47,15 @@ enum Commands {
         key: Option<String>,
         /// Directory path to scope the query (resolved to realpath)
         path: Option<PathBuf>,
-        /// Filter expressions (e.g., "ext=jpg" or "content_hash.sha256?")
+        /// Filter expressions (e.g., "source.ext=jpg" or "content.hash.sha256?")
         #[arg(long = "where")]
         filters: Vec<String>,
         /// Maximum number of values to show (0 for unlimited, default 50)
         #[arg(long, default_value = "50")]
         limit: usize,
+        /// Show all built-in facts (including hidden ones like source.device, source.inode)
+        #[arg(long)]
+        all: bool,
     },
     /// Generate a cluster manifest from matching sources
     Cluster {
@@ -114,8 +117,8 @@ fn main() -> anyhow::Result<()> {
         Commands::ImportFacts => {
             import_facts::run(&db_path)?;
         }
-        Commands::Facts { key, path, filters, limit } => {
-            facts::run(&db_path, key.as_deref(), path.as_deref(), &filters, limit)?;
+        Commands::Facts { key, path, filters, limit, all } => {
+            facts::run(&db_path, key.as_deref(), path.as_deref(), &filters, limit, all)?;
         }
         Commands::Cluster { action } => match action {
             ClusterAction::Generate {

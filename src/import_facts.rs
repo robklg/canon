@@ -30,8 +30,23 @@ struct ImportStats {
     lines_processed: u64,
     facts_imported: u64,
     skipped_stale: u64,
+    skipped_reserved: u64,
     objects_created: u64,
     facts_promoted: u64,
+}
+
+/// Normalize a fact key to use the content.* namespace.
+/// - Keys starting with "source." are rejected (reserved namespace)
+/// - Keys already starting with "content." are left as-is
+/// - All other keys are prefixed with "content."
+fn normalize_fact_key(key: &str) -> Result<String, &'static str> {
+    if key.starts_with("source.") {
+        return Err("source.* namespace is reserved for built-in facts");
+    }
+    if key.starts_with("content.") {
+        return Ok(key.to_string());
+    }
+    Ok(format!("content.{}", key))
 }
 
 pub fn run(db_path: &Path) -> Result<()> {
@@ -67,10 +82,11 @@ pub fn run(db_path: &Path) -> Result<()> {
     }
 
     println!(
-        "Processed {} lines: {} facts imported, {} skipped (stale), {} objects created, {} facts promoted",
+        "Processed {} lines: {} facts imported, {} skipped (stale), {} skipped (reserved), {} objects created, {} facts promoted",
         stats.lines_processed,
         stats.facts_imported,
         stats.skipped_stale,
+        stats.skipped_reserved,
         stats.objects_created,
         stats.facts_promoted
     );
@@ -105,10 +121,28 @@ fn process_import(conn: &Connection, import: &FactImport, stats: &mut ImportStat
         return Ok(());
     }
 
+    // Normalize all fact keys first, collecting valid ones
+    let mut normalized_facts: Vec<(String, &Value)> = Vec::new();
+    for (key, value) in &import.facts {
+        match normalize_fact_key(key) {
+            Ok(normalized_key) => normalized_facts.push((normalized_key, value)),
+            Err(msg) => {
+                eprintln!("Warning: skipping fact '{}': {}", key, msg);
+                stats.skipped_reserved += 1;
+            }
+        }
+    }
+
     // Check for content hash and process it first
+    // Support both old format (hash.sha256) and new format (content.hash.sha256)
     let mut object_id = current_object_id;
-    if let Some(hash_value) = import.facts.get("content_hash.sha256") {
-        if let Some(hash_str) = hash_value.as_str() {
+    let hash_value = normalized_facts
+        .iter()
+        .find(|(k, _)| k == "content.hash.sha256")
+        .map(|(_, v)| *v);
+
+    if let Some(hash_val) = hash_value {
+        if let Some(hash_str) = hash_val.as_str() {
             object_id = Some(get_or_create_object(conn, "sha256", hash_str, stats)?);
 
             // Link source to object if not already linked
@@ -121,12 +155,9 @@ fn process_import(conn: &Connection, import: &FactImport, stats: &mut ImportStat
         }
     }
 
-    // Import facts
-    for (key, value) in &import.facts {
-        // Determine if this is a content fact that should go to object
-        let is_content_fact = is_content_fact(key);
-
-        if is_content_fact && object_id.is_some() {
+    // Import facts - all imported facts are content facts (stored on object when available)
+    for (key, value) in &normalized_facts {
+        if object_id.is_some() {
             // Store as object fact
             insert_fact(
                 conn,
@@ -139,20 +170,8 @@ fn process_import(conn: &Connection, import: &FactImport, stats: &mut ImportStat
             )?;
             stats.facts_imported += 1;
             stats.facts_promoted += 1;
-        } else if is_content_fact && object_id.is_none() {
-            // Store as source fact for now (will be promoted later when hash is known)
-            insert_fact(
-                conn,
-                "source",
-                import.source_id,
-                key,
-                value,
-                import.observed_at,
-                Some(import.basis_rev),
-            )?;
-            stats.facts_imported += 1;
         } else {
-            // Source fact
+            // Store as source fact for now (will be promoted later when hash is known)
             insert_fact(
                 conn,
                 "source",
@@ -204,16 +223,9 @@ fn get_or_create_object(
 }
 
 fn is_content_fact(key: &str) -> bool {
-    // Content facts are facts that are inherent to the file content
-    // and would be the same for any file with the same hash
-    key.starts_with("content_hash.")
-        || key.starts_with("exif.")
-        || key.starts_with("mime.")
-        || key == "mime_type"
-        || key.starts_with("audio.")
-        || key.starts_with("video.")
-        || key.starts_with("image.")
-        || key.starts_with("pdf.")
+    // Content facts use the content.* namespace
+    // All imported facts are content facts (auto-namespaced on import)
+    key.starts_with("content.")
 }
 
 fn insert_fact(
