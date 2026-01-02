@@ -181,6 +181,58 @@ content.Make                        7935      22.9%
 ...
 ```
 
+### canon coverage
+
+Show archive coverage statistics - how many sources are hashed and how many are archived.
+
+```bash
+# Overview of all source roots
+canon coverage
+
+# Scoped to a specific directory
+canon coverage /path/to/photos
+
+# With filters
+canon coverage --where 'source.ext=jpg'
+
+# Coverage relative to a specific archive
+canon coverage --archive /path/to/archive
+
+# Coverage for a sub-path within an archive
+canon coverage --archive /path/to/archive/Photos/2024
+
+# Include archive roots in analysis
+canon coverage --include-archived
+```
+
+Example output:
+```
+Archive Coverage Report
+
+Root: /path/to/backup1 (source)
+  Total sources:     1,234
+  Hashed:            1,100 (89.1%)
+  Archived:            850 (77.3% of hashed)
+  Unarchived:          250
+
+Root: /path/to/backup2 (source)
+  Total sources:       567
+  Hashed:              500 (88.2%)
+  Archived:            400 (80.0% of hashed)
+  Unarchived:          100
+
+────────────────────────────────────────
+Overall:
+  Total sources:     1,801
+  Hashed:            1,600 (88.8%)
+  Archived:          1,250 (78.1% of hashed)
+  Unarchived:          350
+```
+
+- **Hashed**: Sources with a content hash (ready for archiving)
+- **Archived**: Sources whose content exists in an archive root
+- With `--archive`: Shows "In this archive" vs "Not in archive" for that specific archive
+
 ### canon cluster generate
 
 Generate a manifest of files matching filters.
