@@ -186,6 +186,37 @@ content.Make                        7935      22.9%
 ...
 ```
 
+#### canon facts delete
+
+Delete facts by key. Useful for removing incorrect or unwanted metadata.
+
+```bash
+# Preview deletion (dry-run by default)
+canon facts delete content.mime --on object
+canon facts delete content.Make --on source /path/to/photos --where 'source.ext=jpg'
+
+# Execute deletion
+canon facts delete content.mime --on object --yes
+```
+
+- `--on source` or `--on object` is required to specify entity type
+- Protected namespaces (`source.*`, `policy.*`) cannot be deleted
+- Dry-run by default; use `--yes` to execute
+
+#### canon facts prune
+
+Clean up stale facts where the file has changed since the fact was recorded.
+
+```bash
+# Preview what would be deleted
+canon facts prune --stale
+
+# Execute deletion
+canon facts prune --stale --yes
+```
+
+Stale facts are those where `observed_basis_rev` no longer matches the source's current `basis_rev` (meaning the file was modified after the fact was imported).
+
 ### canon coverage
 
 Show archive coverage statistics - how many sources are hashed and how many are archived.

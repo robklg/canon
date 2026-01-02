@@ -56,7 +56,11 @@ enum Commands {
         allow_archived: bool,
     },
     /// Show fact coverage and value distribution
+    #[command(args_conflicts_with_subcommands = true)]
     Facts {
+        #[command(subcommand)]
+        action: Option<FactsAction>,
+
         /// Specific fact key to show value distribution
         key: Option<String>,
         /// Directory path to scope the query (resolved to realpath)
@@ -155,6 +159,35 @@ enum ExcludeAction {
 }
 
 #[derive(Subcommand)]
+enum FactsAction {
+    /// Delete facts by key
+    Delete {
+        /// Fact key to delete (e.g., "content.mime")
+        key: String,
+        /// Directory path to scope the operation (resolved to realpath)
+        path: Option<PathBuf>,
+        /// Filter expressions (e.g., "source.ext=jpg")
+        #[arg(long = "where")]
+        filters: Vec<String>,
+        /// Entity type: 'source' or 'object'
+        #[arg(long, value_name = "TYPE")]
+        on: String,
+        /// Execute deletion (default is dry-run)
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Prune stale or orphaned facts
+    Prune {
+        /// Delete facts with mismatched observed_basis_rev
+        #[arg(long)]
+        stale: bool,
+        /// Execute deletion (default is dry-run)
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ClusterAction {
     /// Generate a new manifest
     Generate {
@@ -193,8 +226,27 @@ fn main() -> anyhow::Result<()> {
         Commands::ImportFacts { allow_archived } => {
             import_facts::run(&db_path, allow_archived)?;
         }
-        Commands::Facts { key, path, filters, limit, all, include_archived, include_excluded } => {
-            facts::run(&db_path, key.as_deref(), path.as_deref(), &filters, limit, all, include_archived, include_excluded)?;
+        Commands::Facts { action, key, path, filters, limit, all, include_archived, include_excluded } => {
+            match action {
+                Some(FactsAction::Delete { key, path, filters, on, yes }) => {
+                    let options = facts::DeleteOptions {
+                        entity_type: on,
+                        dry_run: !yes,
+                    };
+                    facts::delete_facts(&db_path, &key, path.as_deref(), &filters, &options)?;
+                }
+                Some(FactsAction::Prune { stale, yes }) => {
+                    if stale {
+                        facts::prune_stale(&db_path, !yes)?;
+                    } else {
+                        eprintln!("Error: --stale flag is required for prune command");
+                        std::process::exit(1);
+                    }
+                }
+                None => {
+                    facts::run(&db_path, key.as_deref(), path.as_deref(), &filters, limit, all, include_archived, include_excluded)?;
+                }
+            }
         }
         Commands::Coverage { path, filters, archive, include_archived, include_excluded } => {
             coverage::run(&db_path, path.as_deref(), &filters, archive.as_deref(), include_archived, include_excluded)?;

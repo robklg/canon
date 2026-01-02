@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use rusqlite::Connection;
 use std::path::Path;
 
@@ -540,4 +540,252 @@ fn show_builtin_distribution(
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Delete Facts
+// ============================================================================
+
+pub struct DeleteOptions {
+    pub entity_type: String, // "source" or "object"
+    pub dry_run: bool,
+}
+
+/// Check if a fact key is protected from deletion
+fn is_protected_fact(key: &str) -> bool {
+    key.starts_with("source.") || key.starts_with("policy.")
+}
+
+pub fn delete_facts(
+    db_path: &Path,
+    key: &str,
+    scope_path: Option<&Path>,
+    filter_strs: &[String],
+    options: &DeleteOptions,
+) -> Result<()> {
+    // Validate key is not protected
+    if is_protected_fact(key) {
+        bail!(
+            "Cannot delete protected fact '{}'. Facts in source.* and policy.* namespaces cannot be deleted.",
+            key
+        );
+    }
+
+    // Validate entity type
+    if options.entity_type != "source" && options.entity_type != "object" {
+        bail!(
+            "Invalid entity type '{}'. Must be 'source' or 'object'.",
+            options.entity_type
+        );
+    }
+
+    let conn = db::open(db_path)?;
+
+    // Parse filters
+    let filters: Vec<Filter> = filter_strs
+        .iter()
+        .map(|f| Filter::parse(f))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Resolve scope path
+    let scope_prefix = if let Some(p) = scope_path {
+        Some(std::fs::canonicalize(p)?.to_string_lossy().to_string())
+    } else {
+        None
+    };
+
+    // Get matching source IDs
+    let source_ids = get_matching_sources(&conn, scope_prefix.as_deref(), &filters, true, true)?;
+
+    if source_ids.is_empty() {
+        println!("No sources match the given filters.");
+        return Ok(());
+    }
+
+    // Build temp table for efficiency
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS temp_sources (id INTEGER PRIMARY KEY)",
+        [],
+    )?;
+    conn.execute("DELETE FROM temp_sources", [])?;
+
+    let mut stmt = conn.prepare("INSERT INTO temp_sources (id) VALUES (?)")?;
+    for id in &source_ids {
+        stmt.execute([id])?;
+    }
+    drop(stmt);
+
+    // Count and optionally delete based on entity type
+    let (fact_count, entity_count) = if options.entity_type == "source" {
+        // Delete facts on source entities
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts
+             WHERE entity_type = 'source'
+               AND entity_id IN (SELECT id FROM temp_sources)
+               AND key = ?",
+            [key],
+            |row| row.get(0),
+        )?;
+
+        let entity_count: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT entity_id) FROM facts
+             WHERE entity_type = 'source'
+               AND entity_id IN (SELECT id FROM temp_sources)
+               AND key = ?",
+            [key],
+            |row| row.get(0),
+        )?;
+
+        if !options.dry_run && count > 0 {
+            conn.execute(
+                "DELETE FROM facts
+                 WHERE entity_type = 'source'
+                   AND entity_id IN (SELECT id FROM temp_sources)
+                   AND key = ?",
+                [key],
+            )?;
+        }
+
+        (count, entity_count)
+    } else {
+        // Delete facts on object entities
+        // First get object IDs from sources
+        conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS temp_objects (id INTEGER PRIMARY KEY)",
+            [],
+        )?;
+        conn.execute("DELETE FROM temp_objects", [])?;
+        conn.execute(
+            "INSERT OR IGNORE INTO temp_objects (id)
+             SELECT DISTINCT object_id FROM sources
+             WHERE id IN (SELECT id FROM temp_sources) AND object_id IS NOT NULL",
+            [],
+        )?;
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts
+             WHERE entity_type = 'object'
+               AND entity_id IN (SELECT id FROM temp_objects)
+               AND key = ?",
+            [key],
+            |row| row.get(0),
+        )?;
+
+        let entity_count: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT entity_id) FROM facts
+             WHERE entity_type = 'object'
+               AND entity_id IN (SELECT id FROM temp_objects)
+               AND key = ?",
+            [key],
+            |row| row.get(0),
+        )?;
+
+        if !options.dry_run && count > 0 {
+            conn.execute(
+                "DELETE FROM facts
+                 WHERE entity_type = 'object'
+                   AND entity_id IN (SELECT id FROM temp_objects)
+                   AND key = ?",
+                [key],
+            )?;
+        }
+
+        conn.execute("DROP TABLE IF EXISTS temp_objects", [])?;
+
+        (count, entity_count)
+    };
+
+    // Clean up
+    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+
+    // Report results
+    let entity_label = if options.entity_type == "source" {
+        "sources"
+    } else {
+        "objects"
+    };
+
+    if fact_count == 0 {
+        println!("No '{}' facts found on matching {}.", key, entity_label);
+    } else if options.dry_run {
+        println!(
+            "Would delete {} fact rows across {} {}",
+            format_number(fact_count),
+            format_number(entity_count),
+            entity_label
+        );
+    } else {
+        println!(
+            "Deleted {} fact rows across {} {}",
+            format_number(fact_count),
+            format_number(entity_count),
+            entity_label
+        );
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Prune Stale Facts
+// ============================================================================
+
+pub fn prune_stale(db_path: &Path, dry_run: bool) -> Result<()> {
+    let conn = db::open(db_path)?;
+
+    // Find stale source facts: where observed_basis_rev doesn't match current basis_rev
+    let stale_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM facts f
+         JOIN sources s ON f.entity_type = 'source' AND f.entity_id = s.id
+         WHERE f.observed_basis_rev IS NOT NULL
+           AND f.observed_basis_rev != s.basis_rev",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if stale_count == 0 {
+        println!("No stale facts found.");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!(
+            "Would delete {} stale fact rows (observed_basis_rev mismatch)",
+            format_number(stale_count)
+        );
+    } else {
+        let deleted = conn.execute(
+            "DELETE FROM facts
+             WHERE entity_type = 'source'
+               AND entity_id IN (
+                   SELECT f.entity_id FROM facts f
+                   JOIN sources s ON f.entity_type = 'source' AND f.entity_id = s.id
+                   WHERE f.observed_basis_rev IS NOT NULL
+                     AND f.observed_basis_rev != s.basis_rev
+               )
+               AND observed_basis_rev IS NOT NULL
+               AND observed_basis_rev != (
+                   SELECT basis_rev FROM sources WHERE id = facts.entity_id
+               )",
+            [],
+        )?;
+        println!(
+            "Deleted {} stale fact rows (observed_basis_rev mismatch)",
+            format_number(deleted as i64)
+        );
+    }
+
+    Ok(())
+}
+
+fn format_number(n: i64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
 }
