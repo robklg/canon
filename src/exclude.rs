@@ -62,14 +62,10 @@ pub fn set(
 
     if options.dry_run {
         println!("Would exclude {} sources:", to_exclude.len());
-        let sample_size = std::cmp::min(10, to_exclude.len());
-        for &id in &to_exclude[..sample_size] {
+        for &id in &to_exclude {
             if let Some(path) = get_source_path(&conn, id)? {
                 println!("  {}", path);
             }
-        }
-        if to_exclude.len() > 10 {
-            println!("  ... and {} more", to_exclude.len() - 10);
         }
         return Ok(());
     }
@@ -132,12 +128,8 @@ pub fn clear(
 
     if options.dry_run {
         println!("Would clear exclusions for {} sources:", excluded_sources.len());
-        let sample_size = std::cmp::min(10, excluded_sources.len());
-        for (_, path) in &excluded_sources[..sample_size] {
+        for (_, path) in &excluded_sources {
             println!("  {}", path);
-        }
-        if excluded_sources.len() > 10 {
-            println!("  ... and {} more", excluded_sources.len() - 10);
         }
         return Ok(());
     }
