@@ -251,7 +251,14 @@ fn insert_fact(
 
     conn.execute(
         "INSERT INTO facts (entity_type, entity_id, key, value_text, value_num, value_time, value_json, observed_at, observed_basis_rev)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(entity_type, entity_id, key) DO UPDATE SET
+           value_text = excluded.value_text,
+           value_num = excluded.value_num,
+           value_time = excluded.value_time,
+           value_json = excluded.value_json,
+           observed_at = excluded.observed_at,
+           observed_basis_rev = excluded.observed_basis_rev",
         params![
             entity_type,
             entity_id,

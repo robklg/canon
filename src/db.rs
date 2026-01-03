@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS sources_object_id ON sources(object_id);
 CREATE INDEX IF NOT EXISTS facts_entity ON facts(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS facts_key ON facts(key);
 CREATE INDEX IF NOT EXISTS facts_key_entity ON facts(key, entity_type, entity_id);
-CREATE INDEX IF NOT EXISTS facts_entity_key ON facts(entity_type, entity_id, key);
+CREATE UNIQUE INDEX IF NOT EXISTS facts_entity_key_uq ON facts(entity_type, entity_id, key);
 "#;
 
 /// Profile callback for SQL debug logging
