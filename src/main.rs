@@ -114,12 +114,21 @@ enum Commands {
         /// Show what would be done without making changes
         #[arg(long)]
         dry_run: bool,
-        /// Skip all archive conflict checks
-        #[arg(long)]
-        force: bool,
         /// Allow copying files that exist in other archives (but not destination archive)
         #[arg(long)]
         allow_cross_archive_duplicates: bool,
+        /// Only apply sources from these roots (id:N or path:/foo/bar, can repeat)
+        #[arg(long)]
+        root: Vec<String>,
+        /// Use rename instead of copy (Unix only, fails if cross-device, never copies)
+        #[arg(long, conflicts_with = "move_files")]
+        rename: bool,
+        /// Move files: rename, or copy+delete if cross-device (requires --yes)
+        #[arg(long = "move", conflicts_with = "rename", requires = "yes")]
+        move_files: bool,
+        /// Confirm destructive operations (required for --move)
+        #[arg(long)]
+        yes: bool,
     },
     /// Manage source exclusions
     Exclude {
@@ -274,13 +283,24 @@ fn main() -> anyhow::Result<()> {
         Commands::Apply {
             manifest,
             dry_run,
-            force,
             allow_cross_archive_duplicates,
+            root,
+            rename,
+            move_files,
+            yes: _,
         } => {
+            let transfer_mode = if rename {
+                apply::TransferMode::Rename
+            } else if move_files {
+                apply::TransferMode::Move
+            } else {
+                apply::TransferMode::Copy
+            };
             let options = apply::ApplyOptions {
                 dry_run,
-                force,
                 allow_cross_archive_duplicates,
+                roots: root,
+                transfer_mode,
             };
             apply::run(&db, &manifest, &options)?;
         }

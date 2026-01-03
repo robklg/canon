@@ -1,28 +1,50 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::OptionalExtension;
-use std::collections::HashMap;
-use std::fs;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, Metadata};
 use std::path::{Path, PathBuf};
 
 use crate::cluster::{Manifest, ManifestSource};
 use crate::db::{Connection, Db};
 use crate::exclude;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferMode {
+    Copy,   // Default: copy only, source remains
+    Rename, // Unix only, error if cross-device
+    Move,   // Try rename, fallback to copy+delete on EXDEV (requires --yes)
+}
+
 #[derive(Default)]
 struct ApplyStats {
     copied: u64,
-    skipped_exists: u64,
+    renamed: u64,
+    moved: u64,
     skipped_missing: u64,
+    skipped_filtered: u64,
     errors: u64,
 }
 
 pub struct ApplyOptions {
     pub dry_run: bool,
-    pub force: bool,
     pub allow_cross_archive_duplicates: bool,
+    pub roots: Vec<String>,
+    pub transfer_mode: TransferMode,
 }
 
 pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> {
+    // Platform checks: --rename and --move are Unix-only
+    #[cfg(not(unix))]
+    if options.transfer_mode == TransferMode::Rename || options.transfer_mode == TransferMode::Move {
+        bail!("--rename and --move are only supported on Unix platforms");
+    }
+
+    // Metadata preservation warning for Copy mode on non-Unix
+    #[cfg(not(unix))]
+    if options.transfer_mode == TransferMode::Copy {
+        eprintln!("Note: mtime/permissions preservation not available on this platform");
+    }
+
     let content = fs::read_to_string(manifest_path)
         .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
 
@@ -35,58 +57,58 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
 
     let conn = db.conn();
 
-    // Pre-flight checks
-    if !options.force {
-        // Check destination uniqueness first
-        let collisions = check_destination_collisions(&manifest, &base_dir)?;
-        if !collisions.is_empty() {
-            eprintln!(
-                "Error: {} destination paths have multiple sources:",
-                collisions.len()
-            );
-            for (dest, sources) in &collisions {
-                eprintln!("  {} <- {} files:", dest.display(), sources.len());
-                for src in sources {
-                    eprintln!("    {}", src);
-                }
-            }
-            eprintln!("\nUse --force to copy anyway (first source wins)");
-            bail!("Aborting due to destination collisions");
-        }
+    // Filter sources by root if specified
+    let filtered_sources = filter_by_roots(&manifest, &options.roots, conn)?;
+    let skipped_by_filter = manifest.sources.len() - filtered_sources.len();
 
-        // Check archive conflicts
-        let conflicts = check_archive_conflicts(conn, &manifest, &base_dir)?;
-
-        if !conflicts.in_dest_archive.is_empty() {
-            eprintln!(
-                "Error: {} files already exist in destination archive:",
-                conflicts.in_dest_archive.len()
-            );
-            for (src, dst) in &conflicts.in_dest_archive {
-                eprintln!("  {} -> {}", src, dst);
+    // Pre-flight checks (mandatory, always run)
+    // Check destination uniqueness first
+    let collisions = check_destination_collisions_filtered(&filtered_sources, &manifest.output.pattern, &base_dir)?;
+    if !collisions.is_empty() {
+        eprintln!(
+            "Error: {} destination paths have multiple sources:",
+            collisions.len()
+        );
+        for (dest, sources) in &collisions {
+            eprintln!("  {} <- {} files:", dest.display(), sources.len());
+            for src in sources {
+                eprintln!("    {}", src);
             }
-            eprintln!("\nUse --force to copy anyway");
-            bail!("Aborting due to files already in destination archive");
         }
+        bail!("Aborting due to destination collisions");
+    }
 
-        if !conflicts.in_other_archives.is_empty() && !options.allow_cross_archive_duplicates {
-            eprintln!(
-                "Error: {} files already exist in other archive(s):",
-                conflicts.in_other_archives.len()
-            );
-            for (src, dst) in &conflicts.in_other_archives {
-                eprintln!("  {} -> {}", src, dst);
-            }
-            eprintln!("\nUse --allow-cross-archive-duplicates to copy anyway, or --force to skip all checks");
-            bail!("Aborting due to files already in other archives");
+    // Check archive conflicts
+    let conflicts = check_archive_conflicts_filtered(conn, &filtered_sources, &base_dir)?;
+
+    if !conflicts.in_dest_archive.is_empty() {
+        eprintln!(
+            "Error: {} files already exist in destination archive:",
+            conflicts.in_dest_archive.len()
+        );
+        for (src, dst) in &conflicts.in_dest_archive {
+            eprintln!("  {} -> {}", src, dst);
         }
+        bail!("Aborting due to files already in destination archive");
+    }
+
+    if !conflicts.in_other_archives.is_empty() && !options.allow_cross_archive_duplicates {
+        eprintln!(
+            "Error: {} files already exist in other archive(s):",
+            conflicts.in_other_archives.len()
+        );
+        for (src, dst) in &conflicts.in_other_archives {
+            eprintln!("  {} -> {}", src, dst);
+        }
+        eprintln!("\nUse --allow-cross-archive-duplicates to copy anyway");
+        bail!("Aborting due to files already in other archives");
     }
 
     // Defense-in-depth: Check for excluded sources in manifest (hard gate, no override)
     // This should never happen if the manifest was generated correctly,
     // but we check anyway to prevent accidentally copying excluded files
     {
-        let excluded_sources = check_excluded_sources(conn, &manifest)?;
+        let excluded_sources = check_excluded_sources_filtered(conn, &filtered_sources)?;
         if !excluded_sources.is_empty() {
             eprintln!(
                 "Error: {} sources in manifest are marked as excluded:",
@@ -100,13 +122,17 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         }
     }
 
-    let mut stats = ApplyStats::default();
+    let mut stats = ApplyStats {
+        skipped_filtered: skipped_by_filter as u64,
+        ..Default::default()
+    };
 
-    for source in &manifest.sources {
-        match process_source(source, &manifest.output.pattern, &base_dir, options.dry_run) {
+    for source in &filtered_sources {
+        match process_source(source, &manifest.output.pattern, &base_dir, options) {
             Ok(action) => match action {
                 ApplyAction::Copied => stats.copied += 1,
-                ApplyAction::SkippedExists => stats.skipped_exists += 1,
+                ApplyAction::Renamed => stats.renamed += 1,
+                ApplyAction::Moved => stats.moved += 1,
                 ApplyAction::SkippedMissing => stats.skipped_missing += 1,
             },
             Err(e) => {
@@ -118,20 +144,85 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
 
     let mode = if options.dry_run { " (dry-run)" } else { "" };
     println!(
-        "Applied{}: {} copied, {} skipped (exists), {} skipped (missing), {} errors",
-        mode, stats.copied, stats.skipped_exists, stats.skipped_missing, stats.errors
+        "Applied{}: {} copied, {} renamed, {} moved, {} skipped (missing), {} skipped (filtered), {} errors",
+        mode, stats.copied, stats.renamed, stats.moved, stats.skipped_missing, stats.skipped_filtered, stats.errors
     );
 
     Ok(())
 }
 
-fn check_destination_collisions(
-    manifest: &Manifest,
+struct ArchiveConflicts {
+    in_dest_archive: Vec<(String, String)>,   // (source_path, archive_path)
+    in_other_archives: Vec<(String, String)>, // (source_path, archive_path)
+}
+
+fn find_archive_for_path(conn: &Connection, path: &Path) -> Result<Option<i64>> {
+    let path_str = path.to_str().unwrap_or("");
+
+    // Find archive roots and check if path is inside any of them
+    let mut stmt = conn.prepare("SELECT id, path FROM roots WHERE role = 'archive'")?;
+    let archives: Vec<(i64, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (id, archive_path) in archives {
+        if path_str.starts_with(&archive_path) || path_str == archive_path {
+            return Ok(Some(id));
+        }
+    }
+
+    Ok(None)
+}
+
+// ============================================================================
+// Helper functions for pre-flight checks (work with filtered source list)
+// ============================================================================
+
+fn filter_by_roots<'a>(
+    manifest: &'a Manifest,
+    roots: &[String],
+    conn: &Connection,
+) -> Result<Vec<&'a ManifestSource>> {
+    if roots.is_empty() {
+        return Ok(manifest.sources.iter().collect());
+    }
+
+    let mut root_ids = HashSet::new();
+
+    for spec in roots {
+        if let Some(id_str) = spec.strip_prefix("id:") {
+            let id: i64 = id_str.parse().context("Invalid root ID")?;
+            root_ids.insert(id);
+        } else if let Some(path) = spec.strip_prefix("path:") {
+            // Resolve to realpath and look up root ID from database
+            let realpath = fs::canonicalize(path)
+                .with_context(|| format!("Failed to resolve path: {}", path))?;
+            let realpath_str = realpath.to_str()
+                .ok_or_else(|| anyhow!("Path contains invalid UTF-8: {}", realpath.display()))?;
+            let root_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM roots WHERE path = ?",
+                    [realpath_str],
+                    |row| row.get(0),
+                )
+                .with_context(|| format!("No root found for path: {}", realpath.display()))?;
+            root_ids.insert(root_id);
+        } else {
+            bail!("Invalid --root format '{}'. Use id:<N> or path:<path>", spec);
+        }
+    }
+
+    Ok(manifest.sources.iter().filter(|s| root_ids.contains(&s.root_id)).collect())
+}
+
+fn check_destination_collisions_filtered(
+    sources: &[&ManifestSource],
+    pattern: &str,
     base_dir: &Path,
 ) -> Result<Vec<(PathBuf, Vec<String>)>> {
     let mut dest_to_sources: HashMap<PathBuf, Vec<String>> = HashMap::new();
 
-    for source in &manifest.sources {
+    for source in sources {
         let src_path = Path::new(&source.path);
 
         // Skip sources that don't exist (they'll be skipped during copy anyway)
@@ -140,7 +231,7 @@ fn check_destination_collisions(
         }
 
         // Expand pattern to get destination path
-        let dest_rel = expand_pattern(&manifest.output.pattern, source, src_path)?;
+        let dest_rel = expand_pattern(pattern, source, src_path)?;
         let dest_path = base_dir.join(&dest_rel);
 
         dest_to_sources
@@ -161,14 +252,9 @@ fn check_destination_collisions(
     Ok(collisions)
 }
 
-struct ArchiveConflicts {
-    in_dest_archive: Vec<(String, String)>,   // (source_path, archive_path)
-    in_other_archives: Vec<(String, String)>, // (source_path, archive_path)
-}
-
-fn check_archive_conflicts(
+fn check_archive_conflicts_filtered(
     conn: &Connection,
-    manifest: &Manifest,
+    sources: &[&ManifestSource],
     base_dir: &Path,
 ) -> Result<ArchiveConflicts> {
     let mut conflicts = ArchiveConflicts {
@@ -179,7 +265,7 @@ fn check_archive_conflicts(
     // Find if base_dir is inside an archive root
     let dest_archive_id: Option<i64> = find_archive_for_path(conn, base_dir)?;
 
-    for source in &manifest.sources {
+    for source in sources {
         if let Some(ref hash) = source.hash_value {
             // Check if this hash exists in any archive
             let archive_match: Option<(i64, String, String)> = conn
@@ -214,29 +300,13 @@ fn check_archive_conflicts(
     Ok(conflicts)
 }
 
-fn find_archive_for_path(conn: &Connection, path: &Path) -> Result<Option<i64>> {
-    let path_str = path.to_str().unwrap_or("");
-
-    // Find archive roots and check if path is inside any of them
-    let mut stmt = conn.prepare("SELECT id, path FROM roots WHERE role = 'archive'")?;
-    let archives: Vec<(i64, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    for (id, archive_path) in archives {
-        if path_str.starts_with(&archive_path) || path_str == archive_path {
-            return Ok(Some(id));
-        }
-    }
-
-    Ok(None)
-}
-
-/// Check if any sources in the manifest are marked as excluded
-fn check_excluded_sources(conn: &Connection, manifest: &Manifest) -> Result<Vec<(i64, String)>> {
+fn check_excluded_sources_filtered(
+    conn: &Connection,
+    sources: &[&ManifestSource],
+) -> Result<Vec<(i64, String)>> {
     let mut excluded = Vec::new();
 
-    for source in &manifest.sources {
+    for source in sources {
         if exclude::is_excluded(conn, source.id)? {
             excluded.push((source.id, source.path.clone()));
         }
@@ -247,7 +317,8 @@ fn check_excluded_sources(conn: &Connection, manifest: &Manifest) -> Result<Vec<
 
 enum ApplyAction {
     Copied,
-    SkippedExists,
+    Renamed,
+    Moved,
     SkippedMissing,
 }
 
@@ -255,13 +326,13 @@ fn process_source(
     source: &ManifestSource,
     pattern: &str,
     base_dir: &Path,
-    dry_run: bool,
+    options: &ApplyOptions,
 ) -> Result<ApplyAction> {
     let src_path = Path::new(&source.path);
 
     // Check if source exists
     if !src_path.exists() {
-        if dry_run {
+        if options.dry_run {
             println!("SKIP (missing): {}", source.path);
         }
         return Ok(ApplyAction::SkippedMissing);
@@ -271,32 +342,106 @@ fn process_source(
     let dest_rel = expand_pattern(pattern, source, src_path)?;
     let dest_path = base_dir.join(&dest_rel);
 
-    // Check if destination exists
-    if dest_path.exists() {
-        // TODO: Could check hash here to verify it's the same file
-        if dry_run {
-            println!("SKIP (exists): {} -> {}", source.path, dest_path.display());
+    if options.dry_run {
+        match options.transfer_mode {
+            TransferMode::Copy => {
+                println!("COPY: {} -> {}", source.path, dest_path.display());
+                return Ok(ApplyAction::Copied);
+            }
+            TransferMode::Rename => {
+                println!("RENAME: {} -> {}", source.path, dest_path.display());
+                return Ok(ApplyAction::Renamed);
+            }
+            TransferMode::Move => {
+                println!("MOVE: {} -> {} (will delete source; may copy if cross-device)", source.path, dest_path.display());
+                return Ok(ApplyAction::Moved);
+            }
         }
-        return Ok(ApplyAction::SkippedExists);
     }
 
-    if dry_run {
-        println!("COPY: {} -> {}", source.path, dest_path.display());
-    } else {
-        // Create parent directories
-        if let Some(parent) = dest_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-        }
-
-        // Copy the file
-        fs::copy(src_path, &dest_path)
-            .with_context(|| format!("Failed to copy {} to {}", source.path, dest_path.display()))?;
-
-        println!("Copied: {} -> {}", source.path, dest_path.display());
+    // Create parent directories
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
     }
 
-    Ok(ApplyAction::Copied)
+    match options.transfer_mode {
+        TransferMode::Copy => {
+            // Check exists right before copy (noclobber)
+            if dest_path.exists() {
+                bail!("Destination already exists: {}", dest_path.display());
+            }
+            let src_meta = fs::metadata(src_path)
+                .with_context(|| format!("Failed to read metadata: {}", source.path))?;
+            fs::copy(src_path, &dest_path)
+                .with_context(|| format!("Failed to copy {} to {}", source.path, dest_path.display()))?;
+            preserve_metadata(&dest_path, &src_meta)?;
+            println!("Copied: {} -> {}", source.path, dest_path.display());
+            Ok(ApplyAction::Copied)
+        }
+        TransferMode::Rename => {
+            // Check exists right before rename (noclobber)
+            if dest_path.exists() {
+                bail!("Destination already exists: {}", dest_path.display());
+            }
+            // No metadata read needed - rename preserves all attributes
+            fs::rename(src_path, &dest_path)
+                .with_context(|| format!("Failed to rename {} to {}", source.path, dest_path.display()))?;
+            println!("Renamed: {} -> {}", source.path, dest_path.display());
+            Ok(ApplyAction::Renamed)
+        }
+        TransferMode::Move => {
+            // Check exists right before rename attempt (noclobber)
+            if dest_path.exists() {
+                bail!("Destination already exists: {}", dest_path.display());
+            }
+            // Try rename first (mv semantics)
+            match fs::rename(src_path, &dest_path) {
+                Ok(()) => {
+                    println!("Renamed: {} -> {}", source.path, dest_path.display());
+                    Ok(ApplyAction::Renamed)
+                }
+                #[cfg(unix)]
+                Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+                    // Cross-device only: fallback to copy + delete
+                    // Re-check dest doesn't exist (race condition guard)
+                    if dest_path.exists() {
+                        bail!("Destination already exists: {}", dest_path.display());
+                    }
+                    let src_meta = fs::metadata(src_path)
+                        .with_context(|| format!("Failed to read metadata: {}", source.path))?;
+                    fs::copy(src_path, &dest_path)
+                        .with_context(|| format!("Failed to copy {} to {}", source.path, dest_path.display()))?;
+                    preserve_metadata(&dest_path, &src_meta)?;
+                    fs::remove_file(src_path)
+                        .with_context(|| format!("Failed to delete source: {}", source.path))?;
+                    println!("Moved: {} -> {}", source.path, dest_path.display());
+                    Ok(ApplyAction::Moved)
+                }
+                Err(e) => Err(e).with_context(|| {
+                    format!("Failed to rename {} to {}", source.path, dest_path.display())
+                }),
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn preserve_metadata(dest: &Path, src_meta: &Metadata) -> Result<()> {
+    use filetime::FileTime;
+
+    let mtime = FileTime::from_last_modification_time(src_meta);
+    filetime::set_file_mtime(dest, mtime)
+        .with_context(|| format!("Failed to set mtime on {}", dest.display()))?;
+    fs::set_permissions(dest, src_meta.permissions())
+        .with_context(|| format!("Failed to set permissions on {}", dest.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn preserve_metadata(_dest: &Path, _src_meta: &Metadata) -> Result<()> {
+    // No-op on non-Unix
+    Ok(())
 }
 
 fn expand_pattern(pattern: &str, source: &ManifestSource, src_path: &Path) -> Result<String> {

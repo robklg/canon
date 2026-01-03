@@ -32,6 +32,7 @@ pub struct ManifestOutput {
 #[derive(Serialize, Deserialize)]
 pub struct ManifestSource {
     pub id: i64,
+    pub root_id: i64,
     pub path: String,
     pub size: i64,
     pub hash_type: Option<String>,
@@ -202,18 +203,18 @@ fn find_in_archive(conn: &Connection, hash_value: &str) -> Result<Option<String>
 }
 
 fn fetch_source(conn: &Connection, source_id: i64) -> Result<Option<ManifestSource>> {
-    let row: Option<(i64, String, String, i64, Option<i64>)> = conn
+    let row: Option<(i64, i64, String, String, i64, Option<i64>)> = conn
         .query_row(
-            "SELECT s.id, r.path, s.rel_path, s.size, s.object_id
+            "SELECT s.id, s.root_id, r.path, s.rel_path, s.size, s.object_id
              FROM sources s
              JOIN roots r ON s.root_id = r.id
              WHERE s.id = ?",
             [source_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
         )
         .ok();
 
-    let (id, root_path, rel_path, size, object_id) = match row {
+    let (id, root_id, root_path, rel_path, size, object_id) = match row {
         Some(r) => r,
         None => return Ok(None),
     };
@@ -281,6 +282,7 @@ fn fetch_source(conn: &Connection, source_id: i64) -> Result<Option<ManifestSour
 
     Ok(Some(ManifestSource {
         id,
+        root_id,
         path: full_path,
         size,
         hash_type,
