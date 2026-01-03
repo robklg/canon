@@ -1,8 +1,11 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::OptionalExtension;
+use rusqlite::{params, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cluster::{Manifest, ManifestSource};
 use crate::db::{parse_root_spec, Connection, Db};
@@ -140,7 +143,15 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     };
 
     for source in &filtered_sources {
-        match process_source(source, &manifest.output.pattern, &base_dir, options) {
+        match process_source(
+            source,
+            &manifest.output.pattern,
+            &base_dir,
+            &manifest.output.base_dir,
+            options,
+            conn,
+            manifest.output.archive_root_id,
+        ) {
             Ok(action) => match action {
                 ApplyAction::Copied => stats.copied += 1,
                 ApplyAction::Renamed => stats.renamed += 1,
@@ -298,7 +309,10 @@ fn process_source(
     source: &ManifestSource,
     pattern: &str,
     base_dir: &Path,
+    base_dir_rel: &str,
     options: &ApplyOptions,
+    conn: &Connection,
+    archive_root_id: i64,
 ) -> Result<ApplyAction> {
     let src_path = Path::new(&source.path);
 
@@ -313,6 +327,13 @@ fn process_source(
     // Expand pattern to get destination path
     let dest_rel = expand_pattern(pattern, source, src_path)?;
     let dest_path = base_dir.join(&dest_rel);
+
+    // Compute relative path within archive root for registration
+    let archive_rel_path = if base_dir_rel.is_empty() {
+        dest_rel.clone()
+    } else {
+        format!("{}/{}", base_dir_rel, dest_rel)
+    };
 
     if options.dry_run {
         match options.transfer_mode {
@@ -348,6 +369,7 @@ fn process_source(
             fs::copy(src_path, &dest_path)
                 .with_context(|| format!("Failed to copy {} to {}", source.path, dest_path.display()))?;
             preserve_metadata(&dest_path, &src_meta)?;
+            register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id)?;
             println!("Copied: {} -> {}", source.path, dest_path.display());
             Ok(ApplyAction::Copied)
         }
@@ -359,6 +381,7 @@ fn process_source(
             // No metadata read needed - rename preserves all attributes
             fs::rename(src_path, &dest_path)
                 .with_context(|| format!("Failed to rename {} to {}", source.path, dest_path.display()))?;
+            register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id)?;
             println!("Renamed: {} -> {}", source.path, dest_path.display());
             Ok(ApplyAction::Renamed)
         }
@@ -370,6 +393,7 @@ fn process_source(
             // Try rename first (mv semantics)
             match fs::rename(src_path, &dest_path) {
                 Ok(()) => {
+                    register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id)?;
                     println!("Renamed: {} -> {}", source.path, dest_path.display());
                     Ok(ApplyAction::Renamed)
                 }
@@ -387,6 +411,7 @@ fn process_source(
                     preserve_metadata(&dest_path, &src_meta)?;
                     fs::remove_file(src_path)
                         .with_context(|| format!("Failed to delete source: {}", source.path))?;
+                    register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id)?;
                     println!("Moved: {} -> {}", source.path, dest_path.display());
                     Ok(ApplyAction::Moved)
                 }
@@ -413,6 +438,65 @@ fn preserve_metadata(dest: &Path, src_meta: &Metadata) -> Result<()> {
 #[cfg(not(unix))]
 fn preserve_metadata(_dest: &Path, _src_meta: &Metadata) -> Result<()> {
     // No-op on non-Unix
+    Ok(())
+}
+
+#[cfg(unix)]
+fn register_destination(
+    conn: &Connection,
+    archive_root_id: i64,
+    dest_path: &Path,
+    rel_path: &str,
+    object_id: Option<i64>,
+) -> Result<()> {
+    let meta = fs::metadata(dest_path)
+        .with_context(|| format!("Failed to read metadata for registration: {}", dest_path.display()))?;
+    let device = meta.dev() as i64;
+    let inode = meta.ino() as i64;
+    let size = meta.size() as i64;
+    let mtime = meta.mtime();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs() as i64;
+
+    conn.execute(
+        "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime,
+         object_id, basis_rev, scanned_at, last_seen_at, present)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1)",
+        params![archive_root_id, rel_path, device, inode, size, mtime, object_id, now, now],
+    )?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn register_destination(
+    conn: &Connection,
+    archive_root_id: i64,
+    dest_path: &Path,
+    rel_path: &str,
+    object_id: Option<i64>,
+) -> Result<()> {
+    let meta = fs::metadata(dest_path)
+        .with_context(|| format!("Failed to read metadata for registration: {}", dest_path.display()))?;
+    let size = meta.len() as i64;
+    let mtime = meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs() as i64;
+
+    // No device/inode on non-Unix
+    conn.execute(
+        "INSERT INTO sources (root_id, rel_path, size, mtime,
+         object_id, basis_rev, scanned_at, last_seen_at, present)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?, 1)",
+        params![archive_root_id, rel_path, size, mtime, object_id, now, now],
+    )?;
     Ok(())
 }
 

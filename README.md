@@ -344,7 +344,7 @@ The manifest is a TOML file containing the query, output pattern, archive root I
 
 ### canon apply
 
-Apply a manifest to copy/move files.
+Apply a manifest to copy/move files. Copied files are automatically registered in the database with the same content hash, so they're immediately recognized as archived (no separate `scan` needed).
 
 ```bash
 # Preview what would happen
@@ -575,10 +575,11 @@ canon cluster generate --where 'content.hash.sha256?' --where 'source.ext=jpg' -
 # Preview
 canon apply manifest.toml --dry-run
 
-# Execute
+# Execute (automatically registers copied files in the database)
 canon apply manifest.toml
 
-# Scan the archive to track what's there
+# Optional: Scan an existing archive to track what's already there
+# (not needed after apply, which auto-registers new files)
 canon scan --add /Volumes/Archive/Photos --role archive
 ```
 
