@@ -12,13 +12,15 @@ pub fn run(
     db: &Db,
     scope_path: Option<&Path>,
     filter_strs: &[String],
-    archived_only: bool,
+    archived_mode: Option<&str>,
     unarchived_only: bool,
     unhashed_only: bool,
     include_archived: bool,
     include_excluded: bool,
     use_relative_paths: bool,
 ) -> Result<()> {
+    let archived_only = archived_mode.is_some();
+    let show_archive_paths = archived_mode == Some("show");
     let conn = db.conn();
 
     // Parse filters
@@ -61,12 +63,14 @@ pub fn run(
         return Ok(());
     }
 
-    // Apply archived/unarchived/unhashed filter and collect paths
-    let mut paths: Vec<String> = Vec::new();
+    // Apply archived/unarchived/unhashed filter and collect output lines
+    // Each entry is (source_path, optional_archive_path)
+    let mut output_lines: Vec<(String, Option<String>)> = Vec::new();
     let mut unhashed_count = 0usize;
 
     for source_id in &source_ids {
         let (full_path, object_id) = get_source_path(conn, *source_id)?;
+        let formatted_source = format_path(&full_path, cwd.as_deref());
 
         // Check archive status if filtering
         if archived_only {
@@ -76,8 +80,14 @@ pub fn run(
                     unhashed_count += 1;
                 }
                 Some(obj_id) => {
-                    if check_archived(conn, obj_id)? {
-                        paths.push(format_path(&full_path, cwd.as_deref()));
+                    if show_archive_paths {
+                        // Get all archive locations for this object
+                        let archive_paths = get_archive_paths(conn, obj_id)?;
+                        for archive_path in archive_paths {
+                            output_lines.push((formatted_source.clone(), Some(archive_path)));
+                        }
+                    } else if check_archived(conn, obj_id)? {
+                        output_lines.push((formatted_source, None));
                     }
                 }
             }
@@ -89,27 +99,37 @@ pub fn run(
                 }
                 Some(obj_id) => {
                     if !check_archived(conn, obj_id)? {
-                        paths.push(format_path(&full_path, cwd.as_deref()));
+                        output_lines.push((formatted_source, None));
                     }
                 }
             }
         } else if unhashed_only {
             if object_id.is_none() {
-                paths.push(format_path(&full_path, cwd.as_deref()));
+                output_lines.push((formatted_source, None));
             }
         } else {
             // Default: show all
-            paths.push(format_path(&full_path, cwd.as_deref()));
+            output_lines.push((formatted_source, None));
         }
     }
 
-    // Print paths (to stdout for pipe-friendliness)
-    for path in &paths {
-        println!("{}", path);
+    // Print output (to stdout for pipe-friendliness)
+    for (source_path, archive_path) in &output_lines {
+        if let Some(ap) = archive_path {
+            println!("{}\t{}", source_path, ap);
+        } else {
+            println!("{}", source_path);
+        }
     }
 
     // Print footer to stderr
-    let mut footer_parts = vec![format!("{} sources", paths.len())];
+    // Count unique sources (not archive locations)
+    let source_count = if show_archive_paths {
+        output_lines.iter().map(|(s, _)| s).collect::<std::collections::HashSet<_>>().len()
+    } else {
+        output_lines.len()
+    };
+    let mut footer_parts = vec![format!("{} sources", source_count)];
     if !include_excluded && excluded_count > 0 {
         footer_parts.push(format!("{} excluded hidden", excluded_count));
     }
@@ -225,6 +245,30 @@ fn check_archived(conn: &Connection, object_id: i64) -> Result<bool> {
     )?;
 
     Ok(exists)
+}
+
+fn get_archive_paths(conn: &Connection, object_id: i64) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.path, s.rel_path
+         FROM sources s
+         JOIN roots r ON s.root_id = r.id
+         WHERE s.object_id = ? AND r.role = 'archive' AND s.present = 1
+         ORDER BY r.path, s.rel_path",
+    )?;
+
+    let paths: Vec<String> = stmt
+        .query_map([object_id], |row| {
+            let root_path: String = row.get(0)?;
+            let rel_path: String = row.get(1)?;
+            if rel_path.is_empty() {
+                Ok(root_path)
+            } else {
+                Ok(format!("{}/{}", root_path, rel_path))
+            }
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(paths)
 }
 
 fn format_path(full_path: &str, cwd: Option<&str>) -> String {

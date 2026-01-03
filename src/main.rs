@@ -70,9 +70,9 @@ enum Commands {
         /// Filter expressions (e.g., "source.ext=jpg" or "content.hash.sha256?")
         #[arg(long = "where")]
         filters: Vec<String>,
-        /// Only show archived sources (content exists in an archive)
-        #[arg(long, conflicts_with_all = ["unarchived", "unhashed"])]
-        archived: bool,
+        /// Only show archived sources (use --archived=show to include archive paths)
+        #[arg(long, value_name = "MODE", num_args = 0..=1, default_missing_value = "list", conflicts_with_all = ["unarchived", "unhashed"])]
+        archived: Option<String>,
         /// Only show unarchived sources (hashed but not in any archive)
         #[arg(long, conflicts_with_all = ["archived", "unhashed"])]
         unarchived: bool,
@@ -283,7 +283,7 @@ fn main() -> anyhow::Result<()> {
                 let use_rel = !path.as_ref().unwrap().starts_with("/");
                 (path, use_rel)
             };
-            ls::run(&db, scope_path.as_deref(), &filters, archived, unarchived, unhashed, include_archived, include_excluded, use_relative)?;
+            ls::run(&db, scope_path.as_deref(), &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative)?;
         }
         Commands::Facts { action, key, path, filters, limit, all, include_archived, include_excluded } => {
             match action {

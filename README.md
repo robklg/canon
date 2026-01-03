@@ -142,6 +142,10 @@ canon ls --where 'source.ext=jpg'
 # List only archived sources (content exists in an archive)
 canon ls --archived
 
+# List archived sources with their archive location(s)
+# Output: source_path<TAB>archive_path (one line per archive location)
+canon ls --archived=show
+
 # List only unarchived sources (hashed but not in any archive)
 canon ls --unarchived
 
