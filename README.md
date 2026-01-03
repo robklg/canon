@@ -128,6 +128,45 @@ Output format (one JSON object per line):
 {"source_id":123,"path":"/full/path/to/file.jpg","root_id":1,"size":1024,"mtime":1703980800,"basis_rev":0}
 ```
 
+### canon ls
+
+List sources matching filters. Useful for quick inspection and piping to other tools.
+
+```bash
+# List all sources in current directory
+canon ls .
+
+# List sources matching a filter
+canon ls --where 'source.ext=jpg'
+
+# List only archived sources (content exists in an archive)
+canon ls --archived
+
+# List only unarchived sources (hashed but not in any archive)
+canon ls --unarchived
+
+# List only unhashed sources (no content hash yet)
+canon ls --unhashed
+
+# Include sources from archive roots
+canon ls --include-archived
+
+# Include excluded sources
+canon ls --include-excluded
+```
+
+**Path display:**
+- Relative path input (`.`, `subdir`) → relative output paths
+- Absolute path input (`/path/to/dir`) → absolute output paths
+
+Output is one path per line (stdout), with a count printed to stderr:
+```
+vacation/img001.jpg
+vacation/img002.jpg
+work/doc.pdf
+3 sources
+```
+
 ### canon import-facts
 
 Import facts from JSONL on stdin.

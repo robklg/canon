@@ -9,6 +9,7 @@ mod exclude;
 mod facts;
 mod filter;
 mod import_facts;
+mod ls;
 mod scan;
 mod worklist;
 
@@ -61,6 +62,29 @@ enum Commands {
         /// Allow importing facts for sources in archive roots
         #[arg(long)]
         allow_archived: bool,
+    },
+    /// List sources matching filters
+    Ls {
+        /// Directory path to scope the query (resolved to realpath)
+        path: Option<PathBuf>,
+        /// Filter expressions (e.g., "source.ext=jpg" or "content.hash.sha256?")
+        #[arg(long = "where")]
+        filters: Vec<String>,
+        /// Only show archived sources (content exists in an archive)
+        #[arg(long, conflicts_with_all = ["unarchived", "unhashed"])]
+        archived: bool,
+        /// Only show unarchived sources (hashed but not in any archive)
+        #[arg(long, conflicts_with_all = ["archived", "unhashed"])]
+        unarchived: bool,
+        /// Only show unhashed sources (no content hash yet)
+        #[arg(long, conflicts_with_all = ["archived", "unarchived"])]
+        unhashed: bool,
+        /// Include sources from archive roots (by default only source roots)
+        #[arg(long)]
+        include_archived: bool,
+        /// Include excluded sources (by default they are skipped)
+        #[arg(long)]
+        include_excluded: bool,
     },
     /// Show fact coverage and value distribution
     #[command(args_conflicts_with_subcommands = true)]
@@ -246,6 +270,20 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::ImportFacts { allow_archived } => {
             import_facts::run(&db, allow_archived)?;
+        }
+        Commands::Ls { path, filters, archived, unarchived, unhashed, include_archived, include_excluded } => {
+            // If no path given, check if cwd is inside a root
+            let (scope_path, use_relative) = if path.is_none() {
+                let cwd = std::env::current_dir()?;
+                match db::resolve_root_path(db.conn(), &cwd)? {
+                    Some(_) => (Some(cwd), true),   // Inside root: scope to cwd, relative
+                    None => (None, false),           // Outside root: all sources, absolute
+                }
+            } else {
+                let use_rel = !path.as_ref().unwrap().starts_with("/");
+                (path, use_rel)
+            };
+            ls::run(&db, scope_path.as_deref(), &filters, archived, unarchived, unhashed, include_archived, include_excluded, use_relative)?;
         }
         Commands::Facts { action, key, path, filters, limit, all, include_archived, include_excluded } => {
             match action {
