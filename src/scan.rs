@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
-use crate::db::{Connection, Db};
+use crate::db::{resolve_root_path, Connection, Db};
 
 #[derive(Default)]
 struct ScanStats {
@@ -19,7 +19,7 @@ struct ScanStats {
     missing: u64,
 }
 
-pub fn run(db: &Db, paths: &[PathBuf], role: &str) -> Result<()> {
+pub fn run(db: &Db, paths: &[PathBuf], role: &str, add_root: bool) -> Result<()> {
     // Validate role
     if role != "source" && role != "archive" {
         bail!("Invalid role '{}'. Must be 'source' or 'archive'", role);
@@ -34,10 +34,49 @@ pub fn run(db: &Db, paths: &[PathBuf], role: &str) -> Result<()> {
         let canonical = fs::canonicalize(path)
             .with_context(|| format!("Failed to canonicalize path: {}", path.display()))?;
 
-        let root_id = get_or_create_root(&conn, &canonical, role)?;
-        check_overlapping_roots(&conn, &canonical)?;
+        // Check if path is inside an existing root
+        let (root_id, root_path, scan_prefix) = match resolve_root_path(&conn, &canonical)? {
+            Some((id, root_path, existing_role, rel_path)) => {
+                // Path is inside an existing root
+                if add_root {
+                    bail!(
+                        "Path '{}' is already inside {} root '{}'. Remove --add to scan as subtree.",
+                        canonical.display(),
+                        existing_role,
+                        root_path
+                    );
+                }
+                // Check role matches if scanning the root itself (not a subtree)
+                if rel_path.is_empty() && existing_role != role {
+                    bail!(
+                        "Root '{}' has role '{}', cannot scan with --role {}",
+                        root_path,
+                        existing_role,
+                        role
+                    );
+                }
+                let scan_prefix = if rel_path.is_empty() {
+                    None // Scanning entire root
+                } else {
+                    Some(rel_path) // Scanning subtree
+                };
+                (id, PathBuf::from(root_path), scan_prefix)
+            }
+            None => {
+                // Path is not inside any root
+                if !add_root {
+                    bail!(
+                        "Path '{}' is not inside any existing root. Use --add to create a new root.",
+                        canonical.display()
+                    );
+                }
+                check_overlapping_roots(&conn, &canonical)?;
+                let root_id = create_root(&conn, &canonical, role)?;
+                (root_id, canonical.clone(), None)
+            }
+        };
 
-        let stats = scan_root(&conn, root_id, &canonical, now)?;
+        let stats = scan_root(&conn, root_id, &root_path, scan_prefix.as_deref(), now)?;
 
         total_stats.scanned += stats.scanned;
         total_stats.new += stats.new;
@@ -60,31 +99,9 @@ pub fn run(db: &Db, paths: &[PathBuf], role: &str) -> Result<()> {
     Ok(())
 }
 
-fn get_or_create_root(conn: &Connection, path: &Path, role: &str) -> Result<i64> {
+fn create_root(conn: &Connection, path: &Path, role: &str) -> Result<i64> {
     let path_str = path.to_str().context("Path is not valid UTF-8")?;
 
-    // Try to find existing root
-    let existing: Option<(i64, String)> = conn
-        .query_row(
-            "SELECT id, role FROM roots WHERE path = ?",
-            [path_str],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-
-    if let Some((id, existing_role)) = existing {
-        if existing_role != role {
-            bail!(
-                "Root {} already exists with role '{}', cannot change to '{}'",
-                path.display(),
-                existing_role,
-                role
-            );
-        }
-        return Ok(id);
-    }
-
-    // Create new root
     conn.execute(
         "INSERT INTO roots (path, role) VALUES (?, ?)",
         params![path_str, role],
@@ -129,11 +146,23 @@ fn check_overlapping_roots(conn: &Connection, new_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn scan_root(conn: &Connection, root_id: i64, root_path: &Path, now: i64) -> Result<ScanStats> {
+fn scan_root(
+    conn: &Connection,
+    root_id: i64,
+    root_path: &Path,
+    scan_prefix: Option<&str>,
+    now: i64,
+) -> Result<ScanStats> {
     let mut stats = ScanStats::default();
     let mut seen_source_ids: HashSet<i64> = HashSet::new();
 
-    for entry in WalkDir::new(root_path).follow_links(false) {
+    // Determine the actual path to walk
+    let walk_path = match scan_prefix {
+        Some(prefix) => root_path.join(prefix),
+        None => root_path.to_path_buf(),
+    };
+
+    for entry in WalkDir::new(&walk_path).follow_links(false) {
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
@@ -189,8 +218,8 @@ fn scan_root(conn: &Connection, root_id: i64, root_path: &Path, now: i64) -> Res
         }
     }
 
-    // Mark missing files
-    stats.missing = mark_missing(conn, root_id, &seen_source_ids, now)?;
+    // Mark missing files (scoped to prefix if scanning subtree)
+    stats.missing = mark_missing(conn, root_id, scan_prefix, &seen_source_ids, now)?;
 
     Ok(stats)
 }
@@ -307,17 +336,29 @@ fn process_file(
 fn mark_missing(
     conn: &Connection,
     root_id: i64,
+    scan_prefix: Option<&str>,
     seen_ids: &HashSet<i64>,
     now: i64,
 ) -> Result<u64> {
-    // Get all source IDs for this root that are currently present
-    let mut stmt = conn.prepare(
-        "SELECT id FROM sources WHERE root_id = ? AND present = 1"
-    )?;
-
-    let all_ids: Vec<i64> = stmt
-        .query_map([root_id], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+    // Get source IDs for this root that are currently present
+    // If scanning a subtree, only consider files under that prefix
+    let all_ids: Vec<i64> = match scan_prefix {
+        Some(prefix) => {
+            let prefix_pattern = format!("{}%", prefix);
+            conn.prepare(
+                "SELECT id FROM sources WHERE root_id = ? AND present = 1 AND rel_path LIKE ?"
+            )?
+            .query_map(params![root_id, prefix_pattern], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+        }
+        None => {
+            conn.prepare(
+                "SELECT id FROM sources WHERE root_id = ? AND present = 1"
+            )?
+            .query_map([root_id], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+        }
+    };
 
     let mut missing_count = 0u64;
     for id in all_ids {

@@ -38,6 +38,9 @@ enum Commands {
         /// Role for new roots: 'source' (default) or 'archive'
         #[arg(long, default_value = "source")]
         role: String,
+        /// Add path as a new root (required when path is not inside an existing root)
+        #[arg(long)]
+        add: bool,
     },
     /// Output sources as JSONL worklist
     Worklist {
@@ -235,8 +238,8 @@ fn main() -> anyhow::Result<()> {
     let mut db = db::open(&db_path, cli.debug_sql)?;
 
     match cli.command {
-        Commands::Scan { paths, role } => {
-            scan::run(&db, &paths, &role)?;
+        Commands::Scan { paths, role, add } => {
+            scan::run(&db, &paths, &role, add)?;
         }
         Commands::Worklist { path, filters, include_archived, include_excluded } => {
             worklist::run(&db, path.as_deref(), &filters, include_archived, include_excluded)?;

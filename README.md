@@ -20,7 +20,7 @@ Typical workflows involve scanning, extracting metadata, organizing a subset of 
 
 ```bash
 # 1. Scan your files
-canon scan /path/to/photos
+canon scan --add /path/to/photos
 
 # 2. Compute content hashes
 canon worklist --where '!content.hash.sha256?' | ./scripts/hash-worklist.sh | canon import-facts
@@ -79,11 +79,20 @@ By default, Canon will not copy files into an archive if an identical object alr
 Scan directories and index files.
 
 ```bash
-# Scan one or more directories
-canon scan /path/to/photos /path/to/more/photos
+# Add a new root and scan it (--add required for new roots)
+canon scan --add /path/to/photos
 
-# Scan as an archive (for tracking already-organized files)
-canon scan /path/to/archive --role archive
+# Scan multiple new roots
+canon scan --add /path/to/photos /path/to/more/photos
+
+# Add as an archive root (for tracking already-organized files)
+canon scan --add /path/to/archive --role archive
+
+# Re-scan an existing root
+canon scan /path/to/photos
+
+# Scan just a subtree within an existing root
+canon scan /path/to/photos/2024
 ```
 
 Output shows what was found:
@@ -527,7 +536,7 @@ canon apply manifest.toml --dry-run
 canon apply manifest.toml
 
 # Scan the archive to track what's there
-canon scan /Volumes/Archive/Photos --role archive
+canon scan --add /Volumes/Archive/Photos --role archive
 ```
 
 ### Find duplicates

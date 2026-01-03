@@ -176,33 +176,47 @@ pub fn parse_root_spec(conn: &Connection, spec: &str, required_role: Option<&str
     Ok(id)
 }
 
-/// Resolve a path to its containing archive root and relative subdir.
-/// Unlike parse_root_spec which requires exact root match, this accepts any path
-/// inside an archive root and extracts the relative portion.
-/// Returns (root_id, root_path, relative_subdir) or error if not in an archive.
-pub fn resolve_archive_path(conn: &Connection, path: &Path) -> Result<(i64, String, String)> {
+/// Resolve a path to its containing root (any role) and relative subdir.
+/// Returns Some((root_id, root_path, role, relative_subdir)) if inside a root, None otherwise.
+pub fn resolve_root_path(conn: &Connection, path: &Path) -> Result<Option<(i64, String, String, String)>> {
     let canon_path = fs::canonicalize(path)
         .with_context(|| format!("Failed to resolve path: {}", path.display()))?;
     let path_str = canon_path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
 
-    let mut stmt = conn.prepare("SELECT id, path FROM roots WHERE role = 'archive'")?;
-    let archives: Vec<(i64, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+    let mut stmt = conn.prepare("SELECT id, path, role FROM roots")?;
+    let roots: Vec<(i64, String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<Result<Vec<_>, _>>()?;
 
-    for (id, archive_path) in archives {
-        if path_str == archive_path {
-            return Ok((id, archive_path, String::new()));
+    for (id, root_path, role) in roots {
+        if path_str == root_path {
+            return Ok(Some((id, root_path, role, String::new())));
         }
-        if let Some(rel) = path_str.strip_prefix(&format!("{}/", archive_path)) {
-            return Ok((id, archive_path, rel.to_string()));
+        if let Some(rel) = path_str.strip_prefix(&format!("{}/", root_path)) {
+            return Ok(Some((id, root_path, role, rel.to_string())));
         }
     }
 
-    bail!(
-        "Path '{}' is not inside any registered archive root",
-        path.display()
-    );
+    Ok(None)
+}
+
+/// Resolve a path to its containing archive root and relative subdir.
+/// Unlike parse_root_spec which requires exact root match, this accepts any path
+/// inside an archive root and extracts the relative portion.
+/// Returns (root_id, root_path, relative_subdir) or error if not in an archive.
+pub fn resolve_archive_path(conn: &Connection, path: &Path) -> Result<(i64, String, String)> {
+    match resolve_root_path(conn, path)? {
+        Some((id, root_path, role, rel)) if role == "archive" => Ok((id, root_path, rel)),
+        Some((_, _, role, _)) => bail!(
+            "Path '{}' is inside a {} root, not an archive",
+            path.display(),
+            role
+        ),
+        None => bail!(
+            "Path '{}' is not inside any registered archive root",
+            path.display()
+        ),
+    }
 }
