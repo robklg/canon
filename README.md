@@ -291,27 +291,53 @@ The manifest is a TOML file containing the query, output pattern, and all matchi
 
 ### canon apply
 
-Apply a manifest to copy files.
+Apply a manifest to copy/move files.
 
 ```bash
 # Preview what would happen
 canon apply manifest.toml --dry-run
 
-# Actually copy files
+# Copy files (default mode, preserves mtime/permissions on Unix)
 canon apply manifest.toml
 
-# Skip all pre-flight checks
-canon apply manifest.toml --force
+# Rename files instead of copying (Unix only, fails on cross-device)
+canon apply manifest.toml --rename
+
+# Move files: rename if same device, copy+delete if cross-device
+canon apply manifest.toml --move --yes
+
+# Only apply sources from specific roots
+canon apply manifest.toml --root id:1 --root id:2
+canon apply manifest.toml --root path:/path/to/source
 
 # Allow duplicates across archives (but not within destination)
 canon apply manifest.toml --allow-cross-archive-duplicates
 ```
 
-**Pre-flight checks** (skipped with `--force`):
+**Transfer modes:**
+
+| Flag | Behavior |
+|------|----------|
+| (default) | Copy + preserve mtime/permissions (Unix) |
+| `--rename` | Atomic rename; fails if cross-device (Unix only) |
+| `--move` | Try rename; fallback to copy+delete on cross-device (Unix only, requires `--yes`) |
+
+All modes use noclobber semantics: if a destination file exists, apply aborts with an error.
+
+**Root filtering:**
+
+Use `--root` to apply only a subset of sources from the manifest. Useful for staged application when sources are on different drives.
+
+- `--root id:N` - Filter by root ID (shown in manifest as `root_id`)
+- `--root path:/path` - Filter by root path (must match exactly)
+
+**Pre-flight checks** (mandatory):
 
 1. **Destination collisions** - If multiple sources would map to the same destination path (e.g., using `{filename}` when sources have duplicate names), apply aborts with an error showing which files conflict. This prevents silent data loss.
 
 2. **Archive conflicts** - Checks if files already exist in the destination archive or other archives.
+
+3. **Excluded sources** - Blocks if any sources in the manifest are marked as excluded.
 
 Edit the manifest's `[output]` section to customize the destination:
 
