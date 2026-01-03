@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use std::path::Path;
 
-use crate::db::{Connection, Db};
+use crate::db::{populate_temp_sources, Connection, Db};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -27,8 +27,8 @@ fn is_builtin_fact(key: &str) -> bool {
     BUILTIN_FACTS_DEFAULT.contains(&key) || BUILTIN_FACTS_HIDDEN.contains(&key)
 }
 
-pub fn run(db: &Db, key_arg: Option<&str>, path_arg: Option<&Path>, filter_strs: &[String], limit: usize, show_all: bool, include_archived: bool, include_excluded: bool) -> Result<()> {
-    let conn = db.conn();
+pub fn run(db: &mut Db, key_arg: Option<&str>, path_arg: Option<&Path>, filter_strs: &[String], limit: usize, show_all: bool, include_archived: bool, include_excluded: bool) -> Result<()> {
+    let conn = db.conn_mut();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs
@@ -75,12 +75,12 @@ pub fn run(db: &Db, key_arg: Option<&str>, path_arg: Option<&Path>, filter_strs:
 
     if let Some(fact_key) = key {
         if is_builtin_fact(fact_key) {
-            show_builtin_distribution(&conn, &source_ids, fact_key, total_sources, limit)?;
+            show_builtin_distribution(conn, &source_ids, fact_key, total_sources, limit)?;
         } else {
-            show_value_distribution(&conn, &source_ids, fact_key, total_sources, limit)?;
+            show_value_distribution(conn, &source_ids, fact_key, total_sources, limit)?;
         }
     } else {
-        show_all_keys(&conn, &source_ids, total_sources, show_all)?;
+        show_all_keys(conn, &source_ids, total_sources, show_all)?;
     }
 
     // Report excluded count
@@ -159,46 +159,34 @@ fn get_matching_sources(
     Ok(all_ids)
 }
 
-fn show_all_keys(conn: &Connection, source_ids: &[i64], total_sources: usize, show_all: bool) -> Result<()> {
+fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize, show_all: bool) -> Result<()> {
     if source_ids.is_empty() {
         return Ok(());
     }
 
     // Build a temp table for efficiency with large source lists
-    conn.execute("CREATE TEMP TABLE IF NOT EXISTS temp_sources (id INTEGER PRIMARY KEY)", [])?;
-    conn.execute("DELETE FROM temp_sources", [])?;
-
-    let mut stmt = conn.prepare("INSERT INTO temp_sources (id) VALUES (?)")?;
-    for id in source_ids {
-        stmt.execute([id])?;
-    }
-    drop(stmt);
-
-    // Get object IDs for these sources
-    conn.execute(
-        "CREATE TEMP TABLE IF NOT EXISTS temp_objects (id INTEGER PRIMARY KEY)",
-        [],
-    )?;
-    conn.execute("DELETE FROM temp_objects", [])?;
-    conn.execute(
-        "INSERT OR IGNORE INTO temp_objects (id)
-         SELECT DISTINCT object_id FROM sources
-         WHERE id IN (SELECT id FROM temp_sources) AND object_id IS NOT NULL",
-        [],
-    )?;
+    populate_temp_sources(conn, source_ids)?;
 
     // Query fact keys from both source and object facts
     // Count sources (not entities) - multiple sources can share an object
+    // Use UNION ALL for index efficiency, dedupe once in outer SELECT DISTINCT
     let mut results: Vec<(String, i64, bool)> = conn
         .prepare(
             "SELECT key, COUNT(*) as cnt
              FROM (
-                 SELECT DISTINCT ts.id, f.key
-                 FROM temp_sources ts
-                 JOIN sources s ON s.id = ts.id
-                 JOIN facts f ON
-                     (f.entity_type = 'source' AND f.entity_id = s.id)
-                     OR (f.entity_type = 'object' AND f.entity_id = s.object_id)
+                 SELECT DISTINCT id, key FROM (
+                     SELECT ts.id, f.key
+                     FROM temp_sources ts
+                     JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id
+
+                     UNION ALL
+
+                     SELECT ts.id, f.key
+                     FROM temp_sources ts
+                     JOIN sources s ON s.id = ts.id
+                     JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id
+                     WHERE s.object_id IS NOT NULL
+                 )
              )
              GROUP BY key
              ORDER BY cnt DESC"
@@ -206,9 +194,8 @@ fn show_all_keys(conn: &Connection, source_ids: &[i64], total_sources: usize, sh
         .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, false)))?
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Clean up temp tables
+    // Clean up temp table
     conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
-    conn.execute("DROP TABLE IF EXISTS temp_objects", [])?;
 
     // Add built-in facts at the top (they always have 100% coverage)
     let mut all_results: Vec<(String, i64, bool)> = BUILTIN_FACTS_DEFAULT
@@ -244,7 +231,7 @@ fn show_all_keys(conn: &Connection, source_ids: &[i64], total_sources: usize, sh
 }
 
 fn show_value_distribution(
-    conn: &Connection,
+    conn: &mut Connection,
     source_ids: &[i64],
     key: &str,
     total_sources: usize,
@@ -254,41 +241,31 @@ fn show_value_distribution(
         return Ok(());
     }
 
-    // Build temp tables
-    conn.execute("CREATE TEMP TABLE IF NOT EXISTS temp_sources (id INTEGER PRIMARY KEY)", [])?;
-    conn.execute("DELETE FROM temp_sources", [])?;
-
-    let mut stmt = conn.prepare("INSERT INTO temp_sources (id) VALUES (?)")?;
-    for id in source_ids {
-        stmt.execute([id])?;
-    }
-    drop(stmt);
-
-    conn.execute(
-        "CREATE TEMP TABLE IF NOT EXISTS temp_objects (id INTEGER PRIMARY KEY)",
-        [],
-    )?;
-    conn.execute("DELETE FROM temp_objects", [])?;
-    conn.execute(
-        "INSERT OR IGNORE INTO temp_objects (id)
-         SELECT DISTINCT object_id FROM sources
-         WHERE id IN (SELECT id FROM temp_sources) AND object_id IS NOT NULL",
-        [],
-    )?;
+    // Build temp table
+    populate_temp_sources(conn, source_ids)?;
 
     // Query value distribution
     // Count sources (not entities) - multiple sources can share an object
     // Use COALESCE to get a displayable value from the typed columns
+    // Use UNION ALL for index efficiency, dedupe once in outer SELECT DISTINCT
     let query = if limit == 0 {
         "SELECT val, COUNT(*) as cnt
          FROM (
-             SELECT DISTINCT ts.id,
-                 COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch'), f.value_json) as val
-             FROM temp_sources ts
-             JOIN sources s ON s.id = ts.id
-             JOIN facts f ON
-                 (f.entity_type = 'source' AND f.entity_id = s.id AND f.key = ?1)
-                 OR (f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1)
+             SELECT DISTINCT id, val FROM (
+                 SELECT ts.id,
+                     COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch'), f.value_json) as val
+                 FROM temp_sources ts
+                 JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?1
+
+                 UNION ALL
+
+                 SELECT ts.id,
+                     COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch'), f.value_json) as val
+                 FROM temp_sources ts
+                 JOIN sources s ON s.id = ts.id
+                 JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1
+                 WHERE s.object_id IS NOT NULL
+             )
          )
          GROUP BY val
          ORDER BY cnt DESC".to_string()
@@ -296,13 +273,21 @@ fn show_value_distribution(
         format!(
             "SELECT val, COUNT(*) as cnt
              FROM (
-                 SELECT DISTINCT ts.id,
-                     COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch'), f.value_json) as val
-                 FROM temp_sources ts
-                 JOIN sources s ON s.id = ts.id
-                 JOIN facts f ON
-                     (f.entity_type = 'source' AND f.entity_id = s.id AND f.key = ?1)
-                     OR (f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1)
+                 SELECT DISTINCT id, val FROM (
+                     SELECT ts.id,
+                         COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch'), f.value_json) as val
+                     FROM temp_sources ts
+                     JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?1
+
+                     UNION ALL
+
+                     SELECT ts.id,
+                         COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch'), f.value_json) as val
+                     FROM temp_sources ts
+                     JOIN sources s ON s.id = ts.id
+                     JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1
+                     WHERE s.object_id IS NOT NULL
+                 )
              )
              GROUP BY val
              ORDER BY cnt DESC
@@ -321,23 +306,27 @@ fn show_value_distribution(
         .collect::<Result<Vec<_>, _>>()?;
 
     // Count sources that have this fact (either directly or via their object)
+    // Use UNION ALL for index efficiency
     let sources_with_fact: i64 = conn.query_row(
-        "SELECT COUNT(*)
-         FROM temp_sources ts
-         JOIN sources s ON s.id = ts.id
-         WHERE EXISTS (
-             SELECT 1 FROM facts
-             WHERE key = ?
-               AND ((entity_type = 'source' AND entity_id = s.id)
-                    OR (entity_type = 'object' AND entity_id = s.object_id))
+        "SELECT COUNT(DISTINCT id) FROM (
+             SELECT ts.id
+             FROM temp_sources ts
+             JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?1
+
+             UNION ALL
+
+             SELECT ts.id
+             FROM temp_sources ts
+             JOIN sources s ON s.id = ts.id
+             JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1
+             WHERE s.object_id IS NOT NULL
          )",
         [key],
         |row| row.get(0),
     )?;
 
-    // Clean up temp tables
+    // Clean up temp table
     conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
-    conn.execute("DROP TABLE IF EXISTS temp_objects", [])?;
 
     // Print header
     println!("{:<40} {:>10} {:>10}", key, "Count", "Coverage");
@@ -364,7 +353,7 @@ fn show_value_distribution(
 }
 
 fn show_builtin_distribution(
-    conn: &Connection,
+    conn: &mut Connection,
     source_ids: &[i64],
     key: &str,
     total_sources: usize,
@@ -377,14 +366,7 @@ fn show_builtin_distribution(
     }
 
     // Build temp table
-    conn.execute("CREATE TEMP TABLE IF NOT EXISTS temp_sources (id INTEGER PRIMARY KEY)", [])?;
-    conn.execute("DELETE FROM temp_sources", [])?;
-
-    let mut stmt = conn.prepare("INSERT INTO temp_sources (id) VALUES (?)")?;
-    for id in source_ids {
-        stmt.execute([id])?;
-    }
-    drop(stmt);
+    populate_temp_sources(conn, source_ids)?;
 
     let label = format!("{} (built-in)", key);
 
@@ -556,7 +538,7 @@ fn is_protected_fact(key: &str) -> bool {
 }
 
 pub fn delete_facts(
-    db: &Db,
+    db: &mut Db,
     key: &str,
     scope_path: Option<&Path>,
     filter_strs: &[String],
@@ -578,7 +560,7 @@ pub fn delete_facts(
         );
     }
 
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs
@@ -602,17 +584,7 @@ pub fn delete_facts(
     }
 
     // Build temp table for efficiency
-    conn.execute(
-        "CREATE TEMP TABLE IF NOT EXISTS temp_sources (id INTEGER PRIMARY KEY)",
-        [],
-    )?;
-    conn.execute("DELETE FROM temp_sources", [])?;
-
-    let mut stmt = conn.prepare("INSERT INTO temp_sources (id) VALUES (?)")?;
-    for id in &source_ids {
-        stmt.execute([id])?;
-    }
-    drop(stmt);
+    populate_temp_sources(conn, &source_ids)?;
 
     // Count and optionally delete based on entity type
     let (fact_count, entity_count) = if options.entity_type == "source" {

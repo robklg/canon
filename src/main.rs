@@ -92,9 +92,9 @@ enum Commands {
         /// Filter expressions (e.g., "source.ext=jpg" or "content.hash.sha256?")
         #[arg(long = "where")]
         filters: Vec<String>,
-        /// Filter coverage relative to a specific archive (can be archive root or sub-path)
+        /// Filter coverage relative to a specific archive (id:N or path:/foo/bar)
         #[arg(long)]
-        archive: Option<PathBuf>,
+        archive: Option<String>,
         /// Include sources from archive roots (by default only source roots)
         #[arg(long)]
         include_archived: bool,
@@ -229,7 +229,7 @@ fn main() -> anyhow::Result<()> {
         path
     });
 
-    let db = db::open(&db_path, cli.debug_sql)?;
+    let mut db = db::open(&db_path, cli.debug_sql)?;
 
     match cli.command {
         Commands::Scan { paths, role } => {
@@ -248,7 +248,7 @@ fn main() -> anyhow::Result<()> {
                         entity_type: on,
                         dry_run: !yes,
                     };
-                    facts::delete_facts(&db, &key, path.as_deref(), &filters, &options)?;
+                    facts::delete_facts(&mut db, &key, path.as_deref(), &filters, &options)?;
                 }
                 Some(FactsAction::Prune { stale, yes }) => {
                     if stale {
@@ -259,12 +259,12 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 None => {
-                    facts::run(&db, key.as_deref(), path.as_deref(), &filters, limit, all, include_archived, include_excluded)?;
+                    facts::run(&mut db, key.as_deref(), path.as_deref(), &filters, limit, all, include_archived, include_excluded)?;
                 }
             }
         }
         Commands::Coverage { path, filters, archive, include_archived, include_excluded } => {
-            coverage::run(&db, path.as_deref(), &filters, archive.as_deref(), include_archived, include_excluded)?;
+            coverage::run(&mut db, path.as_deref(), &filters, archive.as_deref(), include_archived, include_excluded)?;
         }
         Commands::Cluster { action } => match action {
             ClusterAction::Generate {

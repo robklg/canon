@@ -1,8 +1,7 @@
-use anyhow::{bail, Result};
-use std::collections::HashSet;
+use anyhow::Result;
 use std::path::Path;
 
-use crate::db::{Connection, Db};
+use crate::db::{parse_root_spec, populate_temp_sources, Db};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -65,10 +64,10 @@ impl CoverageStats {
 }
 
 pub fn run(
-    db: &Db,
+    db: &mut Db,
     scope_path: Option<&Path>,
     filter_strs: &[String],
-    archive_path: Option<&Path>,
+    archive_spec: Option<&str>,
     include_archived: bool,
     include_excluded: bool,
 ) -> Result<()> {
@@ -87,105 +86,49 @@ pub fn run(
         None
     };
 
-    // Resolve and validate archive path, find containing archive root
-    let archive_info = if let Some(p) = archive_path {
-        let resolved = std::fs::canonicalize(p)?.to_string_lossy().to_string();
-        let (root_id, root_path) = find_archive_root_for_path(&conn, &resolved)?;
-        Some((root_id, root_path, resolved))
+    // Parse and validate archive spec (must be archive role)
+    let archive_root_id = if let Some(spec) = archive_spec {
+        Some(parse_root_spec(conn, spec, Some("archive"))?)
     } else {
         None
     };
 
-    // Build the set of archived hashes
-    let archived_hashes = build_archived_hash_set(&conn, archive_info.as_ref())?;
+    // Get mutable reference for temp table operations
+    let conn = db.conn_mut();
 
     // Compute and display stats
     if scope_prefix.is_some() {
         // Single scope mode
         let stats = compute_scoped_stats(
-            &conn,
+            conn,
             scope_prefix.as_deref(),
             &filters,
-            &archived_hashes,
+            archive_root_id,
             include_archived,
-            include_excluded,
         )?;
-        display_scoped_stats(&stats, scope_prefix.as_deref(), archive_info.as_ref().map(|(_, _, p)| p.as_str()), include_excluded);
+        display_scoped_stats(&stats, scope_prefix.as_deref(), archive_spec, include_excluded);
     } else {
         // Per-root breakdown mode
         let (per_root_stats, overall) = compute_per_root_stats(
-            &conn,
+            conn,
             &filters,
-            &archived_hashes,
+            archive_root_id,
             include_archived,
-            include_excluded,
         )?;
-        display_per_root_stats(&per_root_stats, &overall, archive_info.as_ref().map(|(_, _, p)| p.as_str()), include_excluded);
+        display_per_root_stats(&per_root_stats, &overall, archive_spec, include_excluded);
     }
 
     Ok(())
 }
 
-/// Find the archive root that contains the given path
-fn find_archive_root_for_path(conn: &Connection, path: &str) -> Result<(i64, String)> {
-    let mut stmt = conn.prepare("SELECT id, path FROM roots WHERE role = 'archive'")?;
-    let archives: Vec<(i64, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    for (id, archive_path) in archives {
-        if path.starts_with(&archive_path) {
-            return Ok((id, archive_path));
-        }
-    }
-
-    bail!("Path '{}' is not within any registered archive root", path);
-}
-
-/// Build a set of all hashes that exist in the specified archive(s)
-fn build_archived_hash_set(
-    conn: &Connection,
-    archive_info: Option<&(i64, String, String)>,
-) -> Result<HashSet<String>> {
-    let hashes = if let Some((root_id, _root_path, resolved_path)) = archive_info {
-        // Specific archive with optional sub-path scope
-        conn.prepare(
-            "SELECT DISTINCT o.hash_value
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             JOIN objects o ON s.object_id = o.id
-             WHERE r.id = ? AND s.present = 1
-               AND (r.path || '/' || s.rel_path) LIKE ? || '%'"
-        )?
-        .query_map([root_id.to_string(), resolved_path.clone()], |row| row.get::<_, String>(0))?
-        .collect::<Result<HashSet<_>, _>>()?
-    } else {
-        // All archive roots
-        conn.prepare(
-            "SELECT DISTINCT o.hash_value
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             JOIN objects o ON s.object_id = o.id
-             WHERE r.role = 'archive' AND s.present = 1"
-        )?
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<HashSet<_>, _>>()?
-    };
-
-    Ok(hashes)
-}
-
-/// Compute coverage stats for sources under a specific path scope
+/// Compute coverage stats for sources under a specific path scope using pure SQL aggregates
 fn compute_scoped_stats(
-    conn: &Connection,
+    conn: &mut rusqlite::Connection,
     scope_prefix: Option<&str>,
     filters: &[Filter],
-    archived_hashes: &HashSet<String>,
+    archive_root_id: Option<i64>,
     include_archived: bool,
-    include_excluded: bool,
 ) -> Result<CoverageStats> {
-    let mut stats = CoverageStats::new();
-
     // Build role clause
     let role_clause = if include_archived {
         "1=1"
@@ -200,11 +143,13 @@ fn compute_scoped_stats(
         "1=1"
     };
 
-    // Build exclude clause - always query all sources, track excluded separately
-    let exclude_clause = exclude::exclude_clause(true); // Always include all, we track separately
+    // Always query all sources (no exclude filtering at query level)
+    let exclude_clause = exclude::exclude_clause(true);
 
-    // Get source IDs with batched processing
+    // Collect all filtered source IDs
+    let mut all_filtered_ids: Vec<i64> = Vec::new();
     let mut last_id: i64 = 0;
+
     loop {
         let batch_query = format!(
             "SELECT s.id FROM sources s
@@ -232,50 +177,22 @@ fn compute_scoped_stats(
 
         // Apply filters
         let filtered_ids = filter::apply_filters(conn, &source_ids, filters)?;
-
-        // Count stats for this batch
-        for source_id in filtered_ids {
-            stats.total_sources += 1;
-
-            // Check if excluded
-            if exclude::is_excluded(conn, source_id)? {
-                stats.excluded_sources += 1;
-                // Skip further processing for excluded sources unless include_excluded
-                if !include_excluded {
-                    continue;
-                }
-            }
-
-            // Check if source has a hash (only for included sources)
-            let hash: Option<String> = conn
-                .query_row(
-                    "SELECT o.hash_value FROM sources s
-                     JOIN objects o ON s.object_id = o.id
-                     WHERE s.id = ?",
-                    [source_id],
-                    |row| row.get(0),
-                )
-                .ok();
-
-            if let Some(h) = hash {
-                stats.hashed_sources += 1;
-                if archived_hashes.contains(&h) {
-                    stats.archived_sources += 1;
-                }
-            }
-        }
+        all_filtered_ids.extend(filtered_ids);
     }
 
-    Ok(stats)
+    // Populate temp table with all filtered source IDs
+    populate_temp_sources(conn, &all_filtered_ids)?;
+
+    // Now compute all stats with aggregate queries
+    compute_stats_from_temp_table(conn, archive_root_id)
 }
 
-/// Compute coverage stats per root, plus overall totals
+/// Compute coverage stats per root, plus overall totals using pure SQL aggregates
 fn compute_per_root_stats(
-    conn: &Connection,
+    conn: &mut rusqlite::Connection,
     filters: &[Filter],
-    archived_hashes: &HashSet<String>,
+    archive_root_id: Option<i64>,
     include_archived: bool,
-    include_excluded: bool,
 ) -> Result<(Vec<CoverageStats>, CoverageStats)> {
     // Get list of roots
     let role_clause = if include_archived {
@@ -296,17 +213,10 @@ fn compute_per_root_stats(
     let mut overall = CoverageStats::new();
 
     for (root_id, root_path, root_role) in roots {
-        let mut stats = CoverageStats {
-            root_path: Some(root_path.clone()),
-            root_role: Some(root_role),
-            total_sources: 0,
-            excluded_sources: 0,
-            hashed_sources: 0,
-            archived_sources: 0,
-        };
-
-        // Get sources for this root with batched processing
+        // Collect all filtered source IDs for this root
+        let mut all_filtered_ids: Vec<i64> = Vec::new();
         let mut last_id: i64 = 0;
+
         loop {
             let source_ids: Vec<i64> = conn
                 .prepare(
@@ -325,39 +235,16 @@ fn compute_per_root_stats(
 
             // Apply filters
             let filtered_ids = filter::apply_filters(conn, &source_ids, filters)?;
-
-            // Count stats for this batch
-            for source_id in filtered_ids {
-                stats.total_sources += 1;
-
-                // Check if excluded
-                if exclude::is_excluded(conn, source_id)? {
-                    stats.excluded_sources += 1;
-                    // Skip further processing for excluded sources unless include_excluded
-                    if !include_excluded {
-                        continue;
-                    }
-                }
-
-                // Check if source has a hash
-                let hash: Option<String> = conn
-                    .query_row(
-                        "SELECT o.hash_value FROM sources s
-                         JOIN objects o ON s.object_id = o.id
-                         WHERE s.id = ?",
-                        [source_id],
-                        |row| row.get(0),
-                    )
-                    .ok();
-
-                if let Some(h) = hash {
-                    stats.hashed_sources += 1;
-                    if archived_hashes.contains(&h) {
-                        stats.archived_sources += 1;
-                    }
-                }
-            }
+            all_filtered_ids.extend(filtered_ids);
         }
+
+        // Populate temp table with all filtered source IDs for this root
+        populate_temp_sources(conn, &all_filtered_ids)?;
+
+        // Compute stats from temp table
+        let mut stats = compute_stats_from_temp_table(conn, archive_root_id)?;
+        stats.root_path = Some(root_path);
+        stats.root_role = Some(root_role);
 
         // Add to overall totals
         overall.total_sources += stats.total_sources;
@@ -369,6 +256,74 @@ fn compute_per_root_stats(
     }
 
     Ok((per_root_stats, overall))
+}
+
+/// Compute all coverage stats from temp_sources using pure SQL aggregates
+fn compute_stats_from_temp_table(
+    conn: &rusqlite::Connection,
+    archive_root_id: Option<i64>,
+) -> Result<CoverageStats> {
+    let mut stats = CoverageStats::new();
+
+    // Total sources
+    stats.total_sources = conn.query_row(
+        "SELECT COUNT(*) FROM temp_sources",
+        [],
+        |row| row.get(0),
+    )?;
+
+    // Excluded sources (presence of policy.exclude key)
+    stats.excluded_sources = conn.query_row(
+        "SELECT COUNT(*) FROM temp_sources ts
+         WHERE EXISTS (
+             SELECT 1 FROM facts f
+             WHERE f.entity_type = 'source' AND f.entity_id = ts.id
+               AND f.key = 'policy.exclude'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+
+    // Hashed sources (have an object_id)
+    stats.hashed_sources = conn.query_row(
+        "SELECT COUNT(*) FROM temp_sources ts
+         JOIN sources s ON s.id = ts.id
+         WHERE s.object_id IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+
+    // Archived sources
+    if let Some(root_id) = archive_root_id {
+        // Specific archive root
+        stats.archived_sources = conn.query_row(
+            "SELECT COUNT(*) FROM temp_sources ts
+             JOIN sources s ON s.id = ts.id
+             WHERE s.object_id IS NOT NULL AND EXISTS (
+                 SELECT 1 FROM sources arch_s
+                 WHERE arch_s.root_id = ?1 AND arch_s.present = 1
+                   AND arch_s.object_id = s.object_id
+             )",
+            [root_id],
+            |row| row.get(0),
+        )?;
+    } else {
+        // Any archive root
+        stats.archived_sources = conn.query_row(
+            "SELECT COUNT(*) FROM temp_sources ts
+             JOIN sources s ON s.id = ts.id
+             WHERE s.object_id IS NOT NULL AND EXISTS (
+                 SELECT 1 FROM sources arch_s
+                 JOIN roots r ON arch_s.root_id = r.id
+                 WHERE r.role = 'archive' AND arch_s.present = 1
+                   AND arch_s.object_id = s.object_id
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+    }
+
+    Ok(stats)
 }
 
 fn display_scoped_stats(stats: &CoverageStats, scope: Option<&str>, archive: Option<&str>, include_excluded: bool) {

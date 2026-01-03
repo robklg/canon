@@ -1,11 +1,11 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::OptionalExtension;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};
 use std::path::{Path, PathBuf};
 
 use crate::cluster::{Manifest, ManifestSource};
-use crate::db::{Connection, Db};
+use crate::db::{parse_root_spec, Connection, Db};
 use crate::exclude;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,28 +188,9 @@ fn filter_by_roots<'a>(
     }
 
     let mut root_ids = HashSet::new();
-
     for spec in roots {
-        if let Some(id_str) = spec.strip_prefix("id:") {
-            let id: i64 = id_str.parse().context("Invalid root ID")?;
-            root_ids.insert(id);
-        } else if let Some(path) = spec.strip_prefix("path:") {
-            // Resolve to realpath and look up root ID from database
-            let realpath = fs::canonicalize(path)
-                .with_context(|| format!("Failed to resolve path: {}", path))?;
-            let realpath_str = realpath.to_str()
-                .ok_or_else(|| anyhow!("Path contains invalid UTF-8: {}", realpath.display()))?;
-            let root_id: i64 = conn
-                .query_row(
-                    "SELECT id FROM roots WHERE path = ?",
-                    [realpath_str],
-                    |row| row.get(0),
-                )
-                .with_context(|| format!("No root found for path: {}", realpath.display()))?;
-            root_ids.insert(root_id);
-        } else {
-            bail!("Invalid --root format '{}'. Use id:<N> or path:<path>", spec);
-        }
+        let id = parse_root_spec(conn, spec, None)?;
+        root_ids.insert(id);
     }
 
     Ok(manifest.sources.iter().filter(|s| root_ids.contains(&s.root_id)).collect())

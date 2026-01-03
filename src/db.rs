@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 pub use rusqlite::Connection;
 use std::fs;
 use std::ops::Deref;
@@ -14,6 +14,11 @@ impl Db {
     /// Get a reference to the underlying connection
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Get a mutable reference to the underlying connection (for transactions)
+    pub fn conn_mut(&mut self) -> &mut Connection {
+        &mut self.conn
     }
 }
 
@@ -85,6 +90,7 @@ CREATE INDEX IF NOT EXISTS sources_object_id ON sources(object_id);
 CREATE INDEX IF NOT EXISTS facts_entity ON facts(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS facts_key ON facts(key);
 CREATE INDEX IF NOT EXISTS facts_key_entity ON facts(key, entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS facts_entity_key ON facts(entity_type, entity_id, key);
 "#;
 
 /// Profile callback for SQL debug logging
@@ -118,4 +124,54 @@ pub fn open(path: &Path, debug_sql: bool) -> Result<Db> {
         .context("Failed to initialize database schema")?;
 
     Ok(Db { conn })
+}
+
+/// Populate temp_sources table with source IDs using a transaction for efficiency
+pub fn populate_temp_sources(conn: &mut Connection, source_ids: &[i64]) -> Result<()> {
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS temp_sources (id INTEGER PRIMARY KEY)", [])?;
+
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM temp_sources", [])?;
+    {
+        let mut stmt = tx.prepare("INSERT INTO temp_sources (id) VALUES (?)")?;
+        for id in source_ids {
+            stmt.execute([id])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Parse root spec (id:N or path:/path) with optional role validation
+pub fn parse_root_spec(conn: &Connection, spec: &str, required_role: Option<&str>) -> Result<i64> {
+    let (id, role) = if let Some(id_str) = spec.strip_prefix("id:") {
+        let id: i64 = id_str.parse().context("Invalid root ID")?;
+        let role: String = conn
+            .query_row("SELECT role FROM roots WHERE id = ?", [id], |row| row.get(0))
+            .with_context(|| format!("No root with id {}", id))?;
+        (id, role)
+    } else if let Some(path) = spec.strip_prefix("path:") {
+        let realpath = fs::canonicalize(path)
+            .with_context(|| format!("Failed to resolve path: {}", path))?;
+        let realpath_str = realpath
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
+        let (id, role): (i64, String) = conn
+            .query_row(
+                "SELECT id, role FROM roots WHERE path = ?",
+                [realpath_str],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .with_context(|| format!("No root for path: {}", path))?;
+        (id, role)
+    } else {
+        bail!("Invalid format '{}'. Use id:<N> or path:<path>", spec);
+    };
+
+    if let Some(req_role) = required_role {
+        if role != req_role {
+            bail!("Root {} has role '{}', expected '{}'", id, role, req_role);
+        }
+    }
+    Ok(id)
 }

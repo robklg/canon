@@ -231,11 +231,9 @@ canon coverage /path/to/photos
 # With filters
 canon coverage --where 'source.ext=jpg'
 
-# Coverage relative to a specific archive
-canon coverage --archive /path/to/archive
-
-# Coverage for a sub-path within an archive
-canon coverage --archive /path/to/archive/Photos/2024
+# Coverage relative to a specific archive root
+canon coverage --archive id:1
+canon coverage --archive path:/path/to/archive
 
 # Include archive roots in analysis
 canon coverage --include-archived
