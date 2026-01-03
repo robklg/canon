@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::{Connection, Db};
+use crate::db::{resolve_archive_path, Connection, Db};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -26,6 +26,7 @@ pub struct ManifestMeta {
 #[derive(Serialize, Deserialize)]
 pub struct ManifestOutput {
     pub pattern: String,
+    pub archive_root_id: i64,
     pub base_dir: String,
 }
 
@@ -48,10 +49,14 @@ pub struct GenerateOptions {
 pub fn generate(
     db: &Db,
     filters: &[String],
+    dest: &Path,
     output_path: &Path,
     options: &GenerateOptions,
 ) -> Result<()> {
     let conn = db.conn();
+
+    // Resolve destination to archive root + relative subdir
+    let (archive_root_id, _archive_root_path, base_dir) = resolve_archive_path(conn, dest)?;
 
     let parsed_filters: Vec<Filter> = filters
         .iter()
@@ -93,7 +98,8 @@ pub fn generate(
         },
         output: ManifestOutput {
             pattern: "{filename}".to_string(),
-            base_dir: ".".to_string(),
+            archive_root_id,
+            base_dir,
         },
         sources,
     };

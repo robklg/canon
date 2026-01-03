@@ -51,11 +51,23 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     let manifest: Manifest = toml::from_str(&content)
         .with_context(|| format!("Failed to parse manifest: {}", manifest_path.display()))?;
 
-    let base_dir = fs::canonicalize(&manifest.output.base_dir).unwrap_or_else(|_| {
-        PathBuf::from(&manifest.output.base_dir)
-    });
-
     let conn = db.conn();
+
+    // Look up archive root path from manifest's archive_root_id
+    let archive_root_path: String = conn
+        .query_row(
+            "SELECT path FROM roots WHERE id = ? AND role = 'archive'",
+            [manifest.output.archive_root_id],
+            |row| row.get(0),
+        )
+        .with_context(|| format!("Archive root id {} not found", manifest.output.archive_root_id))?;
+
+    // Construct full base_dir from archive root + relative subdir
+    let base_dir = if manifest.output.base_dir.is_empty() {
+        PathBuf::from(&archive_root_path)
+    } else {
+        PathBuf::from(&archive_root_path).join(&manifest.output.base_dir)
+    };
 
     // Filter sources by root if specified
     let filtered_sources = filter_by_roots(&manifest, &options.roots, conn)?;
@@ -79,7 +91,7 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     }
 
     // Check archive conflicts
-    let conflicts = check_archive_conflicts_filtered(conn, &filtered_sources, &base_dir)?;
+    let conflicts = check_archive_conflicts_filtered(conn, &filtered_sources, manifest.output.archive_root_id)?;
 
     if !conflicts.in_dest_archive.is_empty() {
         eprintln!(
@@ -156,24 +168,6 @@ struct ArchiveConflicts {
     in_other_archives: Vec<(String, String)>, // (source_path, archive_path)
 }
 
-fn find_archive_for_path(conn: &Connection, path: &Path) -> Result<Option<i64>> {
-    let path_str = path.to_str().unwrap_or("");
-
-    // Find archive roots and check if path is inside any of them
-    let mut stmt = conn.prepare("SELECT id, path FROM roots WHERE role = 'archive'")?;
-    let archives: Vec<(i64, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    for (id, archive_path) in archives {
-        if path_str.starts_with(&archive_path) || path_str == archive_path {
-            return Ok(Some(id));
-        }
-    }
-
-    Ok(None)
-}
-
 // ============================================================================
 // Helper functions for pre-flight checks (work with filtered source list)
 // ============================================================================
@@ -236,15 +230,12 @@ fn check_destination_collisions_filtered(
 fn check_archive_conflicts_filtered(
     conn: &Connection,
     sources: &[&ManifestSource],
-    base_dir: &Path,
+    dest_archive_id: i64,
 ) -> Result<ArchiveConflicts> {
     let mut conflicts = ArchiveConflicts {
         in_dest_archive: Vec::new(),
         in_other_archives: Vec::new(),
     };
-
-    // Find if base_dir is inside an archive root
-    let dest_archive_id: Option<i64> = find_archive_for_path(conn, base_dir)?;
 
     for source in sources {
         if let Some(ref hash) = source.hash_value {
@@ -269,7 +260,7 @@ fn check_archive_conflicts_filtered(
                     format!("{}/{}", root_path, rel_path)
                 };
 
-                if Some(archive_id) == dest_archive_id {
+                if archive_id == dest_archive_id {
                     conflicts.in_dest_archive.push((source.path.clone(), archive_path));
                 } else {
                     conflicts.in_other_archives.push((source.path.clone(), archive_path));

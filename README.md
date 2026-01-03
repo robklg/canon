@@ -30,7 +30,7 @@ canon facts
 canon coverage
 
 # 4. Generate a manifest for organizing files
-canon cluster generate --where 'content.hash.sha256?'
+canon cluster generate --where 'content.hash.sha256?' --dest /path/to/archive
 
 # 5. Preview what would be copied
 canon apply manifest.toml --dry-run
@@ -269,23 +269,26 @@ Overall:
 
 ### canon cluster generate
 
-Generate a manifest of files matching filters.
+Generate a manifest of files matching filters. The `--dest` flag specifies where files will be copied and must be inside a registered archive root.
 
 ```bash
-# All files with content hashes (source roots only by default)
-canon cluster generate --where 'content.hash.sha256?'
+# All files with content hashes to an archive
+canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive/Photos
+
+# Destination can be a subdirectory within an archive
+canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive/Photos/2024
 
 # Custom output file
-canon cluster generate --where 'content.hash.sha256?' -o my-manifest.toml
+canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive -o my-manifest.toml
 
 # Include sources from archive roots
-canon cluster generate --where 'content.hash.sha256?' --include-archived
+canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive --include-archived
 
 # Show which files were excluded (already archived)
-canon cluster generate --where 'content.hash.sha256?' --show-archived
+canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive --show-archived
 ```
 
-The manifest is a TOML file containing the query, output pattern, and all matching sources with their facts.
+The manifest is a TOML file containing the query, output pattern, archive root ID, and all matching sources with their facts.
 
 ### canon apply
 
@@ -512,11 +515,10 @@ done | canon import-facts
 
 ```bash
 # Generate manifest for all hashed photos
-canon cluster generate --where 'content.hash.sha256?' --where 'source.ext=jpg'
+canon cluster generate --where 'content.hash.sha256?' --where 'source.ext=jpg' --dest /Volumes/Archive/Photos
 
 # Edit manifest.toml to set output pattern
 # pattern = "{year}/{month}/{date}_{filename}"
-# base_dir = "/Volumes/Archive/Photos"
 
 # Preview
 canon apply manifest.toml --dry-run

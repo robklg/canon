@@ -207,6 +207,9 @@ enum ClusterAction {
         /// Filter expressions (e.g., "content_hash.sha256?" or "exif.model=iPhone")
         #[arg(long = "where", required = true)]
         filters: Vec<String>,
+        /// Destination path (must be inside an archive root)
+        #[arg(long, required = true)]
+        dest: PathBuf,
         /// Output manifest file
         #[arg(short, long, default_value = "manifest.toml")]
         output: PathBuf,
@@ -269,6 +272,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Cluster { action } => match action {
             ClusterAction::Generate {
                 filters,
+                dest,
                 output,
                 include_archived,
                 show_archived,
@@ -277,7 +281,7 @@ fn main() -> anyhow::Result<()> {
                     include_archived,
                     show_archived,
                 };
-                cluster::generate(&db, &filters, &output, &options)?;
+                cluster::generate(&db, &filters, &dest, &output, &options)?;
             }
         },
         Commands::Apply {
