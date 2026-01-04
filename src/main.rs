@@ -166,6 +166,9 @@ enum Commands {
         /// Show what would be done without making changes
         #[arg(long)]
         dry_run: bool,
+        /// Show detailed output for each file transfer
+        #[arg(long, short = 'v')]
+        verbose: bool,
         /// Allow copying files that exist in other archives (but not destination archive)
         #[arg(long)]
         allow_cross_archive_duplicates: bool,
@@ -399,6 +402,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Apply {
             manifest,
             dry_run,
+            verbose,
             allow_cross_archive_duplicates,
             allow_duplicates,
             root,
@@ -415,6 +419,7 @@ fn main() -> anyhow::Result<()> {
             };
             let options = apply::ApplyOptions {
                 dry_run,
+                verbose,
                 allow_cross_archive_duplicates,
                 allow_duplicates,
                 roots: root,

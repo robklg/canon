@@ -31,6 +31,7 @@ struct ApplyStats {
 
 pub struct ApplyOptions {
     pub dry_run: bool,
+    pub verbose: bool,
     pub allow_cross_archive_duplicates: bool,
     pub allow_duplicates: bool,
     pub roots: Vec<String>,
@@ -208,7 +209,7 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     let skipped_by_filter = manifest.sources.len() - filtered_sources.len();
 
     // Pre-flight checks (mandatory, always run)
-    // Check destination uniqueness first
+    eprintln!("Checking {} sources for destination collisions...", filtered_sources.len());
     let collisions = check_destination_collisions_filtered(&filtered_sources, &pattern, &needed_keys, scope_prefix, &base_dir, conn, &root_paths)?;
     if !collisions.is_empty() {
         eprintln!(
@@ -225,6 +226,7 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     }
 
     // Check archive conflicts
+    eprintln!("Checking archive conflicts...");
     let conflicts = check_archive_conflicts_filtered(conn, &filtered_sources, manifest.output.archive_root_id)?;
 
     if !conflicts.in_dest_archive.is_empty() && !options.allow_duplicates {
@@ -254,6 +256,7 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     // Defense-in-depth: Check for excluded sources in manifest (hard gate, no override)
     // This should never happen if the manifest was generated correctly,
     // but we check anyway to prevent accidentally copying excluded files
+    eprintln!("Checking for excluded sources...");
     {
         let excluded_sources = check_excluded_sources_filtered(conn, &filtered_sources)?;
         if !excluded_sources.is_empty() {
@@ -512,7 +515,9 @@ fn process_source(
                 .with_context(|| format!("Failed to copy {} to {}", source.path, dest_path.display()))?;
             preserve_metadata(&dest_path, &src_meta)?;
             register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id)?;
-            println!("Copied: {} -> {}", source.path, dest_path.display());
+            if options.verbose {
+                println!("Copied: {} -> {}", source.path, dest_path.display());
+            }
             Ok(ApplyAction::Copied)
         }
         TransferMode::Rename => {
@@ -524,7 +529,9 @@ fn process_source(
             fs::rename(src_path, &dest_path)
                 .with_context(|| format!("Failed to rename {} to {}", source.path, dest_path.display()))?;
             register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id)?;
-            println!("Renamed: {} -> {}", source.path, dest_path.display());
+            if options.verbose {
+                println!("Renamed: {} -> {}", source.path, dest_path.display());
+            }
             Ok(ApplyAction::Renamed)
         }
         TransferMode::Move => {
@@ -536,7 +543,9 @@ fn process_source(
             match fs::rename(src_path, &dest_path) {
                 Ok(()) => {
                     register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id)?;
-                    println!("Renamed: {} -> {}", source.path, dest_path.display());
+                    if options.verbose {
+                        println!("Renamed: {} -> {}", source.path, dest_path.display());
+                    }
                     Ok(ApplyAction::Renamed)
                 }
                 #[cfg(unix)]
@@ -554,7 +563,9 @@ fn process_source(
                     fs::remove_file(src_path)
                         .with_context(|| format!("Failed to delete source: {}", source.path))?;
                     register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id)?;
-                    println!("Moved: {} -> {}", source.path, dest_path.display());
+                    if options.verbose {
+                        println!("Moved: {} -> {}", source.path, dest_path.display());
+                    }
                     Ok(ApplyAction::Moved)
                 }
                 Err(e) => Err(e).with_context(|| {
