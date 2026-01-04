@@ -152,6 +152,9 @@ canon ls --unarchived
 # List only unhashed sources (no content hash yet)
 canon ls --unhashed
 
+# Show duplicate files (same content hash), grouped by hash
+canon ls --duplicates
+
 # Include sources from archive roots
 canon ls --include-archived
 
@@ -319,6 +322,28 @@ Overall:
 - **Archived**: Sources whose content exists in an archive root
 - With `--archive`: Shows "In this archive" vs "Not in archive" for that specific archive
 
+### canon compare
+
+Compare two folders by content hash. Useful for verifying backups or finding differences between directories.
+
+```bash
+# Compare two directories
+canon compare /path/to/folder_a /path/to/folder_b
+
+# With filters
+canon compare /path/to/folder_a /path/to/folder_b --where 'source.ext=jpg'
+
+# Summary only (no file lists)
+canon compare /path/to/folder_a /path/to/folder_b --quiet
+```
+
+Output shows:
+- Files only in A (by content)
+- Files only in B (by content)
+- Files in both (matching content hash)
+
+Exit code is 0 if identical, 1 if differences found.
+
 ### canon cluster generate
 
 Generate a manifest of files matching filters. The `--dest` flag specifies where files will be copied and must be inside a registered archive root.
@@ -347,11 +372,14 @@ The manifest is a TOML file containing the query, output pattern, archive root I
 Apply a manifest to copy/move files. Copied files are automatically registered in the database with the same content hash, so they're immediately recognized as archived (no separate `scan` needed).
 
 ```bash
-# Preview what would happen
+# Preview what would happen (fast - skips source existence checks)
 canon apply manifest.toml --dry-run
 
 # Copy files (default mode, preserves mtime/permissions on Unix)
 canon apply manifest.toml
+
+# Show per-file progress during transfer
+canon apply manifest.toml --verbose
 
 # Rename files instead of copying (Unix only, fails on cross-device)
 canon apply manifest.toml --rename
@@ -419,6 +447,12 @@ Manage source exclusions. Excluded sources are skipped by most commands.
 canon exclude set --where 'source.size<1000'
 canon exclude set /path/to/photos --where 'source.ext=tmp'
 
+# Exclude a specific file by path
+canon exclude set /path/to/photos/unwanted.jpg
+
+# Exclude by source ID (shown in ls --duplicates output)
+canon exclude set --id 12345
+
 # Preview what would be excluded
 canon exclude set --where 'source.ext=bak' --dry-run
 
@@ -433,6 +467,23 @@ canon exclude clear --where 'source.ext=tmp'
 # Preview what would be cleared
 canon exclude clear --where 'source.ext=tmp' --dry-run
 ```
+
+#### canon exclude duplicates
+
+Automatically exclude duplicate files while keeping copies in a preferred location.
+
+```bash
+# Exclude duplicates, keeping files under /preferred/path
+canon exclude duplicates /scope/path --prefer /preferred/path
+
+# Preview what would be excluded
+canon exclude duplicates /scope/path --prefer /preferred/path --dry-run
+
+# With filters
+canon exclude duplicates /scope/path --prefer /preferred/path --where 'source.ext=jpg'
+```
+
+This is useful for deduplicating across backup drives while keeping the "canonical" copy in your preferred location.
 
 **How exclusions affect other commands:**
 
@@ -477,6 +528,7 @@ Filters select sources based on facts using a boolean expression language.
 | `key<value` | Less than |
 | `key<=value` | Less or equal |
 | `key IN (v1, v2, ...)` | Fact matches any value in list |
+| `key NOT IN (v1, v2, ...)` | Fact doesn't match any value in list |
 
 ### Boolean Operators
 
@@ -512,6 +564,9 @@ Operator precedence (highest to lowest): NOT, AND, OR. Use parentheses to overri
 
 # Common image formats
 --where 'source.ext IN (jpg, png, gif, webp)'
+
+# Exclude certain extensions
+--where 'source.ext NOT IN (tmp, bak, log)'
 
 # Not temporary files
 --where 'NOT source.ext=tmp'
@@ -583,14 +638,19 @@ canon apply manifest.toml
 canon scan --add /Volumes/Archive/Photos --role archive
 ```
 
-### Find duplicates
+### Find and manage duplicates
 
 ```bash
-# After hashing, check value distribution
-canon facts content.hash.sha256 --limit 0 | grep -v "0.0%"
-```
+# Show duplicate files grouped by content hash
+canon ls --duplicates
 
-Hashes with count > 1 are duplicates.
+# Scope to a specific directory
+canon ls --duplicates /path/to/photos
+
+# Exclude duplicates, keeping copies in preferred location
+canon exclude duplicates /path/to/photos --prefer /path/to/photos/originals --dry-run
+canon exclude duplicates /path/to/photos --prefer /path/to/photos/originals
+```
 
 ## Configuration
 
