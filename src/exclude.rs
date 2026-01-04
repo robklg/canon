@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::params;
 use rusqlite::types::Value;
 use std::path::{Path, PathBuf};
@@ -401,6 +401,57 @@ pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
     )?;
 
     println!("Excluded source (id: {}): {}", source_id, path);
+    Ok(())
+}
+
+/// Exclude a specific source by exact file path
+pub fn set_by_path(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()> {
+    let conn = db.conn();
+
+    // Canonicalize the path
+    let canonical = std::fs::canonicalize(file_path)
+        .with_context(|| format!("Failed to resolve path: {}", file_path.display()))?;
+    let path_str = canonical
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
+
+    // Look up source by exact path match
+    let source_info: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT s.id, s.basis_rev
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             WHERE r.path || '/' || s.rel_path = ? AND s.present = 1",
+            [path_str],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+
+    let Some((source_id, basis_rev)) = source_info else {
+        anyhow::bail!("No source found for path: {}", file_path.display());
+    };
+
+    // Check if already excluded
+    if is_excluded(conn, source_id)? {
+        println!("Source already excluded: {}", path_str);
+        return Ok(());
+    }
+
+    if options.dry_run {
+        println!("Would exclude:");
+        println!("  {}", path_str);
+        return Ok(());
+    }
+
+    // Insert exclusion fact
+    let now = current_timestamp();
+    conn.execute(
+        "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev)
+         VALUES ('source', ?, ?, 'true', ?, ?)",
+        params![source_id, POLICY_EXCLUDE_KEY, now, basis_rev],
+    )?;
+
+    println!("Excluded: {}", path_str);
     Ok(())
 }
 

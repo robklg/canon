@@ -432,6 +432,9 @@ fn main() -> anyhow::Result<()> {
                 let options = exclude::SetOptions { dry_run };
                 if let Some(source_id) = id {
                     exclude::set_by_id(&db, source_id, &options)?;
+                } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {
+                    // Single file path with no filters: exclude exact file
+                    exclude::set_by_path(&db, &paths[0], &options)?;
                 } else {
                     exclude::set(&db, &paths, &filters, &options)?;
                 }
