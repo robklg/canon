@@ -591,7 +591,8 @@ fn process_source(
             // No metadata read needed - rename preserves all attributes
             fs::rename(src_path, &dest_path)
                 .with_context(|| format!("Failed to rename {} to {}", source.path, dest_path.display()))?;
-            register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id)?;
+            // Update existing source row (inode unchanged on same device)
+            relocate_source(conn, source.id, archive_root_id, &archive_rel_path)?;
             if options.verbose {
                 println!("Renamed: {} -> {}", source.path, dest_path.display());
             }
@@ -605,7 +606,8 @@ fn process_source(
             // Try rename first (mv semantics)
             match fs::rename(src_path, &dest_path) {
                 Ok(()) => {
-                    register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id)?;
+                    // Update existing source row (inode unchanged on same device)
+                    relocate_source(conn, source.id, archive_root_id, &archive_rel_path)?;
                     if options.verbose {
                         println!("Renamed: {} -> {}", source.path, dest_path.display());
                     }
@@ -625,6 +627,9 @@ fn process_source(
                     preserve_metadata(&dest_path, &src_meta)?;
                     fs::remove_file(src_path)
                         .with_context(|| format!("Failed to delete source: {}", source.path))?;
+                    // Mark old source as not present (file was deleted)
+                    mark_source_not_present(conn, source.id)?;
+                    // Register new destination (new inode on different device)
                     register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id)?;
                     if options.verbose {
                         println!("Moved: {} -> {}", source.path, dest_path.display());
@@ -654,6 +659,36 @@ fn preserve_metadata(dest: &Path, src_meta: &Metadata) -> Result<()> {
 #[cfg(not(unix))]
 fn preserve_metadata(_dest: &Path, _src_meta: &Metadata) -> Result<()> {
     // No-op on non-Unix
+    Ok(())
+}
+
+/// Relocate an existing source to a new location (for rename/move on same device).
+/// Updates the source row in-place since the inode remains the same.
+fn relocate_source(
+    conn: &Connection,
+    source_id: i64,
+    archive_root_id: i64,
+    rel_path: &str,
+) -> Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs() as i64;
+
+    conn.execute(
+        "UPDATE sources SET root_id = ?, rel_path = ?, scanned_at = ?, last_seen_at = ?
+         WHERE id = ?",
+        params![archive_root_id, rel_path, now, now, source_id],
+    )?;
+    Ok(())
+}
+
+/// Mark a source as no longer present (for cross-device move after deletion).
+fn mark_source_not_present(conn: &Connection, source_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE sources SET present = 0 WHERE id = ?",
+        params![source_id],
+    )?;
     Ok(())
 }
 
