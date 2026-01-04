@@ -4,7 +4,7 @@ use rusqlite::types::Value;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::{build_scope_clause, canonicalize_scopes, Connection, Db};
+use crate::db::{build_scope_clause, canonicalize_scopes, path_is_under, Connection, Db};
 use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;
@@ -482,7 +482,7 @@ pub fn exclude_duplicates(
         };
 
         // Skip if this source is already in the prefer path
-        if source_path.starts_with(&prefer_prefix) || source_path.starts_with(&format!("{}/", prefer_prefix)) {
+        if path_is_under(&source_path, &prefer_prefix) {
             continue;
         }
 

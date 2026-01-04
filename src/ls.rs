@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::types::Value;
 
-use crate::db::{build_scope_clause, canonicalize_scopes, Connection, Db};
+use crate::db::{build_scope_clause, canonicalize_scopes, path_strip_prefix, Connection, Db};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -262,7 +262,7 @@ fn format_path(full_path: &str, cwd: Option<&str>) -> String {
     if let Some(cwd) = cwd {
         if full_path == cwd {
             ".".to_string()
-        } else if let Some(rel) = full_path.strip_prefix(&format!("{}/", cwd)) {
+        } else if let Some(rel) = path_strip_prefix(full_path, cwd) {
             rel.to_string()
         } else {
             full_path.to_string()

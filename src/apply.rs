@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cluster::{Manifest, ManifestSource};
-use crate::db::{parse_root_spec, Connection, Db};
+use crate::db::{parse_root_spec, path_strip_prefix, Connection, Db};
 use crate::exclude;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
 
@@ -107,7 +107,7 @@ fn build_eval_context(
     // Derive rel_path from full path - root_path
     let rel_path = if source.path == *root_path {
         String::new()
-    } else if let Some(rel) = source.path.strip_prefix(&format!("{}/", root_path)) {
+    } else if let Some(rel) = path_strip_prefix(&source.path, root_path) {
         rel.to_string()
     } else {
         // Fallback: the path doesn't match the root, use full path as rel_path
