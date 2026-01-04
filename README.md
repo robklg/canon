@@ -23,7 +23,7 @@ Typical workflows involve scanning, extracting metadata, organizing a subset of 
 canon scan --add /path/to/photos
 
 # 2. Compute content hashes
-canon worklist --where '!content.hash.sha256?' | ./scripts/hash-worklist.sh | canon import-facts
+canon worklist --where 'NOT content.hash.sha256?' | ./scripts/hash-worklist.sh | canon import-facts
 
 # 3. See what you have
 canon facts
@@ -111,7 +111,7 @@ A worklist is a snapshot of sources at a point in time. If files change, fact im
 canon worklist
 
 # Only sources missing a content hash
-canon worklist --where '!content.hash.sha256?'
+canon worklist --where 'NOT content.hash.sha256?'
 
 # Only JPG files
 canon worklist --where 'source.ext=jpg'
@@ -592,7 +592,7 @@ Operator precedence (highest to lowest): NOT, AND, OR. Use parentheses to overri
 ### Hash all files
 
 ```bash
-canon worklist --where '!content.hash.sha256?' \
+canon worklist --where 'NOT content.hash.sha256?' \
   | ./scripts/hash-worklist.sh \
   | canon import-facts
 ```

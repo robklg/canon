@@ -49,7 +49,7 @@ enum Commands {
     Worklist {
         /// Directory paths to scope the query (resolved to realpath)
         paths: Vec<PathBuf>,
-        /// Filter expressions (e.g., "!content_hash.sha256?" or "ext=jpg")
+        /// Filter expressions (e.g., "NOT content.hash.sha256?" or "source.ext=jpg")
         #[arg(long = "where")]
         filters: Vec<String>,
         /// Include sources from archive roots (by default only source roots)
