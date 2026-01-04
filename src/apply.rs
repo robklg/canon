@@ -209,9 +209,11 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     let skipped_by_filter = manifest.sources.len() - filtered_sources.len();
 
     // Pre-flight checks (mandatory, always run)
-    eprintln!("Checking {} sources for destination collisions...", filtered_sources.len());
+    eprint!("Checking {} sources for destination collisions...", filtered_sources.len());
     if options.dry_run {
-        eprintln!("  (skipping source existence checks for speed in dry-run mode)");
+        eprintln!(" (skipping source existence checks for speed in dry-run mode)");
+    } else {
+        eprintln!(" (including source existence checks)");
     }
     let collisions = check_destination_collisions_filtered(&filtered_sources, &pattern, &needed_keys, scope_prefix, &base_dir, conn, &root_paths, options.dry_run)?;
     if !collisions.is_empty() {
