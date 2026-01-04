@@ -231,6 +231,8 @@ enum FactsAction {
 enum ClusterAction {
     /// Generate a new manifest
     Generate {
+        /// Directory path to scope the query (resolved to realpath)
+        path: Option<PathBuf>,
         /// Filter expressions (e.g., "content_hash.sha256?" or "exif.model=iPhone")
         #[arg(long = "where", required = true)]
         filters: Vec<String>,
@@ -312,6 +314,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Cluster { action } => match action {
             ClusterAction::Generate {
+                path,
                 filters,
                 dest,
                 output,
@@ -322,7 +325,7 @@ fn main() -> anyhow::Result<()> {
                     include_archived,
                     show_archived,
                 };
-                cluster::generate(&db, &filters, &dest, &output, &options)?;
+                cluster::generate(&db, path.as_deref(), &filters, &dest, &output, &options)?;
             }
         },
         Commands::Apply {

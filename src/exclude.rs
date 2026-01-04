@@ -3,7 +3,7 @@ use rusqlite::params;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::{Connection, Db};
+use crate::db::{canonicalize_scope, scope_param, Connection, Db, SCOPE_CLAUSE};
 use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;
@@ -40,14 +40,10 @@ pub fn set(
         .collect::<Result<Vec<_>>>()?;
 
     // Resolve scope path
-    let scope_prefix = if let Some(p) = scope_path {
-        Some(std::fs::canonicalize(p)?.to_string_lossy().to_string())
-    } else {
-        None
-    };
+    let scope_prefix = canonicalize_scope(scope_path)?;
 
     // Get matching sources (only from source roots, exclude already-excluded)
-    let source_ids = get_matching_sources(&conn, scope_prefix.as_deref(), &filters, false)?;
+    let source_ids = get_matching_sources(conn, &scope_prefix, &filters, false)?;
 
     // Filter out already excluded sources
     let to_exclude: Vec<i64> = source_ids
@@ -112,14 +108,10 @@ pub fn clear(
         .collect::<Result<Vec<_>>>()?;
 
     // Resolve scope path
-    let scope_prefix = if let Some(p) = scope_path {
-        Some(std::fs::canonicalize(p)?.to_string_lossy().to_string())
-    } else {
-        None
-    };
+    let scope_prefix = canonicalize_scope(scope_path)?;
 
     // Get excluded sources matching filters
-    let excluded_sources = get_excluded_sources(&conn, scope_prefix.as_deref(), &filters)?;
+    let excluded_sources = get_excluded_sources(conn, &scope_prefix, &filters)?;
 
     if excluded_sources.is_empty() {
         println!("No excluded sources match the given filters");
@@ -167,14 +159,10 @@ pub fn list(
         .collect::<Result<Vec<_>>>()?;
 
     // Resolve scope path
-    let scope_prefix = if let Some(p) = scope_path {
-        Some(std::fs::canonicalize(p)?.to_string_lossy().to_string())
-    } else {
-        None
-    };
+    let scope_prefix = canonicalize_scope(scope_path)?;
 
     // Get excluded sources matching filters
-    let excluded = get_excluded_sources(&conn, scope_prefix.as_deref(), &filters)?;
+    let excluded = get_excluded_sources(conn, &scope_prefix, &filters)?;
 
     if excluded.is_empty() {
         println!("No excluded sources match the given filters");
@@ -250,7 +238,7 @@ pub fn count_excluded(conn: &Connection, scope_prefix: Option<&str>, include_arc
 
 fn get_matching_sources(
     conn: &Connection,
-    scope_prefix: Option<&str>,
+    scope_prefix: &Option<String>,
     filters: &[Filter],
     include_excluded: bool,
 ) -> Result<Vec<i64>> {
@@ -258,30 +246,19 @@ fn get_matching_sources(
     let mut last_id: i64 = 0;
 
     let exclude_clause = exclude_clause(include_excluded);
+    let prefix = scope_param(scope_prefix);
 
     loop {
-        let source_ids: Vec<i64> = if let Some(prefix) = scope_prefix {
-            conn.prepare(&format!(
+        let source_ids: Vec<i64> = conn
+            .prepare(&format!(
                 "SELECT s.id FROM sources s
                  JOIN roots r ON s.root_id = r.id
-                 WHERE s.present = 1 AND r.role = 'source' AND {} AND s.id > ?
-                   AND (r.path || '/' || s.rel_path) LIKE ? || '/%'
+                 WHERE s.present = 1 AND r.role = 'source' AND {} AND {} AND s.id > ?
                  ORDER BY s.id LIMIT ?",
-                exclude_clause
+                exclude_clause, SCOPE_CLAUSE
             ))?
-            .query_map(params![last_id, prefix, BATCH_SIZE], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?
-        } else {
-            conn.prepare(&format!(
-                "SELECT s.id FROM sources s
-                 JOIN roots r ON s.root_id = r.id
-                 WHERE s.present = 1 AND r.role = 'source' AND {} AND s.id > ?
-                 ORDER BY s.id LIMIT ?",
-                exclude_clause
-            ))?
-            .query_map(params![last_id, BATCH_SIZE], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?
-        };
+            .query_map(params![prefix, prefix, last_id, BATCH_SIZE], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
 
         if source_ids.is_empty() {
             break;
@@ -299,47 +276,32 @@ fn get_matching_sources(
 
 fn get_excluded_sources(
     conn: &Connection,
-    scope_prefix: Option<&str>,
+    scope_prefix: &Option<String>,
     filters: &[Filter],
 ) -> Result<Vec<(i64, String)>> {
     let mut all_excluded = Vec::new();
     let mut last_id: i64 = 0;
+    let prefix = scope_param(scope_prefix);
 
     loop {
-        let batch: Vec<(i64, String)> = if let Some(prefix) = scope_prefix {
-            conn.prepare(
+        let batch: Vec<(i64, String)> = conn
+            .prepare(&format!(
                 "SELECT s.id, r.path || '/' || s.rel_path as full_path
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
                  WHERE s.present = 1 AND r.role = 'source' AND s.id > ?
-                   AND (r.path || '/' || s.rel_path) LIKE ? || '/%'
+                   AND {}
                    AND EXISTS (
                        SELECT 1 FROM facts
                        WHERE entity_type = 'source' AND entity_id = s.id AND key = ?
                    )
-                 ORDER BY s.id LIMIT ?"
-            )?
-            .query_map(params![last_id, prefix, POLICY_EXCLUDE_KEY, BATCH_SIZE], |row| {
+                 ORDER BY s.id LIMIT ?",
+                SCOPE_CLAUSE
+            ))?
+            .query_map(params![last_id, prefix, prefix, POLICY_EXCLUDE_KEY, BATCH_SIZE], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })?
-            .collect::<Result<Vec<_>, _>>()?
-        } else {
-            conn.prepare(
-                "SELECT s.id, r.path || '/' || s.rel_path as full_path
-                 FROM sources s
-                 JOIN roots r ON s.root_id = r.id
-                 WHERE s.present = 1 AND r.role = 'source' AND s.id > ?
-                   AND EXISTS (
-                       SELECT 1 FROM facts
-                       WHERE entity_type = 'source' AND entity_id = s.id AND key = ?
-                   )
-                 ORDER BY s.id LIMIT ?"
-            )?
-            .query_map(params![last_id, POLICY_EXCLUDE_KEY, BATCH_SIZE], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-        };
+            .collect::<Result<Vec<_>, _>>()?;
 
         if batch.is_empty() {
             break;

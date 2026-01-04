@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use std::path::Path;
 
-use crate::db::{populate_temp_sources, Connection, Db};
+use crate::db::{canonicalize_scope, populate_temp_sources, scope_param, Connection, Db, SCOPE_CLAUSE};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -46,21 +46,17 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, path_arg: Option<&Path>, filter_s
     };
 
     // Resolve scope path to realpath if provided
-    let scope_prefix = if let Some(p) = scope_path {
-        Some(std::fs::canonicalize(p)?.to_string_lossy().to_string())
-    } else {
-        None
-    };
+    let scope_prefix = canonicalize_scope(scope_path)?;
 
     // Get excluded count for reporting
     let excluded_count = if !include_excluded {
-        exclude::count_excluded(&conn, scope_prefix.as_deref(), include_archived)?
+        exclude::count_excluded(conn, scope_prefix.as_deref(), include_archived)?
     } else {
         0
     };
 
     // Get all matching source IDs
-    let source_ids = get_matching_sources(&conn, scope_prefix.as_deref(), &filters, include_archived, include_excluded)?;
+    let source_ids = get_matching_sources(conn, &scope_prefix, &filters, include_archived, include_excluded)?;
     let total_sources = source_ids.len();
 
     if total_sources == 0 {
@@ -93,7 +89,7 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, path_arg: Option<&Path>, filter_s
 
 fn get_matching_sources(
     conn: &Connection,
-    scope_prefix: Option<&str>,
+    scope_prefix: &Option<String>,
     filters: &[Filter],
     include_archived: bool,
     include_excluded: bool,
@@ -108,36 +104,22 @@ fn get_matching_sources(
     };
 
     let exclude_clause = exclude::exclude_clause(include_excluded);
+    let prefix = scope_param(scope_prefix);
 
     loop {
         // Fetch batch of source IDs
-        let batch: Vec<i64> = if let Some(prefix) = scope_prefix {
-            // Filter by path prefix
-            conn.prepare(&format!(
+        let batch: Vec<i64> = conn
+            .prepare(&format!(
                 "SELECT s.id
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
-                 WHERE s.present = 1 AND {} AND {} AND s.id > ?
-                   AND (r.path || '/' || s.rel_path) LIKE ? || '/%'
+                 WHERE s.present = 1 AND {} AND {} AND {} AND s.id > ?
                  ORDER BY s.id
                  LIMIT ?",
-                role_clause, exclude_clause
+                role_clause, exclude_clause, SCOPE_CLAUSE
             ))?
-            .query_map(rusqlite::params![last_id, prefix, BATCH_SIZE], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?
-        } else {
-            conn.prepare(&format!(
-                "SELECT s.id
-                 FROM sources s
-                 JOIN roots r ON s.root_id = r.id
-                 WHERE s.present = 1 AND {} AND {} AND s.id > ?
-                 ORDER BY s.id
-                 LIMIT ?",
-                role_clause, exclude_clause
-            ))?
-            .query_map(rusqlite::params![last_id, BATCH_SIZE], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?
-        };
+            .query_map(rusqlite::params![prefix, prefix, last_id, BATCH_SIZE], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
 
         if batch.is_empty() {
             break;
@@ -569,14 +551,10 @@ pub fn delete_facts(
         .collect::<Result<Vec<_>>>()?;
 
     // Resolve scope path
-    let scope_prefix = if let Some(p) = scope_path {
-        Some(std::fs::canonicalize(p)?.to_string_lossy().to_string())
-    } else {
-        None
-    };
+    let scope_prefix = canonicalize_scope(scope_path)?;
 
     // Get matching source IDs
-    let source_ids = get_matching_sources(&conn, scope_prefix.as_deref(), &filters, true, true)?;
+    let source_ids = get_matching_sources(conn, &scope_prefix, &filters, true, true)?;
 
     if source_ids.is_empty() {
         println!("No sources match the given filters.");

@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::db::{Connection, Db};
+use crate::db::{canonicalize_scope, scope_param, Connection, Db, SCOPE_CLAUSE};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -32,11 +32,7 @@ pub fn run(db: &Db, scope_path: Option<&Path>, filter_strs: &[String], include_a
         .collect::<Result<Vec<_>>>()?;
 
     // Resolve scope path to realpath if provided
-    let scope_prefix = if let Some(p) = scope_path {
-        Some(std::fs::canonicalize(p)?.to_string_lossy().to_string())
-    } else {
-        None
-    };
+    let scope_prefix = canonicalize_scope(scope_path)?;
 
     // Check excluded count if we're skipping them
     let conn = db.conn();
@@ -51,7 +47,7 @@ pub fn run(db: &Db, scope_path: Option<&Path>, filter_strs: &[String], include_a
     let mut last_id: i64 = 0;
 
     loop {
-        let result = fetch_batch(conn, last_id, scope_prefix.as_deref(), &filters, include_archived, include_excluded)?;
+        let result = fetch_batch(conn, last_id, &scope_prefix, &filters, include_archived, include_excluded)?;
 
         // If we didn't see any source IDs, we're done
         let max_id = match result.max_id_seen {
@@ -80,7 +76,7 @@ pub fn run(db: &Db, scope_path: Option<&Path>, filter_strs: &[String], include_a
 fn fetch_batch(
     conn: &Connection,
     after_id: i64,
-    scope_prefix: Option<&str>,
+    scope_prefix: &Option<String>,
     filters: &[Filter],
     include_archived: bool,
     include_excluded: bool,
@@ -93,34 +89,20 @@ fn fetch_batch(
     };
 
     let exclude_clause = exclude::exclude_clause(include_excluded);
+    let prefix = scope_param(scope_prefix);
 
-    let source_ids: Vec<i64> = if let Some(prefix) = scope_prefix {
-        // Filter by path prefix
-        conn.prepare(&format!(
+    let source_ids: Vec<i64> = conn
+        .prepare(&format!(
             "SELECT s.id
              FROM sources s
              JOIN roots r ON s.root_id = r.id
-             WHERE s.present = 1 AND {} AND {} AND s.id > ?
-               AND (r.path || '/' || s.rel_path) LIKE ? || '/%'
+             WHERE s.present = 1 AND {} AND {} AND {} AND s.id > ?
              ORDER BY s.id
              LIMIT ?",
-            role_clause, exclude_clause
+            role_clause, exclude_clause, SCOPE_CLAUSE
         ))?
-        .query_map(rusqlite::params![after_id, prefix, BATCH_SIZE], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?
-    } else {
-        conn.prepare(&format!(
-            "SELECT s.id
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE s.present = 1 AND {} AND {} AND s.id > ?
-             ORDER BY s.id
-             LIMIT ?",
-            role_clause, exclude_clause
-        ))?
-        .query_map(rusqlite::params![after_id, BATCH_SIZE], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?
-    };
+        .query_map(rusqlite::params![prefix, prefix, after_id, BATCH_SIZE], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
 
     if source_ids.is_empty() {
         return Ok(FetchResult {

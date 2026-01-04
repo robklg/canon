@@ -6,9 +6,10 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::{resolve_archive_path, Connection, Db};
+use crate::db::{canonicalize_scope, resolve_archive_path, scope_param, Connection, Db, SCOPE_CLAUSE};
 use crate::exclude;
 use crate::filter::{self, Filter};
+use rusqlite::params;
 
 #[derive(Serialize, Deserialize)]
 pub struct Manifest {
@@ -49,6 +50,7 @@ pub struct GenerateOptions {
 
 pub fn generate(
     db: &Db,
+    scope_path: Option<&Path>,
     filters: &[String],
     dest: &Path,
     output_path: &Path,
@@ -59,12 +61,15 @@ pub fn generate(
     // Resolve destination to archive root + relative subdir
     let (archive_root_id, _archive_root_path, base_dir) = resolve_archive_path(conn, dest)?;
 
+    // Resolve scope path to realpath if provided
+    let scope_prefix = canonicalize_scope(scope_path)?;
+
     let parsed_filters: Vec<Filter> = filters
         .iter()
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    let (sources, archived, excluded_count) = query_sources(&conn, &parsed_filters, options.include_archived)?;
+    let (sources, archived, excluded_count) = query_sources(conn, &scope_prefix, &parsed_filters, options.include_archived)?;
 
     // Report excluded files (hard gate - always skipped)
     if excluded_count > 0 {
@@ -125,6 +130,7 @@ pub fn generate(
 /// excluded_count is the number of sources skipped due to policy.exclude (hard gate)
 fn query_sources(
     conn: &Connection,
+    scope_prefix: &Option<String>,
     filters: &[Filter],
     include_archived: bool,
 ) -> Result<(Vec<ManifestSource>, Vec<(String, String)>, usize)> {
@@ -136,14 +142,15 @@ fn query_sources(
         "r.role = 'source'"
     };
 
+    let prefix = scope_param(scope_prefix);
     let mut source_ids: Vec<i64> = conn
         .prepare(&format!(
             "SELECT s.id FROM sources s
              JOIN roots r ON s.root_id = r.id
-             WHERE s.present = 1 AND {}",
-            role_clause
+             WHERE s.present = 1 AND {} AND {}",
+            role_clause, SCOPE_CLAUSE
         ))?
-        .query_map([], |row| row.get(0))?
+        .query_map(params![prefix, prefix], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
 
     // Apply filters

@@ -220,3 +220,27 @@ pub fn resolve_archive_path(conn: &Connection, path: &Path) -> Result<(i64, Stri
         ),
     }
 }
+
+/// Canonicalize an optional scope path for use in SQL path matching
+pub fn canonicalize_scope(scope_path: Option<&Path>) -> Result<Option<String>> {
+    match scope_path {
+        Some(p) => Ok(Some(
+            fs::canonicalize(p)
+                .with_context(|| format!("Failed to resolve path: {}", p.display()))?
+                .to_string_lossy()
+                .to_string(),
+        )),
+        None => Ok(None),
+    }
+}
+
+/// SQL clause for optional scope filtering. Use with scope_param() which provides
+/// the param value. Pass the param twice in your query params.
+/// Example: format!("... AND {} ...", SCOPE_CLAUSE) with params![prefix, prefix, ...]
+pub const SCOPE_CLAUSE: &str = "(? = '' OR (r.path || '/' || s.rel_path) LIKE ? || '/%')";
+
+/// Get the param value for SCOPE_CLAUSE. Returns "" when no scope.
+/// Pass this value twice in query params (once for = '', once for LIKE).
+pub fn scope_param(scope_prefix: &Option<String>) -> &str {
+    scope_prefix.as_deref().unwrap_or("")
+}

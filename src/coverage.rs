@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::db::{parse_root_spec, populate_temp_sources, Db};
+use crate::db::{canonicalize_scope, parse_root_spec, populate_temp_sources, scope_param, Db, SCOPE_CLAUSE};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -80,11 +80,7 @@ pub fn run(
         .collect::<Result<Vec<_>>>()?;
 
     // Resolve scope path
-    let scope_prefix = if let Some(p) = scope_path {
-        Some(std::fs::canonicalize(p)?.to_string_lossy().to_string())
-    } else {
-        None
-    };
+    let scope_prefix = canonicalize_scope(scope_path)?;
 
     // Parse and validate archive spec (must be archive role)
     let archive_root_id = if let Some(spec) = archive_spec {
@@ -101,7 +97,7 @@ pub fn run(
         // Single scope mode
         let stats = compute_scoped_stats(
             conn,
-            scope_prefix.as_deref(),
+            &scope_prefix,
             &filters,
             archive_root_id,
             include_archived,
@@ -124,7 +120,7 @@ pub fn run(
 /// Compute coverage stats for sources under a specific path scope using pure SQL aggregates
 fn compute_scoped_stats(
     conn: &mut rusqlite::Connection,
-    scope_prefix: Option<&str>,
+    scope_prefix: &Option<String>,
     filters: &[Filter],
     archive_root_id: Option<i64>,
     include_archived: bool,
@@ -136,15 +132,9 @@ fn compute_scoped_stats(
         "r.role = 'source'"
     };
 
-    // Build path clause
-    let path_clause = if scope_prefix.is_some() {
-        "(r.path || '/' || s.rel_path) LIKE ? || '/%'"
-    } else {
-        "1=1"
-    };
-
     // Always query all sources (no exclude filtering at query level)
     let exclude_clause = exclude::exclude_clause(true);
+    let prefix = scope_param(scope_prefix);
 
     // Collect all filtered source IDs
     let mut all_filtered_ids: Vec<i64> = Vec::new();
@@ -156,18 +146,13 @@ fn compute_scoped_stats(
              JOIN roots r ON s.root_id = r.id
              WHERE s.present = 1 AND {} AND {} AND {} AND s.id > ?
              ORDER BY s.id LIMIT ?",
-            role_clause, path_clause, exclude_clause
+            role_clause, exclude_clause, SCOPE_CLAUSE
         );
 
-        let source_ids: Vec<i64> = if let Some(prefix) = scope_prefix {
-            conn.prepare(&batch_query)?
-                .query_map(rusqlite::params![prefix, last_id, BATCH_SIZE], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            conn.prepare(&batch_query)?
-                .query_map(rusqlite::params![last_id, BATCH_SIZE], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
+        let source_ids: Vec<i64> = conn
+            .prepare(&batch_query)?
+            .query_map(rusqlite::params![prefix, prefix, last_id, BATCH_SIZE], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
 
         if source_ids.is_empty() {
             break;
