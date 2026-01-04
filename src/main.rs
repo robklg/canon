@@ -234,7 +234,7 @@ enum ClusterAction {
         /// Directory path to scope the query (resolved to realpath)
         path: Option<PathBuf>,
         /// Filter expressions (e.g., "content_hash.sha256?" or "exif.model=iPhone")
-        #[arg(long = "where", required = true)]
+        #[arg(long = "where")]
         filters: Vec<String>,
         /// Destination path (must be inside an archive root)
         #[arg(long, required = true)]

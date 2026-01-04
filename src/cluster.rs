@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -56,6 +56,11 @@ pub fn generate(
     output_path: &Path,
     options: &GenerateOptions,
 ) -> Result<()> {
+    // Require at least one of path scope or filters
+    if scope_path.is_none() && filters.is_empty() {
+        bail!("At least one of path or --where filter is required");
+    }
+
     let conn = db.conn();
 
     // Resolve destination to archive root + relative subdir
