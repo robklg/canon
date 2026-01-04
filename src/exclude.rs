@@ -1,9 +1,10 @@
 use anyhow::Result;
 use rusqlite::params;
-use std::path::Path;
+use rusqlite::types::Value;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::{canonicalize_scope, scope_param, Connection, Db, SCOPE_CLAUSE};
+use crate::db::{build_scope_clause, canonicalize_scopes, Connection, Db};
 use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;
@@ -27,7 +28,7 @@ pub struct ClearOptions {
 
 pub fn set(
     db: &Db,
-    scope_path: Option<&Path>,
+    scope_paths: &[PathBuf],
     filter_strs: &[String],
     options: &SetOptions,
 ) -> Result<()> {
@@ -39,11 +40,11 @@ pub fn set(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope path
-    let scope_prefix = canonicalize_scope(scope_path)?;
+    // Resolve scope paths
+    let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
     // Get matching sources (only from source roots, exclude already-excluded)
-    let source_ids = get_matching_sources(conn, &scope_prefix, &filters, false)?;
+    let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, false)?;
 
     // Filter out already excluded sources
     let to_exclude: Vec<i64> = source_ids
@@ -95,7 +96,7 @@ pub fn set(
 
 pub fn clear(
     db: &Db,
-    scope_path: Option<&Path>,
+    scope_paths: &[PathBuf],
     filter_strs: &[String],
     options: &ClearOptions,
 ) -> Result<()> {
@@ -107,11 +108,11 @@ pub fn clear(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope path
-    let scope_prefix = canonicalize_scope(scope_path)?;
+    // Resolve scope paths
+    let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
     // Get excluded sources matching filters
-    let excluded_sources = get_excluded_sources(conn, &scope_prefix, &filters)?;
+    let excluded_sources = get_excluded_sources(conn, &scope_prefixes, &filters)?;
 
     if excluded_sources.is_empty() {
         println!("No excluded sources match the given filters");
@@ -147,7 +148,7 @@ pub fn clear(
 
 pub fn list(
     db: &Db,
-    scope_path: Option<&Path>,
+    scope_paths: &[PathBuf],
     filter_strs: &[String],
 ) -> Result<()> {
     let conn = db.conn();
@@ -158,11 +159,11 @@ pub fn list(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope path
-    let scope_prefix = canonicalize_scope(scope_path)?;
+    // Resolve scope paths
+    let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
     // Get excluded sources matching filters
-    let excluded = get_excluded_sources(conn, &scope_prefix, &filters)?;
+    let excluded = get_excluded_sources(conn, &scope_prefixes, &filters)?;
 
     if excluded.is_empty() {
         println!("No excluded sources match the given filters");
@@ -238,26 +239,31 @@ pub fn count_excluded(conn: &Connection, scope_prefix: Option<&str>, include_arc
 
 fn get_matching_sources(
     conn: &Connection,
-    scope_prefix: &Option<String>,
+    scope_prefixes: &[String],
     filters: &[Filter],
     include_excluded: bool,
 ) -> Result<Vec<i64>> {
     let mut all_sources = Vec::new();
     let mut last_id: i64 = 0;
 
-    let exclude_clause = exclude_clause(include_excluded);
-    let prefix = scope_param(scope_prefix);
+    let exclude_sql = exclude_clause(include_excluded);
+    let (scope_clause, scope_params) = build_scope_clause(scope_prefixes);
 
     loop {
+        // Build params: scope params + last_id + batch_size
+        let mut params: Vec<Value> = scope_params.iter().map(|s| Value::from(s.clone())).collect();
+        params.push(Value::from(last_id));
+        params.push(Value::from(BATCH_SIZE));
+
         let source_ids: Vec<i64> = conn
             .prepare(&format!(
                 "SELECT s.id FROM sources s
                  JOIN roots r ON s.root_id = r.id
                  WHERE s.present = 1 AND r.role = 'source' AND {} AND {} AND s.id > ?
                  ORDER BY s.id LIMIT ?",
-                exclude_clause, SCOPE_CLAUSE
+                exclude_sql, scope_clause
             ))?
-            .query_map(params![prefix, prefix, last_id, BATCH_SIZE], |row| row.get(0))?
+            .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
 
         if source_ids.is_empty() {
@@ -276,14 +282,24 @@ fn get_matching_sources(
 
 fn get_excluded_sources(
     conn: &Connection,
-    scope_prefix: &Option<String>,
+    scope_prefixes: &[String],
     filters: &[Filter],
 ) -> Result<Vec<(i64, String)>> {
     let mut all_excluded = Vec::new();
     let mut last_id: i64 = 0;
-    let prefix = scope_param(scope_prefix);
+
+    let (scope_clause, scope_params) = build_scope_clause(scope_prefixes);
 
     loop {
+        // Build params: last_id + scope params + POLICY_EXCLUDE_KEY + batch_size
+        let mut params: Vec<Value> = Vec::new();
+        params.push(Value::from(last_id));
+        for s in &scope_params {
+            params.push(Value::from(s.clone()));
+        }
+        params.push(Value::from(POLICY_EXCLUDE_KEY.to_string()));
+        params.push(Value::from(BATCH_SIZE));
+
         let batch: Vec<(i64, String)> = conn
             .prepare(&format!(
                 "SELECT s.id, r.path || '/' || s.rel_path as full_path
@@ -296,9 +312,9 @@ fn get_excluded_sources(
                        WHERE entity_type = 'source' AND entity_id = s.id AND key = ?
                    )
                  ORDER BY s.id LIMIT ?",
-                SCOPE_CLAUSE
+                scope_clause
             ))?
-            .query_map(params![last_id, prefix, prefix, POLICY_EXCLUDE_KEY, BATCH_SIZE], |row| {
+            .query_map(rusqlite::params_from_iter(params), |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -416,13 +432,19 @@ pub fn exclude_duplicates(
         .collect::<Result<Vec<_>>>()?;
 
     // Resolve paths
-    let scope_prefix = canonicalize_scope(scope_path)?;
+    let scope_prefixes: Vec<String> = if let Some(p) = scope_path {
+        vec![std::fs::canonicalize(p)
+            .map(|cp| cp.to_string_lossy().to_string())
+            .unwrap_or_else(|_| p.to_string_lossy().to_string())]
+    } else {
+        vec![]
+    };
     let prefer_prefix = std::fs::canonicalize(prefer_path)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| prefer_path.to_string_lossy().to_string());
 
     // Get matching sources in scope (candidates for exclusion)
-    let source_ids = get_matching_sources(conn, &scope_prefix, &filters, false)?;
+    let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, false)?;
 
     if source_ids.is_empty() {
         println!("No sources match the given filters.");

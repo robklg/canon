@@ -1,8 +1,7 @@
 use anyhow::Result;
-use rusqlite::params;
-use std::path::Path;
+use rusqlite::types::Value;
 
-use crate::db::{canonicalize_scope, scope_param, Connection, Db, SCOPE_CLAUSE};
+use crate::db::{build_scope_clause, canonicalize_scopes, Connection, Db};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -10,7 +9,7 @@ const BATCH_SIZE: i64 = 1000;
 
 pub fn run(
     db: &Db,
-    scope_path: Option<&Path>,
+    scope_paths: &[std::path::PathBuf],
     filter_strs: &[String],
     archived_mode: Option<&str>,
     unarchived_only: bool,
@@ -29,8 +28,8 @@ pub fn run(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope path to realpath if provided
-    let scope_prefix = canonicalize_scope(scope_path)?;
+    // Resolve scope paths to realpaths
+    let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
     // Get cwd for relative path display (must be canonicalized to match DB paths)
     let cwd = if use_relative_paths {
@@ -42,15 +41,15 @@ pub fn run(
         None
     };
 
-    // Get excluded count for reporting
+    // Get excluded count for reporting (use first scope for count, or none)
     let excluded_count = if !include_excluded {
-        exclude::count_excluded(conn, scope_prefix.as_deref(), include_archived)?
+        exclude::count_excluded(conn, scope_prefixes.first().map(|s| s.as_str()), include_archived)?
     } else {
         0
     };
 
     // Get all matching source IDs
-    let source_ids = get_matching_sources(conn, &scope_prefix, &filters, include_archived, include_excluded)?;
+    let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, include_excluded)?;
 
     if source_ids.is_empty() {
         eprintln!("No sources match the given filters.");
@@ -145,7 +144,7 @@ pub fn run(
 
 fn get_matching_sources(
     conn: &Connection,
-    scope_prefix: &Option<String>,
+    scope_prefixes: &[String],
     filters: &[Filter],
     include_archived: bool,
     include_excluded: bool,
@@ -160,9 +159,14 @@ fn get_matching_sources(
     };
 
     let exclude_clause = exclude::exclude_clause(include_excluded);
-    let prefix = scope_param(scope_prefix);
+    let (scope_clause, scope_params) = build_scope_clause(scope_prefixes);
 
     loop {
+        // Build params: scope params + last_id + batch_size
+        let mut params: Vec<Value> = scope_params.iter().map(|s| Value::from(s.clone())).collect();
+        params.push(Value::from(last_id));
+        params.push(Value::from(BATCH_SIZE));
+
         // Fetch batch of source IDs
         let batch: Vec<i64> = conn
             .prepare(&format!(
@@ -172,9 +176,9 @@ fn get_matching_sources(
                  WHERE s.present = 1 AND {} AND {} AND {} AND s.id > ?
                  ORDER BY s.id
                  LIMIT ?",
-                role_clause, exclude_clause, SCOPE_CLAUSE
+                role_clause, exclude_clause, scope_clause
             ))?
-            .query_map(params![prefix, prefix, last_id, BATCH_SIZE], |row| row.get(0))?
+            .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
 
         if batch.is_empty() {
@@ -287,7 +291,7 @@ fn format_size(bytes: i64) -> String {
 /// Show sources with duplicate content, grouped by hash
 pub fn show_duplicates(
     db: &Db,
-    scope_path: Option<&Path>,
+    scope_paths: &[std::path::PathBuf],
     filter_strs: &[String],
     include_archived: bool,
     include_excluded: bool,
@@ -300,18 +304,18 @@ pub fn show_duplicates(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope path
-    let scope_prefix = canonicalize_scope(scope_path)?;
+    // Resolve scope paths
+    let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
-    // Get excluded count for reporting
+    // Get excluded count for reporting (use first scope for count, or none)
     let excluded_count = if !include_excluded {
-        exclude::count_excluded(conn, scope_prefix.as_deref(), include_archived)?
+        exclude::count_excluded(conn, scope_prefixes.first().map(|s| s.as_str()), include_archived)?
     } else {
         0
     };
 
     // Get all matching source IDs
-    let source_ids = get_matching_sources(conn, &scope_prefix, &filters, include_archived, include_excluded)?;
+    let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, include_excluded)?;
 
     if source_ids.is_empty() {
         eprintln!("No sources match the given filters.");

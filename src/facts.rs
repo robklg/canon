@@ -1,7 +1,8 @@
 use anyhow::{bail, Result};
-use std::path::Path;
+use rusqlite::types::Value;
+use std::path::PathBuf;
 
-use crate::db::{canonicalize_scope, populate_temp_sources, scope_param, Connection, Db, SCOPE_CLAUSE};
+use crate::db::{build_scope_clause, canonicalize_scopes, populate_temp_sources, Connection, Db};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -54,7 +55,7 @@ fn is_builtin_or_derived(key: &str) -> bool {
         || DERIVED_FACTS_DEFAULT.contains(&key) || DERIVED_FACTS_HIDDEN.contains(&key)
 }
 
-pub fn run(db: &mut Db, key_arg: Option<&str>, path_arg: Option<&Path>, filter_strs: &[String], limit: usize, show_all: bool, include_archived: bool, include_excluded: bool) -> Result<()> {
+pub fn run(db: &mut Db, key_arg: Option<&str>, scope_paths: &[PathBuf], filter_strs: &[String], limit: usize, show_all: bool, include_archived: bool, include_excluded: bool) -> Result<()> {
     let conn = db.conn_mut();
 
     // Parse filters
@@ -63,27 +64,18 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, path_arg: Option<&Path>, filter_s
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Disambiguate key vs path: if key looks like a path, swap them
-    let (key, scope_path): (Option<&str>, Option<&Path>) = match (key_arg, path_arg) {
-        (Some(k), None) if k.starts_with('/') || k.starts_with('.') => {
-            // Single arg that looks like a path
-            (None, Some(Path::new(k)))
-        }
-        (k, p) => (k, p),
-    };
-
-    // Resolve scope path to realpath if provided
-    let scope_prefix = canonicalize_scope(scope_path)?;
+    // Resolve scope paths to realpaths
+    let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
     // Get excluded count for reporting
     let excluded_count = if !include_excluded {
-        exclude::count_excluded(conn, scope_prefix.as_deref(), include_archived)?
+        exclude::count_excluded(conn, scope_prefixes.first().map(|s| s.as_str()), include_archived)?
     } else {
         0
     };
 
     // Get all matching source IDs
-    let source_ids = get_matching_sources(conn, &scope_prefix, &filters, include_archived, include_excluded)?;
+    let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, include_excluded)?;
     let total_sources = source_ids.len();
 
     if total_sources == 0 {
@@ -96,7 +88,7 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, path_arg: Option<&Path>, filter_s
 
     println!("Sources matching filters: {}\n", total_sources);
 
-    if let Some(fact_key) = key {
+    if let Some(fact_key) = key_arg {
         if is_builtin_or_derived(fact_key) {
             show_builtin_distribution(conn, &source_ids, fact_key, total_sources, limit)?;
         } else {
@@ -116,7 +108,7 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, path_arg: Option<&Path>, filter_s
 
 fn get_matching_sources(
     conn: &Connection,
-    scope_prefix: &Option<String>,
+    scope_prefixes: &[String],
     filters: &[Filter],
     include_archived: bool,
     include_excluded: bool,
@@ -131,9 +123,14 @@ fn get_matching_sources(
     };
 
     let exclude_clause = exclude::exclude_clause(include_excluded);
-    let prefix = scope_param(scope_prefix);
+    let (scope_clause, scope_params) = build_scope_clause(scope_prefixes);
 
     loop {
+        // Build params: scope params + last_id + batch_size
+        let mut params: Vec<Value> = scope_params.iter().map(|s| Value::from(s.clone())).collect();
+        params.push(Value::from(last_id));
+        params.push(Value::from(BATCH_SIZE));
+
         // Fetch batch of source IDs
         let batch: Vec<i64> = conn
             .prepare(&format!(
@@ -143,9 +140,9 @@ fn get_matching_sources(
                  WHERE s.present = 1 AND {} AND {} AND {} AND s.id > ?
                  ORDER BY s.id
                  LIMIT ?",
-                role_clause, exclude_clause, SCOPE_CLAUSE
+                role_clause, exclude_clause, scope_clause
             ))?
-            .query_map(rusqlite::params![prefix, prefix, last_id, BATCH_SIZE], |row| row.get(0))?
+            .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
 
         if batch.is_empty() {
@@ -587,7 +584,7 @@ fn is_protected_fact(key: &str) -> bool {
 pub fn delete_facts(
     db: &mut Db,
     key: &str,
-    scope_path: Option<&Path>,
+    scope_paths: &[PathBuf],
     filter_strs: &[String],
     options: &DeleteOptions,
 ) -> Result<()> {
@@ -615,11 +612,11 @@ pub fn delete_facts(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope path
-    let scope_prefix = canonicalize_scope(scope_path)?;
+    // Resolve scope paths
+    let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
     // Get matching source IDs
-    let source_ids = get_matching_sources(conn, &scope_prefix, &filters, true, true)?;
+    let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, true, true)?;
 
     if source_ids.is_empty() {
         println!("No sources match the given filters.");

@@ -47,8 +47,8 @@ enum Commands {
     },
     /// Output sources as JSONL worklist
     Worklist {
-        /// Directory path to scope the query (resolved to realpath)
-        path: Option<PathBuf>,
+        /// Directory paths to scope the query (resolved to realpath)
+        paths: Vec<PathBuf>,
         /// Filter expressions (e.g., "!content_hash.sha256?" or "ext=jpg")
         #[arg(long = "where")]
         filters: Vec<String>,
@@ -67,8 +67,8 @@ enum Commands {
     },
     /// List sources matching filters
     Ls {
-        /// Directory path to scope the query (resolved to realpath)
-        path: Option<PathBuf>,
+        /// Directory paths to scope the query (resolved to realpath)
+        paths: Vec<PathBuf>,
         /// Filter expressions (e.g., "source.ext=jpg" or "content.hash.sha256?")
         #[arg(long = "where")]
         filters: Vec<String>,
@@ -98,9 +98,10 @@ enum Commands {
         action: Option<FactsAction>,
 
         /// Specific fact key to show value distribution
+        #[arg(long)]
         key: Option<String>,
-        /// Directory path to scope the query (resolved to realpath)
-        path: Option<PathBuf>,
+        /// Directory paths to scope the query (resolved to realpath)
+        paths: Vec<PathBuf>,
         /// Filter expressions (e.g., "source.ext=jpg" or "content.hash.sha256?")
         #[arg(long = "where")]
         filters: Vec<String>,
@@ -122,8 +123,8 @@ enum Commands {
     },
     /// Show archive coverage statistics
     Coverage {
-        /// Directory path to scope the query (resolved to realpath)
-        path: Option<PathBuf>,
+        /// Directory paths to scope the query (resolved to realpath)
+        paths: Vec<PathBuf>,
         /// Filter expressions (e.g., "source.ext=jpg" or "content.hash.sha256?")
         #[arg(long = "where")]
         filters: Vec<String>,
@@ -195,8 +196,8 @@ enum Commands {
 enum ExcludeAction {
     /// Mark sources as excluded
     Set {
-        /// Directory path to scope the operation (resolved to realpath)
-        path: Option<PathBuf>,
+        /// Directory paths to scope the operation (resolved to realpath)
+        paths: Vec<PathBuf>,
         /// Filter expressions (e.g., "source.size<1000" or "source.ext=tmp")
         #[arg(long = "where")]
         filters: Vec<String>,
@@ -209,8 +210,8 @@ enum ExcludeAction {
     },
     /// Remove exclusions from sources
     Clear {
-        /// Directory path to scope the operation (resolved to realpath)
-        path: Option<PathBuf>,
+        /// Directory paths to scope the operation (resolved to realpath)
+        paths: Vec<PathBuf>,
         /// Filter expressions to match excluded sources
         #[arg(long = "where")]
         filters: Vec<String>,
@@ -220,8 +221,8 @@ enum ExcludeAction {
     },
     /// List excluded sources
     List {
-        /// Directory path to scope the query (resolved to realpath)
-        path: Option<PathBuf>,
+        /// Directory paths to scope the query (resolved to realpath)
+        paths: Vec<PathBuf>,
         /// Filter expressions to match excluded sources
         #[arg(long = "where")]
         filters: Vec<String>,
@@ -248,8 +249,8 @@ enum FactsAction {
     Delete {
         /// Fact key to delete (e.g., "content.mime")
         key: String,
-        /// Directory path to scope the operation (resolved to realpath)
-        path: Option<PathBuf>,
+        /// Directory paths to scope the operation (resolved to realpath)
+        paths: Vec<PathBuf>,
         /// Filter expressions (e.g., "source.ext=jpg")
         #[arg(long = "where")]
         filters: Vec<String>,
@@ -275,8 +276,8 @@ enum FactsAction {
 enum ClusterAction {
     /// Generate a new manifest
     Generate {
-        /// Directory path to scope the query (resolved to realpath)
-        path: Option<PathBuf>,
+        /// Directory paths to scope the query (resolved to realpath)
+        paths: Vec<PathBuf>,
         /// Filter expressions (e.g., "content_hash.sha256?" or "exif.model=iPhone")
         #[arg(long = "where")]
         filters: Vec<String>,
@@ -314,42 +315,42 @@ fn main() -> anyhow::Result<()> {
         Commands::Scan { paths, role, add } => {
             scan::run(&db, &paths, &role, add)?;
         }
-        Commands::Worklist { path, filters, include_archived, include_excluded } => {
-            worklist::run(&db, path.as_deref(), &filters, include_archived, include_excluded)?;
+        Commands::Worklist { paths, filters, include_archived, include_excluded } => {
+            worklist::run(&db, &paths, &filters, include_archived, include_excluded)?;
         }
         Commands::ImportFacts { allow_archived } => {
             import_facts::run(&db, allow_archived)?;
         }
-        Commands::Ls { path, filters, archived, unarchived, unhashed, duplicates, include_archived, include_excluded } => {
-            // If no path given, check if cwd is inside a root
-            let (scope_path, use_relative) = if path.is_none() {
+        Commands::Ls { paths, filters, archived, unarchived, unhashed, duplicates, include_archived, include_excluded } => {
+            // If no paths given, check if cwd is inside a root
+            let (scope_paths, use_relative) = if paths.is_empty() {
                 let cwd = std::env::current_dir()?;
                 match db::resolve_root_path(db.conn(), &cwd)? {
-                    Some(_) => (Some(cwd), true),   // Inside root: scope to cwd, relative
-                    None => (None, false),           // Outside root: all sources, absolute
+                    Some(_) => (vec![cwd], true),   // Inside root: scope to cwd, relative
+                    None => (vec![], false),        // Outside root: all sources, absolute
                 }
             } else {
-                let use_rel = !path.as_ref().unwrap().starts_with("/");
-                (path, use_rel)
+                let use_rel = !paths.first().map(|p| p.starts_with("/")).unwrap_or(false);
+                (paths, use_rel)
             };
             if duplicates {
-                ls::show_duplicates(&db, scope_path.as_deref(), &filters, include_archived, include_excluded)?;
+                ls::show_duplicates(&db, &scope_paths, &filters, include_archived, include_excluded)?;
             } else {
-                ls::run(&db, scope_path.as_deref(), &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative)?;
+                ls::run(&db, &scope_paths, &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative)?;
             }
         }
-        Commands::Facts { action, key, path, filters, limit, all, show_aliases, include_archived, include_excluded } => {
+        Commands::Facts { action, key, paths, filters, limit, all, show_aliases, include_archived, include_excluded } => {
             if show_aliases {
                 facts::show_aliases();
                 return Ok(());
             }
             match action {
-                Some(FactsAction::Delete { key, path, filters, on, yes }) => {
+                Some(FactsAction::Delete { key, paths, filters, on, yes }) => {
                     let options = facts::DeleteOptions {
                         entity_type: on,
                         dry_run: !yes,
                     };
-                    facts::delete_facts(&mut db, &key, path.as_deref(), &filters, &options)?;
+                    facts::delete_facts(&mut db, &key, &paths, &filters, &options)?;
                 }
                 Some(FactsAction::Prune { stale, yes }) => {
                     if stale {
@@ -360,12 +361,12 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 None => {
-                    facts::run(&mut db, key.as_deref(), path.as_deref(), &filters, limit, all, include_archived, include_excluded)?;
+                    facts::run(&mut db, key.as_deref(), &paths, &filters, limit, all, include_archived, include_excluded)?;
                 }
             }
         }
-        Commands::Coverage { path, filters, archive, include_archived, include_excluded } => {
-            coverage::run(&mut db, path.as_deref(), &filters, archive.as_deref(), include_archived, include_excluded)?;
+        Commands::Coverage { paths, filters, archive, include_archived, include_excluded } => {
+            coverage::run(&mut db, &paths, &filters, archive.as_deref(), include_archived, include_excluded)?;
         }
         Commands::Compare { path_a, path_b, filters, include_excluded, quiet } => {
             let options = compare::CompareOptions {
@@ -379,7 +380,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Cluster { action } => match action {
             ClusterAction::Generate {
-                path,
+                paths,
                 filters,
                 dest,
                 output,
@@ -392,7 +393,7 @@ fn main() -> anyhow::Result<()> {
                     show_archived,
                     allow_duplicates,
                 };
-                cluster::generate(&db, path.as_deref(), &filters, &dest, &output, &options)?;
+                cluster::generate(&db, &paths, &filters, &dest, &output, &options)?;
             }
         },
         Commands::Apply {
@@ -422,20 +423,20 @@ fn main() -> anyhow::Result<()> {
             apply::run(&db, &manifest, &options)?;
         }
         Commands::Exclude { action } => match action {
-            ExcludeAction::Set { path, filters, id, dry_run } => {
+            ExcludeAction::Set { paths, filters, id, dry_run } => {
                 let options = exclude::SetOptions { dry_run };
                 if let Some(source_id) = id {
                     exclude::set_by_id(&db, source_id, &options)?;
                 } else {
-                    exclude::set(&db, path.as_deref(), &filters, &options)?;
+                    exclude::set(&db, &paths, &filters, &options)?;
                 }
             }
-            ExcludeAction::Clear { path, filters, dry_run } => {
+            ExcludeAction::Clear { paths, filters, dry_run } => {
                 let options = exclude::ClearOptions { dry_run };
-                exclude::clear(&db, path.as_deref(), &filters, &options)?;
+                exclude::clear(&db, &paths, &filters, &options)?;
             }
-            ExcludeAction::List { path, filters } => {
-                exclude::list(&db, path.as_deref(), &filters)?;
+            ExcludeAction::List { paths, filters } => {
+                exclude::list(&db, &paths, &filters)?;
             }
             ExcludeAction::Duplicates { path, prefer, filters, dry_run } => {
                 exclude::exclude_duplicates(&db, &prefer, Some(path.as_path()), &filters, dry_run)?;

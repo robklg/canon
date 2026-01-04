@@ -1,15 +1,15 @@
 use anyhow::{bail, Context, Result};
+use rusqlite::types::Value;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::{canonicalize_scope, resolve_archive_path, scope_param, Connection, Db, SCOPE_CLAUSE};
+use crate::db::{build_scope_clause, canonicalize_scopes, resolve_archive_path, Connection, Db};
 use crate::exclude;
 use crate::filter::{self, Filter};
-use rusqlite::params;
 
 #[derive(Serialize, Deserialize)]
 pub struct Manifest {
@@ -53,14 +53,14 @@ pub struct GenerateOptions {
 
 pub fn generate(
     db: &Db,
-    scope_path: Option<&Path>,
+    scope_paths: &[PathBuf],
     filters: &[String],
     dest: &Path,
     output_path: &Path,
     options: &GenerateOptions,
 ) -> Result<()> {
     // Require at least one of path scope or filters
-    if scope_path.is_none() && filters.is_empty() {
+    if scope_paths.is_empty() && filters.is_empty() {
         bail!("At least one of path or --where filter is required");
     }
 
@@ -69,15 +69,15 @@ pub fn generate(
     // Resolve destination to archive root + relative subdir
     let (archive_root_id, _archive_root_path, base_dir) = resolve_archive_path(conn, dest)?;
 
-    // Resolve scope path to realpath if provided
-    let scope_prefix = canonicalize_scope(scope_path)?;
+    // Resolve scope paths to realpaths
+    let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
     let parsed_filters: Vec<Filter> = filters
         .iter()
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    let (sources, archived, excluded_count) = query_sources(conn, &scope_prefix, &parsed_filters, options.include_archived)?;
+    let (sources, archived, excluded_count) = query_sources(conn, &scope_prefixes, &parsed_filters, options.include_archived)?;
 
     // Report excluded files (hard gate - always skipped)
     if excluded_count > 0 {
@@ -128,7 +128,13 @@ pub fn generate(
     let manifest = Manifest {
         meta: ManifestMeta {
             query: filters.to_vec(),
-            scope: scope_prefix.clone(),
+            scope: if scope_prefixes.len() == 1 {
+                Some(scope_prefixes[0].clone())
+            } else if scope_prefixes.is_empty() {
+                None
+            } else {
+                Some(scope_prefixes.join(", "))
+            },
             generated_at: current_timestamp(),
         },
         output: ManifestOutput {
@@ -172,7 +178,7 @@ pub fn generate(
 /// excluded_count is the number of sources skipped due to policy.exclude (hard gate)
 fn query_sources(
     conn: &Connection,
-    scope_prefix: &Option<String>,
+    scope_prefixes: &[String],
     filters: &[Filter],
     include_archived: bool,
 ) -> Result<(Vec<ManifestSource>, Vec<(String, String)>, usize)> {
@@ -184,15 +190,17 @@ fn query_sources(
         "r.role = 'source'"
     };
 
-    let prefix = scope_param(scope_prefix);
+    let (scope_clause, scope_params) = build_scope_clause(scope_prefixes);
+    let params: Vec<Value> = scope_params.iter().map(|s| Value::from(s.clone())).collect();
+
     let mut source_ids: Vec<i64> = conn
         .prepare(&format!(
             "SELECT s.id FROM sources s
              JOIN roots r ON s.root_id = r.id
              WHERE s.present = 1 AND {} AND {}",
-            role_clause, SCOPE_CLAUSE
+            role_clause, scope_clause
         ))?
-        .query_map(params![prefix, prefix], |row| row.get(0))?
+        .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
 
     // Apply filters

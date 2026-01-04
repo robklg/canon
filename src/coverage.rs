@@ -1,7 +1,8 @@
 use anyhow::Result;
-use std::path::Path;
+use rusqlite::types::Value;
+use std::path::PathBuf;
 
-use crate::db::{canonicalize_scope, parse_root_spec, populate_temp_sources, scope_param, Db, SCOPE_CLAUSE};
+use crate::db::{build_scope_clause, canonicalize_scopes, parse_root_spec, populate_temp_sources, Db};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -65,7 +66,7 @@ impl CoverageStats {
 
 pub fn run(
     db: &mut Db,
-    scope_path: Option<&Path>,
+    scope_paths: &[PathBuf],
     filter_strs: &[String],
     archive_spec: Option<&str>,
     include_archived: bool,
@@ -79,8 +80,8 @@ pub fn run(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope path
-    let scope_prefix = canonicalize_scope(scope_path)?;
+    // Resolve scope paths
+    let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
     // Parse and validate archive spec (must be archive role)
     let archive_root_id = if let Some(spec) = archive_spec {
@@ -93,16 +94,21 @@ pub fn run(
     let conn = db.conn_mut();
 
     // Compute and display stats
-    if scope_prefix.is_some() {
-        // Single scope mode
+    if !scope_prefixes.is_empty() {
+        // Scoped mode
         let stats = compute_scoped_stats(
             conn,
-            &scope_prefix,
+            &scope_prefixes,
             &filters,
             archive_root_id,
             include_archived,
         )?;
-        display_scoped_stats(&stats, scope_prefix.as_deref(), archive_spec, include_excluded);
+        let scope_display = if scope_prefixes.len() == 1 {
+            Some(scope_prefixes[0].as_str())
+        } else {
+            None
+        };
+        display_scoped_stats(&stats, scope_display, archive_spec, include_excluded);
     } else {
         // Per-root breakdown mode
         let (per_root_stats, overall) = compute_per_root_stats(
@@ -120,7 +126,7 @@ pub fn run(
 /// Compute coverage stats for sources under a specific path scope using pure SQL aggregates
 fn compute_scoped_stats(
     conn: &mut rusqlite::Connection,
-    scope_prefix: &Option<String>,
+    scope_prefixes: &[String],
     filters: &[Filter],
     archive_root_id: Option<i64>,
     include_archived: bool,
@@ -134,24 +140,29 @@ fn compute_scoped_stats(
 
     // Always query all sources (no exclude filtering at query level)
     let exclude_clause = exclude::exclude_clause(true);
-    let prefix = scope_param(scope_prefix);
+    let (scope_clause, scope_params) = build_scope_clause(scope_prefixes);
 
     // Collect all filtered source IDs
     let mut all_filtered_ids: Vec<i64> = Vec::new();
     let mut last_id: i64 = 0;
 
     loop {
+        // Build params: scope params + last_id + batch_size
+        let mut params: Vec<Value> = scope_params.iter().map(|s| Value::from(s.clone())).collect();
+        params.push(Value::from(last_id));
+        params.push(Value::from(BATCH_SIZE));
+
         let batch_query = format!(
             "SELECT s.id FROM sources s
              JOIN roots r ON s.root_id = r.id
              WHERE s.present = 1 AND {} AND {} AND {} AND s.id > ?
              ORDER BY s.id LIMIT ?",
-            role_clause, exclude_clause, SCOPE_CLAUSE
+            role_clause, exclude_clause, scope_clause
         );
 
         let source_ids: Vec<i64> = conn
             .prepare(&batch_query)?
-            .query_map(rusqlite::params![prefix, prefix, last_id, BATCH_SIZE], |row| row.get(0))?
+            .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
 
         if source_ids.is_empty() {

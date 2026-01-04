@@ -1,9 +1,10 @@
 use anyhow::Result;
+use rusqlite::types::Value;
 use serde::Serialize;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::PathBuf;
 
-use crate::db::{canonicalize_scope, scope_param, Connection, Db, SCOPE_CLAUSE};
+use crate::db::{build_scope_clause, canonicalize_scopes, Connection, Db};
 use crate::exclude;
 use crate::filter::{self, Filter};
 
@@ -24,20 +25,20 @@ struct FetchResult {
     max_id_seen: Option<i64>,
 }
 
-pub fn run(db: &Db, scope_path: Option<&Path>, filter_strs: &[String], include_archived: bool, include_excluded: bool) -> Result<()> {
+pub fn run(db: &Db, scope_paths: &[PathBuf], filter_strs: &[String], include_archived: bool, include_excluded: bool) -> Result<()> {
     // Parse filters upfront
     let filters: Vec<Filter> = filter_strs
         .iter()
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope path to realpath if provided
-    let scope_prefix = canonicalize_scope(scope_path)?;
+    // Resolve scope paths to realpaths
+    let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
     // Check excluded count if we're skipping them
     let conn = db.conn();
     let excluded_count = if !include_excluded {
-        exclude::count_excluded(conn, scope_prefix.as_deref(), include_archived)?
+        exclude::count_excluded(conn, scope_prefixes.first().map(|s| s.as_str()), include_archived)?
     } else {
         0
     };
@@ -47,7 +48,7 @@ pub fn run(db: &Db, scope_path: Option<&Path>, filter_strs: &[String], include_a
     let mut last_id: i64 = 0;
 
     loop {
-        let result = fetch_batch(conn, last_id, &scope_prefix, &filters, include_archived, include_excluded)?;
+        let result = fetch_batch(conn, last_id, &scope_prefixes, &filters, include_archived, include_excluded)?;
 
         // If we didn't see any source IDs, we're done
         let max_id = match result.max_id_seen {
@@ -76,7 +77,7 @@ pub fn run(db: &Db, scope_path: Option<&Path>, filter_strs: &[String], include_a
 fn fetch_batch(
     conn: &Connection,
     after_id: i64,
-    scope_prefix: &Option<String>,
+    scope_prefixes: &[String],
     filters: &[Filter],
     include_archived: bool,
     include_excluded: bool,
@@ -89,7 +90,12 @@ fn fetch_batch(
     };
 
     let exclude_clause = exclude::exclude_clause(include_excluded);
-    let prefix = scope_param(scope_prefix);
+    let (scope_clause, scope_params) = build_scope_clause(scope_prefixes);
+
+    // Build params: scope params + after_id + batch_size
+    let mut params: Vec<Value> = scope_params.iter().map(|s| Value::from(s.clone())).collect();
+    params.push(Value::from(after_id));
+    params.push(Value::from(BATCH_SIZE));
 
     let source_ids: Vec<i64> = conn
         .prepare(&format!(
@@ -99,9 +105,9 @@ fn fetch_batch(
              WHERE s.present = 1 AND {} AND {} AND {} AND s.id > ?
              ORDER BY s.id
              LIMIT ?",
-            role_clause, exclude_clause, SCOPE_CLAUSE
+            role_clause, exclude_clause, scope_clause
         ))?
-        .query_map(rusqlite::params![prefix, prefix, after_id, BATCH_SIZE], |row| row.get(0))?
+        .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
 
     if source_ids.is_empty() {

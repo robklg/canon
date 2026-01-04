@@ -244,3 +244,34 @@ pub const SCOPE_CLAUSE: &str = "(? = '' OR (r.path || '/' || s.rel_path) LIKE ? 
 pub fn scope_param(scope_prefix: &Option<String>) -> &str {
     scope_prefix.as_deref().unwrap_or("")
 }
+
+/// Canonicalize multiple scope paths for use in SQL path matching
+pub fn canonicalize_scopes(paths: &[std::path::PathBuf]) -> Result<Vec<String>> {
+    paths
+        .iter()
+        .map(|p| {
+            fs::canonicalize(p)
+                .with_context(|| format!("Failed to resolve path: {}", p.display()))
+                .map(|cp| cp.to_string_lossy().to_string())
+        })
+        .collect()
+}
+
+/// Build SQL clause for multiple scope prefixes.
+/// Returns the clause string and a vector of parameters to bind.
+/// If no prefixes, returns ("1=1", vec![]) to match everything.
+pub fn build_scope_clause(prefixes: &[String]) -> (String, Vec<String>) {
+    if prefixes.is_empty() {
+        return ("1=1".to_string(), vec![]);
+    }
+
+    let conditions: Vec<&str> = prefixes
+        .iter()
+        .map(|_| "(r.path || '/' || s.rel_path) LIKE ? || '/%'")
+        .collect();
+
+    let clause = format!("({})", conditions.join(" OR "));
+    let params: Vec<String> = prefixes.to_vec();
+
+    (clause, params)
+}
