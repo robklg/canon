@@ -537,14 +537,15 @@ pub fn exclude_duplicates(
             continue;
         }
 
-        // Find duplicates of this source in the prefer path
+        // Find duplicates of this source in the prefer path (excluding already-excluded sources)
         let prefer_copies: Vec<String> = conn
             .prepare(
                 "SELECT r.path || '/' || s.rel_path
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
                  WHERE s.object_id = ? AND s.present = 1 AND s.id != ?
-                   AND (r.path || '/' || s.rel_path LIKE ? || '/%' OR r.path || '/' || s.rel_path = ?)"
+                   AND (r.path || '/' || s.rel_path LIKE ? || '/%' OR r.path || '/' || s.rel_path = ?)
+                   AND NOT EXISTS (SELECT 1 FROM facts WHERE entity_type = 'source' AND entity_id = s.id AND key = 'policy.exclude')"
             )?
             .query_map(params![object_id, source_id, prefer_prefix, prefer_prefix], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
