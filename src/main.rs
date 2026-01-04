@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 mod apply;
 mod cluster;
+mod compare;
 mod coverage;
 mod db;
 mod exclude;
@@ -135,6 +136,22 @@ enum Commands {
         /// Include excluded sources (by default they are skipped)
         #[arg(long)]
         include_excluded: bool,
+    },
+    /// Compare two folders by content hash
+    Compare {
+        /// First path to compare
+        path_a: PathBuf,
+        /// Second path to compare
+        path_b: PathBuf,
+        /// Filter expressions (e.g., "source.ext=jpg")
+        #[arg(long = "where")]
+        filters: Vec<String>,
+        /// Include excluded sources (by default they are skipped)
+        #[arg(long)]
+        include_excluded: bool,
+        /// Only show summary, not file lists
+        #[arg(short, long)]
+        quiet: bool,
     },
     /// Generate a cluster manifest from matching sources
     Cluster {
@@ -349,6 +366,16 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Coverage { path, filters, archive, include_archived, include_excluded } => {
             coverage::run(&mut db, path.as_deref(), &filters, archive.as_deref(), include_archived, include_excluded)?;
+        }
+        Commands::Compare { path_a, path_b, filters, include_excluded, quiet } => {
+            let options = compare::CompareOptions {
+                include_excluded,
+                quiet,
+            };
+            let identical = compare::run(&db, &path_a, &path_b, &filters, &options)?;
+            if !identical {
+                std::process::exit(1);
+            }
         }
         Commands::Cluster { action } => match action {
             ClusterAction::Generate {
