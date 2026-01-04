@@ -1,6 +1,8 @@
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection};
 
+use crate::expr;
+
 // ============================================================================
 // Expression AST
 // ============================================================================
@@ -106,19 +108,24 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
         }
 
         // Keywords and identifiers
+        // Allow alphanumeric, underscore, dot, and pipe (for modifiers like key|year)
         if chars[i].is_alphabetic() || chars[i] == '_' {
             let start = i;
-            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.') {
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.' || chars[i] == '|') {
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
-            match word.to_uppercase().as_str() {
-                "AND" => tokens.push(Token::And),
-                "OR" => tokens.push(Token::Or),
-                "NOT" => tokens.push(Token::Not),
-                "IN" => tokens.push(Token::In),
-                _ => tokens.push(Token::Ident(word)),
+            // Only check for keywords if word doesn't contain pipe (modifier syntax)
+            if !word.contains('|') {
+                match word.to_uppercase().as_str() {
+                    "AND" => { tokens.push(Token::And); continue; }
+                    "OR" => { tokens.push(Token::Or); continue; }
+                    "NOT" => { tokens.push(Token::Not); continue; }
+                    "IN" => { tokens.push(Token::In); continue; }
+                    _ => {}
+                }
             }
+            tokens.push(Token::Ident(word));
             continue;
         }
 
@@ -358,11 +365,14 @@ fn eval_expr(conn: &Connection, source_id: i64, expr: &Expr) -> Result<bool> {
 // ============================================================================
 
 fn check_fact_exists(conn: &Connection, source_id: i64, key: &str) -> Result<bool> {
+    // Parse key to get base key (ignore modifiers for existence check)
+    let (base_key, _modifiers) = parse_key_with_modifiers(key)?;
+
     // Check source facts
     let source_exists: bool = conn
         .query_row(
             "SELECT 1 FROM facts WHERE entity_type = 'source' AND entity_id = ? AND key = ?",
-            params![source_id, key],
+            params![source_id, base_key],
             |_| Ok(true),
         )
         .unwrap_or(false);
@@ -384,7 +394,7 @@ fn check_fact_exists(conn: &Connection, source_id: i64, key: &str) -> Result<boo
         let object_exists: bool = conn
             .query_row(
                 "SELECT 1 FROM facts WHERE entity_type = 'object' AND entity_id = ? AND key = ?",
-                params![obj_id, key],
+                params![obj_id, base_key],
                 |_| Ok(true),
             )
             .unwrap_or(false);
@@ -395,9 +405,10 @@ fn check_fact_exists(conn: &Connection, source_id: i64, key: &str) -> Result<boo
     }
 
     // Special case: check for built-in source.* fields
-    match key {
+    match base_key.as_str() {
         "source.ext" | "source.size" | "source.mtime" | "source.path" |
-        "source.root" | "source.rel_path" | "source.device" | "source.inode" => Ok(true),
+        "source.root" | "source.rel_path" | "source.device" | "source.inode" |
+        "filename" => Ok(true),
         "content.hash.sha256" => Ok(object_id.is_some()),
         // Legacy names
         "ext" | "size" | "mtime" | "root_id" | "basis_rev" | "object_id" => Ok(true),
@@ -407,8 +418,11 @@ fn check_fact_exists(conn: &Connection, source_id: i64, key: &str) -> Result<boo
 }
 
 fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareOp, value: &str) -> Result<bool> {
+    // Parse key and modifiers
+    let (base_key, modifiers) = parse_key_with_modifiers(key)?;
+
     // Handle built-in source.* fields first
-    match key {
+    match base_key.as_str() {
         // Text fields
         "source.ext" | "ext" => {
             let rel_path: String = conn.query_row(
@@ -420,7 +434,23 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("");
-            return Ok(compare_text(ext, op, value));
+            let fact_value = FactValue::Text(ext.to_string());
+            let modified = apply_modifiers_to_fact(fact_value, &modifiers, key)?;
+            return Ok(compare_fact_value(&modified, op, value));
+        }
+        "filename" => {
+            let rel_path: String = conn.query_row(
+                "SELECT rel_path FROM sources WHERE id = ?",
+                [source_id],
+                |row| row.get(0),
+            )?;
+            let filename = std::path::Path::new(&rel_path)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or(&rel_path);
+            let fact_value = FactValue::Text(filename.to_string());
+            let modified = apply_modifiers_to_fact(fact_value, &modifiers, key)?;
+            return Ok(compare_fact_value(&modified, op, value));
         }
         "source.root" => {
             let root_path: String = conn.query_row(
@@ -428,7 +458,9 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                 [source_id],
                 |row| row.get(0),
             )?;
-            return Ok(compare_text(&root_path, op, value));
+            let fact_value = FactValue::Text(root_path);
+            let modified = apply_modifiers_to_fact(fact_value, &modifiers, key)?;
+            return Ok(compare_fact_value(&modified, op, value));
         }
         "source.path" => {
             let (root_path, rel_path): (String, String) = conn.query_row(
@@ -441,7 +473,9 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
             } else {
                 format!("{}/{}", root_path, rel_path)
             };
-            return Ok(compare_text(&full_path, op, value));
+            let fact_value = FactValue::Text(full_path);
+            let modified = apply_modifiers_to_fact(fact_value, &modifiers, key)?;
+            return Ok(compare_fact_value(&modified, op, value));
         }
         "source.rel_path" => {
             let rel_path: String = conn.query_row(
@@ -449,7 +483,9 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                 [source_id],
                 |row| row.get(0),
             )?;
-            return Ok(compare_text(&rel_path, op, value));
+            let fact_value = FactValue::Text(rel_path);
+            let modified = apply_modifiers_to_fact(fact_value, &modifiers, key)?;
+            return Ok(compare_fact_value(&modified, op, value));
         }
 
         // Numeric fields
@@ -459,7 +495,9 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                 [source_id],
                 |row| row.get(0),
             )?;
-            return Ok(compare_numeric(v as f64, op, value));
+            let fact_value = FactValue::Num(v as f64);
+            let modified = apply_modifiers_to_fact(fact_value, &modifiers, key)?;
+            return Ok(compare_fact_value(&modified, op, value));
         }
         "source.mtime" | "mtime" => {
             let v: i64 = conn.query_row(
@@ -467,7 +505,10 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                 [source_id],
                 |row| row.get(0),
             )?;
-            return Ok(compare_numeric(v as f64, op, value));
+            // mtime is a time value, so use Time type for proper modifier support
+            let fact_value = FactValue::Time(v);
+            let modified = apply_modifiers_to_fact(fact_value, &modifiers, key)?;
+            return Ok(compare_fact_value(&modified, op, value));
         }
         "source.device" => {
             let device: Option<i64> = conn.query_row(
@@ -475,7 +516,12 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                 [source_id],
                 |row| row.get(0),
             )?;
-            return Ok(device.map(|d| compare_numeric(d as f64, op, value)).unwrap_or(false));
+            if let Some(d) = device {
+                let fact_value = FactValue::Num(d as f64);
+                let modified = apply_modifiers_to_fact(fact_value, &modifiers, key)?;
+                return Ok(compare_fact_value(&modified, op, value));
+            }
+            return Ok(false);
         }
         "source.inode" => {
             let inode: Option<i64> = conn.query_row(
@@ -483,7 +529,12 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                 [source_id],
                 |row| row.get(0),
             )?;
-            return Ok(inode.map(|i| compare_numeric(i as f64, op, value)).unwrap_or(false));
+            if let Some(i) = inode {
+                let fact_value = FactValue::Num(i as f64);
+                let modified = apply_modifiers_to_fact(fact_value, &modifiers, key)?;
+                return Ok(compare_fact_value(&modified, op, value));
+            }
+            return Ok(false);
         }
         "root_id" => {
             let v: i64 = conn.query_row(
@@ -491,7 +542,9 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                 [source_id],
                 |row| row.get(0),
             )?;
-            return Ok(compare_numeric(v as f64, op, value));
+            let fact_value = FactValue::Num(v as f64);
+            let modified = apply_modifiers_to_fact(fact_value, &modifiers, key)?;
+            return Ok(compare_fact_value(&modified, op, value));
         }
         _ => {}
     }
@@ -506,15 +559,17 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
         .unwrap_or(None);
 
     // Check source facts then object facts
-    if let Some(fact_value) = get_fact_value(conn, "source", source_id, key)? {
-        if compare_fact_value(&fact_value, op, value) {
+    if let Some(fact_value) = get_fact_value(conn, "source", source_id, &base_key)? {
+        let modified = apply_modifiers_to_fact(fact_value, &modifiers, key)?;
+        if compare_fact_value(&modified, op, value) {
             return Ok(true);
         }
     }
 
     if let Some(obj_id) = object_id {
-        if let Some(fact_value) = get_fact_value(conn, "object", obj_id, key)? {
-            if compare_fact_value(&fact_value, op, value) {
+        if let Some(fact_value) = get_fact_value(conn, "object", obj_id, &base_key)? {
+            let modified = apply_modifiers_to_fact(fact_value, &modifiers, key)?;
+            if compare_fact_value(&modified, op, value) {
                 return Ok(true);
             }
         }
@@ -531,6 +586,78 @@ fn check_fact_in(conn: &Connection, source_id: i64, key: &str, values: &[String]
         }
     }
     Ok(false)
+}
+
+// ============================================================================
+// Modifier Parsing
+// ============================================================================
+
+/// Parse a key that may contain modifiers: "content.DateTimeOriginal|year"
+/// Returns (base_key, modifiers)
+fn parse_key_with_modifiers(key: &str) -> Result<(String, Vec<expr::Modifier>)> {
+    if !key.contains('|') {
+        return Ok((key.to_string(), Vec::new()));
+    }
+
+    let parts: Vec<&str> = key.split('|').collect();
+    let base_key = parts[0].to_string();
+    let mut modifiers = Vec::new();
+
+    for mod_str in &parts[1..] {
+        let modifier = match mod_str.to_lowercase().as_str() {
+            "year" => expr::Modifier::Year,
+            "month" => expr::Modifier::Month,
+            "day" => expr::Modifier::Day,
+            "hour" => expr::Modifier::Hour,
+            "minute" => expr::Modifier::Minute,
+            "second" => expr::Modifier::Second,
+            "date" => expr::Modifier::Date,
+            "time" => expr::Modifier::Time,
+            "datetime" => expr::Modifier::DateTime,
+            "yearmonth" => expr::Modifier::YearMonth,
+            "week" => expr::Modifier::Week,
+            "weekday" => expr::Modifier::Weekday,
+            "quarter" => expr::Modifier::Quarter,
+            "stem" => expr::Modifier::Stem,
+            "ext" => expr::Modifier::Ext,
+            "short" => expr::Modifier::Short,
+            _ => bail!(
+                "Unknown modifier '{}'. Available: year, month, day, hour, minute, second, \
+                 date, time, datetime, yearmonth, week, weekday, quarter, stem, ext, short",
+                mod_str
+            ),
+        };
+        modifiers.push(modifier);
+    }
+
+    Ok((base_key, modifiers))
+}
+
+/// Apply modifiers to a FactValue using the expr module
+fn apply_modifiers_to_fact(value: FactValue, modifiers: &[expr::Modifier], key: &str) -> Result<FactValue> {
+    if modifiers.is_empty() {
+        return Ok(value);
+    }
+
+    // Convert to expr::FactValue
+    let mut expr_value = match value {
+        FactValue::Text(t) => expr::FactValue::Text(t),
+        FactValue::Num(n) => expr::FactValue::Num(n),
+        FactValue::Time(ts) => expr::FactValue::Time(ts),
+    };
+
+    // Apply modifiers
+    for modifier in modifiers {
+        expr_value = expr::apply_modifier(&expr_value, *modifier, key)?;
+    }
+
+    // Convert back to FactValue
+    Ok(match expr_value {
+        expr::FactValue::Text(t) => FactValue::Text(t),
+        expr::FactValue::Num(n) => FactValue::Num(n),
+        expr::FactValue::Time(ts) => FactValue::Time(ts),
+        expr::FactValue::Path(p) => FactValue::Text(p),
+    })
 }
 
 // ============================================================================

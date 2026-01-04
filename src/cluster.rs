@@ -21,6 +21,8 @@ pub struct Manifest {
 #[derive(Serialize, Deserialize)]
 pub struct ManifestMeta {
     pub query: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     pub generated_at: i64,
 }
 
@@ -102,9 +104,14 @@ pub fn generate(
         return Ok(());
     }
 
+    // Collect facts with 100% coverage for help comments
+    let full_coverage_facts = collect_full_coverage_facts(conn, &sources)?;
+    let fact_help = generate_fact_help(&sources, &full_coverage_facts);
+
     let manifest = Manifest {
         meta: ManifestMeta {
             query: filters.to_vec(),
+            scope: scope_prefix.clone(),
             generated_at: current_timestamp(),
         },
         output: ManifestOutput {
@@ -118,7 +125,20 @@ pub fn generate(
     let toml_str = toml::to_string_pretty(&manifest)
         .context("Failed to serialize manifest")?;
 
-    fs::write(output_path, &toml_str)
+    // Insert fact help comments before [[sources]] section
+    let toml_with_help = if let Some(sources_pos) = toml_str.find("[[sources]]") {
+        format!(
+            "{}\n{}{}",
+            toml_str[..sources_pos].trim_end(),
+            fact_help,
+            &toml_str[sources_pos..]
+        )
+    } else {
+        // No sources section, just append help at the end
+        format!("{}\n{}", toml_str, fact_help)
+    };
+
+    fs::write(output_path, &toml_with_help)
         .with_context(|| format!("Failed to write manifest to {}", output_path.display()))?;
 
     println!(
@@ -335,4 +355,198 @@ fn current_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs() as i64
+}
+
+/// Fact type as stored in the database
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FactType {
+    Text,
+    Num,
+    Time,
+    Json,
+}
+
+impl FactType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            FactType::Text => "text",
+            FactType::Num => "num",
+            FactType::Time => "time",
+            FactType::Json => "json",
+        }
+    }
+}
+
+/// Collect facts with 100% coverage across all sources in the manifest
+fn collect_full_coverage_facts(conn: &Connection, sources: &[ManifestSource]) -> Result<Vec<(String, FactType, String)>> {
+    use std::collections::HashSet;
+
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let source_count = sources.len();
+    let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
+
+    // Count facts by key across all sources
+    let mut fact_counts: HashMap<String, (usize, FactType)> = HashMap::new();
+    let mut seen_keys: HashSet<String> = HashSet::new();
+
+    // Query source facts
+    for source_id in &source_ids {
+        let mut stmt = conn.prepare(
+            "SELECT key, value_text, value_num, value_time, value_json
+             FROM facts WHERE entity_type = 'source' AND entity_id = ?"
+        )?;
+
+        for row in stmt.query_map([source_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<f64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })? {
+            let (key, text, num, time, json) = row?;
+            let fact_type = if text.is_some() {
+                FactType::Text
+            } else if num.is_some() {
+                FactType::Num
+            } else if time.is_some() {
+                FactType::Time
+            } else if json.is_some() {
+                FactType::Json
+            } else {
+                continue;
+            };
+
+            let entry = fact_counts.entry(key.clone()).or_insert((0, fact_type));
+            if !seen_keys.contains(&format!("{}:{}", source_id, key)) {
+                entry.0 += 1;
+                seen_keys.insert(format!("{}:{}", source_id, key));
+            }
+        }
+    }
+
+    // Query object facts (only for sources that have objects)
+    for (source, object_id) in sources.iter().filter_map(|s| s.object_id.map(|oid| (s, oid))) {
+        let mut stmt = conn.prepare(
+            "SELECT key, value_text, value_num, value_time, value_json
+             FROM facts WHERE entity_type = 'object' AND entity_id = ?"
+        )?;
+
+        for row in stmt.query_map([object_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<f64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })? {
+            let (key, text, num, time, json) = row?;
+            let fact_type = if text.is_some() {
+                FactType::Text
+            } else if num.is_some() {
+                FactType::Num
+            } else if time.is_some() {
+                FactType::Time
+            } else if json.is_some() {
+                FactType::Json
+            } else {
+                continue;
+            };
+
+            let entry = fact_counts.entry(key.clone()).or_insert((0, fact_type));
+            // Use source.id for uniqueness, not object_id (since we want per-source coverage)
+            if !seen_keys.contains(&format!("{}:{}", source.id, key)) {
+                entry.0 += 1;
+                seen_keys.insert(format!("{}:{}", source.id, key));
+            }
+        }
+    }
+
+    // Filter to only 100% coverage facts
+    let mut full_coverage: Vec<(String, FactType, String)> = fact_counts
+        .into_iter()
+        .filter(|(_, (count, _))| *count == source_count)
+        .map(|(key, (_, fact_type))| {
+            let description = get_fact_description(&key);
+            (key, fact_type, description)
+        })
+        .collect();
+
+    // Sort by key for consistent output
+    full_coverage.sort_by(|a, b| a.0.cmp(&b.0));
+
+    Ok(full_coverage)
+}
+
+/// Get a human-readable description for a fact key
+fn get_fact_description(key: &str) -> String {
+    match key {
+        "source.mtime" => "File modification time".to_string(),
+        "source.size" => "File size in bytes".to_string(),
+        "content.DateTimeOriginal" | "exif.DateTimeOriginal" => "EXIF capture date".to_string(),
+        "content.Make" | "exif.Make" => "Camera manufacturer".to_string(),
+        "content.Model" | "exif.Model" => "Camera model".to_string(),
+        "content.mime" => "MIME type".to_string(),
+        "content.width" => "Image width in pixels".to_string(),
+        "content.height" => "Image height in pixels".to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Generate fact help comments for the manifest
+fn generate_fact_help(sources: &[ManifestSource], full_coverage_facts: &[(String, FactType, String)]) -> String {
+    if sources.is_empty() {
+        return String::new();
+    }
+
+    let mut help = String::new();
+    help.push_str(&format!("# Available facts for pattern (100% coverage on {} sources in this cluster):\n", sources.len()));
+    help.push_str("#\n");
+
+    // Built-in/derived facts
+    help.push_str("# Built-in:\n");
+    help.push_str("#   source.rel_path    path   - Relative path from root\n");
+    help.push_str("#   source.path        path   - Full absolute path (derived)\n");
+    help.push_str("#   source.root        path   - Root path\n");
+    help.push_str("#   source.id          num    - Source ID\n");
+    help.push_str("#   object.hash        text   - Content hash (if hashed)\n");
+    help.push_str("#\n");
+
+    // User facts with 100% coverage
+    if !full_coverage_facts.is_empty() {
+        help.push_str("# Content facts:\n");
+        for (key, fact_type, description) in full_coverage_facts {
+            let desc_part = if description.is_empty() {
+                String::new()
+            } else {
+                format!(" - {}", description)
+            };
+            help.push_str(&format!("#   {:30} {:6}{}\n", key, fact_type.as_str(), desc_part));
+        }
+        help.push_str("#\n");
+    }
+
+    // Modifiers reference
+    help.push_str("# Modifiers:\n");
+    help.push_str("#   Time: |year |month |day |hour |minute |second |date |datetime |yearmonth |week |weekday |quarter\n");
+    help.push_str("#   String: |stem |ext |short\n");
+    help.push_str("#   Path: [0] [-1] [1:3] etc.\n");
+    help.push_str("#\n");
+
+    // Aliases
+    help.push_str("# Aliases:\n");
+    help.push_str("#   {filename}    → {source.rel_path[-1]}\n");
+    help.push_str("#   {stem}        → {source.rel_path[-1]|stem}\n");
+    help.push_str("#   {ext}         → {source.rel_path[-1]|ext}\n");
+    help.push_str("#   {hash}        → {object.hash}\n");
+    help.push_str("#   {hash_short}  → {object.hash|short}\n");
+    help.push_str("#   {id}          → {source.id}\n");
+    help.push_str("\n");
+
+    help
 }

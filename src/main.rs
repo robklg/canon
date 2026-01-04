@@ -6,6 +6,7 @@ mod cluster;
 mod coverage;
 mod db;
 mod exclude;
+mod expr;
 mod facts;
 mod filter;
 mod import_facts;
@@ -105,6 +106,9 @@ enum Commands {
         /// Show all built-in facts (including hidden ones like source.device, source.inode)
         #[arg(long)]
         all: bool,
+        /// Show pattern aliases available for manifest patterns
+        #[arg(long)]
+        show_aliases: bool,
         /// Include sources from archive roots (by default only source roots)
         #[arg(long)]
         include_archived: bool,
@@ -287,7 +291,11 @@ fn main() -> anyhow::Result<()> {
             };
             ls::run(&db, scope_path.as_deref(), &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative)?;
         }
-        Commands::Facts { action, key, path, filters, limit, all, include_archived, include_excluded } => {
+        Commands::Facts { action, key, path, filters, limit, all, show_aliases, include_archived, include_excluded } => {
+            if show_aliases {
+                facts::show_aliases();
+                return Ok(());
+            }
             match action {
                 Some(FactsAction::Delete { key, path, filters, on, yes }) => {
                     let options = facts::DeleteOptions {

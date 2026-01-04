@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::cluster::{Manifest, ManifestSource};
 use crate::db::{parse_root_spec, Connection, Db};
 use crate::exclude;
+use crate::expr::{self, EvalContext, FactValue, Pattern};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferMode {
@@ -35,6 +36,121 @@ pub struct ApplyOptions {
     pub transfer_mode: TransferMode,
 }
 
+/// Fetch a fact value with its proper type from the database
+fn fetch_typed_fact(conn: &Connection, source_id: i64, object_id: Option<i64>, key: &str) -> Result<Option<FactValue>> {
+    // Check source facts first
+    let row: Option<(Option<String>, Option<f64>, Option<i64>, Option<String>)> = conn
+        .query_row(
+            "SELECT value_text, value_num, value_time, value_json
+             FROM facts WHERE entity_type = 'source' AND entity_id = ? AND key = ?",
+            params![source_id, key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+
+    if let Some((text, num, time, _json)) = row {
+        if let Some(t) = text {
+            return Ok(Some(FactValue::Text(t)));
+        }
+        if let Some(n) = num {
+            return Ok(Some(FactValue::Num(n)));
+        }
+        if let Some(ts) = time {
+            return Ok(Some(FactValue::Time(ts)));
+        }
+        // JSON not yet supported as FactValue
+    }
+
+    // Check object facts if source has object_id
+    if let Some(obj_id) = object_id {
+        let row: Option<(Option<String>, Option<f64>, Option<i64>, Option<String>)> = conn
+            .query_row(
+                "SELECT value_text, value_num, value_time, value_json
+                 FROM facts WHERE entity_type = 'object' AND entity_id = ? AND key = ?",
+                params![obj_id, key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+
+        if let Some((text, num, time, _json)) = row {
+            if let Some(t) = text {
+                return Ok(Some(FactValue::Text(t)));
+            }
+            if let Some(n) = num {
+                return Ok(Some(FactValue::Num(n)));
+            }
+            if let Some(ts) = time {
+                return Ok(Some(FactValue::Time(ts)));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Build an EvalContext for a source using cached root paths
+fn build_eval_context(
+    conn: &Connection,
+    source: &ManifestSource,
+    needed_keys: &[String],
+    scope_prefix: Option<&str>,
+    root_paths: &HashMap<i64, String>,
+) -> Result<EvalContext> {
+    let mut ctx = EvalContext::new();
+
+    // Get root path from cache (looked up once at apply start)
+    let root_path = root_paths.get(&source.root_id)
+        .ok_or_else(|| anyhow::anyhow!("Root {} not found in cache", source.root_id))?;
+
+    // Derive rel_path from full path - root_path
+    let rel_path = if source.path == *root_path {
+        String::new()
+    } else if let Some(rel) = source.path.strip_prefix(&format!("{}/", root_path)) {
+        rel.to_string()
+    } else {
+        // Fallback: the path doesn't match the root, use full path as rel_path
+        source.path.clone()
+    };
+
+    ctx.set_source_root(root_path.clone());
+    ctx.set_source_rel_path(rel_path);
+
+    // Set scope prefix if provided
+    ctx.set_scope_prefix(scope_prefix.map(|s| s.to_string()));
+
+    // Fetch needed facts from database with proper types
+    for key in needed_keys {
+        // Skip derived facts (handled by EvalContext)
+        if key.starts_with("source.") || key.starts_with("scope.") || key == "object.hash" {
+            continue;
+        }
+
+        if let Some(value) = fetch_typed_fact(conn, source.id, source.object_id, key)? {
+            ctx.set_fact(key, value);
+        }
+    }
+
+    // Set object.hash from manifest if available
+    if let Some(ref hash) = source.hash_value {
+        ctx.set_fact("object.hash", FactValue::Text(hash.clone()));
+    }
+
+    Ok(ctx)
+}
+
+/// Evaluate a pattern for a source, returning the destination relative path
+fn evaluate_pattern(
+    pattern: &Pattern,
+    source: &ManifestSource,
+    needed_keys: &[String],
+    scope_prefix: Option<&str>,
+    conn: &Connection,
+    root_paths: &HashMap<i64, String>,
+) -> Result<String> {
+    let ctx = build_eval_context(conn, source, needed_keys, scope_prefix, root_paths)?;
+    expr::evaluate(pattern, &ctx)
+}
+
 pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> {
     // Platform checks: --rename and --move are Unix-only
     #[cfg(not(unix))]
@@ -55,6 +171,20 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         .with_context(|| format!("Failed to parse manifest: {}", manifest_path.display()))?;
 
     let conn = db.conn();
+
+    // Parse the pattern once upfront
+    let pattern = expr::parse_pattern(&manifest.output.pattern)
+        .with_context(|| format!("Failed to parse output pattern: {}", manifest.output.pattern))?;
+    let needed_keys = expr::extract_fact_keys(&pattern);
+
+    // Get scope prefix from manifest if available
+    let scope_prefix = manifest.meta.scope.as_deref();
+
+    // Cache all root paths (single query, avoids per-source lookups)
+    let root_paths: HashMap<i64, String> = conn
+        .prepare("SELECT id, path FROM roots")?
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+        .collect::<Result<HashMap<_, _>, _>>()?;
 
     // Look up archive root path from manifest's archive_root_id
     let archive_root_path: String = conn
@@ -78,7 +208,7 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
 
     // Pre-flight checks (mandatory, always run)
     // Check destination uniqueness first
-    let collisions = check_destination_collisions_filtered(&filtered_sources, &manifest.output.pattern, &base_dir)?;
+    let collisions = check_destination_collisions_filtered(&filtered_sources, &pattern, &needed_keys, scope_prefix, &base_dir, conn, &root_paths)?;
     if !collisions.is_empty() {
         eprintln!(
             "Error: {} destination paths have multiple sources:",
@@ -145,12 +275,15 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     for source in &filtered_sources {
         match process_source(
             source,
-            &manifest.output.pattern,
+            &pattern,
+            &needed_keys,
+            scope_prefix,
             &base_dir,
             &manifest.output.base_dir,
             options,
             conn,
             manifest.output.archive_root_id,
+            &root_paths,
         ) {
             Ok(action) => match action {
                 ApplyAction::Copied => stats.copied += 1,
@@ -203,8 +336,12 @@ fn filter_by_roots<'a>(
 
 fn check_destination_collisions_filtered(
     sources: &[&ManifestSource],
-    pattern: &str,
+    pattern: &Pattern,
+    needed_keys: &[String],
+    scope_prefix: Option<&str>,
     base_dir: &Path,
+    conn: &Connection,
+    root_paths: &HashMap<i64, String>,
 ) -> Result<Vec<(PathBuf, Vec<String>)>> {
     let mut dest_to_sources: HashMap<PathBuf, Vec<String>> = HashMap::new();
 
@@ -216,8 +353,8 @@ fn check_destination_collisions_filtered(
             continue;
         }
 
-        // Expand pattern to get destination path
-        let dest_rel = expand_pattern(pattern, source, src_path)?;
+        // Evaluate pattern to get destination path
+        let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, conn, root_paths)?;
         let dest_path = base_dir.join(&dest_rel);
 
         dest_to_sources
@@ -307,12 +444,15 @@ enum ApplyAction {
 
 fn process_source(
     source: &ManifestSource,
-    pattern: &str,
+    pattern: &Pattern,
+    needed_keys: &[String],
+    scope_prefix: Option<&str>,
     base_dir: &Path,
     base_dir_rel: &str,
     options: &ApplyOptions,
     conn: &Connection,
     archive_root_id: i64,
+    root_paths: &HashMap<i64, String>,
 ) -> Result<ApplyAction> {
     let src_path = Path::new(&source.path);
 
@@ -324,8 +464,8 @@ fn process_source(
         return Ok(ApplyAction::SkippedMissing);
     }
 
-    // Expand pattern to get destination path
-    let dest_rel = expand_pattern(pattern, source, src_path)?;
+    // Evaluate pattern to get destination path
+    let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, conn, root_paths)?;
     let dest_path = base_dir.join(&dest_rel);
 
     // Compute relative path within archive root for registration
@@ -500,81 +640,3 @@ fn register_destination(
     Ok(())
 }
 
-fn expand_pattern(pattern: &str, source: &ManifestSource, src_path: &Path) -> Result<String> {
-    let mut result = pattern.to_string();
-
-    // Build substitution map
-    let mut vars: HashMap<&str, String> = HashMap::new();
-
-    // Built-in variables from source path
-    if let Some(filename) = src_path.file_name().and_then(|s| s.to_str()) {
-        vars.insert("filename", filename.to_string());
-    }
-    if let Some(stem) = src_path.file_stem().and_then(|s| s.to_str()) {
-        vars.insert("stem", stem.to_string());
-    }
-    if let Some(ext) = src_path.extension().and_then(|s| s.to_str()) {
-        vars.insert("ext", ext.to_string());
-    }
-
-    // Source ID and hash
-    vars.insert("id", source.id.to_string());
-    if let Some(ref hash) = source.hash_value {
-        vars.insert("hash", hash.clone());
-        vars.insert("hash_short", hash.chars().take(8).collect());
-    }
-
-    // Date/time from facts (if available)
-    if let Some(dt) = source.facts.get("exif.datetime_original") {
-        if let Some(ts) = dt.as_i64() {
-            let dt = chrono::DateTime::from_timestamp(ts, 0);
-            if let Some(dt) = dt {
-                vars.insert("year", dt.format("%Y").to_string());
-                vars.insert("month", dt.format("%m").to_string());
-                vars.insert("day", dt.format("%d").to_string());
-                vars.insert("date", dt.format("%Y-%m-%d").to_string());
-            }
-        }
-    }
-
-    // Add all facts as variables
-    for (key, value) in &source.facts {
-        let str_value = match value {
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::Bool(b) => b.to_string(),
-            _ => continue,
-        };
-        // Replace dots with underscores for fact keys to make them valid in patterns
-        let safe_key = key.replace('.', "_");
-        vars.insert(Box::leak(safe_key.into_boxed_str()), str_value);
-    }
-
-    // Perform substitutions
-    for (key, value) in &vars {
-        let placeholder = format!("{{{}}}", key);
-        result = result.replace(&placeholder, value);
-    }
-
-    // Check for unresolved placeholders
-    if result.contains('{') && result.contains('}') {
-        // Extract unresolved placeholder for error message
-        if let Some(start) = result.find('{') {
-            if let Some(end) = result[start..].find('}') {
-                let unresolved = &result[start..start + end + 1];
-                bail!(
-                    "Unresolved placeholder {} in pattern. Available: {:?}",
-                    unresolved,
-                    vars.keys().collect::<Vec<_>>()
-                );
-            }
-        }
-    }
-
-    // Sanitize path (remove potentially dangerous characters)
-    let result = result
-        .replace("..", "_")
-        .replace('\0', "_");
-
-    Ok(result)
-}
