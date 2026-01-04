@@ -277,6 +277,21 @@ impl<'a> Parser<'a> {
             return Ok(Expr::In { key, values });
         }
 
+        // Check for NOT IN: key NOT IN (v1, v2, ...)
+        if matches!(self.peek(), Some(Token::Not)) {
+            let saved_pos = self.pos;
+            self.advance(); // consume NOT
+            if matches!(self.peek(), Some(Token::In)) {
+                self.advance(); // consume IN
+                self.expect(&Token::LParen)?;
+                let values = self.parse_value_list()?;
+                self.expect(&Token::RParen)?;
+                return Ok(Expr::Not(Box::new(Expr::In { key, values })));
+            }
+            // Not followed by IN, restore position
+            self.pos = saved_pos;
+        }
+
         // Comparison: key op value
         let op = match self.advance() {
             Some(Token::Op(op)) => *op,
