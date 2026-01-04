@@ -32,6 +32,7 @@ struct ApplyStats {
 pub struct ApplyOptions {
     pub dry_run: bool,
     pub allow_cross_archive_duplicates: bool,
+    pub allow_duplicates: bool,
     pub roots: Vec<String>,
     pub transfer_mode: TransferMode,
 }
@@ -226,7 +227,7 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     // Check archive conflicts
     let conflicts = check_archive_conflicts_filtered(conn, &filtered_sources, manifest.output.archive_root_id)?;
 
-    if !conflicts.in_dest_archive.is_empty() {
+    if !conflicts.in_dest_archive.is_empty() && !options.allow_duplicates {
         eprintln!(
             "Error: {} files already exist in destination archive:",
             conflicts.in_dest_archive.len()
@@ -234,6 +235,7 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         for (src, dst) in &conflicts.in_dest_archive {
             eprintln!("  {} -> {}", src, dst);
         }
+        eprintln!("\nUse --allow-duplicates to copy anyway (to different paths)");
         bail!("Aborting due to files already in destination archive");
     }
 

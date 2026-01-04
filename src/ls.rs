@@ -267,3 +267,151 @@ fn format_path(full_path: &str, cwd: Option<&str>) -> String {
         full_path.to_string()
     }
 }
+
+fn format_size(bytes: i64) -> String {
+    const KB: i64 = 1024;
+    const MB: i64 = 1024 * KB;
+    const GB: i64 = 1024 * MB;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// Show sources with duplicate content, grouped by hash
+pub fn show_duplicates(
+    db: &Db,
+    scope_path: Option<&Path>,
+    filter_strs: &[String],
+    include_archived: bool,
+    include_excluded: bool,
+) -> Result<()> {
+    let conn = db.conn();
+
+    // Parse filters
+    let filters: Vec<Filter> = filter_strs
+        .iter()
+        .map(|f| Filter::parse(f))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Resolve scope path
+    let scope_prefix = canonicalize_scope(scope_path)?;
+
+    // Get excluded count for reporting
+    let excluded_count = if !include_excluded {
+        exclude::count_excluded(conn, scope_prefix.as_deref(), include_archived)?
+    } else {
+        0
+    };
+
+    // Get all matching source IDs
+    let source_ids = get_matching_sources(conn, &scope_prefix, &filters, include_archived, include_excluded)?;
+
+    if source_ids.is_empty() {
+        eprintln!("No sources match the given filters.");
+        if !include_excluded && excluded_count > 0 {
+            eprintln!("({} excluded sources hidden, use --include-excluded to show)", excluded_count);
+        }
+        return Ok(());
+    }
+
+    // Find duplicate groups: object_ids that appear more than once
+    let duplicate_groups = find_duplicate_groups(conn, &source_ids)?;
+
+    if duplicate_groups.is_empty() {
+        println!("No duplicates found.");
+        if !include_excluded && excluded_count > 0 {
+            eprintln!("({} excluded sources hidden, use --include-excluded to show)", excluded_count);
+        }
+        return Ok(());
+    }
+
+    // Print each duplicate group
+    let mut total_sources = 0usize;
+    for (hash, size, sources) in &duplicate_groups {
+        let short_hash = if hash.len() > 12 { &hash[..12] } else { hash };
+        let size_str = format_size(*size);
+        println!("[{}...] {} sources, {}:", short_hash, sources.len(), size_str);
+        for (path, source_id) in sources {
+            println!("  {} (id: {})", path, source_id);
+        }
+        println!();
+        total_sources += sources.len();
+    }
+
+    // Summary
+    println!("Found {} duplicate groups ({} sources)", duplicate_groups.len(), total_sources);
+    if !include_excluded && excluded_count > 0 {
+        eprintln!("({} excluded sources hidden, use --include-excluded to show)", excluded_count);
+    }
+
+    Ok(())
+}
+
+/// Find groups of sources that share the same object_id (content hash)
+/// Returns Vec of (hash_value, size, Vec<(path, source_id)>)
+fn find_duplicate_groups(
+    conn: &Connection,
+    source_ids: &[i64],
+) -> Result<Vec<(String, i64, Vec<(String, i64)>)>> {
+    use std::collections::HashMap;
+
+    if source_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Build a map of object_id -> (hash, size, sources)
+    let mut object_map: HashMap<i64, (String, i64, Vec<(String, i64)>)> = HashMap::new();
+
+    for &source_id in source_ids {
+        // Get source info including object_id, hash, and size
+        let result: Option<(i64, String, i64, String, String)> = conn
+            .query_row(
+                "SELECT s.object_id, o.hash_value, s.size, r.path, s.rel_path
+                 FROM sources s
+                 JOIN roots r ON s.root_id = r.id
+                 JOIN objects o ON s.object_id = o.id
+                 WHERE s.id = ? AND s.object_id IS NOT NULL",
+                [source_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .ok();
+
+        if let Some((object_id, hash, size, root_path, rel_path)) = result {
+            let full_path = if rel_path.is_empty() {
+                root_path
+            } else {
+                format!("{}/{}", root_path, rel_path)
+            };
+
+            object_map
+                .entry(object_id)
+                .or_insert_with(|| (hash, size, Vec::new()))
+                .2
+                .push((full_path, source_id));
+        }
+    }
+
+    // Filter to only groups with 2+ sources
+    let mut groups: Vec<(String, i64, Vec<(String, i64)>)> = object_map
+        .into_values()
+        .filter(|(_, _, sources)| sources.len() > 1)
+        .collect();
+
+    // Sort sources within each group by path
+    for (_, _, sources) in &mut groups {
+        sources.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    // Sort groups by first path (so related duplicates appear near each other)
+    groups.sort_by(|a, b| {
+        a.2.first().map(|(p, _)| p.as_str()).cmp(&b.2.first().map(|(p, _)| p.as_str()))
+    });
+
+    Ok(groups)
+}

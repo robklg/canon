@@ -72,14 +72,17 @@ enum Commands {
         #[arg(long = "where")]
         filters: Vec<String>,
         /// Only show archived sources (use --archived=show to include archive paths)
-        #[arg(long, value_name = "MODE", num_args = 0..=1, default_missing_value = "list", conflicts_with_all = ["unarchived", "unhashed"])]
+        #[arg(long, value_name = "MODE", num_args = 0..=1, default_missing_value = "list", conflicts_with_all = ["unarchived", "unhashed", "duplicates"])]
         archived: Option<String>,
         /// Only show unarchived sources (hashed but not in any archive)
-        #[arg(long, conflicts_with_all = ["archived", "unhashed"])]
+        #[arg(long, conflicts_with_all = ["archived", "unhashed", "duplicates"])]
         unarchived: bool,
         /// Only show unhashed sources (no content hash yet)
-        #[arg(long, conflicts_with_all = ["archived", "unarchived"])]
+        #[arg(long, conflicts_with_all = ["archived", "unarchived", "duplicates"])]
         unhashed: bool,
+        /// Show sources with duplicate content (same hash), grouped by hash
+        #[arg(long, conflicts_with_all = ["archived", "unarchived", "unhashed"])]
+        duplicates: bool,
         /// Include sources from archive roots (by default only source roots)
         #[arg(long)]
         include_archived: bool,
@@ -148,6 +151,9 @@ enum Commands {
         /// Allow copying files that exist in other archives (but not destination archive)
         #[arg(long)]
         allow_cross_archive_duplicates: bool,
+        /// Allow copying files that already exist in the destination archive (same content, different path)
+        #[arg(long)]
+        allow_duplicates: bool,
         /// Only apply sources from these roots (id:N or path:/foo/bar, can repeat)
         #[arg(long)]
         root: Vec<String>,
@@ -177,6 +183,9 @@ enum ExcludeAction {
         /// Filter expressions (e.g., "source.size<1000" or "source.ext=tmp")
         #[arg(long = "where")]
         filters: Vec<String>,
+        /// Exclude specific source by ID (as shown in ls --duplicates)
+        #[arg(long)]
+        id: Option<i64>,
         /// Show what would be excluded without making changes
         #[arg(long)]
         dry_run: bool,
@@ -199,6 +208,20 @@ enum ExcludeAction {
         /// Filter expressions to match excluded sources
         #[arg(long = "where")]
         filters: Vec<String>,
+    },
+    /// Exclude duplicate sources, keeping copies in preferred path
+    Duplicates {
+        /// Directory path to scope the operation (resolved to realpath)
+        path: PathBuf,
+        /// Path prefix to prefer (keep sources here, exclude duplicates elsewhere)
+        #[arg(long, required = true)]
+        prefer: PathBuf,
+        /// Filter expressions (e.g., "source.ext=jpg")
+        #[arg(long = "where")]
+        filters: Vec<String>,
+        /// Show what would be excluded without making changes
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -252,6 +275,9 @@ enum ClusterAction {
         /// Show which files were excluded because they're already archived
         #[arg(long)]
         show_archived: bool,
+        /// Allow sources with duplicate content (same hash) in the manifest
+        #[arg(long)]
+        allow_duplicates: bool,
     },
 }
 
@@ -277,7 +303,7 @@ fn main() -> anyhow::Result<()> {
         Commands::ImportFacts { allow_archived } => {
             import_facts::run(&db, allow_archived)?;
         }
-        Commands::Ls { path, filters, archived, unarchived, unhashed, include_archived, include_excluded } => {
+        Commands::Ls { path, filters, archived, unarchived, unhashed, duplicates, include_archived, include_excluded } => {
             // If no path given, check if cwd is inside a root
             let (scope_path, use_relative) = if path.is_none() {
                 let cwd = std::env::current_dir()?;
@@ -289,7 +315,11 @@ fn main() -> anyhow::Result<()> {
                 let use_rel = !path.as_ref().unwrap().starts_with("/");
                 (path, use_rel)
             };
-            ls::run(&db, scope_path.as_deref(), &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative)?;
+            if duplicates {
+                ls::show_duplicates(&db, scope_path.as_deref(), &filters, include_archived, include_excluded)?;
+            } else {
+                ls::run(&db, scope_path.as_deref(), &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative)?;
+            }
         }
         Commands::Facts { action, key, path, filters, limit, all, show_aliases, include_archived, include_excluded } => {
             if show_aliases {
@@ -328,10 +358,12 @@ fn main() -> anyhow::Result<()> {
                 output,
                 include_archived,
                 show_archived,
+                allow_duplicates,
             } => {
                 let options = cluster::GenerateOptions {
                     include_archived,
                     show_archived,
+                    allow_duplicates,
                 };
                 cluster::generate(&db, path.as_deref(), &filters, &dest, &output, &options)?;
             }
@@ -340,6 +372,7 @@ fn main() -> anyhow::Result<()> {
             manifest,
             dry_run,
             allow_cross_archive_duplicates,
+            allow_duplicates,
             root,
             rename,
             move_files,
@@ -355,15 +388,20 @@ fn main() -> anyhow::Result<()> {
             let options = apply::ApplyOptions {
                 dry_run,
                 allow_cross_archive_duplicates,
+                allow_duplicates,
                 roots: root,
                 transfer_mode,
             };
             apply::run(&db, &manifest, &options)?;
         }
         Commands::Exclude { action } => match action {
-            ExcludeAction::Set { path, filters, dry_run } => {
+            ExcludeAction::Set { path, filters, id, dry_run } => {
                 let options = exclude::SetOptions { dry_run };
-                exclude::set(&db, path.as_deref(), &filters, &options)?;
+                if let Some(source_id) = id {
+                    exclude::set_by_id(&db, source_id, &options)?;
+                } else {
+                    exclude::set(&db, path.as_deref(), &filters, &options)?;
+                }
             }
             ExcludeAction::Clear { path, filters, dry_run } => {
                 let options = exclude::ClearOptions { dry_run };
@@ -371,6 +409,9 @@ fn main() -> anyhow::Result<()> {
             }
             ExcludeAction::List { path, filters } => {
                 exclude::list(&db, path.as_deref(), &filters)?;
+            }
+            ExcludeAction::Duplicates { path, prefer, filters, dry_run } => {
+                exclude::exclude_duplicates(&db, &prefer, Some(path.as_path()), &filters, dry_run)?;
             }
         },
     }

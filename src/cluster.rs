@@ -48,6 +48,7 @@ pub struct ManifestSource {
 pub struct GenerateOptions {
     pub include_archived: bool,
     pub show_archived: bool,
+    pub allow_duplicates: bool,
 }
 
 pub fn generate(
@@ -102,6 +103,22 @@ pub fn generate(
     if sources.is_empty() {
         println!("No sources matched the query");
         return Ok(());
+    }
+
+    // Check for source duplicates (same content hash)
+    if !options.allow_duplicates {
+        let duplicate_groups = find_source_duplicates(&sources);
+        if !duplicate_groups.is_empty() {
+            let total_dup_sources: usize = duplicate_groups.iter().map(|(_, v)| v.len()).sum();
+            bail!(
+                "Found {} duplicate groups ({} sources with identical content)\n\
+                 Use `canon ls --duplicates` to see details (supports [path] and --where filters).\n\
+                 Use `canon exclude duplicates --prefer <path>` to resolve.\n\
+                 Use --allow-duplicates to include them anyway.",
+                duplicate_groups.len(),
+                total_dup_sources
+            );
+        }
     }
 
     // Collect facts with 100% coverage for help comments
@@ -549,4 +566,25 @@ fn generate_fact_help(sources: &[ManifestSource], full_coverage_facts: &[(String
     help.push_str("\n");
 
     help
+}
+
+/// Find duplicate sources (same object_id) within the manifest sources
+/// Returns Vec of (object_id, Vec<source_id>)
+fn find_source_duplicates(sources: &[ManifestSource]) -> Vec<(i64, Vec<i64>)> {
+    let mut object_map: HashMap<i64, Vec<i64>> = HashMap::new();
+
+    for source in sources {
+        if let Some(object_id) = source.object_id {
+            object_map
+                .entry(object_id)
+                .or_default()
+                .push(source.id);
+        }
+    }
+
+    // Return only groups with 2+ sources
+    object_map
+        .into_iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .collect()
 }

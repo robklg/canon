@@ -343,3 +343,211 @@ fn current_timestamp() -> i64 {
         .expect("Time went backwards")
         .as_secs() as i64
 }
+
+/// Exclude a specific source by ID
+pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
+    let conn = db.conn();
+
+    // Verify source exists and get its path
+    let source_info: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT r.path || '/' || s.rel_path, s.basis_rev
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             WHERE s.id = ? AND s.present = 1",
+            [source_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+
+    let Some((path, basis_rev)) = source_info else {
+        anyhow::bail!("Source with id {} not found or not present", source_id);
+    };
+
+    // Check if already excluded
+    if is_excluded(conn, source_id)? {
+        println!("Source already excluded: {}", path);
+        return Ok(());
+    }
+
+    if options.dry_run {
+        println!("Would exclude source (id: {}):", source_id);
+        println!("  {}", path);
+        return Ok(());
+    }
+
+    // Insert exclusion fact
+    let now = current_timestamp();
+    conn.execute(
+        "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev)
+         VALUES ('source', ?, ?, 'true', ?, ?)",
+        params![source_id, POLICY_EXCLUDE_KEY, now, basis_rev],
+    )?;
+
+    println!("Excluded source (id: {}): {}", source_id, path);
+    Ok(())
+}
+
+// ============================================================================
+// Duplicates Command
+// ============================================================================
+
+/// Exclude duplicate sources, keeping copies in the preferred path
+///
+/// Logic:
+/// - scope (path) = which sources are candidates for exclusion
+/// - prefer = where the "keeper" copies should be
+///
+/// For each source in scope, we check if there's a duplicate in the prefer path.
+/// If exactly one duplicate exists in prefer, we exclude the scoped source.
+pub fn exclude_duplicates(
+    db: &Db,
+    prefer_path: &Path,
+    scope_path: Option<&Path>,
+    filter_strs: &[String],
+    dry_run: bool,
+) -> Result<()> {
+    let conn = db.conn();
+
+    // Parse filters
+    let filters: Vec<Filter> = filter_strs
+        .iter()
+        .map(|f| Filter::parse(f))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Resolve paths
+    let scope_prefix = canonicalize_scope(scope_path)?;
+    let prefer_prefix = std::fs::canonicalize(prefer_path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| prefer_path.to_string_lossy().to_string());
+
+    // Get matching sources in scope (candidates for exclusion)
+    let source_ids = get_matching_sources(conn, &scope_prefix, &filters, false)?;
+
+    if source_ids.is_empty() {
+        println!("No sources match the given filters.");
+        return Ok(());
+    }
+
+    // For each scoped source, check if it has duplicates in the prefer path
+    let mut to_exclude: Vec<(i64, String)> = Vec::new();
+    let mut skipped_not_covered = 0usize;
+    let mut skipped_multiple = 0usize;
+    let mut skipped_no_hash = 0usize;
+
+    for &source_id in &source_ids {
+        // Get source info
+        let source_info: Option<(i64, String, String)> = conn
+            .query_row(
+                "SELECT s.object_id, r.path, s.rel_path
+                 FROM sources s
+                 JOIN roots r ON s.root_id = r.id
+                 WHERE s.id = ? AND s.object_id IS NOT NULL",
+                [source_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok();
+
+        let Some((object_id, root_path, rel_path)) = source_info else {
+            skipped_no_hash += 1;
+            continue;
+        };
+
+        let source_path = if rel_path.is_empty() {
+            root_path
+        } else {
+            format!("{}/{}", root_path, rel_path)
+        };
+
+        // Skip if this source is already in the prefer path
+        if source_path.starts_with(&prefer_prefix) || source_path.starts_with(&format!("{}/", prefer_prefix)) {
+            continue;
+        }
+
+        // Find duplicates of this source in the prefer path
+        let prefer_copies: Vec<String> = conn
+            .prepare(
+                "SELECT r.path || '/' || s.rel_path
+                 FROM sources s
+                 JOIN roots r ON s.root_id = r.id
+                 WHERE s.object_id = ? AND s.present = 1 AND s.id != ?
+                   AND (r.path || '/' || s.rel_path LIKE ? || '/%' OR r.path || '/' || s.rel_path = ?)"
+            )?
+            .query_map(params![object_id, source_id, prefer_prefix, prefer_prefix], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        match prefer_copies.len() {
+            0 => {
+                // No copy in prefer path
+                skipped_not_covered += 1;
+            }
+            1 => {
+                // Exactly one copy in prefer path - exclude this source
+                to_exclude.push((source_id, source_path));
+            }
+            _ => {
+                // Multiple copies in prefer path - ambiguous
+                skipped_multiple += 1;
+            }
+        }
+    }
+
+    // Summary header
+    let total_candidates = source_ids.len() - skipped_no_hash;
+    println!("Sources in scope: {} ({} unhashed skipped)", source_ids.len(), skipped_no_hash);
+    println!("  Will exclude: {}", to_exclude.len());
+    println!("  Skipped (no copy in --prefer): {}", skipped_not_covered);
+    println!("  Skipped (multiple copies in --prefer): {}", skipped_multiple);
+    if total_candidates > 0 {
+        let in_prefer_count = total_candidates - to_exclude.len() - skipped_not_covered - skipped_multiple;
+        if in_prefer_count > 0 {
+            println!("  Skipped (already in --prefer): {}", in_prefer_count);
+        }
+    }
+    println!();
+
+    if to_exclude.is_empty() {
+        println!("Nothing to exclude.");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("Would exclude {} sources:", to_exclude.len());
+        for (_, path) in &to_exclude {
+            println!("  {}", path);
+        }
+        println!();
+        println!("Use `canon ls --duplicates` to see remaining duplicates.");
+        return Ok(());
+    }
+
+    // Execute exclusions
+    let now = current_timestamp();
+    let mut excluded_count = 0;
+
+    for (source_id, _) in &to_exclude {
+        // Skip if already excluded
+        if is_excluded(conn, *source_id)? {
+            continue;
+        }
+
+        let basis_rev: i64 = conn.query_row(
+            "SELECT basis_rev FROM sources WHERE id = ?",
+            [source_id],
+            |row| row.get(0),
+        )?;
+
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev)
+             VALUES ('source', ?, ?, 'true', ?, ?)",
+            params![source_id, POLICY_EXCLUDE_KEY, now, basis_rev],
+        )?;
+        excluded_count += 1;
+    }
+
+    println!("Excluded {} sources", excluded_count);
+    println!();
+    println!("Use `canon ls --duplicates` to see remaining duplicates.");
+
+    Ok(())
+}
