@@ -225,7 +225,7 @@ pub fn count_excluded(conn: &Connection, scope_prefix: Option<&str>, include_arc
                 "SELECT COUNT(*) FROM sources s
                  JOIN roots r ON s.root_id = r.id
                  WHERE s.present = 1 AND {}
-                   AND (r.path || '/' || s.rel_path) LIKE ? || '%'
+                   AND (r.path || '/' || s.rel_path) LIKE ? || '/%'
                    AND EXISTS (SELECT 1 FROM facts WHERE entity_type = 'source' AND entity_id = s.id AND key = ?)",
                 role_clause
             ),
@@ -265,7 +265,7 @@ fn get_matching_sources(
                 "SELECT s.id FROM sources s
                  JOIN roots r ON s.root_id = r.id
                  WHERE s.present = 1 AND r.role = 'source' AND {} AND s.id > ?
-                   AND (r.path || '/' || s.rel_path) LIKE ? || '%'
+                   AND (r.path || '/' || s.rel_path) LIKE ? || '/%'
                  ORDER BY s.id LIMIT ?",
                 exclude_clause
             ))?
@@ -312,7 +312,7 @@ fn get_excluded_sources(
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
                  WHERE s.present = 1 AND r.role = 'source' AND s.id > ?
-                   AND (r.path || '/' || s.rel_path) LIKE ? || '%'
+                   AND (r.path || '/' || s.rel_path) LIKE ? || '/%'
                    AND EXISTS (
                        SELECT 1 FROM facts
                        WHERE entity_type = 'source' AND entity_id = s.id AND key = ?

@@ -118,7 +118,7 @@ fn get_matching_sources(
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
                  WHERE s.present = 1 AND {} AND {} AND s.id > ?
-                   AND (r.path || '/' || s.rel_path) LIKE ? || '%'
+                   AND (r.path || '/' || s.rel_path) LIKE ? || '/%'
                  ORDER BY s.id
                  LIMIT ?",
                 role_clause, exclude_clause

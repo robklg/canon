@@ -138,7 +138,7 @@ fn compute_scoped_stats(
 
     // Build path clause
     let path_clause = if scope_prefix.is_some() {
-        "(r.path || '/' || s.rel_path) LIKE ? || '%'"
+        "(r.path || '/' || s.rel_path) LIKE ? || '/%'"
     } else {
         "1=1"
     };
