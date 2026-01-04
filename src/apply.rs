@@ -210,7 +210,10 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
 
     // Pre-flight checks (mandatory, always run)
     eprintln!("Checking {} sources for destination collisions...", filtered_sources.len());
-    let collisions = check_destination_collisions_filtered(&filtered_sources, &pattern, &needed_keys, scope_prefix, &base_dir, conn, &root_paths)?;
+    if options.dry_run {
+        eprintln!("  (skipping source existence checks for speed in dry-run mode)");
+    }
+    let collisions = check_destination_collisions_filtered(&filtered_sources, &pattern, &needed_keys, scope_prefix, &base_dir, conn, &root_paths, options.dry_run)?;
     if !collisions.is_empty() {
         eprintln!(
             "Error: {} destination paths have multiple sources:",
@@ -277,7 +280,17 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         ..Default::default()
     };
 
-    for source in &filtered_sources {
+    let total = filtered_sources.len();
+    let progress_interval = std::cmp::max(total / 20, 1); // Update every 5%
+    eprintln!("Processing {} sources...", total);
+
+    for (i, source) in filtered_sources.iter().enumerate() {
+        // Progress indicator
+        if i > 0 && i % progress_interval == 0 {
+            let pct = (i * 100) / total;
+            eprint!("\r  {}% ({}/{})", pct, i, total);
+        }
+
         match process_source(
             source,
             &pattern,
@@ -301,6 +314,11 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
                 stats.errors += 1;
             }
         }
+    }
+
+    // Clear progress line
+    if total > progress_interval {
+        eprint!("\r  100% ({}/{})\n", total, total);
     }
 
     let mode = if options.dry_run { " (dry-run)" } else { "" };
@@ -347,15 +365,26 @@ fn check_destination_collisions_filtered(
     base_dir: &Path,
     conn: &Connection,
     root_paths: &HashMap<i64, String>,
+    dry_run: bool,
 ) -> Result<Vec<(PathBuf, Vec<String>)>> {
     let mut dest_to_sources: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    let total = sources.len();
+    let progress_interval = std::cmp::max(total / 20, 1); // Update every 5%
 
-    for source in sources {
-        let src_path = Path::new(&source.path);
+    for (i, source) in sources.iter().enumerate() {
+        // Progress indicator
+        if i > 0 && i % progress_interval == 0 {
+            let pct = (i * 100) / total;
+            eprint!("\r  {}% ({}/{})", pct, i, total);
+        }
 
         // Skip sources that don't exist (they'll be skipped during copy anyway)
-        if !src_path.exists() {
-            continue;
+        // In dry-run mode, skip this check for speed (it involves filesystem stat calls)
+        if !dry_run {
+            let src_path = Path::new(&source.path);
+            if !src_path.exists() {
+                continue;
+            }
         }
 
         // Evaluate pattern to get destination path
@@ -366,6 +395,11 @@ fn check_destination_collisions_filtered(
             .entry(dest_path)
             .or_default()
             .push(source.path.clone());
+    }
+
+    // Clear progress line
+    if total > progress_interval {
+        eprint!("\r  100% ({}/{})\n", total, total);
     }
 
     // Filter to only collisions (more than one source per destination)
@@ -390,7 +424,16 @@ fn check_archive_conflicts_filtered(
         in_other_archives: Vec::new(),
     };
 
-    for source in sources {
+    let total = sources.len();
+    let progress_interval = std::cmp::max(total / 20, 1); // Update every 5%
+
+    for (i, source) in sources.iter().enumerate() {
+        // Progress indicator
+        if i > 0 && i % progress_interval == 0 {
+            let pct = (i * 100) / total;
+            eprint!("\r  {}% ({}/{})", pct, i, total);
+        }
+
         if let Some(ref hash) = source.hash_value {
             // Check if this hash exists in any archive
             let archive_match: Option<(i64, String, String)> = conn
@@ -422,6 +465,11 @@ fn check_archive_conflicts_filtered(
         }
     }
 
+    // Clear progress line
+    if total > progress_interval {
+        eprint!("\r  100% ({}/{})\n", total, total);
+    }
+
     Ok(conflicts)
 }
 
@@ -430,11 +478,24 @@ fn check_excluded_sources_filtered(
     sources: &[&ManifestSource],
 ) -> Result<Vec<(i64, String)>> {
     let mut excluded = Vec::new();
+    let total = sources.len();
+    let progress_interval = std::cmp::max(total / 20, 1); // Update every 5%
 
-    for source in sources {
+    for (i, source) in sources.iter().enumerate() {
+        // Progress indicator
+        if i > 0 && i % progress_interval == 0 {
+            let pct = (i * 100) / total;
+            eprint!("\r  {}% ({}/{})", pct, i, total);
+        }
+
         if exclude::is_excluded(conn, source.id)? {
             excluded.push((source.id, source.path.clone()));
         }
+    }
+
+    // Clear progress line
+    if total > progress_interval {
+        eprint!("\r  100% ({}/{})\n", total, total);
     }
 
     Ok(excluded)
@@ -464,7 +525,7 @@ fn process_source(
     // Check if source exists
     if !src_path.exists() {
         if options.dry_run {
-            println!("SKIP (missing): {}", source.path);
+            println!("[dry-run] SKIP (missing): {}", source.path);
         }
         return Ok(ApplyAction::SkippedMissing);
     }
@@ -483,15 +544,15 @@ fn process_source(
     if options.dry_run {
         match options.transfer_mode {
             TransferMode::Copy => {
-                println!("COPY: {} -> {}", source.path, dest_path.display());
+                println!("[dry-run] COPY: {} -> {}", source.path, dest_path.display());
                 return Ok(ApplyAction::Copied);
             }
             TransferMode::Rename => {
-                println!("RENAME: {} -> {}", source.path, dest_path.display());
+                println!("[dry-run] RENAME: {} -> {}", source.path, dest_path.display());
                 return Ok(ApplyAction::Renamed);
             }
             TransferMode::Move => {
-                println!("MOVE: {} -> {} (will delete source; may copy if cross-device)", source.path, dest_path.display());
+                println!("[dry-run] MOVE: {} -> {} (would delete source; may copy if cross-device)", source.path, dest_path.display());
                 return Ok(ApplyAction::Moved);
             }
         }
