@@ -337,7 +337,7 @@ fn main() -> anyhow::Result<()> {
                 (paths, use_rel)
             };
             if duplicates {
-                ls::show_duplicates(&db, &scope_paths, &filters, include_archived, include_excluded)?;
+                ls::show_duplicates(&db, &scope_paths, &filters, include_archived, include_excluded, use_relative)?;
             } else {
                 ls::run(&db, &scope_paths, &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative)?;
             }

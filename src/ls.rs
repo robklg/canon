@@ -295,6 +295,7 @@ pub fn show_duplicates(
     filter_strs: &[String],
     include_archived: bool,
     include_excluded: bool,
+    use_relative_paths: bool,
 ) -> Result<()> {
     let conn = db.conn();
 
@@ -306,6 +307,16 @@ pub fn show_duplicates(
 
     // Resolve scope paths
     let scope_prefixes = canonicalize_scopes(scope_paths)?;
+
+    // Get cwd for relative path display (must be canonicalized to match DB paths)
+    let cwd = if use_relative_paths {
+        std::env::current_dir()
+            .ok()
+            .and_then(|p| std::fs::canonicalize(p).ok())
+            .and_then(|p| p.to_str().map(String::from))
+    } else {
+        None
+    };
 
     // Get excluded count for reporting (use first scope for count, or none)
     let excluded_count = if !include_excluded {
@@ -343,7 +354,8 @@ pub fn show_duplicates(
         let size_str = format_size(*size);
         println!("[{}...] {} sources, {}:", short_hash, sources.len(), size_str);
         for (path, source_id) in sources {
-            println!("  {} (id: {})", path, source_id);
+            let display_path = format_path(path, cwd.as_deref());
+            println!("  {} (id: {})", display_path, source_id);
         }
         println!();
         total_sources += sources.len();
