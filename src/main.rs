@@ -12,6 +12,7 @@ mod facts;
 mod filter;
 mod import_facts;
 mod ls;
+mod roots;
 mod scan;
 mod worklist;
 
@@ -196,6 +197,11 @@ enum Commands {
         #[command(subcommand)]
         action: ExcludeAction,
     },
+    /// List and manage roots
+    Roots {
+        #[command(subcommand)]
+        action: Option<RootsAction>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -273,6 +279,20 @@ enum FactsAction {
         #[arg(long)]
         stale: bool,
         /// Execute deletion (default is dry-run)
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RootsAction {
+    /// List all roots
+    List,
+    /// Remove a root and its sources from the database (files on disk are not deleted)
+    Rm {
+        /// Root specifier: id:<N> or path:<path>
+        spec: String,
+        /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
     },
@@ -487,6 +507,14 @@ fn main() -> anyhow::Result<()> {
             }
             ExcludeAction::Duplicates { path, prefer, filters, dry_run } => {
                 exclude::exclude_duplicates(&db, &prefer, Some(path.as_path()), &filters, dry_run)?;
+            }
+        },
+        Commands::Roots { action } => match action {
+            Some(RootsAction::List) | None => {
+                roots::list(&db)?;
+            }
+            Some(RootsAction::Rm { spec, yes }) => {
+                roots::remove(&db, &spec, yes)?;
             }
         },
     }
