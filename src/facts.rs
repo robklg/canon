@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use crate::db::{build_scope_clause, canonicalize_scopes, populate_temp_sources, Connection, Db};
 use crate::exclude;
+use crate::expr::{self, FactValue, Modifier, PathAccessor};
 use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;
@@ -55,6 +56,44 @@ fn is_builtin_or_derived(key: &str) -> bool {
         || DERIVED_FACTS_DEFAULT.contains(&key) || DERIVED_FACTS_HIDDEN.contains(&key)
 }
 
+/// Apply accessor and modifiers to a FactValue, returning a string for grouping
+fn apply_transforms(
+    value: FactValue,
+    accessor: &Option<PathAccessor>,
+    modifiers: &[Modifier],
+    key: &str,
+) -> Result<String> {
+    let mut result = value;
+
+    // Apply accessor if present
+    if let Some(acc) = accessor {
+        result = expr::apply_accessor(&result, acc, key)?;
+    }
+
+    // Apply modifiers
+    for modifier in modifiers {
+        result = expr::apply_modifier(&result, *modifier, key)?;
+    }
+
+    // Convert to string for grouping
+    Ok(match result {
+        FactValue::Text(t) => t,
+        FactValue::Path(p) => p,
+        FactValue::Num(n) => {
+            if n.fract() == 0.0 {
+                format!("{}", n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
+        FactValue::Time(ts) => {
+            chrono::DateTime::from_timestamp(ts, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| ts.to_string())
+        }
+    })
+}
+
 pub fn run(db: &mut Db, key_arg: Option<&str>, scope_paths: &[PathBuf], filter_strs: &[String], limit: usize, show_all: bool, include_archived: bool, include_excluded: bool) -> Result<()> {
     let conn = db.conn_mut();
 
@@ -89,10 +128,18 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, scope_paths: &[PathBuf], filter_s
     println!("Sources matching filters: {}\n", total_sources);
 
     if let Some(fact_key) = key_arg {
-        if is_builtin_or_derived(fact_key) {
-            show_builtin_distribution(conn, &source_ids, fact_key, total_sources, limit)?;
+        // Parse key for accessor and modifiers
+        let (base_key, accessor, modifiers) = expr::parse_key_with_modifiers(fact_key)?;
+        let has_transforms = accessor.is_some() || !modifiers.is_empty();
+
+        if is_builtin_or_derived(&base_key) {
+            show_builtin_distribution(conn, &source_ids, &base_key, fact_key, &accessor, &modifiers, total_sources, limit)?;
+        } else if has_transforms {
+            // Stored fact with transforms - need to fetch raw values and apply transforms
+            show_transformed_distribution(conn, &source_ids, &base_key, fact_key, &accessor, &modifiers, total_sources, limit)?;
         } else {
-            show_value_distribution(conn, &source_ids, fact_key, total_sources, limit)?;
+            // Stored fact without transforms - use SQL grouping
+            show_value_distribution(conn, &source_ids, &base_key, total_sources, limit)?;
         }
     } else {
         show_all_keys(conn, &source_ids, total_sources, show_all)?;
@@ -375,10 +422,14 @@ fn show_value_distribution(
     Ok(())
 }
 
-fn show_builtin_distribution(
+/// Show distribution for stored facts with transforms (accessor/modifiers)
+fn show_transformed_distribution(
     conn: &mut Connection,
     source_ids: &[i64],
-    key: &str,
+    base_key: &str,
+    display_key: &str,
+    accessor: &Option<PathAccessor>,
+    modifiers: &[Modifier],
     total_sources: usize,
     limit: usize,
 ) -> Result<()> {
@@ -391,17 +442,119 @@ fn show_builtin_distribution(
     // Build temp table
     populate_temp_sources(conn, source_ids)?;
 
-    let category = get_fact_category(key);
+    // Fetch raw values and apply transforms
+    // Query both source and object facts
+    let rows: Vec<(Option<String>, Option<f64>, Option<i64>)> = conn
+        .prepare(
+            "SELECT DISTINCT
+                 COALESCE(f.value_text, NULL) as text_val,
+                 COALESCE(f.value_num, NULL) as num_val,
+                 COALESCE(f.value_time, NULL) as time_val
+             FROM (
+                 SELECT ts.id, f.value_text, f.value_num, f.value_time
+                 FROM temp_sources ts
+                 JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?1
+
+                 UNION ALL
+
+                 SELECT ts.id, f.value_text, f.value_num, f.value_time
+                 FROM temp_sources ts
+                 JOIN sources s ON s.id = ts.id
+                 JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1
+                 WHERE s.object_id IS NOT NULL
+             ) f"
+        )?
+        .query_map([base_key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    let mut sources_with_fact: i64 = 0;
+
+    for (text_val, num_val, time_val) in rows {
+        let fact_value = if let Some(t) = text_val {
+            FactValue::Text(t)
+        } else if let Some(n) = num_val {
+            FactValue::Num(n)
+        } else if let Some(ts) = time_val {
+            FactValue::Time(ts)
+        } else {
+            continue;
+        };
+
+        sources_with_fact += 1;
+        let transformed = apply_transforms(fact_value, accessor, modifiers, display_key)?;
+        *counts.entry(transformed).or_insert(0) += 1;
+    }
+
+    // Clean up temp table
+    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+
+    // Sort by count descending
+    let mut results: Vec<(String, i64)> = counts.into_iter().collect();
+    results.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Apply limit
+    if limit > 0 && results.len() > limit {
+        results.truncate(limit);
+    }
+
+    // Print header
+    println!("{:<40} {:>10} {:>10}", display_key, "Count", "Coverage");
+    println!("{}", "─".repeat(62));
+
+    for (value, count) in &results {
+        let display_val = if value.is_empty() {
+            "(empty)".to_string()
+        } else if value.len() > 38 {
+            format!("{}...", &value[..35])
+        } else {
+            value.clone()
+        };
+        let coverage = (*count as f64 / total_sources as f64) * 100.0;
+        println!("{:<40} {:>10} {:>9.1}%", display_val, count, coverage);
+    }
+
+    // Show "(no value)" count
+    let without_fact = total_sources as i64 - sources_with_fact;
+    if without_fact > 0 {
+        let coverage = (without_fact as f64 / total_sources as f64) * 100.0;
+        println!("{:<40} {:>10} {:>9.1}%", "(no value)", without_fact, coverage);
+    }
+
+    Ok(())
+}
+
+fn show_builtin_distribution(
+    conn: &mut Connection,
+    source_ids: &[i64],
+    base_key: &str,
+    display_key: &str,
+    accessor: &Option<PathAccessor>,
+    modifiers: &[Modifier],
+    total_sources: usize,
+    limit: usize,
+) -> Result<()> {
+    use std::collections::HashMap;
+
+    if source_ids.is_empty() {
+        return Ok(());
+    }
+
+    // Build temp table
+    populate_temp_sources(conn, source_ids)?;
+
+    let category = get_fact_category(base_key);
     let category_str = match category {
         FactCategory::BuiltIn => "built-in",
         FactCategory::Derived => "derived",
         FactCategory::Stored => "stored",
     };
-    let label = format!("{} ({})", key, category_str);
+    let label = format!("{} ({})", display_key, category_str);
 
+    let has_transforms = accessor.is_some() || !modifiers.is_empty();
     let mut counts: HashMap<String, i64> = HashMap::new();
 
-    match key {
+    match base_key {
         "source.ext" => {
             let rows: Vec<String> = conn
                 .prepare("SELECT rel_path FROM sources WHERE id IN (SELECT id FROM temp_sources)")?
@@ -414,7 +567,12 @@ fn show_builtin_distribution(
                     .and_then(|e| e.to_str())
                     .map(|e| e.to_lowercase())
                     .unwrap_or_default();
-                *counts.entry(ext).or_insert(0) += 1;
+                let val = if has_transforms {
+                    apply_transforms(FactValue::Text(ext), accessor, modifiers, display_key)?
+                } else {
+                    ext
+                };
+                *counts.entry(val).or_insert(0) += 1;
             }
         }
         "source.size" => {
@@ -424,20 +582,26 @@ fn show_builtin_distribution(
                 .collect::<Result<Vec<_>, _>>()?;
 
             for size in rows {
-                let bucket = if size < 1024 {
-                    "< 1 KB"
-                } else if size < 1024 * 1024 {
-                    "1 KB - 1 MB"
-                } else if size < 10 * 1024 * 1024 {
-                    "1 MB - 10 MB"
-                } else if size < 100 * 1024 * 1024 {
-                    "10 MB - 100 MB"
-                } else if size < 1024 * 1024 * 1024 {
-                    "100 MB - 1 GB"
+                let val = if has_transforms {
+                    apply_transforms(FactValue::Num(size as f64), accessor, modifiers, display_key)?
                 } else {
-                    "> 1 GB"
+                    // Default: size buckets
+                    let bucket = if size < 1024 {
+                        "< 1 KB"
+                    } else if size < 1024 * 1024 {
+                        "1 KB - 1 MB"
+                    } else if size < 10 * 1024 * 1024 {
+                        "1 MB - 10 MB"
+                    } else if size < 100 * 1024 * 1024 {
+                        "10 MB - 100 MB"
+                    } else if size < 1024 * 1024 * 1024 {
+                        "100 MB - 1 GB"
+                    } else {
+                        "> 1 GB"
+                    };
+                    bucket.to_string()
                 };
-                *counts.entry(bucket.to_string()).or_insert(0) += 1;
+                *counts.entry(val).or_insert(0) += 1;
             }
         }
         "source.mtime" => {
@@ -447,10 +611,15 @@ fn show_builtin_distribution(
                 .collect::<Result<Vec<_>, _>>()?;
 
             for mtime in rows {
-                let year = chrono::DateTime::from_timestamp(mtime, 0)
-                    .map(|dt| dt.format("%Y").to_string())
-                    .unwrap_or_else(|| "(unknown)".to_string());
-                *counts.entry(year).or_insert(0) += 1;
+                let val = if has_transforms {
+                    apply_transforms(FactValue::Time(mtime), accessor, modifiers, display_key)?
+                } else {
+                    // Default: group by year
+                    chrono::DateTime::from_timestamp(mtime, 0)
+                        .map(|dt| dt.format("%Y").to_string())
+                        .unwrap_or_else(|| "(unknown)".to_string())
+                };
+                *counts.entry(val).or_insert(0) += 1;
             }
         }
         "source.path" => {
@@ -469,7 +638,12 @@ fn show_builtin_distribution(
                 } else {
                     format!("{}/{}", root_path, rel_path)
                 };
-                *counts.entry(full_path).or_insert(0) += 1;
+                let val = if has_transforms {
+                    apply_transforms(FactValue::Path(full_path), accessor, modifiers, display_key)?
+                } else {
+                    full_path
+                };
+                *counts.entry(val).or_insert(0) += 1;
             }
         }
         "source.root" => {
@@ -483,7 +657,12 @@ fn show_builtin_distribution(
                 .collect::<Result<Vec<_>, _>>()?;
 
             for root_path in rows {
-                *counts.entry(root_path).or_insert(0) += 1;
+                let val = if has_transforms {
+                    apply_transforms(FactValue::Path(root_path), accessor, modifiers, display_key)?
+                } else {
+                    root_path
+                };
+                *counts.entry(val).or_insert(0) += 1;
             }
         }
         "source.rel_path" => {
@@ -493,7 +672,12 @@ fn show_builtin_distribution(
                 .collect::<Result<Vec<_>, _>>()?;
 
             for rel_path in rows {
-                *counts.entry(rel_path).or_insert(0) += 1;
+                let val = if has_transforms {
+                    apply_transforms(FactValue::Path(rel_path), accessor, modifiers, display_key)?
+                } else {
+                    rel_path
+                };
+                *counts.entry(val).or_insert(0) += 1;
             }
         }
         "source.device" => {
@@ -503,7 +687,16 @@ fn show_builtin_distribution(
                 .collect::<Result<Vec<_>, _>>()?;
 
             for device in rows {
-                let val = device.map(|d| d.to_string()).unwrap_or_else(|| "(null)".to_string());
+                let val = match device {
+                    Some(d) => {
+                        if has_transforms {
+                            apply_transforms(FactValue::Num(d as f64), accessor, modifiers, display_key)?
+                        } else {
+                            d.to_string()
+                        }
+                    }
+                    None => "(null)".to_string(),
+                };
                 *counts.entry(val).or_insert(0) += 1;
             }
         }
@@ -514,7 +707,16 @@ fn show_builtin_distribution(
                 .collect::<Result<Vec<_>, _>>()?;
 
             for inode in rows {
-                let val = inode.map(|i| i.to_string()).unwrap_or_else(|| "(null)".to_string());
+                let val = match inode {
+                    Some(i) => {
+                        if has_transforms {
+                            apply_transforms(FactValue::Num(i as f64), accessor, modifiers, display_key)?
+                        } else {
+                            i.to_string()
+                        }
+                    }
+                    None => "(null)".to_string(),
+                };
                 *counts.entry(val).or_insert(0) += 1;
             }
         }
@@ -530,7 +732,12 @@ fn show_builtin_distribution(
                     .and_then(|f| f.to_str())
                     .unwrap_or(&rel_path)
                     .to_string();
-                *counts.entry(filename).or_insert(0) += 1;
+                let val = if has_transforms {
+                    apply_transforms(FactValue::Text(filename), accessor, modifiers, display_key)?
+                } else {
+                    filename
+                };
+                *counts.entry(val).or_insert(0) += 1;
             }
         }
         _ => return Ok(()),

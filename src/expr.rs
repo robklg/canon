@@ -281,7 +281,7 @@ fn parse_accessor(s: &str) -> Result<PathAccessor> {
 }
 
 /// Parse a modifier name
-fn parse_modifier(s: &str) -> Result<Modifier> {
+pub fn parse_modifier(s: &str) -> Result<Modifier> {
     match s.to_lowercase().as_str() {
         "year" => Ok(Modifier::Year),
         "month" => Ok(Modifier::Month),
@@ -305,6 +305,26 @@ fn parse_modifier(s: &str) -> Result<Modifier> {
             s
         ),
     }
+}
+
+/// Parse a key string that may contain accessors and modifiers: "source.rel_path[-1]|stem"
+/// Returns (base_key, accessor, modifiers)
+pub fn parse_key_with_modifiers(key: &str) -> Result<(String, Option<PathAccessor>, Vec<Modifier>)> {
+    // Split by | first to separate modifiers
+    let parts: Vec<&str> = key.split('|').collect();
+    let key_part = parts[0];
+
+    // Parse accessor from the key part
+    let (base_key, accessor) = parse_key_and_accessor(key_part)?;
+
+    // Parse modifiers
+    let mut modifiers = Vec::new();
+    for mod_str in &parts[1..] {
+        let modifier = parse_modifier(mod_str.trim())?;
+        modifiers.push(modifier);
+    }
+
+    Ok((base_key, accessor, modifiers))
 }
 
 /// Extract all fact keys referenced by a pattern (for prefetching from DB)

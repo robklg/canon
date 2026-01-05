@@ -607,46 +607,9 @@ fn check_fact_in(conn: &Connection, source_id: i64, key: &str, values: &[String]
 // Modifier and Accessor Parsing
 // ============================================================================
 
-/// Parse a key that may contain accessors and modifiers: "source.rel_path[-1]|stem"
-/// Returns (base_key, accessor, modifiers)
+// Use expr::parse_key_with_modifiers for parsing - just re-export for local use
 fn parse_key_with_modifiers(key: &str) -> Result<(String, Option<expr::PathAccessor>, Vec<expr::Modifier>)> {
-    // Split by | first to separate modifiers
-    let parts: Vec<&str> = key.split('|').collect();
-    let key_part = parts[0];
-
-    // Parse accessor from the key part
-    let (base_key, accessor) = expr::parse_key_and_accessor(key_part)?;
-
-    // Parse modifiers
-    let mut modifiers = Vec::new();
-    for mod_str in &parts[1..] {
-        let modifier = match mod_str.to_lowercase().as_str() {
-            "year" => expr::Modifier::Year,
-            "month" => expr::Modifier::Month,
-            "day" => expr::Modifier::Day,
-            "hour" => expr::Modifier::Hour,
-            "minute" => expr::Modifier::Minute,
-            "second" => expr::Modifier::Second,
-            "date" => expr::Modifier::Date,
-            "time" => expr::Modifier::Time,
-            "datetime" => expr::Modifier::DateTime,
-            "yearmonth" => expr::Modifier::YearMonth,
-            "week" => expr::Modifier::Week,
-            "weekday" => expr::Modifier::Weekday,
-            "quarter" => expr::Modifier::Quarter,
-            "stem" => expr::Modifier::Stem,
-            "ext" => expr::Modifier::Ext,
-            "short" => expr::Modifier::Short,
-            _ => bail!(
-                "Unknown modifier '{}'. Available: year, month, day, hour, minute, second, \
-                 date, time, datetime, yearmonth, week, weekday, quarter, stem, ext, short",
-                mod_str
-            ),
-        };
-        modifiers.push(modifier);
-    }
-
-    Ok((base_key, accessor, modifiers))
+    expr::parse_key_with_modifiers(key)
 }
 
 /// Apply accessor and modifiers to a FactValue using the expr module

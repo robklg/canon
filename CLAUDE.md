@@ -46,7 +46,7 @@ Canon is a CLI tool for organizing large media libraries into a "canonical archi
 - `worklist` - Output sources as JSONL for external processing
 - `import-facts` - Import facts from JSONL on stdin
 - `ls` - List sources matching filters (supports `-l` for long format)
-- `facts` - Show fact coverage and value distribution
+- `facts` - Show fact coverage and value distribution (`--key` supports modifiers/accessors)
 - `coverage` - Show archive coverage statistics
 - `compare` - Compare two folders by content hash
 - `cluster generate` - Generate manifest from matching sources

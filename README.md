@@ -215,13 +215,22 @@ canon facts /path/to/photos
 canon facts --where 'source.ext=jpg'
 
 # Value distribution for a specific fact
-canon facts content.Make
+canon facts --key content.Make
+
+# With modifiers: group mtime by year-month
+canon facts --key source.mtime|yearmonth
+
+# With accessors: distribution by top-level directory
+canon facts --key source.rel_path[0]
+
+# Combine accessor and modifier: distribution by filename extension
+canon facts --key source.rel_path[-1]|ext
 
 # Show hidden built-in facts
 canon facts --all
 
 # Unlimited results (default is 50)
-canon facts content.hash.sha256 --limit 0
+canon facts --key content.hash.sha256 --limit 0
 
 # Include sources from archive roots
 canon facts --include-archived
