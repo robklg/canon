@@ -61,7 +61,7 @@ pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
         eprintln!("Files on disk will NOT be deleted.");
         eprintln!();
         eprintln!("To see which sources will be forgotten:");
-        eprintln!("  canon ls path:{}", path);
+        eprintln!("  canon ls {}", path);
         eprintln!();
         eprint!("Proceed? [y/N] ");
         io::stderr().flush()?;

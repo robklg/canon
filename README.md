@@ -2,7 +2,23 @@
 
 A CLI tool for organizing large media libraries into a canonical archive.
 
-Canon helps you deduplicate, organize, and archive large collections of files (photos, videos, documents) by tracking content hashes and metadata, then generating organized output structures.
+Canon helps you deduplicate, organize, and archive large collections of files (photos, videos, documents) by tracking content hashes and metadata, then generating organized output structures. All metadata is stored in a local SQLite database (`~/.canon/canon.db`).
+
+**Non-destructive by design:** Canon doesn't make changes to your filesystem until you explicitly run `canon apply` (without `--dry-run`). You can safely scan, enrich, and explore your library. Even `apply` is defensive: it validates integrity, never overwrites existing files, and requires confirmation for move operations.
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Core Concepts](#core-concepts)
+- [Commands](#commands)
+  - [Scan](#scan) – scan, roots
+  - [Enrich](#enrich) – worklist, import-facts
+  - [Discover](#discover) – ls, facts, coverage, compare
+  - [Organize](#organize) – exclude, cluster, apply
+- [Filter Syntax](#filter-syntax)
+- [Workflows](#workflows)
+- [Built-in Facts Reference](#built-in-facts-reference)
 
 ## Installation
 
@@ -16,26 +32,35 @@ The binary will be at `./target/release/canon`.
 
 Canon is designed to be used iteratively and incrementally.
 Instead of a single destructive run, you gradually build up metadata, apply policies, and converge on a canonical archive over time.
-Typical workflows involve scanning, extracting metadata, organizing a subset of files, and repeating as coverage improves.
 
 ```bash
-# 1. Scan your files
-canon scan --add /path/to/photos
+# Scan – index your source files and existing archive
+canon scan --add --role source /path/to/photos
+canon scan --add --role source /path/to/backup-drive/photos
+canon scan --add --role archive /Volumes/Archive
 
-# 2. Compute content hashes
-canon worklist --where 'NOT content.hash.sha256?' | ./scripts/hash-worklist.sh | canon import-facts
+# Enrich – compute content hashes for all roots
+canon worklist --where 'NOT content.hash.sha256?' \
+  | ./scripts/hash-worklist.sh \
+  | canon import-facts
+canon worklist --where 'NOT content.hash.sha256?' --include-archived \
+  | ./scripts/hash-worklist.sh \
+  | canon import-facts --allow-archived
 
-# 3. See what you have
+# Enrich – extract EXIF metadata for date-based organization
+canon worklist --where 'source.ext|lowercase~jp?g' --where 'NOT content.DateTimeOriginal?' \
+  | canonargs --json -- exiftool -json -DateTimeOriginal {} \
+  | canon import-facts
+
+# Discover – see what you have and what's already archived
+canon ls
 canon facts
 canon coverage
 
-# 4. Generate a manifest for organizing files
-canon cluster generate --where 'content.hash.sha256?' --dest /path/to/archive
-
-# 5. Preview what would be copied
+# Organize – generate manifest, edit pattern, preview, and apply
+canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive/Photos
+# Edit manifest.toml: set pattern = "{content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{filename}"
 canon apply manifest.toml --dry-run
-
-# 6. Apply the manifest
 canon apply manifest.toml
 ```
 
@@ -47,11 +72,14 @@ A **source** is a file discovered on disk. Canon tracks:
 - Location (root + relative path)
 - Physical identity (device + inode)
 - Size and modification time
+- Partial hash for integrity validation during transfers
 - A `basis_rev` that increments when the file changes
 
 ### Objects
 
-An **object** represents unique content identified by its hash. Multiple sources can point to the same object (duplicates). Objects are created when you import a content hash.
+An **object** represents unique content identified by its hash. Multiple sources can point to the same object (duplicates). Objects are created when you import a content hash (`hash.sha256`) via the [Enrich](#enrich) pipeline.
+
+Content hashing is essential: it enables deduplication, archive tracking, and integrity validation. Sources without a content hash cannot be organized into an archive.
 
 ### Facts
 
@@ -70,25 +98,33 @@ A **root** is a top-level directory that Canon tracks. Roots have a role:
 - `source` - Where your unorganized files live (default)
 - `archive` - Where organized files are stored
 
-By default, Canon will not copy files into an archive if an identical object already exists there
+By default, Canon will not copy files into an archive if an identical object already exists there.
 
 ## Commands
+
+Commands follow a typical workflow: **Scan → Enrich → Discover → Organize**
+
+---
+
+## Scan
+
+Index files and manage roots.
 
 ### canon scan
 
 Scan directories and index files.
 
 ```bash
-# Add a new root and scan it (--add required for new roots)
-canon scan --add /path/to/photos
+# Add a new root and scan it (--add and --role required for new roots)
+canon scan --add --role source /path/to/photos
 
 # Scan multiple new roots
-canon scan --add /path/to/photos /path/to/more/photos
+canon scan --add --role source /path/to/photos /path/to/more/photos
 
 # Add as an archive root (for tracking already-organized files)
-canon scan --add /path/to/archive --role archive
+canon scan --add --role archive /path/to/archive
 
-# Re-scan an existing root
+# Re-scan an existing root (--role optional, validated against existing)
 canon scan /path/to/photos
 
 # Scan just a subtree within an existing root
@@ -100,11 +136,76 @@ Output shows what was found:
 Scanned 1234 files: 100 new, 5 updated, 2 moved, 1127 unchanged, 0 missing
 ```
 
+### canon roots
+
+List and manage registered roots.
+
+```bash
+# List all roots with file counts
+canon roots
+
+# Remove a root by ID (files on disk are NOT deleted)
+canon roots rm id:1
+
+# Remove a root by path
+canon roots rm path:/path/to/photos
+
+# Skip confirmation prompt
+canon roots rm id:1 --yes
+```
+
+Example output:
+```
+ID   ROLE       FILES  PATH
+1    source     16635  /path/to/photos
+2    archive   169941  /path/to/archive
+```
+
+When removing a root, Canon suggests using `canon ls <path>` to preview which sources will be forgotten. The root and all its sources are removed from the database, but files on disk are not deleted.
+
+---
+
+## Enrich
+
+Add metadata to indexed files using external processors.
+
+**Content hashing is required** before files can be organized into an archive. You should hash both your source files and any existing archive files (to enable deduplication and archive tracking).
+
+Canon uses a pipeline model for enrichment: `worklist` outputs sources, an external processor reads files and extracts metadata, then `import-facts` stores the results.
+
+```
+canon worklist → processor → canon import-facts
+```
+
+Example pipeline to compute content hashes:
+```bash
+# Hash source files
+canon worklist --where 'NOT content.hash.sha256?' | ./scripts/hash-worklist.sh | canon import-facts
+
+# Hash existing archive files (for deduplication tracking)
+canon worklist --include-archived --where 'NOT content.hash.sha256?' | ./scripts/hash-worklist.sh | canon import-facts --allow-archived
+```
+
+### Writing processors
+
+The `canonargs` helper (in `canonargs/`) reduces boilerplate when writing processors. It handles the worklist input, runs a command for each file, and emits facts in the correct format.
+
+```bash
+# Extract a single fact (command outputs one value)
+canon worklist | canonargs --fact mime -- file -b --mime-type {} | canon import-facts
+
+# Extract key=value pairs (one per line)
+canon worklist | canonargs --kv -- my-extractor {} | canon import-facts
+
+# Extract JSON object
+canon worklist | canonargs --json -- exiftool -json {} | canon import-facts
+```
+
+Processors can be chained since `canonargs` passes through the path and merges facts.
+
 ### canon worklist
 
 Output sources as JSONL for processing by external tools.
-
-A worklist is a snapshot of sources at a point in time. If files change, fact imports may be skipped.
 
 ```bash
 # All sources (from source roots only)
@@ -128,6 +229,36 @@ Output format (one JSON object per line):
 {"source_id":123,"path":"/full/path/to/file.jpg","root_id":1,"size":1024,"mtime":1703980800,"basis_rev":0}
 ```
 
+The worklist is a snapshot of sources at a point in time. Each entry includes `basis_rev` which tracks file changes.
+
+### canon import-facts
+
+Import facts from JSONL on stdin. Designed to receive output from a processor that read the worklist.
+
+```bash
+canon worklist | some-processor | canon import-facts
+
+# Allow importing facts for sources in archive roots
+canon worklist --include-archived | some-processor | canon import-facts --allow-archived
+```
+
+Input format (processor output):
+```json
+{"source_id":123,"basis_rev":0,"facts":{"hash.sha256":"abc123...","mime":"image/jpeg"}}
+```
+
+The processor must pass through `source_id` and `basis_rev` from the worklist entry. If `basis_rev` doesn't match the source's current value, the import is skipped (the file changed since the worklist was generated).
+
+Facts are automatically namespaced under `content.*`. The special key `hash.sha256` creates/links an object.
+
+By default, importing facts for sources in archive roots is skipped. Use `--allow-archived` to enable this (useful for backfilling metadata on already-archived files).
+
+---
+
+## Discover
+
+Explore and analyze your library.
+
 ### canon ls
 
 List sources matching filters. Useful for quick inspection and piping to other tools.
@@ -138,6 +269,9 @@ canon ls .
 
 # List sources matching a filter
 canon ls --where 'source.ext=jpg'
+
+# Filter by source ID
+canon ls --where 'source.id=12345'
 
 # List only archived sources (content exists in an archive)
 canon ls --archived
@@ -176,29 +310,6 @@ vacation/img002.jpg
 work/doc.pdf
 3 sources
 ```
-
-### canon import-facts
-
-Import facts from JSONL on stdin.
-
-```bash
-# Import facts from a processor
-some-processor | canon import-facts
-
-# Allow importing facts for sources in archive roots
-some-processor | canon import-facts --allow-archived
-```
-
-Input format:
-```json
-{"source_id":123,"basis_rev":0,"facts":{"hash.sha256":"abc123...","mime":"image/jpeg"}}
-```
-
-Facts are automatically namespaced under `content.*`. The special key `hash.sha256` creates/links an object.
-
-If `basis_rev` doesn't match the source's current value, the import is skipped (the file changed since the worklist was generated).
-
-By default, importing facts for sources in archive roots is skipped. Use `--allow-archived` to enable this (useful for backfilling metadata on already-archived files).
 
 ### canon facts
 
@@ -356,99 +467,11 @@ Output shows:
 
 Exit code is 0 if identical, 1 if differences found.
 
-### canon cluster generate
+---
 
-Generate a manifest of files matching filters. The `--dest` flag specifies where files will be copied and must be inside a registered archive root.
+## Organize
 
-```bash
-# All files with content hashes to an archive
-canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive/Photos
-
-# Destination can be a subdirectory within an archive
-canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive/Photos/2024
-
-# Custom output file
-canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive -o my-manifest.toml
-
-# Include sources from archive roots
-canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive --include-archived
-
-# Show which files were excluded (already archived)
-canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive --show-archived
-```
-
-The manifest is a TOML file containing the query, output pattern, archive root ID, and all matching sources with their facts.
-
-### canon apply
-
-Apply a manifest to copy/move files. Copied files are automatically registered in the database with the same content hash, so they're immediately recognized as archived (no separate `scan` needed).
-
-```bash
-# Preview what would happen (fast - skips source existence checks)
-canon apply manifest.toml --dry-run
-
-# Copy files (default mode, preserves mtime/permissions on Unix)
-canon apply manifest.toml
-
-# Show per-file progress during transfer
-canon apply manifest.toml --verbose
-
-# Rename files instead of copying (Unix only, fails on cross-device)
-canon apply manifest.toml --rename
-
-# Move files: rename if same device, copy+delete if cross-device
-canon apply manifest.toml --move --yes
-
-# Only apply sources from specific roots
-canon apply manifest.toml --root id:1 --root id:2
-canon apply manifest.toml --root path:/path/to/source
-
-# Allow duplicates across archives (but not within destination)
-canon apply manifest.toml --allow-cross-archive-duplicates
-```
-
-**Transfer modes:**
-
-| Flag | Behavior |
-|------|----------|
-| (default) | Copy + preserve mtime/permissions (Unix) |
-| `--rename` | Atomic rename; fails if cross-device (Unix only) |
-| `--move` | Try rename; fallback to copy+delete on cross-device (Unix only, requires `--yes`) |
-
-All modes use noclobber semantics: if a destination file exists, apply aborts with an error.
-
-**Root filtering:**
-
-Use `--root` to apply only a subset of sources from the manifest. Useful for staged application when sources are on different drives.
-
-- `--root id:N` - Filter by root ID (shown in manifest as `root_id`)
-- `--root path:/path` - Filter by root path (must match exactly)
-
-**Pre-flight checks** (mandatory):
-
-1. **Destination collisions** - If multiple sources would map to the same destination path (e.g., using `{filename}` when sources have duplicate names), apply aborts with an error showing which files conflict. This prevents silent data loss.
-
-2. **Archive conflicts** - Checks if files already exist in the destination archive or other archives.
-
-3. **Excluded sources** - Blocks if any sources in the manifest are marked as excluded.
-
-Edit the manifest's `[output]` section to customize the destination:
-
-```toml
-[output]
-pattern = "{year}/{month}/{filename}"
-base_dir = "/path/to/archive"
-```
-
-Available pattern variables:
-- `{filename}` - Original filename
-- `{stem}` - Filename without extension
-- `{ext}` - File extension
-- `{hash}` - Full content hash
-- `{hash_short}` - First 8 characters of hash
-- `{id}` - Source ID
-- `{year}`, `{month}`, `{day}`, `{date}` - From EXIF DateTimeOriginal
-- Any fact key with dots replaced by underscores (e.g., `{content_Make}`)
+Mark exclusions, generate manifests, and copy files.
 
 ### canon exclude
 
@@ -507,26 +530,172 @@ This is useful for deduplicating across backup drives while keeping the "canonic
 | `cluster generate` | Always skips excluded | No override (hard gate) |
 | `apply` | Blocks if manifest has excluded | No override (hard gate) |
 
-Example output with `--include-excluded`:
+Exclusions are stored as `policy.exclude` facts on sources.
+
+### canon cluster generate
+
+Generate a manifest of files matching filters. The `--dest` flag specifies where files will be copied and must be inside a registered archive root.
+
+```bash
+# All files with content hashes to an archive
+canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive/Photos
+
+# Destination can be a subdirectory within an archive
+canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive/Photos/2024
+
+# Scope to a specific path
+canon cluster generate /path/to/photos --where 'content.hash.sha256?' --dest /Volumes/Archive
+
+# Custom output file
+canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive -o my-manifest.toml
+
+# Include sources from archive roots
+canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive --include-archived
+
+# Show which files were excluded (already archived)
+canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive --show-archived
+
+# Overwrite existing manifest file
+canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive --force
 ```
-canon coverage --include-excluded
 
-Archive Coverage Report
+The command generates two files: a manifest (`.toml`) that you edit, and a lock file (`.lock`) containing the source list.
 
-Root: /path/to/backup (source)
-  Total sources:     1,234
-  Excluded:             50 (4.1%)
-  Included:          1,184
-  Hashed:            1,050 (88.7% of included)
-  Archived:            800 (76.2% of hashed)
-  Unarchived:          250
+**Typical workflow:**
+
+```bash
+canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive
+# Edit manifest.toml to customize the output pattern
+canon apply manifest.toml --dry-run   # Preview
+canon apply manifest.toml             # Execute
 ```
 
-Exclusions are stored as `policy.exclude` facts on sources. Use `canon facts policy.exclude` to see them.
+**Manifest structure:**
+
+The generated manifest includes helpful comments listing all available pattern variables, modifiers, and aliases based on the facts present in your sources:
+
+```toml
+# Available facts for pattern (100% coverage on 1234 sources):
+#
+# Built-in:
+#   filename           text   - Filename (last path component)
+#   source.ext         text   - File extension
+#   source.mtime       time   - Modification time
+#   ...
+#
+# Content facts:
+#   content.Make       text
+#   content.Model      text
+#   ...
+#
+# Modifiers:
+#   Time: |year |month |day |date ...
+#   String: |stem |ext |lowercase ...
+
+[output]
+pattern = "{filename}"           # ← Edit this to customize organization
+base_dir = "/Volumes/Archive"
+archive_root_id = 2
+```
+
+**Common output patterns:**
+
+```toml
+# Flat (default) - all files in base_dir
+pattern = "{filename}"
+
+# By EXIF date
+pattern = "{content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{filename}"
+
+# By EXIF date with hash prefix (avoids collisions)
+pattern = "{content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{hash_short}_{filename}"
+
+# By camera model
+pattern = "{content.Make}/{content.Model}/{filename}"
+
+# By file type
+pattern = "{source.ext}/{filename}"
+```
+
+Use `canon cluster refresh manifest.toml` to update the lock file if sources have changed since generation.
+
+### canon apply
+
+Apply a manifest to copy/move files. Copied files are automatically registered in the database with the same content hash, so they're immediately recognized as archived (no separate `scan` needed).
+
+```bash
+# Preview what would happen (fast - skips source existence checks)
+canon apply manifest.toml --dry-run
+
+# Copy files (default mode, preserves mtime/permissions on Unix)
+canon apply manifest.toml
+
+# Show per-file progress during transfer
+canon apply manifest.toml --verbose
+
+# Rename files instead of copying (Unix only, fails on cross-device)
+canon apply manifest.toml --rename
+
+# Move files: rename if same device, copy+delete if cross-device
+canon apply manifest.toml --move --yes
+
+# Only apply sources from specific roots
+canon apply manifest.toml --root id:1 --root id:2
+canon apply manifest.toml --root path:/path/to/source
+
+# Allow duplicates across archives (but not within destination)
+canon apply manifest.toml --allow-cross-archive-duplicates
+```
+
+**Transfer modes:**
+
+| Flag | Behavior |
+|------|----------|
+| (default) | Copy + preserve mtime/permissions (Unix) |
+| `--rename` | Atomic rename; fails if cross-device (Unix only) |
+| `--move` | Try rename; fallback to copy+delete on cross-device (Unix only, requires `--yes`) |
+
+All modes use noclobber semantics: if a destination file exists, apply aborts with an error.
+
+**Integrity validation:**
+
+During transfer, Canon validates each source file's partial hash (first 8KB + last 8KB) to detect file corruption or modification since the manifest was generated. If validation fails, the transfer is aborted.
+
+**Root filtering:**
+
+Use `--root` to apply only a subset of sources from the manifest. Useful for staged application when sources are on different drives.
+
+- `--root id:N` - Filter by root ID (shown in manifest as `root_id`)
+- `--root path:/path` - Filter by root path (must match exactly)
+
+**Pre-flight checks** (mandatory):
+
+1. **Destination collisions** - If multiple sources would map to the same destination path (e.g., using `{filename}` when sources have duplicate names), apply aborts with an error showing which files conflict.
+
+2. **Archive conflicts** - Checks if files already exist in the destination archive or other archives.
+
+3. **Excluded sources** - Blocks if any sources in the manifest are marked as excluded.
+
+Edit the manifest's `[output]` section to customize the destination:
+
+```toml
+[output]
+pattern = "{content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{filename}"
+base_dir = "/path/to/archive"
+```
+
+Pattern variables use fact keys with optional modifiers (see [Filter Syntax](#filter-syntax) for the full modifier list):
+- `{filename}`, `{stem}`, `{ext}` - Filename aliases
+- `{hash}`, `{hash_short}` - Content hash aliases
+- `{source.mtime|year}`, `{source.mtime|month}` - File modification date
+- `{content.DateTimeOriginal|year}` - EXIF date with modifier
+- `{content.Make}`, `{content.Model}` - Any fact key
+
+---
 
 ## Filter Syntax
 
-Filters select sources based on facts using a boolean expression language.
+Filters select sources based on facts using a boolean expression language. Most commands accept `--where` to filter which sources they operate on. Multiple `--where` flags are combined with AND.
 
 ### Basic Operators
 
@@ -679,6 +848,8 @@ Python-style indexing for path segments:
 --where 'source.ext=jpg' --where 'content.Make=Apple'
 ```
 
+---
+
 ## Workflows
 
 ### Hash all files
@@ -717,7 +888,7 @@ done | canon import-facts
 canon cluster generate --where 'content.hash.sha256?' --where 'source.ext=jpg' --dest /Volumes/Archive/Photos
 
 # Edit manifest.toml to set output pattern
-# pattern = "{year}/{month}/{date}_{filename}"
+# pattern = "{content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{filename}"
 
 # Preview
 canon apply manifest.toml --dry-run
@@ -727,7 +898,7 @@ canon apply manifest.toml
 
 # Optional: Scan an existing archive to track what's already there
 # (not needed after apply, which auto-registers new files)
-canon scan --add /Volumes/Archive/Photos --role archive
+canon scan --add --role archive /Volumes/Archive/Photos
 ```
 
 ### Find and manage duplicates
@@ -744,26 +915,13 @@ canon exclude duplicates /path/to/photos --prefer /path/to/photos/originals --dr
 canon exclude duplicates /path/to/photos --prefer /path/to/photos/originals
 ```
 
-## Configuration
-
-### Database Location
-
-By default, Canon stores its database at `~/.canon/canon.db`. Override with:
-
-```bash
-canon --db /path/to/my.db scan /photos
-```
-
-### Concurrent Access
-
-Canon uses SQLite in WAL mode with busy timeout, so multiple commands can run simultaneously* (e.g., parallel import-facts pipelines).
-
-*Note that commands that modify the filesystem (apply) should not be run concurrently.
+---
 
 ## Built-in Facts Reference
 
 | Fact | Description |
 |------|-------------|
+| `source.id` | Source database ID (--all only) |
 | `source.ext` | File extension (lowercase) |
 | `source.size` | File size in bytes |
 | `source.mtime` | Modification time (unix timestamp) |
@@ -774,3 +932,5 @@ Canon uses SQLite in WAL mode with busy timeout, so multiple commands can run si
 | `source.inode` | Inode number (--all only) |
 | `content.hash.sha256` | SHA-256 content hash |
 | `policy.exclude` | Source is excluded (set via `canon exclude set`) |
+
+Aliases for patterns: `filename`, `stem`, `ext`, `hash`, `hash_short`, `id`
