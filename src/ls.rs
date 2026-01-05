@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{TimeZone, Utc};
 use rusqlite::types::Value;
 
 use crate::db::{build_scope_clause, canonicalize_scopes, path_strip_prefix, Connection, Db};
@@ -17,6 +18,7 @@ pub fn run(
     include_archived: bool,
     include_excluded: bool,
     use_relative_paths: bool,
+    long_format: bool,
 ) -> Result<()> {
     let archived_only = archived_mode.is_some();
     let show_archive_paths = archived_mode == Some("show");
@@ -60,12 +62,17 @@ pub fn run(
     }
 
     // Apply archived/unarchived/unhashed filter and collect output lines
-    // Each entry is (source_path, optional_archive_path)
-    let mut output_lines: Vec<(String, Option<String>)> = Vec::new();
+    // Each entry is (source_path, optional_archive_path, size, mtime)
+    let mut output_lines: Vec<(String, Option<String>, i64, i64)> = Vec::new();
     let mut unhashed_count = 0usize;
 
     for source_id in &source_ids {
-        let (full_path, object_id) = get_source_path(conn, *source_id)?;
+        let (full_path, object_id, size, mtime) = if long_format {
+            get_source_details(conn, *source_id)?
+        } else {
+            let (path, obj_id) = get_source_path(conn, *source_id)?;
+            (path, obj_id, 0, 0)
+        };
         let formatted_source = format_path(&full_path, cwd.as_deref());
 
         // Check archive status if filtering
@@ -80,10 +87,10 @@ pub fn run(
                         // Get all archive locations for this object
                         let archive_paths = get_archive_paths(conn, obj_id)?;
                         for archive_path in archive_paths {
-                            output_lines.push((formatted_source.clone(), Some(archive_path)));
+                            output_lines.push((formatted_source.clone(), Some(archive_path), size, mtime));
                         }
                     } else if check_archived(conn, obj_id)? {
-                        output_lines.push((formatted_source, None));
+                        output_lines.push((formatted_source, None, size, mtime));
                     }
                 }
             }
@@ -95,23 +102,31 @@ pub fn run(
                 }
                 Some(obj_id) => {
                     if !check_archived(conn, obj_id)? {
-                        output_lines.push((formatted_source, None));
+                        output_lines.push((formatted_source, None, size, mtime));
                     }
                 }
             }
         } else if unhashed_only {
             if object_id.is_none() {
-                output_lines.push((formatted_source, None));
+                output_lines.push((formatted_source, None, size, mtime));
             }
         } else {
             // Default: show all
-            output_lines.push((formatted_source, None));
+            output_lines.push((formatted_source, None, size, mtime));
         }
     }
 
     // Print output (to stdout for pipe-friendliness)
-    for (source_path, archive_path) in &output_lines {
-        if let Some(ap) = archive_path {
+    for (source_path, archive_path, size, mtime) in &output_lines {
+        if long_format {
+            let size_str = format_size(*size);
+            let date_str = format_date(*mtime);
+            if let Some(ap) = archive_path {
+                println!("{:>8}  {}  {}\t{}", size_str, date_str, source_path, ap);
+            } else {
+                println!("{:>8}  {}  {}", size_str, date_str, source_path);
+            }
+        } else if let Some(ap) = archive_path {
             println!("{}\t{}", source_path, ap);
         } else {
             println!("{}", source_path);
@@ -121,7 +136,7 @@ pub fn run(
     // Print footer to stderr
     // Count unique sources (not archive locations)
     let source_count = if show_archive_paths {
-        output_lines.iter().map(|(s, _)| s).collect::<std::collections::HashSet<_>>().len()
+        output_lines.iter().map(|(s, _, _, _)| s).collect::<std::collections::HashSet<_>>().len()
     } else {
         output_lines.len()
     };
@@ -220,6 +235,26 @@ fn get_source_path(conn: &Connection, source_id: i64) -> Result<(String, Option<
     Ok((full_path, object_id))
 }
 
+/// Get source details including size and mtime for long format
+fn get_source_details(conn: &Connection, source_id: i64) -> Result<(String, Option<i64>, i64, i64)> {
+    let (root_path, rel_path, object_id, size, mtime): (String, String, Option<i64>, i64, i64) = conn.query_row(
+        "SELECT r.path, s.rel_path, s.object_id, s.size, s.mtime
+         FROM sources s
+         JOIN roots r ON s.root_id = r.id
+         WHERE s.id = ?",
+        [source_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    )?;
+
+    let full_path = if rel_path.is_empty() {
+        root_path
+    } else {
+        format!("{}/{}", root_path, rel_path)
+    };
+
+    Ok((full_path, object_id, size, mtime))
+}
+
 fn check_archived(conn: &Connection, object_id: i64) -> Result<bool> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(
@@ -286,6 +321,13 @@ fn format_size(bytes: i64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+fn format_date(unix_timestamp: i64) -> String {
+    Utc.timestamp_opt(unix_timestamp, 0)
+        .single()
+        .map(|dt| dt.format("%b %e %Y").to_string())
+        .unwrap_or_else(|| "???".to_string())
 }
 
 /// Show sources with duplicate content, grouped by hash

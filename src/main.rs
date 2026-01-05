@@ -90,6 +90,9 @@ enum Commands {
         /// Include excluded sources (by default they are skipped)
         #[arg(long)]
         include_excluded: bool,
+        /// Use long listing format (size, date, path)
+        #[arg(short = 'l', long)]
+        long: bool,
     },
     /// Show fact coverage and value distribution
     #[command(args_conflicts_with_subcommands = true)]
@@ -324,7 +327,7 @@ fn main() -> anyhow::Result<()> {
         Commands::ImportFacts { allow_archived } => {
             import_facts::run(&db, allow_archived)?;
         }
-        Commands::Ls { paths, filters, archived, unarchived, unhashed, duplicates, include_archived, include_excluded } => {
+        Commands::Ls { paths, filters, archived, unarchived, unhashed, duplicates, include_archived, include_excluded, long } => {
             // If no paths given, check if cwd is inside a root
             let (scope_paths, use_relative) = if paths.is_empty() {
                 let cwd = std::env::current_dir()?;
@@ -339,7 +342,7 @@ fn main() -> anyhow::Result<()> {
             if duplicates {
                 ls::show_duplicates(&db, &scope_paths, &filters, include_archived, include_excluded, use_relative)?;
             } else {
-                ls::run(&db, &scope_paths, &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative)?;
+                ls::run(&db, &scope_paths, &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative, long)?;
             }
         }
         Commands::Facts { action, key, paths, filters, limit, all, show_aliases, include_archived, include_excluded } => {
