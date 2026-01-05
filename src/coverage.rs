@@ -280,26 +280,37 @@ fn compute_stats_from_temp_table(
         |row| row.get(0),
     )?;
 
-    // Hashed sources (have an object_id)
+    // Hashed sources (have an object_id, excluding excluded sources)
     stats.hashed_sources = conn.query_row(
         "SELECT COUNT(*) FROM temp_sources ts
          JOIN sources s ON s.id = ts.id
-         WHERE s.object_id IS NOT NULL",
+         WHERE s.object_id IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM facts f
+               WHERE f.entity_type = 'source' AND f.entity_id = ts.id
+                 AND f.key = 'policy.exclude'
+           )",
         [],
         |row| row.get(0),
     )?;
 
-    // Archived sources
+    // Archived sources (excluding excluded sources)
     if let Some(root_id) = archive_root_id {
         // Specific archive root
         stats.archived_sources = conn.query_row(
             "SELECT COUNT(*) FROM temp_sources ts
              JOIN sources s ON s.id = ts.id
-             WHERE s.object_id IS NOT NULL AND EXISTS (
-                 SELECT 1 FROM sources arch_s
-                 WHERE arch_s.root_id = ?1 AND arch_s.present = 1
-                   AND arch_s.object_id = s.object_id
-             )",
+             WHERE s.object_id IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM facts f
+                   WHERE f.entity_type = 'source' AND f.entity_id = ts.id
+                     AND f.key = 'policy.exclude'
+               )
+               AND EXISTS (
+                   SELECT 1 FROM sources arch_s
+                   WHERE arch_s.root_id = ?1 AND arch_s.present = 1
+                     AND arch_s.object_id = s.object_id
+               )",
             [root_id],
             |row| row.get(0),
         )?;
@@ -308,12 +319,18 @@ fn compute_stats_from_temp_table(
         stats.archived_sources = conn.query_row(
             "SELECT COUNT(*) FROM temp_sources ts
              JOIN sources s ON s.id = ts.id
-             WHERE s.object_id IS NOT NULL AND EXISTS (
-                 SELECT 1 FROM sources arch_s
-                 JOIN roots r ON arch_s.root_id = r.id
-                 WHERE r.role = 'archive' AND arch_s.present = 1
-                   AND arch_s.object_id = s.object_id
-             )",
+             WHERE s.object_id IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM facts f
+                   WHERE f.entity_type = 'source' AND f.entity_id = ts.id
+                     AND f.key = 'policy.exclude'
+               )
+               AND EXISTS (
+                   SELECT 1 FROM sources arch_s
+                   JOIN roots r ON arch_s.root_id = r.id
+                   WHERE r.role = 'archive' AND arch_s.present = 1
+                     AND arch_s.object_id = s.object_id
+               )",
             [],
             |row| row.get(0),
         )?;
