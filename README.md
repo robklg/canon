@@ -160,6 +160,9 @@ canon ls --include-archived
 
 # Include excluded sources
 canon ls --include-excluded
+
+# Long format with size and date
+canon ls -l
 ```
 
 **Path display:**
@@ -546,6 +549,48 @@ Operator precedence (highest to lowest): NOT, AND, OR. Use parentheses to overri
 - Numbers: `1000000`, `-5`, `3.14`
 - Dates: `2024-01-15` or `2024-01-15T12:00:00`
 - Strings: `jpg`, `Apple`, or quoted `"value with spaces"`
+
+### Modifiers
+
+Apply transformations to fact values using `|` syntax:
+
+| Modifier | Description |
+|----------|-------------|
+| `year`, `month`, `day` | Extract date component from timestamp |
+| `hour`, `minute`, `second` | Extract time component |
+| `date`, `time`, `datetime` | Format as date/time string |
+| `yearmonth` | Format as YYYY-MM |
+| `week`, `weekday`, `quarter` | Date calculations |
+| `stem` | Filename without extension |
+| `ext` | File extension |
+| `short` | First 8 characters (for hashes) |
+
+```bash
+# Files from 2024
+--where 'source.mtime|year=2024'
+
+# January photos
+--where 'content.DateTimeOriginal|month=1'
+```
+
+### Path Accessors
+
+Python-style indexing for path segments:
+
+| Syntax | Meaning |
+|--------|---------|
+| `key[-1]` | Last segment (filename) |
+| `key[0]` | First segment |
+| `key[1:3]` | Slice segments |
+| `key[:-1]` | All but last |
+
+```bash
+# Match by filename
+--where 'source.rel_path[-1]=photo.jpg'
+
+# Combine with modifiers
+--where 'source.rel_path[-1]|stem=photo'
+```
 
 ### Examples
 

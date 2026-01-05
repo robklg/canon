@@ -68,21 +68,24 @@ Used with `--where`. Supports full boolean logic:
 --where "(source.ext=jpg OR source.ext=png) AND content.hash.sha256?"
 --where "NOT content.hash.sha256?"
 --where "source.mtime|year=2023"
+--where "source.rel_path[-1]=photo.jpg"
 ```
 
 **Operators**: `=`, `!=`, `>`, `<`, `>=`, `<=`, `IN (a, b, c)`, `NOT IN (...)`, `?` (exists)
 
 **Modifiers**: Apply with `|` syntax (reuses expr.rs): `source.mtime|year`, `content.DateTimeOriginal|month`
 
-**Built-in derived facts**: filter.rs has hardcoded built-ins (like `filename`, `source.ext`) derived at query time. Adding new derived facts requires modifying filter.rs.
+**Path accessors**: Python-style indexing works in filters: `source.rel_path[-1]|stem=photo`
+
+**Built-in derived facts**: filter.rs has hardcoded built-ins (like `filename`, `source.ext`) derived at query time for efficiency. These achieve the same result as the equivalent path accessor expressions (e.g., `filename` vs `source.rel_path[-1]`). Adding new derived facts requires modifying filter.rs.
 
 **Database facts**: Any fact stored via `import-facts` can also be used in filters.
 
 ### Manifest Patterns (expr.rs)
 
-Output patterns in manifests use `{expr}` syntax. More flexible than filter.rs:
+Output patterns in manifests use `{expr}` syntax:
 
-**Path accessors** (Python-style indexing, only in patterns):
+**Path accessors** (Python-style indexing):
 - `{source.rel_path[-1]}` - Last segment (filename)
 - `{source.rel_path[0]}` - First segment
 - `{source.rel_path[1:3]}` - Slice segments

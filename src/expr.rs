@@ -230,7 +230,7 @@ fn parse_expr(s: &str) -> Result<Expr> {
 }
 
 /// Parse key with optional accessor: `source.rel_path[-1]` or `source.rel_path[1:3]`
-fn parse_key_and_accessor(s: &str) -> Result<(String, Option<PathAccessor>)> {
+pub fn parse_key_and_accessor(s: &str) -> Result<(String, Option<PathAccessor>)> {
     if let Some(bracket_start) = s.find('[') {
         let key = s[..bracket_start].to_string();
         let rest = &s[bracket_start..];
@@ -450,7 +450,7 @@ fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
 }
 
 /// Apply a path accessor to a value
-fn apply_accessor(value: &FactValue, accessor: &PathAccessor, key: &str) -> Result<FactValue> {
+pub fn apply_accessor(value: &FactValue, accessor: &PathAccessor, key: &str) -> Result<FactValue> {
     let path_str = match value {
         FactValue::Path(p) => p,
         FactValue::Text(t) => t,
