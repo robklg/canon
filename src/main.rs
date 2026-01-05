@@ -293,6 +293,9 @@ enum ClusterAction {
         /// Output manifest file
         #[arg(short, long, default_value = "manifest.toml")]
         output: PathBuf,
+        /// Overwrite existing output file
+        #[arg(short, long)]
+        force: bool,
         /// Include files already in an archive (by default they are excluded)
         #[arg(long)]
         include_archived: bool,
@@ -404,11 +407,13 @@ fn main() -> anyhow::Result<()> {
                 filters,
                 dest,
                 output,
+                force,
                 include_archived,
                 show_archived,
                 allow_duplicates,
             } => {
                 let options = cluster::GenerateOptions {
+                    force,
                     include_archived,
                     show_archived,
                     allow_duplicates,
@@ -422,6 +427,7 @@ fn main() -> anyhow::Result<()> {
                 allow_duplicates,
             } => {
                 let options = cluster::GenerateOptions {
+                    force: false, // refresh by definition updates existing file
                     include_archived,
                     show_archived,
                     allow_duplicates,

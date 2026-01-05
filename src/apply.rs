@@ -12,6 +12,7 @@ use crate::cluster::{LockEntry, ManifestConfig};
 use crate::db::{parse_root_spec, path_strip_prefix, Connection, Db};
 use crate::exclude;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
+use crate::scan::compute_partial_hash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferMode {
@@ -719,6 +720,17 @@ fn validate_source_state(source: &LockEntry) -> std::result::Result<(), String> 
         }
     }
 
+    // Partial hash check - recompute from disk and compare to lock
+    let current_hash = compute_partial_hash(Path::new(&source.path), source.size as u64)
+        .map_err(|e| format!("failed to compute partial hash: {}", e))?;
+    if current_hash != source.partial_hash {
+        mismatches.push(format!(
+            "partial hash mismatch: {}... → {}...",
+            &source.partial_hash[..16.min(source.partial_hash.len())],
+            &current_hash[..16]
+        ));
+    }
+
     if !mismatches.is_empty() {
         Err(mismatches.join(", "))
     } else {
@@ -835,11 +847,11 @@ fn check_source_states_db(conn: &Connection, sources: &[&LockEntry]) -> Result<V
         }
 
         // Get current DB values for this source
-        let db_state: Option<(i64, i64, i64, i64, bool)> = conn
+        let db_state: Option<(i64, i64, i64, i64, Option<String>, bool)> = conn
             .query_row(
-                "SELECT device, inode, size, mtime, present FROM sources WHERE id = ?",
+                "SELECT device, inode, size, mtime, partial_hash, present FROM sources WHERE id = ?",
                 [source.id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             )
             .optional()?;
 
@@ -850,13 +862,13 @@ fn check_source_states_db(conn: &Connection, sources: &[&LockEntry]) -> Result<V
                     reason: "source not found in DB".to_string(),
                 });
             }
-            Some((_, _, _, _, false)) => {
+            Some((_, _, _, _, _, false)) => {
                 stale.push(SkippedStaleSource {
                     path: source.path.clone(),
                     reason: "source marked not present in DB".to_string(),
                 });
             }
-            Some((db_device, db_inode, db_size, db_mtime, true)) => {
+            Some((db_device, db_inode, db_size, db_mtime, db_partial_hash, true)) => {
                 let mut mismatches = Vec::new();
 
                 if db_device != source.device {
@@ -870,6 +882,18 @@ fn check_source_states_db(conn: &Connection, sources: &[&LockEntry]) -> Result<V
                 }
                 if db_mtime != source.mtime {
                     mismatches.push(format!("mtime: {} → {}", source.mtime, db_mtime));
+                }
+                // Compare partial_hash from lock vs DB
+                if let Some(ref db_hash) = db_partial_hash {
+                    if db_hash != &source.partial_hash {
+                        mismatches.push(format!(
+                            "partial hash: {}... → {}...",
+                            &source.partial_hash[..16.min(source.partial_hash.len())],
+                            &db_hash[..16.min(db_hash.len())]
+                        ));
+                    }
+                } else {
+                    mismatches.push("partial hash: missing in DB".to_string());
                 }
 
                 if !mismatches.is_empty() {

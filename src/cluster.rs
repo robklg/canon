@@ -49,6 +49,7 @@ pub struct LockEntry {
     pub inode: i64,
     pub size: i64,
     pub mtime: i64,
+    pub partial_hash: String, // SHA256 of first 8KB + last 8KB (for integrity validation)
     // Content info
     pub object_id: Option<i64>,
     pub hash_type: Option<String>,
@@ -58,6 +59,7 @@ pub struct LockEntry {
 }
 
 pub struct GenerateOptions {
+    pub force: bool,
     pub include_archived: bool,
     pub show_archived: bool,
     pub allow_duplicates: bool,
@@ -140,6 +142,15 @@ pub fn generate(
     output_path: &Path,
     options: &GenerateOptions,
 ) -> Result<()> {
+    // Prevent overwriting existing TOML config (unless --force)
+    if output_path.exists() && !options.force {
+        bail!(
+            "Output file '{}' already exists.\n\
+             Use `cluster refresh` to update the lock file, or -f/--force to overwrite.",
+            output_path.display()
+        );
+    }
+
     // Require at least one of path scope or filters
     if scope_paths.is_empty() && filters.is_empty() {
         bail!("At least one of path or --where filter is required");
@@ -313,6 +324,7 @@ fn write_lock_file(
             inode: source.inode,
             size: source.size,
             mtime: source.mtime,
+            partial_hash: source.partial_hash.clone(),
             object_id: source.object_id,
             hash_type: source.hash_type.clone(),
             hash_value: source.hash_value.clone(),
@@ -440,21 +452,29 @@ fn find_in_archive(conn: &Connection, hash_value: &str) -> Result<Option<String>
 }
 
 fn fetch_source(conn: &Connection, source_id: i64) -> Result<Option<LockEntry>> {
-    let row: Option<(i64, i64, String, String, i64, i64, i64, i64, Option<i64>)> = conn
+    let row: Option<(i64, i64, String, String, i64, i64, i64, i64, Option<String>, Option<i64>)> = conn
         .query_row(
-            "SELECT s.id, s.root_id, r.path, s.rel_path, s.device, s.inode, s.size, s.mtime, s.object_id
+            "SELECT s.id, s.root_id, r.path, s.rel_path, s.device, s.inode, s.size, s.mtime, s.partial_hash, s.object_id
              FROM sources s
              JOIN roots r ON s.root_id = r.id
              WHERE s.id = ?",
             [source_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?)),
         )
         .ok();
 
-    let (id, root_id, root_path, rel_path, device, inode, size, mtime, object_id) = match row {
+    let (id, root_id, root_path, rel_path, device, inode, size, mtime, partial_hash, object_id) = match row {
         Some(r) => r,
         None => return Ok(None),
     };
+
+    // Require partial_hash - sources without it need to be rescanned
+    let partial_hash = partial_hash.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Source {} has no partial_hash. Run `canon scan <path>` to rescan.",
+            source_id
+        )
+    })?;
 
     let full_path = if rel_path.is_empty() {
         root_path
@@ -523,6 +543,7 @@ fn fetch_source(conn: &Connection, source_id: i64) -> Result<Option<LockEntry>> 
         inode,
         size,
         mtime,
+        partial_hash,
         object_id,
         hash_type,
         hash_value,

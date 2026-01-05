@@ -1,7 +1,9 @@
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, OptionalExtension};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -201,6 +203,7 @@ fn scan_root(
             conn,
             root_id,
             rel_path_str,
+            full_path,
             device,
             inode,
             size,
@@ -240,6 +243,7 @@ fn process_file(
     conn: &Connection,
     root_id: i64,
     rel_path: &str,
+    full_path: &Path,
     device: i64,
     inode: i64,
     size: i64,
@@ -265,10 +269,11 @@ fn process_file(
 
         if basis_changed {
             let new_basis_rev = old_basis_rev + 1;
+            let partial_hash = compute_partial_hash(full_path, size as u64)?;
             conn.execute(
                 "UPDATE sources SET device = ?, inode = ?, size = ?, mtime = ?,
-                 basis_rev = ?, last_seen_at = ?, present = 1 WHERE id = ?",
-                params![device, inode, size, mtime, new_basis_rev, now, id],
+                 partial_hash = ?, basis_rev = ?, last_seen_at = ?, present = 1 WHERE id = ?",
+                params![device, inode, size, mtime, partial_hash, new_basis_rev, now, id],
             )?;
             return Ok(ProcessResult {
                 source_id: id,
@@ -308,11 +313,21 @@ fn process_file(
             old_basis_rev
         };
 
-        conn.execute(
-            "UPDATE sources SET root_id = ?, rel_path = ?, size = ?, mtime = ?,
-             basis_rev = ?, last_seen_at = ?, present = 1 WHERE id = ?",
-            params![root_id, rel_path, size, mtime, new_basis_rev, now, id],
-        )?;
+        // Compute partial hash if basis changed, otherwise keep existing
+        if basis_changed {
+            let partial_hash = compute_partial_hash(full_path, size as u64)?;
+            conn.execute(
+                "UPDATE sources SET root_id = ?, rel_path = ?, size = ?, mtime = ?,
+                 partial_hash = ?, basis_rev = ?, last_seen_at = ?, present = 1 WHERE id = ?",
+                params![root_id, rel_path, size, mtime, partial_hash, new_basis_rev, now, id],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE sources SET root_id = ?, rel_path = ?, size = ?, mtime = ?,
+                 basis_rev = ?, last_seen_at = ?, present = 1 WHERE id = ?",
+                params![root_id, rel_path, size, mtime, new_basis_rev, now, id],
+            )?;
+        }
         return Ok(ProcessResult {
             source_id: id,
             action: FileAction::Moved,
@@ -320,11 +335,12 @@ fn process_file(
     }
 
     // New file
+    let partial_hash = compute_partial_hash(full_path, size as u64)?;
     conn.execute(
         "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime,
-         basis_rev, scanned_at, last_seen_at, present)
-         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 1)",
-        params![root_id, rel_path, device, inode, size, mtime, now, now],
+         partial_hash, basis_rev, scanned_at, last_seen_at, present)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1)",
+        params![root_id, rel_path, device, inode, size, mtime, partial_hash, now, now],
     )?;
 
     Ok(ProcessResult {
@@ -379,4 +395,35 @@ fn current_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs() as i64
+}
+
+const PARTIAL_HASH_CHUNK_SIZE: usize = 8192; // 8KB
+
+/// Compute SHA256 hash of first 8KB + last 8KB of a file.
+/// For files <= 16KB, hash the entire file.
+pub fn compute_partial_hash(path: &Path, size: u64) -> Result<String> {
+    let mut file = File::open(path)
+        .with_context(|| format!("Failed to open file for partial hash: {}", path.display()))?;
+    let mut hasher = Sha256::new();
+
+    if size <= (PARTIAL_HASH_CHUNK_SIZE * 2) as u64 {
+        // Small file - hash entire content
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+        hasher.update(&buf);
+    } else {
+        // Large file - hash first 8KB + last 8KB
+        let mut buf = [0u8; PARTIAL_HASH_CHUNK_SIZE];
+
+        // Read first 8KB
+        file.read_exact(&mut buf)?;
+        hasher.update(&buf);
+
+        // Seek to last 8KB and read
+        file.seek(SeekFrom::End(-(PARTIAL_HASH_CHUNK_SIZE as i64)))?;
+        file.read_exact(&mut buf)?;
+        hasher.update(&buf);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
 }
