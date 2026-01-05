@@ -18,6 +18,8 @@ struct WorklistEntry {
     size: i64,
     mtime: i64,
     basis_rev: i64,
+    #[serde(skip_serializing)]
+    object_id: Option<i64>,
 }
 
 struct FetchResult {
@@ -25,7 +27,7 @@ struct FetchResult {
     max_id_seen: Option<i64>,
 }
 
-pub fn run(db: &Db, scope_paths: &[PathBuf], filter_strs: &[String], include_archived: bool, include_excluded: bool) -> Result<()> {
+pub fn run(db: &Db, scope_paths: &[PathBuf], filter_strs: &[String], include_archived: bool, include_excluded: bool, unique_content: bool) -> Result<()> {
     // Parse filters upfront
     let filters: Vec<Filter> = filter_strs
         .iter()
@@ -46,9 +48,12 @@ pub fn run(db: &Db, scope_paths: &[PathBuf], filter_strs: &[String], include_arc
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let mut last_id: i64 = 0;
+    let mut seen_objects: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut skipped_unhashed: u64 = 0;
+    let mut skipped_duplicate: u64 = 0;
 
     loop {
-        let result = fetch_batch(conn, last_id, &scope_prefixes, &filters, include_archived, include_excluded)?;
+        let result = fetch_batch(conn, last_id, &scope_prefixes, &filters, include_archived, include_excluded, unique_content)?;
 
         // If we didn't see any source IDs, we're done
         let max_id = match result.max_id_seen {
@@ -57,6 +62,20 @@ pub fn run(db: &Db, scope_paths: &[PathBuf], filter_strs: &[String], include_arc
         };
 
         for entry in &result.entries {
+            if unique_content {
+                // Skip sources without an object_id
+                if entry.object_id.is_none() {
+                    skipped_unhashed += 1;
+                    continue;
+                }
+                let object_id = entry.object_id.unwrap();
+                // Skip if we've already emitted a source for this object
+                if seen_objects.contains(&object_id) {
+                    skipped_duplicate += 1;
+                    continue;
+                }
+                seen_objects.insert(object_id);
+            }
             let json = serde_json::to_string(entry)?;
             writeln!(handle, "{}", json)?;
         }
@@ -70,6 +89,9 @@ pub fn run(db: &Db, scope_paths: &[PathBuf], filter_strs: &[String], include_arc
     } else if !include_excluded && excluded_count > 0 {
         eprintln!("Skipped {} excluded sources", excluded_count);
     }
+    if unique_content && (skipped_unhashed > 0 || skipped_duplicate > 0) {
+        eprintln!("Skipped {} unhashed, {} duplicate sources", skipped_unhashed, skipped_duplicate);
+    }
 
     Ok(())
 }
@@ -81,6 +103,7 @@ fn fetch_batch(
     filters: &[Filter],
     include_archived: bool,
     include_excluded: bool,
+    _unique_content: bool,
 ) -> Result<FetchResult> {
     // Build the query based on options
     let role_clause = if include_archived {
@@ -142,9 +165,9 @@ fn fetch_batch(
 }
 
 fn fetch_entry(conn: &Connection, source_id: i64) -> Result<Option<WorklistEntry>> {
-    let row: Option<(i64, String, String, i64, i64, i64, i64)> = conn
+    let row: Option<(i64, String, String, i64, i64, i64, i64, Option<i64>)> = conn
         .query_row(
-            "SELECT s.id, r.path, s.rel_path, s.root_id, s.size, s.mtime, s.basis_rev
+            "SELECT s.id, r.path, s.rel_path, s.root_id, s.size, s.mtime, s.basis_rev, s.object_id
              FROM sources s
              JOIN roots r ON s.root_id = r.id
              WHERE s.id = ?",
@@ -157,11 +180,12 @@ fn fetch_entry(conn: &Connection, source_id: i64) -> Result<Option<WorklistEntry
                 row.get(4)?,
                 row.get(5)?,
                 row.get(6)?,
+                row.get(7)?,
             )),
         )
         .ok();
 
-    Ok(row.map(|(id, root_path, rel_path, root_id, size, mtime, basis_rev)| {
+    Ok(row.map(|(id, root_path, rel_path, root_id, size, mtime, basis_rev, object_id)| {
         let full_path = if rel_path.is_empty() {
             root_path
         } else {
@@ -175,6 +199,7 @@ fn fetch_entry(conn: &Connection, source_id: i64) -> Result<Option<WorklistEntry
             size,
             mtime,
             basis_rev,
+            object_id,
         }
     }))
 }

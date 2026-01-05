@@ -66,6 +66,9 @@ enum Commands {
         /// Include excluded sources (by default they are skipped)
         #[arg(long)]
         include_excluded: bool,
+        /// Emit only one source per unique content hash (sources without a hash are skipped)
+        #[arg(long)]
+        unique_content: bool,
     },
     /// Import facts from JSONL on stdin
     ImportFacts {
@@ -365,8 +368,8 @@ fn main() -> anyhow::Result<()> {
             }
             scan::run(&db, &paths, role.as_deref(), add)?;
         }
-        Commands::Worklist { paths, filters, include_archived, include_excluded } => {
-            worklist::run(&db, &paths, &filters, include_archived, include_excluded)?;
+        Commands::Worklist { paths, filters, include_archived, include_excluded, unique_content } => {
+            worklist::run(&db, &paths, &filters, include_archived, include_excluded, unique_content)?;
         }
         Commands::ImportFacts { allow_archived } => {
             import_facts::run(&db, allow_archived)?;
