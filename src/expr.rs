@@ -41,8 +41,16 @@ pub enum PathAccessor {
     Slice { start: Option<i32>, end: Option<i32> },
 }
 
-/// Modifiers that transform values
+/// Modifier category for grouping
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ModifierCategory {
+    Time,
+    String,
+}
+
+/// Modifiers that transform values
+#[derive(Debug, Clone, Copy, PartialEq, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "lowercase")]
 pub enum Modifier {
     // Time modifiers (for time-type facts)
     Year,
@@ -53,7 +61,9 @@ pub enum Modifier {
     Second,
     Date,      // YYYY-MM-DD
     Time,      // HH:MM:SS
+    #[strum(serialize = "datetime")]
     DateTime,  // YYYY-MM-DDTHH:MM:SS
+    #[strum(serialize = "yearmonth")]
     YearMonth, // YYYY-MM
     Week,
     Weekday,
@@ -65,6 +75,24 @@ pub enum Modifier {
     Lowercase,  // convert to lowercase
     Uppercase,  // convert to uppercase
     Capitalize, // capitalize first letter, lowercase rest
+}
+
+impl Modifier {
+    /// Get the category of this modifier
+    pub const fn category(&self) -> ModifierCategory {
+        match self {
+            Modifier::Year | Modifier::Month | Modifier::Day |
+            Modifier::Hour | Modifier::Minute | Modifier::Second |
+            Modifier::Date | Modifier::Time | Modifier::DateTime |
+            Modifier::YearMonth | Modifier::Week | Modifier::Weekday | Modifier::Quarter => {
+                ModifierCategory::Time
+            }
+            Modifier::Stem | Modifier::Ext | Modifier::Short |
+            Modifier::Lowercase | Modifier::Uppercase | Modifier::Capitalize => {
+                ModifierCategory::String
+            }
+        }
+    }
 }
 
 /// Fact value types for evaluation.
@@ -127,20 +155,175 @@ impl Default for EvalContext {
 }
 
 // ============================================================================
-// Alias Expansion
+// Built-in Keys
 // ============================================================================
 
-/// Known aliases that expand to expressions
-fn expand_alias(name: &str) -> Option<&'static str> {
-    match name {
-        "filename" => Some("source.rel_path[-1]"),
-        "stem" => Some("source.rel_path[-1]|stem"),
-        "ext" => Some("source.rel_path[-1]|ext"),
-        "hash" => Some("object.hash"),
-        "hash_short" => Some("object.hash|short"),
-        "id" => Some("source.id"),
-        _ => None,
+/// Visibility of a built-in key in `canon facts` output
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BuiltinKeyVisibility {
+    /// Shown by default in facts listing
+    Default,
+    /// Only shown with --all flag
+    Hidden,
+    /// Not shown in facts listing (alias-only or special)
+    NotListed,
+}
+
+/// Category of a built-in key for display purposes
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BuiltinKeyCategory {
+    /// Computed directly from source columns
+    BuiltIn,
+    /// Derived/computed from other data
+    Derived,
+    /// Stored in facts table (not computed)
+    Stored,
+}
+
+/// Built-in keys - derived from source/object columns or always-valid fact keys.
+/// These are recognized in filters without checking the facts table.
+/// Some keys also serve as pattern aliases with expansions.
+#[derive(Debug, Clone, Copy, PartialEq, strum::IntoStaticStr, strum::EnumIter)]
+pub enum BuiltinKey {
+    // Source fields (derived from source columns)
+    #[strum(serialize = "source.ext")]
+    SourceExt,
+    #[strum(serialize = "source.size")]
+    SourceSize,
+    #[strum(serialize = "source.mtime")]
+    SourceMtime,
+    #[strum(serialize = "source.path")]
+    SourcePath,
+    #[strum(serialize = "source.root")]
+    SourceRoot,
+    #[strum(serialize = "source.rel_path")]
+    SourceRelPath,
+    #[strum(serialize = "source.device")]
+    SourceDevice,
+    #[strum(serialize = "source.inode")]
+    SourceInode,
+
+    // Aliases (also valid in filters, with pattern expansions)
+    #[strum(serialize = "filename")]
+    Filename,
+    #[strum(serialize = "stem")]
+    Stem,
+    #[strum(serialize = "ext")]
+    Ext,
+    #[strum(serialize = "hash")]
+    Hash,
+    #[strum(serialize = "hash_short")]
+    HashShort,
+    #[strum(serialize = "id")]
+    Id,
+
+    // Legacy shortcuts
+    #[strum(serialize = "size")]
+    Size,
+    #[strum(serialize = "mtime")]
+    Mtime,
+    #[strum(serialize = "root_id")]
+    RootId,
+
+    // Well-known content fact (valid even before any hashing is done)
+    #[strum(serialize = "content.hash.sha256")]
+    ContentHashSha256,
+}
+
+impl BuiltinKey {
+    /// Get the pattern expansion for this key (if it's an alias).
+    /// Used when expanding `{key}` in manifest patterns.
+    pub fn expansion(&self) -> Option<&'static str> {
+        match self {
+            BuiltinKey::Filename => Some("source.rel_path[-1]"),
+            BuiltinKey::Stem => Some("source.rel_path[-1]|stem"),
+            BuiltinKey::Ext => Some("source.rel_path[-1]|ext"),
+            BuiltinKey::Hash => Some("object.hash"),
+            BuiltinKey::HashShort => Some("object.hash|short"),
+            BuiltinKey::Id => Some("source.id"),
+            _ => None,
+        }
     }
+
+    /// Get the visibility of this key in `canon facts` output
+    pub fn visibility(&self) -> BuiltinKeyVisibility {
+        match self {
+            // Default visible
+            BuiltinKey::SourceExt
+            | BuiltinKey::SourceSize
+            | BuiltinKey::SourceMtime
+            | BuiltinKey::SourcePath
+            | BuiltinKey::Filename => BuiltinKeyVisibility::Default,
+
+            // Hidden
+            BuiltinKey::SourceRoot
+            | BuiltinKey::SourceRelPath
+            | BuiltinKey::SourceDevice
+            | BuiltinKey::SourceInode => BuiltinKeyVisibility::Hidden,
+
+            // Not listed (aliases, legacy shortcuts, special keys)
+            BuiltinKey::Stem
+            | BuiltinKey::Ext
+            | BuiltinKey::Hash
+            | BuiltinKey::HashShort
+            | BuiltinKey::Id
+            | BuiltinKey::Size
+            | BuiltinKey::Mtime
+            | BuiltinKey::RootId
+            | BuiltinKey::ContentHashSha256 => BuiltinKeyVisibility::NotListed,
+        }
+    }
+
+    /// Get the category of this key for display purposes
+    pub fn category(&self) -> BuiltinKeyCategory {
+        match self {
+            // Built-in: computed directly from source columns
+            BuiltinKey::SourceExt
+            | BuiltinKey::SourceSize
+            | BuiltinKey::SourceMtime
+            | BuiltinKey::SourceRelPath
+            | BuiltinKey::SourceDevice
+            | BuiltinKey::SourceInode
+            | BuiltinKey::Size
+            | BuiltinKey::Mtime
+            | BuiltinKey::RootId
+            | BuiltinKey::Id => BuiltinKeyCategory::BuiltIn,
+
+            // Derived: computed from other data
+            BuiltinKey::SourcePath
+            | BuiltinKey::SourceRoot
+            | BuiltinKey::Filename
+            | BuiltinKey::Stem
+            | BuiltinKey::Ext => BuiltinKeyCategory::Derived,
+
+            // Stored: lives in facts table
+            BuiltinKey::Hash
+            | BuiltinKey::HashShort
+            | BuiltinKey::ContentHashSha256 => BuiltinKeyCategory::Stored,
+        }
+    }
+
+    /// Try to parse a string as a built-in key
+    pub fn from_str(s: &str) -> Option<BuiltinKey> {
+        use strum::IntoEnumIterator;
+        for key in BuiltinKey::iter() {
+            let name: &'static str = key.into();
+            if name == s {
+                return Some(key);
+            }
+        }
+        None
+    }
+}
+
+/// Check if a key is a built-in (recognized without checking facts table)
+pub fn is_builtin_key(key: &str) -> bool {
+    BuiltinKey::from_str(key).is_some()
+}
+
+/// Get pattern expansion for an alias (if it exists)
+fn expand_alias(name: &str) -> Option<&'static str> {
+    BuiltinKey::from_str(name).and_then(|k| k.expansion())
 }
 
 // ============================================================================
@@ -285,33 +468,23 @@ fn parse_accessor(s: &str) -> Result<PathAccessor> {
 
 /// Parse a modifier name
 pub fn parse_modifier(s: &str) -> Result<Modifier> {
-    match s.to_lowercase().as_str() {
-        "year" => Ok(Modifier::Year),
-        "month" => Ok(Modifier::Month),
-        "day" => Ok(Modifier::Day),
-        "hour" => Ok(Modifier::Hour),
-        "minute" => Ok(Modifier::Minute),
-        "second" => Ok(Modifier::Second),
-        "date" => Ok(Modifier::Date),
-        "time" => Ok(Modifier::Time),
-        "datetime" => Ok(Modifier::DateTime),
-        "yearmonth" => Ok(Modifier::YearMonth),
-        "week" => Ok(Modifier::Week),
-        "weekday" => Ok(Modifier::Weekday),
-        "quarter" => Ok(Modifier::Quarter),
-        "stem" => Ok(Modifier::Stem),
-        "ext" => Ok(Modifier::Ext),
-        "short" => Ok(Modifier::Short),
-        "lowercase" => Ok(Modifier::Lowercase),
-        "uppercase" => Ok(Modifier::Uppercase),
-        "capitalize" => Ok(Modifier::Capitalize),
-        _ => bail!(
-            "Unknown modifier: '{}'. Available: year, month, day, hour, minute, second, \
-             date, time, datetime, yearmonth, week, weekday, quarter, stem, ext, short, \
-             lowercase, uppercase, capitalize",
-            s
-        ),
+    use strum::IntoEnumIterator;
+
+    let lower = s.to_lowercase();
+    for m in Modifier::iter() {
+        let name: &'static str = m.into();
+        if name == lower {
+            return Ok(m);
+        }
     }
+
+    // Build list of available modifiers for error message
+    let available: Vec<&'static str> = Modifier::iter().map(|m| m.into()).collect();
+    bail!(
+        "Unknown modifier: '{}'. Available: {}",
+        s,
+        available.join(", ")
+    )
 }
 
 /// Parse a key string that may contain accessors and modifiers: "source.rel_path[-1]|stem"
@@ -393,58 +566,63 @@ fn evaluate_expr(expr: &Expr, ctx: &EvalContext) -> Result<String> {
 
 /// Get a fact value by key, handling derived facts
 fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
-    // Handle derived/built-in facts first
-    match key {
-        "source.rel_path" => {
-            if let Some(ref rel_path) = ctx.source_rel_path {
-                return Ok(FactValue::Path(rel_path.clone()));
+    // Handle scope.rel_path specially (not a BuiltinKey)
+    if key == "scope.rel_path" {
+        // Derived: strip scope prefix from full path
+        match (&ctx.scope_prefix, &ctx.source_root, &ctx.source_rel_path) {
+            (Some(scope), Some(root), Some(rel_path)) => {
+                let full_path = if rel_path.is_empty() {
+                    root.clone()
+                } else {
+                    format!("{}/{}", root, rel_path)
+                };
+                // Strip scope prefix
+                let scope_rel = if full_path.starts_with(scope) {
+                    let stripped = &full_path[scope.len()..];
+                    stripped.trim_start_matches('/').to_string()
+                } else {
+                    // If scope doesn't match, return full rel_path
+                    rel_path.clone()
+                };
+                return Ok(FactValue::Path(scope_rel));
             }
-            bail!("source.rel_path not available");
+            (None, _, _) => bail!("scope.rel_path not available (no scope was specified during manifest generation)"),
+            _ => bail!("scope.rel_path not available"),
         }
-        "source.root" => {
-            if let Some(ref root) = ctx.source_root {
-                return Ok(FactValue::Path(root.clone()));
-            }
-            bail!("source.root not available");
-        }
-        "source.path" => {
-            // Derived: root + "/" + rel_path
-            match (&ctx.source_root, &ctx.source_rel_path) {
-                (Some(root), Some(rel_path)) => {
-                    let full = if rel_path.is_empty() {
-                        root.clone()
-                    } else {
-                        format!("{}/{}", root, rel_path)
-                    };
-                    return Ok(FactValue::Path(full));
+    }
+
+    // Handle built-in keys via enum
+    if let Some(builtin) = BuiltinKey::from_str(key) {
+        match builtin {
+            BuiltinKey::SourceRelPath => {
+                if let Some(ref rel_path) = ctx.source_rel_path {
+                    return Ok(FactValue::Path(rel_path.clone()));
                 }
-                _ => bail!("source.path not available (requires root and rel_path)"),
+                bail!("source.rel_path not available");
             }
-        }
-        "scope.rel_path" => {
-            // Derived: strip scope prefix from full path
-            match (&ctx.scope_prefix, &ctx.source_root, &ctx.source_rel_path) {
-                (Some(scope), Some(root), Some(rel_path)) => {
-                    let full_path = if rel_path.is_empty() {
-                        root.clone()
-                    } else {
-                        format!("{}/{}", root, rel_path)
-                    };
-                    // Strip scope prefix
-                    let scope_rel = if full_path.starts_with(scope) {
-                        let stripped = &full_path[scope.len()..];
-                        stripped.trim_start_matches('/').to_string()
-                    } else {
-                        // If scope doesn't match, return full rel_path
-                        rel_path.clone()
-                    };
-                    return Ok(FactValue::Path(scope_rel));
+            BuiltinKey::SourceRoot => {
+                if let Some(ref root) = ctx.source_root {
+                    return Ok(FactValue::Path(root.clone()));
                 }
-                (None, _, _) => bail!("scope.rel_path not available (no scope was specified during manifest generation)"),
-                _ => bail!("scope.rel_path not available"),
+                bail!("source.root not available");
             }
+            BuiltinKey::SourcePath => {
+                // Derived: root + "/" + rel_path
+                match (&ctx.source_root, &ctx.source_rel_path) {
+                    (Some(root), Some(rel_path)) => {
+                        let full = if rel_path.is_empty() {
+                            root.clone()
+                        } else {
+                            format!("{}/{}", root, rel_path)
+                        };
+                        return Ok(FactValue::Path(full));
+                    }
+                    _ => bail!("source.path not available (requires root and rel_path)"),
+                }
+            }
+            // Other builtin keys are looked up in facts or not available in patterns
+            _ => {}
         }
-        _ => {}
     }
 
     // Look up in facts
@@ -577,13 +755,16 @@ pub fn apply_modifier(value: &FactValue, modifier: Modifier, key: &str) -> Resul
             let timestamp = match value {
                 FactValue::Time(ts) => *ts,
                 FactValue::Num(n) => *n as i64,
-                _ => bail!(
-                    "Time modifier '{}' requires a time-type fact, but '{}' is {}. \
-                     Time modifiers work with facts stored as value_time in the database.",
-                    modifier_name(modifier),
-                    key,
-                    value_type_name(value)
-                ),
+                _ => {
+                    let name: &'static str = modifier.into();
+                    bail!(
+                        "Time modifier '{}' requires a time-type fact, but '{}' is {}. \
+                         Time modifiers work with facts stored as value_time in the database.",
+                        name,
+                        key,
+                        value_type_name(value)
+                    )
+                }
             };
             apply_time_modifier(timestamp, modifier)
         }
@@ -680,31 +861,6 @@ fn value_type_name(value: &FactValue) -> &'static str {
         FactValue::Path(_) => "path",
         FactValue::Num(_) => "number",
         FactValue::Time(_) => "time",
-    }
-}
-
-/// Get modifier name for error messages
-fn modifier_name(modifier: Modifier) -> &'static str {
-    match modifier {
-        Modifier::Year => "year",
-        Modifier::Month => "month",
-        Modifier::Day => "day",
-        Modifier::Hour => "hour",
-        Modifier::Minute => "minute",
-        Modifier::Second => "second",
-        Modifier::Date => "date",
-        Modifier::Time => "time",
-        Modifier::DateTime => "datetime",
-        Modifier::YearMonth => "yearmonth",
-        Modifier::Week => "week",
-        Modifier::Weekday => "weekday",
-        Modifier::Quarter => "quarter",
-        Modifier::Stem => "stem",
-        Modifier::Ext => "ext",
-        Modifier::Short => "short",
-        Modifier::Lowercase => "lowercase",
-        Modifier::Uppercase => "uppercase",
-        Modifier::Capitalize => "capitalize",
     }
 }
 

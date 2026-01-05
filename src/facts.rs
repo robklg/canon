@@ -4,56 +4,21 @@ use std::path::PathBuf;
 
 use crate::db::{build_scope_clause, canonicalize_scopes, populate_temp_sources, Connection, Db};
 use crate::exclude;
-use crate::expr::{self, FactValue, Modifier, PathAccessor};
+use crate::expr::{self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactValue, Modifier, PathAccessor};
 use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;
 
-// Built-in source facts - computed from stored columns, default visible
-const BUILTIN_FACTS_DEFAULT: &[&str] = &[
-    "source.ext",
-    "source.size",
-    "source.mtime",
-];
-
-// Derived facts - computed from other facts, not stored directly
-const DERIVED_FACTS_DEFAULT: &[&str] = &[
-    "source.path",
-    "filename",
-];
-
-// Built-in source facts - only shown with --all
-const BUILTIN_FACTS_HIDDEN: &[&str] = &[
-    "source.device",
-    "source.inode",
-];
-
-// Derived facts - only shown with --all
-const DERIVED_FACTS_HIDDEN: &[&str] = &[
-    "source.root",
-    "source.rel_path",
-];
-
-#[derive(Clone, Copy, PartialEq)]
-enum FactCategory {
-    BuiltIn,
-    Derived,
-    Stored,
-}
-
-fn get_fact_category(key: &str) -> FactCategory {
-    if BUILTIN_FACTS_DEFAULT.contains(&key) || BUILTIN_FACTS_HIDDEN.contains(&key) {
-        FactCategory::BuiltIn
-    } else if DERIVED_FACTS_DEFAULT.contains(&key) || DERIVED_FACTS_HIDDEN.contains(&key) {
-        FactCategory::Derived
-    } else {
-        FactCategory::Stored
-    }
+fn get_fact_category(key: &str) -> BuiltinKeyCategory {
+    BuiltinKey::from_str(key)
+        .map(|k| k.category())
+        .unwrap_or(BuiltinKeyCategory::Stored)
 }
 
 fn is_builtin_or_derived(key: &str) -> bool {
-    BUILTIN_FACTS_DEFAULT.contains(&key) || BUILTIN_FACTS_HIDDEN.contains(&key)
-        || DERIVED_FACTS_DEFAULT.contains(&key) || DERIVED_FACTS_HIDDEN.contains(&key)
+    BuiltinKey::from_str(key)
+        .map(|k| k.visibility() != BuiltinKeyVisibility::NotListed)
+        .unwrap_or(false)
 }
 
 /// Apply accessor and modifiers to a FactValue, returning a string for grouping
@@ -251,30 +216,26 @@ fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize
     conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
 
     // Add built-in and derived facts at the top (they always have 100% coverage)
-    let mut all_results: Vec<(String, i64, FactCategory)> = BUILTIN_FACTS_DEFAULT
-        .iter()
-        .map(|&name| (name.to_string(), total_sources as i64, FactCategory::BuiltIn))
-        .collect();
+    use strum::IntoEnumIterator;
+    let mut all_results: Vec<(String, i64, BuiltinKeyCategory)> = Vec::new();
 
-    // Add derived facts (default visible)
-    for &name in DERIVED_FACTS_DEFAULT {
-        all_results.push((name.to_string(), total_sources as i64, FactCategory::Derived));
-    }
-
-    // Add hidden built-ins and derived facts if --all flag is set
-    if show_all {
-        for &name in BUILTIN_FACTS_HIDDEN {
-            all_results.push((name.to_string(), total_sources as i64, FactCategory::BuiltIn));
+    for key in BuiltinKey::iter() {
+        let vis = key.visibility();
+        // Skip NotListed keys and Hidden keys (unless --all)
+        if vis == BuiltinKeyVisibility::NotListed {
+            continue;
         }
-        for &name in DERIVED_FACTS_HIDDEN {
-            all_results.push((name.to_string(), total_sources as i64, FactCategory::Derived));
+        if vis == BuiltinKeyVisibility::Hidden && !show_all {
+            continue;
         }
+        let name: &'static str = key.into();
+        all_results.push((name.to_string(), total_sources as i64, key.category()));
     }
 
     // Add stored facts (with Stored category)
-    let stored_results: Vec<(String, i64, FactCategory)> = results
+    let stored_results: Vec<(String, i64, BuiltinKeyCategory)> = results
         .into_iter()
-        .map(|(key, count, _)| (key, count, FactCategory::Stored))
+        .map(|(key, count, _)| (key, count, BuiltinKeyCategory::Stored))
         .collect();
     all_results.extend(stored_results);
 
@@ -285,15 +246,17 @@ fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize
     for (key, count, category) in &all_results {
         let coverage = (*count as f64 / total_sources as f64) * 100.0;
         let suffix = match category {
-            FactCategory::BuiltIn => "  (built-in)",
-            FactCategory::Derived => "  (derived)",
-            FactCategory::Stored => "",
+            BuiltinKeyCategory::BuiltIn => "  (built-in)",
+            BuiltinKeyCategory::Derived => "  (derived)",
+            BuiltinKeyCategory::Stored => "",
         };
         println!("{:<30} {:>10} {:>9.1}%{}", key, count, coverage, suffix);
     }
 
     if !show_all {
-        let hidden_count = BUILTIN_FACTS_HIDDEN.len() + DERIVED_FACTS_HIDDEN.len();
+        let hidden_count = BuiltinKey::iter()
+            .filter(|k| k.visibility() == BuiltinKeyVisibility::Hidden)
+            .count();
         println!("\n({} built-in/derived facts hidden, use --all to show)", hidden_count);
     }
 
@@ -545,9 +508,9 @@ fn show_builtin_distribution(
 
     let category = get_fact_category(base_key);
     let category_str = match category {
-        FactCategory::BuiltIn => "built-in",
-        FactCategory::Derived => "derived",
-        FactCategory::Stored => "stored",
+        BuiltinKeyCategory::BuiltIn => "built-in",
+        BuiltinKeyCategory::Derived => "derived",
+        BuiltinKeyCategory::Stored => "stored",
     };
     let label = format!("{} ({})", display_key, category_str);
 
@@ -1013,15 +976,20 @@ fn format_number(n: i64) -> String {
 // ============================================================================
 
 pub fn show_aliases() {
-    println!("Pattern Aliases (for use in manifest output patterns):");
+    use crate::expr::BuiltinKey;
+    use strum::IntoEnumIterator;
+
+    println!("Pattern Aliases:");
     println!();
-    println!("  {:<15} \u{2192} {}", "filename", "source.rel_path[-1]");
-    println!("  {:<15} \u{2192} {}", "stem", "source.rel_path[-1]|stem");
-    println!("  {:<15} \u{2192} {}", "ext", "source.rel_path[-1]|ext");
-    println!("  {:<15} \u{2192} {}", "hash", "object.hash");
-    println!("  {:<15} \u{2192} {}", "hash_short", "object.hash|short");
-    println!("  {:<15} \u{2192} {}", "id", "source.id");
+
+    for key in BuiltinKey::iter() {
+        if let Some(expansion) = key.expansion() {
+            let name: &'static str = key.into();
+            println!("  {:<15} \u{2192} {}", name, expansion);
+        }
+    }
+
     println!();
-    println!("Note: 'filename' is also a derived fact usable in --where filters.");
-    println!("Other aliases only work in manifest patterns (e.g., pattern = '{{stem}}.jpg').");
+    println!("Note: 'filename' and 'ext' also work in --where filters.");
+    println!("Other aliases (stem, hash, hash_short, id) only work in manifest patterns.");
 }

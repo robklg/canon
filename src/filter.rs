@@ -337,6 +337,9 @@ pub fn apply_filters(conn: &Connection, source_ids: &[i64], filters: &[Filter]) 
         return Ok(source_ids.to_vec());
     }
 
+    // Validate that all keys in filters are known
+    validate_filter_keys(conn, filters)?;
+
     // Combine all filters with AND
     let combined = if filters.len() == 1 {
         filters[0].clone()
@@ -351,6 +354,56 @@ pub fn apply_filters(conn: &Connection, source_ids: &[i64], filters: &[Filter]) 
         }
     }
     Ok(result)
+}
+
+/// Validate that all keys used in filters are known (built-in or exist in facts table)
+fn validate_filter_keys(conn: &Connection, filters: &[Filter]) -> Result<()> {
+    let mut all_keys = Vec::new();
+    for filter in filters {
+        extract_keys(filter, &mut all_keys);
+    }
+
+    for key in all_keys {
+        let (base_key, _, _) = parse_key_with_modifiers(&key)?;
+        if !is_known_key(conn, &base_key)? {
+            bail!("Unknown fact key: '{}'. Use 'canon facts' to see available keys.", base_key);
+        }
+    }
+    Ok(())
+}
+
+/// Extract all keys used in an expression
+fn extract_keys(expr: &Expr, keys: &mut Vec<String>) {
+    match expr {
+        Expr::And(exprs) | Expr::Or(exprs) => {
+            for e in exprs {
+                extract_keys(e, keys);
+            }
+        }
+        Expr::Not(e) => extract_keys(e, keys),
+        Expr::Exists { key } => keys.push(key.clone()),
+        Expr::Compare { key, .. } => keys.push(key.clone()),
+        Expr::In { key, .. } => keys.push(key.clone()),
+    }
+}
+
+/// Check if a key is known (either a built-in or exists in the facts table)
+fn is_known_key(conn: &Connection, base_key: &str) -> Result<bool> {
+    // Check built-in keys first
+    if expr::is_builtin_key(base_key) {
+        return Ok(true);
+    }
+
+    // Check if key exists in facts table (for any entity)
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM facts WHERE key = ? LIMIT 1",
+            [base_key],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    Ok(exists)
 }
 
 /// Evaluate an expression against a single source
@@ -423,149 +476,150 @@ fn check_fact_exists(conn: &Connection, source_id: i64, key: &str) -> Result<boo
         }
     }
 
-    // Special case: check for built-in source.* fields
-    match base_key.as_str() {
-        "source.ext" | "source.size" | "source.mtime" | "source.path" |
-        "source.root" | "source.rel_path" | "source.device" | "source.inode" |
-        "filename" => Ok(true),
-        "content.hash.sha256" => Ok(object_id.is_some()),
-        // Legacy names
-        "ext" | "size" | "mtime" | "root_id" | "basis_rev" | "object_id" => Ok(true),
-        "hash" | "content_hash" | "content_hash.sha256" => Ok(object_id.is_some()),
-        _ => Ok(false),
+    // Check for built-in keys (derived from source columns)
+    // Note: content.hash.sha256 is in BUILTIN_KEYS but "exists" only if object_id is set
+    if base_key == "content.hash.sha256" {
+        return Ok(object_id.is_some());
     }
+    Ok(expr::is_builtin_key(&base_key))
 }
 
 fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareOp, value: &str) -> Result<bool> {
+    use expr::BuiltinKey;
+
     // Parse key, accessor, and modifiers
     let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
 
-    // Handle built-in source.* fields first
-    match base_key.as_str() {
-        // Text fields
-        "source.ext" | "ext" => {
-            let rel_path: String = conn.query_row(
-                "SELECT rel_path FROM sources WHERE id = ?",
-                [source_id],
-                |row| row.get(0),
-            )?;
-            let ext = std::path::Path::new(&rel_path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            let fact_value = FactValue::Text(ext.to_string());
-            let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-            return Ok(compare_fact_value(&modified, op, value));
-        }
-        "filename" => {
-            let rel_path: String = conn.query_row(
-                "SELECT rel_path FROM sources WHERE id = ?",
-                [source_id],
-                |row| row.get(0),
-            )?;
-            let filename = std::path::Path::new(&rel_path)
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or(&rel_path);
-            let fact_value = FactValue::Text(filename.to_string());
-            let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-            return Ok(compare_fact_value(&modified, op, value));
-        }
-        "source.root" => {
-            let root_path: String = conn.query_row(
-                "SELECT r.path FROM sources s JOIN roots r ON s.root_id = r.id WHERE s.id = ?",
-                [source_id],
-                |row| row.get(0),
-            )?;
-            let fact_value = FactValue::Text(root_path);
-            let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-            return Ok(compare_fact_value(&modified, op, value));
-        }
-        "source.path" => {
-            let (root_path, rel_path): (String, String) = conn.query_row(
-                "SELECT r.path, s.rel_path FROM sources s JOIN roots r ON s.root_id = r.id WHERE s.id = ?",
-                [source_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            let full_path = if rel_path.is_empty() {
-                root_path
-            } else {
-                format!("{}/{}", root_path, rel_path)
-            };
-            let fact_value = FactValue::Text(full_path);
-            let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-            return Ok(compare_fact_value(&modified, op, value));
-        }
-        "source.rel_path" => {
-            let rel_path: String = conn.query_row(
-                "SELECT rel_path FROM sources WHERE id = ?",
-                [source_id],
-                |row| row.get(0),
-            )?;
-            let fact_value = FactValue::Text(rel_path);
-            let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-            return Ok(compare_fact_value(&modified, op, value));
-        }
+    // Handle built-in keys via enum
+    if let Some(builtin) = BuiltinKey::from_str(&base_key) {
+        match builtin {
+            // Text fields
+            BuiltinKey::SourceExt | BuiltinKey::Ext => {
+                let rel_path: String = conn.query_row(
+                    "SELECT rel_path FROM sources WHERE id = ?",
+                    [source_id],
+                    |row| row.get(0),
+                )?;
+                let ext = std::path::Path::new(&rel_path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                let fact_value = FactValue::Text(ext.to_string());
+                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                return Ok(compare_fact_value(&modified, op, value));
+            }
+            BuiltinKey::Filename => {
+                let rel_path: String = conn.query_row(
+                    "SELECT rel_path FROM sources WHERE id = ?",
+                    [source_id],
+                    |row| row.get(0),
+                )?;
+                let filename = std::path::Path::new(&rel_path)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(&rel_path);
+                let fact_value = FactValue::Text(filename.to_string());
+                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                return Ok(compare_fact_value(&modified, op, value));
+            }
+            BuiltinKey::SourceRoot => {
+                let root_path: String = conn.query_row(
+                    "SELECT r.path FROM sources s JOIN roots r ON s.root_id = r.id WHERE s.id = ?",
+                    [source_id],
+                    |row| row.get(0),
+                )?;
+                let fact_value = FactValue::Text(root_path);
+                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                return Ok(compare_fact_value(&modified, op, value));
+            }
+            BuiltinKey::SourcePath => {
+                let (root_path, rel_path): (String, String) = conn.query_row(
+                    "SELECT r.path, s.rel_path FROM sources s JOIN roots r ON s.root_id = r.id WHERE s.id = ?",
+                    [source_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let full_path = if rel_path.is_empty() {
+                    root_path
+                } else {
+                    format!("{}/{}", root_path, rel_path)
+                };
+                let fact_value = FactValue::Text(full_path);
+                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                return Ok(compare_fact_value(&modified, op, value));
+            }
+            BuiltinKey::SourceRelPath => {
+                let rel_path: String = conn.query_row(
+                    "SELECT rel_path FROM sources WHERE id = ?",
+                    [source_id],
+                    |row| row.get(0),
+                )?;
+                let fact_value = FactValue::Text(rel_path);
+                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                return Ok(compare_fact_value(&modified, op, value));
+            }
 
-        // Numeric fields
-        "source.size" | "size" => {
-            let v: i64 = conn.query_row(
-                "SELECT size FROM sources WHERE id = ?",
-                [source_id],
-                |row| row.get(0),
-            )?;
-            let fact_value = FactValue::Num(v as f64);
-            let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-            return Ok(compare_fact_value(&modified, op, value));
-        }
-        "source.mtime" | "mtime" => {
-            let v: i64 = conn.query_row(
-                "SELECT mtime FROM sources WHERE id = ?",
-                [source_id],
-                |row| row.get(0),
-            )?;
-            // mtime is a time value, so use Time type for proper modifier support
-            let fact_value = FactValue::Time(v);
-            let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-            return Ok(compare_fact_value(&modified, op, value));
-        }
-        "source.device" => {
-            let device: Option<i64> = conn.query_row(
-                "SELECT device FROM sources WHERE id = ?",
-                [source_id],
-                |row| row.get(0),
-            )?;
-            if let Some(d) = device {
-                let fact_value = FactValue::Num(d as f64);
+            // Numeric fields
+            BuiltinKey::SourceSize | BuiltinKey::Size => {
+                let v: i64 = conn.query_row(
+                    "SELECT size FROM sources WHERE id = ?",
+                    [source_id],
+                    |row| row.get(0),
+                )?;
+                let fact_value = FactValue::Num(v as f64);
                 let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
                 return Ok(compare_fact_value(&modified, op, value));
             }
-            return Ok(false);
-        }
-        "source.inode" => {
-            let inode: Option<i64> = conn.query_row(
-                "SELECT inode FROM sources WHERE id = ?",
-                [source_id],
-                |row| row.get(0),
-            )?;
-            if let Some(i) = inode {
-                let fact_value = FactValue::Num(i as f64);
+            BuiltinKey::SourceMtime | BuiltinKey::Mtime => {
+                let v: i64 = conn.query_row(
+                    "SELECT mtime FROM sources WHERE id = ?",
+                    [source_id],
+                    |row| row.get(0),
+                )?;
+                // mtime is a time value, so use Time type for proper modifier support
+                let fact_value = FactValue::Time(v);
                 let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
                 return Ok(compare_fact_value(&modified, op, value));
             }
-            return Ok(false);
+            BuiltinKey::SourceDevice => {
+                let device: Option<i64> = conn.query_row(
+                    "SELECT device FROM sources WHERE id = ?",
+                    [source_id],
+                    |row| row.get(0),
+                )?;
+                if let Some(d) = device {
+                    let fact_value = FactValue::Num(d as f64);
+                    let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                    return Ok(compare_fact_value(&modified, op, value));
+                }
+                return Ok(false);
+            }
+            BuiltinKey::SourceInode => {
+                let inode: Option<i64> = conn.query_row(
+                    "SELECT inode FROM sources WHERE id = ?",
+                    [source_id],
+                    |row| row.get(0),
+                )?;
+                if let Some(i) = inode {
+                    let fact_value = FactValue::Num(i as f64);
+                    let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                    return Ok(compare_fact_value(&modified, op, value));
+                }
+                return Ok(false);
+            }
+            BuiltinKey::RootId => {
+                let v: i64 = conn.query_row(
+                    "SELECT root_id FROM sources WHERE id = ?",
+                    [source_id],
+                    |row| row.get(0),
+                )?;
+                let fact_value = FactValue::Num(v as f64);
+                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                return Ok(compare_fact_value(&modified, op, value));
+            }
+
+            // Other builtin keys (aliases, etc.) fall through to fact lookup
+            _ => {}
         }
-        "root_id" => {
-            let v: i64 = conn.query_row(
-                "SELECT root_id FROM sources WHERE id = ?",
-                [source_id],
-                |row| row.get(0),
-            )?;
-            let fact_value = FactValue::Num(v as f64);
-            let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-            return Ok(compare_fact_value(&modified, op, value));
-        }
-        _ => {}
     }
 
     // Get object_id for checking object facts

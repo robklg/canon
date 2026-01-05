@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::{build_scope_clause, canonicalize_scopes, resolve_archive_path, Connection, Db};
 use crate::exclude;
+use crate::expr::{Modifier, ModifierCategory};
 use crate::filter::{self, Filter};
 
 #[derive(Serialize, Deserialize)]
@@ -556,10 +557,19 @@ fn generate_fact_help(sources: &[ManifestSource], full_coverage_facts: &[(String
         help.push_str("#\n");
     }
 
-    // Modifiers reference
+    // Modifiers reference (auto-generated from Modifier enum)
+    use strum::IntoEnumIterator;
+    let time_mods: Vec<_> = Modifier::iter()
+        .filter(|m| m.category() == ModifierCategory::Time)
+        .map(|m| { let name: &'static str = m.into(); format!("|{}", name) })
+        .collect();
+    let string_mods: Vec<_> = Modifier::iter()
+        .filter(|m| m.category() == ModifierCategory::String)
+        .map(|m| { let name: &'static str = m.into(); format!("|{}", name) })
+        .collect();
     help.push_str("# Modifiers:\n");
-    help.push_str("#   Time: |year |month |day |hour |minute |second |date |datetime |yearmonth |week |weekday |quarter\n");
-    help.push_str("#   String: |stem |ext |short\n");
+    help.push_str(&format!("#   Time: {}\n", time_mods.join(" ")));
+    help.push_str(&format!("#   String: {}\n", string_mods.join(" ")));
     help.push_str("#   Path: [0] [-1] [1:3] etc.\n");
     help.push_str("#\n");
 
