@@ -34,6 +34,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    // -- Scan --
     /// Scan directories and add files to the index
     Scan {
         /// Paths to scan
@@ -46,6 +47,12 @@ enum Commands {
         #[arg(long)]
         add: bool,
     },
+    /// List and manage roots
+    Roots {
+        #[command(subcommand)]
+        action: Option<RootsAction>,
+    },
+    // -- Enrich --
     /// Output sources as JSONL worklist
     Worklist {
         /// Directory paths to scope the query (resolved to realpath)
@@ -66,6 +73,7 @@ enum Commands {
         #[arg(long)]
         allow_archived: bool,
     },
+    // -- Discover --
     /// List sources matching filters
     Ls {
         /// Directory paths to scope the query (resolved to realpath)
@@ -158,6 +166,7 @@ enum Commands {
         #[arg(short, long)]
         quiet: bool,
     },
+    // -- Organize --
     /// Generate a cluster manifest from matching sources
     Cluster {
         #[command(subcommand)]
@@ -196,11 +205,6 @@ enum Commands {
     Exclude {
         #[command(subcommand)]
         action: ExcludeAction,
-    },
-    /// List and manage roots
-    Roots {
-        #[command(subcommand)]
-        action: Option<RootsAction>,
     },
 }
 
