@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::{build_scope_clause, canonicalize_scopes, resolve_archive_path, Connection, Db};
 use crate::exclude;
-use crate::expr::{Modifier, ModifierCategory};
+use crate::expr::{BuiltinKey, BuiltinKeyVisibility, FactType, Modifier, ModifierCategory};
 use crate::filter::{self, Filter};
 
 #[derive(Serialize, Deserialize)]
@@ -307,7 +307,7 @@ fn fetch_source(conn: &Connection, source_id: i64) -> Result<Option<ManifestSour
 
     // Source facts
     let mut stmt = conn.prepare(
-        "SELECT key, value_text, value_num, value_time, value_json
+        "SELECT key, value_text, value_num, value_time
          FROM facts WHERE entity_type = 'source' AND entity_id = ?"
     )?;
     for row in stmt.query_map([source_id], |row| {
@@ -316,18 +316,17 @@ fn fetch_source(conn: &Connection, source_id: i64) -> Result<Option<ManifestSour
             row.get::<_, Option<String>>(1)?,
             row.get::<_, Option<f64>>(2)?,
             row.get::<_, Option<i64>>(3)?,
-            row.get::<_, Option<String>>(4)?,
         ))
     })? {
-        let (key, text, num, time, json) = row?;
-        let value = fact_to_json(text, num, time, json);
+        let (key, text, num, time) = row?;
+        let value = fact_to_json(text, num, time);
         facts.insert(key, value);
     }
 
     // Object facts
     if let Some(obj_id) = object_id {
         let mut stmt = conn.prepare(
-            "SELECT key, value_text, value_num, value_time, value_json
+            "SELECT key, value_text, value_num, value_time
              FROM facts WHERE entity_type = 'object' AND entity_id = ?"
         )?;
         for row in stmt.query_map([obj_id], |row| {
@@ -336,11 +335,10 @@ fn fetch_source(conn: &Connection, source_id: i64) -> Result<Option<ManifestSour
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<f64>>(2)?,
                 row.get::<_, Option<i64>>(3)?,
-                row.get::<_, Option<String>>(4)?,
             ))
         })? {
-            let (key, text, num, time, json) = row?;
-            let value = fact_to_json(text, num, time, json);
+            let (key, text, num, time) = row?;
+            let value = fact_to_json(text, num, time);
             facts.insert(key, value);
         }
     }
@@ -361,7 +359,6 @@ fn fact_to_json(
     text: Option<String>,
     num: Option<f64>,
     time: Option<i64>,
-    json: Option<String>,
 ) -> serde_json::Value {
     if let Some(t) = text {
         serde_json::Value::String(t)
@@ -369,8 +366,6 @@ fn fact_to_json(
         serde_json::json!(n)
     } else if let Some(t) = time {
         serde_json::json!(t)
-    } else if let Some(j) = json {
-        serde_json::from_str(&j).unwrap_or(serde_json::Value::String(j))
     } else {
         serde_json::Value::Null
     }
@@ -383,25 +378,6 @@ fn current_timestamp() -> i64 {
         .as_secs() as i64
 }
 
-/// Fact type as stored in the database
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FactType {
-    Text,
-    Num,
-    Time,
-    Json,
-}
-
-impl FactType {
-    fn as_str(&self) -> &'static str {
-        match self {
-            FactType::Text => "text",
-            FactType::Num => "num",
-            FactType::Time => "time",
-            FactType::Json => "json",
-        }
-    }
-}
 
 /// Collect facts with 100% coverage across all sources in the manifest
 fn collect_full_coverage_facts(conn: &Connection, sources: &[ManifestSource]) -> Result<Vec<(String, FactType, String)>> {
@@ -421,7 +397,7 @@ fn collect_full_coverage_facts(conn: &Connection, sources: &[ManifestSource]) ->
     // Query source facts
     for source_id in &source_ids {
         let mut stmt = conn.prepare(
-            "SELECT key, value_text, value_num, value_time, value_json
+            "SELECT key, value_text, value_num, value_time
              FROM facts WHERE entity_type = 'source' AND entity_id = ?"
         )?;
 
@@ -431,18 +407,15 @@ fn collect_full_coverage_facts(conn: &Connection, sources: &[ManifestSource]) ->
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<f64>>(2)?,
                 row.get::<_, Option<i64>>(3)?,
-                row.get::<_, Option<String>>(4)?,
             ))
         })? {
-            let (key, text, num, time, json) = row?;
+            let (key, text, num, time) = row?;
             let fact_type = if text.is_some() {
                 FactType::Text
             } else if num.is_some() {
                 FactType::Num
             } else if time.is_some() {
                 FactType::Time
-            } else if json.is_some() {
-                FactType::Json
             } else {
                 continue;
             };
@@ -458,7 +431,7 @@ fn collect_full_coverage_facts(conn: &Connection, sources: &[ManifestSource]) ->
     // Query object facts (only for sources that have objects)
     for (source, object_id) in sources.iter().filter_map(|s| s.object_id.map(|oid| (s, oid))) {
         let mut stmt = conn.prepare(
-            "SELECT key, value_text, value_num, value_time, value_json
+            "SELECT key, value_text, value_num, value_time
              FROM facts WHERE entity_type = 'object' AND entity_id = ?"
         )?;
 
@@ -468,18 +441,15 @@ fn collect_full_coverage_facts(conn: &Connection, sources: &[ManifestSource]) ->
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<f64>>(2)?,
                 row.get::<_, Option<i64>>(3)?,
-                row.get::<_, Option<String>>(4)?,
             ))
         })? {
-            let (key, text, num, time, json) = row?;
+            let (key, text, num, time) = row?;
             let fact_type = if text.is_some() {
                 FactType::Text
             } else if num.is_some() {
                 FactType::Num
             } else if time.is_some() {
                 FactType::Time
-            } else if json.is_some() {
-                FactType::Json
             } else {
                 continue;
             };
@@ -511,21 +481,16 @@ fn collect_full_coverage_facts(conn: &Connection, sources: &[ManifestSource]) ->
 
 /// Get a human-readable description for a fact key
 fn get_fact_description(key: &str) -> String {
-    match key {
-        "source.mtime" => "File modification time".to_string(),
-        "source.size" => "File size in bytes".to_string(),
-        "content.DateTimeOriginal" | "exif.DateTimeOriginal" => "EXIF capture date".to_string(),
-        "content.Make" | "exif.Make" => "Camera manufacturer".to_string(),
-        "content.Model" | "exif.Model" => "Camera model".to_string(),
-        "content.mime" => "MIME type".to_string(),
-        "content.width" => "Image width in pixels".to_string(),
-        "content.height" => "Image height in pixels".to_string(),
-        _ => String::new(),
-    }
+    BuiltinKey::from_str(key)
+        .and_then(|k| k.description())
+        .map(|s| s.to_string())
+        .unwrap_or_default()
 }
 
 /// Generate fact help comments for the manifest
 fn generate_fact_help(sources: &[ManifestSource], full_coverage_facts: &[(String, FactType, String)]) -> String {
+    use strum::IntoEnumIterator;
+
     if sources.is_empty() {
         return String::new();
     }
@@ -534,13 +499,18 @@ fn generate_fact_help(sources: &[ManifestSource], full_coverage_facts: &[(String
     help.push_str(&format!("# Available facts for pattern (100% coverage on {} sources in this cluster):\n", sources.len()));
     help.push_str("#\n");
 
-    // Built-in/derived facts
+    // Built-in facts (auto-generated from BuiltinKey enum)
     help.push_str("# Built-in:\n");
-    help.push_str("#   source.rel_path    path   - Relative path from root\n");
-    help.push_str("#   source.path        path   - Full absolute path (derived)\n");
-    help.push_str("#   source.root        path   - Root path\n");
-    help.push_str("#   source.id          num    - Source ID\n");
-    help.push_str("#   object.hash        text   - Content hash (if hashed)\n");
+    for key in BuiltinKey::iter() {
+        // Only show Default visibility keys (skip Hidden and NotListed)
+        if key.visibility() != BuiltinKeyVisibility::Default {
+            continue;
+        }
+        let name: &'static str = key.into();
+        let desc = key.description().unwrap_or("");
+        help.push_str(&format!("#   {:18} {:6} - {}\n", name, key.fact_type().as_str(), desc));
+    }
+    help.push_str(&format!("#   {:18} {:6} - {}\n", "object.hash", "text", "Content hash (if hashed)"));
     help.push_str("#\n");
 
     // User facts with 100% coverage
@@ -552,13 +522,12 @@ fn generate_fact_help(sources: &[ManifestSource], full_coverage_facts: &[(String
             } else {
                 format!(" - {}", description)
             };
-            help.push_str(&format!("#   {:30} {:6}{}\n", key, fact_type.as_str(), desc_part));
+            help.push_str(&format!("#   {:18} {:6}{}\n", key, fact_type.as_str(), desc_part));
         }
         help.push_str("#\n");
     }
 
     // Modifiers reference (auto-generated from Modifier enum)
-    use strum::IntoEnumIterator;
     let time_mods: Vec<_> = Modifier::iter()
         .filter(|m| m.category() == ModifierCategory::Time)
         .map(|m| { let name: &'static str = m.into(); format!("|{}", name) })
@@ -573,14 +542,14 @@ fn generate_fact_help(sources: &[ManifestSource], full_coverage_facts: &[(String
     help.push_str("#   Path: [0] [-1] [1:3] etc.\n");
     help.push_str("#\n");
 
-    // Aliases
+    // Aliases (auto-generated from BuiltinKey enum)
     help.push_str("# Aliases:\n");
-    help.push_str("#   {filename}    → {source.rel_path[-1]}\n");
-    help.push_str("#   {stem}        → {source.rel_path[-1]|stem}\n");
-    help.push_str("#   {ext}         → {source.rel_path[-1]|ext}\n");
-    help.push_str("#   {hash}        → {object.hash}\n");
-    help.push_str("#   {hash_short}  → {object.hash|short}\n");
-    help.push_str("#   {id}          → {source.id}\n");
+    for key in BuiltinKey::iter() {
+        if let Some(expansion) = key.expansion() {
+            let name: &'static str = key.into();
+            help.push_str(&format!("#   {{{}}}  →  {{{}}}\n", name, expansion));
+        }
+    }
     help.push_str("\n");
 
     help

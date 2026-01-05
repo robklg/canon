@@ -95,6 +95,27 @@ impl Modifier {
     }
 }
 
+/// Fact type classification (without the actual value).
+/// Matches the typed columns in the facts table plus Path for derived facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactType {
+    Text,
+    Num,
+    Time,
+    Path, // Derived path facts that support segment indexing
+}
+
+impl FactType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FactType::Text => "text",
+            FactType::Num => "num",
+            FactType::Time => "time",
+            FactType::Path => "path",
+        }
+    }
+}
+
 /// Fact value types for evaluation.
 /// Matches the typed columns in the facts table: value_text, value_num, value_time.
 #[derive(Debug, Clone)]
@@ -300,6 +321,44 @@ impl BuiltinKey {
             BuiltinKey::Hash
             | BuiltinKey::HashShort
             | BuiltinKey::ContentHashSha256 => BuiltinKeyCategory::Stored,
+        }
+    }
+
+    /// Get a human-readable description for this key
+    pub fn description(&self) -> Option<&'static str> {
+        match self {
+            BuiltinKey::SourceExt => Some("File extension"),
+            BuiltinKey::SourceSize | BuiltinKey::Size => Some("File size in bytes"),
+            BuiltinKey::SourceMtime | BuiltinKey::Mtime => Some("File modification time"),
+            BuiltinKey::SourcePath => Some("Full absolute path"),
+            BuiltinKey::SourceRoot => Some("Root path"),
+            BuiltinKey::SourceRelPath => Some("Relative path from root"),
+            BuiltinKey::SourceDevice => Some("Device ID"),
+            BuiltinKey::SourceInode => Some("Inode number"),
+            BuiltinKey::Filename => Some("Filename (last path component)"),
+            BuiltinKey::Stem => Some("Filename without extension"),
+            BuiltinKey::Ext => Some("File extension"),
+            BuiltinKey::Hash => Some("Content hash"),
+            BuiltinKey::HashShort => Some("Content hash (short)"),
+            BuiltinKey::Id => Some("Source ID"),
+            BuiltinKey::RootId => Some("Root ID"),
+            BuiltinKey::ContentHashSha256 => Some("SHA-256 content hash"),
+        }
+    }
+
+    /// Get the fact type for this key
+    pub fn fact_type(&self) -> FactType {
+        match self {
+            BuiltinKey::SourceExt | BuiltinKey::Filename | BuiltinKey::Stem | BuiltinKey::Ext
+            | BuiltinKey::Hash | BuiltinKey::HashShort | BuiltinKey::ContentHashSha256 => FactType::Text,
+
+            BuiltinKey::SourceSize | BuiltinKey::Size
+            | BuiltinKey::SourceDevice | BuiltinKey::SourceInode
+            | BuiltinKey::Id | BuiltinKey::RootId => FactType::Num,
+
+            BuiltinKey::SourceMtime | BuiltinKey::Mtime => FactType::Time,
+
+            BuiltinKey::SourcePath | BuiltinKey::SourceRoot | BuiltinKey::SourceRelPath => FactType::Path,
         }
     }
 

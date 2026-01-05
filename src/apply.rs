@@ -42,16 +42,16 @@ pub struct ApplyOptions {
 /// Fetch a fact value with its proper type from the database
 fn fetch_typed_fact(conn: &Connection, source_id: i64, object_id: Option<i64>, key: &str) -> Result<Option<FactValue>> {
     // Check source facts first
-    let row: Option<(Option<String>, Option<f64>, Option<i64>, Option<String>)> = conn
+    let row: Option<(Option<String>, Option<f64>, Option<i64>)> = conn
         .query_row(
-            "SELECT value_text, value_num, value_time, value_json
+            "SELECT value_text, value_num, value_time
              FROM facts WHERE entity_type = 'source' AND entity_id = ? AND key = ?",
             params![source_id, key],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
 
-    if let Some((text, num, time, _json)) = row {
+    if let Some((text, num, time)) = row {
         if let Some(t) = text {
             return Ok(Some(FactValue::Text(t)));
         }
@@ -61,21 +61,20 @@ fn fetch_typed_fact(conn: &Connection, source_id: i64, object_id: Option<i64>, k
         if let Some(ts) = time {
             return Ok(Some(FactValue::Time(ts)));
         }
-        // JSON not yet supported as FactValue
     }
 
     // Check object facts if source has object_id
     if let Some(obj_id) = object_id {
-        let row: Option<(Option<String>, Option<f64>, Option<i64>, Option<String>)> = conn
+        let row: Option<(Option<String>, Option<f64>, Option<i64>)> = conn
             .query_row(
-                "SELECT value_text, value_num, value_time, value_json
+                "SELECT value_text, value_num, value_time
                  FROM facts WHERE entity_type = 'object' AND entity_id = ? AND key = ?",
                 params![obj_id, key],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
 
-        if let Some((text, num, time, _json)) = row {
+        if let Some((text, num, time)) = row {
             if let Some(t) = text {
                 return Ok(Some(FactValue::Text(t)));
             }

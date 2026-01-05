@@ -72,12 +72,11 @@ CREATE TABLE IF NOT EXISTS facts (
     value_text TEXT,
     value_num REAL,
     value_time INTEGER,
-    value_json TEXT,
     observed_at INTEGER NOT NULL,
     observed_basis_rev INTEGER,
     CHECK (
         (value_text IS NOT NULL) + (value_num IS NOT NULL) +
-        (value_time IS NOT NULL) + (value_json IS NOT NULL) = 1
+        (value_time IS NOT NULL) = 1
     ),
     CHECK (entity_type != 'source' OR observed_basis_rev IS NOT NULL),
     CHECK (entity_type != 'object' OR observed_basis_rev IS NULL)

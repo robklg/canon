@@ -247,16 +247,15 @@ fn insert_fact(
     observed_at: i64,
     observed_basis_rev: Option<i64>,
 ) -> Result<()> {
-    let (value_text, value_num, value_time, value_json) = classify_value(value);
+    let (value_text, value_num, value_time) = classify_value(value);
 
     conn.execute(
-        "INSERT INTO facts (entity_type, entity_id, key, value_text, value_num, value_time, value_json, observed_at, observed_basis_rev)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "INSERT INTO facts (entity_type, entity_id, key, value_text, value_num, value_time, observed_at, observed_basis_rev)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(entity_type, entity_id, key) DO UPDATE SET
            value_text = excluded.value_text,
            value_num = excluded.value_num,
            value_time = excluded.value_time,
-           value_json = excluded.value_json,
            observed_at = excluded.observed_at,
            observed_basis_rev = excluded.observed_basis_rev",
         params![
@@ -266,7 +265,6 @@ fn insert_fact(
             value_text,
             value_num,
             value_time,
-            value_json,
             observed_at,
             observed_basis_rev,
         ],
@@ -275,47 +273,48 @@ fn insert_fact(
     Ok(())
 }
 
-fn classify_value(value: &Value) -> (Option<String>, Option<f64>, Option<i64>, Option<String>) {
+fn classify_value(value: &Value) -> (Option<String>, Option<f64>, Option<i64>) {
     match value {
         Value::String(s) => {
             // Try to parse as timestamp (ISO 8601 format)
             if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-                return (None, None, Some(dt.timestamp()), None);
+                return (None, None, Some(dt.timestamp()));
             }
             // Try simpler datetime formats
             if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-                return (None, None, Some(dt.and_utc().timestamp()), None);
+                return (None, None, Some(dt.and_utc().timestamp()));
             }
             if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y:%m:%d %H:%M:%S") {
                 // EXIF format
-                return (None, None, Some(dt.and_utc().timestamp()), None);
+                return (None, None, Some(dt.and_utc().timestamp()));
             }
-            (Some(s.clone()), None, None, None)
+            (Some(s.clone()), None, None)
         }
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                (None, Some(i as f64), None, None)
+                (None, Some(i as f64), None)
             } else if let Some(f) = n.as_f64() {
-                (None, Some(f), None, None)
+                (None, Some(f), None)
             } else {
-                (Some(n.to_string()), None, None, None)
+                (Some(n.to_string()), None, None)
             }
         }
-        Value::Bool(b) => (None, Some(if *b { 1.0 } else { 0.0 }), None, None),
-        Value::Null => (Some(String::new()), None, None, None),
-        Value::Array(_) | Value::Object(_) => (None, None, None, Some(value.to_string())),
+        Value::Bool(b) => (None, Some(if *b { 1.0 } else { 0.0 }), None),
+        Value::Null => (Some(String::new()), None, None),
+        // Store arrays/objects as their JSON string representation
+        Value::Array(_) | Value::Object(_) => (Some(value.to_string()), None, None),
     }
 }
 
 fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> Result<u64> {
     // Find content facts on this source that should be promoted
     let mut stmt = conn.prepare(
-        "SELECT id, key, value_text, value_num, value_time, value_json, observed_at
+        "SELECT id, key, value_text, value_num, value_time, observed_at
          FROM facts
          WHERE entity_type = 'source' AND entity_id = ?"
     )?;
 
-    let facts: Vec<(i64, String, Option<String>, Option<f64>, Option<i64>, Option<String>, i64)> = stmt
+    let facts: Vec<(i64, String, Option<String>, Option<f64>, Option<i64>, i64)> = stmt
         .query_map([source_id], |row| {
             Ok((
                 row.get(0)?,
@@ -324,13 +323,12 @@ fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> R
                 row.get(3)?,
                 row.get(4)?,
                 row.get(5)?,
-                row.get(6)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut promoted = 0u64;
-    for (fact_id, key, value_text, value_num, value_time, value_json, observed_at) in facts {
+    for (fact_id, key, value_text, value_num, value_time, observed_at) in facts {
         if is_content_fact(&key) {
             // Check if object already has this fact
             let exists: bool = conn
@@ -345,9 +343,9 @@ fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> R
             if !exists {
                 // Copy to object
                 conn.execute(
-                    "INSERT INTO facts (entity_type, entity_id, key, value_text, value_num, value_time, value_json, observed_at, observed_basis_rev)
-                     VALUES ('object', ?, ?, ?, ?, ?, ?, ?, NULL)",
-                    params![object_id, key, value_text, value_num, value_time, value_json, observed_at],
+                    "INSERT INTO facts (entity_type, entity_id, key, value_text, value_num, value_time, observed_at, observed_basis_rev)
+                     VALUES ('object', ?, ?, ?, ?, ?, ?, NULL)",
+                    params![object_id, key, value_text, value_num, value_time, observed_at],
                 )?;
                 promoted += 1;
             }

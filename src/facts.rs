@@ -286,14 +286,14 @@ fn show_value_distribution(
          FROM (
              SELECT DISTINCT id, val FROM (
                  SELECT ts.id,
-                     COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch'), f.value_json) as val
+                     COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch')) as val
                  FROM temp_sources ts
                  JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?1
 
                  UNION ALL
 
                  SELECT ts.id,
-                     COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch'), f.value_json) as val
+                     COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch')) as val
                  FROM temp_sources ts
                  JOIN sources s ON s.id = ts.id
                  JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1
@@ -308,14 +308,14 @@ fn show_value_distribution(
              FROM (
                  SELECT DISTINCT id, val FROM (
                      SELECT ts.id,
-                         COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch'), f.value_json) as val
+                         COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch')) as val
                      FROM temp_sources ts
                      JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?1
 
                      UNION ALL
 
                      SELECT ts.id,
-                         COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch'), f.value_json) as val
+                         COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch')) as val
                      FROM temp_sources ts
                      JOIN sources s ON s.id = ts.id
                      JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1
