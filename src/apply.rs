@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, OptionalExtension};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, Metadata};
+use std::fs::{self, File, Metadata};
+use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -209,19 +210,34 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     let skipped_by_filter = manifest.sources.len() - filtered_sources.len();
 
     // Pre-flight checks (mandatory, always run)
-    eprint!("Checking {} sources for destination collisions...", filtered_sources.len());
+    eprintln!("Checking destination write permissions...");
+    check_destination_writable(&base_dir)?;
+
+    eprint!("Checking {} sources for collisions and accessibility...", filtered_sources.len());
     if options.dry_run {
-        eprintln!(" (skipping source existence checks for speed in dry-run mode)");
+        eprintln!(" (skipping source checks for speed in dry-run mode)");
     } else {
-        eprintln!(" (including source existence checks)");
+        eprintln!();
     }
-    let collisions = check_destination_collisions_filtered(&filtered_sources, &pattern, &needed_keys, scope_prefix, &base_dir, conn, &root_paths, options.dry_run)?;
-    if !collisions.is_empty() {
+    let access_check = check_destination_collisions_filtered(&filtered_sources, &pattern, &needed_keys, scope_prefix, &base_dir, conn, &root_paths, options.dry_run)?;
+
+    if !access_check.unreadable.is_empty() {
+        eprintln!(
+            "Error: {} sources are not readable:",
+            access_check.unreadable.len()
+        );
+        for (path, reason) in &access_check.unreadable {
+            eprintln!("  {} ({})", path, reason);
+        }
+        bail!("Aborting due to unreadable sources");
+    }
+
+    if !access_check.collisions.is_empty() {
         eprintln!(
             "Error: {} destination paths have multiple sources:",
-            collisions.len()
+            access_check.collisions.len()
         );
-        for (dest, sources) in &collisions {
+        for (dest, sources) in &access_check.collisions {
             eprintln!("  {} <- {} files:", dest.display(), sources.len());
             for src in sources {
                 eprintln!("    {}", src);
@@ -337,9 +353,43 @@ struct ArchiveConflicts {
     in_other_archives: Vec<(String, String)>, // (source_path, archive_path)
 }
 
+struct SourceAccessCheck {
+    collisions: Vec<(PathBuf, Vec<String>)>,  // (dest_path, source_paths)
+    unreadable: Vec<(String, String)>,        // (source_path, error_message)
+}
+
 // ============================================================================
 // Helper functions for pre-flight checks (work with filtered source list)
 // ============================================================================
+
+/// Check if destination directory is writable by creating and removing a test file.
+fn check_destination_writable(base_dir: &Path) -> Result<()> {
+    // Find the nearest existing directory
+    let mut check_dir = base_dir.to_path_buf();
+    while !check_dir.exists() {
+        if let Some(parent) = check_dir.parent() {
+            check_dir = parent.to_path_buf();
+        } else {
+            bail!("Cannot find existing parent directory for {}", base_dir.display());
+        }
+    }
+
+    // Try to create a temp file to verify write permissions
+    let test_file = check_dir.join(".canon_write_test");
+    match File::create(&test_file) {
+        Ok(_) => {
+            // Successfully created, now remove it
+            let _ = fs::remove_file(&test_file);
+            Ok(())
+        }
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+            bail!("No write permission for destination directory: {}", check_dir.display());
+        }
+        Err(e) => {
+            bail!("Cannot write to destination directory {}: {}", check_dir.display(), e);
+        }
+    }
+}
 
 fn filter_by_roots<'a>(
     manifest: &'a Manifest,
@@ -368,8 +418,9 @@ fn check_destination_collisions_filtered(
     conn: &Connection,
     root_paths: &HashMap<i64, String>,
     dry_run: bool,
-) -> Result<Vec<(PathBuf, Vec<String>)>> {
+) -> Result<SourceAccessCheck> {
     let mut dest_to_sources: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    let mut unreadable: Vec<(String, String)> = Vec::new();
     let total = sources.len();
     let progress_interval = std::cmp::max(total / 20, 1); // Update every 5%
 
@@ -380,12 +431,23 @@ fn check_destination_collisions_filtered(
             eprint!("\r  {}% ({}/{})", pct, i, total);
         }
 
-        // Skip sources that don't exist (they'll be skipped during copy anyway)
-        // In dry-run mode, skip this check for speed (it involves filesystem stat calls)
+        // Check source accessibility (existence + read permission in one syscall)
+        // In dry-run mode, skip this check for speed
         if !dry_run {
-            let src_path = Path::new(&source.path);
-            if !src_path.exists() {
-                continue;
+            match File::open(&source.path) {
+                Ok(_) => { /* readable, continue */ }
+                Err(e) if e.kind() == ErrorKind::NotFound => {
+                    // File doesn't exist, skip (will be skipped during copy anyway)
+                    continue;
+                }
+                Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                    unreadable.push((source.path.clone(), "permission denied".to_string()));
+                    continue;
+                }
+                Err(e) => {
+                    unreadable.push((source.path.clone(), e.to_string()));
+                    continue;
+                }
             }
         }
 
@@ -413,7 +475,7 @@ fn check_destination_collisions_filtered(
     // Sort for consistent output
     collisions.sort_by(|a, b| a.0.cmp(&b.0));
 
-    Ok(collisions)
+    Ok(SourceAccessCheck { collisions, unreadable })
 }
 
 fn check_archive_conflicts_filtered(
