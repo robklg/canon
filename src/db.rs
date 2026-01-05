@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS sources (
     inode INTEGER,
     size INTEGER NOT NULL,
     mtime INTEGER NOT NULL,
-    partial_hash TEXT,  -- SHA256 of first 8KB + last 8KB (for integrity validation)
+    partial_hash TEXT NOT NULL,  -- SHA256 of first 8KB + last 8KB (for integrity validation)
     basis_rev INTEGER NOT NULL DEFAULT 0,
     scanned_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL,

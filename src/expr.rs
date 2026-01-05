@@ -219,6 +219,8 @@ pub enum BuiltinKey {
     SourceRoot,
     #[strum(serialize = "source.rel_path")]
     SourceRelPath,
+    #[strum(serialize = "source.id")]
+    SourceId,
     #[strum(serialize = "source.device")]
     SourceDevice,
     #[strum(serialize = "source.inode")]
@@ -279,6 +281,7 @@ impl BuiltinKey {
             // Hidden
             BuiltinKey::SourceRoot
             | BuiltinKey::SourceRelPath
+            | BuiltinKey::SourceId
             | BuiltinKey::SourceDevice
             | BuiltinKey::SourceInode => BuiltinKeyVisibility::Hidden,
 
@@ -303,6 +306,7 @@ impl BuiltinKey {
             | BuiltinKey::SourceSize
             | BuiltinKey::SourceMtime
             | BuiltinKey::SourceRelPath
+            | BuiltinKey::SourceId
             | BuiltinKey::SourceDevice
             | BuiltinKey::SourceInode
             | BuiltinKey::Size
@@ -333,6 +337,7 @@ impl BuiltinKey {
             BuiltinKey::SourcePath => Some("Full absolute path"),
             BuiltinKey::SourceRoot => Some("Root path"),
             BuiltinKey::SourceRelPath => Some("Relative path from root"),
+            BuiltinKey::SourceId => Some("Source database ID"),
             BuiltinKey::SourceDevice => Some("Device ID"),
             BuiltinKey::SourceInode => Some("Inode number"),
             BuiltinKey::Filename => Some("Filename (last path component)"),
@@ -353,7 +358,7 @@ impl BuiltinKey {
             | BuiltinKey::Hash | BuiltinKey::HashShort | BuiltinKey::ContentHashSha256 => FactType::Text,
 
             BuiltinKey::SourceSize | BuiltinKey::Size
-            | BuiltinKey::SourceDevice | BuiltinKey::SourceInode
+            | BuiltinKey::SourceId | BuiltinKey::SourceDevice | BuiltinKey::SourceInode
             | BuiltinKey::Id | BuiltinKey::RootId => FactType::Num,
 
             BuiltinKey::SourceMtime | BuiltinKey::Mtime => FactType::Time,

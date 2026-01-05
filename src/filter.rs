@@ -616,6 +616,12 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                 let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
                 return Ok(compare_fact_value(&modified, op, value));
             }
+            BuiltinKey::SourceId | BuiltinKey::Id => {
+                // The source ID is the source_id parameter itself
+                let fact_value = FactValue::Num(source_id as f64);
+                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                return Ok(compare_fact_value(&modified, op, value));
+            }
 
             // Other builtin keys (aliases, etc.) fall through to fact lookup
             _ => {}
