@@ -71,9 +71,13 @@ Used with `--where`. Supports full boolean logic:
 --where "source.rel_path[-1]=photo.jpg"
 ```
 
-**Operators**: `=`, `!=`, `>`, `<`, `>=`, `<=`, `IN (a, b, c)`, `NOT IN (...)`, `?` (exists)
+**Operators**: `=`, `!=`, `~` (glob), `!~` (not glob), `>`, `<`, `>=`, `<=`, `IN (a, b, c)`, `NOT IN (...)`, `?` (exists)
 
-**Modifiers**: Apply with `|` syntax (reuses expr.rs): `source.mtime|year`, `content.DateTimeOriginal|month`
+Note: `=` and `!=` are case-sensitive. Use `|lowercase` modifier for case-insensitive matching.
+
+**Glob patterns** (`~` operator): `*` (any chars), `?` (one char), `[abc]` (char set), `[a-z]` (range), `[!abc]` (negated set)
+
+**Modifiers**: Apply with `|` syntax (reuses expr.rs): `source.mtime|year`, `content.DateTimeOriginal|month`, `source.ext|lowercase`, `filename|capitalize`
 
 **Path accessors**: Python-style indexing works in filters: `source.rel_path[-1]|stem=photo`
 

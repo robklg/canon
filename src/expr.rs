@@ -59,9 +59,12 @@ pub enum Modifier {
     Weekday,
     Quarter,
     // String modifiers
-    Stem,  // filename without extension
-    Ext,   // file extension
-    Short, // first 8 chars (for hashes)
+    Stem,       // filename without extension
+    Ext,        // file extension
+    Short,      // first 8 chars (for hashes)
+    Lowercase,  // convert to lowercase
+    Uppercase,  // convert to uppercase
+    Capitalize, // capitalize first letter, lowercase rest
 }
 
 /// Fact value types for evaluation.
@@ -299,9 +302,13 @@ pub fn parse_modifier(s: &str) -> Result<Modifier> {
         "stem" => Ok(Modifier::Stem),
         "ext" => Ok(Modifier::Ext),
         "short" => Ok(Modifier::Short),
+        "lowercase" => Ok(Modifier::Lowercase),
+        "uppercase" => Ok(Modifier::Uppercase),
+        "capitalize" => Ok(Modifier::Capitalize),
         _ => bail!(
             "Unknown modifier: '{}'. Available: year, month, day, hour, minute, second, \
-             date, time, datetime, yearmonth, week, weekday, quarter, stem, ext, short",
+             date, time, datetime, yearmonth, week, weekday, quarter, stem, ext, short, \
+             lowercase, uppercase, capitalize",
             s
         ),
     }
@@ -598,6 +605,25 @@ pub fn apply_modifier(value: &FactValue, modifier: Modifier, key: &str) -> Resul
             let s = fact_value_to_string(value);
             Ok(FactValue::Text(s.chars().take(8).collect()))
         }
+        Modifier::Lowercase => {
+            let s = fact_value_to_string(value);
+            Ok(FactValue::Text(s.to_lowercase()))
+        }
+        Modifier::Uppercase => {
+            let s = fact_value_to_string(value);
+            Ok(FactValue::Text(s.to_uppercase()))
+        }
+        Modifier::Capitalize => {
+            let s = fact_value_to_string(value);
+            let mut chars = s.chars();
+            let result = match chars.next() {
+                Some(c) => {
+                    c.to_uppercase().to_string() + &chars.as_str().to_lowercase()
+                }
+                None => String::new(),
+            };
+            Ok(FactValue::Text(result))
+        }
     }
 }
 
@@ -676,6 +702,9 @@ fn modifier_name(modifier: Modifier) -> &'static str {
         Modifier::Stem => "stem",
         Modifier::Ext => "ext",
         Modifier::Short => "short",
+        Modifier::Lowercase => "lowercase",
+        Modifier::Uppercase => "uppercase",
+        Modifier::Capitalize => "capitalize",
     }
 }
 

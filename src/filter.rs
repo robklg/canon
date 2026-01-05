@@ -15,6 +15,8 @@ pub enum CompareOp {
     Ge,
     Lt,
     Le,
+    Glob,    // ~
+    NotGlob, // !~
 }
 
 /// Filter expression AST - supports boolean logic
@@ -94,6 +96,7 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
                 ">=" => { tokens.push(Token::Op(CompareOp::Ge)); i += 2; continue; }
                 "<=" => { tokens.push(Token::Op(CompareOp::Le)); i += 2; continue; }
                 "!=" => { tokens.push(Token::Op(CompareOp::Ne)); i += 2; continue; }
+                "!~" => { tokens.push(Token::Op(CompareOp::NotGlob)); i += 2; continue; }
                 _ => {}
             }
         }
@@ -103,6 +106,7 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
             '>' => { tokens.push(Token::Op(CompareOp::Gt)); i += 1; continue; }
             '<' => { tokens.push(Token::Op(CompareOp::Lt)); i += 1; continue; }
             '=' => { tokens.push(Token::Op(CompareOp::Eq)); i += 1; continue; }
+            '~' => { tokens.push(Token::Op(CompareOp::Glob)); i += 1; continue; }
             '!' => { tokens.push(Token::Not); i += 1; continue; }
             _ => {}
         }
@@ -689,16 +693,164 @@ fn compare_fact_value(fact: &FactValue, op: CompareOp, filter_value: &str) -> bo
 
 fn compare_text(stored: &str, op: CompareOp, filter_value: &str) -> bool {
     match op {
-        CompareOp::Eq => stored.eq_ignore_ascii_case(filter_value),
-        CompareOp::Ne => !stored.eq_ignore_ascii_case(filter_value),
+        CompareOp::Eq => stored == filter_value,
+        CompareOp::Ne => stored != filter_value,
         CompareOp::Gt => stored > filter_value,
         CompareOp::Ge => stored >= filter_value,
         CompareOp::Lt => stored < filter_value,
         CompareOp::Le => stored <= filter_value,
+        CompareOp::Glob => glob_match(stored, filter_value),
+        CompareOp::NotGlob => !glob_match(stored, filter_value),
     }
 }
 
+/// Match a string against a glob pattern (case-sensitive).
+///
+/// Supports:
+/// - `*` matches zero or more characters
+/// - `?` matches exactly one character
+/// - `[abc]` matches any character in the set
+/// - `[!abc]` or `[^abc]` matches any character NOT in the set
+/// - `[a-z]` matches character ranges
+/// - `\*`, `\?`, `\[` for literal matching
+fn glob_match(text: &str, pattern: &str) -> bool {
+    let text_chars: Vec<char> = text.chars().collect();
+    let pattern_chars: Vec<char> = pattern.chars().collect();
+    glob_match_recursive(&text_chars, 0, &pattern_chars, 0)
+}
+
+fn glob_match_recursive(text: &[char], ti: usize, pattern: &[char], pi: usize) -> bool {
+    // Both exhausted - match
+    if pi >= pattern.len() && ti >= text.len() {
+        return true;
+    }
+
+    // Pattern exhausted but text remaining - no match
+    if pi >= pattern.len() {
+        return false;
+    }
+
+    // Handle escape sequences
+    if pattern[pi] == '\\' && pi + 1 < pattern.len() {
+        if ti < text.len() && text[ti] == pattern[pi + 1] {
+            return glob_match_recursive(text, ti + 1, pattern, pi + 2);
+        }
+        return false;
+    }
+
+    // Handle wildcards
+    match pattern[pi] {
+        '*' => {
+            // Try matching zero or more characters
+            // First try matching zero characters (skip the *)
+            if glob_match_recursive(text, ti, pattern, pi + 1) {
+                return true;
+            }
+            // Then try matching one character and continue with same *
+            if ti < text.len() && glob_match_recursive(text, ti + 1, pattern, pi) {
+                return true;
+            }
+            false
+        }
+        '?' => {
+            // Match exactly one character
+            if ti < text.len() {
+                glob_match_recursive(text, ti + 1, pattern, pi + 1)
+            } else {
+                false
+            }
+        }
+        '[' => {
+            // Character class
+            if ti >= text.len() {
+                return false;
+            }
+            match parse_char_class(pattern, pi) {
+                Some((matches_set, end_pi)) => {
+                    let c = text[ti];
+                    let in_set = matches_set.contains(&c);
+                    // Check if it's a negated class
+                    let negated = pi + 1 < pattern.len()
+                        && (pattern[pi + 1] == '!' || pattern[pi + 1] == '^');
+                    let matches = if negated { !in_set } else { in_set };
+                    if matches {
+                        glob_match_recursive(text, ti + 1, pattern, end_pi)
+                    } else {
+                        false
+                    }
+                }
+                None => {
+                    // Invalid char class, treat '[' as literal
+                    if ti < text.len() && text[ti] == '[' {
+                        glob_match_recursive(text, ti + 1, pattern, pi + 1)
+                    } else {
+                        false
+                    }
+                }
+            }
+        }
+        c => {
+            // Literal character
+            if ti < text.len() && text[ti] == c {
+                glob_match_recursive(text, ti + 1, pattern, pi + 1)
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// Parse a character class like [abc], [!abc], [a-z], [!a-z0-9]
+/// Returns the set of matching characters and the index after the closing ']'
+fn parse_char_class(pattern: &[char], start: usize) -> Option<(Vec<char>, usize)> {
+    if pattern[start] != '[' {
+        return None;
+    }
+
+    let mut i = start + 1;
+    let mut chars = Vec::new();
+
+    // Check for negation
+    let negated = i < pattern.len() && (pattern[i] == '!' || pattern[i] == '^');
+    if negated {
+        i += 1;
+    }
+
+    // Handle ] as first char (literal)
+    if i < pattern.len() && pattern[i] == ']' {
+        chars.push(']');
+        i += 1;
+    }
+
+    while i < pattern.len() && pattern[i] != ']' {
+        // Check for range like a-z
+        if i + 2 < pattern.len() && pattern[i + 1] == '-' && pattern[i + 2] != ']' {
+            let start_c = pattern[i];
+            let end_c = pattern[i + 2];
+            for c in start_c..=end_c {
+                chars.push(c);
+            }
+            i += 3;
+        } else {
+            chars.push(pattern[i]);
+            i += 1;
+        }
+    }
+
+    if i >= pattern.len() {
+        // No closing ']'
+        return None;
+    }
+
+    Some((chars, i + 1)) // +1 to skip the closing ']'
+}
+
 fn compare_numeric(stored: f64, op: CompareOp, filter_value: &str) -> bool {
+    // Glob operators don't make sense for numeric values
+    if matches!(op, CompareOp::Glob | CompareOp::NotGlob) {
+        return false;
+    }
+
     let filter_num = match parse_filter_value(filter_value) {
         Some(n) => n,
         None => return false,
@@ -711,6 +863,7 @@ fn compare_numeric(stored: f64, op: CompareOp, filter_value: &str) -> bool {
         CompareOp::Ge => stored >= filter_num,
         CompareOp::Lt => stored < filter_num,
         CompareOp::Le => stored <= filter_num,
+        CompareOp::Glob | CompareOp::NotGlob => unreachable!(),
     }
 }
 

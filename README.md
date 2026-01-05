@@ -533,14 +533,43 @@ Filters select sources based on facts using a boolean expression language.
 | Syntax | Meaning |
 |--------|---------|
 | `key?` | Fact exists |
-| `key=value` | Fact equals value |
-| `key!=value` | Fact doesn't equal value |
+| `key=value` | Fact equals value (case-sensitive) |
+| `key!=value` | Fact doesn't equal value (case-sensitive) |
+| `key~pattern` | Glob pattern match (case-sensitive) |
+| `key!~pattern` | Glob pattern doesn't match |
 | `key>value` | Greater than (numbers/dates) |
 | `key>=value` | Greater or equal |
 | `key<value` | Less than |
 | `key<=value` | Less or equal |
 | `key IN (v1, v2, ...)` | Fact matches any value in list |
 | `key NOT IN (v1, v2, ...)` | Fact doesn't match any value in list |
+
+### Glob Patterns
+
+The `~` operator supports shell-style glob patterns:
+
+| Pattern | Meaning |
+|---------|---------|
+| `*` | Match zero or more characters |
+| `?` | Match exactly one character |
+| `[abc]` | Match any character in set |
+| `[a-z]` | Match character range |
+| `[!abc]` | Match any character NOT in set |
+| `\*` | Literal asterisk (escape) |
+
+```bash
+# Files starting with IMG_
+--where 'filename~"IMG_*"'
+
+# Files with 3-letter extension
+--where 'source.ext~"???"'
+
+# Files in a year subdirectory
+--where 'source.rel_path~"*/2024/*"'
+
+# Exclude temp files
+--where 'filename!~"*.tmp"'
+```
 
 ### Boolean Operators
 
@@ -573,6 +602,9 @@ Apply transformations to fact values using `|` syntax:
 | `stem` | Filename without extension |
 | `ext` | File extension |
 | `short` | First 8 characters (for hashes) |
+| `lowercase` | Convert to lowercase |
+| `uppercase` | Convert to uppercase |
+| `capitalize` | Capitalize first letter |
 
 ```bash
 # Files from 2024
@@ -580,6 +612,12 @@ Apply transformations to fact values using `|` syntax:
 
 # January photos
 --where 'content.DateTimeOriginal|month=1'
+
+# Case-insensitive extension matching
+--where 'source.ext|lowercase=jpg'
+
+# Case-insensitive glob
+--where 'filename|lowercase~"img_*"'
 ```
 
 ### Path Accessors
