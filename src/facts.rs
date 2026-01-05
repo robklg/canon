@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::db::{build_scope_clause, canonicalize_scopes, populate_temp_sources, Connection, Db};
 use crate::exclude;
-use crate::expr::{self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactValue, Modifier, PathAccessor};
+use crate::expr::{self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, Modifier, PathAccessor};
 use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;
@@ -188,18 +188,22 @@ fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize
     // Query fact keys from both source and object facts
     // Count sources (not entities) - multiple sources can share an object
     // Use UNION ALL for index efficiency, dedupe once in outer SELECT DISTINCT
-    let results: Vec<(String, i64, bool)> = conn
+    // Also determine fact type from which column is non-null
+    let results: Vec<(String, i64, FactType)> = conn
         .prepare(
-            "SELECT key, COUNT(*) as cnt
+            "SELECT key, COUNT(*) as cnt,
+                    MAX(CASE WHEN value_text IS NOT NULL THEN 1 ELSE 0 END) as is_text,
+                    MAX(CASE WHEN value_num IS NOT NULL THEN 1 ELSE 0 END) as is_num,
+                    MAX(CASE WHEN value_time IS NOT NULL THEN 1 ELSE 0 END) as is_time
              FROM (
-                 SELECT DISTINCT id, key FROM (
-                     SELECT ts.id, f.key
+                 SELECT DISTINCT id, key, value_text, value_num, value_time FROM (
+                     SELECT ts.id, f.key, f.value_text, f.value_num, f.value_time
                      FROM temp_sources ts
                      JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id
 
                      UNION ALL
 
-                     SELECT ts.id, f.key
+                     SELECT ts.id, f.key, f.value_text, f.value_num, f.value_time
                      FROM temp_sources ts
                      JOIN sources s ON s.id = ts.id
                      JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id
@@ -209,7 +213,21 @@ fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize
              GROUP BY key
              ORDER BY cnt DESC"
         )?
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, false)))?
+        .query_map([], |row| {
+            let key: String = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            let _is_text: i64 = row.get(2)?;
+            let is_num: i64 = row.get(3)?;
+            let is_time: i64 = row.get(4)?;
+            let fact_type = if is_time == 1 {
+                FactType::Time
+            } else if is_num == 1 {
+                FactType::Num
+            } else {
+                FactType::Text
+            };
+            Ok((key, count, fact_type))
+        })?
         .collect::<Result<Vec<_>, _>>()?;
 
     // Clean up temp table
@@ -217,7 +235,7 @@ fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize
 
     // Add built-in and derived facts at the top (they always have 100% coverage)
     use strum::IntoEnumIterator;
-    let mut all_results: Vec<(String, i64, BuiltinKeyCategory)> = Vec::new();
+    let mut all_results: Vec<(String, i64, BuiltinKeyCategory, FactType)> = Vec::new();
 
     for key in BuiltinKey::iter() {
         let vis = key.visibility();
@@ -229,28 +247,28 @@ fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize
             continue;
         }
         let name: &'static str = key.into();
-        all_results.push((name.to_string(), total_sources as i64, key.category()));
+        all_results.push((name.to_string(), total_sources as i64, key.category(), key.fact_type()));
     }
 
     // Add stored facts (with Stored category)
-    let stored_results: Vec<(String, i64, BuiltinKeyCategory)> = results
+    let stored_results: Vec<(String, i64, BuiltinKeyCategory, FactType)> = results
         .into_iter()
-        .map(|(key, count, _)| (key, count, BuiltinKeyCategory::Stored))
+        .map(|(key, count, fact_type)| (key, count, BuiltinKeyCategory::Stored, fact_type))
         .collect();
     all_results.extend(stored_results);
 
     // Print header
-    println!("{:<30} {:>10} {:>10}", "Fact", "Count", "Coverage");
-    println!("{}", "─".repeat(52));
+    println!("{:<30} {:>6} {:>10} {:>10}", "Fact", "Type", "Count", "Coverage");
+    println!("{}", "─".repeat(60));
 
-    for (key, count, category) in &all_results {
+    for (key, count, category, fact_type) in &all_results {
         let coverage = (*count as f64 / total_sources as f64) * 100.0;
         let suffix = match category {
             BuiltinKeyCategory::BuiltIn => "  (built-in)",
             BuiltinKeyCategory::Derived => "  (derived)",
             BuiltinKeyCategory::Stored => "",
         };
-        println!("{:<30} {:>10} {:>9.1}%{}", key, count, coverage, suffix);
+        println!("{:<30} {:>6} {:>10} {:>9.1}%{}", key, fact_type.as_str(), count, coverage, suffix);
     }
 
     if !show_all {
