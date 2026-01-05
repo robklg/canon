@@ -303,6 +303,20 @@ enum ClusterAction {
         #[arg(long)]
         allow_duplicates: bool,
     },
+    /// Regenerate lock file from existing manifest config
+    Refresh {
+        /// Path to manifest TOML file
+        manifest: PathBuf,
+        /// Include files already in an archive (by default they are excluded)
+        #[arg(long)]
+        include_archived: bool,
+        /// Show which files were excluded because they're already archived
+        #[arg(long)]
+        show_archived: bool,
+        /// Allow sources with duplicate content (same hash) in the manifest
+        #[arg(long)]
+        allow_duplicates: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -400,6 +414,19 @@ fn main() -> anyhow::Result<()> {
                     allow_duplicates,
                 };
                 cluster::generate(&db, &paths, &filters, &dest, &output, &options)?;
+            }
+            ClusterAction::Refresh {
+                manifest,
+                include_archived,
+                show_archived,
+                allow_duplicates,
+            } => {
+                let options = cluster::GenerateOptions {
+                    include_archived,
+                    show_archived,
+                    allow_duplicates,
+                };
+                cluster::refresh(&db, &manifest, &options)?;
             }
         },
         Commands::Apply {

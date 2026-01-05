@@ -2,13 +2,13 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, Metadata};
-use std::io::ErrorKind;
+use std::io::{BufRead, BufReader, ErrorKind};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::cluster::{Manifest, ManifestSource};
+use crate::cluster::{LockEntry, ManifestConfig};
 use crate::db::{parse_root_spec, path_strip_prefix, Connection, Db};
 use crate::exclude;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
@@ -26,8 +26,15 @@ struct ApplyStats {
     renamed: u64,
     moved: u64,
     skipped_missing: u64,
+    skipped_stale: u64,
     skipped_filtered: u64,
     errors: u64,
+}
+
+/// Tracks sources that were skipped due to state changes
+struct SkippedStaleSource {
+    path: String,
+    reason: String,
 }
 
 pub struct ApplyOptions {
@@ -93,7 +100,7 @@ fn fetch_typed_fact(conn: &Connection, source_id: i64, object_id: Option<i64>, k
 /// Build an EvalContext for a source using cached root paths
 fn build_eval_context(
     conn: &Connection,
-    source: &ManifestSource,
+    source: &LockEntry,
     needed_keys: &[String],
     scope_prefix: Option<&str>,
     root_paths: &HashMap<i64, String>,
@@ -143,7 +150,7 @@ fn build_eval_context(
 /// Evaluate a pattern for a source, returning the destination relative path
 fn evaluate_pattern(
     pattern: &Pattern,
-    source: &ManifestSource,
+    source: &LockEntry,
     needed_keys: &[String],
     scope_prefix: Option<&str>,
     conn: &Connection,
@@ -166,21 +173,53 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         eprintln!("Note: mtime/permissions preservation not available on this platform");
     }
 
-    let content = fs::read_to_string(manifest_path)
-        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
+    // Determine config path and lock path
+    let (config_path, lock_path) = if manifest_path.extension().and_then(|e| e.to_str()) == Some("lock") {
+        (manifest_path.with_extension("toml"), manifest_path.to_path_buf())
+    } else {
+        (manifest_path.to_path_buf(), manifest_path.with_extension("lock"))
+    };
 
-    let manifest: Manifest = toml::from_str(&content)
-        .with_context(|| format!("Failed to parse manifest: {}", manifest_path.display()))?;
+    // Read TOML config
+    let config_content = fs::read_to_string(&config_path)
+        .with_context(|| format!("Failed to read manifest config: {}", config_path.display()))?;
+    let config: ManifestConfig = toml::from_str(&config_content)
+        .with_context(|| format!("Failed to parse manifest config: {}", config_path.display()))?;
+
+    // Read JSONL lock file
+    let lock_file = File::open(&lock_path)
+        .with_context(|| format!("Failed to open lock file: {}", lock_path.display()))?;
+    let sources: Vec<LockEntry> = BufReader::new(lock_file)
+        .lines()
+        .enumerate()
+        .map(|(i, line)| {
+            let line = line.with_context(|| format!("Failed to read line {} of lock file", i + 1))?;
+            serde_json::from_str(&line)
+                .with_context(|| format!("Failed to parse line {} of lock file", i + 1))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Validate lock file hash matches config
+    let actual_hash = crate::cluster::hash_file(&lock_path)?;
+    if actual_hash != config.meta.lock_hash {
+        bail!(
+            "Lock file hash mismatch: expected {}, got {}\n\
+             The lock file may have been modified or does not belong to this config.\n\
+             Run `cluster refresh` to regenerate the lock file.",
+            &config.meta.lock_hash[..16.min(config.meta.lock_hash.len())],
+            &actual_hash[..16]
+        );
+    }
 
     let conn = db.conn();
 
     // Parse the pattern once upfront
-    let pattern = expr::parse_pattern(&manifest.output.pattern)
-        .with_context(|| format!("Failed to parse output pattern: {}", manifest.output.pattern))?;
+    let pattern = expr::parse_pattern(&config.output.pattern)
+        .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
     let needed_keys = expr::extract_fact_keys(&pattern);
 
-    // Get scope prefix from manifest if available
-    let scope_prefix = manifest.meta.scope.as_deref();
+    // Get scope prefix from config if available
+    let scope_prefix = config.meta.scope.as_deref();
 
     // Cache all root paths (single query, avoids per-source lookups)
     let root_paths: HashMap<i64, String> = conn
@@ -192,21 +231,21 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     let archive_root_path: String = conn
         .query_row(
             "SELECT path FROM roots WHERE id = ? AND role = 'archive'",
-            [manifest.output.archive_root_id],
+            [config.output.archive_root_id],
             |row| row.get(0),
         )
-        .with_context(|| format!("Archive root id {} not found", manifest.output.archive_root_id))?;
+        .with_context(|| format!("Archive root id {} not found", config.output.archive_root_id))?;
 
     // Construct full base_dir from archive root + relative subdir
-    let base_dir = if manifest.output.base_dir.is_empty() {
+    let base_dir = if config.output.base_dir.is_empty() {
         PathBuf::from(&archive_root_path)
     } else {
-        PathBuf::from(&archive_root_path).join(&manifest.output.base_dir)
+        PathBuf::from(&archive_root_path).join(&config.output.base_dir)
     };
 
     // Filter sources by root if specified
-    let filtered_sources = filter_by_roots(&manifest, &options.roots, conn)?;
-    let skipped_by_filter = manifest.sources.len() - filtered_sources.len();
+    let filtered_sources = filter_by_roots(&sources, &options.roots, conn)?;
+    let skipped_by_filter = sources.len() - filtered_sources.len();
 
     // Pre-flight checks (mandatory, always run)
     eprintln!("Checking destination write permissions...");
@@ -247,7 +286,7 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
 
     // Check archive conflicts
     eprintln!("Checking archive conflicts...");
-    let conflicts = check_archive_conflicts_filtered(conn, &filtered_sources, manifest.output.archive_root_id)?;
+    let conflicts = check_archive_conflicts_filtered(conn, &filtered_sources, config.output.archive_root_id)?;
 
     if !conflicts.in_dest_archive.is_empty() && !options.allow_duplicates {
         eprintln!(
@@ -292,10 +331,54 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         }
     }
 
+    // Preflight: validate pattern-relevant facts haven't changed
+    eprintln!("Validating snapshot facts...");
+    let fact_mismatches = validate_snapshot_facts(conn, &filtered_sources, &needed_keys)?;
+    if !fact_mismatches.is_empty() {
+        eprintln!(
+            "Error: {} pattern-relevant facts have changed since manifest was generated:",
+            fact_mismatches.len()
+        );
+        for (path, key, old, new) in fact_mismatches.iter().take(5) {
+            eprintln!("  {}: {} was {:?}, now {:?}", path, key, old, new);
+        }
+        if fact_mismatches.len() > 5 {
+            eprintln!("  ... and {} more", fact_mismatches.len() - 5);
+        }
+        eprintln!("\nRun `cluster refresh` to regenerate the lock file.");
+        bail!("Aborting due to fact validation failure");
+    }
+
+    // Preflight: validate source file states
+    // dry-run: fast DB check; real apply: thorough disk check
+    eprintln!("Validating source file states...");
+    let stale = if options.dry_run {
+        check_source_states_db(conn, &filtered_sources)?
+    } else {
+        check_source_states_disk(&filtered_sources)
+    };
+    if !stale.is_empty() {
+        eprintln!(
+            "Error: {} sources have changed since manifest was generated:",
+            stale.len()
+        );
+        for s in stale.iter().take(10) {
+            eprintln!("  {}: {}", s.path, s.reason);
+        }
+        if stale.len() > 10 {
+            eprintln!("  ... and {} more", stale.len() - 10);
+        }
+        eprintln!("\nRun `canon scan` then `cluster refresh` to regenerate the lock file.");
+        bail!("Aborting due to stale sources in manifest");
+    }
+
     let mut stats = ApplyStats {
         skipped_filtered: skipped_by_filter as u64,
         ..Default::default()
     };
+
+    // Track stale sources found during transfers (race condition detection)
+    let mut stale_during_transfer: Vec<SkippedStaleSource> = Vec::new();
 
     let total = filtered_sources.len();
     let progress_interval = std::cmp::max(total / 20, 1); // Update every 5%
@@ -314,10 +397,10 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
             &needed_keys,
             scope_prefix,
             &base_dir,
-            &manifest.output.base_dir,
+            &config.output.base_dir,
             options,
             conn,
-            manifest.output.archive_root_id,
+            config.output.archive_root_id,
             &root_paths,
         ) {
             Ok(action) => match action {
@@ -325,6 +408,13 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
                 ApplyAction::Renamed => stats.renamed += 1,
                 ApplyAction::Moved => stats.moved += 1,
                 ApplyAction::SkippedMissing => stats.skipped_missing += 1,
+                ApplyAction::SkippedStale(reason) => {
+                    stats.skipped_stale += 1;
+                    stale_during_transfer.push(SkippedStaleSource {
+                        path: source.path.clone(),
+                        reason,
+                    });
+                }
             },
             Err(e) => {
                 eprintln!("Error processing {}: {}", source.path, e);
@@ -338,10 +428,22 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         eprint!("\r  100% ({}/{})\n", total, total);
     }
 
+    // Summary of files that became stale during transfer (race conditions)
+    if !stale_during_transfer.is_empty() {
+        eprintln!("\nSkipped {} files that changed during apply:", stale_during_transfer.len());
+        for s in stale_during_transfer.iter().take(10) {
+            eprintln!("  {}: {}", s.path, s.reason);
+        }
+        if stale_during_transfer.len() > 10 {
+            eprintln!("  ... and {} more", stale_during_transfer.len() - 10);
+        }
+        eprintln!("Run `canon scan` then `cluster refresh` to regenerate the lock file.");
+    }
+
     let mode = if options.dry_run { " (dry-run)" } else { "" };
     println!(
-        "Applied{}: {} copied, {} renamed, {} moved, {} skipped (missing), {} skipped (filtered), {} errors",
-        mode, stats.copied, stats.renamed, stats.moved, stats.skipped_missing, stats.skipped_filtered, stats.errors
+        "Applied{}: {} copied, {} renamed, {} moved, {} skipped (missing), {} skipped (stale), {} skipped (filtered), {} errors",
+        mode, stats.copied, stats.renamed, stats.moved, stats.skipped_missing, stats.skipped_stale, stats.skipped_filtered, stats.errors
     );
 
     Ok(())
@@ -391,12 +493,12 @@ fn check_destination_writable(base_dir: &Path) -> Result<()> {
 }
 
 fn filter_by_roots<'a>(
-    manifest: &'a Manifest,
+    sources: &'a [LockEntry],
     roots: &[String],
     conn: &Connection,
-) -> Result<Vec<&'a ManifestSource>> {
+) -> Result<Vec<&'a LockEntry>> {
     if roots.is_empty() {
-        return Ok(manifest.sources.iter().collect());
+        return Ok(sources.iter().collect());
     }
 
     let mut root_ids = HashSet::new();
@@ -405,11 +507,11 @@ fn filter_by_roots<'a>(
         root_ids.insert(id);
     }
 
-    Ok(manifest.sources.iter().filter(|s| root_ids.contains(&s.root_id)).collect())
+    Ok(sources.iter().filter(|s| root_ids.contains(&s.root_id)).collect())
 }
 
 fn check_destination_collisions_filtered(
-    sources: &[&ManifestSource],
+    sources: &[&LockEntry],
     pattern: &Pattern,
     needed_keys: &[String],
     scope_prefix: Option<&str>,
@@ -479,7 +581,7 @@ fn check_destination_collisions_filtered(
 
 fn check_archive_conflicts_filtered(
     conn: &Connection,
-    sources: &[&ManifestSource],
+    sources: &[&LockEntry],
     dest_archive_id: i64,
 ) -> Result<ArchiveConflicts> {
     let mut conflicts = ArchiveConflicts {
@@ -538,7 +640,7 @@ fn check_archive_conflicts_filtered(
 
 fn check_excluded_sources_filtered(
     conn: &Connection,
-    sources: &[&ManifestSource],
+    sources: &[&LockEntry],
 ) -> Result<Vec<(i64, String)>> {
     let mut excluded = Vec::new();
     let total = sources.len();
@@ -564,15 +666,239 @@ fn check_excluded_sources_filtered(
     Ok(excluded)
 }
 
+/// Validate that a source file on disk matches the state recorded in the lock file.
+/// Returns Ok(()) if valid, Err with reason if changed.
+fn validate_source_state(source: &LockEntry) -> std::result::Result<(), String> {
+    let meta = match fs::metadata(&source.path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            return Err("file not found".to_string());
+        }
+        Err(e) => {
+            return Err(format!("cannot stat: {}", e));
+        }
+    };
+
+    let mut mismatches = Vec::new();
+
+    #[cfg(unix)]
+    {
+        let current_device = meta.dev() as i64;
+        let current_inode = meta.ino() as i64;
+        let current_size = meta.size() as i64;
+        let current_mtime = meta.mtime();
+
+        if current_device != source.device {
+            mismatches.push(format!("device: {} → {}", source.device, current_device));
+        }
+        if current_inode != source.inode {
+            mismatches.push(format!("inode: {} → {}", source.inode, current_inode));
+        }
+        if current_size != source.size {
+            mismatches.push(format!("size: {} → {}", source.size, current_size));
+        }
+        if current_mtime != source.mtime {
+            mismatches.push(format!("mtime: {} → {}", source.mtime, current_mtime));
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let current_size = meta.len() as i64;
+        let current_mtime = meta.modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        if current_size != source.size {
+            mismatches.push(format!("size: {} → {}", source.size, current_size));
+        }
+        if current_mtime != source.mtime {
+            mismatches.push(format!("mtime: {} → {}", source.mtime, current_mtime));
+        }
+    }
+
+    if !mismatches.is_empty() {
+        Err(mismatches.join(", "))
+    } else {
+        Ok(())
+    }
+}
+
+/// Batch validate all source file states against disk. Returns list of stale sources.
+fn check_source_states_disk(sources: &[&LockEntry]) -> Vec<SkippedStaleSource> {
+    let mut stale = Vec::new();
+    let total = sources.len();
+    let progress_interval = std::cmp::max(total / 20, 1);
+
+    for (i, source) in sources.iter().enumerate() {
+        if i > 0 && i % progress_interval == 0 {
+            let pct = (i * 100) / total;
+            eprint!("\r  {}% ({}/{})", pct, i, total);
+        }
+
+        if let Err(reason) = validate_source_state(source) {
+            stale.push(SkippedStaleSource {
+                path: source.path.clone(),
+                reason,
+            });
+        }
+    }
+
+    if total > progress_interval {
+        eprint!("\r  100% ({}/{})\n", total, total);
+    }
+
+    stale
+}
+
+/// Convert a FactValue to serde_json::Value for comparison with lock file
+fn fact_value_to_json(value: &FactValue) -> serde_json::Value {
+    match value {
+        FactValue::Text(t) => serde_json::Value::String(t.clone()),
+        FactValue::Num(n) => serde_json::json!(*n),
+        FactValue::Time(t) => serde_json::json!(*t),
+        FactValue::Path(p) => serde_json::Value::String(p.clone()),
+    }
+}
+
+/// Validate that pattern-relevant facts haven't changed since manifest was generated.
+/// Only checks stored facts (not built-in source.*/scope.*/object.hash).
+/// Returns list of mismatches: (path, key, old_value, new_value)
+fn validate_snapshot_facts(
+    conn: &Connection,
+    sources: &[&LockEntry],
+    needed_keys: &[String],
+) -> Result<Vec<(String, String, Option<serde_json::Value>, Option<serde_json::Value>)>> {
+    // Filter to only stored facts (not built-in facts)
+    let stored_keys: Vec<&String> = needed_keys
+        .iter()
+        .filter(|k| !k.starts_with("source.") && !k.starts_with("scope.") && *k != "object.hash")
+        .collect();
+
+    if stored_keys.is_empty() {
+        return Ok(Vec::new()); // Pattern only uses built-in facts
+    }
+
+    let mut mismatches = Vec::new();
+    let total = sources.len();
+    let progress_interval = std::cmp::max(total / 20, 1);
+
+    for (i, source) in sources.iter().enumerate() {
+        if i > 0 && i % progress_interval == 0 {
+            let pct = (i * 100) / total;
+            eprint!("\r  {}% ({}/{})", pct, i, total);
+        }
+
+        for key in &stored_keys {
+            let snapshot_value = source.facts.get(*key);
+            let current = fetch_typed_fact(conn, source.id, source.object_id, key)?;
+            let current_json = current.as_ref().map(fact_value_to_json);
+
+            // Compare: snapshot should match current DB value
+            let mismatch = match (&snapshot_value, &current_json) {
+                (None, None) => false,
+                (Some(a), Some(b)) => *a != b,
+                _ => true,
+            };
+
+            if mismatch {
+                mismatches.push((
+                    source.path.clone(),
+                    (*key).clone(),
+                    snapshot_value.cloned(),
+                    current_json,
+                ));
+            }
+        }
+    }
+
+    if total > progress_interval {
+        eprint!("\r  100% ({}/{})\n", total, total);
+    }
+
+    Ok(mismatches)
+}
+
+/// Batch validate source file states against DB values. Returns list of stale sources.
+/// Used in dry-run mode for faster validation without disk access.
+fn check_source_states_db(conn: &Connection, sources: &[&LockEntry]) -> Result<Vec<SkippedStaleSource>> {
+    let mut stale = Vec::new();
+    let total = sources.len();
+    let progress_interval = std::cmp::max(total / 20, 1);
+
+    for (i, source) in sources.iter().enumerate() {
+        if i > 0 && i % progress_interval == 0 {
+            let pct = (i * 100) / total;
+            eprint!("\r  {}% ({}/{})", pct, i, total);
+        }
+
+        // Get current DB values for this source
+        let db_state: Option<(i64, i64, i64, i64, bool)> = conn
+            .query_row(
+                "SELECT device, inode, size, mtime, present FROM sources WHERE id = ?",
+                [source.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()?;
+
+        match db_state {
+            None => {
+                stale.push(SkippedStaleSource {
+                    path: source.path.clone(),
+                    reason: "source not found in DB".to_string(),
+                });
+            }
+            Some((_, _, _, _, false)) => {
+                stale.push(SkippedStaleSource {
+                    path: source.path.clone(),
+                    reason: "source marked not present in DB".to_string(),
+                });
+            }
+            Some((db_device, db_inode, db_size, db_mtime, true)) => {
+                let mut mismatches = Vec::new();
+
+                if db_device != source.device {
+                    mismatches.push(format!("device: {} → {}", source.device, db_device));
+                }
+                if db_inode != source.inode {
+                    mismatches.push(format!("inode: {} → {}", source.inode, db_inode));
+                }
+                if db_size != source.size {
+                    mismatches.push(format!("size: {} → {}", source.size, db_size));
+                }
+                if db_mtime != source.mtime {
+                    mismatches.push(format!("mtime: {} → {}", source.mtime, db_mtime));
+                }
+
+                if !mismatches.is_empty() {
+                    stale.push(SkippedStaleSource {
+                        path: source.path.clone(),
+                        reason: mismatches.join(", "),
+                    });
+                }
+            }
+        }
+    }
+
+    if total > progress_interval {
+        eprint!("\r  100% ({}/{})\n", total, total);
+    }
+
+    Ok(stale)
+}
+
 enum ApplyAction {
     Copied,
     Renamed,
     Moved,
     SkippedMissing,
+    SkippedStale(String),  // reason
 }
 
 fn process_source(
-    source: &ManifestSource,
+    source: &LockEntry,
     pattern: &Pattern,
     needed_keys: &[String],
     scope_prefix: Option<&str>,
@@ -619,6 +945,12 @@ fn process_source(
                 return Ok(ApplyAction::Moved);
             }
         }
+    }
+
+    // Per-transfer validation: check source hasn't changed since preflight
+    // (catches race conditions where file changes between preflight and transfer)
+    if let Err(reason) = validate_source_state(source) {
+        return Ok(ApplyAction::SkippedStale(reason));
     }
 
     // Create parent directories

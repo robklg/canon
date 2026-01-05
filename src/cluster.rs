@@ -2,21 +2,22 @@ use anyhow::{bail, Context, Result};
 use rusqlite::types::Value;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::{build_scope_clause, canonicalize_scopes, resolve_archive_path, Connection, Db};
 use crate::exclude;
 use crate::expr::{BuiltinKey, BuiltinKeyVisibility, FactType, Modifier, ModifierCategory};
 use crate::filter::{self, Filter};
 
+/// TOML config file (without sources)
 #[derive(Serialize, Deserialize)]
-pub struct Manifest {
+pub struct ManifestConfig {
     pub meta: ManifestMeta,
     pub output: ManifestOutput,
-    pub sources: Vec<ManifestSource>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -24,7 +25,10 @@ pub struct ManifestMeta {
     pub query: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-    pub generated_at: i64,
+    /// RFC3339 timestamp when manifest was generated/refreshed
+    pub generated_at: String,
+    /// SHA256 hash of the lock file (for integrity validation)
+    pub lock_hash: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -34,15 +38,22 @@ pub struct ManifestOutput {
     pub base_dir: String,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct ManifestSource {
+/// JSONL lock entry (one per line in .lock file)
+#[derive(Serialize, Deserialize, Clone)]
+pub struct LockEntry {
     pub id: i64,
     pub root_id: i64,
     pub path: String,
+    // File state at generation time (from DB, for pre-transfer validation)
+    pub device: i64,
+    pub inode: i64,
     pub size: i64,
+    pub mtime: i64,
+    // Content info
     pub object_id: Option<i64>,
     pub hash_type: Option<String>,
     pub hash_value: Option<String>,
+    // Snapshot facts (only 100% coverage facts - eligible for pattern use)
     pub facts: HashMap<String, serde_json::Value>,
 }
 
@@ -50,6 +61,75 @@ pub struct GenerateOptions {
     pub include_archived: bool,
     pub show_archived: bool,
     pub allow_duplicates: bool,
+}
+
+/// Result from generating a lock file
+struct LockGenerationResult {
+    source_count: usize,
+    full_coverage_facts: Vec<(String, FactType, String)>,
+}
+
+/// Core logic shared between generate() and refresh()
+/// Queries sources, validates, and writes the lock file
+fn generate_lock(
+    conn: &Connection,
+    scope_prefixes: &[String],
+    filters: &[Filter],
+    lock_path: &Path,
+    options: &GenerateOptions,
+) -> Result<Option<LockGenerationResult>> {
+    let (sources, archived, excluded_count) =
+        query_sources(conn, scope_prefixes, filters, options.include_archived)?;
+
+    // Report excluded files (hard gate - always skipped)
+    if excluded_count > 0 {
+        eprintln!("Skipped {} excluded sources", excluded_count);
+    }
+
+    // Report archived files
+    if !archived.is_empty() {
+        eprintln!("Excluded {} files already in archive(s)", archived.len());
+        if options.show_archived {
+            eprintln!("Archived files:");
+            for (source_path, archive_path) in &archived {
+                eprintln!("  {} -> {}", source_path, archive_path);
+            }
+        } else {
+            eprintln!("Use --show-archived to list them");
+        }
+    }
+
+    if sources.is_empty() {
+        println!("No sources matched the query");
+        return Ok(None);
+    }
+
+    // Check for source duplicates (same content hash)
+    if !options.allow_duplicates {
+        let duplicate_groups = find_source_duplicates(&sources);
+        if !duplicate_groups.is_empty() {
+            let total_dup_sources: usize = duplicate_groups.iter().map(|(_, v)| v.len()).sum();
+            bail!(
+                "Found {} duplicate groups ({} sources with identical content)\n\
+                 Use `canon ls --duplicates` to see details (supports [path] and --where filters).\n\
+                 Use `canon exclude duplicates --prefer <path>` to resolve.\n\
+                 Use --allow-duplicates to include them anyway.",
+                duplicate_groups.len(),
+                total_dup_sources
+            );
+        }
+    }
+
+    // Collect facts with 100% coverage
+    let full_coverage_facts = collect_full_coverage_facts(conn, &sources)?;
+
+    // Write JSONL lock file
+    write_lock_file(lock_path, &sources, &full_coverage_facts)?;
+
+    Ok(Some(LockGenerationResult {
+        source_count: sources.len(),
+        full_coverage_facts,
+    }))
 }
 
 pub fn generate(
@@ -78,55 +158,23 @@ pub fn generate(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    let (sources, archived, excluded_count) = query_sources(conn, &scope_prefixes, &parsed_filters, options.include_archived)?;
+    // Generate lock file
+    let lock_path = output_path.with_extension("lock");
+    let result = generate_lock(conn, &scope_prefixes, &parsed_filters, &lock_path, options)?;
 
-    // Report excluded files (hard gate - always skipped)
-    if excluded_count > 0 {
-        eprintln!("Skipped {} excluded sources", excluded_count);
-    }
+    let result = match result {
+        Some(r) => r,
+        None => return Ok(()), // No sources matched
+    };
 
-    // Report archived files
-    if !archived.is_empty() {
-        eprintln!(
-            "Excluded {} files already in archive(s)",
-            archived.len()
-        );
-        if options.show_archived {
-            eprintln!("Archived files:");
-            for (source_path, archive_path) in &archived {
-                eprintln!("  {} -> {}", source_path, archive_path);
-            }
-        } else {
-            eprintln!("Use --show-archived to list them");
-        }
-    }
+    // Compute hash of lock file for integrity validation
+    let lock_hash = hash_file(&lock_path)?;
 
-    if sources.is_empty() {
-        println!("No sources matched the query");
-        return Ok(());
-    }
+    // Generate fact help from full coverage facts
+    let fact_help = generate_fact_help(result.source_count, &result.full_coverage_facts);
 
-    // Check for source duplicates (same content hash)
-    if !options.allow_duplicates {
-        let duplicate_groups = find_source_duplicates(&sources);
-        if !duplicate_groups.is_empty() {
-            let total_dup_sources: usize = duplicate_groups.iter().map(|(_, v)| v.len()).sum();
-            bail!(
-                "Found {} duplicate groups ({} sources with identical content)\n\
-                 Use `canon ls --duplicates` to see details (supports [path] and --where filters).\n\
-                 Use `canon exclude duplicates --prefer <path>` to resolve.\n\
-                 Use --allow-duplicates to include them anyway.",
-                duplicate_groups.len(),
-                total_dup_sources
-            );
-        }
-    }
-
-    // Collect facts with 100% coverage for help comments
-    let full_coverage_facts = collect_full_coverage_facts(conn, &sources)?;
-    let fact_help = generate_fact_help(&sources, &full_coverage_facts);
-
-    let manifest = Manifest {
+    // Build config (TOML without sources)
+    let config = ManifestConfig {
         meta: ManifestMeta {
             query: filters.to_vec(),
             scope: if scope_prefixes.len() == 1 {
@@ -137,41 +185,165 @@ pub fn generate(
                 Some(scope_prefixes.join(", "))
             },
             generated_at: current_timestamp(),
+            lock_hash,
         },
         output: ManifestOutput {
             pattern: "{filename}".to_string(),
             archive_root_id,
             base_dir,
         },
-        sources,
     };
 
-    let toml_str = toml::to_string_pretty(&manifest)
-        .context("Failed to serialize manifest")?;
-
-    // Insert fact help comments before [[sources]] section
-    let toml_with_help = if let Some(sources_pos) = toml_str.find("[[sources]]") {
-        format!(
-            "{}\n{}{}",
-            toml_str[..sources_pos].trim_end(),
-            fact_help,
-            &toml_str[sources_pos..]
-        )
-    } else {
-        // No sources section, just append help at the end
-        format!("{}\n{}", toml_str, fact_help)
-    };
-
+    // Write TOML config file
+    let toml_str =
+        toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
+    let toml_with_help = format!("{}\n\n{}", toml_str.trim_end(), fact_help);
     fs::write(output_path, &toml_with_help)
         .with_context(|| format!("Failed to write manifest to {}", output_path.display()))?;
 
     println!(
-        "Generated manifest with {} sources: {}",
-        manifest.sources.len(),
-        output_path.display()
+        "Generated manifest: {} ({} sources in {})",
+        output_path.display(),
+        result.source_count,
+        lock_path.display()
     );
 
     Ok(())
+}
+
+pub fn refresh(db: &Db, config_path: &Path, options: &GenerateOptions) -> Result<()> {
+    let conn = db.conn();
+
+    // Read existing TOML config
+    let config_content = fs::read_to_string(config_path)
+        .with_context(|| format!("Failed to read config: {}", config_path.display()))?;
+    let mut config: ManifestConfig = toml::from_str(&config_content)
+        .with_context(|| format!("Failed to parse config: {}", config_path.display()))?;
+
+    // Parse scope from config
+    let scope_prefixes: Vec<String> = match &config.meta.scope {
+        Some(s) => s.split(", ").map(|p| p.to_string()).collect(),
+        None => vec![],
+    };
+
+    // Parse filters from config
+    let parsed_filters: Vec<Filter> = config
+        .meta
+        .query
+        .iter()
+        .map(|f| Filter::parse(f))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Generate lock file using shared logic
+    let lock_path = config_path.with_extension("lock");
+    let result = generate_lock(conn, &scope_prefixes, &parsed_filters, &lock_path, options)?;
+
+    match result {
+        Some(r) => {
+            // Compute hash of new lock file
+            let lock_hash = hash_file(&lock_path)?;
+
+            // Update config with new lock_hash and timestamp
+            config.meta.lock_hash = lock_hash;
+            config.meta.generated_at = current_timestamp();
+
+            // Regenerate fact help and rewrite TOML
+            let fact_help = generate_fact_help(r.source_count, &r.full_coverage_facts);
+            let toml_str =
+                toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
+            let toml_with_help = format!("{}\n\n{}", toml_str.trim_end(), fact_help);
+            fs::write(config_path, &toml_with_help)
+                .with_context(|| format!("Failed to write config: {}", config_path.display()))?;
+
+            println!(
+                "Refreshed lock file: {} ({} sources)",
+                lock_path.display(),
+                r.source_count
+            );
+        }
+        None => {
+            // No sources - remove lock file if it exists
+            if lock_path.exists() {
+                fs::remove_file(&lock_path)?;
+            }
+            // Update config with empty lock hash
+            config.meta.lock_hash = String::new();
+            config.meta.generated_at = current_timestamp();
+            let toml_str =
+                toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
+            fs::write(config_path, &toml_str)
+                .with_context(|| format!("Failed to write config: {}", config_path.display()))?;
+            println!("No sources matched the query");
+        }
+    }
+
+    Ok(())
+}
+
+/// Write a JSONL lock file with sources filtered to 100% coverage facts
+fn write_lock_file(
+    lock_path: &Path,
+    sources: &[LockEntry],
+    full_coverage_facts: &[(String, FactType, String)],
+) -> Result<()> {
+    let lock_file = File::create(lock_path)
+        .with_context(|| format!("Failed to create lock file: {}", lock_path.display()))?;
+    let mut writer = BufWriter::new(lock_file);
+
+    // Get 100% coverage fact keys
+    let full_coverage_keys: std::collections::HashSet<&str> = full_coverage_facts
+        .iter()
+        .map(|(k, _, _)| k.as_str())
+        .collect();
+
+    for source in sources {
+        // Filter facts to only 100% coverage facts
+        let filtered_facts: HashMap<String, serde_json::Value> = source
+            .facts
+            .iter()
+            .filter(|(k, _)| full_coverage_keys.contains(k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        let entry = LockEntry {
+            id: source.id,
+            root_id: source.root_id,
+            path: source.path.clone(),
+            device: source.device,
+            inode: source.inode,
+            size: source.size,
+            mtime: source.mtime,
+            object_id: source.object_id,
+            hash_type: source.hash_type.clone(),
+            hash_value: source.hash_value.clone(),
+            facts: filtered_facts,
+        };
+        serde_json::to_writer(&mut writer, &entry)
+            .with_context(|| format!("Failed to write lock entry for {}", source.path))?;
+        writeln!(writer)?;
+    }
+
+    writer.flush()?;
+    Ok(())
+}
+
+/// Compute SHA256 hash of a file, returning hex string
+pub fn hash_file(path: &Path) -> Result<String> {
+    let file = File::open(path)
+        .with_context(|| format!("Failed to open file for hashing: {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Returns (included_sources, archived_sources, excluded_count)
@@ -182,7 +354,7 @@ fn query_sources(
     scope_prefixes: &[String],
     filters: &[Filter],
     include_archived: bool,
-) -> Result<(Vec<ManifestSource>, Vec<(String, String)>, usize)> {
+) -> Result<(Vec<LockEntry>, Vec<(String, String)>, usize)> {
     // Build query based on filters
     // By default only source roots, with --include-archived also include archive roots
     let role_clause = if include_archived {
@@ -267,19 +439,19 @@ fn find_in_archive(conn: &Connection, hash_value: &str) -> Result<Option<String>
     }))
 }
 
-fn fetch_source(conn: &Connection, source_id: i64) -> Result<Option<ManifestSource>> {
-    let row: Option<(i64, i64, String, String, i64, Option<i64>)> = conn
+fn fetch_source(conn: &Connection, source_id: i64) -> Result<Option<LockEntry>> {
+    let row: Option<(i64, i64, String, String, i64, i64, i64, i64, Option<i64>)> = conn
         .query_row(
-            "SELECT s.id, s.root_id, r.path, s.rel_path, s.size, s.object_id
+            "SELECT s.id, s.root_id, r.path, s.rel_path, s.device, s.inode, s.size, s.mtime, s.object_id
              FROM sources s
              JOIN roots r ON s.root_id = r.id
              WHERE s.id = ?",
             [source_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
         )
         .ok();
 
-    let (id, root_id, root_path, rel_path, size, object_id) = match row {
+    let (id, root_id, root_path, rel_path, device, inode, size, mtime, object_id) = match row {
         Some(r) => r,
         None => return Ok(None),
     };
@@ -343,11 +515,14 @@ fn fetch_source(conn: &Connection, source_id: i64) -> Result<Option<ManifestSour
         }
     }
 
-    Ok(Some(ManifestSource {
+    Ok(Some(LockEntry {
         id,
         root_id,
         path: full_path,
+        device,
+        inode,
         size,
+        mtime,
         object_id,
         hash_type,
         hash_value,
@@ -371,16 +546,13 @@ fn fact_to_json(
     }
 }
 
-fn current_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64
+fn current_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339()
 }
 
 
 /// Collect facts with 100% coverage across all sources in the manifest
-fn collect_full_coverage_facts(conn: &Connection, sources: &[ManifestSource]) -> Result<Vec<(String, FactType, String)>> {
+fn collect_full_coverage_facts(conn: &Connection, sources: &[LockEntry]) -> Result<Vec<(String, FactType, String)>> {
     use std::collections::HashSet;
 
     if sources.is_empty() {
@@ -488,15 +660,15 @@ fn get_fact_description(key: &str) -> String {
 }
 
 /// Generate fact help comments for the manifest
-fn generate_fact_help(sources: &[ManifestSource], full_coverage_facts: &[(String, FactType, String)]) -> String {
+fn generate_fact_help(source_count: usize, full_coverage_facts: &[(String, FactType, String)]) -> String {
     use strum::IntoEnumIterator;
 
-    if sources.is_empty() {
+    if source_count == 0 {
         return String::new();
     }
 
     let mut help = String::new();
-    help.push_str(&format!("# Available facts for pattern (100% coverage on {} sources in this cluster):\n", sources.len()));
+    help.push_str(&format!("# Available facts for pattern (100% coverage on {} sources in this cluster):\n", source_count));
     help.push_str("#\n");
 
     // Built-in facts (auto-generated from BuiltinKey enum)
@@ -557,7 +729,7 @@ fn generate_fact_help(sources: &[ManifestSource], full_coverage_facts: &[(String
 
 /// Find duplicate sources (same object_id) within the manifest sources
 /// Returns Vec of (object_id, Vec<source_id>)
-fn find_source_duplicates(sources: &[ManifestSource]) -> Vec<(i64, Vec<i64>)> {
+fn find_source_duplicates(sources: &[LockEntry]) -> Vec<(i64, Vec<i64>)> {
     let mut object_map: HashMap<i64, Vec<i64>> = HashMap::new();
 
     for source in sources {
