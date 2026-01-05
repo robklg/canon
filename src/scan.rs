@@ -21,10 +21,12 @@ struct ScanStats {
     missing: u64,
 }
 
-pub fn run(db: &Db, paths: &[PathBuf], role: &str, add_root: bool) -> Result<()> {
-    // Validate role
-    if role != "source" && role != "archive" {
-        bail!("Invalid role '{}'. Must be 'source' or 'archive'", role);
+pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool) -> Result<()> {
+    // Validate role if provided
+    if let Some(r) = role {
+        if r != "source" && r != "archive" {
+            bail!("Invalid role '{}'. Must be 'source' or 'archive'", r);
+        }
     }
 
     let conn = db.conn();
@@ -48,14 +50,16 @@ pub fn run(db: &Db, paths: &[PathBuf], role: &str, add_root: bool) -> Result<()>
                         root_path
                     );
                 }
-                // Check role matches if scanning the root itself (not a subtree)
-                if rel_path.is_empty() && existing_role != role {
-                    bail!(
-                        "Root '{}' has role '{}', cannot scan with --role {}",
-                        root_path,
-                        existing_role,
-                        role
-                    );
+                // Check role matches if --role was specified
+                if let Some(r) = role {
+                    if existing_role != r {
+                        bail!(
+                            "Root '{}' has role '{}', cannot scan with --role {}",
+                            root_path,
+                            existing_role,
+                            r
+                        );
+                    }
                 }
                 let scan_prefix = if rel_path.is_empty() {
                     None // Scanning entire root
@@ -72,6 +76,8 @@ pub fn run(db: &Db, paths: &[PathBuf], role: &str, add_root: bool) -> Result<()>
                         canonical.display()
                     );
                 }
+                // role is guaranteed to be Some when add_root is true (validated in main.rs)
+                let role = role.expect("--role is required with --add");
                 check_overlapping_roots(&conn, &canonical)?;
                 let root_id = create_root(&conn, &canonical, role)?;
                 (root_id, canonical.clone(), None)

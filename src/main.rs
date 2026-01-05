@@ -38,9 +38,9 @@ enum Commands {
         /// Paths to scan
         #[arg(required = true)]
         paths: Vec<PathBuf>,
-        /// Role for new roots: 'source' (default) or 'archive'
-        #[arg(long, default_value = "source")]
-        role: String,
+        /// Role for new roots: 'source' or 'archive' (required with --add)
+        #[arg(long)]
+        role: Option<String>,
         /// Add path as a new root (required when path is not inside an existing root)
         #[arg(long)]
         add: bool,
@@ -336,7 +336,10 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Scan { paths, role, add } => {
-            scan::run(&db, &paths, &role, add)?;
+            if add && role.is_none() {
+                anyhow::bail!("--role is required when using --add");
+            }
+            scan::run(&db, &paths, role.as_deref(), add)?;
         }
         Commands::Worklist { paths, filters, include_archived, include_excluded } => {
             worklist::run(&db, &paths, &filters, include_archived, include_excluded)?;
