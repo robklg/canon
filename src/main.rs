@@ -37,15 +37,17 @@ enum Commands {
     // -- Scan --
     /// Scan directories and add files to the index
     Scan {
-        /// Paths to scan
-        #[arg(required = true)]
+        /// Paths to scan (not required if --all is used)
         paths: Vec<PathBuf>,
-        /// Role for new roots: 'source' or 'archive' (required with --add)
+        /// Role for new roots: 'source' or 'archive' (required with --add, optional filter with --all)
         #[arg(long)]
         role: Option<String>,
         /// Add path as a new root (required when path is not inside an existing root)
         #[arg(long)]
         add: bool,
+        /// Scan all existing roots (optionally filtered by --role)
+        #[arg(long)]
+        all: bool,
     },
     /// List and manage roots
     Roots {
@@ -393,11 +395,17 @@ fn main() -> anyhow::Result<()> {
     let mut db = db::open(&db_path, cli.debug_sql)?;
 
     match cli.command {
-        Commands::Scan { paths, role, add } => {
+        Commands::Scan { paths, role, add, all } => {
             if add && role.is_none() {
                 anyhow::bail!("--role is required when using --add");
             }
-            scan::run(&db, &paths, role.as_deref(), add)?;
+            if all && add {
+                anyhow::bail!("--all and --add cannot be used together");
+            }
+            if !all && paths.is_empty() {
+                anyhow::bail!("Provide paths to scan, or use --all to scan all roots");
+            }
+            scan::run(&db, &paths, role.as_deref(), add, all)?;
         }
         Commands::Worklist { paths, filters, include_archived, include_excluded, unique_content } => {
             worklist::run(&db, &paths, &filters, include_archived, include_excluded, unique_content)?;

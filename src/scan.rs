@@ -21,7 +21,7 @@ struct ScanStats {
     missing: u64,
 }
 
-pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool) -> Result<()> {
+pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_roots: bool) -> Result<()> {
     // Validate role if provided
     if let Some(r) = role {
         if r != "source" && r != "archive" {
@@ -32,9 +32,32 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool) -> Re
     let conn = db.conn();
     let now = current_timestamp();
 
+    // If --all, get all root paths from the database
+    let paths_to_scan: Vec<PathBuf> = if all_roots {
+        let role_filter = role.map(|r| format!("WHERE role = '{}'", r));
+        let query = format!(
+            "SELECT path FROM roots {} ORDER BY id",
+            role_filter.unwrap_or_default()
+        );
+        let roots: Vec<String> = conn
+            .prepare(&query)?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if roots.is_empty() {
+            println!("No roots to scan.");
+            return Ok(());
+        }
+
+        println!("Scanning {} roots...", roots.len());
+        roots.into_iter().map(PathBuf::from).collect()
+    } else {
+        paths.to_vec()
+    };
+
     let mut total_stats = ScanStats::default();
 
-    for path in paths {
+    for path in &paths_to_scan {
         let canonical = fs::canonicalize(path)
             .with_context(|| format!("Failed to canonicalize path: {}", path.display()))?;
 
