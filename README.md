@@ -381,19 +381,25 @@ canon facts delete content.mime --on object --yes
 - Protected namespaces (`source.*`, `policy.*`) cannot be deleted
 - Dry-run by default; use `--yes` to execute
 
-#### canon facts prune
+### canon prune
 
-Clean up stale facts where the file has changed since the fact was recorded.
+Clean up orphaned or stale data from the database.
 
 ```bash
-# Preview what would be deleted
-canon facts prune --stale
+# Preview stale facts (file changed since fact was recorded)
+canon prune --stale-facts
+
+# Preview orphaned objects (no present sources reference them)
+canon prune --orphaned-objects
 
 # Execute deletion
-canon facts prune --stale --yes
+canon prune --stale-facts --yes
+canon prune --orphaned-objects --yes
 ```
 
-Stale facts are those where `observed_basis_rev` no longer matches the source's current `basis_rev` (meaning the file was modified after the fact was imported).
+**Stale facts** are those where `observed_basis_rev` no longer matches the source's current `basis_rev` (meaning the file was modified after the fact was imported).
+
+**Orphaned objects** are content entries with no remaining present sources. This can happen when files are deleted. You may want to keep them as a historical record, or delete them to clean up the database.
 
 ### canon coverage
 

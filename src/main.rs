@@ -211,6 +211,18 @@ enum Commands {
         #[command(subcommand)]
         action: ExcludeAction,
     },
+    /// Prune orphaned or stale data from the database
+    Prune {
+        /// Delete objects that have no present sources, along with their facts and non-present sources
+        #[arg(long)]
+        orphaned_objects: bool,
+        /// Delete source facts where the file changed since the fact was recorded
+        #[arg(long)]
+        stale_facts: bool,
+        /// Execute deletion (default is dry-run)
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -302,22 +314,6 @@ enum FactsAction {
         /// Entity type: 'source' or 'object'
         #[arg(long, value_name = "TYPE")]
         on: String,
-        /// Execute deletion (default is dry-run)
-        #[arg(long)]
-        yes: bool,
-    },
-    /// Prune stale or orphaned facts
-    Prune {
-        /// Delete facts with mismatched observed_basis_rev
-        #[arg(long)]
-        stale: bool,
-        /// Delete objects, their facts, and non-present sources that have no remaining
-        /// present sources. Note: You may want to keep orphaned objects as a historical
-        /// record of content you've seen, or in case the content reappears (restore from
-        /// backup, found on another drive). Only use this if you're sure you want to
-        /// forget this content entirely.
-        #[arg(long)]
-        orphaned_objects: bool,
         /// Execute deletion (default is dry-run)
         #[arg(long)]
         yes: bool,
@@ -444,21 +440,20 @@ fn main() -> anyhow::Result<()> {
                     };
                     facts::delete_facts(&mut db, &key, &paths, &filters, &options)?;
                 }
-                Some(FactsAction::Prune { stale, orphaned_objects, yes }) => {
-                    if !stale && !orphaned_objects {
-                        eprintln!("Error: at least one of --stale or --orphaned-objects is required");
-                        std::process::exit(1);
-                    }
-                    if stale {
-                        facts::prune_stale(&db, !yes)?;
-                    }
-                    if orphaned_objects {
-                        facts::prune_orphaned_objects(&db, !yes)?;
-                    }
-                }
                 None => {
                     facts::run(&mut db, key.as_deref(), &paths, &filters, limit, all, include_archived, include_excluded)?;
                 }
+            }
+        }
+        Commands::Prune { orphaned_objects, stale_facts, yes } => {
+            if !orphaned_objects && !stale_facts {
+                anyhow::bail!("At least one of --orphaned-objects or --stale-facts is required");
+            }
+            if stale_facts {
+                facts::prune_stale(&db, !yes)?;
+            }
+            if orphaned_objects {
+                facts::prune_orphaned_objects(&db, !yes)?;
             }
         }
         Commands::Coverage { paths, filters, archive, include_archived, include_excluded } => {
