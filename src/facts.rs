@@ -990,6 +990,175 @@ fn format_number(n: i64) -> String {
 }
 
 // ============================================================================
+// Prune Orphaned Objects
+// ============================================================================
+
+/// Delete objects (and their facts) that have no remaining present sources.
+/// Also deletes non-present sources that reference these objects.
+///
+/// An object is considered orphaned when no source with `present = 1` references it.
+/// This can happen when:
+/// - All sources for a piece of content were deleted from disk
+/// - Sources were moved cross-device (old source marked not present, new source created)
+/// - Manual cleanup removed sources but not objects
+///
+/// Note: You may want to keep orphaned objects because:
+/// - They serve as a historical record of content you've processed
+/// - If the content reappears (restore from backup, found on another drive),
+///   all the facts (EXIF, hashes, etc.) are already available
+/// - Storage cost is minimal (just metadata rows)
+pub fn prune_orphaned_objects(db: &Db, dry_run: bool) -> Result<()> {
+    let conn = db.conn();
+
+    // Find orphaned objects: objects with no present sources
+    let orphaned_object_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM objects o
+         WHERE NOT EXISTS (
+             SELECT 1 FROM sources s
+             WHERE s.object_id = o.id AND s.present = 1
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if orphaned_object_count == 0 {
+        println!("No orphaned objects found.");
+        return Ok(());
+    }
+
+    // Count non-present sources that reference orphaned objects
+    let orphaned_source_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sources s
+         WHERE s.present = 0
+           AND s.object_id IN (
+               SELECT o.id FROM objects o
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM sources s2
+                   WHERE s2.object_id = o.id AND s2.present = 1
+               )
+           )",
+        [],
+        |row| row.get(0),
+    )?;
+
+    // Count source facts that would be deleted
+    let source_fact_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM facts f
+         WHERE f.entity_type = 'source'
+           AND f.entity_id IN (
+               SELECT s.id FROM sources s
+               WHERE s.present = 0
+                 AND s.object_id IN (
+                     SELECT o.id FROM objects o
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM sources s2
+                         WHERE s2.object_id = o.id AND s2.present = 1
+                     )
+                 )
+           )",
+        [],
+        |row| row.get(0),
+    )?;
+
+    // Count object facts that would be deleted
+    let object_fact_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM facts f
+         WHERE f.entity_type = 'object'
+           AND f.entity_id IN (
+               SELECT o.id FROM objects o
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM sources s
+                   WHERE s.object_id = o.id AND s.present = 1
+               )
+           )",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let total_fact_count = source_fact_count + object_fact_count;
+
+    if dry_run {
+        println!(
+            "Would delete {} orphaned objects, {} non-present sources, and {} facts",
+            format_number(orphaned_object_count),
+            format_number(orphaned_source_count),
+            format_number(total_fact_count)
+        );
+        println!();
+        println!("Note: Orphaned objects represent content you've seen but no longer have.");
+        println!("They may be useful if the content reappears (backup restore, found elsewhere).");
+        println!("Use --yes to proceed with deletion.");
+    } else {
+        // Delete source facts first
+        let source_facts_deleted = conn.execute(
+            "DELETE FROM facts
+             WHERE entity_type = 'source'
+               AND entity_id IN (
+                   SELECT s.id FROM sources s
+                   WHERE s.present = 0
+                     AND s.object_id IN (
+                         SELECT o.id FROM objects o
+                         WHERE NOT EXISTS (
+                             SELECT 1 FROM sources s2
+                             WHERE s2.object_id = o.id AND s2.present = 1
+                         )
+                     )
+               )",
+            [],
+        )?;
+
+        // Delete non-present sources that reference orphaned objects
+        let sources_deleted = conn.execute(
+            "DELETE FROM sources
+             WHERE present = 0
+               AND object_id IN (
+                   SELECT o.id FROM objects o
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM sources s
+                       WHERE s.object_id = o.id AND s.present = 1
+                   )
+               )",
+            [],
+        )?;
+
+        // Delete object facts
+        let object_facts_deleted = conn.execute(
+            "DELETE FROM facts
+             WHERE entity_type = 'object'
+               AND entity_id IN (
+                   SELECT o.id FROM objects o
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM sources s
+                       WHERE s.object_id = o.id AND s.present = 1
+                   )
+               )",
+            [],
+        )?;
+
+        // Delete orphaned objects
+        let objects_deleted = conn.execute(
+            "DELETE FROM objects
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM sources s
+                 WHERE s.object_id = objects.id AND s.present = 1
+             )",
+            [],
+        )?;
+
+        let total_facts_deleted = source_facts_deleted + object_facts_deleted;
+
+        println!(
+            "Deleted {} orphaned objects, {} non-present sources, and {} facts",
+            format_number(objects_deleted as i64),
+            format_number(sources_deleted as i64),
+            format_number(total_facts_deleted as i64)
+        );
+    }
+
+    Ok(())
+}
+
+// ============================================================================
 // Show Aliases
 // ============================================================================
 

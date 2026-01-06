@@ -285,6 +285,13 @@ enum FactsAction {
         /// Delete facts with mismatched observed_basis_rev
         #[arg(long)]
         stale: bool,
+        /// Delete objects, their facts, and non-present sources that have no remaining
+        /// present sources. Note: You may want to keep orphaned objects as a historical
+        /// record of content you've seen, or in case the content reappears (restore from
+        /// backup, found on another drive). Only use this if you're sure you want to
+        /// forget this content entirely.
+        #[arg(long)]
+        orphaned_objects: bool,
         /// Execute deletion (default is dry-run)
         #[arg(long)]
         yes: bool,
@@ -405,12 +412,16 @@ fn main() -> anyhow::Result<()> {
                     };
                     facts::delete_facts(&mut db, &key, &paths, &filters, &options)?;
                 }
-                Some(FactsAction::Prune { stale, yes }) => {
+                Some(FactsAction::Prune { stale, orphaned_objects, yes }) => {
+                    if !stale && !orphaned_objects {
+                        eprintln!("Error: at least one of --stale or --orphaned-objects is required");
+                        std::process::exit(1);
+                    }
                     if stale {
                         facts::prune_stale(&db, !yes)?;
-                    } else {
-                        eprintln!("Error: --stale flag is required for prune command");
-                        std::process::exit(1);
+                    }
+                    if orphaned_objects {
+                        facts::prune_orphaned_objects(&db, !yes)?;
                     }
                 }
                 None => {
