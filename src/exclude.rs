@@ -163,17 +163,32 @@ pub fn list(
     // Resolve scope paths
     let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
-    // Get excluded sources matching filters
-    let excluded = get_excluded_sources(conn, &scope_prefixes, &filters)?;
+    // Get directly excluded sources
+    let direct_excluded = get_excluded_sources(conn, &scope_prefixes, &filters)?;
 
-    if excluded.is_empty() {
+    // Get sources excluded via their object
+    let object_excluded = get_object_excluded_sources(conn, &scope_prefixes, &filters)?;
+
+    if direct_excluded.is_empty() && object_excluded.is_empty() {
         println!("No excluded sources match the given filters");
         return Ok(());
     }
 
-    println!("Excluded sources ({}):", excluded.len());
-    for (id, path) in &excluded {
-        println!("  {} (id: {})", path, id);
+    if !direct_excluded.is_empty() {
+        println!("Directly excluded ({}):", direct_excluded.len());
+        for (id, path) in &direct_excluded {
+            println!("  {} (id: {})", path, id);
+        }
+    }
+
+    if !object_excluded.is_empty() {
+        if !direct_excluded.is_empty() {
+            println!();
+        }
+        println!("Excluded via object ({}):", object_excluded.len());
+        for (id, path, hash_short) in &object_excluded {
+            println!("  {} (id: {}, object: {}...)", path, id, hash_short);
+        }
     }
 
     Ok(())
@@ -788,4 +803,71 @@ pub fn list_objects(db: &Db) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Get sources excluded via their object (not directly excluded)
+fn get_object_excluded_sources(
+    conn: &Connection,
+    scope_prefixes: &[String],
+    filters: &[Filter],
+) -> Result<Vec<(i64, String, String)>> {
+    // Returns (source_id, path, hash_short)
+    let mut all_excluded = Vec::new();
+    let mut last_id: i64 = 0;
+
+    let (scope_clause, scope_params) = build_scope_clause(scope_prefixes);
+
+    loop {
+        let mut params: Vec<Value> = Vec::new();
+        params.push(Value::from(last_id));
+        for s in &scope_params {
+            params.push(Value::from(s.clone()));
+        }
+        params.push(Value::from(POLICY_OBJECT_EXCLUDE_KEY.to_string()));
+        params.push(Value::from(POLICY_EXCLUDE_KEY.to_string()));
+        params.push(Value::from(BATCH_SIZE));
+
+        let batch: Vec<(i64, String, String)> = conn
+            .prepare(&format!(
+                "SELECT s.id, r.path || '/' || s.rel_path as full_path, o.hash_value
+                 FROM sources s
+                 JOIN roots r ON s.root_id = r.id
+                 JOIN objects o ON s.object_id = o.id
+                 WHERE s.present = 1 AND r.role = 'source' AND s.id > ?
+                   AND {}
+                   AND EXISTS (
+                       SELECT 1 FROM facts f
+                       WHERE f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM facts f
+                       WHERE f.entity_type = 'source' AND f.entity_id = s.id AND f.key = ?
+                   )
+                 ORDER BY s.id LIMIT ?",
+                scope_clause
+            ))?
+            .query_map(rusqlite::params_from_iter(params), |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if batch.is_empty() {
+            break;
+        }
+
+        last_id = batch.last().map(|(id, _, _)| *id).unwrap();
+
+        // Apply additional filters
+        let ids: Vec<i64> = batch.iter().map(|(id, _, _)| *id).collect();
+        let filtered_ids = filter::apply_filters(conn, &ids, filters)?;
+
+        for (id, path, hash) in batch {
+            if filtered_ids.contains(&id) {
+                let hash_short = hash[..16.min(hash.len())].to_string();
+                all_excluded.push((id, path, hash_short));
+            }
+        }
+    }
+
+    Ok(all_excluded)
 }
