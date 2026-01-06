@@ -102,7 +102,6 @@ fn generate_lock(
     }
 
     if sources.is_empty() {
-        println!("No sources matched the query");
         return Ok(None);
     }
 
@@ -175,7 +174,10 @@ pub fn generate(
 
     let result = match result {
         Some(r) => r,
-        None => return Ok(()), // No sources matched
+        None => {
+            println!("No sources matched the query");
+            return Ok(());
+        }
     };
 
     // Compute hash of lock file for integrity validation
