@@ -45,6 +45,7 @@ pub struct ApplyOptions {
     pub allow_duplicates: bool,
     pub roots: Vec<String>,
     pub transfer_mode: TransferMode,
+    pub yes: bool,
 }
 
 /// Fetch a fact value with its proper type from the database
@@ -247,6 +248,14 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     // Filter sources by root if specified
     let filtered_sources = filter_by_roots(&sources, &options.roots, conn)?;
     let skipped_by_filter = sources.len() - filtered_sources.len();
+
+    // Show summary and confirm (unless --yes)
+    print_apply_summary(&config_path, &base_dir, &filtered_sources, options);
+
+    if !options.yes && !confirm_proceed(options.dry_run)? {
+        println!("Aborted.");
+        return Ok(());
+    }
 
     // Pre-flight checks (mandatory, always run)
     eprintln!("Checking destination write permissions...");
@@ -458,6 +467,92 @@ struct ArchiveConflicts {
 struct SourceAccessCheck {
     collisions: Vec<(PathBuf, Vec<String>)>,  // (dest_path, source_paths)
     unreadable: Vec<(String, String)>,        // (source_path, error_message)
+}
+
+// ============================================================================
+// Summary and confirmation helpers
+// ============================================================================
+
+fn print_apply_summary(
+    config_path: &Path,
+    base_dir: &Path,
+    sources: &[&LockEntry],
+    options: &ApplyOptions,
+) {
+    eprintln!();
+    eprintln!("=== Apply Summary ===");
+    eprintln!("Manifest: {}", config_path.display());
+    eprintln!("Destination: {}", base_dir.display());
+    eprintln!();
+
+    let mode_name = match options.transfer_mode {
+        TransferMode::Copy => "copy",
+        TransferMode::Rename => "rename",
+        TransferMode::Move => "move",
+    };
+    eprintln!("Files to {}: {}", mode_name, sources.len());
+
+    // Show destination preview if exists
+    if base_dir.exists() {
+        eprintln!();
+        eprintln!("Destination current contents:");
+        show_directory_preview(base_dir, 5);
+    } else {
+        eprintln!();
+        eprintln!("Destination: (will be created)");
+    }
+
+    eprintln!();
+}
+
+fn show_directory_preview(dir: &Path, max_items: usize) {
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(rd) => rd.filter_map(|e| e.ok()).take(max_items + 1).collect(),
+        Err(_) => return,
+    };
+
+    if entries.is_empty() {
+        eprintln!("  (empty)");
+        return;
+    }
+
+    let mut count = 0;
+    for entry in entries.iter().take(max_items) {
+        let name = entry.file_name();
+        let suffix = entry.file_type().map(|ft| if ft.is_dir() { "/" } else { "" }).unwrap_or("");
+        eprintln!("  {}{}", name.to_string_lossy(), suffix);
+        count += 1;
+    }
+
+    // Count remaining entries
+    if entries.len() > max_items {
+        // We took max_items + 1, so there's at least 1 more
+        // Count actual total to report accurately
+        let total = match fs::read_dir(dir) {
+            Ok(rd) => rd.count(),
+            Err(_) => count + 1,
+        };
+        let remaining = total.saturating_sub(count);
+        if remaining > 0 {
+            eprintln!("  ... and {} more", remaining);
+        }
+    }
+}
+
+fn confirm_proceed(dry_run: bool) -> Result<bool> {
+    use std::io::{self, Write};
+
+    if dry_run {
+        eprint!("Proceed with dry-run? [y/N] ");
+    } else {
+        eprint!("Proceed? [y/N] ");
+    }
+    io::stderr().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
 // ============================================================================

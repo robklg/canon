@@ -199,10 +199,10 @@ enum Commands {
         /// Use rename instead of copy (Unix only, fails if cross-device, never copies)
         #[arg(long, conflicts_with = "move_files")]
         rename: bool,
-        /// Move files: rename, or copy+delete if cross-device (requires --yes)
-        #[arg(long = "move", conflicts_with = "rename", requires = "yes")]
+        /// Move files: rename, or copy+delete if cross-device
+        #[arg(long = "move", conflicts_with = "rename")]
         move_files: bool,
-        /// Confirm destructive operations (required for --move)
+        /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
     },
@@ -512,7 +512,7 @@ fn main() -> anyhow::Result<()> {
             root,
             rename,
             move_files,
-            yes: _,
+            yes,
         } => {
             let transfer_mode = if rename {
                 apply::TransferMode::Rename
@@ -528,6 +528,7 @@ fn main() -> anyhow::Result<()> {
                 allow_duplicates,
                 roots: root,
                 transfer_mode,
+                yes,
             };
             apply::run(&db, &manifest, &options)?;
         }
