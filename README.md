@@ -1,10 +1,72 @@
 # Canon
 
-A CLI tool for organizing large media libraries into a canonical archive.
+Canon helps you understand and take control of digital assets spread across many drives, backups, and years — without requiring you to reorganize or delete anything upfront.
 
-Canon helps you deduplicate, organize, and archive large collections of files (photos, videos, documents) by tracking content hashes and metadata, then generating organized output structures. All metadata is stored in a local SQLite database (`~/.canon/canon.db`).
+## Introduction
 
-**Non-destructive by design:** Canon doesn't make changes to your filesystem until you explicitly run `canon apply` (without `--dry-run`). You can safely scan, enrich, and explore your library. Even `apply` is defensive: it validates integrity, never overwrites existing files, and requires confirmation for move operations.
+Canon is designed to be used iteratively. It supports two primary ways of working:
+
+- discovering and understanding what you have
+- intentionally archiving selected assets into a tracked archive
+
+Discovery already provides value on its own.
+Archiving is optional, and typically incremental and revisitable.
+
+---
+
+### 1. Discovery
+
+Canon can be used purely as a discovery and search tool.
+
+After scanning sources, Canon allows you to **enrich assets with metadata ("facts")** and query across them — even when the files themselves live on many drives, backups, or disconnected storage.
+
+Fact enrichment is deliberately open-ended:
+- facts may come from Canon itself
+- from external tools (e.g. `exiftool`)
+- or from any process that can extract information from files
+
+Anything that can be extracted or inferred from a file can become searchable in Canon.
+
+Using a powerful boolean expression language, this allows queries such as:
+
+- Where are all my photos from 2017 shot with my iPhone 7?
+- Which assets belong to a specific date range or device?
+- What do I actually have across all my backups?
+- Discover files you forgot you had
+
+In practice, discovery often surfaces assets you forgot existed —
+for example, old imports that were never organized (e.g. `microsd_import`, `copy`, `DCIM_1`).
+
+Because Canon stores metadata independently of storage:
+- portable drives can be disconnected
+- old backups can be put away
+- your data remains fully searchable
+
+Discovery alone already provides value, without any organization or export.
+
+---
+### 2. Archiving (Cluster and Apply)
+
+Canon lets you archive assets by selecting and grouping them, and then materializing them into an archive.
+Different kinds of assets often require different approaches, so archiving typically happens in multiple passes.
+
+Clustering is how you express intent about *which assets should be archived together in the same location*.
+It is based on selection and filtering, not on modifying sources.
+
+Clustering can be defined using:
+- path scopes
+- expressive `where` expressions over enriched facts
+- combinations of both
+
+Once a cluster is defined, Canon generates a manifest describing the selected sources.
+The manifest is then edited by the user to define how the clustered assets should be placed in the archive.
+
+Applying a manifest materializes it within an archive root (by copying or moving files), expanding to the specified destination inside an archive.
+Before any files are written, Canon performs a strict preflight check to protect archive integrity:
+
+- output paths are fully resolved
+- collisions are detected
+- unresolved collisions cause the apply step to abort before making any changes
 
 ## Table of Contents
 
