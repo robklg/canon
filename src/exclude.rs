@@ -9,6 +9,7 @@ use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;
 const POLICY_EXCLUDE_KEY: &str = "policy.exclude";
+const POLICY_OBJECT_EXCLUDE_KEY: &str = "policy.exclude";
 
 // ============================================================================
 // Options
@@ -182,9 +183,10 @@ pub fn list(
 // Helper Functions
 // ============================================================================
 
-/// Check if a source is excluded
+/// Check if a source is excluded (either directly or via its object)
 pub fn is_excluded(conn: &Connection, source_id: i64) -> Result<bool> {
-    let exists: bool = conn
+    // Check source-level exclusion
+    let source_excluded: bool = conn
         .query_row(
             "SELECT 1 FROM facts
              WHERE entity_type = 'source' AND entity_id = ? AND key = ?",
@@ -192,15 +194,51 @@ pub fn is_excluded(conn: &Connection, source_id: i64) -> Result<bool> {
             |_| Ok(true),
         )
         .unwrap_or(false);
+
+    if source_excluded {
+        return Ok(true);
+    }
+
+    // Check object-level exclusion
+    let object_excluded: bool = conn
+        .query_row(
+            "SELECT 1 FROM facts f
+             JOIN sources s ON s.object_id IS NOT NULL
+             WHERE s.id = ?
+               AND f.entity_type = 'object'
+               AND f.entity_id = s.object_id
+               AND f.key = ?",
+            params![source_id, POLICY_OBJECT_EXCLUDE_KEY],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    Ok(object_excluded)
+}
+
+/// Check if an object is excluded
+pub fn is_object_excluded(conn: &Connection, object_id: i64) -> Result<bool> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM facts
+             WHERE entity_type = 'object' AND entity_id = ? AND key = ?",
+            params![object_id, POLICY_OBJECT_EXCLUDE_KEY],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
     Ok(exists)
 }
 
-/// SQL clause for excluding excluded sources
+/// SQL clause for excluding excluded sources (checks both source and object exclusions)
 pub fn exclude_clause(include_excluded: bool) -> &'static str {
     if include_excluded {
         "1=1"
     } else {
-        "NOT EXISTS (SELECT 1 FROM facts WHERE entity_type = 'source' AND entity_id = s.id AND key = 'policy.exclude')"
+        // Exclude sources that are:
+        // 1. Directly excluded (source-level policy.exclude)
+        // 2. Have an excluded object (object-level policy.exclude)
+        "NOT EXISTS (SELECT 1 FROM facts WHERE entity_type = 'source' AND entity_id = s.id AND key = 'policy.exclude') \
+         AND NOT EXISTS (SELECT 1 FROM facts f WHERE f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = 'policy.exclude' AND s.object_id IS NOT NULL)"
     }
 }
 
@@ -622,6 +660,132 @@ pub fn exclude_duplicates(
     println!("Excluded {} sources", excluded_count);
     println!();
     println!("Use `canon ls --duplicates` to see remaining duplicates.");
+
+    Ok(())
+}
+
+// ============================================================================
+// Object Exclusion Commands
+// ============================================================================
+
+/// Exclude an object by its hash. All sources with this content will be excluded.
+pub fn set_object(db: &Db, hash: &str, options: &SetOptions) -> Result<()> {
+    let conn = db.conn();
+
+    // Find the object by hash
+    let object_info: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, hash_value FROM objects WHERE hash_value = ?",
+            [hash],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+
+    let Some((object_id, hash_value)) = object_info else {
+        anyhow::bail!("No object found with hash: {}", hash);
+    };
+
+    // Check if already excluded
+    if is_object_excluded(conn, object_id)? {
+        println!("Object already excluded: {}", &hash_value[..16.min(hash_value.len())]);
+        return Ok(());
+    }
+
+    // Count affected sources
+    let source_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sources WHERE object_id = ? AND present = 1",
+        [object_id],
+        |row| row.get(0),
+    )?;
+
+    if options.dry_run {
+        println!("Would exclude object: {}...", &hash_value[..16.min(hash_value.len())]);
+        println!("  Affects {} present sources", source_count);
+        return Ok(());
+    }
+
+    // Insert exclusion fact on object
+    let now = current_timestamp();
+    conn.execute(
+        "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at)
+         VALUES ('object', ?, ?, 'true', ?)",
+        params![object_id, POLICY_OBJECT_EXCLUDE_KEY, now],
+    )?;
+
+    println!("Excluded object: {}...", &hash_value[..16.min(hash_value.len())]);
+    println!("  Affects {} present sources", source_count);
+    Ok(())
+}
+
+/// Clear exclusion from an object by its hash
+pub fn clear_object(db: &Db, hash: &str, options: &ClearOptions) -> Result<()> {
+    let conn = db.conn();
+
+    // Find the object by hash
+    let object_info: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, hash_value FROM objects WHERE hash_value = ?",
+            [hash],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+
+    let Some((object_id, hash_value)) = object_info else {
+        anyhow::bail!("No object found with hash: {}", hash);
+    };
+
+    // Check if excluded
+    if !is_object_excluded(conn, object_id)? {
+        println!("Object is not excluded: {}...", &hash_value[..16.min(hash_value.len())]);
+        return Ok(());
+    }
+
+    if options.dry_run {
+        println!("Would clear exclusion from object: {}...", &hash_value[..16.min(hash_value.len())]);
+        return Ok(());
+    }
+
+    // Delete exclusion fact
+    conn.execute(
+        "DELETE FROM facts WHERE entity_type = 'object' AND entity_id = ? AND key = ?",
+        params![object_id, POLICY_OBJECT_EXCLUDE_KEY],
+    )?;
+
+    println!("Cleared exclusion from object: {}...", &hash_value[..16.min(hash_value.len())]);
+    Ok(())
+}
+
+/// List all excluded objects
+pub fn list_objects(db: &Db) -> Result<()> {
+    let conn = db.conn();
+
+    let excluded: Vec<(i64, String, i64)> = conn
+        .prepare(
+            "SELECT o.id, o.hash_value, (
+                 SELECT COUNT(*) FROM sources s WHERE s.object_id = o.id AND s.present = 1
+             ) as source_count
+             FROM objects o
+             WHERE EXISTS (
+                 SELECT 1 FROM facts f
+                 WHERE f.entity_type = 'object' AND f.entity_id = o.id AND f.key = ?
+             )
+             ORDER BY o.id"
+        )?
+        .query_map([POLICY_OBJECT_EXCLUDE_KEY], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if excluded.is_empty() {
+        println!("No excluded objects");
+        return Ok(());
+    }
+
+    println!("Excluded objects ({}):", excluded.len());
+    for (id, hash, source_count) in &excluded {
+        let hash_short = &hash[..16.min(hash.len())];
+        println!("  {}... (id: {}, {} sources)", hash_short, id, source_count);
+    }
 
     Ok(())
 }

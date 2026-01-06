@@ -260,6 +260,24 @@ enum ExcludeAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Exclude an object by hash (affects all sources with this content)
+    SetObject {
+        /// Content hash (sha256)
+        hash: String,
+        /// Show what would be excluded without making changes
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Clear exclusion from an object by hash
+    ClearObject {
+        /// Content hash (sha256)
+        hash: String,
+        /// Show what would be cleared without making changes
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List excluded objects
+    ListObjects,
 }
 
 #[derive(Subcommand)]
@@ -525,6 +543,17 @@ fn main() -> anyhow::Result<()> {
             }
             ExcludeAction::Duplicates { path, prefer, filters, dry_run } => {
                 exclude::exclude_duplicates(&db, &prefer, Some(path.as_path()), &filters, dry_run)?;
+            }
+            ExcludeAction::SetObject { hash, dry_run } => {
+                let options = exclude::SetOptions { dry_run };
+                exclude::set_object(&db, &hash, &options)?;
+            }
+            ExcludeAction::ClearObject { hash, dry_run } => {
+                let options = exclude::ClearOptions { dry_run };
+                exclude::clear_object(&db, &hash, &options)?;
+            }
+            ExcludeAction::ListObjects => {
+                exclude::list_objects(&db)?;
             }
         },
         Commands::Roots { action } => match action {

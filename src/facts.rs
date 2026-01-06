@@ -1087,6 +1087,7 @@ pub fn prune_orphaned_objects(db: &Db, dry_run: bool) -> Result<()> {
         println!();
         println!("Note: Orphaned objects represent content you've seen but no longer have.");
         println!("They may be useful if the content reappears (backup restore, found elsewhere).");
+        println!("Object-level exclusions will also be deleted (use `exclude list-objects` to review).");
         println!("Use --yes to proceed with deletion.");
     } else {
         // Delete source facts first
