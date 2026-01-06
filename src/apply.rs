@@ -488,14 +488,14 @@ fn print_apply_summary(
     eprintln!("=== Apply Summary ===");
     eprintln!("Manifest: {}", config_path.display());
     eprintln!("Destination: {}", base_dir.display());
-    eprintln!();
 
     let mode_name = match options.transfer_mode {
         TransferMode::Copy => "copy",
         TransferMode::Rename => "rename",
         TransferMode::Move => "move",
     };
-    eprintln!("Files to {}: {}", mode_name, sources.len());
+    eprintln!("Mode: {}", mode_name);
+    eprintln!("Files: {}", sources.len());
 
     // Show destination preview if exists
     if base_dir.exists() {
