@@ -260,13 +260,19 @@ enum ExcludeAction {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Exclude an object by hash (affects all sources with this content)
+    /// Exclude objects by hash, file, or filter (affects all sources with matching content)
     SetObject {
-        /// Content hash (sha256)
-        hash: String,
-        /// Show what would be excluded without making changes
+        /// Directory paths to scope the operation, or a single file path
+        paths: Vec<PathBuf>,
+        /// Filter expressions (e.g., "content.mime=application/octet-stream")
+        #[arg(long = "where")]
+        filters: Vec<String>,
+        /// Exclude specific object by hash (use this for empty files)
         #[arg(long)]
-        dry_run: bool,
+        hash: Option<String>,
+        /// Execute the exclusion (default is dry-run for safety)
+        #[arg(long)]
+        yes: bool,
     },
     /// Clear exclusion from an object by hash
     ClearObject {
@@ -544,9 +550,19 @@ fn main() -> anyhow::Result<()> {
             ExcludeAction::Duplicates { path, prefer, filters, dry_run } => {
                 exclude::exclude_duplicates(&db, &prefer, Some(path.as_path()), &filters, dry_run)?;
             }
-            ExcludeAction::SetObject { hash, dry_run } => {
-                let options = exclude::SetOptions { dry_run };
-                exclude::set_object(&db, &hash, &options)?;
+            ExcludeAction::SetObject { paths, filters, hash, yes } => {
+                let options = exclude::SetOptions { dry_run: !yes };
+                if let Some(h) = hash {
+                    exclude::set_object_by_hash(&db, &h, &options)?;
+                } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {
+                    // Single file path: exclude that file's object
+                    exclude::set_object_by_file(&db, &paths[0], &options)?;
+                } else if !paths.is_empty() || !filters.is_empty() {
+                    // Paths and/or filters: exclude matching objects
+                    exclude::set_objects_by_filter(&db, &paths, &filters, &options)?;
+                } else {
+                    anyhow::bail!("Provide a hash (--hash), file path, or filters (--where)");
+                }
             }
             ExcludeAction::ClearObject { hash, dry_run } => {
                 let options = exclude::ClearOptions { dry_run };

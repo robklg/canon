@@ -684,7 +684,8 @@ pub fn exclude_duplicates(
 // ============================================================================
 
 /// Exclude an object by its hash. All sources with this content will be excluded.
-pub fn set_object(db: &Db, hash: &str, options: &SetOptions) -> Result<()> {
+/// This is the only way to exclude empty files (size = 0).
+pub fn set_object_by_hash(db: &Db, hash: &str, options: &SetOptions) -> Result<()> {
     let conn = db.conn();
 
     // Find the object by hash
@@ -700,9 +701,181 @@ pub fn set_object(db: &Db, hash: &str, options: &SetOptions) -> Result<()> {
         anyhow::bail!("No object found with hash: {}", hash);
     };
 
+    exclude_object_by_id(conn, object_id, &hash_value, options)
+}
+
+/// Exclude an object by file path. Looks up the source, gets its object, and excludes it.
+pub fn set_object_by_file(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()> {
+    let conn = db.conn();
+
+    // Canonicalize the path
+    let canonical = std::fs::canonicalize(file_path)
+        .with_context(|| format!("Failed to resolve path: {}", file_path.display()))?;
+    let path_str = canonical
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
+
+    // Look up source by exact path match
+    let source_info: Option<(i64, i64, String, i64)> = conn
+        .query_row(
+            "SELECT s.object_id, o.id, o.hash_value, s.size
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             JOIN objects o ON s.object_id = o.id
+             WHERE r.path || '/' || s.rel_path = ? AND s.present = 1",
+            [path_str],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .ok();
+
+    let Some((_object_id_check, object_id, hash_value, size)) = source_info else {
+        anyhow::bail!("No hashed source found for path: {}\n  (File must be scanned and hashed first)", file_path.display());
+    };
+
+    // Safety check: refuse to exclude empty files via path lookup
+    if size == 0 {
+        anyhow::bail!(
+            "Cannot exclude empty file via path (all empty files share the same hash).\n  \
+             Use --hash {} to explicitly exclude all empty files.",
+            hash_value
+        );
+    }
+
+    exclude_object_by_id(conn, object_id, &hash_value, options)
+}
+
+/// Exclude objects matching the given scope and filters.
+pub fn set_objects_by_filter(
+    db: &Db,
+    scope_paths: &[PathBuf],
+    filter_strs: &[String],
+    options: &SetOptions,
+) -> Result<()> {
+    let conn = db.conn();
+
+    // Parse filters
+    let filters: Vec<Filter> = filter_strs
+        .iter()
+        .map(|f| Filter::parse(f))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Resolve scope paths
+    let scope_prefixes = canonicalize_scopes(scope_paths)?;
+
+    // Get matching sources (only from source roots, include already-excluded to find their objects)
+    let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, true)?;
+
+    if source_ids.is_empty() {
+        println!("No sources match the given filters.");
+        return Ok(());
+    }
+
+    // Get unique objects from these sources, excluding empty files and already-excluded objects
+    let mut objects_to_exclude: Vec<(i64, String, i64)> = Vec::new(); // (object_id, hash, source_count)
+    let mut empty_skipped = 0;
+    let mut already_excluded = 0;
+    let mut no_hash = 0;
+
+    // Get unique object IDs
+    let mut seen_objects: std::collections::HashSet<i64> = std::collections::HashSet::new();
+
+    for source_id in &source_ids {
+        let obj_info: Option<(i64, String, i64)> = conn
+            .query_row(
+                "SELECT o.id, o.hash_value, s.size
+                 FROM sources s
+                 JOIN objects o ON s.object_id = o.id
+                 WHERE s.id = ?",
+                [source_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok();
+
+        let Some((object_id, hash_value, size)) = obj_info else {
+            no_hash += 1;
+            continue;
+        };
+
+        if seen_objects.contains(&object_id) {
+            continue;
+        }
+        seen_objects.insert(object_id);
+
+        // Skip empty files
+        if size == 0 {
+            empty_skipped += 1;
+            continue;
+        }
+
+        // Skip already excluded
+        if is_object_excluded(conn, object_id)? {
+            already_excluded += 1;
+            continue;
+        }
+
+        // Count affected sources for this object
+        let source_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sources WHERE object_id = ? AND present = 1",
+            [object_id],
+            |row| row.get(0),
+        )?;
+
+        objects_to_exclude.push((object_id, hash_value, source_count));
+    }
+
+    if objects_to_exclude.is_empty() {
+        println!("No objects to exclude.");
+        if no_hash > 0 {
+            println!("  {} sources have no hash yet", no_hash);
+        }
+        if empty_skipped > 0 {
+            println!("  {} empty files skipped (use --hash to exclude explicitly)", empty_skipped);
+        }
+        if already_excluded > 0 {
+            println!("  {} objects already excluded", already_excluded);
+        }
+        return Ok(());
+    }
+
+    // Summary
+    let total_sources: i64 = objects_to_exclude.iter().map(|(_, _, c)| c).sum();
+    if options.dry_run {
+        println!("Would exclude {} objects affecting {} sources:", objects_to_exclude.len(), total_sources);
+        for (_, hash, count) in &objects_to_exclude {
+            println!("  {}... ({} sources)", &hash[..16.min(hash.len())], count);
+        }
+        if no_hash > 0 {
+            println!("\n  {} sources skipped (no hash)", no_hash);
+        }
+        if empty_skipped > 0 {
+            println!("  {} empty files skipped (use --hash to exclude explicitly)", empty_skipped);
+        }
+        if already_excluded > 0 {
+            println!("  {} objects already excluded", already_excluded);
+        }
+        println!("\nUse --yes to execute.");
+        return Ok(());
+    }
+
+    // Execute exclusions
+    let now = current_timestamp();
+    for (object_id, _, _) in &objects_to_exclude {
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at)
+             VALUES ('object', ?, ?, 'true', ?)",
+            params![object_id, POLICY_OBJECT_EXCLUDE_KEY, now],
+        )?;
+    }
+
+    println!("Excluded {} objects affecting {} sources", objects_to_exclude.len(), total_sources);
+    Ok(())
+}
+
+/// Internal helper to exclude an object by its ID
+fn exclude_object_by_id(conn: &Connection, object_id: i64, hash_value: &str, options: &SetOptions) -> Result<()> {
     // Check if already excluded
     if is_object_excluded(conn, object_id)? {
-        println!("Object already excluded: {}", &hash_value[..16.min(hash_value.len())]);
+        println!("Object already excluded: {}...", &hash_value[..16.min(hash_value.len())]);
         return Ok(());
     }
 
@@ -716,6 +889,7 @@ pub fn set_object(db: &Db, hash: &str, options: &SetOptions) -> Result<()> {
     if options.dry_run {
         println!("Would exclude object: {}...", &hash_value[..16.min(hash_value.len())]);
         println!("  Affects {} present sources", source_count);
+        println!("\nUse --yes to execute.");
         return Ok(());
     }
 
