@@ -456,6 +456,11 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         mode, stats.copied, stats.renamed, stats.moved, stats.skipped_missing, stats.skipped_stale, stats.skipped_filtered, stats.errors
     );
 
+    // Update query planner statistics after bulk changes (skip for dry-run)
+    if !options.dry_run {
+        conn.execute("ANALYZE", [])?;
+    }
+
     Ok(())
 }
 

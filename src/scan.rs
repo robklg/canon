@@ -127,6 +127,9 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_r
         total_stats.missing
     );
 
+    // Update query planner statistics after bulk changes
+    conn.execute("ANALYZE", [])?;
+
     Ok(())
 }
 

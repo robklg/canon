@@ -92,6 +92,9 @@ pub fn run(db: &Db, allow_archived: bool) -> Result<()> {
         stats.facts_promoted
     );
 
+    // Update query planner statistics after bulk changes
+    conn.execute("ANALYZE", [])?;
+
     Ok(())
 }
 
