@@ -10,6 +10,7 @@ const BATCH_SIZE: i64 = 1000;
 
 /// Statistics for a single root or overall
 struct CoverageStats {
+    root_id: Option<i64>,
     root_path: Option<String>,
     root_role: Option<String>,
     total_sources: i64,
@@ -21,6 +22,7 @@ struct CoverageStats {
 impl CoverageStats {
     fn new() -> Self {
         CoverageStats {
+            root_id: None,
             root_path: None,
             root_role: None,
             total_sources: 0,
@@ -199,7 +201,7 @@ fn compute_per_root_stats(
 
     let roots: Vec<(i64, String, String)> = conn
         .prepare(&format!(
-            "SELECT id, path, role FROM roots WHERE {} ORDER BY path",
+            "SELECT id, path, role FROM roots WHERE {} ORDER BY id",
             role_clause
         ))?
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
@@ -239,6 +241,7 @@ fn compute_per_root_stats(
 
         // Compute stats from temp table
         let mut stats = compute_stats_from_temp_table(conn, archive_root_id)?;
+        stats.root_id = Some(root_id);
         stats.root_path = Some(root_path);
         stats.root_role = Some(root_role);
 
@@ -415,9 +418,10 @@ fn display_per_root_stats(per_root: &[CoverageStats], overall: &CoverageStats, a
             continue;
         }
 
+        let root_id = stats.root_id.map(|id| id.to_string()).unwrap_or_else(|| "?".to_string());
         let root_path = stats.root_path.as_deref().unwrap_or("unknown");
         let root_role = stats.root_role.as_deref().unwrap_or("unknown");
-        println!("Root: {} ({})", root_path, root_role);
+        println!("Root {}: {} ({})", root_id, root_path, root_role);
 
         if include_excluded && stats.excluded_sources > 0 {
             println!("  Total sources:   {:>8}", format_number(stats.total_sources));
