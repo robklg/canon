@@ -106,7 +106,7 @@ canon scan --add --role source /path/to/backup-drive/photos
 canon scan --add --role archive /Volumes/Archive
 
 # Enrich – compute content hashes for any image on all roots that don't have one yet (necessary for deduplication)
-canon worklist --where 'NOT content.hash.sha256?' --where 'source.ext IN (jpg, png, heic)' \
+canon worklist --where 'NOT content.hash.sha256?' --where 'source.ext|lowercase IN (jpg, nef, heic)' \
   | ./scripts/hash-worklist.sh \
   | canon import-facts
 
@@ -119,9 +119,10 @@ canon worklist --where 'source.ext|lowercase~jp?g' --where 'NOT content.DateTime
 canon ls
 canon facts
 canon coverage
+canon facts --key content.mime # which mime types exist?
 
 # Organize – generate manifest, edit pattern, preview, and apply
-canon cluster generate --where 'source.ext IN (jpg, png, heic)' --dest /Volumes/Archive/Photos
+canon cluster generate --where 'source.ext|lowercase IN (jpg, nef, heic)' --where 'content.DateTimeOriginal|year>2017' --dest /Volumes/Archive/Photos
 # Edit manifest.toml: set pattern = "{content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{filename}"
 canon apply manifest.toml --dry-run
 canon apply manifest.toml
