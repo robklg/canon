@@ -77,6 +77,9 @@ enum Commands {
         /// Allow importing facts for sources in archive roots
         #[arg(long)]
         allow_archived: bool,
+        /// Show each fact as it's imported
+        #[arg(short, long)]
+        verbose: bool,
     },
     // -- Discover --
     /// List sources matching filters
@@ -406,8 +409,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Worklist { paths, filters, include_archived, include_excluded, unique_content } => {
             worklist::run(&db, &paths, &filters, include_archived, include_excluded, unique_content)?;
         }
-        Commands::ImportFacts { allow_archived } => {
-            import_facts::run(&db, allow_archived)?;
+        Commands::ImportFacts { allow_archived, verbose } => {
+            import_facts::run(&db, allow_archived, verbose)?;
         }
         Commands::Ls { paths, filters, archived, unarchived, unhashed, duplicates, include_archived, include_excluded, long } => {
             // If no paths given, check if cwd is inside a root

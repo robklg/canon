@@ -49,7 +49,7 @@ fn normalize_fact_key(key: &str) -> Result<String, &'static str> {
     Ok(format!("content.{}", key))
 }
 
-pub fn run(db: &Db, allow_archived: bool) -> Result<()> {
+pub fn run(db: &Db, allow_archived: bool, verbose: bool) -> Result<()> {
     let conn = db.conn();
     let stdin = io::stdin();
     let mut stats = ImportStats::default();
@@ -70,7 +70,7 @@ pub fn run(db: &Db, allow_archived: bool) -> Result<()> {
             }
         };
 
-        match process_import(&conn, &import, &mut stats, allow_archived) {
+        match process_import(&conn, &import, &mut stats, allow_archived, verbose) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!(
@@ -98,20 +98,20 @@ pub fn run(db: &Db, allow_archived: bool) -> Result<()> {
     Ok(())
 }
 
-fn process_import(conn: &Connection, import: &FactImport, stats: &mut ImportStats, allow_archived: bool) -> Result<()> {
-    // Check if source exists and get its basis_rev and role
-    let current: Option<(i64, Option<i64>, String)> = conn
+fn process_import(conn: &Connection, import: &FactImport, stats: &mut ImportStats, allow_archived: bool, verbose: bool) -> Result<()> {
+    // Check if source exists and get its basis_rev, role, and paths
+    let current: Option<(i64, Option<i64>, String, String, String)> = conn
         .query_row(
-            "SELECT s.basis_rev, s.object_id, r.role
+            "SELECT s.basis_rev, s.object_id, r.role, r.path, s.rel_path
              FROM sources s
              JOIN roots r ON s.root_id = r.id
              WHERE s.id = ?",
             [import.source_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .optional()?;
 
-    let (current_basis_rev, current_object_id, role) = match current {
+    let (current_basis_rev, current_object_id, role, root_path, rel_path) = match current {
         Some(c) => c,
         None => {
             eprintln!("Warning: source_id {} not found", import.source_id);
@@ -169,8 +169,14 @@ fn process_import(conn: &Connection, import: &FactImport, stats: &mut ImportStat
     }
 
     // Import facts - all imported facts are content facts (stored on object when available)
+    if verbose && !normalized_facts.is_empty() {
+        eprintln!("[{}] {}", root_path, rel_path);
+    }
     for (key, value) in &normalized_facts {
         if object_id.is_some() {
+            if verbose {
+                eprintln!("  {}: {} (on object)", key, value);
+            }
             // Store as object fact
             insert_fact(
                 conn,
@@ -184,6 +190,9 @@ fn process_import(conn: &Connection, import: &FactImport, stats: &mut ImportStat
             stats.facts_imported += 1;
             stats.facts_promoted += 1;
         } else {
+            if verbose {
+                eprintln!("  {}: {} (on source)", key, value);
+            }
             // Store as source fact for now (will be promoted later when hash is known)
             insert_fact(
                 conn,
