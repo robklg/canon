@@ -48,6 +48,10 @@ enum Commands {
         /// Scan all existing roots (optionally filtered by --role)
         #[arg(long)]
         all: bool,
+        /// Compute content hashes for scanned files. Archive roots auto-hash by default.
+        /// Use without value for new/changed files, or =all to recompute all hashes.
+        #[arg(long, value_name = "MODE", default_missing_value = "new", num_args = 0..=1)]
+        compute_hashes: Option<String>,
     },
     /// List and manage roots
     Roots {
@@ -394,7 +398,7 @@ fn main() -> anyhow::Result<()> {
     let mut db = db::open(&db_path, cli.debug_sql)?;
 
     match cli.command {
-        Commands::Scan { paths, role, add, all } => {
+        Commands::Scan { paths, role, add, all, compute_hashes } => {
             if add && role.is_none() {
                 anyhow::bail!("--role is required when using --add");
             }
@@ -404,7 +408,7 @@ fn main() -> anyhow::Result<()> {
             if !all && paths.is_empty() {
                 anyhow::bail!("Provide paths to scan, or use --all to scan all roots");
             }
-            scan::run(&db, &paths, role.as_deref(), add, all)?;
+            scan::run(&db, &paths, role.as_deref(), add, all, compute_hashes.as_deref())?;
         }
         Commands::Worklist { paths, filters, include_archived, include_excluded, unique_content } => {
             worklist::run(&db, &paths, &filters, include_archived, include_excluded, unique_content)?;

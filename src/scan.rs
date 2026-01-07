@@ -19,9 +19,19 @@ struct ScanStats {
     moved: u64,
     unchanged: u64,
     missing: u64,
+    hashed: u64,
+    unexpected_hash_changes: u64,
 }
 
-pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_roots: bool) -> Result<()> {
+/// File info collected during scan for hashing
+struct FileToHash {
+    source_id: i64,
+    full_path: PathBuf,
+    old_object_id: Option<i64>,
+    basis_changed: bool,  // True if file was new/updated (mtime/size changed)
+}
+
+pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_roots: bool, compute_hashes: Option<&str>) -> Result<()> {
     // Validate role if provided
     if let Some(r) = role {
         if r != "source" && r != "archive" {
@@ -56,13 +66,14 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_r
     };
 
     let mut total_stats = ScanStats::default();
+    let mut all_files_to_hash: Vec<FileToHash> = Vec::new();
 
     for path in &paths_to_scan {
         let canonical = fs::canonicalize(path)
             .with_context(|| format!("Failed to canonicalize path: {}", path.display()))?;
 
         // Check if path is inside an existing root
-        let (root_id, root_path, scan_prefix) = match resolve_root_path(&conn, &canonical)? {
+        let (root_id, root_path, scan_prefix, root_role) = match resolve_root_path(&conn, &canonical)? {
             Some((id, root_path, existing_role, rel_path)) => {
                 // Path is inside an existing root
                 if add_root {
@@ -89,7 +100,7 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_r
                 } else {
                     Some(rel_path) // Scanning subtree
                 };
-                (id, PathBuf::from(root_path), scan_prefix)
+                (id, PathBuf::from(root_path), scan_prefix, existing_role)
             }
             None => {
                 // Path is not inside any root
@@ -100,21 +111,41 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_r
                     );
                 }
                 // role is guaranteed to be Some when add_root is true (validated in main.rs)
-                let role = role.expect("--role is required with --add");
+                let new_role = role.expect("--role is required with --add");
                 check_overlapping_roots(&conn, &canonical)?;
-                let root_id = create_root(&conn, &canonical, role)?;
-                (root_id, canonical.clone(), None)
+                let root_id = create_root(&conn, &canonical, new_role)?;
+                (root_id, canonical.clone(), None, new_role.to_string())
             }
         };
 
-        let stats = scan_root(&conn, root_id, &root_path, scan_prefix.as_deref(), now)?;
+        // Determine if we should hash this root
+        let should_hash = match (root_role.as_str(), compute_hashes) {
+            (_, Some("all")) => true,           // --compute-hashes=all: always hash all
+            ("archive", _) => true,             // archive roots: always hash new/changed
+            ("source", Some(_)) => true,        // source + --compute-hashes: hash new/changed
+            ("source", None) => false,          // source without flag: skip hashing
+            _ => false,
+        };
+        let hash_all = compute_hashes == Some("all");
 
-        total_stats.scanned += stats.scanned;
-        total_stats.new += stats.new;
-        total_stats.updated += stats.updated;
-        total_stats.moved += stats.moved;
-        total_stats.unchanged += stats.unchanged;
-        total_stats.missing += stats.missing;
+        if root_role == "archive" && compute_hashes.is_none() {
+            eprintln!(
+                "Scanning archive {} (will compute hashes for new/changed files)...",
+                root_path.display()
+            );
+        }
+
+        let result = scan_root(&conn, root_id, &root_path, scan_prefix.as_deref(), now, should_hash, hash_all)?;
+
+        total_stats.scanned += result.stats.scanned;
+        total_stats.new += result.stats.new;
+        total_stats.updated += result.stats.updated;
+        total_stats.moved += result.stats.moved;
+        total_stats.unchanged += result.stats.unchanged;
+        total_stats.missing += result.stats.missing;
+
+        // Collect files for hashing
+        all_files_to_hash.extend(result.files_to_hash);
     }
 
     println!(
@@ -126,6 +157,72 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_r
         total_stats.unchanged,
         total_stats.missing
     );
+
+    // Hash collected files with progress indicator
+    if !all_files_to_hash.is_empty() {
+        let total = all_files_to_hash.len();
+        let progress_interval = std::cmp::max(total / 20, 1);
+        eprintln!("Computing hashes for {} files...", total);
+
+        for (i, file) in all_files_to_hash.iter().enumerate() {
+            // Progress indicator
+            if i > 0 && i % progress_interval == 0 {
+                let pct = (i * 100) / total;
+                eprint!("\r  {}% ({}/{})", pct, i, total);
+            }
+
+            // Compute full SHA256 hash
+            let hash_value = match compute_full_hash(&file.full_path) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("\nWarning: Failed to hash {}: {}", file.full_path.display(), e);
+                    continue;
+                }
+            };
+
+            // Get or create object
+            let new_object_id = get_or_create_object(conn, "sha256", &hash_value)?;
+
+            // Check for unexpected hash change (only if basis didn't change and file had existing hash)
+            if !file.basis_changed {
+                if let Some(old_oid) = file.old_object_id {
+                    if old_oid != new_object_id {
+                        eprintln!(
+                            "\nWarning: hash changed for {} (file may be corrupted or was modified without mtime change)",
+                            file.full_path.display()
+                        );
+                        total_stats.unexpected_hash_changes += 1;
+                    }
+                }
+            }
+
+            // Link source to object
+            conn.execute(
+                "UPDATE sources SET object_id = ? WHERE id = ?",
+                params![new_object_id, file.source_id],
+            )?;
+
+            // Store hash as fact on object
+            store_hash_fact(conn, new_object_id, &hash_value)?;
+
+            total_stats.hashed += 1;
+        }
+
+        // Clear progress line
+        if total > progress_interval {
+            eprint!("\r  100% ({}/{})\n", total, total);
+        }
+
+        println!("Hashed {} files", total_stats.hashed);
+    }
+
+    // Exit with error if there were unexpected hash changes (possible corruption)
+    if total_stats.unexpected_hash_changes > 0 {
+        bail!(
+            "{} files have unexpected hash changes (file may be corrupted or was modified without mtime change)",
+            total_stats.unexpected_hash_changes
+        );
+    }
 
     // Update query planner statistics after bulk changes
     conn.execute("ANALYZE", [])?;
@@ -180,15 +277,23 @@ fn check_overlapping_roots(conn: &Connection, new_path: &Path) -> Result<()> {
     Ok(())
 }
 
+struct ScanRootResult {
+    stats: ScanStats,
+    files_to_hash: Vec<FileToHash>,
+}
+
 fn scan_root(
     conn: &Connection,
     root_id: i64,
     root_path: &Path,
     scan_prefix: Option<&str>,
     now: i64,
-) -> Result<ScanStats> {
+    should_hash: bool,
+    hash_all: bool,
+) -> Result<ScanRootResult> {
     let mut stats = ScanStats::default();
     let mut seen_source_ids: HashSet<i64> = HashSet::new();
+    let mut files_to_hash: Vec<FileToHash> = Vec::new();
 
     // Determine the actual path to walk
     let walk_path = match scan_prefix {
@@ -251,12 +356,28 @@ fn scan_root(
             FileAction::Moved => stats.moved += 1,
             FileAction::Unchanged => stats.unchanged += 1,
         }
+
+        // Collect files for hashing based on mode
+        if should_hash {
+            let needs_hash = match result.action {
+                FileAction::New | FileAction::Updated => true,  // New/changed files always need hash
+                FileAction::Moved | FileAction::Unchanged => hash_all,  // Only if --compute-hashes=all
+            };
+            if needs_hash {
+                files_to_hash.push(FileToHash {
+                    source_id: result.source_id,
+                    full_path: full_path.to_path_buf(),
+                    old_object_id: result.old_object_id,
+                    basis_changed: matches!(result.action, FileAction::New | FileAction::Updated),
+                });
+            }
+        }
     }
 
     // Mark missing files (scoped to prefix if scanning subtree)
     stats.missing = mark_missing(conn, root_id, scan_prefix, &seen_source_ids, now)?;
 
-    Ok(stats)
+    Ok(ScanRootResult { stats, files_to_hash })
 }
 
 enum FileAction {
@@ -269,6 +390,7 @@ enum FileAction {
 struct ProcessResult {
     source_id: i64,
     action: FileAction,
+    old_object_id: Option<i64>,  // For detecting unexpected hash changes
 }
 
 fn process_file(
@@ -283,16 +405,16 @@ fn process_file(
     now: i64,
 ) -> Result<ProcessResult> {
     // First, check if we have an existing source at this path
-    let existing_by_path: Option<(i64, Option<i64>, Option<i64>, i64, i64, i64)> = conn
+    let existing_by_path: Option<(i64, Option<i64>, Option<i64>, i64, i64, i64, Option<i64>)> = conn
         .query_row(
-            "SELECT id, device, inode, size, mtime, basis_rev FROM sources
+            "SELECT id, device, inode, size, mtime, basis_rev, object_id FROM sources
              WHERE root_id = ? AND rel_path = ?",
             params![root_id, rel_path],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
         )
         .optional()?;
 
-    if let Some((id, old_device, old_inode, old_size, old_mtime, old_basis_rev)) = existing_by_path {
+    if let Some((id, old_device, old_inode, old_size, old_mtime, old_basis_rev, old_object_id)) = existing_by_path {
         // Source exists at this path
         let basis_changed = size != old_size
             || mtime != old_mtime
@@ -310,6 +432,7 @@ fn process_file(
             return Ok(ProcessResult {
                 source_id: id,
                 action: FileAction::Updated,
+                old_object_id,
             });
         } else {
             // Just update last_seen_at
@@ -320,21 +443,22 @@ fn process_file(
             return Ok(ProcessResult {
                 source_id: id,
                 action: FileAction::Unchanged,
+                old_object_id,
             });
         }
     }
 
     // Check if we have an existing source with this device+inode (moved file)
-    let existing_by_inode: Option<(i64, i64, String, i64)> = conn
+    let existing_by_inode: Option<(i64, i64, String, i64, Option<i64>)> = conn
         .query_row(
-            "SELECT id, root_id, rel_path, basis_rev FROM sources
+            "SELECT id, root_id, rel_path, basis_rev, object_id FROM sources
              WHERE device = ? AND inode = ?",
             params![device, inode],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .optional()?;
 
-    if let Some((id, old_root_id, _old_rel_path, old_basis_rev)) = existing_by_inode {
+    if let Some((id, old_root_id, _old_rel_path, old_basis_rev, old_object_id)) = existing_by_inode {
         // File was moved
         // Note: We might need to handle cross-root moves differently, but for now
         // we'll just update to the new location
@@ -363,6 +487,7 @@ fn process_file(
         return Ok(ProcessResult {
             source_id: id,
             action: FileAction::Moved,
+            old_object_id,
         });
     }
 
@@ -378,6 +503,7 @@ fn process_file(
     Ok(ProcessResult {
         source_id: conn.last_insert_rowid(),
         action: FileAction::New,
+        old_object_id: None,
     })
 }
 
@@ -458,4 +584,61 @@ pub fn compute_partial_hash(path: &Path, size: u64) -> Result<String> {
     }
 
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Compute full SHA256 hash of a file
+fn compute_full_hash(path: &Path) -> Result<String> {
+    let mut file = File::open(path)
+        .with_context(|| format!("Failed to open file for hashing: {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536]; // 64KB buffer
+
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Get or create an object by hash, returning its ID
+fn get_or_create_object(conn: &Connection, hash_type: &str, hash_value: &str) -> Result<i64> {
+    use rusqlite::OptionalExtension;
+
+    // Try to find existing object
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM objects WHERE hash_type = ? AND hash_value = ?",
+            params![hash_type, hash_value],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+
+    // Create new object
+    conn.execute(
+        "INSERT INTO objects (hash_type, hash_value) VALUES (?, ?)",
+        params![hash_type, hash_value],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Store the content hash as a fact on the object
+fn store_hash_fact(conn: &Connection, object_id: i64, hash_value: &str) -> Result<()> {
+    let now = current_timestamp();
+    conn.execute(
+        "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at)
+         VALUES ('object', ?, 'content.hash.sha256', ?, ?)
+         ON CONFLICT(entity_type, entity_id, key) DO UPDATE SET
+           value_text = excluded.value_text,
+           observed_at = excluded.observed_at",
+        params![object_id, hash_value, now],
+    )?;
+    Ok(())
 }

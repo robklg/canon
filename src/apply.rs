@@ -215,6 +215,12 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
 
     let conn = db.conn();
 
+    // Early preflight: Check for unhashed sources in manifest
+    check_unhashed_sources(&sources)?;
+
+    // Early preflight: Check archive has complete hash coverage
+    check_archive_hash_coverage(conn, config.output.archive_root_id)?;
+
     // Parse the pattern once upfront
     let pattern = expr::parse_pattern(&config.output.pattern)
         .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
@@ -737,6 +743,55 @@ fn check_archive_conflicts_filtered(
     }
 
     Ok(conflicts)
+}
+
+/// Check that all sources in manifest have content hashes.
+/// Unhashed sources cannot be applied - deduplication requires content hashes.
+fn check_unhashed_sources(sources: &[LockEntry]) -> Result<()> {
+    let unhashed: Vec<_> = sources
+        .iter()
+        .filter(|s| s.object_id.is_none())
+        .collect();
+
+    if !unhashed.is_empty() {
+        eprintln!(
+            "Error: Manifest contains {} sources without content hash",
+            unhashed.len()
+        );
+        for source in unhashed.iter().take(10) {
+            eprintln!("  {}", source.path);
+        }
+        if unhashed.len() > 10 {
+            eprintln!("  ... and {} more", unhashed.len() - 10);
+        }
+        bail!(
+            "Cannot apply unhashed sources - deduplication and integrity checks require content hashes.\n\
+             Import hashes via worklist pipeline, then run 'canon cluster refresh <manifest>'."
+        );
+    }
+    Ok(())
+}
+
+/// Check that destination archive has complete hash coverage.
+/// Without complete coverage, we can't reliably detect duplicates.
+fn check_archive_hash_coverage(conn: &Connection, archive_root_id: i64) -> Result<()> {
+    let (total, unhashed): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), SUM(CASE WHEN object_id IS NULL THEN 1 ELSE 0 END)
+             FROM sources WHERE root_id = ? AND present = 1",
+            [archive_root_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+    if unhashed > 0 {
+        bail!(
+            "Destination archive has {} files without content hash (out of {})\n\
+             Cannot reliably detect duplicates without complete hash coverage.\n\
+             Run 'canon scan <archive-path>' to index and hash the archive.",
+            unhashed, total
+        );
+    }
+    Ok(())
 }
 
 fn check_excluded_sources_filtered(

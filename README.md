@@ -124,7 +124,7 @@ canon facts
 canon coverage
 
 # Organize – generate manifest, edit pattern, preview, and apply
-canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive/Photos
+canon cluster generate --where 'source.ext IN (jpg, png, heic)' --dest /Volumes/Archive/Photos
 # Edit manifest.toml: set pattern = "{content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{filename}"
 canon apply manifest.toml --dry-run
 canon apply manifest.toml
@@ -195,11 +195,22 @@ canon scan /path/to/photos
 
 # Scan just a subtree within an existing root
 canon scan /path/to/photos/2024
+
+# Compute content hashes during scan (optional for source roots)
+canon scan --compute-hashes /path/to/photos
+
+# Verify archive integrity by recomputing all hashes (good for cron jobs)
+canon scan --compute-hashes=all /Volumes/Archive
 ```
+
+**Hash computation:** Archive roots automatically compute hashes for new/changed files during scan (required for duplicate detection). Source roots skip hashing by default—use `--compute-hashes` to hash during scan, or import hashes via the worklist pipeline for more control.
+
+**Integrity verification:** Use `--compute-hashes=all` to recompute hashes for all files, even unchanged ones. This is especially useful for archives: run periodically (e.g., via cron) to detect file corruption. If a file's hash changes without its mtime changing, Canon warns about possible corruption and exits with an error.
 
 Output shows what was found:
 ```
 Scanned 1234 files: 100 new, 5 updated, 2 moved, 1127 unchanged, 0 missing
+Hashed 105 files
 ```
 
 ### canon roots
@@ -609,26 +620,26 @@ Exclusions are stored as `policy.exclude` facts on sources.
 Generate a manifest of files matching filters. The `--dest` flag specifies where files will be copied and must be inside a registered archive root.
 
 ```bash
-# All files with content hashes to an archive
-canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive/Photos
+# All photos to an archive (unhashed sources are automatically skipped)
+canon cluster generate --where 'source.ext IN (jpg, png, heic)' --dest /Volumes/Archive/Photos
 
 # Destination can be a subdirectory within an archive
-canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive/Photos/2024
+canon cluster generate --where 'source.ext IN (jpg, png, heic)' --dest /Volumes/Archive/Photos/2024
 
 # Scope to a specific path
-canon cluster generate /path/to/photos --where 'content.hash.sha256?' --dest /Volumes/Archive
+canon cluster generate /path/to/photos --dest /Volumes/Archive
 
 # Custom output file
-canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive -o my-manifest.toml
+canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive -o my-manifest.toml
 
 # Include sources from archive roots
-canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive --include-archived
+canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive --include-archived
 
 # Show which files were excluded (already archived)
-canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive --show-archived
+canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive --show-archived
 
 # Overwrite existing manifest file
-canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive --force
+canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive --force
 ```
 
 The command generates two files: a manifest (`.toml`) that you edit, and a lock file (`.lock`) containing the source list.
@@ -636,7 +647,7 @@ The command generates two files: a manifest (`.toml`) that you edit, and a lock 
 **Typical workflow:**
 
 ```bash
-canon cluster generate --where 'content.hash.sha256?' --dest /Volumes/Archive
+canon cluster generate --where 'source.ext IN (jpg, png, heic)' --dest /Volumes/Archive
 # Edit manifest.toml to customize the output pattern
 canon apply manifest.toml --dry-run   # Preview
 canon apply manifest.toml             # Execute
@@ -956,8 +967,8 @@ done | canon import-facts
 ### Organize photos by date
 
 ```bash
-# Generate manifest for all hashed photos
-canon cluster generate --where 'content.hash.sha256?' --where 'source.ext=jpg' --dest /Volumes/Archive/Photos
+# Generate manifest for all JPG photos (unhashed sources are automatically skipped)
+canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive/Photos
 
 # Edit manifest.toml to set output pattern
 # pattern = "{content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{filename}"

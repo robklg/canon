@@ -80,12 +80,20 @@ fn generate_lock(
     lock_path: &Path,
     options: &GenerateOptions,
 ) -> Result<Option<LockGenerationResult>> {
-    let (sources, archived, excluded_count) =
+    let (sources, archived, excluded_count, unhashed_count) =
         query_sources(conn, scope_prefixes, filters, options.include_archived)?;
 
     // Report excluded files (hard gate - always skipped)
     if excluded_count > 0 {
         eprintln!("Skipped {} excluded sources", excluded_count);
+    }
+
+    // Report unhashed files (hard gate - always skipped)
+    if unhashed_count > 0 {
+        eprintln!("Skipped {} sources without content hash", unhashed_count);
+        eprintln!("  To discover: run 'canon ls --unhashed' with your scope/pattern");
+        eprintln!("  To include: import hashes via worklist pipeline, then run 'canon cluster refresh'");
+        eprintln!("  To permanently exclude: use 'canon exclude set' with your pattern AND 'NOT content.hash.sha256?'");
     }
 
     // Report archived files
@@ -360,15 +368,16 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Returns (included_sources, archived_sources, excluded_count)
+/// Returns (included_sources, archived_sources, excluded_count, unhashed_count)
 /// archived_sources is a list of (source_path, archive_path) for files already in an archive
 /// excluded_count is the number of sources skipped due to policy.exclude (hard gate)
+/// unhashed_count is the number of sources skipped due to missing content hash
 fn query_sources(
     conn: &Connection,
     scope_prefixes: &[String],
     filters: &[Filter],
     include_archived: bool,
-) -> Result<(Vec<LockEntry>, Vec<(String, String)>, usize)> {
+) -> Result<(Vec<LockEntry>, Vec<(String, String)>, usize, usize)> {
     // Build query based on filters
     // By default only source roots, with --include-archived also include archive roots
     let role_clause = if include_archived {
@@ -394,10 +403,11 @@ fn query_sources(
     source_ids = filter::apply_filters(conn, &source_ids, filters)?;
 
     // Check which sources are already archived (same object_id exists in an archive root)
-    // Also apply hard gate for excluded sources
+    // Also apply hard gates for excluded and unhashed sources
     let mut sources = Vec::new();
     let mut archived = Vec::new();
     let mut excluded_count = 0;
+    let mut unhashed_count = 0;
 
     for source_id in source_ids {
         // HARD GATE: Skip excluded sources (no override flag)
@@ -407,6 +417,12 @@ fn query_sources(
         }
 
         if let Some(source) = fetch_source(conn, source_id)? {
+            // Skip sources without content hash
+            if source.object_id.is_none() {
+                unhashed_count += 1;
+                continue;
+            }
+
             // Check if this content is already in an archive
             let archive_path = if let Some(ref hash) = source.hash_value {
                 find_in_archive(conn, hash)?
@@ -426,7 +442,7 @@ fn query_sources(
         }
     }
 
-    Ok((sources, archived, excluded_count))
+    Ok((sources, archived, excluded_count, unhashed_count))
 }
 
 /// Find if a hash exists in any archive root, return the path if found
