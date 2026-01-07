@@ -42,8 +42,58 @@ struct ImportStats {
     skipped_stale: u64,
     skipped_reserved: u64,
     skipped_archived: u64,
+    skipped_type_mismatch: u64,
     objects_created: u64,
     facts_promoted: u64,
+}
+
+/// Fact value type for type consistency checking
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FactValueType {
+    Text,
+    Num,
+    Time,
+}
+
+impl std::fmt::Display for FactValueType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FactValueType::Text => write!(f, "text"),
+            FactValueType::Num => write!(f, "num"),
+            FactValueType::Time => write!(f, "time"),
+        }
+    }
+}
+
+/// Build a map of known fact keys to their established types
+fn build_fact_type_map(conn: &Connection) -> Result<HashMap<String, FactValueType>> {
+    let mut type_map = HashMap::new();
+
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT key,
+                CASE
+                    WHEN value_time IS NOT NULL THEN 'time'
+                    WHEN value_num IS NOT NULL THEN 'num'
+                    ELSE 'text'
+                END as type
+         FROM facts"
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    for row in rows {
+        let (key, type_str) = row?;
+        let fact_type = match type_str.as_str() {
+            "time" => FactValueType::Time,
+            "num" => FactValueType::Num,
+            _ => FactValueType::Text,
+        };
+        type_map.insert(key, fact_type);
+    }
+
+    Ok(type_map)
 }
 
 /// Normalize a fact key to use the content.* namespace.
@@ -65,6 +115,12 @@ pub fn run(db: &Db, allow_archived: bool, verbose: bool) -> Result<()> {
     let stdin = io::stdin();
     let mut stats = ImportStats::default();
 
+    // Build type map once at start for efficient type checking
+    let fact_type_map = build_fact_type_map(&conn)?;
+
+    // Track which keys had type mismatches (for summary)
+    let mut type_mismatch_keys: HashMap<String, (FactValueType, FactValueType)> = HashMap::new();
+
     for line in stdin.lock().lines() {
         let line = line.context("Failed to read line from stdin")?;
         if line.trim().is_empty() {
@@ -81,7 +137,7 @@ pub fn run(db: &Db, allow_archived: bool, verbose: bool) -> Result<()> {
             }
         };
 
-        match process_import(&conn, &import, &mut stats, allow_archived, verbose) {
+        match process_import(&conn, &import, &mut stats, &fact_type_map, &mut type_mismatch_keys, allow_archived, verbose) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!(
@@ -92,13 +148,27 @@ pub fn run(db: &Db, allow_archived: bool, verbose: bool) -> Result<()> {
         }
     }
 
+    // Print type mismatch warnings with remediation hint
+    if !type_mismatch_keys.is_empty() {
+        eprintln!("\nType mismatch warnings:");
+        let mut keys: Vec<_> = type_mismatch_keys.iter().collect();
+        keys.sort_by_key(|(k, _)| *k);
+        for (key, (existing, attempted)) in keys {
+            eprintln!("  {}: existing type is {}, attempted to import {}", key, existing, attempted);
+        }
+        eprintln!("\nTo change the type, first delete existing facts:");
+        eprintln!("  canon facts delete --key <key>");
+        eprintln!("Then re-import with the new type.");
+    }
+
     println!(
-        "Processed {} lines: {} facts imported, {} skipped (stale), {} skipped (reserved), {} skipped (archived), {} objects created, {} facts promoted",
+        "Processed {} lines: {} facts imported, {} skipped (stale), {} skipped (reserved), {} skipped (archived), {} skipped (type mismatch), {} objects created, {} facts promoted",
         stats.lines_processed,
         stats.facts_imported,
         stats.skipped_stale,
         stats.skipped_reserved,
         stats.skipped_archived,
+        stats.skipped_type_mismatch,
         stats.objects_created,
         stats.facts_promoted
     );
@@ -109,7 +179,15 @@ pub fn run(db: &Db, allow_archived: bool, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn process_import(conn: &Connection, import: &FactImport, stats: &mut ImportStats, allow_archived: bool, verbose: bool) -> Result<()> {
+fn process_import(
+    conn: &Connection,
+    import: &FactImport,
+    stats: &mut ImportStats,
+    fact_type_map: &HashMap<String, FactValueType>,
+    type_mismatch_keys: &mut HashMap<String, (FactValueType, FactValueType)>,
+    allow_archived: bool,
+    verbose: bool,
+) -> Result<()> {
     // Check if source exists and get its basis_rev, role, and paths
     let current: Option<(i64, Option<i64>, String, String, String)> = conn
         .query_row(
@@ -184,6 +262,17 @@ fn process_import(conn: &Connection, import: &FactImport, stats: &mut ImportStat
         eprintln!("[{}] {}", root_path, rel_path);
     }
     for (key, value) in &normalized_facts {
+        // Check type consistency before inserting
+        let new_type = get_value_type(value);
+        if let Some(&existing_type) = fact_type_map.get(key) {
+            if existing_type != new_type {
+                // Type mismatch - skip this fact
+                type_mismatch_keys.entry(key.clone()).or_insert((existing_type, new_type));
+                stats.skipped_type_mismatch += 1;
+                continue;
+            }
+        }
+
         if object_id.is_some() {
             if verbose {
                 eprintln!("  {}: {} (on object)", key, value);
@@ -326,6 +415,28 @@ fn classify_value(value: &Value) -> (Option<String>, Option<f64>, Option<i64>) {
         Value::Null => (Some(String::new()), None, None),
         // Store arrays/objects as their JSON string representation
         Value::Array(_) | Value::Object(_) => (Some(value.to_string()), None, None),
+    }
+}
+
+/// Determine what type a value will be stored as (mirrors classify_value logic)
+fn get_value_type(value: &Value) -> FactValueType {
+    match value {
+        Value::String(s) => {
+            // Try to parse as timestamp (same logic as classify_value)
+            if chrono::DateTime::parse_from_rfc3339(s).is_ok() {
+                return FactValueType::Time;
+            }
+            if chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").is_ok() {
+                return FactValueType::Time;
+            }
+            if chrono::NaiveDateTime::parse_from_str(s, "%Y:%m:%d %H:%M:%S").is_ok() {
+                return FactValueType::Time;
+            }
+            FactValueType::Text
+        }
+        Value::Number(_) => FactValueType::Num,
+        Value::Bool(_) => FactValueType::Num,
+        Value::Null | Value::Array(_) | Value::Object(_) => FactValueType::Text,
     }
 }
 

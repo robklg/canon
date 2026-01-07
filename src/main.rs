@@ -321,6 +321,9 @@ enum FactsAction {
         /// Entity type: 'source' or 'object'
         #[arg(long, value_name = "TYPE")]
         on: String,
+        /// Filter by value storage type (text, num, or time)
+        #[arg(long, value_parser = ["text", "num", "time"])]
+        value_type: Option<String>,
         /// Execute deletion (default is dry-run)
         #[arg(long)]
         yes: bool,
@@ -440,9 +443,10 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             match action {
-                Some(FactsAction::Delete { key, paths, filters, on, yes }) => {
+                Some(FactsAction::Delete { key, paths, filters, on, value_type, yes }) => {
                     let options = facts::DeleteOptions {
                         entity_type: on,
+                        value_type,
                         dry_run: !yes,
                     };
                     facts::delete_facts(&mut db, &key, &paths, &filters, &options)?;

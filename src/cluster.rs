@@ -590,6 +590,57 @@ fn current_timestamp() -> String {
 }
 
 
+/// Track types seen for a fact key
+#[derive(Default)]
+struct FactTypeTracker {
+    count: usize,
+    text_count: usize,
+    num_count: usize,
+    time_count: usize,
+}
+
+impl FactTypeTracker {
+    fn add(&mut self, fact_type: FactType) {
+        self.count += 1;
+        match fact_type {
+            FactType::Text | FactType::Path => self.text_count += 1,
+            FactType::Num => self.num_count += 1,
+            FactType::Time => self.time_count += 1,
+        }
+    }
+
+    fn has_mixed_types(&self) -> bool {
+        let type_count = (self.text_count > 0) as usize
+            + (self.num_count > 0) as usize
+            + (self.time_count > 0) as usize;
+        type_count > 1
+    }
+
+    fn dominant_type(&self) -> FactType {
+        if self.time_count >= self.text_count && self.time_count >= self.num_count {
+            FactType::Time
+        } else if self.num_count >= self.text_count {
+            FactType::Num
+        } else {
+            FactType::Text
+        }
+    }
+
+    fn type_breakdown(&self) -> String {
+        let mut parts = Vec::new();
+        if self.time_count > 0 {
+            parts.push(format!("{} time", self.time_count));
+        }
+        if self.text_count > 0 {
+            parts.push(format!("{} text", self.text_count));
+        }
+        if self.num_count > 0 {
+            parts.push(format!("{} num", self.num_count));
+        }
+        parts.join(", ")
+    }
+}
+
 /// Collect facts with 100% coverage across all sources in the manifest
 fn collect_full_coverage_facts(conn: &Connection, sources: &[LockEntry]) -> Result<Vec<(String, FactType, String)>> {
     use std::collections::HashSet;
@@ -601,8 +652,8 @@ fn collect_full_coverage_facts(conn: &Connection, sources: &[LockEntry]) -> Resu
     let source_count = sources.len();
     let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
 
-    // Count facts by key across all sources
-    let mut fact_counts: HashMap<String, (usize, FactType)> = HashMap::new();
+    // Count facts by key across all sources, tracking type consistency
+    let mut fact_counts: HashMap<String, FactTypeTracker> = HashMap::new();
     let mut seen_keys: HashSet<String> = HashSet::new();
 
     // Query source facts
@@ -631,10 +682,10 @@ fn collect_full_coverage_facts(conn: &Connection, sources: &[LockEntry]) -> Resu
                 continue;
             };
 
-            let entry = fact_counts.entry(key.clone()).or_insert((0, fact_type));
-            if !seen_keys.contains(&format!("{}:{}", source_id, key)) {
-                entry.0 += 1;
-                seen_keys.insert(format!("{}:{}", source_id, key));
+            let seen_key = format!("{}:{}", source_id, key);
+            if !seen_keys.contains(&seen_key) {
+                fact_counts.entry(key.clone()).or_default().add(fact_type);
+                seen_keys.insert(seen_key);
             }
         }
     }
@@ -665,22 +716,40 @@ fn collect_full_coverage_facts(conn: &Connection, sources: &[LockEntry]) -> Resu
                 continue;
             };
 
-            let entry = fact_counts.entry(key.clone()).or_insert((0, fact_type));
             // Use source.id for uniqueness, not object_id (since we want per-source coverage)
-            if !seen_keys.contains(&format!("{}:{}", source.id, key)) {
-                entry.0 += 1;
-                seen_keys.insert(format!("{}:{}", source.id, key));
+            let seen_key = format!("{}:{}", source.id, key);
+            if !seen_keys.contains(&seen_key) {
+                fact_counts.entry(key.clone()).or_default().add(fact_type);
+                seen_keys.insert(seen_key);
             }
         }
+    }
+
+    // Warn about facts with mixed types (only for 100% coverage facts)
+    let mut mixed_type_warnings: Vec<(String, String)> = Vec::new();
+    for (key, tracker) in &fact_counts {
+        if tracker.count == source_count && tracker.has_mixed_types() {
+            mixed_type_warnings.push((key.clone(), tracker.type_breakdown()));
+        }
+    }
+
+    if !mixed_type_warnings.is_empty() {
+        mixed_type_warnings.sort_by(|a, b| a.0.cmp(&b.0));
+        eprintln!("Warning: some facts have inconsistent types across sources:");
+        for (key, breakdown) in &mixed_type_warnings {
+            eprintln!("  {}: {}", key, breakdown);
+        }
+        eprintln!("  Type-specific modifiers (|year, |month, etc.) may fail on mismatched values.");
+        eprintln!("  To fix: delete outliers with 'canon facts delete <key> --on object --value-type <minority-type>'");
     }
 
     // Filter to only 100% coverage facts
     let mut full_coverage: Vec<(String, FactType, String)> = fact_counts
         .into_iter()
-        .filter(|(_, (count, _))| *count == source_count)
-        .map(|(key, (_, fact_type))| {
+        .filter(|(_, tracker)| tracker.count == source_count)
+        .map(|(key, tracker)| {
             let description = get_fact_description(&key);
-            (key, fact_type, description)
+            (key, tracker.dominant_type(), description)
         })
         .collect();
 

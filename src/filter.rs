@@ -638,18 +638,22 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
         .unwrap_or(None);
 
     // Check source facts then object facts
+    // Note: if modifier fails (e.g., time modifier on text value due to bad data),
+    // treat as "no match" rather than error
     if let Some(fact_value) = get_fact_value(conn, "source", source_id, &base_key)? {
-        let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-        if compare_fact_value(&modified, op, value) {
-            return Ok(true);
+        if let Ok(modified) = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key) {
+            if compare_fact_value(&modified, op, value) {
+                return Ok(true);
+            }
         }
     }
 
     if let Some(obj_id) = object_id {
         if let Some(fact_value) = get_fact_value(conn, "object", obj_id, &base_key)? {
-            let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-            if compare_fact_value(&modified, op, value) {
-                return Ok(true);
+            if let Ok(modified) = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key) {
+                if compare_fact_value(&modified, op, value) {
+                    return Ok(true);
+                }
             }
         }
     }

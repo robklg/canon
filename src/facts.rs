@@ -450,6 +450,7 @@ fn show_transformed_distribution(
 
     let mut counts: HashMap<String, i64> = HashMap::new();
     let mut sources_with_fact: i64 = 0;
+    let mut skipped_type_mismatch: i64 = 0;
 
     for (text_val, num_val, time_val) in rows {
         let fact_value = if let Some(t) = text_val {
@@ -463,8 +464,16 @@ fn show_transformed_distribution(
         };
 
         sources_with_fact += 1;
-        let transformed = apply_transforms(fact_value, accessor, modifiers, display_key)?;
-        *counts.entry(transformed).or_insert(0) += 1;
+        match apply_transforms(fact_value, accessor, modifiers, display_key) {
+            Ok(transformed) => {
+                *counts.entry(transformed).or_insert(0) += 1;
+            }
+            Err(_) => {
+                // Type mismatch (e.g., text value when time modifier expected)
+                // This can happen with malformed data - skip and count
+                skipped_type_mismatch += 1;
+            }
+        }
     }
 
     // Clean up temp table
@@ -500,6 +509,14 @@ fn show_transformed_distribution(
     if without_fact > 0 {
         let coverage = (without_fact as f64 / total_sources as f64) * 100.0;
         println!("{:<40} {:>10} {:>9.1}%", "(no value)", without_fact, coverage);
+    }
+
+    // Warn about skipped values due to type mismatch
+    if skipped_type_mismatch > 0 {
+        eprintln!(
+            "Warning: skipped {} values with incompatible type for transform",
+            skipped_type_mismatch
+        );
     }
 
     Ok(())
@@ -761,7 +778,18 @@ fn show_builtin_distribution(
 
 pub struct DeleteOptions {
     pub entity_type: String, // "source" or "object"
+    pub value_type: Option<String>, // "text", "num", or "time"
     pub dry_run: bool,
+}
+
+/// Build SQL clause for value type filter
+fn value_type_clause(value_type: &Option<String>) -> &'static str {
+    match value_type.as_deref() {
+        Some("text") => "AND value_text IS NOT NULL",
+        Some("num") => "AND value_num IS NOT NULL",
+        Some("time") => "AND value_time IS NOT NULL",
+        _ => "",
+    }
 }
 
 /// Check if a fact key is protected from deletion
@@ -814,33 +842,45 @@ pub fn delete_facts(
     // Build temp table for efficiency
     populate_temp_sources(conn, &source_ids)?;
 
+    // Build value type clause for filtering
+    let vt_clause = value_type_clause(&options.value_type);
+
     // Count and optionally delete based on entity type
     let (fact_count, entity_count) = if options.entity_type == "source" {
         // Delete facts on source entities
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts
-             WHERE entity_type = 'source'
-               AND entity_id IN (SELECT id FROM temp_sources)
-               AND key = ?",
+            &format!(
+                "SELECT COUNT(*) FROM facts
+                 WHERE entity_type = 'source'
+                   AND entity_id IN (SELECT id FROM temp_sources)
+                   AND key = ? {}",
+                vt_clause
+            ),
             [key],
             |row| row.get(0),
         )?;
 
         let entity_count: i64 = conn.query_row(
-            "SELECT COUNT(DISTINCT entity_id) FROM facts
-             WHERE entity_type = 'source'
-               AND entity_id IN (SELECT id FROM temp_sources)
-               AND key = ?",
+            &format!(
+                "SELECT COUNT(DISTINCT entity_id) FROM facts
+                 WHERE entity_type = 'source'
+                   AND entity_id IN (SELECT id FROM temp_sources)
+                   AND key = ? {}",
+                vt_clause
+            ),
             [key],
             |row| row.get(0),
         )?;
 
         if !options.dry_run && count > 0 {
             conn.execute(
-                "DELETE FROM facts
-                 WHERE entity_type = 'source'
-                   AND entity_id IN (SELECT id FROM temp_sources)
-                   AND key = ?",
+                &format!(
+                    "DELETE FROM facts
+                     WHERE entity_type = 'source'
+                       AND entity_id IN (SELECT id FROM temp_sources)
+                       AND key = ? {}",
+                    vt_clause
+                ),
                 [key],
             )?;
         }
@@ -862,29 +902,38 @@ pub fn delete_facts(
         )?;
 
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts
-             WHERE entity_type = 'object'
-               AND entity_id IN (SELECT id FROM temp_objects)
-               AND key = ?",
+            &format!(
+                "SELECT COUNT(*) FROM facts
+                 WHERE entity_type = 'object'
+                   AND entity_id IN (SELECT id FROM temp_objects)
+                   AND key = ? {}",
+                vt_clause
+            ),
             [key],
             |row| row.get(0),
         )?;
 
         let entity_count: i64 = conn.query_row(
-            "SELECT COUNT(DISTINCT entity_id) FROM facts
-             WHERE entity_type = 'object'
-               AND entity_id IN (SELECT id FROM temp_objects)
-               AND key = ?",
+            &format!(
+                "SELECT COUNT(DISTINCT entity_id) FROM facts
+                 WHERE entity_type = 'object'
+                   AND entity_id IN (SELECT id FROM temp_objects)
+                   AND key = ? {}",
+                vt_clause
+            ),
             [key],
             |row| row.get(0),
         )?;
 
         if !options.dry_run && count > 0 {
             conn.execute(
-                "DELETE FROM facts
-                 WHERE entity_type = 'object'
-                   AND entity_id IN (SELECT id FROM temp_objects)
-                   AND key = ?",
+                &format!(
+                    "DELETE FROM facts
+                     WHERE entity_type = 'object'
+                       AND entity_id IN (SELECT id FROM temp_objects)
+                       AND key = ? {}",
+                    vt_clause
+                ),
                 [key],
             )?;
         }
