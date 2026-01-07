@@ -105,13 +105,10 @@ canon scan --add --role source /path/to/photos
 canon scan --add --role source /path/to/backup-drive/photos
 canon scan --add --role archive /Volumes/Archive
 
-# Enrich – compute content hashes for all roots
-canon worklist --where 'NOT content.hash.sha256?' \
+# Enrich – compute content hashes for any image on all roots that don't have one yet (necessary for deduplication)
+canon worklist --where 'NOT content.hash.sha256?' --where 'source.ext IN (jpg, png, heic)' \
   | ./scripts/hash-worklist.sh \
   | canon import-facts
-canon worklist --where 'NOT content.hash.sha256?' --include-archived \
-  | ./scripts/hash-worklist.sh \
-  | canon import-facts --allow-archived
 
 # Enrich – extract EXIF metadata for date-based organization
 canon worklist --where 'source.ext|lowercase~jp?g' --where 'NOT content.DateTimeOriginal?' \
