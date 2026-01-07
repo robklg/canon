@@ -260,19 +260,30 @@ pub fn canonicalize_scopes(paths: &[std::path::PathBuf]) -> Result<Vec<String>> 
 /// Build SQL clause for multiple scope prefixes.
 /// Returns the clause string and a vector of parameters to bind.
 /// If no prefixes, returns ("1=1", vec![]) to match everything.
+/// For directories: matches files under the directory
+/// For files: matches the exact file path
 pub fn build_scope_clause(prefixes: &[String]) -> (String, Vec<String>) {
     if prefixes.is_empty() {
         return ("1=1".to_string(), vec![]);
     }
 
-    let conditions: Vec<&str> = prefixes
-        .iter()
-        .map(|_| "(r.path || '/' || s.rel_path) LIKE ? || '/%'")
-        .collect();
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+
+    for prefix in prefixes {
+        let path = Path::new(prefix);
+        if path.is_file() {
+            // Exact file match
+            conditions.push("(r.path || '/' || s.rel_path) = ?".to_string());
+            params.push(prefix.clone());
+        } else {
+            // Directory: match files under it
+            conditions.push("(r.path || '/' || s.rel_path) LIKE ? || '/%'".to_string());
+            params.push(prefix.clone());
+        }
+    }
 
     let clause = format!("({})", conditions.join(" OR "));
-    let params: Vec<String> = prefixes.to_vec();
-
     (clause, params)
 }
 
