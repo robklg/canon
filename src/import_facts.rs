@@ -10,6 +10,7 @@ use crate::db::{Connection, Db};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)] // Worklist pass-through fields are intentionally accepted but not read
 struct FactImport {
     source_id: i64,
     basis_rev: i64,
