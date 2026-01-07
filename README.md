@@ -21,6 +21,7 @@ Canon can be used purely as a discovery and search tool.
 After scanning sources, Canon allows you to **enrich assets with metadata ("facts")** and query across them — even when the files themselves live on many drives, backups, or disconnected storage.
 
 Fact enrichment is deliberately open-ended:
+
 - facts may come from Canon itself
 - from external tools (e.g. `exiftool`)
 - or from any process that can extract information from files
@@ -38,6 +39,7 @@ In practice, discovery often surfaces assets you forgot existed —
 for example, old imports that were never organized (e.g. `microsd_import`, `copy`, `DCIM_1`).
 
 Because Canon stores metadata independently of storage:
+
 - portable drives can be disconnected
 - old backups can be put away
 - your data remains fully searchable
@@ -54,16 +56,18 @@ Clustering is how you express intent about *which assets should be archived toge
 It is based on selection and filtering, not on modifying sources.
 
 Clustering can be defined using:
+
 - path scopes
 - expressive `where` expressions over enriched facts
 - combinations of both
 
-Once a cluster is defined, Canon generates a manifest describing the selected sources.
-The manifest is then edited by the user to define how the clustered assets should be placed in the archive.
+Once you constructed the right expression for the files to cluster, Canon can generate a manifest with the selected sources.
+This manifest is then edited to define how the clustered assets should be placed in the archive, with an output pattern you build from facts and modifiers.
 
 Applying a manifest materializes it within an archive root (by copying or moving files), expanding to the specified destination inside an archive.
-Before any files are written, Canon performs a strict preflight check to protect archive integrity:
+Before any files are written, Canon previews what will happen and performs a strict preflight check to protect archive integrity:
 
+- manifest is checked for validity and current state
 - output paths are fully resolved
 - collisions are detected
 - unresolved collisions cause the apply step to abort before making any changes
