@@ -9,12 +9,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::db::{Connection, Db};
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FactImport {
     source_id: i64,
     basis_rev: i64,
     #[serde(default = "current_timestamp")]
     observed_at: i64,
     facts: HashMap<String, Value>,
+    // Optional fields from worklist pass-through (allowed but ignored)
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    root_id: Option<i64>,
+    #[serde(default)]
+    size: Option<i64>,
+    #[serde(default)]
+    mtime: Option<i64>,
 }
 
 fn current_timestamp() -> i64 {

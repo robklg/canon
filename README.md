@@ -291,7 +291,7 @@ Output format (one JSON object per line):
 {"source_id":123,"path":"/full/path/to/file.jpg","root_id":1,"size":1024,"mtime":1703980800,"basis_rev":0}
 ```
 
-The worklist is a snapshot of sources at a point in time. Each entry includes `basis_rev` which tracks file changes.
+The worklist is a snapshot of sources at a point in time. Each entry includes `basis_rev` which tracks file changes. The `size` and `mtime` fields allow processors to verify a file hasn't changed since the scan before extracting facts.
 
 ### canon import-facts
 
