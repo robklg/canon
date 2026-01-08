@@ -105,25 +105,28 @@ canon scan --add --role source /path/to/photos
 canon scan --add --role source /path/to/backup-drive/photos
 canon scan --add --role archive /Volumes/Archive
 
-# Enrich – compute content hashes for any image on all roots that don't have one yet (necessary for deduplication)
+# Enrich – compute content hashes (necessary for deduplication)
 canon worklist --where 'NOT content.hash.sha256?' --where 'source.ext|lowercase IN (jpg, nef, heic)' \
   | ./scripts/hash-worklist.sh \
   | canon import-facts
 
-# Enrich – extract EXIF metadata for date-based organization
-canon worklist --where 'source.ext|lowercase~jp?g' --where 'NOT content.DateTimeOriginal?' \
-  | canonargs --json -- exiftool -json -DateTimeOriginal {} \
+# Enrich – extract EXIF metadata including GPS-based geolocation (city, region, country)
+canon worklist --where 'source.ext|lowercase IN (jpg, jpeg, heic, mov, mp4)' \
+  | ./scripts/exif-worklist.sh \
   | canon import-facts
 
-# Discover – see what you have and what's already archived
-canon ls
-canon facts
-canon coverage
-canon facts --key content.mime # which mime types exist?
+# Discover – explore your collection
+canon facts                                    # see all available facts
+canon facts --key content.geo.region           # where were photos taken?
+canon facts --key "content.media.capture_datetime|year"  # which years?
 
-# Organize – generate manifest, edit pattern, preview, and apply
-canon cluster generate --where 'source.ext|lowercase IN (jpg, nef, heic)' --where 'content.DateTimeOriginal|year>2017' --dest /Volumes/Archive/Photos
-# Edit manifest.toml: set pattern = "{content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{filename}"
+# Organize – archive your 2023 Amsterdam trip
+canon cluster generate \
+  --where 'content.media.capture_datetime|year = 2023' \
+  --where 'content.geo.region = "North Holland"' \
+  --dest /Volumes/Archive/Trips/2023-Amsterdam
+
+# Edit manifest.toml: set pattern = "{content.media.capture_datetime|date}/{filename}"
 canon apply manifest.toml --dry-run
 canon apply manifest.toml
 ```
