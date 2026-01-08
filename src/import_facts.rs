@@ -385,20 +385,53 @@ fn insert_fact(
     Ok(())
 }
 
+/// Try to parse a string as a datetime, returning the Unix timestamp if successful
+fn try_parse_datetime(s: &str) -> Option<i64> {
+    // RFC3339 format (2020-01-15T10:30:00+00:00)
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.timestamp());
+    }
+    // ISO format without timezone (2020-01-15T10:30:00)
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+        return Some(dt.and_utc().timestamp());
+    }
+
+    // EXIF format uses colons in date: "2020:07:23 11:06:32"
+    // Normalize to ISO format: "2020-07-23T11:06:32" then parse
+    if s.len() >= 19 && s.chars().nth(4) == Some(':') && s.chars().nth(7) == Some(':') {
+        // Convert "2020:07:23 11:06:32..." to "2020-07-23T11:06:32..."
+        let iso: String = s
+            .chars()
+            .enumerate()
+            .map(|(i, c)| match i {
+                4 | 7 => '-',            // date colons → dashes
+                10 if c == ' ' => 'T',   // space → T
+                _ => c,
+            })
+            .collect();
+
+        // Try with timezone (handles subseconds too: 2020-07-23T11:06:32.023+02:00)
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&iso) {
+            return Some(dt.timestamp());
+        }
+        // Try with Z suffix
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&format!("{}Z", &iso)) {
+            return Some(dt.timestamp());
+        }
+        // Try without timezone (assume UTC)
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&iso[..19], "%Y-%m-%dT%H:%M:%S") {
+            return Some(dt.and_utc().timestamp());
+        }
+    }
+
+    None
+}
+
 fn classify_value(value: &Value) -> (Option<String>, Option<f64>, Option<i64>) {
     match value {
         Value::String(s) => {
-            // Try to parse as timestamp (ISO 8601 format)
-            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-                return (None, None, Some(dt.timestamp()));
-            }
-            // Try simpler datetime formats
-            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-                return (None, None, Some(dt.and_utc().timestamp()));
-            }
-            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y:%m:%d %H:%M:%S") {
-                // EXIF format
-                return (None, None, Some(dt.and_utc().timestamp()));
+            if let Some(ts) = try_parse_datetime(s) {
+                return (None, None, Some(ts));
             }
             (Some(s.clone()), None, None)
         }
@@ -422,17 +455,11 @@ fn classify_value(value: &Value) -> (Option<String>, Option<f64>, Option<i64>) {
 fn get_value_type(value: &Value) -> FactValueType {
     match value {
         Value::String(s) => {
-            // Try to parse as timestamp (same logic as classify_value)
-            if chrono::DateTime::parse_from_rfc3339(s).is_ok() {
-                return FactValueType::Time;
+            if try_parse_datetime(s).is_some() {
+                FactValueType::Time
+            } else {
+                FactValueType::Text
             }
-            if chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").is_ok() {
-                return FactValueType::Time;
-            }
-            if chrono::NaiveDateTime::parse_from_str(s, "%Y:%m:%d %H:%M:%S").is_ok() {
-                return FactValueType::Time;
-            }
-            FactValueType::Text
         }
         Value::Number(_) => FactValueType::Num,
         Value::Bool(_) => FactValueType::Num,
