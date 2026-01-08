@@ -300,11 +300,20 @@ canon worklist /path/to/photos
 
 # Include sources from archive roots (for backfilling facts)
 canon worklist --include-archived
+
+# Include existing facts in output (for chained enrichment)
+canon worklist --emit content.geo.lat --emit content.geo.lon
 ```
 
 Output format (one JSON object per line):
 ```json
 {"source_id":123,"path":"/full/path/to/file.jpg","root_id":1,"size":1024,"mtime":1703980800,"basis_rev":0}
+```
+
+With `--emit`, requested facts are always included (`null` if absent):
+```json
+{"source_id":123,"path":"/...","...":"...","facts":{"content.geo.lat":52.37,"content.geo.lon":4.89}}
+{"source_id":124,"path":"/...","...":"...","facts":{"content.geo.lat":null,"content.geo.lon":null}}
 ```
 
 The worklist is a snapshot of sources at a point in time. Each entry includes `basis_rev` which tracks file changes. The `size` and `mtime` fields allow processors to verify a file hasn't changed since the scan before extracting facts.

@@ -75,6 +75,9 @@ enum Commands {
         /// Emit only one source per unique content hash (sources without a hash are skipped)
         #[arg(long)]
         unique_content: bool,
+        /// Include specific facts in the output (e.g., --emit geo.lat --emit geo.lon)
+        #[arg(long)]
+        emit: Vec<String>,
     },
     /// Import facts from JSONL on stdin
     ImportFacts {
@@ -413,8 +416,8 @@ fn main() -> anyhow::Result<()> {
             }
             scan::run(&db, &paths, role.as_deref(), add, all, compute_hashes.as_deref())?;
         }
-        Commands::Worklist { paths, filters, include_archived, include_excluded, unique_content } => {
-            worklist::run(&db, &paths, &filters, include_archived, include_excluded, unique_content)?;
+        Commands::Worklist { paths, filters, include_archived, include_excluded, unique_content, emit } => {
+            worklist::run(&db, &paths, &filters, include_archived, include_excluded, unique_content, &emit)?;
         }
         Commands::ImportFacts { allow_archived, verbose } => {
             import_facts::run(&db, allow_archived, verbose)?;

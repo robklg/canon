@@ -1,12 +1,13 @@
 use anyhow::Result;
 use rusqlite::types::Value;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::db::{build_scope_clause, canonicalize_scopes, Connection, Db};
 use crate::exclude;
-use crate::filter::{self, Filter};
+use crate::filter::{self, get_fact_value, Filter};
 
 const BATCH_SIZE: i64 = 1000;
 
@@ -18,6 +19,8 @@ struct WorklistEntry {
     size: i64,
     mtime: i64,
     basis_rev: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    facts: Option<HashMap<String, serde_json::Value>>,
     #[serde(skip_serializing)]
     object_id: Option<i64>,
 }
@@ -27,7 +30,7 @@ struct FetchResult {
     max_id_seen: Option<i64>,
 }
 
-pub fn run(db: &Db, scope_paths: &[PathBuf], filter_strs: &[String], include_archived: bool, include_excluded: bool, unique_content: bool) -> Result<()> {
+pub fn run(db: &Db, scope_paths: &[PathBuf], filter_strs: &[String], include_archived: bool, include_excluded: bool, unique_content: bool, emit_keys: &[String]) -> Result<()> {
     // Parse filters upfront
     let filters: Vec<Filter> = filter_strs
         .iter()
@@ -53,7 +56,7 @@ pub fn run(db: &Db, scope_paths: &[PathBuf], filter_strs: &[String], include_arc
     let mut skipped_duplicate: u64 = 0;
 
     loop {
-        let result = fetch_batch(conn, last_id, &scope_prefixes, &filters, include_archived, include_excluded, unique_content)?;
+        let result = fetch_batch(conn, last_id, &scope_prefixes, &filters, include_archived, include_excluded, unique_content, emit_keys)?;
 
         // If we didn't see any source IDs, we're done
         let max_id = match result.max_id_seen {
@@ -104,6 +107,7 @@ fn fetch_batch(
     include_archived: bool,
     include_excluded: bool,
     _unique_content: bool,
+    emit_keys: &[String],
 ) -> Result<FetchResult> {
     // Build the query based on options
     let role_clause = if include_archived {
@@ -153,7 +157,7 @@ fn fetch_batch(
     // Fetch full entries for filtered IDs
     let mut entries = Vec::new();
     for source_id in filtered_ids {
-        if let Some(entry) = fetch_entry(conn, source_id)? {
+        if let Some(entry) = fetch_entry(conn, source_id, emit_keys)? {
             entries.push(entry);
         }
     }
@@ -164,7 +168,7 @@ fn fetch_batch(
     })
 }
 
-fn fetch_entry(conn: &Connection, source_id: i64) -> Result<Option<WorklistEntry>> {
+fn fetch_entry(conn: &Connection, source_id: i64, emit_keys: &[String]) -> Result<Option<WorklistEntry>> {
     let row: Option<(i64, String, String, i64, i64, i64, i64, Option<i64>)> = conn
         .query_row(
             "SELECT s.id, r.path, s.rel_path, s.root_id, s.size, s.mtime, s.basis_rev, s.object_id
@@ -185,21 +189,47 @@ fn fetch_entry(conn: &Connection, source_id: i64) -> Result<Option<WorklistEntry
         )
         .ok();
 
-    Ok(row.map(|(id, root_path, rel_path, root_id, size, mtime, basis_rev, object_id)| {
-        let full_path = if rel_path.is_empty() {
-            root_path
-        } else {
-            format!("{}/{}", root_path, rel_path)
-        };
+    let Some((id, root_path, rel_path, root_id, size, mtime, basis_rev, object_id)) = row else {
+        return Ok(None);
+    };
 
-        WorklistEntry {
-            source_id: id,
-            path: full_path,
-            root_id,
-            size,
-            mtime,
-            basis_rev,
-            object_id,
+    let full_path = if rel_path.is_empty() {
+        root_path
+    } else {
+        format!("{}/{}", root_path, rel_path)
+    };
+
+    // Fetch requested facts using the existing get_fact_value from filter module
+    // Always emit requested keys (null if absent) for consistent structure
+    let facts = if emit_keys.is_empty() {
+        None
+    } else {
+        let mut map = HashMap::new();
+        for key in emit_keys {
+            let (entity_type, entity_id) = if key.starts_with("source.") {
+                ("source", Some(id))
+            } else {
+                ("object", object_id)
+            };
+            let value = match entity_id {
+                Some(eid) => get_fact_value(conn, entity_type, eid, key)?
+                    .map(|v| v.into())
+                    .unwrap_or(serde_json::Value::Null),
+                None => serde_json::Value::Null,
+            };
+            map.insert(key.clone(), value);
         }
+        Some(map)
+    };
+
+    Ok(Some(WorklistEntry {
+        source_id: id,
+        path: full_path,
+        root_id,
+        size,
+        mtime,
+        basis_rev,
+        facts,
+        object_id,
     }))
 }

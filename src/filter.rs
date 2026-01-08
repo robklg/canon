@@ -718,13 +718,27 @@ fn apply_accessor_and_modifiers(
 // ============================================================================
 
 /// Stored fact value - can be text, number, or timestamp
-enum FactValue {
+/// A fact value from the database
+#[derive(Clone)]
+pub enum FactValue {
     Text(String),
     Num(f64),
     Time(i64),
 }
 
-fn get_fact_value(conn: &Connection, entity_type: &str, entity_id: i64, key: &str) -> Result<Option<FactValue>> {
+impl From<FactValue> for serde_json::Value {
+    fn from(fv: FactValue) -> Self {
+        match fv {
+            FactValue::Text(s) => serde_json::Value::String(s),
+            FactValue::Num(n) => serde_json::Number::from_f64(n)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            FactValue::Time(ts) => serde_json::Value::Number(ts.into()),
+        }
+    }
+}
+
+pub fn get_fact_value(conn: &Connection, entity_type: &str, entity_id: i64, key: &str) -> Result<Option<FactValue>> {
     let result: Option<(Option<String>, Option<f64>, Option<i64>)> = conn
         .query_row(
             "SELECT value_text, value_num, value_time FROM facts
