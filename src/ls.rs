@@ -19,6 +19,7 @@ pub fn run(
     include_excluded: bool,
     use_relative_paths: bool,
     long_format: bool,
+    null_delim: bool,
 ) -> Result<()> {
     let archived_only = archived_mode.is_some();
     let show_archive_paths = archived_mode == Some("show");
@@ -121,19 +122,20 @@ pub fn run(
     }
 
     // Print output (to stdout for pipe-friendliness)
+    let line_end = if null_delim { "\0" } else { "\n" };
     for (source_path, archive_path, size, mtime) in &output_lines {
         if long_format {
             let size_str = format_size(*size);
             let date_str = format_date(*mtime);
             if let Some(ap) = archive_path {
-                println!("{:>8}  {}  {}\t{}", size_str, date_str, source_path, ap);
+                print!("{:>8}  {}  {}\t{}{}", size_str, date_str, source_path, ap, line_end);
             } else {
-                println!("{:>8}  {}  {}", size_str, date_str, source_path);
+                print!("{:>8}  {}  {}{}", size_str, date_str, source_path, line_end);
             }
         } else if let Some(ap) = archive_path {
-            println!("{}\t{}", source_path, ap);
+            print!("{}\t{}{}", source_path, ap, line_end);
         } else {
-            println!("{}", source_path);
+            print!("{}{}", source_path, line_end);
         }
     }
 

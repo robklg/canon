@@ -120,6 +120,9 @@ canon facts                                    # see all available facts
 canon facts --key content.geo.region           # where were photos taken?
 canon facts --key "content.media.capture_datetime|year"  # which years?
 
+# Preview photos from your trip to Bletchley Park (macOS)
+canon ls -0 --where 'content.geo.city=Bletchley' | xargs -0 open -a Preview
+
 # Organize – archive your 2023 Amsterdam trip
 canon cluster generate \
   --where 'content.media.capture_datetime|year = 2023' \
@@ -384,6 +387,9 @@ canon ls --include-excluded
 
 # Long format with size and date
 canon ls -l
+
+# Null-delimited output for xargs (handles spaces in paths, macOS)
+canon ls -0 --where 'source.ext=jpg' | xargs -0 open -a Preview
 ```
 
 **Path display:**

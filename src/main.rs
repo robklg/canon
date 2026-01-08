@@ -117,6 +117,9 @@ enum Commands {
         /// Use long listing format (size, date, path)
         #[arg(short = 'l', long)]
         long: bool,
+        /// Output null-delimited paths (for use with xargs -0)
+        #[arg(short = '0', long = "null")]
+        null_delim: bool,
     },
     /// Show fact coverage and value distribution
     #[command(args_conflicts_with_subcommands = true)]
@@ -422,7 +425,7 @@ fn main() -> anyhow::Result<()> {
         Commands::ImportFacts { allow_archived, verbose } => {
             import_facts::run(&db, allow_archived, verbose)?;
         }
-        Commands::Ls { paths, filters, archived, unarchived, unhashed, duplicates, include_archived, include_excluded, long } => {
+        Commands::Ls { paths, filters, archived, unarchived, unhashed, duplicates, include_archived, include_excluded, long, null_delim } => {
             // If no paths given, check if cwd is inside a root
             let (scope_paths, use_relative) = if paths.is_empty() {
                 let cwd = std::env::current_dir()?;
@@ -437,7 +440,7 @@ fn main() -> anyhow::Result<()> {
             if duplicates {
                 ls::show_duplicates(&db, &scope_paths, &filters, include_archived, include_excluded, use_relative)?;
             } else {
-                ls::run(&db, &scope_paths, &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative, long)?;
+                ls::run(&db, &scope_paths, &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative, long, null_delim)?;
             }
         }
         Commands::Facts { action, key, paths, filters, limit, all, show_aliases, include_archived, include_excluded } => {
