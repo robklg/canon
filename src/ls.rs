@@ -43,23 +43,27 @@ pub fn run(
         None
     };
 
-    // Get excluded count for reporting (use first scope for count, or none)
-    let excluded_count = if !include_excluded {
-        exclude::count_excluded(conn, scope_prefixes.first().map(|s| s.as_str()), include_archived)?
-    } else {
-        0
-    };
-
     // Get all matching source IDs
     let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, include_excluded)?;
 
     if source_ids.is_empty() {
         eprintln!("No sources match the given filters.");
-        if !include_excluded && excluded_count > 0 {
-            eprintln!("({} excluded sources hidden, use --include-excluded to show)", excluded_count);
+        // Only show excluded hint if excluded sources actually match the filter
+        if !include_excluded {
+            let excluded_matches = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, true)?.len();
+            if excluded_matches > 0 {
+                eprintln!("({} excluded sources hidden, use --include-excluded to show)", excluded_matches);
+            }
         }
         return Ok(());
     }
+
+    // Get excluded count for reporting (sources matching filter but excluded)
+    let excluded_count = if !include_excluded {
+        get_matching_sources(conn, &scope_prefixes, &filters, include_archived, true)?.len() - source_ids.len()
+    } else {
+        0
+    };
 
     // Apply archived/unarchived/unhashed filter and collect output lines
     // Each entry is (source_path, optional_archive_path, size, mtime)
@@ -360,23 +364,27 @@ pub fn show_duplicates(
         None
     };
 
-    // Get excluded count for reporting (use first scope for count, or none)
-    let excluded_count = if !include_excluded {
-        exclude::count_excluded(conn, scope_prefixes.first().map(|s| s.as_str()), include_archived)?
-    } else {
-        0
-    };
-
     // Get all matching source IDs
     let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, include_excluded)?;
 
     if source_ids.is_empty() {
         eprintln!("No sources match the given filters.");
-        if !include_excluded && excluded_count > 0 {
-            eprintln!("({} excluded sources hidden, use --include-excluded to show)", excluded_count);
+        // Only show excluded hint if excluded sources actually match the filter
+        if !include_excluded {
+            let excluded_matches = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, true)?.len();
+            if excluded_matches > 0 {
+                eprintln!("({} excluded sources hidden, use --include-excluded to show)", excluded_matches);
+            }
         }
         return Ok(());
     }
+
+    // Get excluded count for reporting (sources matching filter but excluded)
+    let excluded_count = if !include_excluded {
+        get_matching_sources(conn, &scope_prefixes, &filters, include_archived, true)?.len() - source_ids.len()
+    } else {
+        0
+    };
 
     // Find duplicate groups: object_ids that appear more than once
     let duplicate_groups = find_duplicate_groups(conn, &source_ids)?;

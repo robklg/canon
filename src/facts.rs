@@ -71,24 +71,28 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, scope_paths: &[PathBuf], filter_s
     // Resolve scope paths to realpaths
     let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
-    // Get excluded count for reporting
-    let excluded_count = if !include_excluded {
-        exclude::count_excluded(conn, scope_prefixes.first().map(|s| s.as_str()), include_archived)?
-    } else {
-        0
-    };
-
     // Get all matching source IDs
     let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, include_excluded)?;
     let total_sources = source_ids.len();
 
     if total_sources == 0 {
         println!("No sources match the given filters.");
-        if !include_excluded && excluded_count > 0 {
-            println!("\n({} excluded sources hidden, use --include-excluded to show)", excluded_count);
+        // Only show excluded hint if excluded sources actually match the filter
+        if !include_excluded {
+            let excluded_matches = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, true)?.len();
+            if excluded_matches > 0 {
+                println!("\n({} excluded sources hidden, use --include-excluded to show)", excluded_matches);
+            }
         }
         return Ok(());
     }
+
+    // Get excluded count for reporting (sources matching filter but excluded)
+    let excluded_count = if !include_excluded {
+        get_matching_sources(conn, &scope_prefixes, &filters, include_archived, true)?.len() - source_ids.len()
+    } else {
+        0
+    };
 
     println!("Sources matching filters: {}\n", total_sources);
 
