@@ -116,7 +116,8 @@ pub fn run(db: &Db, allow_archived: bool, verbose: bool) -> Result<()> {
     let mut stats = ImportStats::default();
 
     // Build type map once at start for efficient type checking
-    let fact_type_map = build_fact_type_map(&conn)?;
+    // This map is updated during import to catch mixed types in the input stream
+    let mut fact_type_map = build_fact_type_map(&conn)?;
 
     // Track which keys had type mismatches (for summary)
     let mut type_mismatch_keys: HashMap<String, (FactValueType, FactValueType)> = HashMap::new();
@@ -137,7 +138,7 @@ pub fn run(db: &Db, allow_archived: bool, verbose: bool) -> Result<()> {
             }
         };
 
-        match process_import(&conn, &import, &mut stats, &fact_type_map, &mut type_mismatch_keys, allow_archived, verbose) {
+        match process_import(&conn, &import, &mut stats, &mut fact_type_map, &mut type_mismatch_keys, allow_archived, verbose) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!(
@@ -183,7 +184,7 @@ fn process_import(
     conn: &Connection,
     import: &FactImport,
     stats: &mut ImportStats,
-    fact_type_map: &HashMap<String, FactValueType>,
+    fact_type_map: &mut HashMap<String, FactValueType>,
     type_mismatch_keys: &mut HashMap<String, (FactValueType, FactValueType)>,
     allow_archived: bool,
     verbose: bool,
@@ -271,6 +272,9 @@ fn process_import(
                 stats.skipped_type_mismatch += 1;
                 continue;
             }
+        } else {
+            // New key - register its type for subsequent records in this import session
+            fact_type_map.insert(key.clone(), new_type);
         }
 
         if object_id.is_some() {
