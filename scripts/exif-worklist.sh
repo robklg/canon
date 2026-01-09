@@ -44,7 +44,7 @@ while IFS= read -r line; do
     continue
   fi
 
-  # Extract EXIF as JSON, filter to useful fields (focused on images and videos)
+  # Extract EXIF as JSON, filter to useful fields (images, videos, and audio)
   if ! exif_json=$(
     exiftool -json -n \
       -api LargeFileSupport=1 \
@@ -65,9 +65,10 @@ while IFS= read -r line; do
       "-Geolocation*" \
       -ImageWidth -ImageHeight -Orientation \
       -Duration -MediaDuration \
-      -VideoCodec -AudioCodec -AudioChannels \
+      -VideoCodec -AudioCodec -AudioChannels -AudioSampleRate -AudioBitrate \
       -VideoFrameRate -AvgBitrate -Bitrate \
       -Megapixels \
+      -Artist -Album -Title -Genre -Year -Track \
       "$path" 2>/dev/null | jq -c '.[0] // empty'
   ); then
     echo "SKIP (exiftool/jq error): $path" >&2
@@ -91,6 +92,7 @@ while IFS= read -r line; do
         "ImageWidth", "ImageHeight", "Megapixels", "Orientation",
         "AvgBitrate", "Bitrate", "Duration", "MediaDuration",
         "VideoFrameRate", "AudioChannels", "VideoCodec", "AudioCodec",
+        "AudioSampleRate", "AudioBitrate",
         # Device
         "Make", "Model", "Software", "SerialNumber", "BodySerialNumber",
         # Lens
@@ -104,7 +106,9 @@ while IFS= read -r line; do
         "CreateDate", "SubSecCreateDate",
         "ModifyDate", "SubSecModifyDate",
         "MediaCreateDate", "MediaModifyDate",
-        "TrackCreateDate", "TrackModifyDate"
+        "TrackCreateDate", "TrackModifyDate",
+        # Audio/music metadata
+        "Artist", "Album", "Title", "Genre", "Year", "Track"
       );
 
     . as $ex
@@ -176,6 +180,16 @@ while IFS= read -r line; do
 
         "audio.codec": ($ex.AudioCodec | if type == "number" then tostring else . end),
         "audio.channels": $ex.AudioChannels,
+        "audio.sample_rate": $ex.AudioSampleRate,
+        "audio.bitrate": $ex.AudioBitrate,
+        "audio.duration": ($ex.MediaDuration // $ex.Duration),
+
+        "music.artist": ($ex.Artist | if type == "number" then tostring else . end),
+        "music.album": ($ex.Album | if type == "number" then tostring else . end),
+        "music.title": ($ex.Title | if type == "number" then tostring else . end),
+        "music.genre": ($ex.Genre | if type == "number" then tostring else . end),
+        "music.year": $ex.Year,
+        "music.track": $ex.Track,
 
         "media.bitrate": ($ex.AvgBitrate // $ex.Bitrate)
       })
