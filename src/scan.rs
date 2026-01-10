@@ -11,6 +11,106 @@ use walkdir::WalkDir;
 
 use crate::db::{resolve_root_path, Connection, Db};
 
+/// Outcome for a source during scan - determines what action to take
+enum SourceOutcome {
+    Seen,         // Found during walk - confirmed present
+    Missing,      // Not found, parent device matches - truly gone
+    Disconnected, // Not found, parent device differs - mount offline
+}
+
+/// Get device ID of a directory (Unix only)
+fn get_dir_device(path: &Path) -> Option<i64> {
+    fs::metadata(path).ok().map(|m| m.dev() as i64)
+}
+
+/// Check if a directory is empty (no entries)
+fn is_empty_dir(path: &Path) -> bool {
+    fs::read_dir(path)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false)
+}
+
+/// Classify sources under an empty directory by comparing stored device to current device.
+/// Emits a warning if sources are on a different device (possibly disconnected storage).
+fn classify_sources_in_empty_dir(
+    conn: &Connection,
+    root_id: i64,
+    rel_prefix: &str,
+    current_device: i64,
+) -> Result<Vec<(i64, SourceOutcome)>> {
+    let prefix_pattern = if rel_prefix.is_empty() {
+        "%".to_string()
+    } else {
+        format!("{}/%", rel_prefix)
+    };
+
+    let sources: Vec<(i64, Option<i64>)> = conn
+        .prepare("SELECT id, device FROM sources WHERE root_id = ? AND rel_path LIKE ? AND present = 1")?
+        .query_map(params![root_id, prefix_pattern], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut disconnected_count = 0usize;
+    let results: Vec<_> = sources
+        .into_iter()
+        .map(|(id, stored_device)| {
+            let outcome = match stored_device {
+                Some(dev) if dev != current_device => {
+                    disconnected_count += 1;
+                    SourceOutcome::Disconnected
+                }
+                _ => SourceOutcome::Missing, // Same device or no device info
+            };
+            (id, outcome)
+        })
+        .collect();
+
+    // Emit warning immediately so user knows which directory had disconnected sources
+    if disconnected_count > 0 {
+        let path_desc = if rel_prefix.is_empty() {
+            "(root)"
+        } else {
+            rel_prefix
+        };
+        eprintln!(
+            "Warning: {} contains {} files on different device (possibly disconnected storage)",
+            path_desc, disconnected_count
+        );
+    }
+
+    Ok(results)
+}
+
+/// Identify sources that are missing (not seen during walk, not already handled).
+/// No device check needed - if we walked through the parent dir, the file is gone.
+fn identify_missing_sources(
+    conn: &Connection,
+    root_id: i64,
+    scan_prefix: Option<&str>,
+    seen_ids: &HashSet<i64>,
+    handled_ids: &HashSet<i64>,
+) -> Result<Vec<(i64, SourceOutcome)>> {
+    let candidate_ids: Vec<i64> = match scan_prefix {
+        Some(prefix) => {
+            let pattern = format!("{}%", prefix);
+            conn.prepare(
+                "SELECT id FROM sources WHERE root_id = ? AND present = 1 AND rel_path LIKE ?",
+            )?
+            .query_map(params![root_id, pattern], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+        }
+        None => conn
+            .prepare("SELECT id FROM sources WHERE root_id = ? AND present = 1")?
+            .query_map([root_id], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+
+    Ok(candidate_ids
+        .into_iter()
+        .filter(|id| !seen_ids.contains(id) && !handled_ids.contains(id))
+        .map(|id| (id, SourceOutcome::Missing))
+        .collect())
+}
+
 #[derive(Default)]
 struct ScanStats {
     scanned: u64,
@@ -19,6 +119,7 @@ struct ScanStats {
     moved: u64,
     unchanged: u64,
     missing: u64,
+    disconnected: u64,
     hashed: u64,
     unexpected_hash_changes: u64,
 }
@@ -31,7 +132,7 @@ struct FileToHash {
     basis_changed: bool,  // True if file was new/updated (mtime/size changed)
 }
 
-pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_roots: bool, compute_hashes: Option<&str>) -> Result<()> {
+pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_roots: bool, compute_hashes: Option<&str>, ignore_device_id: bool) -> Result<()> {
     // Validate role if provided
     if let Some(r) = role {
         if r != "source" && r != "archive" {
@@ -135,7 +236,7 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_r
             );
         }
 
-        let result = scan_root(&conn, root_id, &root_path, scan_prefix.as_deref(), now, should_hash, hash_all)?;
+        let result = scan_root(&conn, root_id, &root_path, scan_prefix.as_deref(), now, should_hash, hash_all, ignore_device_id)?;
 
         total_stats.scanned += result.stats.scanned;
         total_stats.new += result.stats.new;
@@ -143,12 +244,14 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_r
         total_stats.moved += result.stats.moved;
         total_stats.unchanged += result.stats.unchanged;
         total_stats.missing += result.stats.missing;
+        total_stats.disconnected += result.stats.disconnected;
 
         // Collect files for hashing
         all_files_to_hash.extend(result.files_to_hash);
     }
 
-    println!(
+    // Build summary message
+    let mut summary = format!(
         "Scanned {} files: {} new, {} updated, {} moved, {} unchanged, {} missing",
         total_stats.scanned,
         total_stats.new,
@@ -157,6 +260,10 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_r
         total_stats.unchanged,
         total_stats.missing
     );
+    if total_stats.disconnected > 0 {
+        summary.push_str(&format!(", {} skipped (disconnected)", total_stats.disconnected));
+    }
+    println!("{}", summary);
 
     // Hash collected files with progress indicator
     if !all_files_to_hash.is_empty() {
@@ -290,10 +397,15 @@ fn scan_root(
     now: i64,
     should_hash: bool,
     hash_all: bool,
+    ignore_device_id: bool,
 ) -> Result<ScanRootResult> {
     let mut stats = ScanStats::default();
     let mut seen_source_ids: HashSet<i64> = HashSet::new();
     let mut files_to_hash: Vec<FileToHash> = Vec::new();
+
+    // Track outcomes for sources (for mount protection)
+    let mut outcomes: Vec<(i64, SourceOutcome)> = Vec::new();
+    let mut handled_ids: HashSet<i64> = HashSet::new();
 
     // Determine the actual path to walk
     let walk_path = match scan_prefix {
@@ -309,6 +421,26 @@ fn scan_root(
                 continue;
             }
         };
+
+        // Handle empty directories - may contain sources on disconnected mounts
+        if entry.file_type().is_dir() {
+            if is_empty_dir(entry.path()) {
+                if let Some(current_dev) = get_dir_device(entry.path()) {
+                    let rel = entry
+                        .path()
+                        .strip_prefix(root_path)
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let dir_outcomes =
+                        classify_sources_in_empty_dir(conn, root_id, &rel, current_dev)?;
+                    for (id, outcome) in dir_outcomes {
+                        handled_ids.insert(id);
+                        outcomes.push((id, outcome));
+                    }
+                }
+            }
+            continue;
+        }
 
         if !entry.file_type().is_file() {
             continue;
@@ -349,6 +481,7 @@ fn scan_root(
         )?;
 
         seen_source_ids.insert(result.source_id);
+        outcomes.push((result.source_id, SourceOutcome::Seen));
 
         match result.action {
             FileAction::New => stats.new += 1,
@@ -360,8 +493,8 @@ fn scan_root(
         // Collect files for hashing based on mode
         if should_hash {
             let needs_hash = match result.action {
-                FileAction::New | FileAction::Updated => true,  // New/changed files always need hash
-                FileAction::Moved | FileAction::Unchanged => hash_all,  // Only if --compute-hashes=all
+                FileAction::New | FileAction::Updated => true, // New/changed files always need hash
+                FileAction::Moved | FileAction::Unchanged => hash_all, // Only if --compute-hashes=all
             };
             if needs_hash {
                 files_to_hash.push(FileToHash {
@@ -374,8 +507,15 @@ fn scan_root(
         }
     }
 
-    // Mark missing files (scoped to prefix if scanning subtree)
-    stats.missing = mark_missing(conn, root_id, scan_prefix, &seen_source_ids, now)?;
+    // Identify sources that are truly missing (not seen, not already handled via empty-dir logic)
+    let missing_outcomes =
+        identify_missing_sources(conn, root_id, scan_prefix, &seen_source_ids, &handled_ids)?;
+    outcomes.extend(missing_outcomes);
+
+    // Mark missing/disconnected files based on outcomes
+    let (missing_count, disconnected_count) = mark_missing(conn, &outcomes, now, ignore_device_id)?;
+    stats.missing = missing_count;
+    stats.disconnected = disconnected_count;
 
     Ok(ScanRootResult { stats, files_to_hash })
 }
@@ -509,43 +649,51 @@ fn process_file(
 
 fn mark_missing(
     conn: &Connection,
-    root_id: i64,
-    scan_prefix: Option<&str>,
-    seen_ids: &HashSet<i64>,
+    outcomes: &[(i64, SourceOutcome)],
     now: i64,
-) -> Result<u64> {
-    // Get source IDs for this root that are currently present
-    // If scanning a subtree, only consider files under that prefix
-    let all_ids: Vec<i64> = match scan_prefix {
-        Some(prefix) => {
-            let prefix_pattern = format!("{}%", prefix);
-            conn.prepare(
-                "SELECT id FROM sources WHERE root_id = ? AND present = 1 AND rel_path LIKE ?"
-            )?
-            .query_map(params![root_id, prefix_pattern], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?
-        }
-        None => {
-            conn.prepare(
-                "SELECT id FROM sources WHERE root_id = ? AND present = 1"
-            )?
-            .query_map([root_id], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?
-        }
-    };
-
+    ignore_device_id: bool,
+) -> Result<(u64, u64)> {
     let mut missing_count = 0u64;
-    for id in all_ids {
-        if !seen_ids.contains(&id) {
-            conn.execute(
-                "UPDATE sources SET present = 0, last_seen_at = ? WHERE id = ?",
-                params![now, id],
-            )?;
-            missing_count += 1;
+    let mut disconnected_count = 0u64;
+
+    for (id, outcome) in outcomes {
+        match outcome {
+            SourceOutcome::Seen => {
+                // Nothing to do - already updated during walk
+            }
+            SourceOutcome::Missing => {
+                conn.execute(
+                    "UPDATE sources SET present = 0, last_seen_at = ? WHERE id = ?",
+                    params![now, id],
+                )?;
+                missing_count += 1;
+            }
+            SourceOutcome::Disconnected => {
+                if ignore_device_id {
+                    // User explicitly opted out of protection
+                    conn.execute(
+                        "UPDATE sources SET present = 0, last_seen_at = ? WHERE id = ?",
+                        params![now, id],
+                    )?;
+                    missing_count += 1;
+                } else {
+                    disconnected_count += 1;
+                }
+            }
         }
     }
 
-    Ok(missing_count)
+    if disconnected_count > 0 {
+        eprintln!(
+            "Skipped {} files (device ID mismatch - possibly disconnected storage)",
+            disconnected_count
+        );
+        eprintln!(
+            "  If device IDs changed (e.g., NAS remount), re-run with --ignore-device-id"
+        );
+    }
+
+    Ok((missing_count, disconnected_count))
 }
 
 fn current_timestamp() -> i64 {

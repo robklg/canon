@@ -55,6 +55,10 @@ enum Commands {
         /// Find directories with files that aren't under any root
         #[arg(long, conflicts_with_all = ["add", "all", "compute_hashes"])]
         candidates: bool,
+        /// Disable mount protection that skips files on disconnected storage.
+        /// Use when device IDs change between scans (e.g., NAS remounts).
+        #[arg(long)]
+        ignore_device_id: bool,
     },
     /// List and manage roots
     Roots {
@@ -410,7 +414,7 @@ fn main() -> anyhow::Result<()> {
     let mut db = db::open(&db_path, cli.debug_sql)?;
 
     match cli.command {
-        Commands::Scan { paths, role, add, all, compute_hashes, candidates } => {
+        Commands::Scan { paths, role, add, all, compute_hashes, candidates, ignore_device_id } => {
             if candidates {
                 if paths.is_empty() {
                     anyhow::bail!("--candidates requires a path");
@@ -429,7 +433,11 @@ fn main() -> anyhow::Result<()> {
             if !all && paths.is_empty() {
                 anyhow::bail!("Provide paths to scan, or use --all to scan all roots");
             }
-            scan::run(&db, &paths, role.as_deref(), add, all, compute_hashes.as_deref())?;
+            #[cfg(not(unix))]
+            if all {
+                anyhow::bail!("--all is not supported on this platform (no device ID detection for mount safety)");
+            }
+            scan::run(&db, &paths, role.as_deref(), add, all, compute_hashes.as_deref(), ignore_device_id)?;
         }
         Commands::Worklist { paths, filters, include_archived, include_excluded, unique_content, emit } => {
             worklist::run(&db, &paths, &filters, include_archived, include_excluded, unique_content, &emit)?;
