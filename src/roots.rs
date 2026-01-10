@@ -1,10 +1,23 @@
 use anyhow::{bail, Result};
+use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 
 use crate::db::{parse_root_spec, Db};
 
-pub fn list(db: &Db) -> Result<()> {
+pub fn list(db: &Db, scope: Option<&Path>) -> Result<()> {
     let conn = db.conn();
+
+    // Canonicalize scope path if provided
+    let scope_str = match scope {
+        Some(p) => Some(
+            fs::canonicalize(p)
+                .map_err(|e| anyhow::anyhow!("Failed to resolve path '{}': {}", p.display(), e))?
+                .to_string_lossy()
+                .to_string(),
+        ),
+        None => None,
+    };
 
     let mut stmt = conn.prepare(
         "SELECT r.id, r.role, r.path, COUNT(s.id) as file_count
@@ -20,15 +33,32 @@ pub fn list(db: &Db) -> Result<()> {
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    if roots.is_empty() {
-        println!("No roots registered. Use `canon scan --add --role <source|archive> <path>` to add one.");
+    // Filter roots by scope if provided
+    let filtered_roots: Vec<_> = match &scope_str {
+        Some(scope) => roots
+            .into_iter()
+            .filter(|(_, _, path, _)| {
+                // Root is at or beneath scope: root path starts with scope
+                // OR scope is beneath root: scope starts with root path
+                path.starts_with(scope) || scope.starts_with(path)
+            })
+            .collect(),
+        None => roots,
+    };
+
+    if filtered_roots.is_empty() {
+        if scope.is_some() {
+            println!("No roots at or beneath this path.");
+        } else {
+            println!("No roots registered. Use `canon scan --add --role <source|archive> <path>` to add one.");
+        }
         return Ok(());
     }
 
     // Print header
     println!("{:<4} {:<8} {:>8}  {}", "ID", "ROLE", "FILES", "PATH");
 
-    for (id, role, path, file_count) in roots {
+    for (id, role, path, file_count) in filtered_roots {
         println!("{:<4} {:<8} {:>8}  {}", id, role, file_count, path);
     }
 

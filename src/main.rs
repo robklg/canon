@@ -61,9 +61,13 @@ enum Commands {
         ignore_device_id: bool,
     },
     /// List and manage roots
+    #[command(args_conflicts_with_subcommands = true)]
     Roots {
         #[command(subcommand)]
         action: Option<RootsAction>,
+
+        /// Scope to roots at or beneath this path (for default list action)
+        path: Option<PathBuf>,
     },
     // -- Enrich --
     /// Output sources as JSONL worklist
@@ -346,7 +350,10 @@ enum FactsAction {
 #[derive(Subcommand)]
 enum RootsAction {
     /// List all roots
-    List,
+    List {
+        /// Scope to roots at or beneath this path
+        path: Option<PathBuf>,
+    },
     /// Remove a root and its sources from the database (files on disk are not deleted)
     Rm {
         /// Root specifier: id:<N> or path:<path>
@@ -613,9 +620,12 @@ fn main() -> anyhow::Result<()> {
                 exclude::list_objects(&db)?;
             }
         },
-        Commands::Roots { action } => match action {
-            Some(RootsAction::List) | None => {
-                roots::list(&db)?;
+        Commands::Roots { action, path } => match action {
+            Some(RootsAction::List { path }) => {
+                roots::list(&db, path.as_deref())?;
+            }
+            None => {
+                roots::list(&db, path.as_deref())?;
             }
             Some(RootsAction::Rm { spec, yes }) => {
                 roots::remove(&db, &spec, yes)?;
