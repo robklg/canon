@@ -211,6 +211,20 @@ canon scan --compute-hashes=all /Volumes/Archive
 
 **Integrity verification:** Use `--compute-hashes=all` to recompute hashes for all files, even unchanged ones. This is especially useful for archives: run periodically (e.g., via cron) to detect file corruption. If a file's hash changes without its mtime changing, Canon warns about possible corruption and exits with an error.
 
+**Discovering untracked directories:** Use `--candidates` to find directories with files that aren't yet under any root. This is useful when exploring a drive or backup to see what could be added:
+
+```bash
+# Find candidate roots to add under a path
+canon scan --candidates /Volumes/Backup
+
+# Output shows directories with untracked files
+Candidate roots to add:
+  /Volumes/Backup/photos  (3 directories with files)
+  /Volumes/Backup/imports  (1 directory with files)
+```
+
+Directories under existing roots are skipped. When multiple subdirectories share a common ancestor that could be added as a single root, they're rolled up (unless that ancestor contains an existing root).
+
 Output shows what was found:
 ```
 Scanned 1234 files: 100 new, 5 updated, 2 moved, 1127 unchanged, 0 missing

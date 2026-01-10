@@ -52,6 +52,9 @@ enum Commands {
         /// Use without value for new/changed files, or =all to recompute all hashes.
         #[arg(long, value_name = "MODE", default_missing_value = "new", num_args = 0..=1)]
         compute_hashes: Option<String>,
+        /// Find directories with files that aren't under any root
+        #[arg(long, conflicts_with_all = ["add", "all", "compute_hashes"])]
+        candidates: bool,
     },
     /// List and manage roots
     Roots {
@@ -407,7 +410,16 @@ fn main() -> anyhow::Result<()> {
     let mut db = db::open(&db_path, cli.debug_sql)?;
 
     match cli.command {
-        Commands::Scan { paths, role, add, all, compute_hashes } => {
+        Commands::Scan { paths, role, add, all, compute_hashes, candidates } => {
+            if candidates {
+                if paths.is_empty() {
+                    anyhow::bail!("--candidates requires a path");
+                }
+                for path in &paths {
+                    scan::find_candidates(&db, path)?;
+                }
+                return Ok(());
+            }
             if add && role.is_none() {
                 anyhow::bail!("--role is required when using --add");
             }

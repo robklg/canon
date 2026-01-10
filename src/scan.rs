@@ -642,3 +642,135 @@ fn store_hash_fact(conn: &Connection, object_id: i64, hash_value: &str) -> Resul
     )?;
     Ok(())
 }
+
+/// Find directories with files that aren't under any root
+pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
+    let conn = db.conn();
+    let scope = fs::canonicalize(scope_path)
+        .with_context(|| format!("Failed to canonicalize path: {}", scope_path.display()))?;
+
+    // Check if scope is already a root or under a root
+    if let Some((_, root_path, role, _)) = resolve_root_path(conn, &scope)? {
+        if scope.to_string_lossy() == root_path {
+            println!("{} is already a {} root", scope.display(), role);
+        } else {
+            println!("{} is already under {} root {}", scope.display(), role, root_path);
+        }
+        return Ok(());
+    }
+
+    // Get all existing roots
+    let roots: Vec<PathBuf> = conn
+        .prepare("SELECT path FROM roots")?
+        .query_map([], |row| Ok(PathBuf::from(row.get::<_, String>(0)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Find directories with files, skipping tracked subtrees
+    let mut dirs_with_files: HashSet<PathBuf> = HashSet::new();
+    scan_for_untracked(&scope, &roots, &mut dirs_with_files)?;
+
+    if dirs_with_files.is_empty() {
+        println!("No untracked directories with files found under {}", scope.display());
+        return Ok(());
+    }
+
+    // Find shortest common ancestors (bounded by scope)
+    let candidates = find_common_ancestors(&dirs_with_files, &roots, &scope);
+
+    println!("Candidate roots to add:");
+    for (path, count) in candidates {
+        if count == 1 {
+            println!("  {}  (1 directory with files)", path.display());
+        } else {
+            println!("  {}  ({} directories with files)", path.display(), count);
+        }
+    }
+
+    Ok(())
+}
+
+/// Recursively scan for untracked directories with files
+fn scan_for_untracked(
+    dir: &Path,
+    roots: &[PathBuf],
+    result: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    // Skip if this directory is under an existing root
+    if roots.iter().any(|root| dir == root || dir.starts_with(root)) {
+        return Ok(());
+    }
+
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+        Err(e) => {
+            eprintln!("Warning: cannot read {}: {}", dir.display(), e);
+            return Ok(());
+        }
+    };
+
+    // Check if this directory has any files (stop at first one found)
+    let has_file = entries.iter().any(|e| {
+        e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+    });
+
+    // Check if this directory contains any root (can't be added as a root - invariant)
+    let contains_root = roots.iter().any(|root| root.starts_with(dir) && root != dir);
+
+    if has_file && !contains_root {
+        // Found a file and directory doesn't contain any roots: record it
+        result.insert(dir.to_path_buf());
+    } else {
+        // Either no files here, or directory contains roots: recurse into subdirs
+        for entry in entries {
+            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                scan_for_untracked(&entry.path(), roots, result)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Find the shortest common ancestors for a set of directories
+fn find_common_ancestors(
+    dirs_with_files: &HashSet<PathBuf>,
+    roots: &[PathBuf],
+    scope: &Path,
+) -> Vec<(PathBuf, usize)> {
+    use std::collections::HashMap;
+
+    let mut ancestors: HashMap<PathBuf, usize> = HashMap::new();
+
+    for dir in dirs_with_files {
+        // Walk up the path, find the highest ancestor not under a root
+        let mut current = dir.clone();
+        let mut highest_untracked = dir.clone();
+
+        while let Some(parent) = current.parent() {
+            // Stop if we've reached the scope boundary (don't walk up to scope itself)
+            if parent == scope || !parent.starts_with(scope) {
+                break;
+            }
+
+            // Stop if we hit a root
+            if roots.iter().any(|root| parent == root || parent.starts_with(root)) {
+                break;
+            }
+
+            // Stop if parent contains a root (don't suggest parent of existing root)
+            if roots.iter().any(|root| root.starts_with(parent)) {
+                break;
+            }
+
+            highest_untracked = parent.to_path_buf();
+            current = parent.to_path_buf();
+        }
+
+        *ancestors.entry(highest_untracked).or_insert(0) += 1;
+    }
+
+    // Sort by path for consistent output
+    let mut result: Vec<_> = ancestors.into_iter().collect();
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    result
+}
