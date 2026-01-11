@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::{parse_root_spec, Db};
 
@@ -20,16 +21,16 @@ pub fn list(db: &Db, scope: Option<&Path>) -> Result<()> {
     };
 
     let mut stmt = conn.prepare(
-        "SELECT r.id, r.role, r.path, r.comment, COUNT(s.id) as file_count
+        "SELECT r.id, r.role, r.path, r.comment, r.last_scanned_at, COUNT(s.id) as file_count
          FROM roots r
          LEFT JOIN sources s ON s.root_id = r.id AND s.present = 1
          GROUP BY r.id
          ORDER BY r.id",
     )?;
 
-    let roots: Vec<(i64, String, String, Option<String>, i64)> = stmt
+    let roots: Vec<(i64, String, String, Option<String>, Option<i64>, i64)> = stmt
         .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -37,7 +38,7 @@ pub fn list(db: &Db, scope: Option<&Path>) -> Result<()> {
     let filtered_roots: Vec<_> = match &scope_str {
         Some(scope) => roots
             .into_iter()
-            .filter(|(_, _, path, _, _)| {
+            .filter(|(_, _, path, _, _, _)| {
                 // Root is at or beneath scope: root path starts with scope
                 // OR scope is beneath root: scope starts with root path
                 path.starts_with(scope) || scope.starts_with(path)
@@ -56,17 +57,43 @@ pub fn list(db: &Db, scope: Option<&Path>) -> Result<()> {
     }
 
     // Print header
-    println!("{:<4} {:<8} {:>8}  {}", "ID", "ROLE", "FILES", "PATH");
+    println!("{:<4} {:<8} {:>8}  {:<16}  {}", "ID", "ROLE", "FILES", "LAST SCAN", "PATH");
 
-    for (id, role, path, comment, file_count) in filtered_roots {
-        if let Some(c) = comment {
-            println!("{:<4} {:<8} {:>8}  {} ({})", id, role, file_count, path, c);
-        } else {
-            println!("{:<4} {:<8} {:>8}  {}", id, role, file_count, path);
-        }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    for (id, role, path, comment, last_scanned_at, file_count) in filtered_roots {
+        let scan_ago = format_time_ago(last_scanned_at, now);
+        let path_with_comment = match comment {
+            Some(c) => format!("{} ({})", path, c),
+            None => path,
+        };
+        println!("{:<4} {:<8} {:>8}  {:<16}  {}", id, role, file_count, scan_ago, path_with_comment);
     }
 
     Ok(())
+}
+
+fn format_time_ago(timestamp: Option<i64>, now: i64) -> String {
+    match timestamp {
+        None => "never".to_string(),
+        Some(ts) => {
+            let secs = now - ts;
+            if secs < 0 {
+                "just now".to_string()
+            } else if secs < 60 {
+                format!("{}s ago", secs)
+            } else if secs < 3600 {
+                format!("{}m ago", secs / 60)
+            } else if secs < 86400 {
+                format!("{}h ago", secs / 3600)
+            } else {
+                format!("{}d ago", secs / 86400)
+            }
+        }
+    }
 }
 
 pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {

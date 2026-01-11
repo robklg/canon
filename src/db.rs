@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS roots (
     id INTEGER PRIMARY KEY,
     path TEXT NOT NULL UNIQUE,
     role TEXT NOT NULL DEFAULT 'source' CHECK (role IN ('source', 'archive')),
-    comment TEXT
+    comment TEXT,
+    last_scanned_at INTEGER
 );
 
 -- Sources: files discovered on disk

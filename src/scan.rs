@@ -238,6 +238,14 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
 
         let result = scan_root(&conn, root_id, &root_path, scan_prefix.as_deref(), now, should_hash, hash_all, ignore_device_id)?;
 
+        // Update last_scanned_at only for full root scans (not subdirectory scans)
+        if scan_prefix.is_none() {
+            conn.execute(
+                "UPDATE roots SET last_scanned_at = ? WHERE id = ?",
+                params![now, root_id],
+            )?;
+        }
+
         total_stats.scanned += result.stats.scanned;
         total_stats.new += result.stats.new;
         total_stats.updated += result.stats.updated;
