@@ -84,8 +84,6 @@ CREATE TABLE IF NOT EXISTS facts (
 );
 
 -- Indexes
-CREATE UNIQUE INDEX IF NOT EXISTS sources_device_inode_uq ON sources(device, inode)
-    WHERE device IS NOT NULL AND inode IS NOT NULL;
 CREATE INDEX IF NOT EXISTS sources_object_id ON sources(object_id);
 CREATE INDEX IF NOT EXISTS facts_entity ON facts(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS facts_key ON facts(key);

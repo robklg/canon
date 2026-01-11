@@ -140,10 +140,10 @@ canon apply manifest.toml
 
 A **source** is a file discovered on disk. Canon tracks:
 - Location (root + relative path)
-- Physical identity (device + inode)
+- Device ID and inode (for move detection and disconnected storage protection)
 - Size and modification time
 - Partial hash for integrity validation during transfers
-- A `basis_rev` that increments when the file changes
+- A `basis_rev` that increments when the file's size or mtime changes
 
 ### Objects
 

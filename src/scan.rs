@@ -554,12 +554,14 @@ fn process_file(
         )
         .optional()?;
 
-    if let Some((id, old_device, old_inode, old_size, old_mtime, old_basis_rev, old_object_id)) = existing_by_path {
+    if let Some((id, _old_device, _old_inode, old_size, old_mtime, old_basis_rev, old_object_id)) = existing_by_path {
         // Source exists at this path
-        let basis_changed = size != old_size
-            || mtime != old_mtime
-            || Some(device) != old_device
-            || Some(inode) != old_inode;
+        // Detect content changes via size/mtime only. Device/inode changes don't
+        // indicate content changes (e.g., NAS remounts) so they don't affect basis_rev.
+        // We skip partial_hash for performance (would read 16KB per file per scan).
+        // Content changes without mtime update are caught during transfer validation
+        // via partial_hash, or flagged as "unexpected hash change" during hashing.
+        let basis_changed = size != old_size || mtime != old_mtime;
 
         if basis_changed {
             let new_basis_rev = old_basis_rev + 1;
@@ -598,32 +600,17 @@ fn process_file(
         )
         .optional()?;
 
-    if let Some((id, old_root_id, _old_rel_path, old_basis_rev, old_object_id)) = existing_by_inode {
-        // File was moved
-        // Note: We might need to handle cross-root moves differently, but for now
-        // we'll just update to the new location
-        let basis_changed = old_root_id != root_id; // Cross-root move is a basis change
-        let new_basis_rev = if basis_changed {
-            old_basis_rev + 1
-        } else {
-            old_basis_rev
-        };
-
-        // Compute partial hash if basis changed, otherwise keep existing
-        if basis_changed {
-            let partial_hash = compute_partial_hash(full_path, size as u64)?;
-            conn.execute(
-                "UPDATE sources SET root_id = ?, rel_path = ?, size = ?, mtime = ?,
-                 partial_hash = ?, basis_rev = ?, last_seen_at = ?, present = 1 WHERE id = ?",
-                params![root_id, rel_path, size, mtime, partial_hash, new_basis_rev, now, id],
-            )?;
-        } else {
-            conn.execute(
-                "UPDATE sources SET root_id = ?, rel_path = ?, size = ?, mtime = ?,
-                 basis_rev = ?, last_seen_at = ?, present = 1 WHERE id = ?",
-                params![root_id, rel_path, size, mtime, new_basis_rev, now, id],
-            )?;
-        }
+    if let Some((id, _old_root_id, _old_rel_path, _old_basis_rev, old_object_id)) = existing_by_inode {
+        // File was moved (same device+inode found at different path)
+        // Moving a file (even across roots) doesn't invalidate facts. Source facts
+        // describe content, not location - they're often "object facts not yet promoted"
+        // waiting for the content hash. Since content is unchanged, facts remain valid.
+        // We update location and device+inode but preserve basis_rev and partial_hash.
+        conn.execute(
+            "UPDATE sources SET root_id = ?, rel_path = ?, device = ?, inode = ?,
+             size = ?, mtime = ?, last_seen_at = ?, present = 1 WHERE id = ?",
+            params![root_id, rel_path, device, inode, size, mtime, now, id],
+        )?;
         return Ok(ProcessResult {
             source_id: id,
             action: FileAction::Moved,

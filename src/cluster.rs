@@ -44,9 +44,11 @@ pub struct LockEntry {
     pub id: i64,
     pub root_id: i64,
     pub path: String,
-    // File state at generation time (from DB, for pre-transfer validation)
+    // Device and inode are recorded for move detection, not for staleness validation.
+    // Staleness is determined by size+mtime+partial_hash only.
     pub device: i64,
     pub inode: i64,
+    // File state for pre-transfer staleness validation
     pub size: i64,
     pub mtime: i64,
     pub partial_hash: String, // SHA256 of first 8KB + last 8KB (for integrity validation)

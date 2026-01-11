@@ -839,17 +839,11 @@ fn validate_source_state(source: &LockEntry) -> std::result::Result<(), String> 
 
     #[cfg(unix)]
     {
-        let current_device = meta.dev() as i64;
-        let current_inode = meta.ino() as i64;
+        // Validate size+mtime only; device/inode changes don't indicate content changes
+        // (e.g., NAS remounts). Staleness is determined by size+mtime+partial_hash.
         let current_size = meta.size() as i64;
         let current_mtime = meta.mtime();
 
-        if current_device != source.device {
-            mismatches.push(format!("device: {} → {}", source.device, current_device));
-        }
-        if current_inode != source.inode {
-            mismatches.push(format!("inode: {} → {}", source.inode, current_inode));
-        }
         if current_size != source.size {
             mismatches.push(format!("size: {} → {}", source.size, current_size));
         }
@@ -1002,11 +996,12 @@ fn check_source_states_db(conn: &Connection, sources: &[&LockEntry]) -> Result<V
         }
 
         // Get current DB values for this source
-        let db_state: Option<(i64, i64, i64, i64, Option<String>, bool)> = conn
+        let db_state: Option<(i64, i64, Option<String>, bool)> = conn
             .query_row(
-                "SELECT device, inode, size, mtime, partial_hash, present FROM sources WHERE id = ?",
+                // Validate size+mtime+partial_hash only; device/inode not used for staleness
+                "SELECT size, mtime, partial_hash, present FROM sources WHERE id = ?",
                 [source.id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
 
@@ -1017,21 +1012,15 @@ fn check_source_states_db(conn: &Connection, sources: &[&LockEntry]) -> Result<V
                     reason: "source not found in DB".to_string(),
                 });
             }
-            Some((_, _, _, _, _, false)) => {
+            Some((_, _, _, false)) => {
                 stale.push(SkippedStaleSource {
                     path: source.path.clone(),
                     reason: "source marked not present in DB".to_string(),
                 });
             }
-            Some((db_device, db_inode, db_size, db_mtime, db_partial_hash, true)) => {
+            Some((db_size, db_mtime, db_partial_hash, true)) => {
                 let mut mismatches = Vec::new();
 
-                if db_device != source.device {
-                    mismatches.push(format!("device: {} → {}", source.device, db_device));
-                }
-                if db_inode != source.inode {
-                    mismatches.push(format!("inode: {} → {}", source.inode, db_inode));
-                }
                 if db_size != source.size {
                     mismatches.push(format!("size: {} → {}", source.size, db_size));
                 }
