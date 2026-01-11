@@ -473,16 +473,26 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Ls { paths, filters, archived, unarchived, unhashed, duplicates, include_archived, include_excluded, long, sort, reverse, null_delim } => {
             // If no paths given, check if cwd is inside a root
-            let (scope_paths, use_relative) = if paths.is_empty() {
+            // Also detect if scope is inside an archive root to auto-include archived sources
+            let (scope_paths, use_relative, auto_include_archived) = if paths.is_empty() {
                 let cwd = std::env::current_dir()?;
                 match db::resolve_root_path(db.conn(), &cwd)? {
-                    Some(_) => (vec![cwd], true),   // Inside root: scope to cwd, relative
-                    None => (vec![], false),        // Outside root: all sources, absolute
+                    Some((_, _, role, _)) => (vec![cwd], true, role == "archive"),
+                    None => (vec![], false, false),
                 }
             } else {
                 let use_rel = !paths.first().map(|p| p.starts_with("/")).unwrap_or(false);
-                (paths, use_rel)
+                // Check if any explicit path is inside an archive root
+                let any_archive = paths.iter().any(|p| {
+                    db::resolve_root_path(db.conn(), p)
+                        .ok()
+                        .flatten()
+                        .map(|(_, _, role, _)| role == "archive")
+                        .unwrap_or(false)
+                });
+                (paths, use_rel, any_archive)
             };
+            let include_archived = include_archived || auto_include_archived;
             if duplicates {
                 ls::show_duplicates(&db, &scope_paths, &filters, include_archived, include_excluded, use_relative)?;
             } else {
