@@ -268,7 +268,15 @@ fn process_import(
         if let Some(&existing_type) = fact_type_map.get(key) {
             if existing_type != new_type {
                 // Type mismatch - skip this fact
+                let is_new_key = !type_mismatch_keys.contains_key(key);
                 type_mismatch_keys.entry(key.clone()).or_insert((existing_type, new_type));
+                if is_new_key {
+                    // First occurrence of this mismatch - show the path
+                    eprintln!(
+                        "Warning: type mismatch for '{}' in {}/{}: existing {}, got {}",
+                        key, root_path, rel_path, existing_type, new_type
+                    );
+                }
                 stats.skipped_type_mismatch += 1;
                 continue;
             }
