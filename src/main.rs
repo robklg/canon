@@ -368,6 +368,13 @@ enum RootsAction {
         #[arg(long)]
         yes: bool,
     },
+    /// Set or clear a comment on a root
+    Comment {
+        /// Root specifier: id:<N> or path:<path>
+        spec: String,
+        /// Comment text (omit to clear)
+        comment: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -635,6 +642,9 @@ fn main() -> anyhow::Result<()> {
             }
             Some(RootsAction::Rm { spec, yes }) => {
                 roots::remove(&db, &spec, yes)?;
+            }
+            Some(RootsAction::Comment { spec, comment }) => {
+                roots::set_comment(&db, &spec, comment.as_deref())?;
             }
         },
     }

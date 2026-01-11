@@ -20,16 +20,16 @@ pub fn list(db: &Db, scope: Option<&Path>) -> Result<()> {
     };
 
     let mut stmt = conn.prepare(
-        "SELECT r.id, r.role, r.path, COUNT(s.id) as file_count
+        "SELECT r.id, r.role, r.path, r.comment, COUNT(s.id) as file_count
          FROM roots r
          LEFT JOIN sources s ON s.root_id = r.id AND s.present = 1
          GROUP BY r.id
          ORDER BY r.id",
     )?;
 
-    let roots: Vec<(i64, String, String, i64)> = stmt
+    let roots: Vec<(i64, String, String, Option<String>, i64)> = stmt
         .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -37,7 +37,7 @@ pub fn list(db: &Db, scope: Option<&Path>) -> Result<()> {
     let filtered_roots: Vec<_> = match &scope_str {
         Some(scope) => roots
             .into_iter()
-            .filter(|(_, _, path, _)| {
+            .filter(|(_, _, path, _, _)| {
                 // Root is at or beneath scope: root path starts with scope
                 // OR scope is beneath root: scope starts with root path
                 path.starts_with(scope) || scope.starts_with(path)
@@ -58,8 +58,12 @@ pub fn list(db: &Db, scope: Option<&Path>) -> Result<()> {
     // Print header
     println!("{:<4} {:<8} {:>8}  {}", "ID", "ROLE", "FILES", "PATH");
 
-    for (id, role, path, file_count) in filtered_roots {
-        println!("{:<4} {:<8} {:>8}  {}", id, role, file_count, path);
+    for (id, role, path, comment, file_count) in filtered_roots {
+        if let Some(c) = comment {
+            println!("{:<4} {:<8} {:>8}  {} ({})", id, role, file_count, path, c);
+        } else {
+            println!("{:<4} {:<8} {:>8}  {}", id, role, file_count, path);
+        }
     }
 
     Ok(())
@@ -118,6 +122,25 @@ pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
     conn.execute("DELETE FROM roots WHERE id = ?", [root_id])?;
 
     println!("Removed root {} and {} sources", root_id, deleted_sources);
+
+    Ok(())
+}
+
+pub fn set_comment(db: &Db, spec: &str, comment: Option<&str>) -> Result<()> {
+    let conn = db.conn();
+
+    // Parse the spec to get root id and validate it exists
+    let root_id = parse_root_spec(conn, spec, None)?;
+
+    conn.execute(
+        "UPDATE roots SET comment = ? WHERE id = ?",
+        rusqlite::params![comment, root_id],
+    )?;
+
+    match comment {
+        Some(c) => println!("Set comment on root {}: {}", root_id, c),
+        None => println!("Cleared comment on root {}", root_id),
+    }
 
     Ok(())
 }

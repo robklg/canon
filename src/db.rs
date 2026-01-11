@@ -35,7 +35,8 @@ const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS roots (
     id INTEGER PRIMARY KEY,
     path TEXT NOT NULL UNIQUE,
-    role TEXT NOT NULL DEFAULT 'source' CHECK (role IN ('source', 'archive'))
+    role TEXT NOT NULL DEFAULT 'source' CHECK (role IN ('source', 'archive')),
+    comment TEXT
 );
 
 -- Sources: files discovered on disk
