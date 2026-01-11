@@ -19,11 +19,17 @@ pub fn run(
     include_excluded: bool,
     use_relative_paths: bool,
     long_format: bool,
+    sort_by: &str,
     null_delim: bool,
 ) -> Result<()> {
     let archived_only = archived_mode.is_some();
     let show_archive_paths = archived_mode == Some("show");
     let conn = db.conn();
+
+    // Validate sort option
+    if !matches!(sort_by, "path" | "size" | "mtime" | "name") {
+        anyhow::bail!("Invalid sort option '{}'. Valid options: path, size, mtime, name", sort_by);
+    }
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs
@@ -71,8 +77,11 @@ pub fn run(
     let mut output_lines: Vec<(String, Option<String>, i64, i64)> = Vec::new();
     let mut unhashed_count = 0usize;
 
+    // Need size/mtime for long format or when sorting by those fields
+    let need_details = long_format || matches!(sort_by, "size" | "mtime");
+
     for source_id in &source_ids {
-        let (full_path, object_id, size, mtime) = if long_format {
+        let (full_path, object_id, size, mtime) = if need_details {
             get_source_details(conn, *source_id)?
         } else {
             let (path, obj_id) = get_source_path(conn, *source_id)?;
@@ -119,6 +128,19 @@ pub fn run(
             // Default: show all
             output_lines.push((formatted_source, None, size, mtime));
         }
+    }
+
+    // Sort output
+    match sort_by {
+        "path" => output_lines.sort_by(|a, b| a.0.cmp(&b.0)),
+        "size" => output_lines.sort_by(|a, b| b.2.cmp(&a.2)), // Largest first
+        "mtime" => output_lines.sort_by(|a, b| b.3.cmp(&a.3)), // Newest first
+        "name" => output_lines.sort_by(|a, b| {
+            let name_a = a.0.rsplit('/').next().unwrap_or(&a.0);
+            let name_b = b.0.rsplit('/').next().unwrap_or(&b.0);
+            name_a.cmp(name_b)
+        }),
+        _ => {} // Already validated above
     }
 
     // Print output (to stdout for pipe-friendliness)
