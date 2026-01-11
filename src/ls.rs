@@ -20,6 +20,7 @@ pub fn run(
     use_relative_paths: bool,
     long_format: bool,
     sort_by: &str,
+    reverse: bool,
     null_delim: bool,
 ) -> Result<()> {
     let archived_only = archived_mode.is_some();
@@ -130,17 +131,20 @@ pub fn run(
         }
     }
 
-    // Sort output
+    // Sort output (all ascending by default, -r reverses)
     match sort_by {
         "path" => output_lines.sort_by(|a, b| a.0.cmp(&b.0)),
-        "size" => output_lines.sort_by(|a, b| b.2.cmp(&a.2)), // Largest first
-        "mtime" => output_lines.sort_by(|a, b| b.3.cmp(&a.3)), // Newest first
+        "size" => output_lines.sort_by(|a, b| a.2.cmp(&b.2)),
+        "mtime" => output_lines.sort_by(|a, b| a.3.cmp(&b.3)),
         "name" => output_lines.sort_by(|a, b| {
             let name_a = a.0.rsplit('/').next().unwrap_or(&a.0);
             let name_b = b.0.rsplit('/').next().unwrap_or(&b.0);
             name_a.cmp(name_b)
         }),
         _ => {} // Already validated above
+    }
+    if reverse {
+        output_lines.reverse();
     }
 
     // Print output (to stdout for pipe-friendliness)
