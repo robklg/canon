@@ -103,6 +103,7 @@ Instead of a single destructive run, you gradually build up metadata, apply poli
 # Scan – index your source files and existing archive
 canon scan --add --role source /path/to/photos
 canon scan --add --role source /path/to/backup-drive/photos
+canon scan --add --role source -c "Old backup, possibly duplicates" /Volumes/OldDrive
 canon scan --add --role archive /Volumes/Archive
 
 # Enrich – compute content hashes (necessary for deduplication)

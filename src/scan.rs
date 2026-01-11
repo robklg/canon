@@ -132,7 +132,7 @@ struct FileToHash {
     basis_changed: bool,  // True if file was new/updated (mtime/size changed)
 }
 
-pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_roots: bool, compute_hashes: Option<&str>, ignore_device_id: bool) -> Result<()> {
+pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comment: Option<&str>, all_roots: bool, compute_hashes: Option<&str>, ignore_device_id: bool) -> Result<()> {
     // Validate role if provided
     if let Some(r) = role {
         if r != "source" && r != "archive" {
@@ -214,7 +214,7 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_r
                 // role is guaranteed to be Some when add_root is true (validated in main.rs)
                 let new_role = role.expect("--role is required with --add");
                 check_overlapping_roots(&conn, &canonical)?;
-                let root_id = create_root(&conn, &canonical, new_role)?;
+                let root_id = create_root(&conn, &canonical, new_role, comment)?;
                 (root_id, canonical.clone(), None, new_role.to_string())
             }
         };
@@ -337,12 +337,12 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, all_r
     Ok(())
 }
 
-fn create_root(conn: &Connection, path: &Path, role: &str) -> Result<i64> {
+fn create_root(conn: &Connection, path: &Path, role: &str, comment: Option<&str>) -> Result<i64> {
     let path_str = path.to_str().context("Path is not valid UTF-8")?;
 
     conn.execute(
-        "INSERT INTO roots (path, role) VALUES (?, ?)",
-        params![path_str, role],
+        "INSERT INTO roots (path, role, comment) VALUES (?, ?, ?)",
+        params![path_str, role, comment],
     )?;
     Ok(conn.last_insert_rowid())
 }

@@ -45,6 +45,9 @@ enum Commands {
         /// Add path as a new root (required when path is not inside an existing root)
         #[arg(long)]
         add: bool,
+        /// Comment for the new root (only with --add)
+        #[arg(short = 'c', long)]
+        comment: Option<String>,
         /// Scan all existing roots (optionally filtered by --role)
         #[arg(long)]
         all: bool,
@@ -434,7 +437,7 @@ fn main() -> anyhow::Result<()> {
     let mut db = db::open(&db_path, cli.debug_sql)?;
 
     match cli.command {
-        Commands::Scan { paths, role, add, all, compute_hashes, candidates, ignore_device_id } => {
+        Commands::Scan { paths, role, add, comment, all, compute_hashes, candidates, ignore_device_id } => {
             if candidates {
                 if paths.is_empty() {
                     anyhow::bail!("--candidates requires a path");
@@ -447,6 +450,9 @@ fn main() -> anyhow::Result<()> {
             if add && role.is_none() {
                 anyhow::bail!("--role is required when using --add");
             }
+            if comment.is_some() && !add {
+                anyhow::bail!("--comment requires --add");
+            }
             if all && add {
                 anyhow::bail!("--all and --add cannot be used together");
             }
@@ -457,7 +463,7 @@ fn main() -> anyhow::Result<()> {
             if all {
                 anyhow::bail!("--all is not supported on this platform (no device ID detection for mount safety)");
             }
-            scan::run(&db, &paths, role.as_deref(), add, all, compute_hashes.as_deref(), ignore_device_id)?;
+            scan::run(&db, &paths, role.as_deref(), add, comment.as_deref(), all, compute_hashes.as_deref(), ignore_device_id)?;
         }
         Commands::Worklist { paths, filters, include_archived, include_excluded, unique_content, emit } => {
             worklist::run(&db, &paths, &filters, include_archived, include_excluded, unique_content, &emit)?;
