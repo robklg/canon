@@ -362,6 +362,9 @@ enum RootsAction {
     List {
         /// Scope to roots at or beneath this path
         path: Option<PathBuf>,
+        /// Include suspended roots in the listing
+        #[arg(long)]
+        show_suspended: bool,
     },
     /// Remove a root and its sources from the database (files on disk are not deleted)
     Rm {
@@ -377,6 +380,16 @@ enum RootsAction {
         spec: String,
         /// Comment text (omit to clear)
         comment: Option<String>,
+    },
+    /// Suspend a root (hide from all operations)
+    Suspend {
+        /// Root specifier: id:<N> or path:<path>
+        spec: String,
+    },
+    /// Unsuspend a root (make visible again)
+    Unsuspend {
+        /// Root specifier: id:<N> or path:<path>
+        spec: String,
     },
 }
 
@@ -650,17 +663,23 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Roots { action, path } => match action {
-            Some(RootsAction::List { path }) => {
-                roots::list(&db, path.as_deref())?;
+            Some(RootsAction::List { path, show_suspended }) => {
+                roots::list(&db, path.as_deref(), show_suspended)?;
             }
             None => {
-                roots::list(&db, path.as_deref())?;
+                roots::list(&db, path.as_deref(), false)?;
             }
             Some(RootsAction::Rm { spec, yes }) => {
                 roots::remove(&db, &spec, yes)?;
             }
             Some(RootsAction::Comment { spec, comment }) => {
                 roots::set_comment(&db, &spec, comment.as_deref())?;
+            }
+            Some(RootsAction::Suspend { spec }) => {
+                roots::suspend(&db, &spec)?;
+            }
+            Some(RootsAction::Unsuspend { spec }) => {
+                roots::unsuspend(&db, &spec)?;
             }
         },
     }

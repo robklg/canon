@@ -383,9 +383,9 @@ fn query_sources(
     // Build query based on filters
     // By default only source roots, with --include-archived also include archive roots
     let role_clause = if include_archived {
-        "1=1" // Include all roles
+        "r.suspended = 0" // Include all roles, but not suspended
     } else {
-        "r.role = 'source'"
+        "r.role = 'source' AND r.suspended = 0"
     };
 
     let (scope_clause, scope_params) = build_scope_clause(scope_prefixes);

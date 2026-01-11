@@ -135,9 +135,9 @@ fn compute_scoped_stats(
 ) -> Result<CoverageStats> {
     // Build role clause
     let role_clause = if include_archived {
-        "1=1"
+        "r.suspended = 0" // Include all roles, but not suspended
     } else {
-        "r.role = 'source'"
+        "r.role = 'source' AND r.suspended = 0"
     };
 
     // Always query all sources (no exclude filtering at query level)
@@ -194,9 +194,9 @@ fn compute_per_root_stats(
 ) -> Result<(Vec<CoverageStats>, CoverageStats)> {
     // Get list of roots
     let role_clause = if include_archived {
-        "1=1"
+        "suspended = 0" // Include all roles, but not suspended
     } else {
-        "role = 'source'"
+        "role = 'source' AND suspended = 0"
     };
 
     let roots: Vec<(i64, String, String)> = conn

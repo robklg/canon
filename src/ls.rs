@@ -200,9 +200,9 @@ fn get_matching_sources(
     let mut last_id: i64 = 0;
 
     let role_clause = if include_archived {
-        "1=1" // Include all roles
+        "r.suspended = 0" // Include all roles, but not suspended
     } else {
-        "r.role = 'source'"
+        "r.role = 'source' AND r.suspended = 0"
     };
 
     let exclude_clause = exclude::exclude_clause(include_excluded);

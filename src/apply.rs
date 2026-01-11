@@ -347,6 +347,25 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         }
     }
 
+    // Defense-in-depth: Check for sources from suspended roots
+    // This catches the case where a root was suspended after a manifest was generated
+    eprintln!("Checking for suspended roots...");
+    {
+        let suspended_sources = check_suspended_sources_filtered(conn, &filtered_sources)?;
+        if !suspended_sources.is_empty() {
+            eprintln!(
+                "Error: {} sources in manifest are from suspended roots:",
+                suspended_sources.len()
+            );
+            for (id, path) in &suspended_sources {
+                eprintln!("  {} (id: {})", path, id);
+            }
+            eprintln!("\nSources from suspended roots cannot be applied.");
+            eprintln!("Use 'canon roots unsuspend' to reactivate the root, or regenerate the manifest.");
+            bail!("Aborting due to sources from suspended roots");
+        }
+    }
+
     // Preflight: validate pattern-relevant facts haven't changed
     eprintln!("Validating snapshot facts...");
     let fact_mismatches = validate_snapshot_facts(conn, &filtered_sources, &needed_keys)?;
@@ -820,6 +839,45 @@ fn check_excluded_sources_filtered(
     }
 
     Ok(excluded)
+}
+
+fn check_suspended_sources_filtered(
+    conn: &Connection,
+    sources: &[&LockEntry],
+) -> Result<Vec<(i64, String)>> {
+    let mut suspended = Vec::new();
+    let total = sources.len();
+    let progress_interval = std::cmp::max(total / 20, 1); // Update every 5%
+
+    for (i, source) in sources.iter().enumerate() {
+        // Progress indicator
+        if i > 0 && i % progress_interval == 0 {
+            let pct = (i * 100) / total;
+            eprint!("\r  {}% ({}/{})", pct, i, total);
+        }
+
+        // Check if source's root is suspended
+        let is_suspended: bool = conn
+            .query_row(
+                "SELECT r.suspended FROM sources s
+                 JOIN roots r ON s.root_id = r.id
+                 WHERE s.id = ?",
+                [source.id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false); // Treat missing source as not suspended (will fail elsewhere)
+
+        if is_suspended {
+            suspended.push((source.id, source.path.clone()));
+        }
+    }
+
+    // Clear progress line
+    if total > progress_interval {
+        eprint!("\r  100% ({}/{})\n", total, total);
+    }
+
+    Ok(suspended)
 }
 
 /// Validate that a source file on disk matches the state recorded in the lock file.

@@ -126,12 +126,12 @@ fn query_sources(
     let exclude_clause = exclude::exclude_clause(include_excluded);
     let prefix = scope_param(scope_prefix);
 
-    // Query all sources in scope
+    // Query all sources in scope (exclude suspended roots)
     let mut stmt = conn.prepare(&format!(
         "SELECT s.id, s.object_id, r.path || '/' || s.rel_path as full_path
          FROM sources s
          JOIN roots r ON s.root_id = r.id
-         WHERE s.present = 1 AND {} AND {}",
+         WHERE s.present = 1 AND r.suspended = 0 AND {} AND {}",
         exclude_clause, SCOPE_CLAUSE
     ))?;
 

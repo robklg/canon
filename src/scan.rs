@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
-use crate::db::{resolve_root_path, Connection, Db};
+use crate::db::{resolve_root_path_any, Connection, Db};
 
 /// Outcome for a source during scan - determines what action to take
 enum SourceOutcome {
@@ -143,12 +143,15 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
     let conn = db.conn();
     let now = current_timestamp();
 
-    // If --all, get all root paths from the database
+    // If --all, get all root paths from the database (excluding suspended)
     let paths_to_scan: Vec<PathBuf> = if all_roots {
-        let role_filter = role.map(|r| format!("WHERE role = '{}'", r));
+        let role_filter = match role {
+            Some(r) => format!("AND role = '{}'", r),
+            None => String::new(),
+        };
         let query = format!(
-            "SELECT path FROM roots {} ORDER BY id",
-            role_filter.unwrap_or_default()
+            "SELECT path FROM roots WHERE suspended = 0 {} ORDER BY id",
+            role_filter
         );
         let roots: Vec<String> = conn
             .prepare(&query)?
@@ -173,10 +176,23 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
         let canonical = fs::canonicalize(path)
             .with_context(|| format!("Failed to canonicalize path: {}", path.display()))?;
 
-        // Check if path is inside an existing root
-        let (root_id, root_path, scan_prefix, root_role) = match resolve_root_path(&conn, &canonical)? {
+        // Check if path is inside an existing root (including suspended)
+        let (root_id, root_path, scan_prefix, root_role) = match resolve_root_path_any(conn, &canonical)? {
             Some((id, root_path, existing_role, rel_path)) => {
-                // Path is inside an existing root
+                // Path is inside an existing root - check if suspended
+                let suspended: bool = conn.query_row(
+                    "SELECT suspended FROM roots WHERE id = ?",
+                    [id],
+                    |row| row.get(0),
+                )?;
+                if suspended {
+                    bail!(
+                        "Root '{}' is suspended. Use 'canon roots unsuspend' to reactivate.",
+                        root_path
+                    );
+                }
+
+                // Path is inside an existing active root
                 if add_root {
                     bail!(
                         "Path '{}' is already inside {} root '{}'. Remove --add to scan as subtree.",
@@ -792,19 +808,26 @@ pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
     let scope = fs::canonicalize(scope_path)
         .with_context(|| format!("Failed to canonicalize path: {}", scope_path.display()))?;
 
-    // Check if scope is already a root or under a root
-    if let Some((_, root_path, role, _)) = resolve_root_path(conn, &scope)? {
+    // Check if scope is already a root or under a root (including suspended)
+    if let Some((id, root_path, role, _)) = resolve_root_path_any(conn, &scope)? {
+        let suspended: bool = conn.query_row(
+            "SELECT suspended FROM roots WHERE id = ?",
+            [id],
+            |row| row.get(0),
+        )?;
+        let suspended_str = if suspended { " (suspended)" } else { "" };
+
         if scope.to_string_lossy() == root_path {
-            println!("{} is already a {} root", scope.display(), role);
+            println!("{} is already a {} root{}", scope.display(), role, suspended_str);
         } else {
-            println!("{} is already under {} root {}", scope.display(), role, root_path);
+            println!("{} is already under {} root {}{}", scope.display(), role, root_path, suspended_str);
         }
         return Ok(());
     }
 
-    // Get all existing roots
+    // Get all existing roots (excluding suspended for candidate discovery)
     let roots: Vec<PathBuf> = conn
-        .prepare("SELECT path FROM roots")?
+        .prepare("SELECT path FROM roots WHERE suspended = 0")?
         .query_map([], |row| Ok(PathBuf::from(row.get::<_, String>(0)?)))?
         .collect::<Result<Vec<_>, _>>()?;
 

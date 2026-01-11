@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS roots (
     path TEXT NOT NULL UNIQUE,
     role TEXT NOT NULL DEFAULT 'source' CHECK (role IN ('source', 'archive')),
     comment TEXT,
-    last_scanned_at INTEGER
+    last_scanned_at INTEGER,
+    suspended INTEGER NOT NULL DEFAULT 0
 );
 
 -- Sources: files discovered on disk
@@ -142,12 +143,30 @@ pub fn populate_temp_sources(conn: &mut Connection, source_ids: &[i64]) -> Resul
     Ok(())
 }
 
-/// Parse root spec (id:N or path:/path) with optional role validation
+/// Parse root spec (id:N or path:/path) with optional role validation.
+/// Excludes suspended roots. Use parse_root_spec_any() to include them.
 pub fn parse_root_spec(conn: &Connection, spec: &str, required_role: Option<&str>) -> Result<i64> {
+    parse_root_spec_impl(conn, spec, required_role, false)
+}
+
+/// Parse root spec including suspended roots. Used for suspend/unsuspend commands.
+pub fn parse_root_spec_any(conn: &Connection, spec: &str) -> Result<i64> {
+    parse_root_spec_impl(conn, spec, None, true)
+}
+
+fn parse_root_spec_impl(
+    conn: &Connection,
+    spec: &str,
+    required_role: Option<&str>,
+    include_suspended: bool,
+) -> Result<i64> {
+    let suspended_clause = if include_suspended { "" } else { " AND suspended = 0" };
+
     let (id, role) = if let Some(id_str) = spec.strip_prefix("id:") {
         let id: i64 = id_str.parse().context("Invalid root ID")?;
+        let query = format!("SELECT role FROM roots WHERE id = ?{}", suspended_clause);
         let role: String = conn
-            .query_row("SELECT role FROM roots WHERE id = ?", [id], |row| row.get(0))
+            .query_row(&query, [id], |row| row.get(0))
             .with_context(|| format!("No root with id {}", id))?;
         (id, role)
     } else if let Some(path) = spec.strip_prefix("path:") {
@@ -156,12 +175,14 @@ pub fn parse_root_spec(conn: &Connection, spec: &str, required_role: Option<&str
         let realpath_str = realpath
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
+        let query = format!(
+            "SELECT id, role FROM roots WHERE path = ?{}",
+            suspended_clause
+        );
         let (id, role): (i64, String) = conn
-            .query_row(
-                "SELECT id, role FROM roots WHERE path = ?",
-                [realpath_str],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+            .query_row(&query, [realpath_str], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .with_context(|| format!("No root for path: {}", path))?;
         (id, role)
     } else {
@@ -177,15 +198,35 @@ pub fn parse_root_spec(conn: &Connection, spec: &str, required_role: Option<&str
 }
 
 /// Resolve a path to its containing root (any role) and relative subdir.
+/// Excludes suspended roots. Use resolve_root_path_any() to include them.
 /// Returns Some((root_id, root_path, role, relative_subdir)) if inside a root, None otherwise.
 pub fn resolve_root_path(conn: &Connection, path: &Path) -> Result<Option<(i64, String, String, String)>> {
+    resolve_root_path_impl(conn, path, false)
+}
+
+/// Resolve a path to its containing root, including suspended roots.
+/// Used for internal operations like unsuspend and overlap checking.
+pub fn resolve_root_path_any(conn: &Connection, path: &Path) -> Result<Option<(i64, String, String, String)>> {
+    resolve_root_path_impl(conn, path, true)
+}
+
+fn resolve_root_path_impl(
+    conn: &Connection,
+    path: &Path,
+    include_suspended: bool,
+) -> Result<Option<(i64, String, String, String)>> {
     let canon_path = fs::canonicalize(path)
         .with_context(|| format!("Failed to resolve path: {}", path.display()))?;
     let path_str = canon_path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
 
-    let mut stmt = conn.prepare("SELECT id, path, role FROM roots")?;
+    let query = if include_suspended {
+        "SELECT id, path, role FROM roots"
+    } else {
+        "SELECT id, path, role FROM roots WHERE suspended = 0"
+    };
+    let mut stmt = conn.prepare(query)?;
     let roots: Vec<(i64, String, String)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<Result<Vec<_>, _>>()?;

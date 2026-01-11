@@ -259,7 +259,7 @@ pub fn exclude_clause(include_excluded: bool) -> &'static str {
 
 /// Count excluded sources in scope
 pub fn count_excluded(conn: &Connection, scope_prefix: Option<&str>, include_archived: bool) -> Result<i64> {
-    let role_clause = if include_archived { "1=1" } else { "r.role = 'source'" };
+    let role_clause = if include_archived { "r.suspended = 0" } else { "r.role = 'source' AND r.suspended = 0" };
 
     let count: i64 = if let Some(prefix) = scope_prefix {
         conn.query_row(
@@ -312,7 +312,7 @@ fn get_matching_sources(
             .prepare(&format!(
                 "SELECT s.id FROM sources s
                  JOIN roots r ON s.root_id = r.id
-                 WHERE s.present = 1 AND r.role = 'source' AND {} AND {} AND s.id > ?
+                 WHERE s.present = 1 AND r.role = 'source' AND r.suspended = 0 AND {} AND {} AND s.id > ?
                  ORDER BY s.id LIMIT ?",
                 exclude_sql, scope_clause
             ))?
@@ -358,7 +358,7 @@ fn get_excluded_sources(
                 "SELECT s.id, r.path || '/' || s.rel_path as full_path
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
-                 WHERE s.present = 1 AND r.role = 'source' AND s.id > ?
+                 WHERE s.present = 1 AND r.role = 'source' AND r.suspended = 0 AND s.id > ?
                    AND {}
                    AND EXISTS (
                        SELECT 1 FROM facts
@@ -1007,7 +1007,7 @@ fn get_object_excluded_sources(
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
                  JOIN objects o ON s.object_id = o.id
-                 WHERE s.present = 1 AND r.role = 'source' AND s.id > ?
+                 WHERE s.present = 1 AND r.role = 'source' AND r.suspended = 0 AND s.id > ?
                    AND {}
                    AND EXISTS (
                        SELECT 1 FROM facts f
