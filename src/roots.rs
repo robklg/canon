@@ -121,9 +121,29 @@ pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
         |row| row.get(0),
     )?;
 
+    // Count sources whose content is in an archive (same object_id exists in an archive root)
+    let in_archive_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sources s
+         WHERE s.root_id = ?
+           AND s.object_id IS NOT NULL
+           AND EXISTS (
+               SELECT 1 FROM sources s2
+               JOIN roots r2 ON s2.root_id = r2.id
+               WHERE s2.object_id = s.object_id
+                 AND r2.role = 'archive'
+                 AND s2.present = 1
+           )",
+        [root_id],
+        |row| row.get(0),
+    )?;
+    let not_in_archive = source_count - in_archive_count;
+
     if !yes {
         eprintln!("About to remove {} root: {}", role, path);
-        eprintln!("This will forget {} sources from the database.", source_count);
+        eprintln!(
+            "This will forget {} sources ({} in archive, {} not in archive).",
+            source_count, in_archive_count, not_in_archive
+        );
         eprintln!("Files on disk will NOT be deleted.");
         eprintln!();
         eprintln!("To see which sources will be forgotten:");
