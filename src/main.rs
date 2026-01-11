@@ -50,7 +50,7 @@ enum Commands {
         all: bool,
         /// Compute content hashes for scanned files. Archive roots auto-hash by default.
         /// Use without value for new/changed files, or =all to recompute all hashes.
-        #[arg(long, value_name = "MODE", default_missing_value = "new", num_args = 0..=1)]
+        #[arg(long, value_name = "MODE", default_missing_value = "new", num_args = 0..=1, require_equals = true)]
         compute_hashes: Option<String>,
         /// Find directories with files that aren't under any root
         #[arg(long, conflicts_with_all = ["add", "all", "compute_hashes"])]
