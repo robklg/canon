@@ -37,12 +37,14 @@ Canon is a CLI tool for organizing large media libraries into a "canonical archi
 - `src/cluster.rs` - Manifest generation with query filters
 - `src/apply.rs` - File copying/moving based on manifests
 - `src/exclude.rs` - Source exclusion management
+- `src/roots.rs` - Root management (list, suspend/unsuspend, comment, remove)
 - `src/expr.rs` - Pattern expression evaluation for manifest output; defines Modifier enum, FactValue types, and modifier application logic. Supports alias expansion and Python-style path accessors.
 - `src/filter.rs` - Filter expression parsing; depends on expr.rs for modifier handling. Has hardcoded built-ins for derived facts. New derived facts require code changes here.
 
 ### Commands
 
 - `scan` - Index directories, add files to database
+- `roots` - List, suspend/unsuspend, comment, and remove roots
 - `worklist` - Output sources as JSONL for external processing
 - `import-facts` - Import facts from JSONL on stdin
 - `ls` - List sources matching filters (supports `-l` for long format)
@@ -58,6 +60,8 @@ Canon is a CLI tool for organizing large media libraries into a "canonical archi
 Default location: `~/.canon/canon.db` (override with `--db` flag)
 
 Key tables: `roots`, `sources`, `objects`, `facts`
+
+Roots table columns include `suspended` (integer, default 0) for temporarily hiding roots from operations, `comment` for user notes, and `last_scanned_at` timestamp.
 
 ### Filter Expressions (filter.rs)
 
@@ -116,7 +120,8 @@ In `db.rs`:
 - `canonicalize_scopes()`, `build_scope_clause()` - Path scoping for queries
 - `path_is_under()`, `path_strip_prefix()` - Path manipulation
 - `parse_root_spec()` - Parse `id:N` or `path:/foo` format
-- `resolve_root_path()`, `resolve_archive_path()` - Find roots containing paths
+- `resolve_root_path()`, `resolve_archive_path()` - Find roots containing paths (excludes suspended roots)
+- `resolve_root_path_any()` - Find roots including suspended ones (for unsuspend command)
 - `populate_temp_sources()` - Batch insert pattern for large ID sets
 
 In other modules:

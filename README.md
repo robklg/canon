@@ -2,6 +2,19 @@
 
 Canon helps you understand and take control of digital assets spread across many drives, backups, and years — without requiring you to reorganize or delete anything upfront.
 
+## Features
+
+| Feature                   | Description                                                                |
+|---------------------------|----------------------------------------------------------------------------|
+| **Multi-root scanning**   | Index files across multiple drives and backups                             |
+| **Extensible metadata**   | Enrich with facts from any external tool (exiftool, etc.)                  |
+| **Powerful filtering**    | Boolean expressions with modifiers, path accessors, and globs              |
+| **Asset discovery**       | Know what exists where and what is archived across all drives              |
+| **Cluster and apply**     | Group files to archive as a collection, generate manifests, and apply them |
+| **Content deduplication** | Identify duplicates by hash across all sources                             |
+| **Integrity validation**  | Detect corruption and automatically verify transfers with partial hashing  |
+| **Offline queryable**     | Explore metadata even when source drives are disconnected                  |
+
 ## Introduction
 
 Canon is designed to be used iteratively. It supports two primary ways of working:
@@ -103,7 +116,7 @@ Instead of a single destructive run, you gradually build up metadata, apply poli
 # Scan – index your source files and existing archive
 canon scan --add --role source /path/to/photos
 canon scan --add --role source /path/to/backup-drive/photos
-canon scan --add --role source -c "Old backup, possibly duplicates" /Volumes/OldDrive
+canon scan --add --role source --comment "Old backup, possibly duplicates" /Volumes/OldDrive
 canon scan --add --role archive /Volumes/Archive
 
 # Enrich – compute content hashes (necessary for deduplication)
@@ -192,6 +205,9 @@ canon scan --add --role source /path/to/photos
 # Scan multiple new roots
 canon scan --add --role source /path/to/photos /path/to/more/photos
 
+# Add with a descriptive comment
+canon scan --add --role source --comment "Photos from 2020 trip" /path/to/photos
+
 # Add as an archive root (for tracking already-organized files)
 canon scan --add --role archive /path/to/archive
 
@@ -237,8 +253,25 @@ Hashed 105 files
 List and manage registered roots.
 
 ```bash
-# List all roots with file counts
+# List all roots with file counts and last scan time
 canon roots
+
+# List roots at or beneath a specific path
+canon roots /path/to/photos
+
+# Include suspended roots in listing
+canon roots --show-suspended
+
+# Set a comment on a root
+canon roots comment id:1 "Old backup, possibly duplicates"
+canon roots comment id:1 # clear comment
+
+# Suspend a root (hides from all operations without deleting data)
+canon roots suspend id:1
+canon roots suspend path:/path/to/photos
+
+# Unsuspend a root (make visible again)
+canon roots unsuspend id:1
 
 # Remove a root by ID (files on disk are NOT deleted)
 canon roots rm id:1
@@ -252,12 +285,15 @@ canon roots rm id:1 --yes
 
 Example output:
 ```
-ID   ROLE       FILES  PATH
-1    source     16635  /path/to/photos
-2    archive   169941  /path/to/archive
+ID   ROLE       FILES  LAST SCAN         PATH
+1    source     16635  2h ago            /path/to/photos
+2    archive   169941  5d ago            /path/to/archive
+3    source      1234  never             /path/to/backup (Old backup, possibly duplicates)
 ```
 
-When removing a root, Canon suggests using `canon ls <path>` to preview which sources will be forgotten. The root and all its sources are removed from the database, but files on disk are not deleted.
+**Suspended roots** are hidden from listings, excluded from `scan --all`, and their sources are excluded from all queries (`ls`, `facts`, `coverage`, `worklist`, etc.). Suspended roots still prevent overlapping (you cannot add a new root at a suspended root's path). Use `--show-suspended` to see them.
+
+When removing a root, Canon shows how many sources are "in archive" (same content exists in an archive) vs "not in archive", and suggests using `canon ls <path>` to preview which sources will be forgotten.
 
 ---
 
@@ -394,7 +430,7 @@ canon ls --unhashed
 # Show duplicate files (same content hash), grouped by hash
 canon ls --duplicates
 
-# Include sources from archive roots
+# Include sources from archive roots (automatic when scope is in an archive)
 canon ls --include-archived
 
 # Include excluded sources
