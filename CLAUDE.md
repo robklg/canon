@@ -134,3 +134,7 @@ In other modules:
 - Incremental workflow (scan -> enrich -> cluster -> apply)
 - Human-editable manifest files (.toml)
 - basis_rev tracks file state changes for staleness detection
+
+### CLI Conventions
+
+- `canon roots` and `canon roots list` must behave identically. When adding flags to `RootsAction::List`, also add them to the top-level `Roots` command so both forms work the same way.

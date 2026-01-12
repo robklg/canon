@@ -71,6 +71,10 @@ enum Commands {
 
         /// Scope to roots at or beneath this path (for default list action)
         path: Option<PathBuf>,
+
+        /// Only list suspended roots
+        #[arg(long)]
+        suspended: bool,
     },
     // -- Enrich --
     /// Output sources as JSONL worklist
@@ -362,9 +366,9 @@ enum RootsAction {
     List {
         /// Scope to roots at or beneath this path
         path: Option<PathBuf>,
-        /// Include suspended roots in the listing
+        /// Only list suspended roots
         #[arg(long)]
-        show_suspended: bool,
+        suspended: bool,
     },
     /// Remove a root and its sources from the database (files on disk are not deleted)
     Rm {
@@ -662,12 +666,12 @@ fn main() -> anyhow::Result<()> {
                 exclude::list_objects(&db)?;
             }
         },
-        Commands::Roots { action, path } => match action {
-            Some(RootsAction::List { path, show_suspended }) => {
-                roots::list(&db, path.as_deref(), show_suspended)?;
+        Commands::Roots { action, path, suspended } => match action {
+            Some(RootsAction::List { path, suspended }) => {
+                roots::list(&db, path.as_deref(), suspended)?;
             }
             None => {
-                roots::list(&db, path.as_deref(), false)?;
+                roots::list(&db, path.as_deref(), suspended)?;
             }
             Some(RootsAction::Rm { spec, yes }) => {
                 roots::remove(&db, &spec, yes)?;

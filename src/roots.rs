@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::{parse_root_spec, parse_root_spec_any, Db};
 
-pub fn list(db: &Db, scope: Option<&Path>, show_suspended: bool) -> Result<()> {
+pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
     let conn = db.conn();
 
     // Canonicalize scope path if provided
@@ -20,7 +20,7 @@ pub fn list(db: &Db, scope: Option<&Path>, show_suspended: bool) -> Result<()> {
         None => None,
     };
 
-    let suspended_clause = if show_suspended { "1=1" } else { "r.suspended = 0" };
+    let suspended_clause = if suspended_only { "r.suspended = 1" } else { "r.suspended = 0" };
     let query = format!(
         "SELECT r.id, r.role, r.path, r.comment, r.last_scanned_at, r.suspended, COUNT(s.id) as file_count
          FROM roots r

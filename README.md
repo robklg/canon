@@ -259,12 +259,12 @@ canon roots
 # List roots at or beneath a specific path
 canon roots /path/to/photos
 
-# Include suspended roots in listing
-canon roots --show-suspended
+# List only suspended roots
+canon roots --suspended
 
-# Set a comment on a root
+# Set a comment on a root (omit text to clear)
 canon roots comment id:1 "Old backup, possibly duplicates"
-canon roots comment id:1 # clear comment
+canon roots comment id:1
 
 # Suspend a root (hides from all operations without deleting data)
 canon roots suspend id:1
@@ -291,7 +291,7 @@ ID   ROLE       FILES  LAST SCAN         PATH
 3    source      1234  never             /path/to/backup (Old backup, possibly duplicates)
 ```
 
-**Suspended roots** are hidden from listings, excluded from `scan --all`, and their sources are excluded from all queries (`ls`, `facts`, `coverage`, `worklist`, etc.). Suspended roots still prevent overlapping (you cannot add a new root at a suspended root's path). Use `--show-suspended` to see them.
+**Suspended roots** are hidden from listings, excluded from `scan --all`, and their sources are excluded from all queries (`ls`, `facts`, `coverage`, `worklist`, etc.). Suspended roots still prevent overlapping (you cannot add a new root at a suspended root's path). Use `--suspended` to list only suspended roots.
 
 When removing a root, Canon shows how many sources are "in archive" (same content exists in an archive) vs "not in archive", and suggests using `canon ls <path>` to preview which sources will be forgotten.
 
