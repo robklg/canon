@@ -191,6 +191,9 @@ enum Commands {
         /// Include excluded sources (by default they are skipped)
         #[arg(long)]
         include_excluded: bool,
+        /// Compact output: one line per root
+        #[arg(long)]
+        compact: bool,
     },
     /// Compare two folders by content hash
     Compare {
@@ -546,8 +549,8 @@ fn main() -> anyhow::Result<()> {
                 facts::prune_orphaned_objects(&db, !yes)?;
             }
         }
-        Commands::Coverage { paths, filters, archive, include_archived, include_excluded } => {
-            coverage::run(&mut db, &paths, &filters, archive.as_deref(), include_archived, include_excluded)?;
+        Commands::Coverage { paths, filters, archive, include_archived, include_excluded, compact } => {
+            coverage::run(&mut db, &paths, &filters, archive.as_deref(), include_archived, include_excluded, compact)?;
         }
         Commands::Compare { path_a, path_b, filters, include_excluded, quiet } => {
             let options = compare::CompareOptions {

@@ -73,6 +73,7 @@ pub fn run(
     archive_spec: Option<&str>,
     include_archived: bool,
     include_excluded: bool,
+    compact: bool,
 ) -> Result<()> {
     let conn = db.conn();
 
@@ -110,7 +111,11 @@ pub fn run(
         } else {
             None
         };
-        display_scoped_stats(&stats, scope_display, archive_spec, include_excluded);
+        if compact {
+            display_compact_scoped(&stats, scope_display);
+        } else {
+            display_scoped_stats(&stats, scope_display, archive_spec, include_excluded);
+        }
     } else {
         // Per-root breakdown mode
         let (per_root_stats, overall) = compute_per_root_stats(
@@ -119,7 +124,11 @@ pub fn run(
             archive_root_id,
             include_archived,
         )?;
-        display_per_root_stats(&per_root_stats, &overall, archive_spec, include_excluded);
+        if compact {
+            display_compact_per_root(&per_root_stats, &overall);
+        } else {
+            display_per_root_stats(&per_root_stats, &overall, archive_spec, include_excluded);
+        }
     }
 
     Ok(())
@@ -340,6 +349,64 @@ fn compute_stats_from_temp_table(
     }
 
     Ok(stats)
+}
+
+fn display_compact_scoped(stats: &CoverageStats, scope: Option<&str>) {
+    let label = scope.unwrap_or("(all)");
+    print_compact_line(label, stats, true);
+}
+
+fn display_compact_per_root(per_root: &[CoverageStats], overall: &CoverageStats) {
+    let mut first = true;
+    for stats in per_root {
+        if stats.total_sources == 0 {
+            continue;
+        }
+        let id = stats.root_id.map(|i| i.to_string()).unwrap_or_else(|| "?".to_string());
+        let path = stats.root_path.as_deref().unwrap_or("unknown");
+        let label = format_compact_label(&id, path);
+        print_compact_line(&label, stats, first);
+        first = false;
+    }
+
+    // Overall summary if multiple roots
+    if per_root.len() > 1 && overall.total_sources > 0 {
+        print_compact_line("(total)", overall, false);
+    }
+}
+
+fn format_compact_label(id: &str, path: &str) -> String {
+    const MAX_PATH_LEN: usize = 35;
+    let id_prefix = format!("id:{:<2}", id);
+
+    if path.len() <= MAX_PATH_LEN {
+        format!("{} {}", id_prefix, path)
+    } else {
+        // Show ...last_n_chars
+        let truncated = &path[path.len() - MAX_PATH_LEN + 3..];
+        format!("{} ...{}", id_prefix, truncated)
+    }
+}
+
+fn print_compact_line(label: &str, stats: &CoverageStats, show_legend: bool) {
+    let sources = stats.included_sources();
+    let hashed_pct = stats.hashed_pct();
+    let archived_pct = stats.archived_pct();
+
+    let legend = if show_legend {
+        "  (sources/hashed/archived)"
+    } else {
+        ""
+    };
+
+    println!(
+        "{:<42} {:>10}/{:>5.1}%/{:>5.1}%{}",
+        label,
+        format_number(sources),
+        hashed_pct,
+        archived_pct,
+        legend
+    );
 }
 
 fn display_scoped_stats(stats: &CoverageStats, scope: Option<&str>, archive: Option<&str>, include_excluded: bool) {
