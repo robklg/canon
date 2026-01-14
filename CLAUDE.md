@@ -89,6 +89,8 @@ Note: `=` and `!=` are case-sensitive. Use `|lowercase` modifier for case-insens
 
 **Database facts**: Any fact stored via `import-facts` can also be used in filters.
 
+**Content prefix is optional**: The `content.` prefix is optional when specifying fact keys. Keys without a namespace prefix are automatically normalized to `content.*`. For example, `Make` becomes `content.Make`. This applies to `--where`, `--key`, `--group-by`, and manifest patterns. Built-in keys (`source.*`, `filename`, etc.) and keys with explicit prefixes (`policy.*`, `object.*`) are not modified.
+
 ### Manifest Patterns (expr.rs)
 
 Output patterns in manifests use `{expr}` syntax:
@@ -199,9 +201,25 @@ use crate::expr::{PathAccessor, apply_accessor};
 let result = expr::apply_accessor(&path_value, &accessor, key)?;
 ```
 
+**Key normalization** - The `content.` prefix is optional for user input:
+
+```rust
+use crate::expr::{normalize_fact_key, normalize_key_string};
+
+// For base keys (no accessors/modifiers)
+normalize_fact_key("Make")           // → "content.Make"
+normalize_fact_key("source.ext")     // → "source.ext" (built-in)
+normalize_fact_key("content.Make")   // → "content.Make" (already prefixed)
+
+// For full key strings with accessors/modifiers
+normalize_key_string("Make|year")    // → "content.Make|year"
+normalize_key_string("path[-1]|stem") // → "content.path[-1]|stem"
+```
+
 **Best practices:**
 
 1. Always use `BuiltinKey::from_str()` instead of string matching for built-in keys
 2. When fetching fact values, check `BuiltinKey` first; fall back to facts table for stored facts
 3. Use `FactValue` for typed value handling; apply transforms via `apply_modifier()` and `apply_accessor()`
 4. For new features needing fact values, see `facts.rs:get_builtin_value()` as a reference implementation
+5. Use `normalize_key_string()` when accepting user input for fact keys to ensure `content.` prefix is added

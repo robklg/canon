@@ -261,7 +261,7 @@ impl<'a> Parser<'a> {
     /// atom := ident '?' | ident 'IN' '(' value_list ')' | ident op value
     fn parse_atom(&mut self) -> Result<Expr> {
         let key = match self.advance() {
-            Some(Token::Ident(k)) => k.clone(),
+            Some(Token::Ident(k)) => expr::normalize_key_string(k),
             Some(t) => bail!("Expected identifier, got {:?}", t),
             None => bail!("Expected identifier, got end of input"),
         };

@@ -551,8 +551,60 @@ pub fn parse_modifier(s: &str) -> Result<Modifier> {
     )
 }
 
+/// Known namespace prefixes for fact keys
+const KNOWN_PREFIXES: &[&str] = &["source.", "content.", "policy.", "object."];
+
+/// Normalize a base fact key by adding `content.` prefix if needed.
+/// Returns the key unchanged if it's a built-in key or already has a namespace prefix.
+pub fn normalize_fact_key(key: &str) -> String {
+    // Check if it's a built-in key (source.ext, filename, etc.)
+    if BuiltinKey::from_str(key).is_some() {
+        return key.to_string();
+    }
+
+    // Check if it already has a known namespace prefix
+    for prefix in KNOWN_PREFIXES {
+        if key.starts_with(prefix) {
+            return key.to_string();
+        }
+    }
+
+    // Add content. prefix
+    format!("content.{}", key)
+}
+
+/// Normalize a full key string that may contain accessors and modifiers.
+/// E.g., "Make|year" becomes "content.Make|year", but "source.mtime|year" stays unchanged.
+pub fn normalize_key_string(key: &str) -> String {
+    // Split off modifiers first
+    let parts: Vec<&str> = key.split('|').collect();
+    let key_part = parts[0];
+
+    // Split off accessor if present (e.g., "key[-1]" -> "key", "[-1]")
+    let (base_part, accessor_part) = if let Some(bracket_pos) = key_part.find('[') {
+        (&key_part[..bracket_pos], &key_part[bracket_pos..])
+    } else {
+        (key_part, "")
+    };
+
+    // Normalize the base part
+    let normalized_base = normalize_fact_key(base_part);
+
+    // Reconstruct with accessor and modifiers
+    let mut result = normalized_base;
+    result.push_str(accessor_part);
+    for modifier in &parts[1..] {
+        result.push('|');
+        result.push_str(modifier);
+    }
+    result
+}
+
 /// Parse a key string that may contain accessors and modifiers: "source.rel_path[-1]|stem"
 /// Returns (base_key, accessor, modifiers)
+///
+/// Keys without a namespace prefix are normalized to `content.*` (e.g., "Make" becomes "content.Make").
+/// Built-in keys (source.*, filename, etc.) are not modified.
 pub fn parse_key_with_modifiers(key: &str) -> Result<(String, Option<PathAccessor>, Vec<Modifier>)> {
     // Split by | first to separate modifiers
     let parts: Vec<&str> = key.split('|').collect();
@@ -561,6 +613,9 @@ pub fn parse_key_with_modifiers(key: &str) -> Result<(String, Option<PathAccesso
     // Parse accessor from the key part
     let (base_key, accessor) = parse_key_and_accessor(key_part)?;
 
+    // Normalize the base key (add content. prefix if needed)
+    let normalized_key = normalize_fact_key(&base_key);
+
     // Parse modifiers
     let mut modifiers = Vec::new();
     for mod_str in &parts[1..] {
@@ -568,7 +623,7 @@ pub fn parse_key_with_modifiers(key: &str) -> Result<(String, Option<PathAccesso
         modifiers.push(modifier);
     }
 
-    Ok((base_key, accessor, modifiers))
+    Ok((normalized_key, accessor, modifiers))
 }
 
 /// Extract all fact keys referenced by a pattern (for prefetching from DB)

@@ -131,16 +131,16 @@ canon worklist --where 'source.ext|lowercase IN (jpg, jpeg, heic, mov, mp4)' \
 
 # Discover – explore your collection
 canon facts                                    # see all available facts
-canon facts --key content.geo.region           # where were photos taken?
-canon facts --key "content.media.capture_datetime|year"  # which years?
+canon facts --key geo.region                   # where were photos taken?
+canon facts --key "media.capture_datetime|year"  # which years?
 
 # Preview photos from your trip to Bletchley Park (macOS)
-canon ls -0 --where 'content.geo.city=Bletchley' | xargs -0 open -a Preview
+canon ls -0 --where 'geo.city=Bletchley' | xargs -0 open -a Preview
 
 # Organize – archive your 2023 Amsterdam trip
 canon cluster generate \
-  --where 'content.media.capture_datetime|year = 2023' \
-  --where 'content.geo.region = "North Holland"' \
+  --where 'media.capture_datetime|year = 2023' \
+  --where 'geo.region = "North Holland"' \
   --dest /Volumes/Archive/Trips/2023-Amsterdam
 
 # Edit manifest.toml: set pattern = "{content.media.capture_datetime|date}/{filename}"
@@ -171,6 +171,8 @@ Content hashing is essential: it enables deduplication, archive tracking, and in
 
 - `source.*` - Built-in facts derived from the file itself (extension, size, mtime, path)
 - `content.*` - Facts about the content, stored on objects (hash, EXIF data, mime type)
+
+The `content.` prefix is optional when querying facts. For example, `--where 'Make=Apple'` is equivalent to `--where 'content.Make=Apple'`. Keys with an existing namespace prefix (`source.*`, `policy.*`, `object.*`) are not modified.
 
 When you import facts, like hash.sha256, they're automatically namespaced under `content.*`, so you query them later like `content.hash.256`.
 Content facts are stored on objects when a content hash is known; otherwise they are attached to the source.
@@ -1004,8 +1006,8 @@ Python-style indexing for path segments:
 # Not temporary files
 --where 'NOT source.ext=tmp'
 
-# iPhone photos
---where 'content.Make=Apple'
+# iPhone photos (content. prefix is optional)
+--where 'Make=Apple'
 
 # Files larger than 1MB
 --where 'source.size>1000000'
