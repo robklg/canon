@@ -333,6 +333,9 @@ enum ExcludeAction {
         /// Execute the exclusion (default is dry-run for safety)
         #[arg(long)]
         yes: bool,
+        /// Show all source locations (default shows up to 3)
+        #[arg(long, short)]
+        verbose: bool,
     },
     /// Clear exclusion from an object by hash
     ClearObject {
@@ -633,7 +636,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Exclude { action } => match action {
             ExcludeAction::Set { paths, filters, id, dry_run } => {
-                let options = exclude::SetOptions { dry_run };
+                let options = exclude::SetOptions { dry_run, verbose: false };
                 if let Some(source_id) = id {
                     exclude::set_by_id(&db, source_id, &options)?;
                 } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {
@@ -653,8 +656,8 @@ fn main() -> anyhow::Result<()> {
             ExcludeAction::Duplicates { path, prefer, filters, dry_run } => {
                 exclude::exclude_duplicates(&db, &prefer, Some(path.as_path()), &filters, dry_run)?;
             }
-            ExcludeAction::SetObject { paths, filters, hash, yes } => {
-                let options = exclude::SetOptions { dry_run: !yes };
+            ExcludeAction::SetObject { paths, filters, hash, yes, verbose } => {
+                let options = exclude::SetOptions { dry_run: !yes, verbose };
                 if let Some(h) = hash {
                     exclude::set_object_by_hash(&db, &h, &options)?;
                 } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {

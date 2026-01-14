@@ -17,6 +17,7 @@ const POLICY_OBJECT_EXCLUDE_KEY: &str = "policy.exclude";
 
 pub struct SetOptions {
     pub dry_run: bool,
+    pub verbose: bool,
 }
 
 pub struct ClearOptions {
@@ -837,12 +838,35 @@ pub fn set_objects_by_filter(
         return Ok(());
     }
 
+    // Gather source details for each object
+    let mut all_sources: Vec<(i64, String, Vec<SourceInfo>)> = Vec::new(); // (object_id, hash, sources)
+    let mut total_source_count = 0;
+    let mut total_archive_count = 0;
+
+    for (object_id, hash, _) in &objects_to_exclude {
+        let sources = get_object_sources(conn, *object_id)?;
+        let archive_count = sources.iter().filter(|s| s.is_archive).count();
+        total_archive_count += archive_count;
+        total_source_count += sources.len();
+        all_sources.push((*object_id, hash.clone(), sources));
+    }
+
+    let total_in_source_roots = total_source_count - total_archive_count;
+
     // Summary
-    let total_sources: i64 = objects_to_exclude.iter().map(|(_, _, c)| c).sum();
     if options.dry_run {
-        println!("Would exclude {} objects affecting {} sources:", objects_to_exclude.len(), total_sources);
-        for (_, hash, count) in &objects_to_exclude {
-            println!("  {}... ({} sources)", &hash[..16.min(hash.len())], count);
+        println!("Would exclude {} objects affecting {} sources ({} in source roots, {} in archives):",
+            objects_to_exclude.len(), total_source_count, total_in_source_roots, total_archive_count);
+        for (_, hash, sources) in &all_sources {
+            let archive_count = sources.iter().filter(|s| s.is_archive).count();
+            let src_count = sources.len() - archive_count;
+            println!("  {}... ({} source, {} archive)", &hash[..16.min(hash.len())], src_count, archive_count);
+            if options.verbose {
+                for source in sources {
+                    let marker = if source.is_archive { " (archive)" } else { "" };
+                    println!("      {}{}", source.path, marker);
+                }
+            }
         }
         if no_hash > 0 {
             println!("\n  {} sources skipped (no hash)", no_hash);
@@ -859,7 +883,7 @@ pub fn set_objects_by_filter(
 
     // Execute exclusions
     let now = current_timestamp();
-    for (object_id, _, _) in &objects_to_exclude {
+    for (object_id, _, _) in &all_sources {
         conn.execute(
             "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at)
              VALUES ('object', ?, ?, 'true', ?)",
@@ -867,8 +891,59 @@ pub fn set_objects_by_filter(
         )?;
     }
 
-    println!("Excluded {} objects affecting {} sources", objects_to_exclude.len(), total_sources);
+    println!("Excluded {} objects affecting {} sources ({} in source roots, {} in archives)",
+        all_sources.len(), total_source_count, total_in_source_roots, total_archive_count);
     Ok(())
+}
+
+/// Source info for display
+struct SourceInfo {
+    path: String,
+    is_archive: bool,
+}
+
+/// Fetch source details for an object
+fn get_object_sources(conn: &Connection, object_id: i64) -> Result<Vec<SourceInfo>> {
+    let sources: Vec<SourceInfo> = conn
+        .prepare(
+            "SELECT r.path || '/' || s.rel_path, r.role
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             WHERE s.object_id = ? AND s.present = 1
+             ORDER BY r.role DESC, r.path, s.rel_path"  // archives first
+        )?
+        .query_map([object_id], |row| {
+            let path: String = row.get(0)?;
+            let role: String = row.get(1)?;
+            Ok(SourceInfo {
+                path,
+                is_archive: role == "archive",
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(sources)
+}
+
+/// Display source locations for an object
+fn print_source_locations(sources: &[SourceInfo], verbose: bool) {
+    let archive_count = sources.iter().filter(|s| s.is_archive).count();
+    let source_count = sources.len() - archive_count;
+
+    println!("  Sources: {} in source roots, {} in archive roots", source_count, archive_count);
+
+    // Show paths (limited unless verbose)
+    const DEFAULT_LIMIT: usize = 3;
+    let show_count = if verbose { sources.len() } else { DEFAULT_LIMIT };
+    let truncated = sources.len() > show_count && !verbose;
+
+    for source in sources.iter().take(show_count) {
+        let marker = if source.is_archive { " (archive)" } else { "" };
+        println!("    {}{}", source.path, marker);
+    }
+
+    if truncated {
+        println!("    ... and {} more (use --verbose to show all)", sources.len() - show_count);
+    }
 }
 
 /// Internal helper to exclude an object by its ID
@@ -879,16 +954,12 @@ fn exclude_object_by_id(conn: &Connection, object_id: i64, hash_value: &str, opt
         return Ok(());
     }
 
-    // Count affected sources
-    let source_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sources WHERE object_id = ? AND present = 1",
-        [object_id],
-        |row| row.get(0),
-    )?;
+    // Get source details
+    let sources = get_object_sources(conn, object_id)?;
 
     if options.dry_run {
         println!("Would exclude object: {}...", &hash_value[..16.min(hash_value.len())]);
-        println!("  Affects {} present sources", source_count);
+        print_source_locations(&sources, options.verbose);
         println!("\nUse --yes to execute.");
         return Ok(());
     }
@@ -902,7 +973,7 @@ fn exclude_object_by_id(conn: &Connection, object_id: i64, hash_value: &str, opt
     )?;
 
     println!("Excluded object: {}...", &hash_value[..16.min(hash_value.len())]);
-    println!("  Affects {} present sources", source_count);
+    print_source_locations(&sources, options.verbose);
     Ok(())
 }
 
