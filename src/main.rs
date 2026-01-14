@@ -174,6 +174,12 @@ enum Commands {
         /// Include excluded sources (by default they are skipped)
         #[arg(long)]
         include_excluded: bool,
+        /// Group results by root (requires --key)
+        #[arg(long)]
+        by_root: bool,
+        /// Group results by fact key(s), comma-separated (requires --key). Supports modifiers.
+        #[arg(long, value_delimiter = ',')]
+        group_by: Vec<String>,
     },
     /// Show archive coverage statistics
     Coverage {
@@ -519,7 +525,7 @@ fn main() -> anyhow::Result<()> {
                 ls::run(&db, &scope_paths, &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative, long, &sort, reverse, null_delim)?;
             }
         }
-        Commands::Facts { action, key, paths, filters, limit, all, show_aliases, include_archived, include_excluded } => {
+        Commands::Facts { action, key, paths, filters, limit, all, show_aliases, include_archived, include_excluded, by_root, group_by } => {
             if show_aliases {
                 facts::show_aliases();
                 return Ok(());
@@ -534,7 +540,7 @@ fn main() -> anyhow::Result<()> {
                     facts::delete_facts(&mut db, &key, &paths, &filters, &options)?;
                 }
                 None => {
-                    facts::run(&mut db, key.as_deref(), &paths, &filters, limit, all, include_archived, include_excluded)?;
+                    facts::run(&mut db, key.as_deref(), &paths, &filters, limit, all, include_archived, include_excluded, by_root, &group_by)?;
                 }
             }
         }

@@ -138,3 +138,70 @@ In other modules:
 ### CLI Conventions
 
 - `canon roots` and `canon roots list` must behave identically. When adding flags to `RootsAction::List`, also add them to the top-level `Roots` command so both forms work the same way.
+
+### Type System for Facts (expr.rs)
+
+The fact system uses several key types defined in `expr.rs`:
+
+**BuiltinKey enum** - Represents all built-in fact keys (derived from source columns or well-known facts):
+
+```rust
+use crate::expr::BuiltinKey;
+
+// Check if a key is built-in
+if let Some(builtin) = BuiltinKey::from_str(key) {
+    // Handle built-in key
+    match builtin {
+        BuiltinKey::SourceExt => { /* ... */ }
+        BuiltinKey::SourceSize => { /* ... */ }
+        // etc.
+    }
+} else {
+    // Handle stored fact (from facts table)
+}
+```
+
+Built-in keys have associated metadata:
+- `builtin.visibility()` → `Default`, `Hidden`, or `NotListed` (for `canon facts` listing)
+- `builtin.category()` → `BuiltIn`, `Derived`, or `Stored`
+- `builtin.fact_type()` → `Text`, `Num`, `Time`, or `Path`
+- `builtin.expansion()` → Pattern alias expansion (e.g., `filename` → `source.rel_path[-1]`)
+
+**FactValue enum** - Typed fact values for processing:
+
+```rust
+use crate::expr::FactValue;
+
+let value = FactValue::Text("hello".to_string());
+let value = FactValue::Num(42.0);
+let value = FactValue::Time(1704067200);  // Unix timestamp
+let value = FactValue::Path("/some/path".to_string());
+```
+
+**Modifier enum** - Transformations applied to values:
+
+```rust
+use crate::expr::{Modifier, apply_modifier};
+
+// Modifiers are parsed from key strings like "source.mtime|year"
+let (base_key, accessor, modifiers) = expr::parse_key_with_modifiers("source.mtime|year")?;
+
+// Apply modifiers to a value
+let result = expr::apply_modifier(&value, Modifier::Year, "source.mtime|year")?;
+```
+
+**PathAccessor** - Python-style path indexing:
+
+```rust
+use crate::expr::{PathAccessor, apply_accessor};
+
+// Parsed from keys like "source.rel_path[-1]"
+let result = expr::apply_accessor(&path_value, &accessor, key)?;
+```
+
+**Best practices:**
+
+1. Always use `BuiltinKey::from_str()` instead of string matching for built-in keys
+2. When fetching fact values, check `BuiltinKey` first; fall back to facts table for stored facts
+3. Use `FactValue` for typed value handling; apply transforms via `apply_modifier()` and `apply_accessor()`
+4. For new features needing fact values, see `facts.rs:get_builtin_value()` as a reference implementation
