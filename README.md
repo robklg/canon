@@ -146,6 +146,11 @@ canon cluster generate \
 # Edit manifest.toml: set pattern = "{content.media.capture_datetime|date}/{filename}"
 canon apply manifest.toml --dry-run
 canon apply manifest.toml
+
+# Organize – relocate a folder preserving its structure
+canon cluster generate /path/to/old-backup/photos --dest /Volumes/Archive/Photos
+# Edit manifest.toml: set pattern = "{source.rel_path}"  (preserves original folder structure)
+canon apply manifest.toml
 ```
 
 ## Core Concepts
@@ -777,6 +782,9 @@ archive_root_id = 2
 ```toml
 # Flat (default) - all files in base_dir
 pattern = "{filename}"
+
+# Preserve original folder structure (relocate as-is)
+pattern = "{source.rel_path}"
 
 # By EXIF date
 pattern = "{content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{filename}"
