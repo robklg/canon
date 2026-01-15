@@ -9,7 +9,7 @@ use crate::filter::{self, Filter};
 const BATCH_SIZE: i64 = 1000;
 
 pub fn run(
-    db: &Db,
+    db: &mut Db,
     scope_paths: &[std::path::PathBuf],
     filter_strs: &[String],
     archived_mode: Option<&str>,
@@ -25,7 +25,7 @@ pub fn run(
 ) -> Result<()> {
     let archived_only = archived_mode.is_some();
     let show_archive_paths = archived_mode == Some("show");
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     // Validate sort option
     if !matches!(sort_by, "path" | "size" | "mtime" | "name") {
@@ -190,7 +190,7 @@ pub fn run(
 }
 
 fn get_matching_sources(
-    conn: &Connection,
+    conn: &mut Connection,
     scope_prefixes: &[String],
     filters: &[Filter],
     include_archived: bool,
@@ -364,14 +364,14 @@ fn format_date(unix_timestamp: i64) -> String {
 
 /// Show sources with duplicate content, grouped by hash
 pub fn show_duplicates(
-    db: &Db,
+    db: &mut Db,
     scope_paths: &[std::path::PathBuf],
     filter_strs: &[String],
     include_archived: bool,
     include_excluded: bool,
     use_relative_paths: bool,
 ) -> Result<()> {
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs

@@ -29,12 +29,12 @@ pub struct ClearOptions {
 // ============================================================================
 
 pub fn set(
-    db: &Db,
+    db: &mut Db,
     scope_paths: &[PathBuf],
     filter_strs: &[String],
     options: &SetOptions,
 ) -> Result<()> {
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs
@@ -97,12 +97,12 @@ pub fn set(
 // ============================================================================
 
 pub fn clear(
-    db: &Db,
+    db: &mut Db,
     scope_paths: &[PathBuf],
     filter_strs: &[String],
     options: &ClearOptions,
 ) -> Result<()> {
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs
@@ -149,11 +149,11 @@ pub fn clear(
 // ============================================================================
 
 pub fn list(
-    db: &Db,
+    db: &mut Db,
     scope_paths: &[PathBuf],
     filter_strs: &[String],
 ) -> Result<()> {
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs
@@ -292,7 +292,7 @@ pub fn count_excluded(conn: &Connection, scope_prefix: Option<&str>, include_arc
 }
 
 fn get_matching_sources(
-    conn: &Connection,
+    conn: &mut Connection,
     scope_prefixes: &[String],
     filters: &[Filter],
     include_excluded: bool,
@@ -335,7 +335,7 @@ fn get_matching_sources(
 }
 
 fn get_excluded_sources(
-    conn: &Connection,
+    conn: &mut Connection,
     scope_prefixes: &[String],
     filters: &[Filter],
 ) -> Result<Vec<(i64, String)>> {
@@ -522,13 +522,13 @@ pub fn set_by_path(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()
 /// For each source in scope, we check if there's a duplicate in the prefer path.
 /// If exactly one duplicate exists in prefer, we exclude the scoped source.
 pub fn exclude_duplicates(
-    db: &Db,
+    db: &mut Db,
     prefer_path: &Path,
     scope_path: Option<&Path>,
     filter_strs: &[String],
     dry_run: bool,
 ) -> Result<()> {
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs
@@ -747,12 +747,12 @@ pub fn set_object_by_file(db: &Db, file_path: &Path, options: &SetOptions) -> Re
 
 /// Exclude objects matching the given scope and filters.
 pub fn set_objects_by_filter(
-    db: &Db,
+    db: &mut Db,
     scope_paths: &[PathBuf],
     filter_strs: &[String],
     options: &SetOptions,
 ) -> Result<()> {
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs
@@ -1052,7 +1052,7 @@ pub fn list_objects(db: &Db) -> Result<()> {
 
 /// Get sources excluded via their object (not directly excluded)
 fn get_object_excluded_sources(
-    conn: &Connection,
+    conn: &mut Connection,
     scope_prefixes: &[String],
     filters: &[Filter],
 ) -> Result<Vec<(i64, String, String)>> {

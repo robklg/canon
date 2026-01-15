@@ -30,7 +30,7 @@ struct FetchResult {
     max_id_seen: Option<i64>,
 }
 
-pub fn run(db: &Db, scope_paths: &[PathBuf], filter_strs: &[String], include_archived: bool, include_excluded: bool, unique_content: bool, emit_keys: &[String]) -> Result<()> {
+pub fn run(db: &mut Db, scope_paths: &[PathBuf], filter_strs: &[String], include_archived: bool, include_excluded: bool, unique_content: bool, emit_keys: &[String]) -> Result<()> {
     // Parse filters upfront
     let filters: Vec<Filter> = filter_strs
         .iter()
@@ -41,7 +41,7 @@ pub fn run(db: &Db, scope_paths: &[PathBuf], filter_strs: &[String], include_arc
     let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
     // Check excluded count if we're skipping them
-    let conn = db.conn();
+    let conn = db.conn_mut();
     let excluded_count = if !include_excluded {
         exclude::count_excluded(conn, scope_prefixes.first().map(|s| s.as_str()), include_archived)?
     } else {
@@ -100,7 +100,7 @@ pub fn run(db: &Db, scope_paths: &[PathBuf], filter_strs: &[String], include_arc
 }
 
 fn fetch_batch(
-    conn: &Connection,
+    conn: &mut Connection,
     after_id: i64,
     scope_prefixes: &[String],
     filters: &[Filter],

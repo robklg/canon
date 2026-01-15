@@ -495,7 +495,7 @@ fn main() -> anyhow::Result<()> {
             scan::run(&db, &paths, role.as_deref(), add, comment.as_deref(), all, compute_hashes.as_deref(), ignore_device_id)?;
         }
         Commands::Worklist { paths, filters, include_archived, include_excluded, unique_content, emit } => {
-            worklist::run(&db, &paths, &filters, include_archived, include_excluded, unique_content, &emit)?;
+            worklist::run(&mut db, &paths, &filters, include_archived, include_excluded, unique_content, &emit)?;
         }
         Commands::ImportFacts { allow_archived, verbose } => {
             import_facts::run(&db, allow_archived, verbose)?;
@@ -523,9 +523,9 @@ fn main() -> anyhow::Result<()> {
             };
             let include_archived = include_archived || auto_include_archived;
             if duplicates {
-                ls::show_duplicates(&db, &scope_paths, &filters, include_archived, include_excluded, use_relative)?;
+                ls::show_duplicates(&mut db, &scope_paths, &filters, include_archived, include_excluded, use_relative)?;
             } else {
-                ls::run(&db, &scope_paths, &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative, long, &sort, reverse, null_delim)?;
+                ls::run(&mut db, &scope_paths, &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative, long, &sort, reverse, null_delim)?;
             }
         }
         Commands::Facts { action, key, paths, filters, limit, all, show_aliases, include_archived, include_excluded, by_root, group_by } => {
@@ -566,7 +566,7 @@ fn main() -> anyhow::Result<()> {
                 include_excluded,
                 quiet,
             };
-            let identical = compare::run(&db, &path_a, &path_b, &filters, &options)?;
+            let identical = compare::run(&mut db, &path_a, &path_b, &filters, &options)?;
             if !identical {
                 std::process::exit(1);
             }
@@ -588,7 +588,7 @@ fn main() -> anyhow::Result<()> {
                     show_archived,
                     allow_duplicates,
                 };
-                cluster::generate(&db, &paths, &filters, &dest, &output, &options)?;
+                cluster::generate(&mut db, &paths, &filters, &dest, &output, &options)?;
             }
             ClusterAction::Refresh {
                 manifest,
@@ -602,7 +602,7 @@ fn main() -> anyhow::Result<()> {
                     show_archived,
                     allow_duplicates,
                 };
-                cluster::refresh(&db, &manifest, &options)?;
+                cluster::refresh(&mut db, &manifest, &options)?;
             }
         },
         Commands::Apply {
@@ -643,18 +643,18 @@ fn main() -> anyhow::Result<()> {
                     // Single file path with no filters: exclude exact file
                     exclude::set_by_path(&db, &paths[0], &options)?;
                 } else {
-                    exclude::set(&db, &paths, &filters, &options)?;
+                    exclude::set(&mut db, &paths, &filters, &options)?;
                 }
             }
             ExcludeAction::Clear { paths, filters, dry_run } => {
                 let options = exclude::ClearOptions { dry_run };
-                exclude::clear(&db, &paths, &filters, &options)?;
+                exclude::clear(&mut db, &paths, &filters, &options)?;
             }
             ExcludeAction::List { paths, filters } => {
-                exclude::list(&db, &paths, &filters)?;
+                exclude::list(&mut db, &paths, &filters)?;
             }
             ExcludeAction::Duplicates { path, prefer, filters, dry_run } => {
-                exclude::exclude_duplicates(&db, &prefer, Some(path.as_path()), &filters, dry_run)?;
+                exclude::exclude_duplicates(&mut db, &prefer, Some(path.as_path()), &filters, dry_run)?;
             }
             ExcludeAction::SetObject { paths, filters, hash, yes, verbose } => {
                 let options = exclude::SetOptions { dry_run: !yes, verbose };
@@ -665,7 +665,7 @@ fn main() -> anyhow::Result<()> {
                     exclude::set_object_by_file(&db, &paths[0], &options)?;
                 } else if !paths.is_empty() || !filters.is_empty() {
                     // Paths and/or filters: exclude matching objects
-                    exclude::set_objects_by_filter(&db, &paths, &filters, &options)?;
+                    exclude::set_objects_by_filter(&mut db, &paths, &filters, &options)?;
                 } else {
                     anyhow::bail!("Provide a hash (--hash), file path, or filters (--where)");
                 }

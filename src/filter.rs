@@ -1,6 +1,8 @@
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection};
+use std::collections::{HashMap, HashSet};
 
+use crate::db::populate_temp_sources;
 use crate::expr;
 
 // ============================================================================
@@ -32,6 +34,177 @@ pub enum Expr {
 
 // Keep Filter as alias for backwards compatibility
 pub type Filter = Expr;
+
+// ============================================================================
+// Fact Cache for Bulk Prefetching
+// ============================================================================
+
+/// Cache of prefetched fact values to avoid N+1 queries
+struct FactCache {
+    /// Source facts: (source_id, key) -> FactValue
+    source_facts: HashMap<(i64, String), expr::FactValue>,
+    /// Object facts: (object_id, key) -> FactValue
+    object_facts: HashMap<(i64, String), expr::FactValue>,
+    /// Source to object mapping
+    source_objects: HashMap<i64, i64>,
+    /// Keys that were prefetched (for existence checks)
+    prefetched_keys: HashSet<String>,
+}
+
+impl FactCache {
+    fn new() -> Self {
+        FactCache {
+            source_facts: HashMap::new(),
+            object_facts: HashMap::new(),
+            source_objects: HashMap::new(),
+            prefetched_keys: HashSet::new(),
+        }
+    }
+
+    fn get_source_fact(&self, source_id: i64, key: &str) -> Option<&expr::FactValue> {
+        self.source_facts.get(&(source_id, key.to_string()))
+    }
+
+    fn get_object_fact(&self, source_id: i64, key: &str) -> Option<&expr::FactValue> {
+        self.source_objects
+            .get(&source_id)
+            .and_then(|obj_id| self.object_facts.get(&(*obj_id, key.to_string())))
+    }
+
+    fn get_object_id(&self, source_id: i64) -> Option<i64> {
+        self.source_objects.get(&source_id).copied()
+    }
+
+    fn has_key(&self, key: &str) -> bool {
+        self.prefetched_keys.contains(key)
+    }
+}
+
+/// Prefetch facts for a batch of sources and keys
+fn prefetch_facts(conn: &mut Connection, source_ids: &[i64], keys: &[String]) -> Result<FactCache> {
+    let mut cache = FactCache::new();
+
+    if source_ids.is_empty() || keys.is_empty() {
+        return Ok(cache);
+    }
+
+    // Parse keys to get base keys (without accessors/modifiers)
+    let base_keys: Vec<String> = keys
+        .iter()
+        .filter_map(|k| {
+            parse_key_with_modifiers(k)
+                .ok()
+                .map(|(base, _, _)| base)
+        })
+        .collect();
+
+    // Skip built-in keys (they don't need DB lookups)
+    let stored_keys: Vec<&String> = base_keys
+        .iter()
+        .filter(|k| !expr::is_builtin_key(k))
+        .collect();
+
+    for key in &base_keys {
+        cache.prefetched_keys.insert(key.clone());
+    }
+
+    if stored_keys.is_empty() {
+        return Ok(cache);
+    }
+
+    // Create temp table for source IDs
+    populate_temp_sources(conn, source_ids)?;
+
+    // Fetch source->object mappings
+    let mappings: Vec<(i64, i64)> = conn
+        .prepare(
+            "SELECT ts.id, s.object_id
+             FROM temp_sources ts
+             JOIN sources s ON s.id = ts.id
+             WHERE s.object_id IS NOT NULL"
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (source_id, object_id) in mappings {
+        cache.source_objects.insert(source_id, object_id);
+    }
+
+    // Fetch source facts for all keys
+    for key in &stored_keys {
+        let facts: Vec<(i64, Option<String>, Option<f64>, Option<i64>)> = conn
+            .prepare(
+                "SELECT ts.id, f.value_text, f.value_num, f.value_time
+                 FROM temp_sources ts
+                 LEFT JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?"
+            )?
+            .query_map([*key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (source_id, text_val, num_val, time_val) in facts {
+            if let Some(fv) = to_fact_value(text_val, num_val, time_val) {
+                cache.source_facts.insert((source_id, (*key).clone()), fv);
+            }
+        }
+    }
+
+    // Fetch object facts for all keys
+    // Get unique object IDs (multiple sources may share the same object)
+    let object_ids: Vec<i64> = cache
+        .source_objects
+        .values()
+        .copied()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    if !object_ids.is_empty() {
+        // Create temp table for object IDs
+        conn.execute("DROP TABLE IF EXISTS temp_objects", [])?;
+        conn.execute("CREATE TEMP TABLE temp_objects (id INTEGER PRIMARY KEY)", [])?;
+        {
+            let mut stmt = conn.prepare("INSERT INTO temp_objects (id) VALUES (?)")?;
+            for oid in &object_ids {
+                stmt.execute([oid])?;
+            }
+        }
+
+        for key in &stored_keys {
+            let facts: Vec<(i64, Option<String>, Option<f64>, Option<i64>)> = conn
+                .prepare(
+                    "SELECT t.id, f.value_text, f.value_num, f.value_time
+                     FROM temp_objects t
+                     LEFT JOIN facts f ON f.entity_type = 'object' AND f.entity_id = t.id AND f.key = ?"
+                )?
+                .query_map([*key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            for (object_id, text_val, num_val, time_val) in facts {
+                if let Some(fv) = to_fact_value(text_val, num_val, time_val) {
+                    cache.object_facts.insert((object_id, (*key).clone()), fv);
+                }
+            }
+        }
+
+        conn.execute("DROP TABLE IF EXISTS temp_objects", [])?;
+    }
+
+    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+
+    Ok(cache)
+}
+
+/// Convert DB values to FactValue
+fn to_fact_value(text: Option<String>, num: Option<f64>, time: Option<i64>) -> Option<expr::FactValue> {
+    if let Some(t) = text {
+        Some(expr::FactValue::Text(t))
+    } else if let Some(n) = num {
+        Some(expr::FactValue::Num(n))
+    } else if let Some(ts) = time {
+        Some(expr::FactValue::Time(ts))
+    } else {
+        None
+    }
+}
 
 impl Expr {
     /// Parse a filter expression string into an AST
@@ -332,13 +505,20 @@ impl<'a> Parser<'a> {
 // ============================================================================
 
 /// Apply a list of filters to a set of source IDs (AND logic between filters)
-pub fn apply_filters(conn: &Connection, source_ids: &[i64], filters: &[Filter]) -> Result<Vec<i64>> {
+pub fn apply_filters(conn: &mut Connection, source_ids: &[i64], filters: &[Filter]) -> Result<Vec<i64>> {
     if filters.is_empty() {
         return Ok(source_ids.to_vec());
     }
 
     // Validate that all keys in filters are known
     validate_filter_keys(conn, filters)?;
+
+    // Extract all keys used in filters and prefetch their values
+    let mut all_keys = Vec::new();
+    for filter in filters {
+        extract_keys(filter, &mut all_keys);
+    }
+    let cache = prefetch_facts(conn, source_ids, &all_keys)?;
 
     // Combine all filters with AND
     let combined = if filters.len() == 1 {
@@ -349,7 +529,7 @@ pub fn apply_filters(conn: &Connection, source_ids: &[i64], filters: &[Filter]) 
 
     let mut result = Vec::new();
     for &source_id in source_ids {
-        if eval_expr(conn, source_id, &combined)? {
+        if eval_expr_cached(conn, source_id, &combined, &cache)? {
             result.push(source_id);
         }
     }
@@ -406,84 +586,12 @@ fn is_known_key(conn: &Connection, base_key: &str) -> Result<bool> {
     Ok(exists)
 }
 
-/// Evaluate an expression against a single source
-fn eval_expr(conn: &Connection, source_id: i64, expr: &Expr) -> Result<bool> {
-    match expr {
-        Expr::And(exprs) => {
-            for e in exprs {
-                if !eval_expr(conn, source_id, e)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        Expr::Or(exprs) => {
-            for e in exprs {
-                if eval_expr(conn, source_id, e)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-        Expr::Not(e) => Ok(!eval_expr(conn, source_id, e)?),
-        Expr::Exists { key } => check_fact_exists(conn, source_id, key),
-        Expr::Compare { key, op, value } => check_fact_compare(conn, source_id, key, *op, value),
-        Expr::In { key, values } => check_fact_in(conn, source_id, key, values),
-    }
-}
-
 // ============================================================================
 // Fact Checking Functions
 // ============================================================================
 
-fn check_fact_exists(conn: &Connection, source_id: i64, key: &str) -> Result<bool> {
-    // Parse key to get base key (ignore accessor and modifiers for existence check)
-    let (base_key, _accessor, _modifiers) = parse_key_with_modifiers(key)?;
-
-    // Check source facts
-    let source_exists: bool = conn
-        .query_row(
-            "SELECT 1 FROM facts WHERE entity_type = 'source' AND entity_id = ? AND key = ?",
-            params![source_id, base_key],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-
-    if source_exists {
-        return Ok(true);
-    }
-
-    // Check object facts if source has an object
-    let object_id: Option<i64> = conn
-        .query_row(
-            "SELECT object_id FROM sources WHERE id = ?",
-            [source_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(None);
-
-    if let Some(obj_id) = object_id {
-        let object_exists: bool = conn
-            .query_row(
-                "SELECT 1 FROM facts WHERE entity_type = 'object' AND entity_id = ? AND key = ?",
-                params![obj_id, base_key],
-                |_| Ok(true),
-            )
-            .unwrap_or(false);
-
-        if object_exists {
-            return Ok(true);
-        }
-    }
-
-    // Check for built-in keys (derived from source columns)
-    // Note: content.hash.sha256 is in BUILTIN_KEYS but "exists" only if object_id is set
-    if base_key == "content.hash.sha256" {
-        return Ok(object_id.is_some());
-    }
-    Ok(expr::is_builtin_key(&base_key))
-}
-
+/// Check fact comparison for built-in keys (derived from source columns)
+/// This is used by the cached version for built-in key fallback
 fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareOp, value: &str) -> Result<bool> {
     use expr::BuiltinKey;
 
@@ -661,14 +769,106 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
     Ok(false)
 }
 
-fn check_fact_in(conn: &Connection, source_id: i64, key: &str, values: &[String]) -> Result<bool> {
-    // Check if fact value matches any of the provided values
+// ============================================================================
+// Cached Evaluation Functions (for bulk filtering)
+// ============================================================================
+
+/// Evaluate an expression using prefetched fact cache
+fn eval_expr_cached(conn: &Connection, source_id: i64, expr: &Expr, cache: &FactCache) -> Result<bool> {
+    match expr {
+        Expr::And(exprs) => {
+            for e in exprs {
+                if !eval_expr_cached(conn, source_id, e, cache)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Expr::Or(exprs) => {
+            for e in exprs {
+                if eval_expr_cached(conn, source_id, e, cache)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        Expr::Not(e) => Ok(!eval_expr_cached(conn, source_id, e, cache)?),
+        Expr::Exists { key } => check_fact_exists_cached(conn, source_id, key, cache),
+        Expr::Compare { key, op, value } => check_fact_compare_cached(conn, source_id, key, *op, value, cache),
+        Expr::In { key, values } => check_fact_in_cached(conn, source_id, key, values, cache),
+    }
+}
+
+fn check_fact_exists_cached(_conn: &Connection, source_id: i64, key: &str, cache: &FactCache) -> Result<bool> {
+    let (base_key, _accessor, _modifiers) = parse_key_with_modifiers(key)?;
+
+    // Check cache for stored facts
+    if cache.has_key(&base_key) {
+        if cache.get_source_fact(source_id, &base_key).is_some() {
+            return Ok(true);
+        }
+        if cache.get_object_fact(source_id, &base_key).is_some() {
+            return Ok(true);
+        }
+    }
+
+    // Check for built-in keys
+    if base_key == "content.hash.sha256" {
+        return Ok(cache.get_object_id(source_id).is_some());
+    }
+    Ok(expr::is_builtin_key(&base_key))
+}
+
+fn check_fact_compare_cached(conn: &Connection, source_id: i64, key: &str, op: CompareOp, value: &str, cache: &FactCache) -> Result<bool> {
+    use expr::BuiltinKey;
+
+    let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
+
+    // Handle built-in keys (still need DB for source columns)
+    if BuiltinKey::from_str(&base_key).is_some() {
+        // For built-ins, fall back to uncached version (they query source table, not facts)
+        return check_fact_compare(conn, source_id, key, op, value);
+    }
+
+    // Use cache for stored facts
+    if let Some(fact_value) = cache.get_source_fact(source_id, &base_key) {
+        let local_value = to_local_fact_value(fact_value);
+        if let Ok(modified) = apply_accessor_and_modifiers(local_value, &accessor, &modifiers, key) {
+            if compare_fact_value(&modified, op, value) {
+                return Ok(true);
+            }
+        }
+    }
+
+    if let Some(fact_value) = cache.get_object_fact(source_id, &base_key) {
+        let local_value = to_local_fact_value(fact_value);
+        if let Ok(modified) = apply_accessor_and_modifiers(local_value, &accessor, &modifiers, key) {
+            if compare_fact_value(&modified, op, value) {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn check_fact_in_cached(conn: &Connection, source_id: i64, key: &str, values: &[String], cache: &FactCache) -> Result<bool> {
     for value in values {
-        if check_fact_compare(conn, source_id, key, CompareOp::Eq, value)? {
+        if check_fact_compare_cached(conn, source_id, key, CompareOp::Eq, value, cache)? {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Convert expr::FactValue to local FactValue
+fn to_local_fact_value(fv: &expr::FactValue) -> FactValue {
+    match fv {
+        expr::FactValue::Text(t) => FactValue::Text(t.clone()),
+        expr::FactValue::Num(n) => FactValue::Num(*n),
+        expr::FactValue::Time(ts) => FactValue::Time(*ts),
+        expr::FactValue::Path(p) => FactValue::Text(p.clone()),
+    }
 }
 
 // ============================================================================

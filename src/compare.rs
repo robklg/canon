@@ -13,13 +13,13 @@ pub struct CompareOptions {
 }
 
 pub fn run(
-    db: &Db,
+    db: &mut Db,
     path_a: &Path,
     path_b: &Path,
     filter_strs: &[String],
     options: &CompareOptions,
 ) -> Result<bool> {
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     // Parse filters
     let filters: Vec<Filter> = filter_strs
@@ -118,7 +118,7 @@ pub fn run(
 
 /// Query sources in scope, returns (object_id -> path map, unhashed count)
 fn query_sources(
-    conn: &crate::db::Connection,
+    conn: &mut crate::db::Connection,
     scope_prefix: &Option<String>,
     filters: &[Filter],
     include_excluded: bool,
@@ -127,19 +127,21 @@ fn query_sources(
     let prefix = scope_param(scope_prefix);
 
     // Query all sources in scope (exclude suspended roots)
-    let mut stmt = conn.prepare(&format!(
-        "SELECT s.id, s.object_id, r.path || '/' || s.rel_path as full_path
-         FROM sources s
-         JOIN roots r ON s.root_id = r.id
-         WHERE s.present = 1 AND r.suspended = 0 AND {} AND {}",
-        exclude_clause, SCOPE_CLAUSE
-    ))?;
-
-    let rows: Vec<(i64, Option<i64>, String)> = stmt
-        .query_map(params![prefix, prefix], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+    let rows: Vec<(i64, Option<i64>, String)> = {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT s.id, s.object_id, r.path || '/' || s.rel_path as full_path
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             WHERE s.present = 1 AND r.suspended = 0 AND {} AND {}",
+            exclude_clause, SCOPE_CLAUSE
+        ))?;
+        let result = stmt
+            .query_map(params![prefix, prefix], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        result
+    };
 
     // Apply filters
     let source_ids: Vec<i64> = rows.iter().map(|(id, _, _)| *id).collect();

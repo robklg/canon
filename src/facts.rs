@@ -166,7 +166,7 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, scope_paths: &[PathBuf], filter_s
 }
 
 fn get_matching_sources(
-    conn: &Connection,
+    conn: &mut Connection,
     scope_prefixes: &[String],
     filters: &[Filter],
     include_archived: bool,

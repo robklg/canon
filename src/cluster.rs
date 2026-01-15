@@ -76,7 +76,7 @@ struct LockGenerationResult {
 /// Core logic shared between generate() and refresh()
 /// Queries sources, validates, and writes the lock file
 fn generate_lock(
-    conn: &Connection,
+    conn: &mut Connection,
     scope_prefixes: &[String],
     filters: &[Filter],
     lock_path: &Path,
@@ -144,7 +144,7 @@ fn generate_lock(
 }
 
 pub fn generate(
-    db: &Db,
+    db: &mut Db,
     scope_paths: &[PathBuf],
     filters: &[String],
     dest: &Path,
@@ -165,7 +165,7 @@ pub fn generate(
         bail!("At least one of path or --where filter is required");
     }
 
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     // Resolve destination to archive root + relative subdir
     let (archive_root_id, _archive_root_path, base_dir) = resolve_archive_path(conn, dest)?;
@@ -234,8 +234,8 @@ pub fn generate(
     Ok(())
 }
 
-pub fn refresh(db: &Db, config_path: &Path, options: &GenerateOptions) -> Result<()> {
-    let conn = db.conn();
+pub fn refresh(db: &mut Db, config_path: &Path, options: &GenerateOptions) -> Result<()> {
+    let conn = db.conn_mut();
 
     // Read existing TOML config
     let config_content = fs::read_to_string(config_path)
@@ -375,7 +375,7 @@ pub fn hash_file(path: &Path) -> Result<String> {
 /// excluded_count is the number of sources skipped due to policy.exclude (hard gate)
 /// unhashed_count is the number of sources skipped due to missing content hash
 fn query_sources(
-    conn: &Connection,
+    conn: &mut Connection,
     scope_prefixes: &[String],
     filters: &[Filter],
     include_archived: bool,
