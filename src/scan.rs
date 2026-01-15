@@ -173,8 +173,13 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
     let mut all_files_to_hash: Vec<FileToHash> = Vec::new();
 
     for path in &paths_to_scan {
-        let canonical = fs::canonicalize(path)
-            .with_context(|| format!("Failed to canonicalize path: {}", path.display()))?;
+        let canonical = match fs::canonicalize(path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Warning: skipping {}: {}", path.display(), e);
+                continue;
+            }
+        };
 
         // Check if path is inside an existing root (including suspended)
         let (root_id, root_path, scan_prefix, root_role) = match resolve_root_path_any(conn, &canonical)? {
