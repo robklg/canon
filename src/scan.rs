@@ -132,7 +132,7 @@ struct FileToHash {
     basis_changed: bool,  // True if file was new/updated (mtime/size changed)
 }
 
-pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comment: Option<&str>, all_roots: bool, compute_hashes: Option<&str>, ignore_device_id: bool) -> Result<()> {
+pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comment: Option<&str>, all_roots: bool, no_hash: bool, verify: bool, ignore_device_id: bool) -> Result<()> {
     // Validate role if provided
     if let Some(r) = role {
         if r != "source" && r != "archive" {
@@ -182,7 +182,7 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
         };
 
         // Check if path is inside an existing root (including suspended)
-        let (root_id, root_path, scan_prefix, root_role) = match resolve_root_path_any(conn, &canonical)? {
+        let (root_id, root_path, scan_prefix, _root_role) = match resolve_root_path_any(conn, &canonical)? {
             Some((id, root_path, existing_role, rel_path)) => {
                 // Path is inside an existing root - check if suspended
                 let suspended: bool = conn.query_row(
@@ -241,21 +241,9 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
         };
 
         // Determine if we should hash this root
-        let should_hash = match (root_role.as_str(), compute_hashes) {
-            (_, Some("all")) => true,           // --compute-hashes=all: always hash all
-            ("archive", _) => true,             // archive roots: always hash new/changed
-            ("source", Some(_)) => true,        // source + --compute-hashes: hash new/changed
-            ("source", None) => false,          // source without flag: skip hashing
-            _ => false,
-        };
-        let hash_all = compute_hashes == Some("all");
-
-        if root_role == "archive" && compute_hashes.is_none() {
-            eprintln!(
-                "Scanning archive {} (will compute hashes for new/changed files)...",
-                root_path.display()
-            );
-        }
+        // Default: hash new/changed files; --no-hash to skip; --verify to rehash all
+        let should_hash = !no_hash;
+        let hash_all = verify;
 
         let result = scan_root(&conn, root_id, &root_path, scan_prefix.as_deref(), now, should_hash, hash_all, ignore_device_id)?;
 

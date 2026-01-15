@@ -113,16 +113,11 @@ Canon is designed to be used iteratively and incrementally.
 Instead of a single destructive run, you gradually build up metadata, apply policies, and converge on a canonical archive over time.
 
 ```bash
-# Scan – index your source files and existing archive
+# Scan – index your source files and existing archive (computes hashes by default)
 canon scan --add --role source /path/to/photos
 canon scan --add --role source /path/to/backup-drive/photos
 canon scan --add --role source --comment "Old backup, possibly duplicates" /Volumes/OldDrive
 canon scan --add --role archive /Volumes/Archive
-
-# Enrich – compute content hashes (necessary for deduplication)
-canon worklist --where 'NOT content.hash.sha256?' --where 'source.ext|lowercase IN (jpg, nef, heic)' \
-  | ./scripts/hash-worklist.sh \
-  | canon import-facts
 
 # Enrich – extract EXIF metadata including GPS-based geolocation (city, region, country)
 canon worklist --where 'source.ext|lowercase IN (jpg, jpeg, heic, mov, mp4)' \
@@ -224,16 +219,16 @@ canon scan /path/to/photos
 # Scan just a subtree within an existing root
 canon scan /path/to/photos/2024
 
-# Compute content hashes during scan (optional for source roots)
-canon scan --compute-hashes /path/to/photos
+# Scan without computing hashes (just index files)
+canon scan --no-hash /path/to/photos
 
 # Verify archive integrity by recomputing all hashes (good for cron jobs)
-canon scan --compute-hashes=all /Volumes/Archive
+canon scan --verify /Volumes/Archive
 ```
 
-**Hash computation:** Archive roots automatically compute hashes for new/changed files during scan (required for duplicate detection). Source roots skip hashing by default—use `--compute-hashes` to hash during scan, or import hashes via the worklist pipeline for more control.
+**Hash computation:** By default, Canon computes content hashes for new and changed files during scan. This enables deduplication and archive tracking. Use `--no-hash` to skip hashing if you just want to index files quickly.
 
-**Integrity verification:** Use `--compute-hashes=all` to recompute hashes for all files, even unchanged ones. This is especially useful for archives: run periodically (e.g., via cron) to detect file corruption. If a file's hash changes without its mtime changing, Canon warns about possible corruption and exits with an error.
+**Integrity verification:** Use `--verify` to recompute hashes for all files, even unchanged ones. Run periodically (e.g., via cron) to detect file corruption. If a file's hash changes without its mtime changing, Canon warns about possible corruption and exits with an error.
 
 **Discovering untracked directories:** Use `--candidates` to find directories with files that aren't yet under any root. This is useful when exploring a drive or backup to see what could be added:
 
@@ -308,21 +303,21 @@ When removing a root, Canon shows how many sources are "in archive" (same conten
 
 Add metadata to indexed files using external processors.
 
-**Content hashing is required** before files can be organized into an archive. You should hash both your source files and any existing archive files (to enable deduplication and archive tracking).
-
 Canon uses a pipeline model for enrichment: `worklist` outputs sources, an external processor reads files and extracts metadata, then `import-facts` stores the results.
 
 ```
 canon worklist → processor → canon import-facts
 ```
 
-Example pipeline to compute content hashes:
-```bash
-# Hash source files
-canon worklist --where 'NOT content.hash.sha256?' | ./scripts/hash-worklist.sh | canon import-facts
+**Content hashing** happens automatically during `scan`. Alternatively, use `--no-hash` and hash selectively via the worklist pipeline—useful when you only want to hash specific file types:
 
-# Hash existing archive files (for deduplication tracking)
-canon worklist --include-archived --where 'NOT content.hash.sha256?' | ./scripts/hash-worklist.sh | canon import-facts --allow-archived
+```bash
+# Scan without hashing, extract mime types, then hash only media files
+canon scan --no-hash --add --role source /path/to/mixed-files
+canon worklist | canonargs --fact mime -- file -b --mime-type {} | canon import-facts
+canon worklist --where 'mime~"image/*" OR mime~"video/*"' \
+  | ./scripts/hash-worklist.sh \
+  | canon import-facts
 ```
 
 ### Writing processors
@@ -1033,14 +1028,6 @@ Python-style indexing for path segments:
 ---
 
 ## Workflows
-
-### Hash all files
-
-```bash
-canon worklist --where 'NOT content.hash.sha256?' \
-  | ./scripts/hash-worklist.sh \
-  | canon import-facts
-```
 
 ### Extract EXIF metadata
 

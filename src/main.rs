@@ -51,12 +51,14 @@ enum Commands {
         /// Scan all existing roots (optionally filtered by --role)
         #[arg(long)]
         all: bool,
-        /// Compute content hashes for scanned files. Archive roots auto-hash by default.
-        /// Use without value for new/changed files, or =all to recompute all hashes.
-        #[arg(long, value_name = "MODE", default_missing_value = "new", num_args = 0..=1, require_equals = true)]
-        compute_hashes: Option<String>,
+        /// Skip computing content hashes (just index files)
+        #[arg(long)]
+        no_hash: bool,
+        /// Recompute ALL hashes for integrity verification (even unchanged files)
+        #[arg(long, conflicts_with = "no_hash")]
+        verify: bool,
         /// Find directories with files that aren't under any root
-        #[arg(long, conflicts_with_all = ["add", "all", "compute_hashes"])]
+        #[arg(long, conflicts_with_all = ["add", "all", "verify"])]
         candidates: bool,
         /// Disable mount protection that skips files on disconnected storage.
         /// Use when device IDs change between scans (e.g., NAS remounts).
@@ -466,7 +468,7 @@ fn main() -> anyhow::Result<()> {
     let mut db = db::open(&db_path, cli.debug_sql)?;
 
     match cli.command {
-        Commands::Scan { paths, role, add, comment, all, compute_hashes, candidates, ignore_device_id } => {
+        Commands::Scan { paths, role, add, comment, all, no_hash, verify, candidates, ignore_device_id } => {
             if candidates {
                 if paths.is_empty() {
                     anyhow::bail!("--candidates requires a path");
@@ -492,7 +494,7 @@ fn main() -> anyhow::Result<()> {
             if all {
                 anyhow::bail!("--all is not supported on this platform (no device ID detection for mount safety)");
             }
-            scan::run(&db, &paths, role.as_deref(), add, comment.as_deref(), all, compute_hashes.as_deref(), ignore_device_id)?;
+            scan::run(&db, &paths, role.as_deref(), add, comment.as_deref(), all, no_hash, verify, ignore_device_id)?;
         }
         Commands::Worklist { paths, filters, include_archived, include_excluded, unique_content, emit } => {
             worklist::run(&mut db, &paths, &filters, include_archived, include_excluded, unique_content, &emit)?;
