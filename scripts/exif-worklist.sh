@@ -85,6 +85,9 @@ while IFS= read -r line; do
     def snake:
       gsub("(?<a>[a-z])(?<b>[A-Z])"; "\(.a)_\(.b)") | ascii_downcase;
 
+    # Wrap a value with a type hint for import-facts
+    def typed($t): if . then {value: ., type: $t} else null end;
+
     # Fields that have normalized versions (excluded from exif.* namespace)
     def is_normalized:
       IN(
@@ -128,16 +131,16 @@ while IFS= read -r line; do
           ( $ex.SubSecDateTimeOriginal // $ex.DateTimeOriginal
             // $ex.MediaCreateDate // $ex.TrackCreateDate
             // $ex.SubSecCreateDate // $ex.CreateDate
-          ),
+          ) | typed("datetime"),
         "media.create_datetime":
           ( $ex.MediaCreateDate // $ex.TrackCreateDate
             // $ex.SubSecCreateDate // $ex.CreateDate
-          ),
+          ) | typed("datetime"),
         "media.modify_datetime":
           ( $ex.MediaModifyDate // $ex.TrackModifyDate
             // $ex.SubSecModifyDate // $ex.ModifyDate
             // $ex.FileModifyDate
-          ),
+          ) | typed("datetime"),
 
         "device.make": ($ex.Make | if type == "number" then tostring else . end),
         "device.model": ($ex.Model | if type == "number" then tostring else . end),
@@ -160,7 +163,7 @@ while IFS= read -r line; do
         "geo.lat": $ex.GPSLatitude,
         "geo.lon": $ex.GPSLongitude,
         "geo.alt": $ex.GPSAltitude,
-        "geo.datetime": $ex.GPSDateTime,
+        "geo.datetime": ($ex.GPSDateTime | typed("datetime")),
 
         "geo.city": ($ex.GeolocationCity | if type == "number" then tostring else . end),
         "geo.region": ($ex.GeolocationRegion | if type == "number" then tostring else . end),
@@ -175,14 +178,14 @@ while IFS= read -r line; do
         "geo.bearing": $ex.GeolocationBearing,
 
         "video.codec": ($ex.VideoCodec | if type == "number" then tostring else . end),
-        "video.duration": ($ex.MediaDuration // $ex.Duration),
+        "video.duration": (($ex.MediaDuration // $ex.Duration) | typed("duration")),
         "video.frame_rate": $ex.VideoFrameRate,
 
         "audio.codec": ($ex.AudioCodec | if type == "number" then tostring else . end),
         "audio.channels": $ex.AudioChannels,
         "audio.sample_rate": $ex.AudioSampleRate,
         "audio.bitrate": $ex.AudioBitrate,
-        "audio.duration": ($ex.MediaDuration // $ex.Duration),
+        "audio.duration": (($ex.MediaDuration // $ex.Duration) | typed("duration")),
 
         "music.artist": ($ex.Artist | if type == "number" then tostring else . end),
         "music.album": ($ex.Album | if type == "number" then tostring else . end),

@@ -55,6 +55,28 @@ enum FactValueType {
     Time,
 }
 
+/// A fact value with optional type hint
+enum TypedValue {
+    Plain(Value),
+    Hinted { value: Value, type_hint: String },
+}
+
+impl TypedValue {
+    fn parse(v: &Value) -> Self {
+        if let Value::Object(obj) = v {
+            if let (Some(value), Some(Value::String(type_hint))) =
+                (obj.get("value"), obj.get("type"))
+            {
+                return TypedValue::Hinted {
+                    value: value.clone(),
+                    type_hint: type_hint.clone(),
+                };
+            }
+        }
+        TypedValue::Plain(v.clone())
+    }
+}
+
 impl std::fmt::Display for FactValueType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -263,18 +285,32 @@ fn process_import(
         eprintln!("[{}] {}", root_path, rel_path);
     }
     for (key, value) in &normalized_facts {
-        // Check type consistency before inserting
-        let new_type = get_value_type(value);
+        // Parse as typed value (plain or with hint)
+        let typed = TypedValue::parse(value);
+
+        // Check type consistency
+        let new_type = match get_typed_value_type(&typed) {
+            Some(t) => t,
+            None => {
+                // Type hint parsing failed - classify_typed_value will give details
+                if let Err(e) = classify_typed_value(&typed) {
+                    eprintln!("Warning: {} for '{}' in {}/{}", e, key, root_path, rel_path);
+                }
+                stats.skipped_type_mismatch += 1;
+                continue;
+            }
+        };
+
         if let Some(&existing_type) = fact_type_map.get(key) {
             if existing_type != new_type {
                 // Type mismatch - skip this fact
                 let is_new_key = !type_mismatch_keys.contains_key(key);
                 type_mismatch_keys.entry(key.clone()).or_insert((existing_type, new_type));
                 if is_new_key {
-                    // First occurrence of this mismatch - show the path
+                    // First occurrence of this mismatch - show the path and value
                     eprintln!(
-                        "Warning: type mismatch for '{}' in {}/{}: existing {}, got {}",
-                        key, root_path, rel_path, existing_type, new_type
+                        "Warning: type mismatch for '{}' in {}/{}: existing {}, got {} (value: {})",
+                        key, root_path, rel_path, existing_type, new_type, value
                     );
                 }
                 stats.skipped_type_mismatch += 1;
@@ -284,6 +320,16 @@ fn process_import(
             // New key - register its type for subsequent records in this import session
             fact_type_map.insert(key.clone(), new_type);
         }
+
+        // Classify for storage
+        let (value_text, value_num, value_time) = match classify_typed_value(&typed) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Warning: {}", e);
+                stats.skipped_type_mismatch += 1;
+                continue;
+            }
+        };
 
         if object_id.is_some() {
             if verbose {
@@ -295,7 +341,9 @@ fn process_import(
                 "object",
                 object_id.unwrap(),
                 key,
-                value,
+                value_text,
+                value_num,
+                value_time,
                 import.observed_at,
                 None, // object facts don't have observed_basis_rev
             )?;
@@ -311,7 +359,9 @@ fn process_import(
                 "source",
                 import.source_id,
                 key,
-                value,
+                value_text,
+                value_num,
+                value_time,
                 import.observed_at,
                 Some(import.basis_rev),
             )?;
@@ -367,12 +417,12 @@ fn insert_fact(
     entity_type: &str,
     entity_id: i64,
     key: &str,
-    value: &Value,
+    value_text: Option<String>,
+    value_num: Option<f64>,
+    value_time: Option<i64>,
     observed_at: i64,
     observed_basis_rev: Option<i64>,
 ) -> Result<()> {
-    let (value_text, value_num, value_time) = classify_value(value);
-
     conn.execute(
         "INSERT INTO facts (entity_type, entity_id, key, value_text, value_num, value_time, observed_at, observed_basis_rev)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -439,14 +489,46 @@ fn try_parse_datetime(s: &str) -> Option<i64> {
     None
 }
 
+/// Parse duration string to seconds. Supports:
+/// - "H:MM:SS" or "HH:MM:SS" (hours:minutes:seconds)
+/// - "M:SS" or "MM:SS" (minutes:seconds)
+/// - "SS" or "SS.ms" (seconds with optional decimals)
+/// - Numeric values (already in seconds)
+fn try_parse_duration(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => {
+            let s = s.trim();
+            let parts: Vec<&str> = s.split(':').collect();
+            match parts.len() {
+                3 => {
+                    // H:MM:SS
+                    let hours: f64 = parts[0].parse().ok()?;
+                    let mins: f64 = parts[1].parse().ok()?;
+                    let secs: f64 = parts[2].parse().ok()?;
+                    Some(hours * 3600.0 + mins * 60.0 + secs)
+                }
+                2 => {
+                    // M:SS
+                    let mins: f64 = parts[0].parse().ok()?;
+                    let secs: f64 = parts[1].parse().ok()?;
+                    Some(mins * 60.0 + secs)
+                }
+                1 => {
+                    // Plain seconds (possibly with decimals)
+                    s.parse().ok()
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Classify a plain value (no type hint) - NO date guessing
 fn classify_value(value: &Value) -> (Option<String>, Option<f64>, Option<i64>) {
     match value {
-        Value::String(s) => {
-            if let Some(ts) = try_parse_datetime(s) {
-                return (None, None, Some(ts));
-            }
-            (Some(s.clone()), None, None)
-        }
+        Value::String(s) => (Some(s.clone()), None, None), // Just store as text
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 (None, Some(i as f64), None)
@@ -463,19 +545,68 @@ fn classify_value(value: &Value) -> (Option<String>, Option<f64>, Option<i64>) {
     }
 }
 
-/// Determine what type a value will be stored as (mirrors classify_value logic)
+/// Classify a value with optional type hint
+fn classify_typed_value(typed: &TypedValue) -> Result<(Option<String>, Option<f64>, Option<i64>), String> {
+    match typed {
+        TypedValue::Plain(v) => Ok(classify_value(v)),
+        TypedValue::Hinted { value, type_hint } => match type_hint.as_str() {
+            "duration" => {
+                if let Some(secs) = try_parse_duration(value) {
+                    Ok((None, Some(secs), None))
+                } else {
+                    Err(format!("cannot parse as duration: {}", value))
+                }
+            }
+            "datetime" => {
+                if let Value::String(s) = value {
+                    if let Some(ts) = try_parse_datetime(s) {
+                        Ok((None, None, Some(ts)))
+                    } else {
+                        Err(format!("cannot parse as datetime: {}", value))
+                    }
+                } else {
+                    Err(format!("datetime requires string, got: {}", value))
+                }
+            }
+            unknown => Err(format!("unknown type hint: {}", unknown)),
+        },
+    }
+}
+
+/// Determine storage type for plain value - NO date guessing
 fn get_value_type(value: &Value) -> FactValueType {
     match value {
-        Value::String(s) => {
-            if try_parse_datetime(s).is_some() {
-                FactValueType::Time
-            } else {
-                FactValueType::Text
-            }
-        }
-        Value::Number(_) => FactValueType::Num,
-        Value::Bool(_) => FactValueType::Num,
+        Value::String(_) => FactValueType::Text, // Always text
+        Value::Number(_) | Value::Bool(_) => FactValueType::Num,
         Value::Null | Value::Array(_) | Value::Object(_) => FactValueType::Text,
+    }
+}
+
+/// Determine storage type with type hint
+fn get_typed_value_type(typed: &TypedValue) -> Option<FactValueType> {
+    match typed {
+        TypedValue::Plain(v) => Some(get_value_type(v)),
+        TypedValue::Hinted { value, type_hint } => match type_hint.as_str() {
+            "duration" => {
+                if try_parse_duration(value).is_some() {
+                    Some(FactValueType::Num)
+                } else {
+                    None
+                }
+            }
+            "datetime" => {
+                if let Value::String(s) = value {
+                    if try_parse_datetime(s).is_some() {
+                        Some(FactValueType::Time)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None, // Unknown hint
+        },
     }
 }
 
