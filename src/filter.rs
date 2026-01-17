@@ -876,7 +876,7 @@ fn to_local_fact_value(fv: &expr::FactValue) -> FactValue {
 // ============================================================================
 
 // Use expr::parse_key_with_modifiers for parsing - just re-export for local use
-fn parse_key_with_modifiers(key: &str) -> Result<(String, Option<expr::PathAccessor>, Vec<expr::Modifier>)> {
+fn parse_key_with_modifiers(key: &str) -> Result<(String, Option<expr::PathAccessor>, Vec<expr::ModifierCall>)> {
     expr::parse_key_with_modifiers(key)
 }
 
@@ -884,7 +884,7 @@ fn parse_key_with_modifiers(key: &str) -> Result<(String, Option<expr::PathAcces
 fn apply_accessor_and_modifiers(
     value: FactValue,
     accessor: &Option<expr::PathAccessor>,
-    modifiers: &[expr::Modifier],
+    modifiers: &[expr::ModifierCall],
     key: &str,
 ) -> Result<FactValue> {
     // Convert to expr::FactValue
@@ -899,9 +899,9 @@ fn apply_accessor_and_modifiers(
         expr_value = expr::apply_accessor(&expr_value, acc, key)?;
     }
 
-    // Apply modifiers
-    for modifier in modifiers {
-        expr_value = expr::apply_modifier(&expr_value, *modifier, key)?;
+    // Apply modifiers (for_display: true since filters are typically for display/comparison)
+    for modifier_call in modifiers {
+        expr_value = expr::apply_modifier(&expr_value, modifier_call, key, true)?;
     }
 
     // Convert back to FactValue

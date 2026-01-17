@@ -29,7 +29,14 @@ pub enum PatternSegment {
 pub struct Expr {
     pub key: String,
     pub accessor: Option<PathAccessor>,
-    pub modifiers: Vec<Modifier>,
+    pub modifiers: Vec<ModifierCall>,
+}
+
+/// A modifier with optional arguments
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModifierCall {
+    pub modifier: Modifier,
+    pub args: Vec<f64>, // empty for no args
 }
 
 /// Path segment accessor for indexing into path-type values
@@ -46,6 +53,7 @@ pub enum PathAccessor {
 pub enum ModifierCategory {
     Time,
     String,
+    Numeric,
 }
 
 /// Modifiers that transform values
@@ -75,6 +83,8 @@ pub enum Modifier {
     Lowercase,  // convert to lowercase
     Uppercase,  // convert to uppercase
     Capitalize, // capitalize first letter, lowercase rest
+    // Numeric modifiers
+    Bucket, // magnitude-based or threshold-based ranges
 }
 
 impl Modifier {
@@ -91,6 +101,7 @@ impl Modifier {
             Modifier::Lowercase | Modifier::Uppercase | Modifier::Capitalize => {
                 ModifierCategory::String
             }
+            Modifier::Bucket => ModifierCategory::Numeric,
         }
     }
 }
@@ -530,15 +541,41 @@ fn parse_accessor(s: &str) -> Result<PathAccessor> {
     }
 }
 
-/// Parse a modifier name
-pub fn parse_modifier(s: &str) -> Result<Modifier> {
+/// Parse a modifier with optional arguments: "year" or "bucket(60,300,600)"
+pub fn parse_modifier(s: &str) -> Result<ModifierCall> {
     use strum::IntoEnumIterator;
 
-    let lower = s.to_lowercase();
+    // Check for function syntax: modifier(arg1,arg2,...)
+    let (name, args) = if let Some(paren_pos) = s.find('(') {
+        if !s.ends_with(')') {
+            bail!("Unclosed '(' in modifier: '{}'", s);
+        }
+        let name = &s[..paren_pos];
+        let args_str = &s[paren_pos + 1..s.len() - 1];
+
+        let args: Vec<f64> = if args_str.is_empty() {
+            vec![]
+        } else {
+            args_str
+                .split(',')
+                .map(|a| {
+                    a.trim()
+                        .parse::<f64>()
+                        .map_err(|_| anyhow::anyhow!("Invalid modifier argument: '{}'", a.trim()))
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+
+        (name, args)
+    } else {
+        (s, vec![])
+    };
+
+    let lower = name.to_lowercase();
     for m in Modifier::iter() {
-        let name: &'static str = m.into();
-        if name == lower {
-            return Ok(m);
+        let mname: &'static str = m.into();
+        if mname == lower {
+            return Ok(ModifierCall { modifier: m, args });
         }
     }
 
@@ -546,7 +583,7 @@ pub fn parse_modifier(s: &str) -> Result<Modifier> {
     let available: Vec<&'static str> = Modifier::iter().map(|m| m.into()).collect();
     bail!(
         "Unknown modifier: '{}'. Available: {}",
-        s,
+        name,
         available.join(", ")
     )
 }
@@ -605,7 +642,7 @@ pub fn normalize_key_string(key: &str) -> String {
 ///
 /// Keys without a namespace prefix are normalized to `content.*` (e.g., "Make" becomes "content.Make").
 /// Built-in keys (source.*, filename, etc.) are not modified.
-pub fn parse_key_with_modifiers(key: &str) -> Result<(String, Option<PathAccessor>, Vec<Modifier>)> {
+pub fn parse_key_with_modifiers(key: &str) -> Result<(String, Option<PathAccessor>, Vec<ModifierCall>)> {
     // Split by | first to separate modifiers
     let parts: Vec<&str> = key.split('|').collect();
     let key_part = parts[0];
@@ -619,8 +656,8 @@ pub fn parse_key_with_modifiers(key: &str) -> Result<(String, Option<PathAccesso
     // Parse modifiers
     let mut modifiers = Vec::new();
     for mod_str in &parts[1..] {
-        let modifier = parse_modifier(mod_str.trim())?;
-        modifiers.push(modifier);
+        let modifier_call = parse_modifier(mod_str.trim())?;
+        modifiers.push(modifier_call);
     }
 
     Ok((normalized_key, accessor, modifiers))
@@ -673,10 +710,10 @@ fn evaluate_expr(expr: &Expr, ctx: &EvalContext) -> Result<String> {
         value
     };
 
-    // Apply modifiers in order
+    // Apply modifiers in order (for_display: false since patterns are used for paths)
     let mut result = value;
-    for modifier in &expr.modifiers {
-        result = apply_modifier(&result, *modifier, &expr.key)?;
+    for modifier_call in &expr.modifiers {
+        result = apply_modifier(&result, modifier_call, &expr.key, false)?;
     }
 
     // Convert to string
@@ -855,8 +892,17 @@ fn normalize_index(idx: i32, len: i32) -> i32 {
 }
 
 /// Apply a modifier to a value
-pub fn apply_modifier(value: &FactValue, modifier: Modifier, key: &str) -> Result<FactValue> {
-    match modifier {
+///
+/// The `for_display` parameter controls formatting context:
+/// - `true`: Human-readable format (e.g., `<60`, `>600`)
+/// - `false`: Path-safe format (e.g., `-Inf-60`, `600-Inf`)
+pub fn apply_modifier(
+    value: &FactValue,
+    call: &ModifierCall,
+    key: &str,
+    for_display: bool,
+) -> Result<FactValue> {
+    match call.modifier {
         // Time modifiers
         Modifier::Year
         | Modifier::Month
@@ -875,7 +921,7 @@ pub fn apply_modifier(value: &FactValue, modifier: Modifier, key: &str) -> Resul
                 FactValue::Time(ts) => *ts,
                 FactValue::Num(n) => *n as i64,
                 _ => {
-                    let name: &'static str = modifier.into();
+                    let name: &'static str = call.modifier.into();
                     bail!(
                         "Time modifier '{}' requires a time-type fact, but '{}' is {}. \
                          Time modifiers work with facts stored as value_time in the database.",
@@ -885,7 +931,7 @@ pub fn apply_modifier(value: &FactValue, modifier: Modifier, key: &str) -> Resul
                     )
                 }
             };
-            apply_time_modifier(timestamp, modifier)
+            apply_time_modifier(timestamp, call.modifier)
         }
 
         // String modifiers
@@ -917,12 +963,32 @@ pub fn apply_modifier(value: &FactValue, modifier: Modifier, key: &str) -> Resul
             let s = fact_value_to_string(value);
             let mut chars = s.chars();
             let result = match chars.next() {
-                Some(c) => {
-                    c.to_uppercase().to_string() + &chars.as_str().to_lowercase()
-                }
+                Some(c) => c.to_uppercase().to_string() + &chars.as_str().to_lowercase(),
                 None => String::new(),
             };
             Ok(FactValue::Text(result))
+        }
+
+        // Numeric modifiers
+        Modifier::Bucket => {
+            let n = match value {
+                FactValue::Num(n) => *n,
+                _ => bail!(
+                    "Bucket modifier requires numeric fact, '{}' is {}",
+                    key,
+                    value_type_name(value)
+                ),
+            };
+
+            if call.args.is_empty() {
+                Ok(FactValue::Text(format_magnitude_bucket(n)))
+            } else {
+                Ok(FactValue::Text(format_threshold_bucket(
+                    n,
+                    &call.args,
+                    for_display,
+                )))
+            }
         }
     }
 }
@@ -955,6 +1021,81 @@ fn apply_time_modifier(timestamp: i64, modifier: Modifier) -> Result<FactValue> 
     };
 
     Ok(FactValue::Text(result))
+}
+
+/// Format bucket using magnitude (powers of 10)
+fn format_magnitude_bucket(n: f64) -> String {
+    if n == 0.0 {
+        return "0".to_string();
+    }
+
+    let abs_n = n.abs();
+    let sign = if n < 0.0 { "-" } else { "" };
+    let log = abs_n.log10().floor() as i32;
+    let lower = 10_f64.powi(log);
+    let upper = 10_f64.powi(log + 1);
+
+    format!("{}{}-{}", sign, format_bucket_num(lower), format_bucket_num(upper))
+}
+
+/// Format bucket using custom thresholds
+/// Uses exact threshold values as specified by user (no SI suffix conversion)
+fn format_threshold_bucket(n: f64, thresholds: &[f64], for_display: bool) -> String {
+    for (i, &t) in thresholds.iter().enumerate() {
+        if n < t {
+            if i == 0 {
+                // Below first threshold
+                return if for_display {
+                    format!("<{}", format_threshold_num(t))
+                } else {
+                    format!("-Inf-{}", format_threshold_num(t))
+                };
+            } else {
+                return format!(
+                    "{}-{}",
+                    format_threshold_num(thresholds[i - 1]),
+                    format_threshold_num(t)
+                );
+            }
+        }
+    }
+    // Value >= last threshold
+    let last = format_threshold_num(*thresholds.last().unwrap());
+    if for_display {
+        format!(">{}", last)
+    } else {
+        format!("{}-Inf", last)
+    }
+}
+
+/// Format a user-specified threshold value (preserves exact value, no SI suffixes)
+fn format_threshold_num(v: f64) -> String {
+    if v.fract() == 0.0 {
+        format!("{}", v as i64)
+    } else {
+        format!("{}", v)
+    }
+}
+
+/// Format number with SI suffixes for bucket labels
+fn format_bucket_num(v: f64) -> String {
+    if v >= 1_000_000_000.0 {
+        format!("{}G", (v / 1_000_000_000.0) as i64)
+    } else if v >= 1_000_000.0 {
+        format!("{}M", (v / 1_000_000.0) as i64)
+    } else if v >= 1_000.0 {
+        format!("{}K", (v / 1_000.0) as i64)
+    } else if v >= 1.0 {
+        format!("{}", v as i64)
+    } else if v == 0.0 {
+        "0".to_string()
+    } else {
+        // For sub-1 values, trim trailing zeros
+        format!("{:.3}", v)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    }
 }
 
 /// Convert a FactValue to string
@@ -1024,7 +1165,8 @@ mod tests {
         if let PatternSegment::Expr(e) = &pattern.segments[0] {
             assert_eq!(e.key, "content.DateTimeOriginal");
             assert_eq!(e.modifiers.len(), 1);
-            assert_eq!(e.modifiers[0], Modifier::Year);
+            assert_eq!(e.modifiers[0].modifier, Modifier::Year);
+            assert!(e.modifiers[0].args.is_empty());
         } else {
             panic!("Expected Expr");
         }
@@ -1160,5 +1302,68 @@ mod tests {
         ctx.set_fact("object.hash", FactValue::Text("abcdef1234567890".to_string()));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "vacation/2024/IMG_001_abcdef12.jpg");
+    }
+
+    #[test]
+    fn test_bucket_magnitude() {
+        // Test format_magnitude_bucket directly
+        assert_eq!(format_magnitude_bucket(0.0), "0");
+        assert_eq!(format_magnitude_bucket(5.0), "1-10");
+        assert_eq!(format_magnitude_bucket(50.0), "10-100");
+        assert_eq!(format_magnitude_bucket(500.0), "100-1K");
+        assert_eq!(format_magnitude_bucket(5000.0), "1K-10K");
+        assert_eq!(format_magnitude_bucket(50000.0), "10K-100K");
+        assert_eq!(format_magnitude_bucket(5000000.0), "1M-10M");
+        assert_eq!(format_magnitude_bucket(5000000000.0), "1G-10G");
+        // Negative numbers
+        assert_eq!(format_magnitude_bucket(-50.0), "-10-100");
+    }
+
+    #[test]
+    fn test_bucket_threshold_display() {
+        // Test format_threshold_bucket with for_display=true
+        // Uses exact values as specified (no SI suffix conversion)
+        let thresholds = vec![60.0, 3600.0, 7200.0];
+        assert_eq!(format_threshold_bucket(30.0, &thresholds, true), "<60");
+        assert_eq!(format_threshold_bucket(100.0, &thresholds, true), "60-3600");
+        assert_eq!(format_threshold_bucket(5000.0, &thresholds, true), "3600-7200");
+        assert_eq!(format_threshold_bucket(10000.0, &thresholds, true), ">7200");
+    }
+
+    #[test]
+    fn test_bucket_threshold_path() {
+        // Test format_threshold_bucket with for_display=false (path-safe)
+        let thresholds = vec![60.0, 3600.0, 7200.0];
+        assert_eq!(format_threshold_bucket(30.0, &thresholds, false), "-Inf-60");
+        assert_eq!(format_threshold_bucket(100.0, &thresholds, false), "60-3600");
+        assert_eq!(format_threshold_bucket(5000.0, &thresholds, false), "3600-7200");
+        assert_eq!(format_threshold_bucket(10000.0, &thresholds, false), "7200-Inf");
+    }
+
+    #[test]
+    fn test_parse_bucket_with_args() {
+        // Test parsing bucket modifier with arguments
+        let call = parse_modifier("bucket(60,300,600)").unwrap();
+        assert_eq!(call.modifier, Modifier::Bucket);
+        assert_eq!(call.args, vec![60.0, 300.0, 600.0]);
+
+        // Without args
+        let call = parse_modifier("bucket").unwrap();
+        assert_eq!(call.modifier, Modifier::Bucket);
+        assert!(call.args.is_empty());
+    }
+
+    #[test]
+    fn test_bucket_num_format() {
+        // Test format_bucket_num with SI suffixes
+        assert_eq!(format_bucket_num(0.0), "0");
+        assert_eq!(format_bucket_num(1.0), "1");
+        assert_eq!(format_bucket_num(100.0), "100");
+        assert_eq!(format_bucket_num(1000.0), "1K");
+        assert_eq!(format_bucket_num(10000.0), "10K");
+        assert_eq!(format_bucket_num(1000000.0), "1M");
+        assert_eq!(format_bucket_num(1000000000.0), "1G");
+        assert_eq!(format_bucket_num(0.5), "0.5");
+        assert_eq!(format_bucket_num(0.123), "0.123");
     }
 }

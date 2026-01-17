@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::db::{build_scope_clause, canonicalize_scopes, populate_temp_sources, Connection, Db};
 use crate::exclude;
-use crate::expr::{self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, Modifier, PathAccessor};
+use crate::expr::{self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, ModifierCall, PathAccessor};
 use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;
@@ -16,7 +16,7 @@ struct GroupingKey {
     raw: String,                      // Original key string for display
     base_key: String,                 // Base fact key
     accessor: Option<PathAccessor>,
-    modifiers: Vec<Modifier>,
+    modifiers: Vec<ModifierCall>,
     is_root: bool,                    // Special handling for source.root
 }
 
@@ -50,7 +50,7 @@ fn is_builtin_or_derived(key: &str) -> bool {
 fn apply_transforms(
     value: FactValue,
     accessor: &Option<PathAccessor>,
-    modifiers: &[Modifier],
+    modifiers: &[ModifierCall],
     key: &str,
 ) -> Result<String> {
     let mut result = value;
@@ -60,9 +60,9 @@ fn apply_transforms(
         result = expr::apply_accessor(&result, acc, key)?;
     }
 
-    // Apply modifiers
-    for modifier in modifiers {
-        result = expr::apply_modifier(&result, *modifier, key)?;
+    // Apply modifiers (for_display: true since this is for facts output)
+    for modifier_call in modifiers {
+        result = expr::apply_modifier(&result, modifier_call, key, true)?;
     }
 
     // Convert to string for grouping
@@ -457,7 +457,7 @@ fn show_transformed_distribution(
     base_key: &str,
     display_key: &str,
     accessor: &Option<PathAccessor>,
-    modifiers: &[Modifier],
+    modifiers: &[ModifierCall],
     total_sources: usize,
     limit: usize,
 ) -> Result<()> {
@@ -471,10 +471,10 @@ fn show_transformed_distribution(
     populate_temp_sources(conn, source_ids)?;
 
     // Fetch raw values and apply transforms
-    // Query both source and object facts
+    // Query both source and object facts (one row per source)
     let rows: Vec<(Option<String>, Option<f64>, Option<i64>)> = conn
         .prepare(
-            "SELECT DISTINCT
+            "SELECT
                  COALESCE(f.value_text, NULL) as text_val,
                  COALESCE(f.value_num, NULL) as num_val,
                  COALESCE(f.value_time, NULL) as time_val
@@ -575,7 +575,7 @@ fn show_builtin_distribution(
     base_key: &str,
     display_key: &str,
     accessor: &Option<PathAccessor>,
-    modifiers: &[Modifier],
+    modifiers: &[ModifierCall],
     total_sources: usize,
     limit: usize,
 ) -> Result<()> {
@@ -984,7 +984,7 @@ fn show_grouped_distribution(
     main_base_key: &str,
     main_display_key: &str,
     main_accessor: &Option<PathAccessor>,
-    main_modifiers: &[Modifier],
+    main_modifiers: &[ModifierCall],
     grouping_keys: &[GroupingKey],
     total_sources: usize,
     limit: usize,
