@@ -630,8 +630,8 @@ canon compare /path/to/folder_a /path/to/folder_b
 # With filters
 canon compare /path/to/folder_a /path/to/folder_b --where 'source.ext=jpg'
 
-# Summary only (no file lists)
-canon compare /path/to/folder_a /path/to/folder_b --quiet
+# Show file paths for differences
+canon compare /path/to/folder_a /path/to/folder_b --verbose
 ```
 
 Output shows:

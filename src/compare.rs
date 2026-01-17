@@ -9,7 +9,7 @@ use crate::filter::{self, Filter};
 
 pub struct CompareOptions {
     pub include_excluded: bool,
-    pub quiet: bool,
+    pub verbose: bool,
 }
 
 pub fn run(
@@ -70,50 +70,38 @@ pub fn run(
     // Check if identical
     let is_identical = only_in_a.is_empty() && only_in_b.is_empty();
 
-    if is_identical {
-        println!("Folders are identical ({} files)", in_both.len());
-        return Ok(true);
-    }
-
-    // Print summary
+    // Print summary (always show all lines, even if count is 0)
     println!("Files in both (by content): {}", in_both.len());
 
     // Print only in A
-    if !only_in_a.is_empty() {
-        println!("Only in A: {}", only_in_a.len());
-        if !options.quiet {
-            let mut paths: Vec<&str> = only_in_a
-                .iter()
-                .filter_map(|oid| sources_a.get(oid))
-                .map(|s| s.as_str())
-                .collect();
-            paths.sort();
-            for path in paths {
-                println!("  {}", path);
-            }
+    println!("Only in A: {}", only_in_a.len());
+    if options.verbose && !only_in_a.is_empty() {
+        let mut paths: Vec<&str> = only_in_a
+            .iter()
+            .filter_map(|oid| sources_a.get(oid))
+            .map(|s| s.as_str())
+            .collect();
+        paths.sort();
+        for path in paths {
+            println!("  {}", path);
         }
     }
 
     // Print only in B
-    if !only_in_b.is_empty() {
-        println!("Only in B: {}", only_in_b.len());
-        if !options.quiet {
-            let mut paths: Vec<&str> = only_in_b
-                .iter()
-                .filter_map(|oid| sources_b.get(oid))
-                .map(|s| s.as_str())
-                .collect();
-            paths.sort();
-            for path in paths {
-                println!("  {}", path);
-            }
+    println!("Only in B: {}", only_in_b.len());
+    if options.verbose && !only_in_b.is_empty() {
+        let mut paths: Vec<&str> = only_in_b
+            .iter()
+            .filter_map(|oid| sources_b.get(oid))
+            .map(|s| s.as_str())
+            .collect();
+        paths.sort();
+        for path in paths {
+            println!("  {}", path);
         }
     }
 
-    println!();
-    println!("Folders are NOT identical");
-
-    Ok(false)
+    Ok(is_identical)
 }
 
 /// Query sources in scope, returns (object_id -> path map, unhashed count)

@@ -215,9 +215,9 @@ enum Commands {
         /// Include excluded sources (by default they are skipped)
         #[arg(long)]
         include_excluded: bool,
-        /// Only show summary, not file lists
+        /// Show file paths for differences
         #[arg(short, long)]
-        quiet: bool,
+        verbose: bool,
     },
     // -- Organize --
     /// Generate a cluster manifest from matching sources
@@ -563,10 +563,10 @@ fn main() -> anyhow::Result<()> {
         Commands::Coverage { paths, filters, archive, include_archived, include_excluded, compact } => {
             coverage::run(&mut db, &paths, &filters, archive.as_deref(), include_archived, include_excluded, compact)?;
         }
-        Commands::Compare { path_a, path_b, filters, include_excluded, quiet } => {
+        Commands::Compare { path_a, path_b, filters, include_excluded, verbose } => {
             let options = compare::CompareOptions {
                 include_excluded,
-                quiet,
+                verbose,
             };
             let identical = compare::run(&mut db, &path_a, &path_b, &filters, &options)?;
             if !identical {
