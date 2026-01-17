@@ -486,7 +486,27 @@ fn try_parse_datetime(s: &str) -> Option<i64> {
         }
     }
 
+    // Plain 4-digit year string (e.g., "2005") - Jan 1 midnight UTC
+    if s.len() == 4 {
+        if let Ok(year) = s.parse::<i32>() {
+            return year_to_timestamp(year);
+        }
+    }
+
     None
+}
+
+/// Convert a year to a Unix timestamp (Jan 1 midnight UTC)
+fn year_to_timestamp(year: i32) -> Option<i64> {
+    use chrono::TimeZone;
+    // Sanity check for reasonable year range
+    if (1900..=2100).contains(&year) {
+        chrono::Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0)
+            .single()
+            .map(|dt| dt.timestamp())
+    } else {
+        None
+    }
 }
 
 /// Parse duration string to seconds. Supports:
@@ -564,8 +584,19 @@ fn classify_typed_value(typed: &TypedValue) -> Result<(Option<String>, Option<f6
                     } else {
                         Err(format!("cannot parse as datetime: {}", value))
                     }
+                } else if let Value::Number(n) = value {
+                    // Handle numeric year (e.g., 2005 from audio metadata)
+                    if let Some(year) = n.as_i64() {
+                        if let Some(ts) = year_to_timestamp(year as i32) {
+                            Ok((None, None, Some(ts)))
+                        } else {
+                            Err(format!("year out of range: {}", year))
+                        }
+                    } else {
+                        Err(format!("datetime requires integer year, got: {}", value))
+                    }
                 } else {
-                    Err(format!("datetime requires string, got: {}", value))
+                    Err(format!("datetime requires string or year, got: {}", value))
                 }
             }
             unknown => Err(format!("unknown type hint: {}", unknown)),
@@ -598,6 +629,17 @@ fn get_typed_value_type(typed: &TypedValue) -> Option<FactValueType> {
                 if let Value::String(s) = value {
                     if try_parse_datetime(s).is_some() {
                         Some(FactValueType::Time)
+                    } else {
+                        None
+                    }
+                } else if let Value::Number(n) = value {
+                    // Numeric year (e.g., 2005)
+                    if let Some(year) = n.as_i64() {
+                        if year_to_timestamp(year as i32).is_some() {
+                            Some(FactValueType::Time)
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }

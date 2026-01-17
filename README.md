@@ -394,6 +394,22 @@ The processor must pass through `source_id` and `basis_rev` from the worklist en
 
 Facts are automatically namespaced under `content.*`. The special key `hash.sha256` creates/links an object.
 
+**Type hints:** Facts can include type hints to ensure correct storage and enable modifiers:
+
+```json
+{"source_id":123,"basis_rev":0,"facts":{
+  "capture_datetime": {"value": "2024:07:23 11:06:32", "type": "datetime"},
+  "duration": {"value": 125.5, "type": "duration"}
+}}
+```
+
+| Type | Description |
+|------|-------------|
+| `datetime` | Parses date strings (ISO, EXIF format) or plain years (2005) as Unix timestamps |
+| `duration` | Parses duration strings ("1:23:45", "5:30") or numbers as seconds |
+
+Without type hints, values are stored as-is (strings as text, numbers as numbers). Type hints enable time modifiers (`\|year`, `\|month`) to work correctly on datetime facts.
+
 By default, importing facts for sources in archive roots is skipped. Use `--allow-archived` to enable this (useful for backfilling metadata on already-archived files).
 
 ---
@@ -951,6 +967,17 @@ Apply transformations to fact values using `|` syntax:
 | `lowercase` | Convert to lowercase |
 | `uppercase` | Convert to uppercase |
 | `capitalize` | Capitalize first letter |
+| `bucket` | Group numeric values into ranges (see below) |
+
+**Bucket modifier:** Groups numeric values into ranges for analysis:
+
+```bash
+# Default: magnitude-based buckets (powers of 10)
+canon facts --key 'audio.duration|bucket'        # Shows: 1-10, 10-100, 100-1K, etc.
+
+# Custom thresholds (e.g., short/medium/long audio clips)
+canon facts --key 'audio.duration|bucket(60,300,600)'  # Shows: <60, 60-300, 300-600, >600
+```
 
 ```bash
 # Files from 2024
