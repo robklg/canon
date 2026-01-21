@@ -8,7 +8,8 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::db::{build_scope_clause, canonicalize_scopes, resolve_archive_path, Connection, Db};
+use crate::db::{build_scope_clause, resolve_archive_path, Connection, Db};
+use crate::path::canonicalize_scopes;
 use crate::exclude;
 use crate::expr::{BuiltinKey, BuiltinKeyVisibility, FactType, Modifier, ModifierCategory};
 use crate::filter::{self, Filter};

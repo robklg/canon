@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use std::collections::HashMap;
 
-use crate::db::{build_scope_clause, canonicalize_scopes, populate_temp_sources, Connection, Db};
+use crate::db::{build_scope_clause, populate_temp_sources, Connection, Db};
+use crate::path::canonicalize_scopes;
 use crate::exclude;
 use crate::expr::{self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, ModifierCall, PathAccessor};
 use crate::filter::{self, Filter};

@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use crate::db::{build_scope_clause, canonicalize_scopes, Connection, Db};
+use crate::db::{build_scope_clause, Connection, Db};
+use crate::path::canonicalize_scopes;
 use crate::exclude;
 use crate::filter::{self, get_fact_value, Filter};
 

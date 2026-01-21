@@ -1,9 +1,14 @@
-//! Pure path utilities for canon.
+//! Path utilities for canon.
 //!
-//! This module contains path manipulation functions that have no I/O or database
-//! dependencies. They operate purely on path strings.
+//! This module contains:
+//! - Pure path manipulation functions (no I/O)
+//! - Path canonicalization helpers (filesystem I/O for resolving paths)
+//!
+//! No database dependencies.
 
-use std::path::Path;
+use anyhow::{Context, Result};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Check if a path is equal to or under a directory prefix.
 /// Uses Path::starts_with which correctly handles directory boundaries.
@@ -23,6 +28,37 @@ pub fn path_strip_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
         .strip_prefix(prefix)
         .ok()
         .and_then(|p| p.to_str())
+}
+
+// ============================================================================
+// Path Canonicalization (Filesystem I/O)
+// ============================================================================
+
+/// Canonicalize an optional scope path for use in SQL path matching.
+/// Returns the canonical (absolute, resolved) path as a string.
+pub fn canonicalize_scope(scope_path: Option<&Path>) -> Result<Option<String>> {
+    match scope_path {
+        Some(p) => Ok(Some(
+            fs::canonicalize(p)
+                .with_context(|| format!("Failed to resolve path: {}", p.display()))?
+                .to_string_lossy()
+                .to_string(),
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Canonicalize multiple scope paths for use in SQL path matching.
+/// Returns canonical (absolute, resolved) paths as strings.
+pub fn canonicalize_scopes(paths: &[PathBuf]) -> Result<Vec<String>> {
+    paths
+        .iter()
+        .map(|p| {
+            fs::canonicalize(p)
+                .with_context(|| format!("Failed to resolve path: {}", p.display()))
+                .map(|cp| cp.to_string_lossy().to_string())
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -2,8 +2,8 @@ use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use rusqlite::types::Value;
 
-use crate::db::{build_scope_clause, canonicalize_scopes, Connection, Db};
-use crate::path::path_strip_prefix;
+use crate::db::{build_scope_clause, Connection, Db};
+use crate::path::{canonicalize_scopes, path_strip_prefix};
 use crate::exclude;
 use crate::filter::{self, Filter};
 

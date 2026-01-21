@@ -121,9 +121,10 @@ Used with `--root`, `--archive` flags:
 
 In `path.rs`:
 - `path_is_under()`, `path_strip_prefix()` - Pure path manipulation (no I/O)
+- `canonicalize_scope()`, `canonicalize_scopes()` - Path canonicalization (filesystem I/O)
 
 In `db.rs`:
-- `canonicalize_scopes()`, `build_scope_clause()` - Path scoping for queries
+- `build_scope_clause()` - SQL clause building for path scopes
 - `parse_root_spec()` - Parse `id:N` or `path:/foo` format
 - `resolve_root_path()`, `resolve_archive_path()` - Find roots containing paths (excludes suspended roots)
 - `resolve_root_path_any()` - Find roots including suspended ones (for unsuspend command)

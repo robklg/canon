@@ -2,7 +2,8 @@ use anyhow::Result;
 use rusqlite::types::Value;
 use std::path::PathBuf;
 
-use crate::db::{build_scope_clause, canonicalize_scopes, parse_root_spec, populate_temp_sources, Db};
+use crate::db::{build_scope_clause, parse_root_spec, populate_temp_sources, Db};
+use crate::path::canonicalize_scopes;
 use crate::exclude;
 use crate::filter::{self, Filter};
 
