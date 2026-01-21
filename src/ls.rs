@@ -2,7 +2,8 @@ use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use rusqlite::types::Value;
 
-use crate::db::{build_scope_clause, Connection, Db};
+use crate::db::{Connection, Db};
+use crate::scope::{build_scope_clause, ScopeMatch};
 use crate::path::{canonicalize_scopes, path_strip_prefix};
 use crate::exclude;
 use crate::filter::{self, Filter};
@@ -207,7 +208,8 @@ fn get_matching_sources(
     };
 
     let exclude_clause = exclude::exclude_clause(include_excluded);
-    let (scope_clause, scope_params) = build_scope_clause(scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let (scope_clause, scope_params) = build_scope_clause(&scopes);
 
     loop {
         // Build params: scope params + last_id + batch_size

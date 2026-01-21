@@ -2,7 +2,8 @@ use anyhow::Result;
 use rusqlite::types::Value;
 use std::path::PathBuf;
 
-use crate::db::{build_scope_clause, parse_root_spec, populate_temp_sources, Db};
+use crate::db::{parse_root_spec, populate_temp_sources, Db};
+use crate::scope::{build_scope_clause, ScopeMatch};
 use crate::path::canonicalize_scopes;
 use crate::exclude;
 use crate::filter::{self, Filter};
@@ -152,7 +153,8 @@ fn compute_scoped_stats(
 
     // Always query all sources (no exclude filtering at query level)
     let exclude_clause = exclude::exclude_clause(true);
-    let (scope_clause, scope_params) = build_scope_clause(scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let (scope_clause, scope_params) = build_scope_clause(&scopes);
 
     // Collect all filtered source IDs
     let mut all_filtered_ids: Vec<i64> = Vec::new();

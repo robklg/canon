@@ -26,8 +26,9 @@ Canon is a CLI tool for organizing large media libraries into a "canonical archi
 ### Architecture
 
 - `src/main.rs` - CLI entry point using clap
-- `src/path.rs` - Pure path utilities (no I/O, no DB)
-- `src/db.rs` - SQLite database, schema, and scope utilities
+- `src/path.rs` - Path utilities (pure manipulation + canonicalization)
+- `src/scope.rs` - Scope domain concepts (ScopeMatch enum, SQL clause building)
+- `src/db.rs` - SQLite database infrastructure (connection, schema, transactions)
 - `src/scan.rs` - Directory scanning logic
 - `src/worklist.rs` - JSONL worklist generation for external processing
 - `src/import_facts.rs` - Fact import with staleness validation
@@ -123,8 +124,13 @@ In `path.rs`:
 - `path_is_under()`, `path_strip_prefix()` - Pure path manipulation (no I/O)
 - `canonicalize_scope()`, `canonicalize_scopes()` - Path canonicalization (filesystem I/O)
 
+In `scope.rs`:
+- `ScopeMatch` enum - Domain concept for file vs directory scope matching
+- `ScopeMatch::classify_all()` - Classify paths as exact file or directory matches
+- `build_scope_clause()` - SQL clause building (takes `&[ScopeMatch]`, no I/O)
+- `SCOPE_CLAUSE`, `scope_param()` - Helpers for single optional scope
+
 In `db.rs`:
-- `build_scope_clause()` - SQL clause building for path scopes
 - `parse_root_spec()` - Parse `id:N` or `path:/foo` format
 - `resolve_root_path()`, `resolve_archive_path()` - Find roots containing paths (excludes suspended roots)
 - `resolve_root_path_any()` - Find roots including suspended ones (for unsuspend command)

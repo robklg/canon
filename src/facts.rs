@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use std::collections::HashMap;
 
-use crate::db::{build_scope_clause, populate_temp_sources, Connection, Db};
+use crate::db::{populate_temp_sources, Connection, Db};
+use crate::scope::{build_scope_clause, ScopeMatch};
 use crate::path::canonicalize_scopes;
 use crate::exclude;
 use crate::expr::{self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, ModifierCall, PathAccessor};
@@ -183,7 +184,8 @@ fn get_matching_sources(
     };
 
     let exclude_clause = exclude::exclude_clause(include_excluded);
-    let (scope_clause, scope_params) = build_scope_clause(scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let (scope_clause, scope_params) = build_scope_clause(&scopes);
 
     loop {
         // Build params: scope params + last_id + batch_size

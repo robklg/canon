@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use crate::db::{build_scope_clause, Connection, Db};
+use crate::db::{Connection, Db};
+use crate::scope::{build_scope_clause, ScopeMatch};
 use crate::path::canonicalize_scopes;
 use crate::exclude;
 use crate::filter::{self, get_fact_value, Filter};
@@ -118,7 +119,8 @@ fn fetch_batch(
     };
 
     let exclude_clause = exclude::exclude_clause(include_excluded);
-    let (scope_clause, scope_params) = build_scope_clause(scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let (scope_clause, scope_params) = build_scope_clause(&scopes);
 
     // Build params: scope params + after_id + batch_size
     let mut params: Vec<Value> = scope_params.iter().map(|s| Value::from(s.clone())).collect();

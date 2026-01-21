@@ -3,7 +3,8 @@ use rusqlite::params;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::db::{scope_param, Db, SCOPE_CLAUSE};
+use crate::db::Db;
+use crate::scope::{scope_param, SCOPE_CLAUSE};
 use crate::path::canonicalize_scope;
 use crate::exclude;
 use crate::filter::{self, Filter};

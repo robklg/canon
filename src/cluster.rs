@@ -8,7 +8,8 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::db::{build_scope_clause, resolve_archive_path, Connection, Db};
+use crate::db::{resolve_archive_path, Connection, Db};
+use crate::scope::{build_scope_clause, ScopeMatch};
 use crate::path::canonicalize_scopes;
 use crate::exclude;
 use crate::expr::{BuiltinKey, BuiltinKeyVisibility, FactType, Modifier, ModifierCategory};
@@ -389,7 +390,8 @@ fn query_sources(
         "r.role = 'source' AND r.suspended = 0"
     };
 
-    let (scope_clause, scope_params) = build_scope_clause(scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let (scope_clause, scope_params) = build_scope_clause(&scopes);
     let params: Vec<Value> = scope_params.iter().map(|s| Value::from(s.clone())).collect();
 
     let mut source_ids: Vec<i64> = conn
