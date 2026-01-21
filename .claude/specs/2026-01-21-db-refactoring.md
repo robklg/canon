@@ -52,14 +52,24 @@ This refactoring separates these concerns to improve testability, clarity, and m
 - **Rationale**: Separates domain knowledge ("how do scopes work") from repository concerns ("how to query SQLite"). Enables future support for different storage backends.
 
 ### Phase 4: Clean Repository Boundary
-- **Status**: pending
+- **Status**: completed
 - **Goal**: `db.rs` becomes purely about SQLite infrastructure
 - **Scope**:
+  - Create `src/root.rs` with:
+    - `RootSpec` enum (`ById`, `ByPath`) — domain concept for how users identify roots
+    - `RootSpec::parse()` — pure parsing of spec strings
+    - `find_containing_root()` — pure function to match paths against root candidates
+  - Move orchestration functions to `root.rs`:
+    - `parse_root_spec()`, `parse_root_spec_any()` — refactored to use `RootSpec::parse()`
+    - `resolve_root_path()`, `resolve_root_path_any()` — refactored to use `find_containing_root()`
+    - `resolve_archive_path()` — thin wrapper with role validation
   - `db.rs` retains only: `Db` struct, `open()`, `SCHEMA`, `populate_temp_sources()`
-  - Evaluate `parse_root_spec*` and `resolve_root_path*`:
-    - These mix filesystem I/O + DB queries + domain rules
-    - Consider extracting to `root.rs` (domain) or keeping as application-layer orchestration
-- **Non-goals**: TBD based on Phase 3 learnings
+  - Update imports in `main.rs`, `roots.rs`, `scan.rs`, `cluster.rs`, `coverage.rs`, `apply.rs`
+- **Non-goals**:
+  - Not abstracting DB queries behind traits (Phase 5 territory)
+  - Not abstracting filesystem operations
+  - Not changing public API signatures of orchestration functions
+- **Rationale**: Follows `scope.rs` pattern — extract domain concepts (`RootSpec`, `find_containing_root`) as pure functions, keep orchestration in the same module. Enables unit testing of domain logic.
 - **Dependencies**: Phase 3
 
 ### Phase 5: (Future, Optional) Directory Structure
@@ -85,6 +95,7 @@ This refactoring separates these concerns to improve testability, clarity, and m
   - **Application layer**: Command modules orchestrating domain + repository
 - **Incremental approach**: Flat modules first (`scope.rs`, `root.rs`), directory structure (`domain/`, `repository/`) only if complexity warrants
 - **Scope domain concept**: `ScopeMatch` enum separates "what kind of match" (domain) from "how to express in SQL" (repository), enabling future storage backends
+- **Root domain concept**: `RootSpec` enum represents how users identify roots (by ID or path), independent of storage. `find_containing_root()` is pure matching logic, enabling unit testing and future storage backends
 
 ## Test Requirements
 
@@ -121,3 +132,18 @@ This refactoring separates these concerns to improve testability, clarity, and m
 - `scope_param_with_value`: Returns path when present ✓
 - `scope_param_without_value`: Returns "" when None ✓
 - Verified all 40 tests pass
+
+#### Phase 4 (completed)
+- `parse_root_spec_by_id`: Parse "id:123" format ✓
+- `parse_root_spec_by_id_zero`: Parse "id:0" (edge case) ✓
+- `parse_root_spec_by_path`: Parse "path:/foo/bar" format ✓
+- `parse_root_spec_by_path_relative`: Relative paths accepted (caller canonicalizes) ✓
+- `parse_root_spec_invalid_id`: Non-numeric ID returns error ✓
+- `parse_root_spec_invalid_format`: Invalid format returns error ✓
+- `find_containing_root_exact_match`: Path exactly matches root ✓
+- `find_containing_root_under_root`: Path under root returns relative path ✓
+- `find_containing_root_not_found`: Path not under any root returns None ✓
+- `find_containing_root_not_under_similar_prefix`: `/a/bc` not under `/a/b` ✓
+- `find_containing_root_multiple_roots_first_match`: First matching root wins ✓
+- `find_containing_root_empty_roots`: Empty roots list returns None ✓
+- Verified all 52 tests pass

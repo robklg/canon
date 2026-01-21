@@ -1,11 +1,9 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 pub use rusqlite::Connection;
 use std::fs;
 use std::ops::Deref;
 use std::path::Path;
 use std::time::Duration;
-
-use crate::path::path_strip_prefix;
 
 /// Database context that wraps a Connection with optional SQL debug logging
 pub struct Db {
@@ -143,123 +141,4 @@ pub fn populate_temp_sources(conn: &mut Connection, source_ids: &[i64]) -> Resul
     }
     tx.commit()?;
     Ok(())
-}
-
-/// Parse root spec (id:N or path:/path) with optional role validation.
-/// Excludes suspended roots. Use parse_root_spec_any() to include them.
-pub fn parse_root_spec(conn: &Connection, spec: &str, required_role: Option<&str>) -> Result<i64> {
-    parse_root_spec_impl(conn, spec, required_role, false)
-}
-
-/// Parse root spec including suspended roots. Used for suspend/unsuspend commands.
-pub fn parse_root_spec_any(conn: &Connection, spec: &str) -> Result<i64> {
-    parse_root_spec_impl(conn, spec, None, true)
-}
-
-fn parse_root_spec_impl(
-    conn: &Connection,
-    spec: &str,
-    required_role: Option<&str>,
-    include_suspended: bool,
-) -> Result<i64> {
-    let suspended_clause = if include_suspended { "" } else { " AND suspended = 0" };
-
-    let (id, role) = if let Some(id_str) = spec.strip_prefix("id:") {
-        let id: i64 = id_str.parse().context("Invalid root ID")?;
-        let query = format!("SELECT role FROM roots WHERE id = ?{}", suspended_clause);
-        let role: String = conn
-            .query_row(&query, [id], |row| row.get(0))
-            .with_context(|| format!("No root with id {}", id))?;
-        (id, role)
-    } else if let Some(path) = spec.strip_prefix("path:") {
-        let realpath = fs::canonicalize(path)
-            .with_context(|| format!("Failed to resolve path: {}", path))?;
-        let realpath_str = realpath
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
-        let query = format!(
-            "SELECT id, role FROM roots WHERE path = ?{}",
-            suspended_clause
-        );
-        let (id, role): (i64, String) = conn
-            .query_row(&query, [realpath_str], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .with_context(|| format!("No root for path: {}", path))?;
-        (id, role)
-    } else {
-        bail!("Invalid format '{}'. Use id:<N> or path:<path>", spec);
-    };
-
-    if let Some(req_role) = required_role {
-        if role != req_role {
-            bail!("Root {} has role '{}', expected '{}'", id, role, req_role);
-        }
-    }
-    Ok(id)
-}
-
-/// Resolve a path to its containing root (any role) and relative subdir.
-/// Excludes suspended roots. Use resolve_root_path_any() to include them.
-/// Returns Some((root_id, root_path, role, relative_subdir)) if inside a root, None otherwise.
-pub fn resolve_root_path(conn: &Connection, path: &Path) -> Result<Option<(i64, String, String, String)>> {
-    resolve_root_path_impl(conn, path, false)
-}
-
-/// Resolve a path to its containing root, including suspended roots.
-/// Used for internal operations like unsuspend and overlap checking.
-pub fn resolve_root_path_any(conn: &Connection, path: &Path) -> Result<Option<(i64, String, String, String)>> {
-    resolve_root_path_impl(conn, path, true)
-}
-
-fn resolve_root_path_impl(
-    conn: &Connection,
-    path: &Path,
-    include_suspended: bool,
-) -> Result<Option<(i64, String, String, String)>> {
-    let canon_path = fs::canonicalize(path)
-        .with_context(|| format!("Failed to resolve path: {}", path.display()))?;
-    let path_str = canon_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
-
-    let query = if include_suspended {
-        "SELECT id, path, role FROM roots"
-    } else {
-        "SELECT id, path, role FROM roots WHERE suspended = 0"
-    };
-    let mut stmt = conn.prepare(query)?;
-    let roots: Vec<(i64, String, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    for (id, root_path, role) in roots {
-        if path_str == root_path {
-            return Ok(Some((id, root_path, role, String::new())));
-        }
-        if let Some(rel) = path_strip_prefix(path_str, &root_path) {
-            return Ok(Some((id, root_path, role, rel.to_string())));
-        }
-    }
-
-    Ok(None)
-}
-
-/// Resolve a path to its containing archive root and relative subdir.
-/// Unlike parse_root_spec which requires exact root match, this accepts any path
-/// inside an archive root and extracts the relative portion.
-/// Returns (root_id, root_path, relative_subdir) or error if not in an archive.
-pub fn resolve_archive_path(conn: &Connection, path: &Path) -> Result<(i64, String, String)> {
-    match resolve_root_path(conn, path)? {
-        Some((id, root_path, role, rel)) if role == "archive" => Ok((id, root_path, rel)),
-        Some((_, _, role, _)) => bail!(
-            "Path '{}' is inside a {} root, not an archive",
-            path.display(),
-            role
-        ),
-        None => bail!(
-            "Path '{}' is not inside any registered archive root",
-            path.display()
-        ),
-    }
 }

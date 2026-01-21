@@ -28,6 +28,7 @@ Canon is a CLI tool for organizing large media libraries into a "canonical archi
 - `src/main.rs` - CLI entry point using clap
 - `src/path.rs` - Path utilities (pure manipulation + canonicalization)
 - `src/scope.rs` - Scope domain concepts (ScopeMatch enum, SQL clause building)
+- `src/root.rs` - Root domain concepts (RootSpec enum, root resolution)
 - `src/db.rs` - SQLite database infrastructure (connection, schema, transactions)
 - `src/scan.rs` - Directory scanning logic
 - `src/worklist.rs` - JSONL worklist generation for external processing
@@ -130,10 +131,16 @@ In `scope.rs`:
 - `build_scope_clause()` - SQL clause building (takes `&[ScopeMatch]`, no I/O)
 - `SCOPE_CLAUSE`, `scope_param()` - Helpers for single optional scope
 
+In `root.rs`:
+- `RootSpec` enum - Domain concept for how users identify roots (`id:N` or `path:/foo`)
+- `RootSpec::parse()` - Parse root spec string (pure, no I/O)
+- `find_containing_root()` - Match a path against candidate roots (pure, no I/O)
+- `parse_root_spec()`, `parse_root_spec_any()` - Parse and resolve root specs (orchestration)
+- `resolve_root_path()`, `resolve_root_path_any()` - Find roots containing paths (orchestration)
+- `resolve_archive_path()` - Find archive root containing a path
+
 In `db.rs`:
-- `parse_root_spec()` - Parse `id:N` or `path:/foo` format
-- `resolve_root_path()`, `resolve_archive_path()` - Find roots containing paths (excludes suspended roots)
-- `resolve_root_path_any()` - Find roots including suspended ones (for unsuspend command)
+- `Db` struct, `open()` - Database connection and initialization
 - `populate_temp_sources()` - Batch insert pattern for large ID sets
 
 In other modules:
@@ -146,6 +153,27 @@ In other modules:
 - Incremental workflow (scan -> enrich -> cluster -> apply)
 - Human-editable manifest files (.toml)
 - basis_rev tracks file state changes for staleness detection
+
+### Architectural Direction
+
+The codebase is evolving toward a clean architecture with separated concerns, prioritizing **reliability through testability**:
+
+- **Domain layer**: Pure concepts and rules (`ScopeMatch`, `RootSpec`, `find_containing_root`)
+- **Infrastructure layer**: Storage and filesystem adapters (`db.rs`, canonicalization)
+- **Application layer**: Command modules orchestrating domain + infrastructure
+
+**Established pattern** (see `scope.rs`, `root.rs`):
+1. Extract domain concepts as enums and pure functions (no I/O, unit-testable)
+2. Keep orchestration functions in the same module (combine domain + infrastructure)
+3. Callers do I/O first, then pass results to pure domain functions
+
+**Why this matters for reliability:**
+- Pure domain functions can be thoroughly unit-tested with known inputs/outputs
+- Command modules depend on a common set of well-tested, proven-correct functions
+- Bugs in core logic (path matching, scope resolution) are caught by tests, not users
+- New commands automatically benefit from battle-tested domain functions
+
+This separation also enables future flexibility (e.g., different storage backends, cloud filesystem support) without requiring rewrites. The refactoring started with `db.rs` to establish the pattern. See `.claude/specs/2026-01-21-db-refactoring.md` for the refactoring history and design decisions.
 
 ### CLI Conventions
 

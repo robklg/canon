@@ -13,6 +13,7 @@ mod filter;
 mod import_facts;
 mod ls;
 mod path;
+mod root;
 mod roots;
 mod scan;
 mod scope;
@@ -509,7 +510,7 @@ fn main() -> anyhow::Result<()> {
             // Also detect if scope is inside an archive root to auto-include archived sources
             let (scope_paths, use_relative, auto_include_archived) = if paths.is_empty() {
                 let cwd = std::env::current_dir()?;
-                match db::resolve_root_path(db.conn(), &cwd)? {
+                match root::resolve_root_path(db.conn(), &cwd)? {
                     Some((_, _, role, _)) => (vec![cwd], true, role == "archive"),
                     None => (vec![], false, false),
                 }
@@ -517,7 +518,7 @@ fn main() -> anyhow::Result<()> {
                 let use_rel = !paths.first().map(|p| p.starts_with("/")).unwrap_or(false);
                 // Check if any explicit path is inside an archive root
                 let any_archive = paths.iter().any(|p| {
-                    db::resolve_root_path(db.conn(), p)
+                    root::resolve_root_path(db.conn(), p)
                         .ok()
                         .flatten()
                         .map(|(_, _, role, _)| role == "archive")

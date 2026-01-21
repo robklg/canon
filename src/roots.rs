@@ -4,7 +4,8 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::{parse_root_spec, parse_root_spec_any, Db};
+use crate::db::Db;
+use crate::root::{parse_root_spec, parse_root_spec_any};
 
 pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
     let conn = db.conn();
