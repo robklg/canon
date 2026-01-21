@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cluster::{LockEntry, ManifestConfig};
-use crate::db::{parse_root_spec, path_strip_prefix, Connection, Db};
+use crate::db::{parse_root_spec, Connection, Db};
+use crate::path::path_strip_prefix;
 use crate::exclude;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
 use crate::scan::compute_partial_hash;

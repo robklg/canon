@@ -5,6 +5,8 @@ use std::ops::Deref;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::path::path_strip_prefix;
+
 /// Database context that wraps a Connection with optional SQL debug logging
 pub struct Db {
     conn: Connection,
@@ -328,22 +330,3 @@ pub fn build_scope_clause(prefixes: &[String]) -> (String, Vec<String>) {
     (clause, params)
 }
 
-/// Check if a path is equal to or under a directory prefix.
-/// Uses Path::starts_with which correctly handles directory boundaries.
-/// Example: path_is_under("/a/bc/d", "/a/b") → false
-///          path_is_under("/a/b/d", "/a/b") → true
-pub fn path_is_under(path: &str, prefix: &str) -> bool {
-    Path::new(path).starts_with(prefix)
-}
-
-/// Strip a directory prefix from a path, returning the relative portion.
-/// Uses Path::strip_prefix which correctly handles directory boundaries.
-/// Returns None if path is not under prefix.
-/// Example: path_strip_prefix("/a/b/c", "/a/b") → Some("c")
-///          path_strip_prefix("/a/bc", "/a/b") → None
-pub fn path_strip_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
-    Path::new(path)
-        .strip_prefix(prefix)
-        .ok()
-        .and_then(|p| p.to_str())
-}

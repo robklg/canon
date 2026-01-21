@@ -4,7 +4,8 @@ use rusqlite::types::Value;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::{build_scope_clause, canonicalize_scopes, path_is_under, Connection, Db};
+use crate::db::{build_scope_clause, canonicalize_scopes, Connection, Db};
+use crate::path::path_is_under;
 use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;

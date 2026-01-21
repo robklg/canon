@@ -12,6 +12,7 @@ mod facts;
 mod filter;
 mod import_facts;
 mod ls;
+mod path;
 mod roots;
 mod scan;
 mod worklist;

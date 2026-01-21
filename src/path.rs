@@ -1,0 +1,94 @@
+//! Pure path utilities for canon.
+//!
+//! This module contains path manipulation functions that have no I/O or database
+//! dependencies. They operate purely on path strings.
+
+use std::path::Path;
+
+/// Check if a path is equal to or under a directory prefix.
+/// Uses Path::starts_with which correctly handles directory boundaries.
+/// Example: path_is_under("/a/bc/d", "/a/b") → false
+///          path_is_under("/a/b/d", "/a/b") → true
+pub fn path_is_under(path: &str, prefix: &str) -> bool {
+    Path::new(path).starts_with(prefix)
+}
+
+/// Strip a directory prefix from a path, returning the relative portion.
+/// Uses Path::strip_prefix which correctly handles directory boundaries.
+/// Returns None if path is not under prefix.
+/// Example: path_strip_prefix("/a/b/c", "/a/b") → Some("c")
+///          path_strip_prefix("/a/bc", "/a/b") → None
+pub fn path_strip_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    Path::new(path)
+        .strip_prefix(prefix)
+        .ok()
+        .and_then(|p| p.to_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // path_is_under tests
+
+    #[test]
+    fn path_is_under_exact_match() {
+        assert!(path_is_under("/a/b", "/a/b"));
+    }
+
+    #[test]
+    fn path_is_under_child() {
+        assert!(path_is_under("/a/b/c", "/a/b"));
+    }
+
+    #[test]
+    fn path_is_under_deep_child() {
+        assert!(path_is_under("/a/b/c/d/e", "/a/b"));
+    }
+
+    #[test]
+    fn path_is_under_false_positive_prevention() {
+        // Critical: /a/bc is NOT under /a/b (different directory)
+        assert!(!path_is_under("/a/bc", "/a/b"));
+        assert!(!path_is_under("/a/bc/d", "/a/b"));
+    }
+
+    #[test]
+    fn path_is_under_unrelated() {
+        assert!(!path_is_under("/x/y/z", "/a/b"));
+    }
+
+    #[test]
+    fn path_is_under_root() {
+        assert!(path_is_under("/a/b/c", "/"));
+    }
+
+    // path_strip_prefix tests
+
+    #[test]
+    fn path_strip_prefix_basic() {
+        assert_eq!(path_strip_prefix("/a/b/c", "/a/b"), Some("c"));
+    }
+
+    #[test]
+    fn path_strip_prefix_deep() {
+        assert_eq!(path_strip_prefix("/a/b/c/d", "/a/b"), Some("c/d"));
+    }
+
+    #[test]
+    fn path_strip_prefix_exact_match() {
+        // When path equals prefix, result is empty string
+        assert_eq!(path_strip_prefix("/a/b", "/a/b"), Some(""));
+    }
+
+    #[test]
+    fn path_strip_prefix_not_under() {
+        // /a/bc is not under /a/b
+        assert_eq!(path_strip_prefix("/a/bc", "/a/b"), None);
+    }
+
+    #[test]
+    fn path_strip_prefix_unrelated() {
+        assert_eq!(path_strip_prefix("/x/y", "/a/b"), None);
+    }
+}

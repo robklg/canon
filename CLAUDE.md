@@ -26,7 +26,8 @@ Canon is a CLI tool for organizing large media libraries into a "canonical archi
 ### Architecture
 
 - `src/main.rs` - CLI entry point using clap
-- `src/db.rs` - SQLite database, schema, and shared path/scope utilities
+- `src/path.rs` - Pure path utilities (no I/O, no DB)
+- `src/db.rs` - SQLite database, schema, and scope utilities
 - `src/scan.rs` - Directory scanning logic
 - `src/worklist.rs` - JSONL worklist generation for external processing
 - `src/import_facts.rs` - Fact import with staleness validation
@@ -118,9 +119,11 @@ Used with `--root`, `--archive` flags:
 
 ### Shared Utilities
 
+In `path.rs`:
+- `path_is_under()`, `path_strip_prefix()` - Pure path manipulation (no I/O)
+
 In `db.rs`:
 - `canonicalize_scopes()`, `build_scope_clause()` - Path scoping for queries
-- `path_is_under()`, `path_strip_prefix()` - Path manipulation
 - `parse_root_spec()` - Parse `id:N` or `path:/foo` format
 - `resolve_root_path()`, `resolve_archive_path()` - Find roots containing paths (excludes suspended roots)
 - `resolve_root_path_any()` - Find roots including suspended ones (for unsuspend command)
