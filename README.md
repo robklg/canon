@@ -31,21 +31,14 @@ cp target/release/canon /usr/local/bin/
 
 ## Documentation
 
-Full documentation is available in the `docs/` directory. To view it locally:
-
-```bash
-cargo install mdbook
-mdbook serve docs/
-```
-
-Then open [http://localhost:3000](http://localhost:3000) in your browser.
+Full documentation is available at **[robklg.github.io/canon](https://robklg.github.io/canon/)**.
 
 The documentation covers:
 
-- [Setup](docs/src/setup.md) and [Getting Started](docs/src/getting-started.md)
-- [Core concepts](docs/src/concepts/index.md): roots, sources, objects, and facts
-- [Command reference](docs/src/commands/index.md): scan, enrich, query, and archive
-- [Filter syntax](docs/src/reference/filter.md) and [pattern expressions](docs/src/reference/expr.md)
+- Setup and getting started
+- Core concepts: roots, sources, objects, and facts
+- Command reference: scan, enrich, query, and archive
+- Filter syntax and pattern expressions
 
 ## Quick Example
 
