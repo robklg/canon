@@ -40,6 +40,6 @@ Canon uses the source-object relationship to track archiving progress:
 By default, Canon hashes all files during scanning. Since hashing can be time-consuming for large collections, you can:
 
 - Use `--no-hash` during scan to skip hashing initially
-- Hash selectively via the [enrichment pipeline](../commands/enrich.md), targeting specific file types
+- Hash selectively via the [enrichment pipeline](../commands/enrich/index.md), targeting specific file types
 
 Unhashed sources cannot be linked to objects, so they cannot be deduplicated or tracked for archive coverage.

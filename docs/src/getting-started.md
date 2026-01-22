@@ -28,7 +28,7 @@ canon worklist --where 'source.ext|lowercase IN (jpg, jpeg, heic, mov, mp4)' \
   | canon import-facts
 ```
 
-See [Enriching](commands/enrich.md) for details on the worklist/import pipeline.
+See [Enriching](commands/enrich/index.md) for details on the worklist/import pipeline.
 
 ## Querying
 

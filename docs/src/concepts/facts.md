@@ -10,7 +10,7 @@ Facts are key-value metadata attached to [sources](source.md) or [objects](objec
 - `source.mtime` - Modification timestamp
 - `content.hash.sha256` - Content hash (when computed)
 
-**Imported facts** come from external tools via the [enrichment pipeline](../commands/enrich.md):
+**Imported facts** come from external tools via the [enrichment pipeline](../commands/enrich/index.md):
 - EXIF metadata: `content.Make`, `content.Model`, `content.DateTimeOriginal`
 - Geolocation: `content.geo.city`, `content.geo.country`
 - Media info: `content.mime`, `content.duration`
@@ -33,4 +33,4 @@ Canon stores facts as:
 - **Numbers**: Integers or decimals like `1024` or `3.14`
 - **Timestamps**: Unix timestamps, enabling date modifiers like `|year` and `|month`
 
-Type hints can be provided during import to ensure correct parsing. See [Enriching](../commands/enrich.md) for details.
+Type hints can be provided during import to ensure correct parsing. See [Enriching](../commands/enrich/index.md) for details.
