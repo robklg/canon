@@ -81,11 +81,13 @@ Example using aliases:
 
 ## Missing Values
 
-If a fact is missing for a source, the expression evaluates to an empty string. This can cause unexpected path collisions. To avoid issues:
+Canon requires all facts used in a pattern to have values for every source. If any source is missing a required fact, `canon apply` will refuse to proceed and report which facts are missing.
 
-1. Use facts with 100% coverage (shown in `canon cluster generate` output)
-2. Include `{hash_short}` as a collision-avoiding prefix
-3. Check coverage with `canon facts --key <key>` before using in patterns
+When you run `canon cluster generate`, the manifest includes comments listing all facts with 100% coverage—these are safe to use in your pattern.
+
+If sources are missing required facts, you can:
+- Filter them out during generation: `--where 'DateTimeOriginal?'`
+- Import the missing facts via the [enrichment pipeline](../commands/enrich/index.md)
 
 ## Common Patterns
 
