@@ -1,0 +1,13 @@
+# Source
+
+A **source** is a file discovered on disk during scanning. Canon tracks:
+
+- **Location**: Root path + relative path within the root
+- **Identity**: Device ID and inode for move detection
+- **Metadata**: Size and modification time
+- **Integrity**: Partial hash (first + last 8KB) for validation during transfers
+- **State**: A `basis_rev` counter that increments when size or mtime changes
+
+Sources represent where files are found. Multiple sources can point to the same content (see [Object](object.md)) when files are duplicated across locations.
+
+When a source is scanned with hashing enabled (the default), Canon computes its SHA-256 hash and links it to an [object](object.md). This enables deduplication and archive tracking.

@@ -1,0 +1,117 @@
+# Filter Syntax
+
+Filters select sources based on facts using a boolean expression language. Most commands accept `--where` to filter which sources they operate on. Multiple `--where` flags are combined with AND.
+
+## Operators
+
+### Basic
+
+| Syntax | Meaning |
+|--------|---------|
+| `key?` | Fact exists |
+| `key=value` | Fact equals value (case-sensitive) |
+| `key!=value` | Fact doesn't equal value (case-sensitive) |
+| `key~pattern` | Glob pattern match (case-sensitive) |
+| `key!~pattern` | Glob pattern doesn't match |
+| `key>value` | Greater than (numbers/dates) |
+| `key>=value` | Greater or equal |
+| `key<value` | Less than |
+| `key<=value` | Less or equal |
+| `key IN (v1, v2, ...)` | Fact matches any value in list |
+| `key NOT IN (v1, v2, ...)` | Fact doesn't match any value in list |
+
+### Glob Patterns
+
+The `~` operator supports shell-style glob patterns:
+
+| Pattern | Meaning |
+|---------|---------|
+| `*` | Match zero or more characters |
+| `?` | Match exactly one character |
+| `[abc]` | Match any character in set |
+| `[a-z]` | Match character range |
+| `[!abc]` | Match any character NOT in set |
+| `\*` | Literal asterisk (escape) |
+
+```bash
+# Files starting with IMG_
+--where 'filename~"IMG_*"'
+
+# Files with 3-letter extension
+--where 'source.ext~"???"'
+
+# Files in a year subdirectory
+--where 'source.rel_path~"*/2024/*"'
+
+# Exclude temp files
+--where 'filename!~"*.tmp"'
+```
+
+## Boolean Operators
+
+| Syntax | Meaning |
+|--------|---------|
+| `expr AND expr` | Both conditions must match |
+| `expr OR expr` | Either condition matches |
+| `NOT expr` | Negates the condition |
+| `(expr)` | Grouping for precedence |
+
+Operator precedence (highest to lowest): NOT, AND, OR. Use parentheses to override.
+
+## Using Modifiers
+
+Modifiers can be applied to fact keys using the `|` syntax. See [Facts](facts.md#modifiers) for the complete list.
+
+```bash
+# Files from 2024
+--where 'source.mtime|year=2024'
+
+# January photos
+--where 'content.DateTimeOriginal|month=1'
+
+# Case-insensitive extension matching
+--where 'source.ext|lowercase=jpg'
+
+# Case-insensitive glob
+--where 'filename|lowercase~"img_*"'
+```
+
+### Examples
+
+```bash
+# Files with a content hash
+--where 'content.hash.sha256?'
+
+# Files missing a content hash
+--where 'NOT content.hash.sha256?'
+
+# JPG files only
+--where 'source.ext=jpg'
+
+# JPG or PNG files
+--where 'source.ext=jpg OR source.ext=png'
+
+# Common image formats
+--where 'source.ext IN (jpg, png, gif, webp)'
+
+# Exclude certain extensions
+--where 'source.ext NOT IN (tmp, bak, log)'
+
+# Not temporary files
+--where 'NOT source.ext=tmp'
+
+# iPhone photos (content. prefix is optional)
+--where 'Make=Apple'
+
+# Files larger than 1MB
+--where 'source.size>1000000'
+
+# Files modified in 2024 or later
+--where 'source.mtime>=2024-01-01'
+
+# Large images (combining with parentheses)
+--where '(source.ext=jpg OR source.ext=png) AND source.size>1000000'
+
+# Multiple --where flags combine with AND
+--where 'source.ext=jpg' --where 'content.Make=Apple'
+```
