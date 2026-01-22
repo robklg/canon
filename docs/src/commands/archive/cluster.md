@@ -86,6 +86,8 @@ pattern = "{content.Make}/{content.Model}/{filename}"
 pattern = "{source.ext}/{filename}"
 ```
 
+See [Pattern Expressions](../../reference/expr.md) for the full syntax reference, including modifiers, path accessors, and aliases.
+
 ## Refreshing the Lock File
 
 Use `canon cluster refresh` to update the lock file if sources have changed since the manifest was generated:

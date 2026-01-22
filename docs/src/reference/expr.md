@@ -2,6 +2,8 @@
 
 Pattern expressions define how files are organized in archives. They use `{expr}` syntax to insert dynamic values based on facts.
 
+Patterns are used in the `pattern` field of [cluster manifests](../commands/archive/cluster.md). When you run `canon cluster generate`, it creates a manifest with a default `pattern = "{filename}"` that you can customize.
+
 ## Basic Syntax
 
 Patterns consist of literal path segments and expressions in curly braces:
