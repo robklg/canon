@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use std::fs;
 use std::path::Path;
 
-use crate::path::path_strip_prefix;
+use crate::path::{canonicalize_maybe_missing, path_strip_prefix};
 
 // ============================================================================
 // Domain Concepts (pure, no I/O)
@@ -182,20 +182,45 @@ fn resolve_root_path_impl(
 /// Resolve a path to its containing archive root and relative subdir.
 /// Unlike parse_root_spec which requires exact root match, this accepts any path
 /// inside an archive root and extracts the relative portion.
+/// The path does not need to exist - only an ancestor within an archive root must exist.
 /// Returns (root_id, root_path, relative_subdir) or error if not in an archive.
 pub fn resolve_archive_path(conn: &Connection, path: &Path) -> Result<(i64, String, String)> {
-    match resolve_root_path(conn, path)? {
-        Some((id, root_path, role, rel)) if role == "archive" => Ok((id, root_path, rel)),
-        Some((_, _, role, _)) => bail!(
-            "Path '{}' is inside a {} root, not an archive",
-            path.display(),
-            role
-        ),
-        None => bail!(
-            "Path '{}' is not inside any registered archive root",
-            path.display()
-        ),
+    // Canonicalize path (allowing non-existent subdirs)
+    let path_str = canonicalize_maybe_missing(path)?;
+
+    // Find matching archive root
+    let mut stmt = conn.prepare("SELECT id, path, role FROM roots WHERE suspended = 0")?;
+    let roots: Vec<(i64, String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (id, root_path, role) in roots {
+        if path_str == root_path {
+            if role != "archive" {
+                bail!(
+                    "Path '{}' is inside a {} root, not an archive",
+                    path.display(),
+                    role
+                );
+            }
+            return Ok((id, root_path, String::new()));
+        }
+        if let Some(rel) = path_strip_prefix(&path_str, &root_path) {
+            if role != "archive" {
+                bail!(
+                    "Path '{}' is inside a {} root, not an archive",
+                    path.display(),
+                    role
+                );
+            }
+            return Ok((id, root_path, rel.to_string()));
+        }
     }
+
+    bail!(
+        "Path '{}' is not inside any registered archive root",
+        path.display()
+    )
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@
 //!
 //! No database dependencies.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -59,6 +59,40 @@ pub fn canonicalize_scopes(paths: &[PathBuf]) -> Result<Vec<String>> {
                 .map(|cp| cp.to_string_lossy().to_string())
         })
         .collect()
+}
+
+/// Canonicalize a path that may not exist yet by finding the nearest existing
+/// ancestor and appending the remaining components.
+pub fn canonicalize_maybe_missing(path: &Path) -> Result<String> {
+    // Try canonicalizing the full path first
+    if let Ok(canon) = fs::canonicalize(path) {
+        return Ok(canon.to_string_lossy().to_string());
+    }
+
+    // Walk up to find existing ancestor
+    let mut existing = path.to_path_buf();
+    let mut missing_parts = Vec::new();
+
+    while !existing.exists() {
+        if let Some(name) = existing.file_name() {
+            missing_parts.push(name.to_os_string());
+        }
+        if !existing.pop() {
+            bail!("Cannot resolve path: {}", path.display());
+        }
+    }
+
+    // Canonicalize the existing part
+    let canon_existing = fs::canonicalize(&existing)
+        .with_context(|| format!("Failed to resolve path: {}", existing.display()))?;
+
+    // Append missing parts
+    let mut result = canon_existing;
+    for part in missing_parts.into_iter().rev() {
+        result.push(part);
+    }
+
+    Ok(result.to_string_lossy().to_string())
 }
 
 #[cfg(test)]
