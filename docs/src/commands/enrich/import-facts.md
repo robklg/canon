@@ -33,21 +33,44 @@ The special key `hash.sha256` creates or links an object, enabling deduplication
 
 ## Type Hints
 
-Facts can include type hints to ensure correct storage and enable modifiers:
+**Types matter.** Canon stores facts as text, numbers, or timestamps. The type determines what operations work on a fact:
+
+- **Timestamps** enable date modifiers (`|year`, `|month`, `|date`) and date comparisons (`>=2024-01-01`)
+- **Numbers** enable numeric comparisons (`>1000`, `<=5.0`) and the `|bucket` modifier
+- **Text** enables string matching (`=`, `~` glob) and string modifiers (`|lowercase`, `|stem`)
+
+If a datetime like `"2024:07:23 11:06:32"` is stored as text instead of a timestamp, queries like `--where 'DateTimeOriginal|year=2024'` won't work—the modifier expects a timestamp, not a string.
+
+### Providing Type Hints
+
+Wrap values in an object with `value` and `type`:
 
 ```json
 {"source_id":123,"basis_rev":0,"facts":{
-  "capture_datetime": {"value": "2024:07:23 11:06:32", "type": "datetime"},
-  "duration": {"value": 125.5, "type": "duration"}
+  "DateTimeOriginal": {"value": "2024:07:23 11:06:32", "type": "datetime"},
+  "duration": {"value": "1:23:45", "type": "duration"},
+  "rating": 5
 }}
 ```
 
-| Type | Description |
-|------|-------------|
-| `datetime` | Parses date strings (ISO, EXIF format) or plain years (2005) as Unix timestamps |
-| `duration` | Parses duration strings ("1:23:45", "5:30") or numbers as seconds |
+| Type | Parses | Stored As |
+|------|--------|-----------|
+| `datetime` | ISO dates, EXIF format, plain years (`2024`) | Unix timestamp |
+| `duration` | `"1:23:45"`, `"5:30"`, or seconds as number | Seconds (number) |
+| *(none)* | Strings as text, numbers as numbers | As-is |
 
-Without type hints, values are stored as-is (strings as text, numbers as numbers). Type hints enable time modifiers (`|year`, `|month`) to work correctly on datetime facts.
+### Common Pitfalls
+
+**Dates as strings:** EXIF dates from tools like `exiftool` come as strings (`"2024:07:23 11:06:32"`). Without a type hint, they're stored as text and time modifiers won't work. Always use `"type": "datetime"` for date fields.
+
+**Mixed types:** A fact key must have a consistent type across all sources. You cannot store `DateTimeOriginal` as text for some files and as a timestamp for others. If you initially imported facts with the wrong type and need to re-import with the correct type, first delete the existing entries:
+
+```bash
+# Delete all DateTimeOriginal facts that were stored as text
+canon facts delete --key content.DateTimeOriginal --type text
+```
+
+Then re-run your processor with proper type hints.
 
 ## Archive Sources
 

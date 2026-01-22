@@ -103,8 +103,34 @@ canon worklist \
 
 Processors can access previously imported facts via the `--emit` flag on worklist. See [Emitting Existing Facts](worklist.md#emitting-existing-facts) for details.
 
+## Type Hints
+
+**Important:** The type of a fact determines what operations work on it:
+
+- **Timestamps** enable `|year`, `|month` modifiers and date comparisons (`>=2024-01-01`)
+- **Numbers** enable numeric comparisons (`>1000`) and `|bucket` modifier
+- **Text** enables string matching and `|lowercase`, `|stem` modifiers
+
+If your processor outputs dates as strings or numbers as strings, add type hints:
+
+```json
+{"source_id":123,"basis_rev":0,"facts":{
+  "DateTimeOriginal": {"value": "2024:07:23 11:06:32", "type": "datetime"},
+  "duration": {"value": "1:23:45", "type": "duration"},
+  "width": 1920
+}}
+```
+
+Without `"type": "datetime"`, a date string like `"2024:07:23 11:06:32"` is stored as text and `--where 'DateTimeOriginal|year=2024'` won't work.
+
+Numbers from JSON are automatically stored as numbers. But if your extractor outputs `"width": "1920"` (a string), numeric comparisons like `--where 'width>1000'` won't work as expected.
+
+See [import-facts](import-facts.md#type-hints) for full details.
+
 ## Tips
 
 - Always pass through `source_id` and `basis_rev` unchanged
 - Use `jq -c` for compact JSON output (one object per line)
 - Handle errors gracefully—skip files that can't be processed
+- Use type hints for datetime fields so modifiers work correctly
+- Ensure numbers are actual JSON numbers, not quoted strings
