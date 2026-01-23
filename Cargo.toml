@@ -1,7 +1,21 @@
 [package]
-name = "canon"
+name = "canon-archive"
 version = "0.1.0"
+description = "A CLI tool for organizing large media libraries into a canonical archive"
+documentation = "https://robklg.github.io/canon/"
+repository = "https://github.com/robklg/canon"
+authors = [
+    "Robby klein Gunnewiek <rob.kleingunnewiek@gmail.com>"
+]
+license = "GPL-3.0"
+readme = "README.md"
+keywords = ["archiving", "archive", "organizing", "asset-management"]
+categories = ["command-line-utilities", "filesystem"]
 edition = "2021"
+
+[[bin]]
+name = "canon"
+path = "src/main.rs"
 
 [workspace]
 members = ["canonargs"]
