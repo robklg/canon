@@ -60,6 +60,18 @@ canon worklist | canonargs --fact mime -- file -b --mime-type {} | canon import-
 
 The `{}` is replaced with the file path. The command's stdout becomes the fact value.
 
+**Default behavior:** Values are stored as text. To specify a type, add `--type`:
+
+```bash
+# Store as datetime (enables |year, |month modifiers)
+canon worklist | canonargs --fact DateTimeOriginal --type datetime -- exiftool -DateTimeOriginal -s3 {} | canon import-facts
+
+# Store image width as number (using ImageMagick's identify)
+canon worklist | canonargs --fact width --type number -- identify -format '%w' {} | canon import-facts
+```
+
+Valid types: `datetime`, `duration`, `number`
+
 ### Key-Value Mode
 
 When your command outputs `key=value` pairs (one per line):
@@ -68,10 +80,12 @@ When your command outputs `key=value` pairs (one per line):
 canon worklist | canonargs --kv -- my-extractor {} | canon import-facts
 ```
 
-Example extractor output:
+**Default behavior:** All values are stored as text. To specify types, use `key:type=value` syntax:
+
 ```
-width=1920
-height=1080
+width:number=1920
+height:number=1080
+DateTimeOriginal:datetime=2024:07:23 14:30:00
 codec=h264
 ```
 
@@ -86,6 +100,13 @@ canon worklist | canonargs --json -- exiftool -json {} | canon import-facts
 Example extractor output:
 ```json
 {"Make": "Apple", "Model": "iPhone 12", "DateTimeOriginal": "2024:07:23 14:30:00"}
+```
+
+**JSON mode auto-detects numbers.** If your command outputs `"width": 1920` (a JSON number), it's stored as a number. If it outputs `"width": "1920"` (a quoted string), it's stored as text.
+
+For datetime fields, you still need to use the typed hint format:
+```json
+{"DateTimeOriginal": {"value": "2024:07:23 14:30:00", "type": "datetime"}}
 ```
 
 ### Chaining

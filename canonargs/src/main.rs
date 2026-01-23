@@ -14,7 +14,12 @@ struct Cli {
     #[arg(long, group = "mode")]
     fact: Option<String>,
 
+    /// Type hint for --fact mode (datetime or duration)
+    #[arg(long, requires = "fact")]
+    r#type: Option<String>,
+
     /// Output mode: key=value pairs (one per line)
+    /// Use key:type=value to specify types (e.g., DateTimeOriginal:datetime=2024:07:23)
     #[arg(long, group = "mode")]
     kv: bool,
 
@@ -53,7 +58,7 @@ fn main() -> Result<()> {
 
     // Validate that exactly one mode is specified
     let mode = if let Some(ref key) = cli.fact {
-        OutputMode::SingleFact(key.clone())
+        OutputMode::SingleFact { key: key.clone(), type_hint: cli.r#type.clone() }
     } else if cli.kv {
         OutputMode::KeyValue
     } else if cli.json {
@@ -95,7 +100,7 @@ fn main() -> Result<()> {
 }
 
 enum OutputMode {
-    SingleFact(String),
+    SingleFact { key: String, type_hint: Option<String> },
     KeyValue,
     Json,
 }
@@ -158,16 +163,37 @@ fn process_entry(
     })
 }
 
+/// Create a typed fact value with type hint
+fn typed_value(value: &str, type_hint: &str) -> serde_json::Value {
+    // For number type, parse and store as a JSON number
+    if type_hint == "number" {
+        if let Ok(n) = value.parse::<f64>() {
+            return serde_json::Value::Number(
+                serde_json::Number::from_f64(n).unwrap_or_else(|| serde_json::Number::from(0))
+            );
+        }
+        // Fall through to typed hint if parsing fails
+    }
+    serde_json::json!({
+        "value": value,
+        "type": type_hint
+    })
+}
+
 fn parse_output(stdout: &str, mode: &OutputMode) -> Result<HashMap<String, serde_json::Value>> {
     let mut facts = HashMap::new();
 
     match mode {
-        OutputMode::SingleFact(key) => {
+        OutputMode::SingleFact { key, type_hint } => {
             let value = stdout.trim();
             if value.is_empty() {
                 bail!("Empty output");
             }
-            facts.insert(key.clone(), serde_json::Value::String(value.to_string()));
+            let fact_value = match type_hint {
+                Some(t) => typed_value(value, t),
+                None => serde_json::Value::String(value.to_string()),
+            };
+            facts.insert(key.clone(), fact_value);
         }
         OutputMode::KeyValue => {
             for line in stdout.lines() {
@@ -175,15 +201,23 @@ fn parse_output(stdout: &str, mode: &OutputMode) -> Result<HashMap<String, serde
                 if line.is_empty() {
                     continue;
                 }
-                if let Some((key, value)) = line.split_once('=') {
-                    let key = key.trim();
+                if let Some((key_part, value)) = line.split_once('=') {
+                    let key_part = key_part.trim();
                     let value = value.trim();
-                    if !key.is_empty() {
-                        facts.insert(
-                            key.to_string(),
-                            serde_json::Value::String(value.to_string()),
-                        );
+                    if key_part.is_empty() {
+                        continue;
                     }
+                    // Parse key:type or just key
+                    let (key, type_hint) = if let Some((k, t)) = key_part.split_once(':') {
+                        (k.trim(), Some(t.trim()))
+                    } else {
+                        (key_part, None)
+                    };
+                    let fact_value = match type_hint {
+                        Some(t) => typed_value(value, t),
+                        None => serde_json::Value::String(value.to_string()),
+                    };
+                    facts.insert(key.to_string(), fact_value);
                 } else {
                     eprintln!("Warning: Skipping malformed key=value line: {}", line);
                 }
