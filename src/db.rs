@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::ops::Deref;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Query record for profiling
 #[derive(Clone)]
@@ -20,7 +20,7 @@ thread_local! {
     static PROFILE_ENABLED: RefCell<bool> = const { RefCell::new(false) };
 }
 
-/// Database context that wraps a Connection with optional SQL debug logging
+/// Database context that wraps a Connection
 pub struct Db {
     conn: Connection,
 }
@@ -35,6 +35,57 @@ impl Db {
     pub fn conn_mut(&mut self) -> &mut Connection {
         &mut self.conn
     }
+
+    /// Check if ANALYZE should be run based on time since last analyze.
+    /// If stale (>24 hours), runs ANALYZE and updates metadata.
+    pub fn maybe_analyze(&self) -> Result<bool> {
+        if self.is_analyze_stale()? {
+            self.run_analyze()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Check if ANALYZE statistics are stale (older than threshold)
+    fn is_analyze_stale(&self) -> Result<bool> {
+        let last_analyze: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT value_int FROM _meta WHERE key = 'last_analyze_at'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+
+        match last_analyze {
+            None => Ok(true), // Never analyzed
+            Some(timestamp) => {
+                let now = current_timestamp();
+                Ok(now - timestamp > ANALYZE_TIME_THRESHOLD_SECS)
+            }
+        }
+    }
+
+    /// Run ANALYZE and record the timestamp
+    pub fn run_analyze(&self) -> Result<()> {
+        self.conn.execute("ANALYZE", [])?;
+
+        let now = current_timestamp();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO _meta (key, value_int) VALUES ('last_analyze_at', ?)",
+            [now],
+        )?;
+
+        Ok(())
+    }
+}
+
+fn current_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs() as i64
 }
 
 impl Deref for Db {
@@ -110,7 +161,17 @@ CREATE INDEX IF NOT EXISTS facts_entity ON facts(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS facts_key ON facts(key);
 CREATE INDEX IF NOT EXISTS facts_key_entity ON facts(key, entity_type, entity_id);
 CREATE UNIQUE INDEX IF NOT EXISTS facts_entity_key_uq ON facts(entity_type, entity_id, key);
+
+-- Metadata for internal tracking
+CREATE TABLE IF NOT EXISTS _meta (
+    key TEXT PRIMARY KEY,
+    value_int INTEGER,
+    value_text TEXT
+);
 "#;
+
+/// Threshold for auto-ANALYZE: seconds since last analyze (24 hours)
+const ANALYZE_TIME_THRESHOLD_SECS: i64 = 24 * 60 * 60;
 
 /// Profile callback for SQL debug logging
 fn sql_debug_callback(sql: &str, duration: Duration) {

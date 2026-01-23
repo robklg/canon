@@ -350,7 +350,7 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
     }
 
     // Update query planner statistics after bulk changes
-    conn.execute("ANALYZE", [])?;
+    db.run_analyze()?;
 
     Ok(())
 }

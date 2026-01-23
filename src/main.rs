@@ -715,6 +715,9 @@ fn main() -> anyhow::Result<()> {
         },
     }
 
+    // Check if ANALYZE should run (based on modifications or time since last analyze)
+    let _ = db.maybe_analyze();
+
     // Print profile summary if profiling was enabled
     db::print_profile_summary(db.conn());
 

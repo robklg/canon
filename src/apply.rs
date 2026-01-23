@@ -485,7 +485,7 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
 
     // Update query planner statistics after bulk changes (skip for dry-run)
     if !options.dry_run {
-        conn.execute("ANALYZE", [])?;
+        db.run_analyze()?;
     }
 
     Ok(())
