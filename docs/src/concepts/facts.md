@@ -22,7 +22,6 @@ Facts are namespaced:
 
 - `source.*` - Facts about the file on disk (path, size, timestamps)
 - `content.*` - Facts about the content itself (stored on objects when hashed)
-- `policy.*` - Canon's internal state (exclusions, etc.)
 
 When querying, the `content.` prefix is optional: `--where 'Make=Apple'` is equivalent to `--where 'content.Make=Apple'`.
 

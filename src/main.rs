@@ -274,6 +274,9 @@ enum Commands {
         /// Delete source facts where the file changed since the fact was recorded
         #[arg(long)]
         stale_facts: bool,
+        /// Delete facts for excluded sources and/or objects (=source, =object, or omit for both)
+        #[arg(long, value_name = "SCOPE", default_missing_value = "all", num_args = 0..=1)]
+        excluded_facts: Option<String>,
         /// Execute deletion (default is dry-run)
         #[arg(long)]
         yes: bool,
@@ -562,15 +565,18 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Prune { orphaned_objects, stale_facts, yes } => {
-            if !orphaned_objects && !stale_facts {
-                anyhow::bail!("At least one of --orphaned-objects or --stale-facts is required");
+        Commands::Prune { orphaned_objects, stale_facts, excluded_facts, yes } => {
+            if !orphaned_objects && !stale_facts && excluded_facts.is_none() {
+                anyhow::bail!("At least one of --orphaned-objects, --stale-facts, or --excluded-facts is required");
             }
             if stale_facts {
                 facts::prune_stale(&db, !yes)?;
             }
             if orphaned_objects {
                 facts::prune_orphaned_objects(&db, !yes)?;
+            }
+            if let Some(scope) = excluded_facts {
+                facts::prune_excluded_facts(&db, &scope, !yes)?;
             }
         }
         Commands::Coverage { paths, filters, archive, include_archived, include_excluded, compact } => {

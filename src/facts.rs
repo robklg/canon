@@ -1635,6 +1635,131 @@ pub fn prune_orphaned_objects(db: &Db, dry_run: bool) -> Result<()> {
 }
 
 // ============================================================================
+// Prune Excluded Facts
+// ============================================================================
+
+/// Delete facts for excluded sources and/or objects.
+///
+/// Scope options:
+/// - "all": Delete facts for both excluded sources AND excluded objects (default)
+/// - "source": Delete only source facts where sources.excluded = 1
+/// - "object": Delete only object facts where objects.excluded = 1
+///
+/// This is useful when you've excluded sources/objects you're not interested in archiving,
+/// and want to free up database space by removing their associated metadata.
+pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
+    let conn = db.conn();
+
+    // Parse scope
+    let prune_sources = scope == "all" || scope == "source";
+    let prune_objects = scope == "all" || scope == "object";
+
+    if !prune_sources && !prune_objects {
+        anyhow::bail!(
+            "Invalid scope '{}'. Use 'source', 'object', or omit for both.",
+            scope
+        );
+    }
+
+    // Count source facts for excluded sources
+    let source_fact_count: i64 = if prune_sources {
+        conn.query_row(
+            "SELECT COUNT(*) FROM facts
+             WHERE entity_type = 'source'
+               AND entity_id IN (SELECT id FROM sources WHERE excluded = 1)",
+            [],
+            |row| row.get(0),
+        )?
+    } else {
+        0
+    };
+
+    // Count object facts for excluded objects
+    let object_fact_count: i64 = if prune_objects {
+        conn.query_row(
+            "SELECT COUNT(*) FROM facts
+             WHERE entity_type = 'object'
+               AND entity_id IN (SELECT id FROM objects WHERE excluded = 1)",
+            [],
+            |row| row.get(0),
+        )?
+    } else {
+        0
+    };
+
+    let total_count = source_fact_count + object_fact_count;
+
+    if total_count == 0 {
+        println!("No facts found for excluded entities.");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("Facts for excluded entities:");
+        if prune_sources {
+            println!(
+                "  Source facts (excluded sources): {}",
+                format_number(source_fact_count)
+            );
+        }
+        if prune_objects {
+            println!(
+                "  Object facts (excluded objects): {}",
+                format_number(object_fact_count)
+            );
+        }
+        println!(
+            "  Total: {} facts would be deleted",
+            format_number(total_count)
+        );
+        println!();
+        if scope == "all" {
+            println!("Tip: Use --excluded-facts=source or --excluded-facts=object to narrow scope.");
+        }
+        println!("Use --yes to proceed with deletion.");
+    } else {
+        let mut total_deleted = 0;
+
+        if prune_sources && source_fact_count > 0 {
+            let deleted = conn.execute(
+                "DELETE FROM facts
+                 WHERE entity_type = 'source'
+                   AND entity_id IN (SELECT id FROM sources WHERE excluded = 1)",
+                [],
+            )?;
+            total_deleted += deleted;
+            println!(
+                "Deleted {} source facts (from excluded sources)",
+                format_number(deleted as i64)
+            );
+        }
+
+        if prune_objects && object_fact_count > 0 {
+            let deleted = conn.execute(
+                "DELETE FROM facts
+                 WHERE entity_type = 'object'
+                   AND entity_id IN (SELECT id FROM objects WHERE excluded = 1)",
+                [],
+            )?;
+            total_deleted += deleted;
+            println!(
+                "Deleted {} object facts (from excluded objects)",
+                format_number(deleted as i64)
+            );
+        }
+
+        if total_deleted > 0 {
+            println!(
+                "Total: {} facts deleted",
+                format_number(total_deleted as i64)
+            );
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
 // Show Aliases
 // ============================================================================
 
