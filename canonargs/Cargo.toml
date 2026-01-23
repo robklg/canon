@@ -1,6 +1,15 @@
 [package]
 name = "canonargs"
 version = "0.1.0"
+description = "Run commands for each worklist entry and emit facts for canon import"
+documentation = "https://robklg.github.io/canon/"
+repository = "https://github.com/robklg/canon"
+authors = [
+    "Robby klein Gunnewiek <rob.kleingunnewiek@gmail.com>"
+]
+license = "GPL-3.0"
+keywords = ["canon-archive", "metadata", "enrichment", "pipeline"]
+categories = ["command-line-utilities"]
 edition = "2021"
 
 [dependencies]

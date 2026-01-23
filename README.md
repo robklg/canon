@@ -19,14 +19,15 @@ Scan your devices, enrich with metadata, discover what you have, and archive sel
 ## Installation
 
 ```bash
-cargo install --path .
+cargo install canon-archive
 ```
 
-Or build manually:
+This installs the `canon` binary.
+
+For the optional `canonargs` helper (used in enrichment pipelines):
 
 ```bash
-cargo build --release
-cp target/release/canon /usr/local/bin/
+cargo install canonargs
 ```
 
 ## Documentation

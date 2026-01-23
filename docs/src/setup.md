@@ -2,17 +2,22 @@
 
 ## Installation
 
-Install Canon using Cargo:
+Install Canon from crates.io:
 
 ```bash
-cargo install --path .
+cargo install canon-archive
 ```
 
-Or build and copy to a directory in your `$PATH`:
+This installs the `canon` binary.
+
+### From Source
+
+Alternatively, build from source:
 
 ```bash
-cargo build --release
-cp target/release/canon /usr/local/bin/
+git clone https://github.com/robklg/canon.git
+cd canon
+cargo install --path .
 ```
 
 ## Database

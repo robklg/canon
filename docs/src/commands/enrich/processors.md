@@ -47,7 +47,7 @@ If you don't want to handle JSONL parsing and output formatting yourself, `canon
 ### Installation
 
 ```bash
-cargo install --path canonargs/
+cargo install canonargs
 ```
 
 ### Single Fact Mode

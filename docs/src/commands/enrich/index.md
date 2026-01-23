@@ -40,7 +40,7 @@ Canon includes ready-to-use processors:
 | `scripts/hash-worklist.sh` | SHA-256 content hashes | jq |
 | `canonargs --fact mime -- file -b --mime-type {}` | MIME type detection | canonargs |
 
-Install `canonargs` with: `cargo install --path canonargs/`
+Install `canonargs` with: `cargo install canonargs`
 
 ## Going Deeper
 
