@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use rusqlite::params;
 use rusqlite::types::Value;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::{Connection, Db};
 use crate::scope::{build_scope_clause, ScopeMatch};
@@ -10,8 +9,6 @@ use crate::path::{canonicalize_scopes, path_is_under};
 use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;
-const POLICY_EXCLUDE_KEY: &str = "policy.exclude";
-const POLICY_OBJECT_EXCLUDE_KEY: &str = "policy.exclude";
 
 // ============================================================================
 // Options
@@ -71,26 +68,12 @@ pub fn set(
         return Ok(());
     }
 
-    // Insert exclusion facts
-    let now = current_timestamp();
-    let mut excluded_count = 0;
-
+    // Mark sources as excluded
     for source_id in &to_exclude {
-        let basis_rev: i64 = conn.query_row(
-            "SELECT basis_rev FROM sources WHERE id = ?",
-            [source_id],
-            |row| row.get(0),
-        )?;
-
-        conn.execute(
-            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev)
-             VALUES ('source', ?, ?, 'true', ?, ?)",
-            params![source_id, POLICY_EXCLUDE_KEY, now, basis_rev],
-        )?;
-        excluded_count += 1;
+        conn.execute("UPDATE sources SET excluded = 1 WHERE id = ?", [source_id])?;
     }
 
-    println!("Excluded {} sources", excluded_count);
+    println!("Excluded {} sources", to_exclude.len());
     Ok(())
 }
 
@@ -131,18 +114,12 @@ pub fn clear(
         return Ok(());
     }
 
-    // Delete exclusion facts
-    let mut cleared_count = 0;
+    // Clear exclusions
     for (source_id, _) in &excluded_sources {
-        let rows = conn.execute(
-            "DELETE FROM facts
-             WHERE entity_type = 'source' AND entity_id = ? AND key = ?",
-            params![source_id, POLICY_EXCLUDE_KEY],
-        )?;
-        cleared_count += rows;
+        conn.execute("UPDATE sources SET excluded = 0 WHERE id = ?", [source_id])?;
     }
 
-    println!("Cleared exclusions for {} sources", cleared_count);
+    println!("Cleared exclusions for {} sources", excluded_sources.len());
     Ok(())
 }
 
@@ -202,49 +179,33 @@ pub fn list(
 // ============================================================================
 
 /// Check if a source is excluded (either directly or via its object)
+/// Uses denormalized columns for fast lookup
 pub fn is_excluded(conn: &Connection, source_id: i64) -> Result<bool> {
-    // Check source-level exclusion
-    let source_excluded: bool = conn
+    let excluded: bool = conn
         .query_row(
-            "SELECT 1 FROM facts
-             WHERE entity_type = 'source' AND entity_id = ? AND key = ?",
-            params![source_id, POLICY_EXCLUDE_KEY],
-            |_| Ok(true),
+            "SELECT s.excluded = 1 OR (o.excluded IS NOT NULL AND o.excluded = 1)
+             FROM sources s
+             LEFT JOIN objects o ON s.object_id = o.id
+             WHERE s.id = ?",
+            [source_id],
+            |row| row.get(0),
         )
         .unwrap_or(false);
 
-    if source_excluded {
-        return Ok(true);
-    }
-
-    // Check object-level exclusion
-    let object_excluded: bool = conn
-        .query_row(
-            "SELECT 1 FROM facts f
-             JOIN sources s ON s.object_id IS NOT NULL
-             WHERE s.id = ?
-               AND f.entity_type = 'object'
-               AND f.entity_id = s.object_id
-               AND f.key = ?",
-            params![source_id, POLICY_OBJECT_EXCLUDE_KEY],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-
-    Ok(object_excluded)
+    Ok(excluded)
 }
 
 /// Check if an object is excluded
+/// Uses denormalized column for fast lookup
 pub fn is_object_excluded(conn: &Connection, object_id: i64) -> Result<bool> {
-    let exists: bool = conn
+    let excluded: bool = conn
         .query_row(
-            "SELECT 1 FROM facts
-             WHERE entity_type = 'object' AND entity_id = ? AND key = ?",
-            params![object_id, POLICY_OBJECT_EXCLUDE_KEY],
-            |_| Ok(true),
+            "SELECT excluded = 1 FROM objects WHERE id = ?",
+            [object_id],
+            |row| row.get(0),
         )
         .unwrap_or(false);
-    Ok(exists)
+    Ok(excluded)
 }
 
 /// SQL clause for excluding excluded sources (checks both source and object exclusions)
@@ -252,11 +213,9 @@ pub fn exclude_clause(include_excluded: bool) -> &'static str {
     if include_excluded {
         "1=1"
     } else {
-        // Exclude sources that are:
-        // 1. Directly excluded (source-level policy.exclude)
-        // 2. Have an excluded object (object-level policy.exclude)
-        "NOT EXISTS (SELECT 1 FROM facts WHERE entity_type = 'source' AND entity_id = s.id AND key = 'policy.exclude') \
-         AND NOT EXISTS (SELECT 1 FROM facts f WHERE f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = 'policy.exclude' AND s.object_id IS NOT NULL)"
+        // Check both source-level and object-level exclusions
+        // NOTE: Queries using this clause must LEFT JOIN objects o ON s.object_id = o.id
+        "s.excluded = 0 AND (s.object_id IS NULL OR o.excluded = 0)"
     }
 }
 
@@ -271,10 +230,10 @@ pub fn count_excluded(conn: &Connection, scope_prefix: Option<&str>, include_arc
                  JOIN roots r ON s.root_id = r.id
                  WHERE s.present = 1 AND {}
                    AND (r.path || '/' || s.rel_path) LIKE ? || '/%'
-                   AND EXISTS (SELECT 1 FROM facts WHERE entity_type = 'source' AND entity_id = s.id AND key = ?)",
+                   AND s.excluded = 1",
                 role_clause
             ),
-            params![prefix, POLICY_EXCLUDE_KEY],
+            [prefix],
             |row| row.get(0),
         )?
     } else {
@@ -283,10 +242,10 @@ pub fn count_excluded(conn: &Connection, scope_prefix: Option<&str>, include_arc
                 "SELECT COUNT(*) FROM sources s
                  JOIN roots r ON s.root_id = r.id
                  WHERE s.present = 1 AND {}
-                   AND EXISTS (SELECT 1 FROM facts WHERE entity_type = 'source' AND entity_id = s.id AND key = ?)",
+                   AND s.excluded = 1",
                 role_clause
             ),
-            params![POLICY_EXCLUDE_KEY],
+            [],
             |row| row.get(0),
         )?
     };
@@ -316,6 +275,7 @@ fn get_matching_sources(
             .prepare(&format!(
                 "SELECT s.id FROM sources s
                  JOIN roots r ON s.root_id = r.id
+                 LEFT JOIN objects o ON s.object_id = o.id
                  WHERE s.present = 1 AND r.role = 'source' AND r.suspended = 0 AND {} AND {} AND s.id > ?
                  ORDER BY s.id LIMIT ?",
                 exclude_sql, scope_clause
@@ -349,13 +309,12 @@ fn get_excluded_sources(
     let (scope_clause, scope_params) = build_scope_clause(&scopes);
 
     loop {
-        // Build params: last_id + scope params + POLICY_EXCLUDE_KEY + batch_size
+        // Build params: last_id + scope params + batch_size
         let mut params: Vec<Value> = Vec::new();
         params.push(Value::from(last_id));
         for s in &scope_params {
             params.push(Value::from(s.clone()));
         }
-        params.push(Value::from(POLICY_EXCLUDE_KEY.to_string()));
         params.push(Value::from(BATCH_SIZE));
 
         let batch: Vec<(i64, String)> = conn
@@ -365,10 +324,7 @@ fn get_excluded_sources(
                  JOIN roots r ON s.root_id = r.id
                  WHERE s.present = 1 AND r.role = 'source' AND r.suspended = 0 AND s.id > ?
                    AND {}
-                   AND EXISTS (
-                       SELECT 1 FROM facts
-                       WHERE entity_type = 'source' AND entity_id = s.id AND key = ?
-                   )
+                   AND s.excluded = 1
                  ORDER BY s.id LIMIT ?",
                 scope_clause
             ))?
@@ -411,30 +367,23 @@ fn get_source_path(conn: &Connection, source_id: i64) -> Result<Option<String>> 
     Ok(result)
 }
 
-fn current_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64
-}
-
 /// Exclude a specific source by ID
 pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
     let conn = db.conn();
 
     // Verify source exists and get its path
-    let source_info: Option<(String, i64)> = conn
+    let path: Option<String> = conn
         .query_row(
-            "SELECT r.path || '/' || s.rel_path, s.basis_rev
+            "SELECT r.path || '/' || s.rel_path
              FROM sources s
              JOIN roots r ON s.root_id = r.id
              WHERE s.id = ? AND s.present = 1",
             [source_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .ok();
 
-    let Some((path, basis_rev)) = source_info else {
+    let Some(path) = path else {
         anyhow::bail!("Source with id {} not found or not present", source_id);
     };
 
@@ -450,13 +399,7 @@ pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
         return Ok(());
     }
 
-    // Insert exclusion fact
-    let now = current_timestamp();
-    conn.execute(
-        "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev)
-         VALUES ('source', ?, ?, 'true', ?, ?)",
-        params![source_id, POLICY_EXCLUDE_KEY, now, basis_rev],
-    )?;
+    conn.execute("UPDATE sources SET excluded = 1 WHERE id = ?", [source_id])?;
 
     println!("Excluded source (id: {}): {}", source_id, path);
     Ok(())
@@ -474,18 +417,18 @@ pub fn set_by_path(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()
         .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
 
     // Look up source by exact path match
-    let source_info: Option<(i64, i64)> = conn
+    let source_id: Option<i64> = conn
         .query_row(
-            "SELECT s.id, s.basis_rev
+            "SELECT s.id
              FROM sources s
              JOIN roots r ON s.root_id = r.id
              WHERE r.path || '/' || s.rel_path = ? AND s.present = 1",
             [path_str],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .ok();
 
-    let Some((source_id, basis_rev)) = source_info else {
+    let Some(source_id) = source_id else {
         anyhow::bail!("No source found for path: {}", file_path.display());
     };
 
@@ -501,13 +444,7 @@ pub fn set_by_path(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()
         return Ok(());
     }
 
-    // Insert exclusion fact
-    let now = current_timestamp();
-    conn.execute(
-        "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev)
-         VALUES ('source', ?, ?, 'true', ?, ?)",
-        params![source_id, POLICY_EXCLUDE_KEY, now, basis_rev],
-    )?;
+    conn.execute("UPDATE sources SET excluded = 1 WHERE id = ?", [source_id])?;
 
     println!("Excluded: {}", path_str);
     Ok(())
@@ -603,7 +540,7 @@ pub fn exclude_duplicates(
                  JOIN roots r ON s.root_id = r.id
                  WHERE s.object_id = ? AND s.present = 1 AND s.id != ?
                    AND (r.path || '/' || s.rel_path LIKE ? || '/%' OR r.path || '/' || s.rel_path = ?)
-                   AND NOT EXISTS (SELECT 1 FROM facts WHERE entity_type = 'source' AND entity_id = s.id AND key = 'policy.exclude')"
+                   AND s.excluded = 0"
             )?
             .query_map(params![object_id, source_id, prefer_prefix, prefer_prefix], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -654,7 +591,6 @@ pub fn exclude_duplicates(
     }
 
     // Execute exclusions
-    let now = current_timestamp();
     let mut excluded_count = 0;
 
     for (source_id, _) in &to_exclude {
@@ -663,17 +599,7 @@ pub fn exclude_duplicates(
             continue;
         }
 
-        let basis_rev: i64 = conn.query_row(
-            "SELECT basis_rev FROM sources WHERE id = ?",
-            [source_id],
-            |row| row.get(0),
-        )?;
-
-        conn.execute(
-            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev)
-             VALUES ('source', ?, ?, 'true', ?, ?)",
-            params![source_id, POLICY_EXCLUDE_KEY, now, basis_rev],
-        )?;
+        conn.execute("UPDATE sources SET excluded = 1 WHERE id = ?", [source_id])?;
         excluded_count += 1;
     }
 
@@ -886,13 +812,8 @@ pub fn set_objects_by_filter(
     }
 
     // Execute exclusions
-    let now = current_timestamp();
     for (object_id, _, _) in &all_sources {
-        conn.execute(
-            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at)
-             VALUES ('object', ?, ?, 'true', ?)",
-            params![object_id, POLICY_OBJECT_EXCLUDE_KEY, now],
-        )?;
+        conn.execute("UPDATE objects SET excluded = 1 WHERE id = ?", [object_id])?;
     }
 
     println!("Excluded {} objects affecting {} sources ({} in source roots, {} in archives)",
@@ -968,13 +889,7 @@ fn exclude_object_by_id(conn: &Connection, object_id: i64, hash_value: &str, opt
         return Ok(());
     }
 
-    // Insert exclusion fact on object
-    let now = current_timestamp();
-    conn.execute(
-        "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at)
-         VALUES ('object', ?, ?, 'true', ?)",
-        params![object_id, POLICY_OBJECT_EXCLUDE_KEY, now],
-    )?;
+    conn.execute("UPDATE objects SET excluded = 1 WHERE id = ?", [object_id])?;
 
     println!("Excluded object: {}...", &hash_value[..16.min(hash_value.len())]);
     print_source_locations(&sources, options.verbose);
@@ -1009,11 +924,7 @@ pub fn clear_object(db: &Db, hash: &str, options: &ClearOptions) -> Result<()> {
         return Ok(());
     }
 
-    // Delete exclusion fact
-    conn.execute(
-        "DELETE FROM facts WHERE entity_type = 'object' AND entity_id = ? AND key = ?",
-        params![object_id, POLICY_OBJECT_EXCLUDE_KEY],
-    )?;
+    conn.execute("UPDATE objects SET excluded = 0 WHERE id = ?", [object_id])?;
 
     println!("Cleared exclusion from object: {}...", &hash_value[..16.min(hash_value.len())]);
     Ok(())
@@ -1029,13 +940,10 @@ pub fn list_objects(db: &Db) -> Result<()> {
                  SELECT COUNT(*) FROM sources s WHERE s.object_id = o.id AND s.present = 1
              ) as source_count
              FROM objects o
-             WHERE EXISTS (
-                 SELECT 1 FROM facts f
-                 WHERE f.entity_type = 'object' AND f.entity_id = o.id AND f.key = ?
-             )
+             WHERE o.excluded = 1
              ORDER BY o.id"
         )?
-        .query_map([POLICY_OBJECT_EXCLUDE_KEY], |row| {
+        .query_map([], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1073,8 +981,6 @@ fn get_object_excluded_sources(
         for s in &scope_params {
             params.push(Value::from(s.clone()));
         }
-        params.push(Value::from(POLICY_OBJECT_EXCLUDE_KEY.to_string()));
-        params.push(Value::from(POLICY_EXCLUDE_KEY.to_string()));
         params.push(Value::from(BATCH_SIZE));
 
         let batch: Vec<(i64, String, String)> = conn
@@ -1085,14 +991,8 @@ fn get_object_excluded_sources(
                  JOIN objects o ON s.object_id = o.id
                  WHERE s.present = 1 AND r.role = 'source' AND r.suspended = 0 AND s.id > ?
                    AND {}
-                   AND EXISTS (
-                       SELECT 1 FROM facts f
-                       WHERE f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1 FROM facts f
-                       WHERE f.entity_type = 'source' AND f.entity_id = s.id AND f.key = ?
-                   )
+                   AND o.excluded = 1
+                   AND s.excluded = 0
                  ORDER BY s.id LIMIT ?",
                 scope_clause
             ))?

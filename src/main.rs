@@ -31,6 +31,10 @@ struct Cli {
     #[arg(long, global = true)]
     debug_sql: bool,
 
+    /// Profile SQL queries and show summary with slow query analysis
+    #[arg(long, global = true)]
+    profile: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -468,7 +472,13 @@ fn main() -> anyhow::Result<()> {
         path
     });
 
-    let mut db = db::open(&db_path, cli.debug_sql)?;
+    let mut db = db::open_with_options(
+        &db_path,
+        db::DbOptions {
+            debug_sql: cli.debug_sql,
+            profile: cli.profile,
+        },
+    )?;
 
     match cli.command {
         Commands::Scan { paths, role, add, comment, all, no_hash, verify, candidates, ignore_device_id } => {
@@ -704,6 +714,9 @@ fn main() -> anyhow::Result<()> {
             }
         },
     }
+
+    // Print profile summary if profiling was enabled
+    db::print_profile_summary(db.conn());
 
     Ok(())
 }

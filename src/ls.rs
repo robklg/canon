@@ -223,6 +223,7 @@ fn get_matching_sources(
                 "SELECT s.id
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
+                 LEFT JOIN objects o ON s.object_id = o.id
                  WHERE s.present = 1 AND {} AND {} AND {} AND s.id > ?
                  ORDER BY s.id
                  LIMIT ?",

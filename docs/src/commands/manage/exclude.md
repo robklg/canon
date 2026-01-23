@@ -55,4 +55,4 @@ This is useful for deduplicating across backup drives while keeping the "canonic
 | `cluster generate` | Always skips excluded | No override (hard gate) |
 | `apply` | Blocks if manifest has excluded | No override (hard gate) |
 
-Exclusions are stored as `policy.exclude` facts on sources.
+Exclusions are stored directly on sources and objects in the database.

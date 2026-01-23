@@ -22,12 +22,6 @@ These facts are automatically available for all sources without enrichment.
 |------|------|-------------|
 | `content.hash.sha256` | text | SHA-256 content hash |
 
-## Policy Facts
-
-| Fact | Type | Description |
-|------|------|-------------|
-| `policy.exclude` | text | Source exclusion flag |
-
 ## Pattern Aliases
 
 These aliases are available in [pattern expressions](expr.md):

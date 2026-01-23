@@ -9,4 +9,4 @@ The [`exclude`](exclude.md) command lets you mark sources to skip during `cluste
 - Filtering out small files below a size threshold
 - Removing unwanted files from consideration without deleting them
 
-Exclusions are stored as `policy.exclude` facts and can be cleared at any time.
+Exclusions are stored directly on sources and can be cleared at any time.

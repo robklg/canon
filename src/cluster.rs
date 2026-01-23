@@ -375,7 +375,7 @@ pub fn hash_file(path: &Path) -> Result<String> {
 
 /// Returns (included_sources, archived_sources, excluded_count, unhashed_count)
 /// archived_sources is a list of (source_path, archive_path) for files already in an archive
-/// excluded_count is the number of sources skipped due to policy.exclude (hard gate)
+/// excluded_count is the number of sources skipped due to exclusion (hard gate)
 /// unhashed_count is the number of sources skipped due to missing content hash
 fn query_sources(
     conn: &mut Connection,

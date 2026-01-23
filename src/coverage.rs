@@ -220,6 +220,12 @@ fn compute_per_root_stats(
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<Result<Vec<_>, _>>()?;
 
+    // Fast path: no filters - compute everything with GROUP BY in SQL
+    if filters.is_empty() {
+        return compute_per_root_stats_fast(conn, &roots, archive_root_id, include_archived);
+    }
+
+    // Slow path: has filters - need per-root batch processing
     let mut per_root_stats = Vec::new();
     let mut overall = CoverageStats::new();
 
@@ -270,6 +276,128 @@ fn compute_per_root_stats(
     Ok((per_root_stats, overall))
 }
 
+/// Fast path: compute per-root stats using GROUP BY (no filters)
+fn compute_per_root_stats_fast(
+    conn: &rusqlite::Connection,
+    roots: &[(i64, String, String)],
+    archive_root_id: Option<i64>,
+    include_archived: bool,
+) -> Result<(Vec<CoverageStats>, CoverageStats)> {
+    use std::collections::HashMap;
+
+    let role_clause = if include_archived {
+        "r.suspended = 0"
+    } else {
+        "r.role = 'source' AND r.suspended = 0"
+    };
+
+    // Query 1: Total sources per root
+    let totals: HashMap<i64, i64> = conn
+        .prepare(&format!(
+            "SELECT s.root_id, COUNT(*) as cnt
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             WHERE s.present = 1 AND {}
+             GROUP BY s.root_id",
+            role_clause
+        ))?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<HashMap<_, _>, _>>()?;
+
+    // Query 2: Excluded sources per root
+    let excluded: HashMap<i64, i64> = conn
+        .prepare(&format!(
+            "SELECT s.root_id, COUNT(*) as cnt
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             WHERE s.present = 1 AND {}
+               AND s.excluded = 1
+             GROUP BY s.root_id",
+            role_clause
+        ))?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<HashMap<_, _>, _>>()?;
+
+    // Query 3: Hashed (non-excluded) sources per root
+    let hashed: HashMap<i64, i64> = conn
+        .prepare(&format!(
+            "SELECT s.root_id, COUNT(*) as cnt
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             WHERE s.present = 1 AND {}
+               AND s.object_id IS NOT NULL
+               AND s.excluded = 0
+             GROUP BY s.root_id",
+            role_clause
+        ))?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<HashMap<_, _>, _>>()?;
+
+    // Query 4: Archived (non-excluded) sources per root
+    let archived: HashMap<i64, i64> = if let Some(arch_root_id) = archive_root_id {
+        conn.prepare(&format!(
+            "SELECT s.root_id, COUNT(*) as cnt
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             WHERE s.present = 1 AND {}
+               AND s.object_id IS NOT NULL
+               AND s.excluded = 0
+               AND EXISTS (
+                   SELECT 1 FROM sources arch_s
+                   WHERE arch_s.root_id = ?1 AND arch_s.present = 1
+                     AND arch_s.object_id = s.object_id
+               )
+             GROUP BY s.root_id",
+            role_clause
+        ))?
+        .query_map([arch_root_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<HashMap<_, _>, _>>()?
+    } else {
+        conn.prepare(&format!(
+            "SELECT s.root_id, COUNT(*) as cnt
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             WHERE s.present = 1 AND {}
+               AND s.object_id IS NOT NULL
+               AND s.excluded = 0
+               AND EXISTS (
+                   SELECT 1 FROM sources arch_s
+                   JOIN roots ar ON arch_s.root_id = ar.id
+                   WHERE ar.role = 'archive' AND arch_s.present = 1
+                     AND arch_s.object_id = s.object_id
+               )
+             GROUP BY s.root_id",
+            role_clause
+        ))?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<HashMap<_, _>, _>>()?
+    };
+
+    // Build per-root stats
+    let mut per_root_stats = Vec::new();
+    let mut overall = CoverageStats::new();
+
+    for (root_id, root_path, root_role) in roots {
+        let mut stats = CoverageStats::new();
+        stats.root_id = Some(*root_id);
+        stats.root_path = Some(root_path.clone());
+        stats.root_role = Some(root_role.clone());
+        stats.total_sources = *totals.get(root_id).unwrap_or(&0);
+        stats.excluded_sources = *excluded.get(root_id).unwrap_or(&0);
+        stats.hashed_sources = *hashed.get(root_id).unwrap_or(&0);
+        stats.archived_sources = *archived.get(root_id).unwrap_or(&0);
+
+        overall.total_sources += stats.total_sources;
+        overall.excluded_sources += stats.excluded_sources;
+        overall.hashed_sources += stats.hashed_sources;
+        overall.archived_sources += stats.archived_sources;
+
+        per_root_stats.push(stats);
+    }
+
+    Ok((per_root_stats, overall))
+}
+
 /// Compute all coverage stats from temp_sources using pure SQL aggregates
 fn compute_stats_from_temp_table(
     conn: &rusqlite::Connection,
@@ -284,14 +412,11 @@ fn compute_stats_from_temp_table(
         |row| row.get(0),
     )?;
 
-    // Excluded sources (presence of policy.exclude key)
+    // Excluded sources (using denormalized excluded column)
     stats.excluded_sources = conn.query_row(
         "SELECT COUNT(*) FROM temp_sources ts
-         WHERE EXISTS (
-             SELECT 1 FROM facts f
-             WHERE f.entity_type = 'source' AND f.entity_id = ts.id
-               AND f.key = 'policy.exclude'
-         )",
+         JOIN sources s ON s.id = ts.id
+         WHERE s.excluded = 1",
         [],
         |row| row.get(0),
     )?;
@@ -301,11 +426,7 @@ fn compute_stats_from_temp_table(
         "SELECT COUNT(*) FROM temp_sources ts
          JOIN sources s ON s.id = ts.id
          WHERE s.object_id IS NOT NULL
-           AND NOT EXISTS (
-               SELECT 1 FROM facts f
-               WHERE f.entity_type = 'source' AND f.entity_id = ts.id
-                 AND f.key = 'policy.exclude'
-           )",
+           AND s.excluded = 0",
         [],
         |row| row.get(0),
     )?;
@@ -317,11 +438,7 @@ fn compute_stats_from_temp_table(
             "SELECT COUNT(*) FROM temp_sources ts
              JOIN sources s ON s.id = ts.id
              WHERE s.object_id IS NOT NULL
-               AND NOT EXISTS (
-                   SELECT 1 FROM facts f
-                   WHERE f.entity_type = 'source' AND f.entity_id = ts.id
-                     AND f.key = 'policy.exclude'
-               )
+               AND s.excluded = 0
                AND EXISTS (
                    SELECT 1 FROM sources arch_s
                    WHERE arch_s.root_id = ?1 AND arch_s.present = 1
@@ -336,11 +453,7 @@ fn compute_stats_from_temp_table(
             "SELECT COUNT(*) FROM temp_sources ts
              JOIN sources s ON s.id = ts.id
              WHERE s.object_id IS NOT NULL
-               AND NOT EXISTS (
-                   SELECT 1 FROM facts f
-                   WHERE f.entity_type = 'source' AND f.entity_id = ts.id
-                     AND f.key = 'policy.exclude'
-               )
+               AND s.excluded = 0
                AND EXISTS (
                    SELECT 1 FROM sources arch_s
                    JOIN roots r ON arch_s.root_id = r.id

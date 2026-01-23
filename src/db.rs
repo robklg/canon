@@ -1,9 +1,24 @@
 use anyhow::{Context, Result};
 pub use rusqlite::Connection;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
 use std::ops::Deref;
 use std::path::Path;
 use std::time::Duration;
+
+/// Query record for profiling
+#[derive(Clone)]
+struct QueryRecord {
+    sql: String,
+    duration_ms: f64,
+}
+
+// Thread-local storage for profiling data
+thread_local! {
+    static PROFILE_DATA: RefCell<Vec<QueryRecord>> = const { RefCell::new(Vec::new()) };
+    static PROFILE_ENABLED: RefCell<bool> = const { RefCell::new(false) };
+}
 
 /// Database context that wraps a Connection with optional SQL debug logging
 pub struct Db {
@@ -56,6 +71,7 @@ CREATE TABLE IF NOT EXISTS sources (
     last_seen_at INTEGER NOT NULL,
     present INTEGER NOT NULL DEFAULT 1,
     object_id INTEGER REFERENCES objects(id),
+    excluded INTEGER NOT NULL DEFAULT 0,  -- 1 if source is excluded from processing
     UNIQUE(root_id, rel_path)
 );
 
@@ -64,6 +80,7 @@ CREATE TABLE IF NOT EXISTS objects (
     id INTEGER PRIMARY KEY,
     hash_type TEXT NOT NULL,
     hash_value TEXT NOT NULL,
+    excluded INTEGER NOT NULL DEFAULT 0,  -- 1 if object (and all its sources) is excluded
     UNIQUE(hash_type, hash_value)
 );
 
@@ -88,6 +105,7 @@ CREATE TABLE IF NOT EXISTS facts (
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS sources_object_id ON sources(object_id);
+CREATE INDEX IF NOT EXISTS sources_excluded ON sources(excluded);
 CREATE INDEX IF NOT EXISTS facts_entity ON facts(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS facts_key ON facts(key);
 CREATE INDEX IF NOT EXISTS facts_key_entity ON facts(key, entity_type, entity_id);
@@ -95,11 +113,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS facts_entity_key_uq ON facts(entity_type, enti
 "#;
 
 /// Profile callback for SQL debug logging
-fn sql_profile_callback(sql: &str, duration: Duration) {
+fn sql_debug_callback(sql: &str, duration: Duration) {
     eprintln!("[SQL {:.1}ms] {}", duration.as_secs_f64() * 1000.0, sql);
 }
 
-pub fn open(path: &Path, debug_sql: bool) -> Result<Db> {
+/// Profile callback that collects timing data
+fn sql_profile_callback(sql: &str, duration: Duration) {
+    PROFILE_DATA.with(|data| {
+        data.borrow_mut().push(QueryRecord {
+            sql: sql.to_string(),
+            duration_ms: duration.as_secs_f64() * 1000.0,
+        });
+    });
+}
+
+/// Options for database opening
+pub struct DbOptions {
+    pub debug_sql: bool,
+    pub profile: bool,
+}
+
+pub fn open_with_options(path: &Path, options: DbOptions) -> Result<Db> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
@@ -108,8 +142,12 @@ pub fn open(path: &Path, debug_sql: bool) -> Result<Db> {
     let mut conn = Connection::open(path)
         .with_context(|| format!("Failed to open database: {}", path.display()))?;
 
-    // Enable SQL profiling if debug flag is set
-    if debug_sql {
+    // Enable SQL debug logging if debug flag is set
+    if options.debug_sql {
+        conn.profile(Some(sql_debug_callback));
+    } else if options.profile {
+        // Enable profiling (collect data for summary)
+        PROFILE_ENABLED.with(|enabled| *enabled.borrow_mut() = true);
         conn.profile(Some(sql_profile_callback));
     }
 
@@ -141,4 +179,176 @@ pub fn populate_temp_sources(conn: &mut Connection, source_ids: &[i64]) -> Resul
     }
     tx.commit()?;
     Ok(())
+}
+
+/// Threshold in ms for a query to be considered "slow"
+const SLOW_QUERY_THRESHOLD_MS: f64 = 100.0;
+
+/// Number of slowest queries to show in summary
+const TOP_SLOW_QUERIES: usize = 10;
+
+/// Print profile summary if profiling was enabled
+pub fn print_profile_summary(conn: &Connection) {
+    let enabled = PROFILE_ENABLED.with(|e| *e.borrow());
+    if !enabled {
+        return;
+    }
+
+    // Clone data and release borrow before running EXPLAIN queries
+    // (EXPLAIN triggers the profile callback which would cause a borrow conflict)
+    let (total_queries, total_time_ms, sorted) = PROFILE_DATA.with(|data| {
+        let records = data.borrow();
+        if records.is_empty() {
+            return (0, 0.0, Vec::new());
+        }
+
+        // Aggregate by normalized SQL (remove parameter values for grouping)
+        let mut aggregated: HashMap<String, (usize, f64, f64, String)> = HashMap::new();
+        for record in records.iter() {
+            let normalized = normalize_sql(&record.sql);
+            let entry = aggregated
+                .entry(normalized)
+                .or_insert((0, 0.0, 0.0, record.sql.clone()));
+            entry.0 += 1; // count
+            entry.1 += record.duration_ms; // total time
+            if record.duration_ms > entry.2 {
+                entry.2 = record.duration_ms; // max time
+                entry.3 = record.sql.clone(); // example SQL with max time
+            }
+        }
+
+        // Calculate totals
+        let total_queries = records.len();
+        let total_time_ms: f64 = records.iter().map(|r| r.duration_ms).sum();
+
+        // Sort by total time descending
+        let mut sorted: Vec<_> = aggregated.into_iter().collect();
+        sorted.sort_by(|a, b| b.1 .1.partial_cmp(&a.1 .1).unwrap());
+
+        (total_queries, total_time_ms, sorted)
+    });
+
+    if total_queries == 0 {
+        return;
+    }
+
+    eprintln!("\n{}", "=".repeat(70));
+    eprintln!("SQL Profile Summary");
+    eprintln!("{}", "=".repeat(70));
+    eprintln!(
+        "Total: {} queries in {:.1}ms ({:.1}s)",
+        total_queries,
+        total_time_ms,
+        total_time_ms / 1000.0
+    );
+    eprintln!("Unique query patterns: {}", sorted.len());
+
+    // Show top slow queries
+    eprintln!(
+        "\nTop {} slowest query patterns (by total time):",
+        TOP_SLOW_QUERIES
+    );
+    eprintln!("{}", "-".repeat(70));
+
+    for (i, (normalized, (count, total_ms, max_ms, example_sql))) in
+        sorted.iter().take(TOP_SLOW_QUERIES).enumerate()
+    {
+        let avg_ms = total_ms / *count as f64;
+        eprintln!(
+            "\n{}. [{:.1}ms total, {}x, {:.1}ms avg, {:.1}ms max]",
+            i + 1,
+            total_ms,
+            count,
+            avg_ms,
+            max_ms
+        );
+
+        // Show truncated SQL
+        let display_sql = if normalized.len() > 200 {
+            format!("{}...", &normalized[..200])
+        } else {
+            normalized.clone()
+        };
+        eprintln!("   {}", display_sql);
+
+        // Show EXPLAIN QUERY PLAN for slow queries
+        if *max_ms >= SLOW_QUERY_THRESHOLD_MS {
+            if let Some(plan) = get_query_plan(conn, example_sql) {
+                eprintln!("   Query plan:");
+                for line in plan.lines() {
+                    eprintln!("     {}", line);
+                }
+            }
+        }
+    }
+
+    eprintln!("\n{}", "=".repeat(70));
+}
+
+/// Normalize SQL by replacing literal values with placeholders
+fn normalize_sql(sql: &str) -> String {
+    let mut result = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            // String literals
+            '\'' => {
+                result.push('?');
+                // Skip until closing quote (handling escaped quotes)
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next == '\'' {
+                        if chars.peek() == Some(&'\'') {
+                            chars.next(); // escaped quote
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Numbers (but not after letters/underscores - those are identifiers)
+            '0'..='9' if !result.ends_with(|c: char| c.is_alphanumeric() || c == '_') => {
+                result.push('?');
+                // Skip rest of number
+                while let Some(&next) = chars.peek() {
+                    if next.is_ascii_digit() || next == '.' {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            _ => result.push(c),
+        }
+    }
+
+    result
+}
+
+/// Get EXPLAIN QUERY PLAN output for a SQL statement
+fn get_query_plan(conn: &Connection, sql: &str) -> Option<String> {
+    // Skip non-SELECT statements and statements with temp tables
+    // (temp tables won't exist when we run EXPLAIN)
+    let sql_upper = sql.to_uppercase();
+    if !sql_upper.starts_with("SELECT") || sql_upper.contains("TEMP_SOURCES") {
+        return None;
+    }
+
+    let explain_sql = format!("EXPLAIN QUERY PLAN {}", sql);
+    let mut stmt = conn.prepare(&explain_sql).ok()?;
+    let rows: Vec<String> = stmt
+        .query_map([], |row| {
+            let detail: String = row.get(3)?;
+            Ok(detail)
+        })
+        .ok()?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if rows.is_empty() {
+        None
+    } else {
+        Some(rows.join("\n"))
+    }
 }

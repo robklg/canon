@@ -183,7 +183,9 @@ fn get_matching_sources(
         "r.role = 'source' AND r.suspended = 0"
     };
 
+    // Use denormalized excluded columns for fast filtering
     let exclude_clause = exclude::exclude_clause(include_excluded);
+
     let scopes = ScopeMatch::classify_all(scope_prefixes);
     let (scope_clause, scope_params) = build_scope_clause(&scopes);
 
@@ -199,6 +201,7 @@ fn get_matching_sources(
                 "SELECT s.id
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
+                 LEFT JOIN objects o ON s.object_id = o.id
                  WHERE s.present = 1 AND {} AND {} AND {} AND s.id > ?
                  ORDER BY s.id
                  LIMIT ?",
@@ -237,28 +240,26 @@ fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize
 
     // Query fact keys from both source and object facts
     // Count sources (not entities) - multiple sources can share an object
-    // Use UNION ALL for index efficiency, dedupe once in outer SELECT DISTINCT
+    // Use COUNT(DISTINCT id) to count each source once per key
     // Also determine fact type from which column is non-null
     let results: Vec<(String, i64, FactType)> = conn
         .prepare(
-            "SELECT key, COUNT(*) as cnt,
+            "SELECT key, COUNT(DISTINCT id) as cnt,
                     MAX(CASE WHEN value_text IS NOT NULL THEN 1 ELSE 0 END) as is_text,
                     MAX(CASE WHEN value_num IS NOT NULL THEN 1 ELSE 0 END) as is_num,
                     MAX(CASE WHEN value_time IS NOT NULL THEN 1 ELSE 0 END) as is_time
              FROM (
-                 SELECT DISTINCT id, key, value_text, value_num, value_time FROM (
-                     SELECT ts.id, f.key, f.value_text, f.value_num, f.value_time
-                     FROM temp_sources ts
-                     JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id
+                 SELECT ts.id, f.key, f.value_text, f.value_num, f.value_time
+                 FROM temp_sources ts
+                 JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id
 
-                     UNION ALL
+                 UNION ALL
 
-                     SELECT ts.id, f.key, f.value_text, f.value_num, f.value_time
-                     FROM temp_sources ts
-                     JOIN sources s ON s.id = ts.id
-                     JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id
-                     WHERE s.object_id IS NOT NULL
-                 )
+                 SELECT ts.id, f.key, f.value_text, f.value_num, f.value_time
+                 FROM temp_sources ts
+                 JOIN sources s ON s.id = ts.id
+                 JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id
+                 WHERE s.object_id IS NOT NULL
              )
              GROUP BY key
              ORDER BY cnt DESC"
