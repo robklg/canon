@@ -1,17 +1,13 @@
 use anyhow::{bail, Result};
-use rusqlite::types::Value;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use std::collections::HashMap;
-
 use crate::db::{populate_temp_sources, Connection, Db};
-use crate::scope::{build_scope_clause, ScopeMatch};
-use crate::path::canonicalize_scopes;
-use crate::exclude;
 use crate::expr::{self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, ModifierCall, PathAccessor};
 use crate::filter::{self, Filter};
-
-const BATCH_SIZE: i64 = 1000;
+use crate::path::canonicalize_scopes;
+use crate::scope::ScopeMatch;
+use crate::source_repo;
 
 /// Represents a parsed grouping key
 struct GroupingKey {
@@ -113,28 +109,19 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, scope_paths: &[PathBuf], filter_s
     // Resolve scope paths to realpaths
     let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
-    // Get all matching source IDs
-    let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, include_excluded)?;
+    // Get all matching source IDs using domain predicates
+    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let (source_ids, excluded_count) = get_matching_sources(conn, &scopes, &filters, include_archived, include_excluded)?;
     let total_sources = source_ids.len();
 
     if total_sources == 0 {
         println!("No sources match the given filters.");
-        // Only show excluded hint if excluded sources actually match the filter
-        if !include_excluded {
-            let excluded_matches = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, true)?.len();
-            if excluded_matches > 0 {
-                println!("\n({} excluded sources hidden, use --include-excluded to show)", excluded_matches);
-            }
+        // Show excluded hint if excluded sources were filtered out
+        if !include_excluded && excluded_count > 0 {
+            println!("\n({} excluded sources hidden, use --include-excluded to show)", excluded_count);
         }
         return Ok(());
     }
-
-    // Get excluded count for reporting (sources matching filter but excluded)
-    let excluded_count = if !include_excluded {
-        get_matching_sources(conn, &scope_prefixes, &filters, include_archived, true)?.len() - source_ids.len()
-    } else {
-        0
-    };
 
     println!("Sources matching filters: {}\n", total_sources);
 
@@ -167,67 +154,60 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, scope_paths: &[PathBuf], filter_s
     Ok(())
 }
 
+/// Fetch sources matching scope/role/exclusion criteria, then apply --where filters.
+///
+/// Returns (source_ids, excluded_count) where excluded_count is the number
+/// of sources that matched scope/role but were excluded.
 fn get_matching_sources(
     conn: &mut Connection,
-    scope_prefixes: &[String],
+    scopes: &[ScopeMatch],
     filters: &[Filter],
     include_archived: bool,
     include_excluded: bool,
-) -> Result<Vec<i64>> {
-    let mut all_ids = Vec::new();
-    let mut last_id: i64 = 0;
+) -> Result<(Vec<i64>, usize)> {
+    // 1. Get all root IDs
+    let root_ids: Vec<i64> = conn
+        .prepare("SELECT id FROM roots")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
 
-    let role_clause = if include_archived {
-        "r.suspended = 0" // Include all roles, but not suspended
-    } else {
-        "r.role = 'source' AND r.suspended = 0"
-    };
+    // 2. Fetch all present sources for those roots
+    let all_sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
 
-    // Use denormalized excluded columns for fast filtering
-    let exclude_clause = exclude::exclude_clause(include_excluded);
+    // 3. Filter using domain predicates, tracking excluded count
+    let mut excluded_count = 0usize;
+    let filtered: Vec<i64> = all_sources
+        .into_iter()
+        .filter(|s| s.is_active())
+        .filter(|s| include_archived || s.is_from_role("source"))
+        .filter(|s| s.matches_scope(scopes))
+        .filter(|s| {
+            if s.is_excluded() {
+                if !include_excluded {
+                    excluded_count += 1;
+                    return false;
+                }
+            }
+            true
+        })
+        .map(|s| s.id)
+        .collect();
 
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
-    let (scope_clause, scope_params) = build_scope_clause(&scopes);
-
-    loop {
-        // Build params: scope params + last_id + batch_size
-        let mut params: Vec<Value> = scope_params.iter().map(|s| Value::from(s.clone())).collect();
-        params.push(Value::from(last_id));
-        params.push(Value::from(BATCH_SIZE));
-
-        // Fetch batch of source IDs
-        let batch: Vec<i64> = conn
-            .prepare(&format!(
-                "SELECT s.id
-                 FROM sources s
-                 JOIN roots r ON s.root_id = r.id
-                 LEFT JOIN objects o ON s.object_id = o.id
-                 WHERE s.present = 1 AND {} AND {} AND {} AND s.id > ?
-                 ORDER BY s.id
-                 LIMIT ?",
-                role_clause, exclude_clause, scope_clause
-            ))?
-            .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if batch.is_empty() {
-            break;
-        }
-
-        let max_id = *batch.last().unwrap();
-
-        // Apply filters
-        let filtered = if filters.is_empty() {
-            batch
-        } else {
-            filter::apply_filters(conn, &batch, filters)?
-        };
-
-        all_ids.extend(filtered);
-        last_id = max_id;
+    // 4. Apply --where filters if present
+    if filters.is_empty() {
+        return Ok((filtered, excluded_count));
     }
 
-    Ok(all_ids)
+    let filtered_ids = filter::apply_filters(conn, &filtered, filters)?;
+    let filtered_id_set: HashSet<i64> = filtered_ids.into_iter().collect();
+
+    // Keep only IDs that passed the filter (preserving order)
+    let result: Vec<i64> = filtered
+        .into_iter()
+        .filter(|id| filtered_id_set.contains(id))
+        .collect();
+
+    Ok((result, excluded_count))
 }
 
 fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize, show_all: bool) -> Result<()> {
@@ -1256,9 +1236,10 @@ pub fn delete_facts(
 
     // Resolve scope paths
     let scope_prefixes = canonicalize_scopes(scope_paths)?;
+    let scopes = ScopeMatch::classify_all(&scope_prefixes);
 
-    // Get matching source IDs
-    let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, true, true)?;
+    // Get matching source IDs (include_archived=true, include_excluded=true for delete)
+    let (source_ids, _excluded_count) = get_matching_sources(conn, &scopes, &filters, true, true)?;
 
     if source_ids.is_empty() {
         println!("No sources match the given filters.");

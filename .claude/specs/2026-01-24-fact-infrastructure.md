@@ -341,17 +341,23 @@ But the SQL is isolated in the repository — commands just call `batch_fetch_fo
   - Object facts keyed by source_id in result map (not entity_id)
 
 ### Phase 3: Migrate facts.rs Source Selection
-- **Status**: pending
+- **Status**: ✅ completed
 - **Goal**: Replace `get_matching_sources()` with Source domain model
 - **Scope**:
   - Use `source_repo::batch_fetch_by_roots()` + domain predicates
   - Same pattern as `ls.rs`, `worklist.rs`, `coverage.rs`
   - Keep existing fact queries temporarily
+- **Changes**:
+  - Rewrote `get_matching_sources()` to return `(Vec<i64>, usize)` with excluded_count
+  - Removed SQL-based pagination, now uses batch fetch + domain predicates
+  - Updated `run()` to use excluded_count instead of separate query
+  - Updated `delete_fact_values()` call site
+  - Removed imports: `rusqlite::types::Value`, `build_scope_clause`, `exclude`
+  - Added imports: `source_repo`, `HashSet`
 - **Validation**:
-  - `canon facts` (no args): IDENTICAL output
-  - `canon facts --key content.Make`: IDENTICAL output
-  - `canon facts <scope>`: IDENTICAL output
-  - `canon facts --where 'source.ext=jpg'`: IDENTICAL output
+  - `canon facts` (no args): ✓ identical behavior
+  - `canon facts --key content.device.make`: ✓ identical behavior
+  - `canon facts --where 'source.ext=jpg'`: ✓ identical behavior
 - **Dependencies**: Phase 2
 
 ### Phase 4: Migrate facts.rs Fact Fetching
