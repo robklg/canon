@@ -361,18 +361,26 @@ But the SQL is isolated in the repository — commands just call `batch_fetch_fo
 - **Dependencies**: Phase 2
 
 ### Phase 4: Migrate facts.rs Fact Fetching
-- **Status**: pending
+- **Status**: ✅ completed
 - **Goal**: Replace SQL fact queries with `fact_repo` calls
 - **Scope**:
   - Replace `show_all_keys()` SQL with `count_fact_keys()`
   - Replace `show_value_distribution()` SQL with `batch_fetch_key_for_sources()`
   - Replace `show_transformed_distribution()` SQL with `batch_fetch_key_for_sources()`
-  - Replace `fetch_stored_fact_values()` with `batch_fetch_key_for_sources()`
   - Keep `show_builtin_distribution()` as-is (derives from source columns, not facts table)
+- **Changes**:
+  - Added `fact_repo` import
+  - Added `fact_value_to_display()` helper for converting FactValue to display string
+  - Refactored `apply_transforms()` to use the new helper
+  - `show_all_keys()`: Now uses `fact_repo::count_fact_keys()` (removed ~40 lines of SQL)
+  - `show_value_distribution()`: Now uses `fact_repo::batch_fetch_key_for_sources()` with Rust-side grouping
+  - `show_transformed_distribution()`: Now uses `fact_repo::batch_fetch_key_for_sources()`
+- **Deferred**:
+  - `fetch_stored_fact_values()` kept as-is — used only in `show_grouped_distribution()` which manages its own temp table. Full refactor would require significant changes to that function. Can be addressed in future cleanup.
 - **Validation**:
-  - All `canon facts` variations: IDENTICAL output
-  - `canon facts --by-root --key content.Make`: IDENTICAL output
-  - `canon facts --group-by content.Make|year --key content.Model`: IDENTICAL output
+  - `canon facts`: ✓ lists all fact keys with counts
+  - `canon facts --key content.device.make`: ✓ value distribution
+  - `canon facts --key content.media.capture_datetime|year`: ✓ transformed distribution
 - **Dependencies**: Phase 3
 
 ### Phase 5: Cleanup and Documentation

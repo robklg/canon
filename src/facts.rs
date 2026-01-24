@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use crate::db::{populate_temp_sources, Connection, Db};
 use crate::expr::{self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, ModifierCall, PathAccessor};
+use crate::fact_repo;
 use crate::filter::{self, Filter};
 use crate::path::canonicalize_scopes;
 use crate::scope::ScopeMatch;
@@ -44,6 +45,26 @@ fn is_builtin_or_derived(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Convert a FactValue to a display string.
+fn fact_value_to_display(value: &FactValue) -> String {
+    match value {
+        FactValue::Text(t) => t.clone(),
+        FactValue::Path(p) => p.clone(),
+        FactValue::Num(n) => {
+            if n.fract() == 0.0 {
+                format!("{}", *n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
+        FactValue::Time(ts) => {
+            chrono::DateTime::from_timestamp(*ts, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| ts.to_string())
+        }
+    }
+}
+
 /// Apply accessor and modifiers to a FactValue, returning a string for grouping
 fn apply_transforms(
     value: FactValue,
@@ -63,23 +84,8 @@ fn apply_transforms(
         result = expr::apply_modifier(&result, modifier_call, key, true)?;
     }
 
-    // Convert to string for grouping
-    Ok(match result {
-        FactValue::Text(t) => t,
-        FactValue::Path(p) => p,
-        FactValue::Num(n) => {
-            if n.fract() == 0.0 {
-                format!("{}", n as i64)
-            } else {
-                format!("{}", n)
-            }
-        }
-        FactValue::Time(ts) => {
-            chrono::DateTime::from_timestamp(ts, 0)
-                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                .unwrap_or_else(|| ts.to_string())
-        }
-    })
+    // Convert to string for display
+    Ok(fact_value_to_display(&result))
 }
 
 pub fn run(db: &mut Db, key_arg: Option<&str>, scope_paths: &[PathBuf], filter_strs: &[String], limit: usize, show_all: bool, include_archived: bool, include_excluded: bool, by_root: bool, group_by: &[String]) -> Result<()> {
@@ -215,54 +221,8 @@ fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize
         return Ok(());
     }
 
-    // Build a temp table for efficiency with large source lists
-    populate_temp_sources(conn, source_ids)?;
-
-    // Query fact keys from both source and object facts
-    // Count sources (not entities) - multiple sources can share an object
-    // Use COUNT(DISTINCT id) to count each source once per key
-    // Also determine fact type from which column is non-null
-    let results: Vec<(String, i64, FactType)> = conn
-        .prepare(
-            "SELECT key, COUNT(DISTINCT id) as cnt,
-                    MAX(CASE WHEN value_text IS NOT NULL THEN 1 ELSE 0 END) as is_text,
-                    MAX(CASE WHEN value_num IS NOT NULL THEN 1 ELSE 0 END) as is_num,
-                    MAX(CASE WHEN value_time IS NOT NULL THEN 1 ELSE 0 END) as is_time
-             FROM (
-                 SELECT ts.id, f.key, f.value_text, f.value_num, f.value_time
-                 FROM temp_sources ts
-                 JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id
-
-                 UNION ALL
-
-                 SELECT ts.id, f.key, f.value_text, f.value_num, f.value_time
-                 FROM temp_sources ts
-                 JOIN sources s ON s.id = ts.id
-                 JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id
-                 WHERE s.object_id IS NOT NULL
-             )
-             GROUP BY key
-             ORDER BY cnt DESC"
-        )?
-        .query_map([], |row| {
-            let key: String = row.get(0)?;
-            let count: i64 = row.get(1)?;
-            let _is_text: i64 = row.get(2)?;
-            let is_num: i64 = row.get(3)?;
-            let is_time: i64 = row.get(4)?;
-            let fact_type = if is_time == 1 {
-                FactType::Time
-            } else if is_num == 1 {
-                FactType::Num
-            } else {
-                FactType::Text
-            };
-            Ok((key, count, fact_type))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Clean up temp table
-    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+    // Use fact_repo to count fact keys
+    let results = fact_repo::count_fact_keys(conn, source_ids)?;
 
     // Add built-in and derived facts at the top (they always have 100% coverage)
     use strum::IntoEnumIterator;
@@ -284,7 +244,7 @@ fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize
     // Add stored facts (with Stored category)
     let stored_results: Vec<(String, i64, BuiltinKeyCategory, FactType)> = results
         .into_iter()
-        .map(|(key, count, fact_type)| (key, count, BuiltinKeyCategory::Stored, fact_type))
+        .map(|(key, count, fact_type)| (key, count as i64, BuiltinKeyCategory::Stored, fact_type))
         .collect();
     all_results.extend(stored_results);
 
@@ -323,92 +283,29 @@ fn show_value_distribution(
         return Ok(());
     }
 
-    // Build temp table
-    populate_temp_sources(conn, source_ids)?;
+    // Fetch values using fact_repo
+    let fact_map = fact_repo::batch_fetch_key_for_sources(conn, source_ids, key)?;
 
-    // Query value distribution
-    // Count sources (not entities) - multiple sources can share an object
-    // Use COALESCE to get a displayable value from the typed columns
-    // Use UNION ALL for index efficiency, dedupe once in outer SELECT DISTINCT
-    let query = if limit == 0 {
-        "SELECT val, COUNT(*) as cnt
-         FROM (
-             SELECT DISTINCT id, val FROM (
-                 SELECT ts.id,
-                     COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch')) as val
-                 FROM temp_sources ts
-                 JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?1
+    // Group values and count
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    let mut sources_with_fact: i64 = 0;
 
-                 UNION ALL
+    for (_source_id, entry_opt) in &fact_map {
+        if let Some(entry) = entry_opt {
+            sources_with_fact += 1;
+            let display_val = fact_value_to_display(&entry.value);
+            *counts.entry(display_val).or_insert(0) += 1;
+        }
+    }
 
-                 SELECT ts.id,
-                     COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch')) as val
-                 FROM temp_sources ts
-                 JOIN sources s ON s.id = ts.id
-                 JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1
-                 WHERE s.object_id IS NOT NULL
-             )
-         )
-         GROUP BY val
-         ORDER BY cnt DESC".to_string()
-    } else {
-        format!(
-            "SELECT val, COUNT(*) as cnt
-             FROM (
-                 SELECT DISTINCT id, val FROM (
-                     SELECT ts.id,
-                         COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch')) as val
-                     FROM temp_sources ts
-                     JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?1
+    // Sort by count descending
+    let mut results: Vec<(String, i64)> = counts.into_iter().collect();
+    results.sort_by(|a, b| b.1.cmp(&a.1));
 
-                     UNION ALL
-
-                     SELECT ts.id,
-                         COALESCE(f.value_text, CAST(f.value_num AS TEXT), datetime(f.value_time, 'unixepoch')) as val
-                     FROM temp_sources ts
-                     JOIN sources s ON s.id = ts.id
-                     JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1
-                     WHERE s.object_id IS NOT NULL
-                 )
-             )
-             GROUP BY val
-             ORDER BY cnt DESC
-             LIMIT {}",
-            limit
-        )
-    };
-
-    let results: Vec<(String, i64)> = conn
-        .prepare(&query)?
-        .query_map([key], |row| {
-            let val: Option<String> = row.get(0)?;
-            let cnt: i64 = row.get(1)?;
-            Ok((val.unwrap_or_else(|| "(null)".to_string()), cnt))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Count sources that have this fact (either directly or via their object)
-    // Use UNION ALL for index efficiency
-    let sources_with_fact: i64 = conn.query_row(
-        "SELECT COUNT(DISTINCT id) FROM (
-             SELECT ts.id
-             FROM temp_sources ts
-             JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?1
-
-             UNION ALL
-
-             SELECT ts.id
-             FROM temp_sources ts
-             JOIN sources s ON s.id = ts.id
-             JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1
-             WHERE s.object_id IS NOT NULL
-         )",
-        [key],
-        |row| row.get(0),
-    )?;
-
-    // Clean up temp table
-    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+    // Apply limit
+    if limit > 0 && results.len() > limit {
+        results.truncate(limit);
+    }
 
     // Print header
     println!("{:<40} {:>10} {:>10}", key, "Count", "Coverage");
@@ -445,70 +342,31 @@ fn show_transformed_distribution(
     total_sources: usize,
     limit: usize,
 ) -> Result<()> {
-    use std::collections::HashMap;
-
     if source_ids.is_empty() {
         return Ok(());
     }
 
-    // Build temp table
-    populate_temp_sources(conn, source_ids)?;
-
-    // Fetch raw values and apply transforms
-    // Query both source and object facts (one row per source)
-    let rows: Vec<(Option<String>, Option<f64>, Option<i64>)> = conn
-        .prepare(
-            "SELECT
-                 COALESCE(f.value_text, NULL) as text_val,
-                 COALESCE(f.value_num, NULL) as num_val,
-                 COALESCE(f.value_time, NULL) as time_val
-             FROM (
-                 SELECT ts.id, f.value_text, f.value_num, f.value_time
-                 FROM temp_sources ts
-                 JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?1
-
-                 UNION ALL
-
-                 SELECT ts.id, f.value_text, f.value_num, f.value_time
-                 FROM temp_sources ts
-                 JOIN sources s ON s.id = ts.id
-                 JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1
-                 WHERE s.object_id IS NOT NULL
-             ) f"
-        )?
-        .query_map([base_key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
+    // Fetch values using fact_repo
+    let fact_map = fact_repo::batch_fetch_key_for_sources(conn, source_ids, base_key)?;
 
     let mut counts: HashMap<String, i64> = HashMap::new();
     let mut sources_with_fact: i64 = 0;
     let mut skipped_type_mismatch: i64 = 0;
 
-    for (text_val, num_val, time_val) in rows {
-        let fact_value = if let Some(t) = text_val {
-            FactValue::Text(t)
-        } else if let Some(n) = num_val {
-            FactValue::Num(n)
-        } else if let Some(ts) = time_val {
-            FactValue::Time(ts)
-        } else {
-            continue;
-        };
-
-        sources_with_fact += 1;
-        match apply_transforms(fact_value, accessor, modifiers, display_key) {
-            Ok(transformed) => {
-                *counts.entry(transformed).or_insert(0) += 1;
-            }
-            Err(_) => {
-                // Type mismatch (e.g., text value when time modifier expected)
-                // This can happen with malformed data - skip and count
-                skipped_type_mismatch += 1;
+    for (_source_id, entry_opt) in &fact_map {
+        if let Some(entry) = entry_opt {
+            sources_with_fact += 1;
+            match apply_transforms(entry.value.clone(), accessor, modifiers, display_key) {
+                Ok(transformed) => {
+                    *counts.entry(transformed).or_insert(0) += 1;
+                }
+                Err(_) => {
+                    // Type mismatch (e.g., text value when time modifier expected)
+                    skipped_type_mismatch += 1;
+                }
             }
         }
     }
-
-    // Clean up temp table
-    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
 
     // Sort by count descending
     let mut results: Vec<(String, i64)> = counts.into_iter().collect();
