@@ -399,15 +399,34 @@ This spec establishes the **template pattern** for Canon's domain model. Once so
 3. **Migrate commands** - Replace SQL logic with domain predicates
 4. **Tests** - Unit tests for domain, integration tests for commands
 
-### Fact Infrastructure (Future Project)
+### Fact Infrastructure (Next Project)
 
-**Why it matters**: Fact queries power `--where` filters, `cluster` manifests, and coverage reports. Currently, fact access is scattered and inconsistent.
+**Status**: Spec created at `.claude/specs/2026-01-24-fact-infrastructure.md`
+
+**Why it matters**: Fact queries power `--where` filters, `cluster` manifests, and coverage reports. Currently, fact access is scattered and inconsistent — `facts.rs` and `cluster.rs` each have custom SQL with duplicated entity_type handling.
+
+**Scope** (from dedicated spec):
+- `fact.rs` - Domain types (`FactEntry` struct, reuse `FactValue` from `expr.rs`)
+- `fact_repo.rs` - Batch fetch facts for source IDs (transparently merges source + object facts)
+- Migrate `facts.rs` command only — use Source + Fact infrastructure
+
+**Explicitly deferred**:
+- `cluster.rs` migration — separate follow-up project after Fact Infrastructure validates the abstraction
+- `filter.rs` changes — keep existing ad-hoc approach
+
+### Cluster Migration (Future Project, Depends on Fact Infrastructure)
+
+**Why separate**: `cluster.rs` is large (864 lines) and has specific requirements. Splitting it out:
+1. Keeps Fact Infrastructure focused and manageable
+2. Validates the abstraction works before committing to cluster.rs changes
+3. Reduces risk of building something that doesn't fit cluster.rs needs
 
 **Scope**:
-- `fact.rs` - Domain types (Fact struct, FactValue enum, fact predicates)
-- `fact_repo.rs` - Batch fetch facts by entity type/id
-- Migrate: `facts.rs` command, `cluster.rs` fact collection, `filter.rs` fact evaluation
-- Enables: Full `cluster.rs` migration (currently deferred due to fact dependency)
+- Use Source domain model for `query_sources()`
+- Use Fact Infrastructure for fact collection and 100% coverage detection
+- Preserve lock file format exactly (consumed by `apply.rs`)
+
+**Prerequisites**: Fact Infrastructure complete
 
 ### Root Infrastructure (Future Project)
 

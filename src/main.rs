@@ -8,6 +8,7 @@ mod coverage;
 mod db;
 mod exclude;
 mod expr;
+mod fact;
 mod facts;
 mod filter;
 mod import_facts;
