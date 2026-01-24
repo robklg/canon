@@ -17,6 +17,7 @@ mod import_facts;
 mod ls;
 mod path;
 mod root;
+mod root_repo;
 mod roots;
 mod scan;
 mod scope;

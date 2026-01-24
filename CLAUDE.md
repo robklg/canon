@@ -28,7 +28,8 @@ Canon is a CLI tool for organizing large media libraries into a "canonical archi
 - `src/main.rs` - CLI entry point using clap
 - `src/path.rs` - Path utilities (pure manipulation + canonicalization)
 - `src/scope.rs` - Scope domain concepts (ScopeMatch enum, SQL clause building)
-- `src/root.rs` - Root domain concepts (RootSpec enum, root resolution)
+- `src/root.rs` - Root domain model (Root struct, RootSpec enum, predicates like `is_suspended()`, `is_source()`)
+- `src/root_repo.rs` - Root repository layer (batch fetch from database, no domain logic)
 - `src/source.rs` - Source domain model (Source struct, predicates like `is_excluded()`, `matches_scope()`)
 - `src/source_repo.rs` - Source repository layer (batch fetch from database, no domain logic)
 - `src/fact.rs` - Fact domain model (FactEntry struct, re-exports FactValue/FactType from expr.rs)
@@ -135,13 +136,21 @@ In `scope.rs`:
 - `build_scope_clause()` - SQL clause building (takes `&[ScopeMatch]`, no I/O)
 - `SCOPE_CLAUSE`, `scope_param()` - Helpers for single optional scope
 
-In `root.rs`:
+In `root.rs` (domain layer):
+- `Root` struct - The authoritative definition of a root with all fields
+- `root.is_suspended()`, `root.is_active()` - Suspension state predicates
+- `root.is_source()`, `root.is_archive()` - Role predicates
+- `root.matches_scope(scope)` - Check if root relates to a path (bidirectional)
 - `RootSpec` enum - Domain concept for how users identify roots (`id:N` or `path:/foo`)
 - `RootSpec::parse()` - Parse root spec string (pure, no I/O)
 - `find_containing_root()` - Match a path against candidate roots (pure, no I/O)
 - `parse_root_spec()`, `parse_root_spec_any()` - Parse and resolve root specs (orchestration)
 - `resolve_root_path()`, `resolve_root_path_any()` - Find roots containing paths (orchestration)
 - `resolve_archive_path()` - Find archive root containing a path
+
+In `root_repo.rs` (infrastructure layer):
+- `fetch_all(conn)` - Fetch all roots ordered by ID
+- `batch_fetch_by_ids(conn, root_ids)` - Fetch specific roots by ID (HashMap)
 
 In `db.rs`:
 - `Db` struct, `open()` - Database connection and initialization

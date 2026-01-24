@@ -1,11 +1,14 @@
-use anyhow::{bail, Result};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::{bail, Result};
+
 use crate::db::Db;
-use crate::root::{parse_root_spec, parse_root_spec_any};
+use crate::root::{parse_root_spec, parse_root_spec_any, Root};
+use crate::root_repo;
 
 pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
     let conn = db.conn();
@@ -21,36 +24,28 @@ pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
         None => None,
     };
 
-    let suspended_clause = if suspended_only { "r.suspended = 1" } else { "r.suspended = 0" };
-    let query = format!(
-        "SELECT r.id, r.role, r.path, r.comment, r.last_scanned_at, r.suspended, COUNT(s.id) as file_count
-         FROM roots r
-         LEFT JOIN sources s ON s.root_id = r.id AND s.present = 1
-         WHERE {}
-         GROUP BY r.id
-         ORDER BY r.id",
-        suspended_clause
-    );
-    let mut stmt = conn.prepare(&query)?;
+    // Fetch all roots using repository layer
+    let all_roots = root_repo::fetch_all(conn)?;
 
-    let roots: Vec<(i64, String, String, Option<String>, Option<i64>, bool, i64)> = stmt
-        .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Filter roots by scope if provided
-    let filtered_roots: Vec<_> = match &scope_str {
-        Some(scope) => roots
-            .into_iter()
-            .filter(|(_, _, path, _, _, _, _)| {
-                // Root is at or beneath scope: root path starts with scope
-                // OR scope is beneath root: scope starts with root path
-                path.starts_with(scope) || scope.starts_with(path)
-            })
-            .collect(),
-        None => roots,
-    };
+    // Apply domain predicates for filtering
+    let filtered_roots: Vec<&Root> = all_roots
+        .iter()
+        .filter(|r| {
+            // Filter by suspended status
+            if suspended_only {
+                r.is_suspended()
+            } else {
+                r.is_active()
+            }
+        })
+        .filter(|r| {
+            // Filter by scope if provided
+            match &scope_str {
+                Some(scope) => r.matches_scope(scope),
+                None => true,
+            }
+        })
+        .collect();
 
     if filtered_roots.is_empty() {
         if scope.is_some() {
@@ -61,25 +56,76 @@ pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Fetch file counts for the filtered roots
+    let root_ids: Vec<i64> = filtered_roots.iter().map(|r| r.id).collect();
+    let file_counts = fetch_file_counts(conn, &root_ids)?;
+
     // Print header
-    println!("{:<4} {:<8} {:>8}  {:<16}  {}", "ID", "ROLE", "FILES", "LAST SCAN", "PATH");
+    println!(
+        "{:<4} {:<8} {:>8}  {:<16}  {}",
+        "ID", "ROLE", "FILES", "LAST SCAN", "PATH"
+    );
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    for (id, role, path, comment, last_scanned_at, suspended, file_count) in filtered_roots {
-        let scan_ago = format_time_ago(last_scanned_at, now);
-        let suspended_marker = if suspended { " [suspended]" } else { "" };
-        let path_with_info = match comment {
-            Some(c) => format!("{}{} ({})", path, suspended_marker, c),
-            None => format!("{}{}", path, suspended_marker),
+    for root in filtered_roots {
+        let file_count = file_counts.get(&root.id).copied().unwrap_or(0);
+        let scan_ago = format_time_ago(root.last_scanned_at, now);
+        let suspended_marker = if root.is_suspended() {
+            " [suspended]"
+        } else {
+            ""
         };
-        println!("{:<4} {:<8} {:>8}  {:<16}  {}", id, role, file_count, scan_ago, path_with_info);
+        let path_with_info = match &root.comment {
+            Some(c) => format!("{}{} ({})", root.path, suspended_marker, c),
+            None => format!("{}{}", root.path, suspended_marker),
+        };
+        println!(
+            "{:<4} {:<8} {:>8}  {:<16}  {}",
+            root.id, root.role, file_count, scan_ago, path_with_info
+        );
     }
 
     Ok(())
+}
+
+/// Fetch file counts for a set of root IDs.
+///
+/// Returns a HashMap from root_id to count of present sources.
+fn fetch_file_counts(
+    conn: &rusqlite::Connection,
+    root_ids: &[i64],
+) -> Result<HashMap<i64, i64>> {
+    if root_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let placeholders: Vec<&str> = root_ids.iter().map(|_| "?").collect();
+    let sql = format!(
+        "SELECT root_id, COUNT(*) FROM sources WHERE present = 1 AND root_id IN ({}) GROUP BY root_id",
+        placeholders.join(",")
+    );
+
+    let params: Vec<rusqlite::types::Value> = root_ids
+        .iter()
+        .map(|&id| rusqlite::types::Value::from(id))
+        .collect();
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+
+    let mut counts = HashMap::new();
+    for row in rows {
+        let (root_id, count) = row?;
+        counts.insert(root_id, count);
+    }
+
+    Ok(counts)
 }
 
 fn format_time_ago(timestamp: Option<i64>, now: i64) -> String {

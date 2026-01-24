@@ -1,10 +1,11 @@
 //! Root domain concepts for canon.
 //!
 //! This module defines how roots are identified and resolved:
-//! - Domain concepts: RootSpec enum, find_containing_root()
+//! - Domain types: Root struct, RootSpec enum
+//! - Domain functions: find_containing_root(), predicates
 //! - Orchestration: parse_root_spec(), resolve_root_path()
 //!
-//! The domain concepts are pure (no I/O) and can be unit tested.
+//! The domain types and functions are pure (no I/O) and can be unit tested.
 //! The orchestration functions combine domain logic with filesystem
 //! and database operations.
 
@@ -72,6 +73,62 @@ pub fn find_containing_root(
         }
     }
     None
+}
+
+/// A root directory registered in canon.
+///
+/// Roots are the top-level directories that canon manages. Each root has a role
+/// (source or archive) that determines how its contents are treated.
+///
+/// This struct represents the domain model for roots — it contains all stored
+/// root data and provides pure predicates for filtering and classification.
+#[derive(Debug, Clone)]
+pub struct Root {
+    /// Database ID
+    pub id: i64,
+    /// Canonical absolute path
+    pub path: String,
+    /// Role: "source" or "archive"
+    pub role: String,
+    /// Optional user comment
+    pub comment: Option<String>,
+    /// Unix timestamp of last scan (None if never scanned)
+    pub last_scanned_at: Option<i64>,
+    /// Whether this root is suspended (hidden from most operations)
+    pub suspended: bool,
+}
+
+impl Root {
+    /// Check if this root is suspended.
+    pub fn is_suspended(&self) -> bool {
+        self.suspended
+    }
+
+    /// Check if this root is active (not suspended).
+    pub fn is_active(&self) -> bool {
+        !self.suspended
+    }
+
+    /// Check if this root has the "source" role.
+    pub fn is_source(&self) -> bool {
+        self.role == "source"
+    }
+
+    /// Check if this root has the "archive" role.
+    pub fn is_archive(&self) -> bool {
+        self.role == "archive"
+    }
+
+    /// Check if this root matches a scope path.
+    ///
+    /// Matching is bidirectional:
+    /// - Root is at or under the scope (root path starts with scope)
+    /// - Scope is at or under the root (scope starts with root path)
+    ///
+    /// This is used by `canon roots <scope>` to find related roots.
+    pub fn matches_scope(&self, scope: &str) -> bool {
+        self.path.starts_with(scope) || scope.starts_with(&self.path)
+    }
 }
 
 // ============================================================================
@@ -327,5 +384,148 @@ mod tests {
         let roots: Vec<(i64, String, String)> = vec![];
         let result = find_containing_root("/a/b", &roots);
         assert_eq!(result, None);
+    }
+
+    // ========================================================================
+    // Root struct and predicates tests
+    // ========================================================================
+
+    /// Helper to create a Root with sensible defaults for testing.
+    fn make_root() -> Root {
+        Root {
+            id: 1,
+            path: "/test/path".to_string(),
+            role: "source".to_string(),
+            comment: None,
+            last_scanned_at: None,
+            suspended: false,
+        }
+    }
+
+    #[test]
+    fn is_suspended_true() {
+        let root = Root {
+            suspended: true,
+            ..make_root()
+        };
+        assert!(root.is_suspended());
+    }
+
+    #[test]
+    fn is_suspended_false() {
+        let root = Root {
+            suspended: false,
+            ..make_root()
+        };
+        assert!(!root.is_suspended());
+    }
+
+    #[test]
+    fn is_active_when_not_suspended() {
+        let root = Root {
+            suspended: false,
+            ..make_root()
+        };
+        assert!(root.is_active());
+    }
+
+    #[test]
+    fn is_active_when_suspended() {
+        let root = Root {
+            suspended: true,
+            ..make_root()
+        };
+        assert!(!root.is_active());
+    }
+
+    #[test]
+    fn is_source_true() {
+        let root = Root {
+            role: "source".to_string(),
+            ..make_root()
+        };
+        assert!(root.is_source());
+        assert!(!root.is_archive());
+    }
+
+    #[test]
+    fn is_source_false() {
+        let root = Root {
+            role: "archive".to_string(),
+            ..make_root()
+        };
+        assert!(!root.is_source());
+    }
+
+    #[test]
+    fn is_archive_true() {
+        let root = Root {
+            role: "archive".to_string(),
+            ..make_root()
+        };
+        assert!(root.is_archive());
+        assert!(!root.is_source());
+    }
+
+    #[test]
+    fn is_archive_false() {
+        let root = Root {
+            role: "source".to_string(),
+            ..make_root()
+        };
+        assert!(!root.is_archive());
+    }
+
+    #[test]
+    fn matches_scope_root_under_scope() {
+        // Root /a/b/c is under scope /a/b
+        let root = Root {
+            path: "/a/b/c".to_string(),
+            ..make_root()
+        };
+        assert!(root.matches_scope("/a/b"));
+    }
+
+    #[test]
+    fn matches_scope_scope_under_root() {
+        // Scope /a/b/c/d is under root /a/b
+        let root = Root {
+            path: "/a/b".to_string(),
+            ..make_root()
+        };
+        assert!(root.matches_scope("/a/b/c/d"));
+    }
+
+    #[test]
+    fn matches_scope_exact_match() {
+        let root = Root {
+            path: "/a/b".to_string(),
+            ..make_root()
+        };
+        assert!(root.matches_scope("/a/b"));
+    }
+
+    #[test]
+    fn matches_scope_no_match() {
+        let root = Root {
+            path: "/a/b".to_string(),
+            ..make_root()
+        };
+        assert!(!root.matches_scope("/x/y"));
+    }
+
+    #[test]
+    fn matches_scope_similar_prefix_no_match() {
+        // /a/bc is not under /a/b (different directory, not a child)
+        // But with starts_with, "/a/bc".starts_with("/a/b") is true!
+        // This is the current behavior in roots.rs - it uses starts_with.
+        // Note: This differs from find_containing_root which uses path_strip_prefix.
+        let root = Root {
+            path: "/a/bc".to_string(),
+            ..make_root()
+        };
+        // Current behavior: starts_with matches similar prefixes
+        // This matches how roots.rs:list() currently works
+        assert!(root.matches_scope("/a/b"));
     }
 }
