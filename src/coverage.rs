@@ -1,15 +1,14 @@
 use anyhow::Result;
-use rusqlite::types::Value;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::db::{populate_temp_sources, Db};
-use crate::root::parse_root_spec;
-use crate::scope::{build_scope_clause, ScopeMatch};
-use crate::path::canonicalize_scopes;
-use crate::exclude;
 use crate::filter::{self, Filter};
-
-const BATCH_SIZE: i64 = 1000;
+use crate::path::canonicalize_scopes;
+use crate::root::parse_root_spec;
+use crate::scope::ScopeMatch;
+use crate::source::Source;
+use crate::source_repo;
 
 /// Statistics for a single root or overall
 struct CoverageStats {
@@ -75,7 +74,7 @@ pub fn run(
     filter_strs: &[String],
     archive_spec: Option<&str>,
     include_archived: bool,
-    include_excluded: bool,
+    _include_excluded: bool,
     compact: bool,
 ) -> Result<()> {
     let conn = db.conn();
@@ -88,6 +87,7 @@ pub fn run(
 
     // Resolve scope paths
     let scope_prefixes = canonicalize_scopes(scope_paths)?;
+    let scopes = ScopeMatch::classify_all(&scope_prefixes);
 
     // Parse and validate archive spec (must be archive role)
     let archive_root_id = if let Some(spec) = archive_spec {
@@ -96,7 +96,7 @@ pub fn run(
         None
     };
 
-    // Get mutable reference for temp table operations
+    // Get mutable reference for operations
     let conn = db.conn_mut();
 
     // Compute and display stats
@@ -104,7 +104,7 @@ pub fn run(
         // Scoped mode
         let stats = compute_scoped_stats(
             conn,
-            &scope_prefixes,
+            &scopes,
             &filters,
             archive_root_id,
             include_archived,
@@ -117,7 +117,7 @@ pub fn run(
         if compact {
             display_compact_scoped(&stats, scope_display);
         } else {
-            display_scoped_stats(&stats, scope_display, archive_spec, include_excluded);
+            display_scoped_stats(&stats, scope_display, archive_spec);
         }
     } else {
         // Per-root breakdown mode
@@ -130,75 +130,66 @@ pub fn run(
         if compact {
             display_compact_per_root(&per_root_stats, &overall);
         } else {
-            display_per_root_stats(&per_root_stats, &overall, archive_spec, include_excluded);
+            display_per_root_stats(&per_root_stats, &overall, archive_spec);
         }
     }
 
     Ok(())
 }
 
-/// Compute coverage stats for sources under a specific path scope using pure SQL aggregates
+/// Get all sources matching scope/role criteria, then apply filters.
+fn get_matching_sources(
+    conn: &mut rusqlite::Connection,
+    scopes: &[ScopeMatch],
+    filters: &[Filter],
+    include_archived: bool,
+) -> Result<Vec<Source>> {
+    // Get all root IDs
+    let root_ids: Vec<i64> = conn
+        .prepare("SELECT id FROM roots")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Fetch all present sources
+    let all_sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
+
+    // Filter using domain predicates
+    let filtered: Vec<Source> = all_sources
+        .into_iter()
+        .filter(|s| s.is_active())
+        .filter(|s| include_archived || s.is_from_role("source"))
+        .filter(|s| s.matches_scope(scopes))
+        .collect();
+
+    // Apply --where filters if present
+    if filters.is_empty() {
+        return Ok(filtered);
+    }
+
+    let source_ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
+    let filtered_ids: HashSet<i64> = filter::apply_filters(conn, &source_ids, filters)?
+        .into_iter()
+        .collect();
+
+    Ok(filtered
+        .into_iter()
+        .filter(|s| filtered_ids.contains(&s.id))
+        .collect())
+}
+
+/// Compute coverage stats for sources under a specific path scope
 fn compute_scoped_stats(
     conn: &mut rusqlite::Connection,
-    scope_prefixes: &[String],
+    scopes: &[ScopeMatch],
     filters: &[Filter],
     archive_root_id: Option<i64>,
     include_archived: bool,
 ) -> Result<CoverageStats> {
-    // Build role clause
-    let role_clause = if include_archived {
-        "r.suspended = 0" // Include all roles, but not suspended
-    } else {
-        "r.role = 'source' AND r.suspended = 0"
-    };
-
-    // Always query all sources (no exclude filtering at query level)
-    let exclude_clause = exclude::exclude_clause(true);
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
-    let (scope_clause, scope_params) = build_scope_clause(&scopes);
-
-    // Collect all filtered source IDs
-    let mut all_filtered_ids: Vec<i64> = Vec::new();
-    let mut last_id: i64 = 0;
-
-    loop {
-        // Build params: scope params + last_id + batch_size
-        let mut params: Vec<Value> = scope_params.iter().map(|s| Value::from(s.clone())).collect();
-        params.push(Value::from(last_id));
-        params.push(Value::from(BATCH_SIZE));
-
-        let batch_query = format!(
-            "SELECT s.id FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE s.present = 1 AND {} AND {} AND {} AND s.id > ?
-             ORDER BY s.id LIMIT ?",
-            role_clause, exclude_clause, scope_clause
-        );
-
-        let source_ids: Vec<i64> = conn
-            .prepare(&batch_query)?
-            .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if source_ids.is_empty() {
-            break;
-        }
-
-        last_id = *source_ids.last().unwrap();
-
-        // Apply filters
-        let filtered_ids = filter::apply_filters(conn, &source_ids, filters)?;
-        all_filtered_ids.extend(filtered_ids);
-    }
-
-    // Populate temp table with all filtered source IDs
-    populate_temp_sources(conn, &all_filtered_ids)?;
-
-    // Now compute all stats with aggregate queries
-    compute_stats_from_temp_table(conn, archive_root_id)
+    let sources = get_matching_sources(conn, scopes, filters, include_archived)?;
+    compute_stats_from_sources(conn, &sources, archive_root_id)
 }
 
-/// Compute coverage stats per root, plus overall totals using pure SQL aggregates
+/// Compute coverage stats per root, plus overall totals
 fn compute_per_root_stats(
     conn: &mut rusqlite::Connection,
     filters: &[Filter],
@@ -207,7 +198,7 @@ fn compute_per_root_stats(
 ) -> Result<(Vec<CoverageStats>, CoverageStats)> {
     // Get list of roots
     let role_clause = if include_archived {
-        "suspended = 0" // Include all roles, but not suspended
+        "suspended = 0"
     } else {
         "role = 'source' AND suspended = 0"
     };
@@ -220,46 +211,21 @@ fn compute_per_root_stats(
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Fast path: no filters - compute everything with GROUP BY in SQL
-    if filters.is_empty() {
-        return compute_per_root_stats_fast(conn, &roots, archive_root_id, include_archived);
-    }
+    // Get all matching sources (unscoped)
+    let all_sources = get_matching_sources(conn, &[], filters, include_archived)?;
 
-    // Slow path: has filters - need per-root batch processing
+    // Group by root_id
     let mut per_root_stats = Vec::new();
     let mut overall = CoverageStats::new();
 
     for (root_id, root_path, root_role) in roots {
-        // Collect all filtered source IDs for this root
-        let mut all_filtered_ids: Vec<i64> = Vec::new();
-        let mut last_id: i64 = 0;
+        // Filter sources for this root
+        let root_sources: Vec<&Source> = all_sources
+            .iter()
+            .filter(|s| s.root_id == root_id)
+            .collect();
 
-        loop {
-            let source_ids: Vec<i64> = conn
-                .prepare(
-                    "SELECT id FROM sources
-                     WHERE root_id = ? AND present = 1 AND id > ?
-                     ORDER BY id LIMIT ?"
-                )?
-                .query_map(rusqlite::params![root_id, last_id, BATCH_SIZE], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            if source_ids.is_empty() {
-                break;
-            }
-
-            last_id = *source_ids.last().unwrap();
-
-            // Apply filters
-            let filtered_ids = filter::apply_filters(conn, &source_ids, filters)?;
-            all_filtered_ids.extend(filtered_ids);
-        }
-
-        // Populate temp table with all filtered source IDs for this root
-        populate_temp_sources(conn, &all_filtered_ids)?;
-
-        // Compute stats from temp table
-        let mut stats = compute_stats_from_temp_table(conn, archive_root_id)?;
+        let mut stats = compute_stats_from_source_refs(conn, &root_sources, archive_root_id)?;
         stats.root_id = Some(root_id);
         stats.root_path = Some(root_path);
         stats.root_role = Some(root_role);
@@ -276,196 +242,89 @@ fn compute_per_root_stats(
     Ok((per_root_stats, overall))
 }
 
-/// Fast path: compute per-root stats using GROUP BY (no filters)
-fn compute_per_root_stats_fast(
-    conn: &rusqlite::Connection,
-    roots: &[(i64, String, String)],
+/// Compute stats from a list of sources using domain predicates.
+/// Uses is_excluded() which checks BOTH source-level and object-level exclusion.
+fn compute_stats_from_sources(
+    conn: &mut rusqlite::Connection,
+    sources: &[Source],
     archive_root_id: Option<i64>,
-    include_archived: bool,
-) -> Result<(Vec<CoverageStats>, CoverageStats)> {
-    use std::collections::HashMap;
-
-    let role_clause = if include_archived {
-        "r.suspended = 0"
-    } else {
-        "r.role = 'source' AND r.suspended = 0"
-    };
-
-    // Query 1: Total sources per root
-    let totals: HashMap<i64, i64> = conn
-        .prepare(&format!(
-            "SELECT s.root_id, COUNT(*) as cnt
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE s.present = 1 AND {}
-             GROUP BY s.root_id",
-            role_clause
-        ))?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<Result<HashMap<_, _>, _>>()?;
-
-    // Query 2: Excluded sources per root
-    let excluded: HashMap<i64, i64> = conn
-        .prepare(&format!(
-            "SELECT s.root_id, COUNT(*) as cnt
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE s.present = 1 AND {}
-               AND s.excluded = 1
-             GROUP BY s.root_id",
-            role_clause
-        ))?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<Result<HashMap<_, _>, _>>()?;
-
-    // Query 3: Hashed (non-excluded) sources per root
-    let hashed: HashMap<i64, i64> = conn
-        .prepare(&format!(
-            "SELECT s.root_id, COUNT(*) as cnt
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE s.present = 1 AND {}
-               AND s.object_id IS NOT NULL
-               AND s.excluded = 0
-             GROUP BY s.root_id",
-            role_clause
-        ))?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<Result<HashMap<_, _>, _>>()?;
-
-    // Query 4: Archived (non-excluded) sources per root
-    let archived: HashMap<i64, i64> = if let Some(arch_root_id) = archive_root_id {
-        conn.prepare(&format!(
-            "SELECT s.root_id, COUNT(*) as cnt
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE s.present = 1 AND {}
-               AND s.object_id IS NOT NULL
-               AND s.excluded = 0
-               AND EXISTS (
-                   SELECT 1 FROM sources arch_s
-                   WHERE arch_s.root_id = ?1 AND arch_s.present = 1
-                     AND arch_s.object_id = s.object_id
-               )
-             GROUP BY s.root_id",
-            role_clause
-        ))?
-        .query_map([arch_root_id], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<Result<HashMap<_, _>, _>>()?
-    } else {
-        conn.prepare(&format!(
-            "SELECT s.root_id, COUNT(*) as cnt
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE s.present = 1 AND {}
-               AND s.object_id IS NOT NULL
-               AND s.excluded = 0
-               AND EXISTS (
-                   SELECT 1 FROM sources arch_s
-                   JOIN roots ar ON arch_s.root_id = ar.id
-                   WHERE ar.role = 'archive' AND arch_s.present = 1
-                     AND arch_s.object_id = s.object_id
-               )
-             GROUP BY s.root_id",
-            role_clause
-        ))?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<Result<HashMap<_, _>, _>>()?
-    };
-
-    // Build per-root stats
-    let mut per_root_stats = Vec::new();
-    let mut overall = CoverageStats::new();
-
-    for (root_id, root_path, root_role) in roots {
-        let mut stats = CoverageStats::new();
-        stats.root_id = Some(*root_id);
-        stats.root_path = Some(root_path.clone());
-        stats.root_role = Some(root_role.clone());
-        stats.total_sources = *totals.get(root_id).unwrap_or(&0);
-        stats.excluded_sources = *excluded.get(root_id).unwrap_or(&0);
-        stats.hashed_sources = *hashed.get(root_id).unwrap_or(&0);
-        stats.archived_sources = *archived.get(root_id).unwrap_or(&0);
-
-        overall.total_sources += stats.total_sources;
-        overall.excluded_sources += stats.excluded_sources;
-        overall.hashed_sources += stats.hashed_sources;
-        overall.archived_sources += stats.archived_sources;
-
-        per_root_stats.push(stats);
-    }
-
-    Ok((per_root_stats, overall))
+) -> Result<CoverageStats> {
+    let refs: Vec<&Source> = sources.iter().collect();
+    compute_stats_from_source_refs(conn, &refs, archive_root_id)
 }
 
-/// Compute all coverage stats from temp_sources using pure SQL aggregates
-fn compute_stats_from_temp_table(
-    conn: &rusqlite::Connection,
+/// Compute stats from source references.
+fn compute_stats_from_source_refs(
+    conn: &mut rusqlite::Connection,
+    sources: &[&Source],
     archive_root_id: Option<i64>,
 ) -> Result<CoverageStats> {
     let mut stats = CoverageStats::new();
 
     // Total sources
-    stats.total_sources = conn.query_row(
-        "SELECT COUNT(*) FROM temp_sources",
-        [],
-        |row| row.get(0),
-    )?;
+    stats.total_sources = sources.len() as i64;
 
-    // Excluded sources (using denormalized excluded column)
-    stats.excluded_sources = conn.query_row(
-        "SELECT COUNT(*) FROM temp_sources ts
-         JOIN sources s ON s.id = ts.id
-         WHERE s.excluded = 1",
-        [],
-        |row| row.get(0),
-    )?;
+    // Excluded sources - uses is_excluded() which checks BOTH source and object level
+    stats.excluded_sources = sources.iter().filter(|s| s.is_excluded()).count() as i64;
 
-    // Hashed sources (have an object_id, excluding excluded sources)
-    stats.hashed_sources = conn.query_row(
-        "SELECT COUNT(*) FROM temp_sources ts
-         JOIN sources s ON s.id = ts.id
-         WHERE s.object_id IS NOT NULL
-           AND s.excluded = 0",
-        [],
-        |row| row.get(0),
-    )?;
+    // Hashed sources (have object_id AND not excluded)
+    let hashed_sources: Vec<&&Source> = sources
+        .iter()
+        .filter(|s| s.object_id.is_some() && !s.is_excluded())
+        .collect();
+    stats.hashed_sources = hashed_sources.len() as i64;
 
-    // Archived sources (excluding excluded sources)
-    if let Some(root_id) = archive_root_id {
-        // Specific archive root
-        stats.archived_sources = conn.query_row(
-            "SELECT COUNT(*) FROM temp_sources ts
-             JOIN sources s ON s.id = ts.id
-             WHERE s.object_id IS NOT NULL
-               AND s.excluded = 0
-               AND EXISTS (
-                   SELECT 1 FROM sources arch_s
-                   WHERE arch_s.root_id = ?1 AND arch_s.present = 1
-                     AND arch_s.object_id = s.object_id
-               )",
-            [root_id],
-            |row| row.get(0),
-        )?;
-    } else {
-        // Any archive root
-        stats.archived_sources = conn.query_row(
-            "SELECT COUNT(*) FROM temp_sources ts
-             JOIN sources s ON s.id = ts.id
-             WHERE s.object_id IS NOT NULL
-               AND s.excluded = 0
-               AND EXISTS (
-                   SELECT 1 FROM sources arch_s
-                   JOIN roots r ON arch_s.root_id = r.id
-                   WHERE r.role = 'archive' AND arch_s.present = 1
-                     AND arch_s.object_id = s.object_id
-               )",
-            [],
-            |row| row.get(0),
-        )?;
+    // Archived sources - need SQL EXISTS query (Object infrastructure)
+    if stats.hashed_sources > 0 {
+        // Collect source IDs that are hashed and not excluded
+        let hashed_ids: Vec<i64> = hashed_sources.iter().map(|s| s.id).collect();
+
+        // Populate temp table
+        populate_temp_sources(conn, &hashed_ids)?;
+
+        // Count archived using EXISTS query
+        stats.archived_sources = count_archived_from_temp(conn, archive_root_id)?;
     }
 
     Ok(stats)
+}
+
+/// Count how many sources in temp_sources have their content in an archive.
+/// This uses SQL EXISTS because archive checking is Object infrastructure.
+fn count_archived_from_temp(
+    conn: &rusqlite::Connection,
+    archive_root_id: Option<i64>,
+) -> Result<i64> {
+    let count: i64 = if let Some(root_id) = archive_root_id {
+        // Specific archive root
+        conn.query_row(
+            "SELECT COUNT(*) FROM temp_sources ts
+             JOIN sources s ON s.id = ts.id
+             WHERE EXISTS (
+                 SELECT 1 FROM sources arch_s
+                 WHERE arch_s.root_id = ?1 AND arch_s.present = 1
+                   AND arch_s.object_id = s.object_id
+             )",
+            [root_id],
+            |row| row.get(0),
+        )?
+    } else {
+        // Any archive root
+        conn.query_row(
+            "SELECT COUNT(*) FROM temp_sources ts
+             JOIN sources s ON s.id = ts.id
+             WHERE EXISTS (
+                 SELECT 1 FROM sources arch_s
+                 JOIN roots r ON arch_s.root_id = r.id
+                 WHERE r.role = 'archive' AND arch_s.present = 1
+                   AND arch_s.object_id = s.object_id
+             )",
+            [],
+            |row| row.get(0),
+        )?
+    };
+
+    Ok(count)
 }
 
 fn display_compact_scoped(stats: &CoverageStats, scope: Option<&str>) {
@@ -479,7 +338,10 @@ fn display_compact_per_root(per_root: &[CoverageStats], overall: &CoverageStats)
         if stats.total_sources == 0 {
             continue;
         }
-        let id = stats.root_id.map(|i| i.to_string()).unwrap_or_else(|| "?".to_string());
+        let id = stats
+            .root_id
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "?".to_string());
         let path = stats.root_path.as_deref().unwrap_or("unknown");
         let label = format_compact_label(&id, path);
         print_compact_line(&label, stats, first);
@@ -526,7 +388,7 @@ fn print_compact_line(label: &str, stats: &CoverageStats, show_legend: bool) {
     );
 }
 
-fn display_scoped_stats(stats: &CoverageStats, scope: Option<&str>, archive: Option<&str>, include_excluded: bool) {
+fn display_scoped_stats(stats: &CoverageStats, scope: Option<&str>, archive: Option<&str>) {
     if let Some(arch) = archive {
         println!("Archive Coverage (relative to {})", arch);
     } else {
@@ -544,29 +406,16 @@ fn display_scoped_stats(stats: &CoverageStats, scope: Option<&str>, archive: Opt
         return;
     }
 
-    if include_excluded && stats.excluded_sources > 0 {
-        // Show full breakdown with excluded
-        println!("  Total sources:   {:>8}", format_number(stats.total_sources));
-        println!(
-            "  Excluded:        {:>8} ({:.1}%)",
-            format_number(stats.excluded_sources),
-            stats.excluded_pct()
-        );
-        println!("  Included:        {:>8}", format_number(stats.included_sources()));
-        println!(
-            "  Hashed:          {:>8} ({:.1}% of included)",
-            format_number(stats.hashed_sources),
-            stats.hashed_pct()
-        );
-    } else {
-        // Default view: show included sources as total
-        println!("  Total sources:   {:>8}", format_number(stats.included_sources()));
-        println!(
-            "  Hashed:          {:>8} ({:.1}%)",
-            format_number(stats.hashed_sources),
-            stats.hashed_pct()
-        );
-    }
+    // Always show included sources as total (excluded are filtered out conceptually)
+    println!(
+        "  Total sources:   {:>8}",
+        format_number(stats.included_sources())
+    );
+    println!(
+        "  Hashed:          {:>8} ({:.1}%)",
+        format_number(stats.hashed_sources),
+        stats.hashed_pct()
+    );
 
     if archive.is_some() {
         println!(
@@ -574,7 +423,10 @@ fn display_scoped_stats(stats: &CoverageStats, scope: Option<&str>, archive: Opt
             format_number(stats.archived_sources),
             stats.archived_pct()
         );
-        println!("  Not in archive:  {:>8}", format_number(stats.unarchived()));
+        println!(
+            "  Not in archive:  {:>8}",
+            format_number(stats.unarchived())
+        );
     } else {
         println!(
             "  Archived:        {:>8} ({:.1}% of hashed)",
@@ -585,7 +437,11 @@ fn display_scoped_stats(stats: &CoverageStats, scope: Option<&str>, archive: Opt
     }
 }
 
-fn display_per_root_stats(per_root: &[CoverageStats], overall: &CoverageStats, archive: Option<&str>, include_excluded: bool) {
+fn display_per_root_stats(
+    per_root: &[CoverageStats],
+    overall: &CoverageStats,
+    archive: Option<&str>,
+) {
     if let Some(arch) = archive {
         println!("Archive Coverage Report (relative to {})\n", arch);
     } else {
@@ -602,32 +458,23 @@ fn display_per_root_stats(per_root: &[CoverageStats], overall: &CoverageStats, a
             continue;
         }
 
-        let root_id = stats.root_id.map(|id| id.to_string()).unwrap_or_else(|| "?".to_string());
+        let root_id = stats
+            .root_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "?".to_string());
         let root_path = stats.root_path.as_deref().unwrap_or("unknown");
         let root_role = stats.root_role.as_deref().unwrap_or("unknown");
         println!("Root {}: {} ({})", root_id, root_path, root_role);
 
-        if include_excluded && stats.excluded_sources > 0 {
-            println!("  Total sources:   {:>8}", format_number(stats.total_sources));
-            println!(
-                "  Excluded:        {:>8} ({:.1}%)",
-                format_number(stats.excluded_sources),
-                stats.excluded_pct()
-            );
-            println!("  Included:        {:>8}", format_number(stats.included_sources()));
-            println!(
-                "  Hashed:          {:>8} ({:.1}% of included)",
-                format_number(stats.hashed_sources),
-                stats.hashed_pct()
-            );
-        } else {
-            println!("  Total sources:   {:>8}", format_number(stats.included_sources()));
-            println!(
-                "  Hashed:          {:>8} ({:.1}%)",
-                format_number(stats.hashed_sources),
-                stats.hashed_pct()
-            );
-        }
+        println!(
+            "  Total sources:   {:>8}",
+            format_number(stats.included_sources())
+        );
+        println!(
+            "  Hashed:          {:>8} ({:.1}%)",
+            format_number(stats.hashed_sources),
+            stats.hashed_pct()
+        );
 
         if archive.is_some() {
             println!(
@@ -635,7 +482,10 @@ fn display_per_root_stats(per_root: &[CoverageStats], overall: &CoverageStats, a
                 format_number(stats.archived_sources),
                 stats.archived_pct()
             );
-            println!("  Not in archive:  {:>8}", format_number(stats.unarchived()));
+            println!(
+                "  Not in archive:  {:>8}",
+                format_number(stats.unarchived())
+            );
         } else {
             println!(
                 "  Archived:        {:>8} ({:.1}% of hashed)",
@@ -651,27 +501,15 @@ fn display_per_root_stats(per_root: &[CoverageStats], overall: &CoverageStats, a
     println!("{}", "─".repeat(40));
     println!("Overall:");
 
-    if include_excluded && overall.excluded_sources > 0 {
-        println!("  Total sources:   {:>8}", format_number(overall.total_sources));
-        println!(
-            "  Excluded:        {:>8} ({:.1}%)",
-            format_number(overall.excluded_sources),
-            overall.excluded_pct()
-        );
-        println!("  Included:        {:>8}", format_number(overall.included_sources()));
-        println!(
-            "  Hashed:          {:>8} ({:.1}% of included)",
-            format_number(overall.hashed_sources),
-            overall.hashed_pct()
-        );
-    } else {
-        println!("  Total sources:   {:>8}", format_number(overall.included_sources()));
-        println!(
-            "  Hashed:          {:>8} ({:.1}%)",
-            format_number(overall.hashed_sources),
-            overall.hashed_pct()
-        );
-    }
+    println!(
+        "  Total sources:   {:>8}",
+        format_number(overall.included_sources())
+    );
+    println!(
+        "  Hashed:          {:>8} ({:.1}%)",
+        format_number(overall.hashed_sources),
+        overall.hashed_pct()
+    );
 
     if archive.is_some() {
         println!(
@@ -679,14 +517,20 @@ fn display_per_root_stats(per_root: &[CoverageStats], overall: &CoverageStats, a
             format_number(overall.archived_sources),
             overall.archived_pct()
         );
-        println!("  Not in archive:  {:>8}", format_number(overall.unarchived()));
+        println!(
+            "  Not in archive:  {:>8}",
+            format_number(overall.unarchived())
+        );
     } else {
         println!(
             "  Archived:        {:>8} ({:.1}% of hashed)",
             format_number(overall.archived_sources),
             overall.archived_pct()
         );
-        println!("  Unarchived:      {:>8}", format_number(overall.unarchived()));
+        println!(
+            "  Unarchived:      {:>8}",
+            format_number(overall.unarchived())
+        );
     }
 }
 

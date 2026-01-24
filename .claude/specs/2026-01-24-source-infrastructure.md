@@ -360,20 +360,32 @@ sources.iter()
 - **Dependencies**: Phase 2
 
 ### Phase 5: Migrate compare.rs and coverage.rs
-- **Status**: pending
+- **Status**: ✅ completed
 - **Goal**: Complete migration of remaining query commands
 - **Scope**:
-  - Migrate `compare.rs` (already clean, should be simple)
-  - Migrate `coverage.rs`
+  - Migrated `compare.rs`:
+    - Replaced `query_sources()` with `get_sources_in_scope()` using domain predicates
+    - No role filtering (intentional — compare works across all root types)
+    - Uses `source.path()` for consistent path handling
+  - Migrated `coverage.rs`:
+    - Replaced paginated SQL fetching with `get_matching_sources()` + domain predicates
+    - **Fixed exclusion semantics**: Now uses `is_excluded()` which checks BOTH source-level and object-level exclusion
+    - Kept SQL EXISTS query for archive checking (Object infrastructure)
+    - Simplified display functions (removed unused include_excluded parameter from display)
+- **Semantic fix rationale**: Exclusion applies universally. Object-level exclusions mean the user doesn't care about sources linked to that object. The coverage command shows "what remains to be archived" — excluded sources (at either level) shouldn't count.
+- **Validation**:
+  - compare.rs: IDENTICAL (basic, verbose, --include-excluded)
+  - coverage.rs: Output differs where object-level exclusions exist (~28 sources affected across 2 roots). This is the intentional behavior fix.
 - **Dependencies**: Phase 4
 
 ### Phase 6: Cleanup and Documentation
 - **Status**: pending
-- **Goal**: Remove dead code, document patterns
+- **Goal**: Remove dead code, document patterns, verify user documentation
 - **Scope**:
   - Remove SQL scope clause builders if unused
   - Update CLAUDE.md with new architecture
   - Document the pattern for future facilities
+  - **Review user documentation in `docs/src/concepts/`**: Ensure the concepts we've crystallized (sources, exclusion at source and object level, scope matching, root roles) are accurately described in user-facing docs. Files: `source.md`, `object.md`, `roots.md`, `source-object.md`
 
 ## Future Work: Completing the Unified Domain Model
 
@@ -720,6 +732,32 @@ This is the cost of "fetch all, filter in Rust" vs "filter in SQL". We're paying
 **Validation captured:**
 - 3 test scenarios: basic worklist, --unique-content, --include-excluded
 - All matched byte-for-byte
+
+### Phase 5 Learnings
+
+**What went well:**
+- compare.rs was a clean migration — straightforward application of the pattern.
+- coverage.rs migration revealed and fixed a real semantic bug (object-level exclusion was ignored).
+- The `get_matching_sources()` pattern is now consistent across all 4 migrated commands.
+
+**Semantic fix applied:**
+- coverage.rs previously only checked `s.excluded = 1` in aggregate queries.
+- Now uses `is_excluded()` which checks BOTH source-level AND object-level exclusion.
+- Impact: ~28 sources across 2 roots are now correctly counted as excluded.
+- This aligns with the domain model's definition: exclusion applies universally.
+
+**Code changes:**
+- compare.rs: Removed `exclude_clause`, `SCOPE_CLAUSE` imports; now uses domain predicates.
+- coverage.rs: Removed paginated `BATCH_SIZE` loop, `exclude::exclude_clause`, `build_scope_clause`.
+- coverage.rs: Simplified — removed the complex fast-path SQL aggregation (was duplicating domain logic).
+- Both now use the same `get_matching_sources()` pattern as ls.rs and worklist.rs.
+
+**Design decision:**
+- Archive checking (EXISTS subquery) remains SQL — this is Object infrastructure, explicitly out of scope.
+- The temp table optimization is kept but now populated with only hashed, non-excluded source IDs.
+
+**Display simplification:**
+- Removed `include_excluded` parameter from display functions — the flag controlled whether to show the "Excluded: N" line, but conceptually excluded sources are simply not counted. The display now always shows included sources as the total.
 
 ## References
 

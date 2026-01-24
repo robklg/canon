@@ -1,13 +1,13 @@
 use anyhow::{bail, Result};
-use rusqlite::params;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::db::Db;
-use crate::scope::{scope_param, SCOPE_CLAUSE};
-use crate::path::canonicalize_scope;
-use crate::exclude;
 use crate::filter::{self, Filter};
+use crate::path::canonicalize_scope;
+use crate::scope::ScopeMatch;
+use crate::source::Source;
+use crate::source_repo;
 
 pub struct CompareOptions {
     pub include_excluded: bool,
@@ -21,8 +21,6 @@ pub fn run(
     filter_strs: &[String],
     options: &CompareOptions,
 ) -> Result<bool> {
-    let conn = db.conn_mut();
-
     // Parse filters
     let filters: Vec<Filter> = filter_strs
         .iter()
@@ -40,9 +38,13 @@ pub fn run(
         bail!("Path B does not exist: {}", path_b.display());
     };
 
+    let conn = db.conn_mut();
+
     // Query sources in each scope
-    let (sources_a, unhashed_a) = query_sources(conn, &scope_a, &filters, options.include_excluded)?;
-    let (sources_b, unhashed_b) = query_sources(conn, &scope_b, &filters, options.include_excluded)?;
+    let (sources_a, unhashed_a) =
+        get_sources_in_scope(conn, prefix_a, &filters, options.include_excluded)?;
+    let (sources_b, unhashed_b) =
+        get_sources_in_scope(conn, prefix_b, &filters, options.include_excluded)?;
 
     // Build object_id sets
     let objects_a: HashSet<i64> = sources_a.keys().copied().collect();
@@ -106,41 +108,48 @@ pub fn run(
     Ok(is_identical)
 }
 
-/// Query sources in scope, returns (object_id -> path map, unhashed count)
-fn query_sources(
+/// Get sources in scope, returns (object_id -> path map, unhashed count)
+///
+/// Note: compare does NOT filter by role. When comparing folders, all sources
+/// are included regardless of whether root is "source" or "archive".
+fn get_sources_in_scope(
     conn: &mut crate::db::Connection,
-    scope_prefix: &Option<String>,
+    scope_prefix: &str,
     filters: &[Filter],
     include_excluded: bool,
 ) -> Result<(HashMap<i64, String>, usize)> {
-    let exclude_clause = exclude::exclude_clause(include_excluded);
-    let prefix = scope_param(scope_prefix);
+    // Classify the scope
+    let scopes = ScopeMatch::classify_all(&[scope_prefix.to_string()]);
 
-    // Query all sources in scope (exclude suspended roots)
-    let rows: Vec<(i64, Option<i64>, String)> = {
-        let mut stmt = conn.prepare(&format!(
-            "SELECT s.id, s.object_id, r.path || '/' || s.rel_path as full_path
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             LEFT JOIN objects o ON s.object_id = o.id
-             WHERE s.present = 1 AND r.suspended = 0 AND {} AND {}",
-            exclude_clause, SCOPE_CLAUSE
-        ))?;
-        let result = stmt
-            .query_map(params![prefix, prefix], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        result
-    };
+    // Get all root IDs
+    let root_ids: Vec<i64> = conn
+        .prepare("SELECT id FROM roots")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
 
-    // Apply filters
-    let source_ids: Vec<i64> = rows.iter().map(|(id, _, _)| *id).collect();
-    let filtered_ids: HashSet<i64> = if filters.is_empty() {
-        source_ids.into_iter().collect()
+    // Fetch all present sources
+    let all_sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
+
+    // Filter using domain predicates
+    // Note: No role filtering - compare works across all root types
+    let filtered: Vec<Source> = all_sources
+        .into_iter()
+        .filter(|s| s.is_active())
+        .filter(|s| s.matches_scope(&scopes))
+        .filter(|s| include_excluded || !s.is_excluded())
+        .collect();
+
+    // Apply --where filters if present
+    let final_sources = if filters.is_empty() {
+        filtered
     } else {
-        filter::apply_filters(conn, &source_ids, filters)?
+        let source_ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
+        let filtered_ids: HashSet<i64> = filter::apply_filters(conn, &source_ids, filters)?
             .into_iter()
+            .collect();
+        filtered
+            .into_iter()
+            .filter(|s| filtered_ids.contains(&s.id))
             .collect()
     };
 
@@ -148,15 +157,11 @@ fn query_sources(
     let mut result: HashMap<i64, String> = HashMap::new();
     let mut unhashed = 0;
 
-    for (id, object_id, path) in rows {
-        if !filtered_ids.contains(&id) {
-            continue;
-        }
-
-        match object_id {
+    for source in final_sources {
+        match source.object_id {
             Some(oid) => {
                 // If multiple sources have same object_id, keep first path
-                result.entry(oid).or_insert(path);
+                result.entry(oid).or_insert_with(|| source.path());
             }
             None => {
                 unhashed += 1;
