@@ -18,6 +18,7 @@ mod roots;
 mod scan;
 mod scope;
 mod source;
+mod source_repo;
 mod worklist;
 
 #[derive(Parser)]

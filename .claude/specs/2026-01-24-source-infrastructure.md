@@ -316,21 +316,18 @@ sources.iter()
 - **Dependencies**: None
 
 ### Phase 2: Repository Layer
-- **Status**: pending
+- **Status**: ✅ completed
 - **Goal**: Create `source_repo.rs` with batch fetch functions
 - **Scope**:
   - Create `src/source_repo.rs`
   - Implement `batch_fetch_by_roots()`
   - Implement `batch_fetch_by_ids()`
+  - Implement `fetch_source_ids_by_roots()`
   - Use BATCH_SIZE chunking for large ID sets
-- **Tests to Add**:
-  - Integration tests with in-memory SQLite
-  - `batch_fetch_by_roots_empty` - returns empty vec
-  - `batch_fetch_by_roots_single_root` - fetches all sources for root
-  - `batch_fetch_by_roots_multiple_roots` - fetches from all roots
-  - `batch_fetch_by_ids_empty` - returns empty hashmap
-  - `batch_fetch_by_ids_found` - returns matching sources
-  - `batch_fetch_by_ids_partial` - handles missing IDs gracefully
+- **Tests Added** (15 total):
+  - `batch_fetch_by_roots_*` (8 tests): empty, no matching, single/multiple roots, excludes non-present, includes excluded, object_excluded, suspended
+  - `batch_fetch_by_ids_*` (4 tests): empty, found, partial, includes non-present
+  - `fetch_source_ids_by_roots_*` (3 tests): empty, returns ids, excludes non-present
 - **Dependencies**: Phase 1
 
 ### Phase 3: Migrate ls.rs
@@ -638,7 +635,22 @@ Capture "before" outputs before starting Phase 3. Compare after each migration.
 - Total project tests: 52 → 74
 
 ### Phase 2 Learnings
-- (To be filled in)
+
+**What went well:**
+- The SOURCE_COLUMNS and SOURCE_FROM constants keep SQL consistent across functions.
+- `source_from_row()` helper makes Source construction reusable and type-safe.
+- Tests use helper functions (`insert_root`, `insert_source`, `insert_object`) for readable test setup.
+
+**Design decisions made:**
+- `batch_fetch_by_ids` does NOT filter by `present=1` — if you have a specific ID, you want it. This differs from `batch_fetch_by_roots` which only returns present sources. Rationale: IDs come from prior queries that already filtered; roots are a broad fetch that should exclude deleted files.
+- Tests verify domain predicates work correctly on fetched Sources (`is_excluded()`, `is_active()`) — showing domain + infra layers integrate properly.
+
+**Key insight:**
+- The repository tests exercise the full integration: SQL → Source struct → domain predicates. Test `batch_fetch_by_roots_includes_object_excluded` verifies that `object_excluded` is fetched via LEFT JOIN and that `source.is_excluded()` correctly identifies it. This validates the two-level exclusion design.
+
+**Test count:**
+- Phase 2 added 15 tests
+- Total project tests: 74 → 89
 
 ## References
 
