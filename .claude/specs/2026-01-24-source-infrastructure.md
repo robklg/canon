@@ -345,15 +345,18 @@ sources.iter()
 - **Dependencies**: Phase 2
 
 ### Phase 4: Migrate worklist.rs
-- **Status**: pending
+- **Status**: ✅ completed
 - **Goal**: Refactor `worklist.rs` to use new infrastructure
 - **Scope**:
-  - Replace `fetch_batch()` / `fetch_entry()` with batch pattern
-  - Use domain predicates for filtering
-  - Preserve JSONL output format exactly
+  - Added `basis_rev` field to Source struct (needed by worklist output)
+  - Replaced `fetch_batch()` / `fetch_entry()` with batch pattern (`source_repo::batch_fetch_by_roots()`)
+  - Used domain predicates for filtering (same pattern as ls.rs)
+  - Added `WorklistEntry::from_source()` helper for clean conversion
+  - Preserved JSONL output format exactly
 - **Validation**:
-  - Manual testing with real worklist pipelines
-  - Compare output before/after
+  - `canon worklist <scope>`: IDENTICAL
+  - `canon worklist --unique-content`: IDENTICAL
+  - `canon worklist --include-excluded`: IDENTICAL
 - **Dependencies**: Phase 2
 
 ### Phase 5: Migrate compare.rs and coverage.rs
@@ -691,6 +694,32 @@ Capture "before" outputs before starting Phase 3. Compare after each migration.
 | Page faults | 11,590 | 72,488 | +6× |
 
 This is the cost of "fetch all, filter in Rust" vs "filter in SQL". We're paying ~0.7s and ~437MB for testable domain logic. Acceptable for a CLI tool — the user still waits ~4 seconds either way, and 619MB is negligible on modern machines.
+
+### Phase 4 Learnings
+
+**What went well:**
+- The `get_matching_sources()` pattern from Phase 3 was directly reusable — copy/adapt, not reinvent.
+- `WorklistEntry::from_source()` helper keeps the conversion logic clean and isolated.
+- Validation was straightforward: same 3-scenario approach as Phase 3.
+
+**Discovery during migration:**
+- `basis_rev` field was missing from Source struct. Worklist output requires it. Added to `source.rs` and `source_repo.rs` during Phase 4.
+- This validates the spec's warning about "verify all commands' needs before finalizing struct" — we caught it, but it shows the struct may evolve as we migrate more commands.
+
+**Code removed:**
+- `fetch_batch()` — paginated SQL with embedded domain logic (role_clause, exclude_clause, scope_clause)
+- `fetch_entry()` — N+1 per-source fetch pattern (one query per source to build WorklistEntry)
+- `FetchResult` struct — pagination tracking no longer needed
+- `BATCH_SIZE` constant — now imported from `source_repo`
+- `exclude::count_excluded()` call — excluded count now computed inline during predicate filtering
+
+**Pattern confirmed:**
+- The predicate chain is now canonical: `is_active()` → `is_from_role()` → `matches_scope()` → exclusion check
+- Both ls.rs and worklist.rs use identical filtering logic — the "one source of truth" goal is working
+
+**Validation captured:**
+- 3 test scenarios: basic worklist, --unique-content, --include-excluded
+- All matched byte-for-byte
 
 ## References
 

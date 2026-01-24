@@ -57,6 +57,8 @@ pub struct Source {
     pub inode: i64,
     /// Partial hash for integrity validation
     pub partial_hash: String,
+    /// Basis revision for staleness detection (increments when file changes)
+    pub basis_rev: i64,
     /// Role of the root: "source" or "archive" (denormalized)
     pub root_role: String,
     /// Whether the root is suspended (denormalized)
@@ -153,6 +155,7 @@ mod tests {
             device: 0,
             inode: 0,
             partial_hash: String::new(),
+            basis_rev: 0,
             root_role: "source".to_string(),
             root_suspended: false,
         }

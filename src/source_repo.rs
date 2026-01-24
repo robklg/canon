@@ -48,6 +48,7 @@ const SOURCE_COLUMNS: &str = r#"
     s.device,
     s.inode,
     s.partial_hash,
+    s.basis_rev,
     r.role as root_role,
     r.suspended as root_suspended
 "#;
@@ -74,8 +75,9 @@ fn source_from_row(row: &rusqlite::Row) -> rusqlite::Result<Source> {
         device: row.get(9)?,
         inode: row.get(10)?,
         partial_hash: row.get(11)?,
-        root_role: row.get(12)?,
-        root_suspended: row.get(13)?,
+        basis_rev: row.get(12)?,
+        root_role: row.get(13)?,
+        root_suspended: row.get(14)?,
     })
 }
 
@@ -220,6 +222,7 @@ mod tests {
                 device INTEGER NOT NULL DEFAULT 0,
                 inode INTEGER NOT NULL DEFAULT 0,
                 partial_hash TEXT NOT NULL DEFAULT '',
+                basis_rev INTEGER NOT NULL DEFAULT 0,
                 present INTEGER NOT NULL DEFAULT 1,
                 excluded INTEGER NOT NULL DEFAULT 0
             );

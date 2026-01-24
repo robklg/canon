@@ -1,17 +1,15 @@
 use anyhow::Result;
-use rusqlite::types::Value;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::db::{Connection, Db};
-use crate::scope::{build_scope_clause, ScopeMatch};
-use crate::path::canonicalize_scopes;
-use crate::exclude;
 use crate::filter::{self, get_fact_value, Filter};
-
-const BATCH_SIZE: i64 = 1000;
+use crate::path::canonicalize_scopes;
+use crate::scope::ScopeMatch;
+use crate::source::Source;
+use crate::source_repo;
 
 #[derive(Serialize)]
 struct WorklistEntry {
@@ -27,65 +25,97 @@ struct WorklistEntry {
     object_id: Option<i64>,
 }
 
-struct FetchResult {
-    entries: Vec<WorklistEntry>,
-    max_id_seen: Option<i64>,
+impl WorklistEntry {
+    /// Create a WorklistEntry from a Source, optionally fetching facts.
+    fn from_source(
+        source: &Source,
+        emit_keys: &[String],
+        conn: &Connection,
+    ) -> Result<Self> {
+        let facts = if emit_keys.is_empty() {
+            None
+        } else {
+            let mut map = HashMap::new();
+            for key in emit_keys {
+                let (entity_type, entity_id) = if key.starts_with("source.") {
+                    ("source", Some(source.id))
+                } else {
+                    ("object", source.object_id)
+                };
+                let value = match entity_id {
+                    Some(eid) => get_fact_value(conn, entity_type, eid, key)?
+                        .map(|v| v.into())
+                        .unwrap_or(serde_json::Value::Null),
+                    None => serde_json::Value::Null,
+                };
+                map.insert(key.clone(), value);
+            }
+            Some(map)
+        };
+
+        Ok(WorklistEntry {
+            source_id: source.id,
+            path: source.path(),
+            root_id: source.root_id,
+            size: source.size,
+            mtime: source.mtime,
+            basis_rev: source.basis_rev,
+            facts,
+            object_id: source.object_id,
+        })
+    }
 }
 
-pub fn run(db: &mut Db, scope_paths: &[PathBuf], filter_strs: &[String], include_archived: bool, include_excluded: bool, unique_content: bool, emit_keys: &[String]) -> Result<()> {
+pub fn run(
+    db: &mut Db,
+    scope_paths: &[PathBuf],
+    filter_strs: &[String],
+    include_archived: bool,
+    include_excluded: bool,
+    unique_content: bool,
+    emit_keys: &[String],
+) -> Result<()> {
     // Parse filters upfront
     let filters: Vec<Filter> = filter_strs
         .iter()
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths to realpaths
+    // Resolve scope paths to realpaths and classify
     let scope_prefixes = canonicalize_scopes(scope_paths)?;
+    let scopes = ScopeMatch::classify_all(&scope_prefixes);
 
-    // Check excluded count if we're skipping them
     let conn = db.conn_mut();
-    let excluded_count = if !include_excluded {
-        exclude::count_excluded(conn, scope_prefixes.first().map(|s| s.as_str()), include_archived)?
-    } else {
-        0
-    };
+
+    // Fetch all matching sources using domain predicates
+    let (sources, excluded_count) =
+        get_matching_sources(conn, &scopes, &filters, include_archived, include_excluded)?;
 
     let stdout = io::stdout();
     let mut handle = stdout.lock();
-    let mut last_id: i64 = 0;
     let mut seen_objects: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut skipped_unhashed: u64 = 0;
     let mut skipped_duplicate: u64 = 0;
 
-    loop {
-        let result = fetch_batch(conn, last_id, &scope_prefixes, &filters, include_archived, include_excluded, unique_content, emit_keys)?;
-
-        // If we didn't see any source IDs, we're done
-        let max_id = match result.max_id_seen {
-            Some(id) => id,
-            None => break,
-        };
-
-        for entry in &result.entries {
-            if unique_content {
-                // Skip sources without an object_id
-                if entry.object_id.is_none() {
-                    skipped_unhashed += 1;
-                    continue;
-                }
-                let object_id = entry.object_id.unwrap();
-                // Skip if we've already emitted a source for this object
-                if seen_objects.contains(&object_id) {
-                    skipped_duplicate += 1;
-                    continue;
-                }
-                seen_objects.insert(object_id);
+    for source in &sources {
+        if unique_content {
+            // Skip sources without an object_id
+            if source.object_id.is_none() {
+                skipped_unhashed += 1;
+                continue;
             }
-            let json = serde_json::to_string(entry)?;
-            writeln!(handle, "{}", json)?;
+            let object_id = source.object_id.unwrap();
+            // Skip if we've already emitted a source for this object
+            if seen_objects.contains(&object_id) {
+                skipped_duplicate += 1;
+                continue;
+            }
+            seen_objects.insert(object_id);
         }
 
-        last_id = max_id;
+        let entry = WorklistEntry::from_source(source, emit_keys, conn)?;
+        let json = serde_json::to_string(&entry)?;
+        writeln!(handle, "{}", json)?;
     }
 
     // Report stats to stderr
@@ -95,145 +125,70 @@ pub fn run(db: &mut Db, scope_paths: &[PathBuf], filter_strs: &[String], include
         eprintln!("Skipped {} excluded sources", excluded_count);
     }
     if unique_content && (skipped_unhashed > 0 || skipped_duplicate > 0) {
-        eprintln!("Skipped {} unhashed, {} duplicate sources", skipped_unhashed, skipped_duplicate);
+        eprintln!(
+            "Skipped {} unhashed, {} duplicate sources",
+            skipped_unhashed, skipped_duplicate
+        );
     }
 
     Ok(())
 }
 
-fn fetch_batch(
+/// Fetch sources matching scope/role/exclusion criteria, then apply --where filters.
+///
+/// Returns (matching_sources, excluded_count) where excluded_count is the number
+/// of sources that matched scope/role but were excluded.
+fn get_matching_sources(
     conn: &mut Connection,
-    after_id: i64,
-    scope_prefixes: &[String],
+    scopes: &[ScopeMatch],
     filters: &[Filter],
     include_archived: bool,
     include_excluded: bool,
-    _unique_content: bool,
-    emit_keys: &[String],
-) -> Result<FetchResult> {
-    // Build the query based on options
-    let role_clause = if include_archived {
-        "r.suspended = 0" // Include all roles, but not suspended
-    } else {
-        "r.role = 'source' AND r.suspended = 0"
-    };
-
-    let exclude_clause = exclude::exclude_clause(include_excluded);
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
-    let (scope_clause, scope_params) = build_scope_clause(&scopes);
-
-    // Build params: scope params + after_id + batch_size
-    let mut params: Vec<Value> = scope_params.iter().map(|s| Value::from(s.clone())).collect();
-    params.push(Value::from(after_id));
-    params.push(Value::from(BATCH_SIZE));
-
-    let source_ids: Vec<i64> = conn
-        .prepare(&format!(
-            "SELECT s.id
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             LEFT JOIN objects o ON s.object_id = o.id
-             WHERE s.present = 1 AND {} AND {} AND {} AND s.id > ?
-             ORDER BY s.id
-             LIMIT ?",
-            role_clause, exclude_clause, scope_clause
-        ))?
-        .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
+) -> Result<(Vec<Source>, usize)> {
+    // 1. Get all root IDs
+    let root_ids: Vec<i64> = conn
+        .prepare("SELECT id FROM roots")?
+        .query_map([], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
 
-    if source_ids.is_empty() {
-        return Ok(FetchResult {
-            entries: Vec::new(),
-            max_id_seen: None,
-        });
+    // 2. Fetch all present sources for those roots
+    let all_sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
+
+    // 3. Filter using domain predicates, tracking excluded count
+    let mut excluded_count = 0usize;
+    let filtered: Vec<Source> = all_sources
+        .into_iter()
+        .filter(|s| s.is_active())
+        .filter(|s| include_archived || s.is_from_role("source"))
+        .filter(|s| s.matches_scope(scopes))
+        .filter(|s| {
+            if s.is_excluded() {
+                if !include_excluded {
+                    excluded_count += 1;
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    // 4. Apply --where filters if present
+    if filters.is_empty() {
+        return Ok((filtered, excluded_count));
     }
 
-    // Track the max ID we fetched (for pagination), before filtering
-    let max_id_seen = source_ids.last().copied();
+    // Extract IDs, apply filters, then map back to Source objects
+    let source_ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
+    let filtered_ids = filter::apply_filters(conn, &source_ids, filters)?;
 
-    // Apply filters
-    let filtered_ids = if filters.is_empty() {
-        source_ids
-    } else {
-        filter::apply_filters(conn, &source_ids, filters)?
-    };
+    // Build a set for O(1) lookup
+    let filtered_id_set: std::collections::HashSet<i64> = filtered_ids.into_iter().collect();
 
-    // Fetch full entries for filtered IDs
-    let mut entries = Vec::new();
-    for source_id in filtered_ids {
-        if let Some(entry) = fetch_entry(conn, source_id, emit_keys)? {
-            entries.push(entry);
-        }
-    }
+    // Keep only sources whose ID passed the filter
+    let result: Vec<Source> = filtered
+        .into_iter()
+        .filter(|s| filtered_id_set.contains(&s.id))
+        .collect();
 
-    Ok(FetchResult {
-        entries,
-        max_id_seen,
-    })
-}
-
-fn fetch_entry(conn: &Connection, source_id: i64, emit_keys: &[String]) -> Result<Option<WorklistEntry>> {
-    let row: Option<(i64, String, String, i64, i64, i64, i64, Option<i64>)> = conn
-        .query_row(
-            "SELECT s.id, r.path, s.rel_path, s.root_id, s.size, s.mtime, s.basis_rev, s.object_id
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE s.id = ?",
-            [source_id],
-            |row| Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-            )),
-        )
-        .ok();
-
-    let Some((id, root_path, rel_path, root_id, size, mtime, basis_rev, object_id)) = row else {
-        return Ok(None);
-    };
-
-    let full_path = if rel_path.is_empty() {
-        root_path
-    } else {
-        format!("{}/{}", root_path, rel_path)
-    };
-
-    // Fetch requested facts using the existing get_fact_value from filter module
-    // Always emit requested keys (null if absent) for consistent structure
-    let facts = if emit_keys.is_empty() {
-        None
-    } else {
-        let mut map = HashMap::new();
-        for key in emit_keys {
-            let (entity_type, entity_id) = if key.starts_with("source.") {
-                ("source", Some(id))
-            } else {
-                ("object", object_id)
-            };
-            let value = match entity_id {
-                Some(eid) => get_fact_value(conn, entity_type, eid, key)?
-                    .map(|v| v.into())
-                    .unwrap_or(serde_json::Value::Null),
-                None => serde_json::Value::Null,
-            };
-            map.insert(key.clone(), value);
-        }
-        Some(map)
-    };
-
-    Ok(Some(WorklistEntry {
-        source_id: id,
-        path: full_path,
-        root_id,
-        size,
-        mtime,
-        basis_rev,
-        facts,
-        object_id,
-    }))
+    Ok((result, excluded_count))
 }
