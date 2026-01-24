@@ -308,7 +308,7 @@ But the SQL is isolated in the repository — commands just call `batch_fetch_fo
   - Dead code warnings expected until Phase 2 uses the types
 
 ### Phase 2: Repository Layer
-- **Status**: pending
+- **Status**: ✅ completed
 - **Goal**: Create `fact_repo.rs` with batch fetch functions
 - **Scope**:
   - Create `src/fact_repo.rs`
@@ -316,14 +316,29 @@ But the SQL is isolated in the repository — commands just call `batch_fetch_fo
   - Implement `batch_fetch_key_for_sources()` (optimization for single-key queries)
   - Implement `count_fact_keys()` (for fact listing)
   - Use temp table pattern for large source sets
-- **Tests** (in-memory SQLite):
-  - Empty source list returns empty map
-  - Fetches source facts correctly
-  - Fetches object facts and associates with source ID
-  - Handles sources without object_id
-  - Handles sources without any facts
-  - BATCH_SIZE chunking works correctly
+- **Tests Added** (17 total):
+  - `batch_fetch_for_sources_empty_ids` — empty input returns empty map
+  - `batch_fetch_for_sources_no_facts` — source exists but has no facts
+  - `batch_fetch_for_sources_source_facts` — fetches direct source facts
+  - `batch_fetch_for_sources_object_facts` — fetches object facts via source's object_id
+  - `batch_fetch_for_sources_mixed_facts` — source with both source and object facts
+  - `batch_fetch_for_sources_no_object_id` — source without object_id gets no object facts
+  - `batch_fetch_for_sources_multiple_sources` — multiple sources, shared objects
+  - `batch_fetch_for_sources_time_value` — Time variant conversion
+  - `batch_fetch_key_for_sources_empty_ids` — empty input
+  - `batch_fetch_key_for_sources_found` — specific key exists
+  - `batch_fetch_key_for_sources_missing` — specific key doesn't exist
+  - `batch_fetch_key_for_sources_partial` — some sources have key, some don't
+  - `count_fact_keys_empty_ids` — empty input
+  - `count_fact_keys_basic` — counts single key correctly
+  - `count_fact_keys_type_detection` — identifies Text/Num/Time types
+  - `count_fact_keys_multiple_sources` — counts across sources
+  - `count_fact_keys_shared_object` — multiple sources sharing object counted correctly
 - **Dependencies**: Phase 1
+- **Notes**:
+  - Uses temp table pattern (`populate_temp_sources`) for large sets — no IN clause chunking needed
+  - UNION ALL pattern matches existing `facts.rs` SQL for consistency
+  - Object facts keyed by source_id in result map (not entity_id)
 
 ### Phase 3: Migrate facts.rs Source Selection
 - **Status**: pending
