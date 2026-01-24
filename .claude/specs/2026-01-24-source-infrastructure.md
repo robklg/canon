@@ -331,16 +331,17 @@ sources.iter()
 - **Dependencies**: Phase 1
 
 ### Phase 3: Migrate ls.rs
-- **Status**: pending
+- **Status**: ✅ completed
 - **Goal**: Refactor `ls.rs` to use new infrastructure
 - **Scope**:
-  - Replace `get_matching_sources()` with new pattern
-  - Remove `batch_fetch_sources()` (now in source_repo)
-  - Use domain predicates for filtering
-  - Preserve all existing behavior
+  - Replaced `get_matching_sources()` with domain-predicate pattern
+  - Removed `SourceData` struct and `batch_fetch_sources()` (uses source_repo)
+  - Uses `Source` struct and predicates for filtering
+  - Preserved all existing behavior (validated with before/after comparison)
 - **Validation**:
-  - Manual testing: `canon ls`, `canon ls /path`, `canon ls --where`, etc.
-  - Performance comparison with `--profile`
+  - Captured baseline output before migration
+  - Compared: basic, long format, --where filter, --duplicates, --include-excluded
+  - All outputs byte-identical
 - **Dependencies**: Phase 2
 
 ### Phase 4: Migrate worklist.rs
@@ -651,6 +652,45 @@ Capture "before" outputs before starting Phase 3. Compare after each migration.
 **Test count:**
 - Phase 2 added 15 tests
 - Total project tests: 74 → 89
+
+### Phase 3 Learnings
+
+**What went well:**
+- The migration was straightforward once domain/infra layers were in place.
+- `source.path()` replaced manual path concatenation throughout.
+- Domain predicates compose naturally: `s.is_active() && s.is_from_role("source") && s.matches_scope(&scopes)`.
+- Before/after validation confirmed byte-identical output for all test cases.
+
+**Code removed:**
+- `SourceData` struct (replaced by `Source`)
+- `batch_fetch_sources()` function (replaced by `source_repo::batch_fetch_by_ids`)
+- `BATCH_SIZE` constant (now imported from `source_repo`)
+- Complex SQL WHERE clauses for role/scope/exclusion (now domain predicates)
+
+**Key architecture change:**
+- Old: `get_matching_sources()` built paginated SQL with embedded domain logic
+- New: `get_matching_sources()` fetches all sources, filters with domain predicates, then applies --where filters
+- The `filter::apply_filters()` still needs DB access for fact queries, so we extract IDs, filter, then map back to Source objects
+
+**What's still SQL-based:**
+- `check_archived()` and `get_archive_paths()` — archive status queries
+- `find_duplicate_groups()` — needs hash_value from objects table (not in Source struct)
+- These could be migrated to Object infrastructure in a future project
+
+**Validation captured:**
+- 5 test scenarios: basic, long format, --where filter, --duplicates, --include-excluded
+- All matched byte-for-byte
+
+**Performance tradeoff (1.4M sources, 378K returned):**
+
+| Metric | Before (SQL filter) | After (Rust filter) | Change |
+|--------|---------------------|---------------------|--------|
+| Wall clock | 3.66s | 4.39s | +20% |
+| User CPU | 0.75s | 1.06s | +41% |
+| Memory (RSS) | 182MB | 619MB | +3.4× |
+| Page faults | 11,590 | 72,488 | +6× |
+
+This is the cost of "fetch all, filter in Rust" vs "filter in SQL". We're paying ~0.7s and ~437MB for testable domain logic. Acceptable for a CLI tool — the user still waits ~4 seconds either way, and 619MB is negligible on modern machines.
 
 ## References
 

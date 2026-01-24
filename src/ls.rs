@@ -4,20 +4,11 @@ use rusqlite::types::Value;
 use std::collections::HashMap;
 
 use crate::db::{Connection, Db};
-use crate::scope::{build_scope_clause, ScopeMatch};
-use crate::path::{canonicalize_scopes, path_strip_prefix};
-use crate::exclude;
 use crate::filter::{self, Filter};
-
-const BATCH_SIZE: i64 = 1000;
-
-/// Source data needed for output
-struct SourceData {
-    path: String,
-    object_id: Option<i64>,
-    size: i64,
-    mtime: i64,
-}
+use crate::path::{canonicalize_scopes, path_strip_prefix};
+use crate::scope::ScopeMatch;
+use crate::source::Source;
+use crate::source_repo::{self, BATCH_SIZE};
 
 pub fn run(
     db: &mut Db,
@@ -40,7 +31,10 @@ pub fn run(
 
     // Validate sort option
     if !matches!(sort_by, "path" | "size" | "mtime" | "name") {
-        anyhow::bail!("Invalid sort option '{}'. Valid options: path, size, mtime, name", sort_by);
+        anyhow::bail!(
+            "Invalid sort option '{}'. Valid options: path, size, mtime, name",
+            sort_by
+        );
     }
 
     // Parse filters
@@ -49,8 +43,9 @@ pub fn run(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths to realpaths
+    // Resolve scope paths to realpaths and classify them
     let scope_prefixes = canonicalize_scopes(scope_paths)?;
+    let scopes = ScopeMatch::classify_all(&scope_prefixes);
 
     // Get cwd for relative path display (must be canonicalized to match DB paths)
     let cwd = if use_relative_paths {
@@ -62,45 +57,31 @@ pub fn run(
         None
     };
 
-    // Get all matching source IDs
-    let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, include_excluded)?;
+    // Fetch all sources and filter using domain predicates
+    let (sources, excluded_count) =
+        get_matching_sources(conn, &scopes, &filters, include_archived, include_excluded)?;
 
-    if source_ids.is_empty() {
+    if sources.is_empty() {
         eprintln!("No sources match the given filters.");
-        // Only show excluded hint if excluded sources actually match the filter
-        if !include_excluded {
-            let excluded_matches = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, true)?.len();
-            if excluded_matches > 0 {
-                eprintln!("({} excluded sources hidden, use --include-excluded to show)", excluded_matches);
-            }
+        if !include_excluded && excluded_count > 0 {
+            eprintln!(
+                "({} excluded sources hidden, use --include-excluded to show)",
+                excluded_count
+            );
         }
         return Ok(());
     }
-
-    // Get excluded count for reporting (sources matching filter but excluded)
-    let excluded_count = if !include_excluded {
-        get_matching_sources(conn, &scope_prefixes, &filters, include_archived, true)?.len() - source_ids.len()
-    } else {
-        0
-    };
-
-    // Batch fetch all source data upfront
-    let source_data = batch_fetch_sources(conn, &source_ids)?;
 
     // Apply archived/unarchived/unhashed filter and collect output lines
     // Each entry is (source_path, optional_archive_path, size, mtime)
     let mut output_lines: Vec<(String, Option<String>, i64, i64)> = Vec::new();
     let mut unhashed_count = 0usize;
 
-    for source_id in &source_ids {
-        let data = match source_data.get(source_id) {
-            Some(d) => d,
-            None => continue, // Should not happen, but skip if missing
-        };
-        let formatted_source = format_path(&data.path, cwd.as_deref());
-        let object_id = data.object_id;
-        let size = data.size;
-        let mtime = data.mtime;
+    for source in &sources {
+        let formatted_source = format_path(&source.path(), cwd.as_deref());
+        let object_id = source.object_id;
+        let size = source.size;
+        let mtime = source.mtime;
 
         // Check archive status if filtering
         if archived_only {
@@ -114,7 +95,12 @@ pub fn run(
                         // Get all archive locations for this object
                         let archive_paths = get_archive_paths(conn, obj_id)?;
                         for archive_path in archive_paths {
-                            output_lines.push((formatted_source.clone(), Some(archive_path), size, mtime));
+                            output_lines.push((
+                                formatted_source.clone(),
+                                Some(archive_path),
+                                size,
+                                mtime,
+                            ));
                         }
                     } else if check_archived(conn, obj_id)? {
                         output_lines.push((formatted_source, None, size, mtime));
@@ -166,7 +152,10 @@ pub fn run(
             let size_str = format_size(*size);
             let date_str = format_date(*mtime);
             if let Some(ap) = archive_path {
-                print!("{:>8}  {}  {}\t{}{}", size_str, date_str, source_path, ap, line_end);
+                print!(
+                    "{:>8}  {}  {}\t{}{}",
+                    size_str, date_str, source_path, ap, line_end
+                );
             } else {
                 print!("{:>8}  {}  {}{}", size_str, date_str, source_path, line_end);
             }
@@ -180,7 +169,11 @@ pub fn run(
     // Print footer to stderr
     // Count unique sources (not archive locations)
     let source_count = if show_archive_paths {
-        output_lines.iter().map(|(s, _, _, _)| s).collect::<std::collections::HashSet<_>>().len()
+        output_lines
+            .iter()
+            .map(|(s, _, _, _)| s)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
     } else {
         output_lines.len()
     };
@@ -189,7 +182,10 @@ pub fn run(
         footer_parts.push(format!("{} excluded hidden", excluded_count));
     }
     if (archived_only || unarchived_only) && unhashed_count > 0 {
-        footer_parts.push(format!("{} unhashed skipped, use --unhashed to see", unhashed_count));
+        footer_parts.push(format!(
+            "{} unhashed skipped, use --unhashed to see",
+            unhashed_count
+        ));
     }
 
     if footer_parts.len() > 1 {
@@ -201,106 +197,68 @@ pub fn run(
     Ok(())
 }
 
+/// Fetch sources matching scope/role/exclusion criteria, then apply --where filters.
+///
+/// Returns (matching_sources, excluded_count) where excluded_count is the number
+/// of sources that matched scope/role but were excluded.
+///
+/// This function implements the domain-predicate filtering pattern:
+/// 1. Fetch all sources from all roots
+/// 2. Filter using pure domain predicates (is_active, is_from_role, matches_scope, is_excluded)
+/// 3. Apply --where filters (requires DB access for fact queries)
 fn get_matching_sources(
     conn: &mut Connection,
-    scope_prefixes: &[String],
+    scopes: &[ScopeMatch],
     filters: &[Filter],
     include_archived: bool,
     include_excluded: bool,
-) -> Result<Vec<i64>> {
-    let mut all_ids = Vec::new();
-    let mut last_id: i64 = 0;
+) -> Result<(Vec<Source>, usize)> {
+    // 1. Get all root IDs
+    let root_ids: Vec<i64> = conn
+        .prepare("SELECT id FROM roots")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
 
-    let role_clause = if include_archived {
-        "r.suspended = 0" // Include all roles, but not suspended
-    } else {
-        "r.role = 'source' AND r.suspended = 0"
-    };
+    // 2. Fetch all present sources for those roots
+    let all_sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
 
-    let exclude_clause = exclude::exclude_clause(include_excluded);
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
-    let (scope_clause, scope_params) = build_scope_clause(&scopes);
+    // 3. Filter using domain predicates, tracking excluded count
+    let mut excluded_count = 0usize;
+    let filtered: Vec<Source> = all_sources
+        .into_iter()
+        .filter(|s| s.is_active())
+        .filter(|s| include_archived || s.is_from_role("source"))
+        .filter(|s| s.matches_scope(scopes))
+        .filter(|s| {
+            if s.is_excluded() {
+                if !include_excluded {
+                    excluded_count += 1;
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
 
-    loop {
-        // Build params: scope params + last_id + batch_size
-        let mut params: Vec<Value> = scope_params.iter().map(|s| Value::from(s.clone())).collect();
-        params.push(Value::from(last_id));
-        params.push(Value::from(BATCH_SIZE));
-
-        // Fetch batch of source IDs
-        let batch: Vec<i64> = conn
-            .prepare(&format!(
-                "SELECT s.id
-                 FROM sources s
-                 JOIN roots r ON s.root_id = r.id
-                 LEFT JOIN objects o ON s.object_id = o.id
-                 WHERE s.present = 1 AND {} AND {} AND {} AND s.id > ?
-                 ORDER BY s.id
-                 LIMIT ?",
-                role_clause, exclude_clause, scope_clause
-            ))?
-            .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if batch.is_empty() {
-            break;
-        }
-
-        let max_id = *batch.last().unwrap();
-
-        // Apply filters
-        let filtered = if filters.is_empty() {
-            batch
-        } else {
-            filter::apply_filters(conn, &batch, filters)?
-        };
-
-        all_ids.extend(filtered);
-        last_id = max_id;
+    // 4. Apply --where filters if present
+    if filters.is_empty() {
+        return Ok((filtered, excluded_count));
     }
 
-    Ok(all_ids)
-}
+    // Extract IDs, apply filters, then map back to Source objects
+    let source_ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
+    let filtered_ids = filter::apply_filters(conn, &source_ids, filters)?;
 
-/// Batch fetch source data for all source IDs
-fn batch_fetch_sources(conn: &Connection, source_ids: &[i64]) -> Result<HashMap<i64, SourceData>> {
-    let mut result = HashMap::with_capacity(source_ids.len());
+    // Build a set for O(1) lookup
+    let filtered_id_set: std::collections::HashSet<i64> = filtered_ids.into_iter().collect();
 
-    // Process in batches to avoid huge IN clauses
-    for chunk in source_ids.chunks(BATCH_SIZE as usize) {
-        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        let sql = format!(
-            "SELECT s.id, r.path, s.rel_path, s.object_id, s.size, s.mtime
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE s.id IN ({})",
-            placeholders.join(",")
-        );
+    // Keep only sources whose ID passed the filter
+    let result: Vec<Source> = filtered
+        .into_iter()
+        .filter(|s| filtered_id_set.contains(&s.id))
+        .collect();
 
-        let params: Vec<Value> = chunk.iter().map(|&id| Value::from(id)).collect();
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
-            let id: i64 = row.get(0)?;
-            let root_path: String = row.get(1)?;
-            let rel_path: String = row.get(2)?;
-            let object_id: Option<i64> = row.get(3)?;
-            let size: i64 = row.get(4)?;
-            let mtime: i64 = row.get(5)?;
-            Ok((id, root_path, rel_path, object_id, size, mtime))
-        })?;
-
-        for row in rows {
-            let (id, root_path, rel_path, object_id, size, mtime) = row?;
-            let path = if rel_path.is_empty() {
-                root_path
-            } else {
-                format!("{}/{}", root_path, rel_path)
-            };
-            result.insert(id, SourceData { path, object_id, size, mtime });
-        }
-    }
-
-    Ok(result)
+    Ok((result, excluded_count))
 }
 
 fn check_archived(conn: &Connection, object_id: i64) -> Result<bool> {
@@ -395,8 +353,9 @@ pub fn show_duplicates(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths
+    // Resolve scope paths and classify
     let scope_prefixes = canonicalize_scopes(scope_paths)?;
+    let scopes = ScopeMatch::classify_all(&scope_prefixes);
 
     // Get cwd for relative path display (must be canonicalized to match DB paths)
     let cwd = if use_relative_paths {
@@ -408,27 +367,23 @@ pub fn show_duplicates(
         None
     };
 
-    // Get all matching source IDs
-    let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, include_excluded)?;
+    // Get all matching sources using domain predicates
+    let (sources, excluded_count) =
+        get_matching_sources(conn, &scopes, &filters, include_archived, include_excluded)?;
 
-    if source_ids.is_empty() {
+    if sources.is_empty() {
         eprintln!("No sources match the given filters.");
-        // Only show excluded hint if excluded sources actually match the filter
-        if !include_excluded {
-            let excluded_matches = get_matching_sources(conn, &scope_prefixes, &filters, include_archived, true)?.len();
-            if excluded_matches > 0 {
-                eprintln!("({} excluded sources hidden, use --include-excluded to show)", excluded_matches);
-            }
+        if !include_excluded && excluded_count > 0 {
+            eprintln!(
+                "({} excluded sources hidden, use --include-excluded to show)",
+                excluded_count
+            );
         }
         return Ok(());
     }
 
-    // Get excluded count for reporting (sources matching filter but excluded)
-    let excluded_count = if !include_excluded {
-        get_matching_sources(conn, &scope_prefixes, &filters, include_archived, true)?.len() - source_ids.len()
-    } else {
-        0
-    };
+    // Extract source IDs for duplicate finding
+    let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
 
     // Find duplicate groups: object_ids that appear more than once
     let duplicate_groups = find_duplicate_groups(conn, &source_ids)?;
@@ -436,29 +391,44 @@ pub fn show_duplicates(
     if duplicate_groups.is_empty() {
         println!("No duplicates found.");
         if !include_excluded && excluded_count > 0 {
-            eprintln!("({} excluded sources hidden, use --include-excluded to show)", excluded_count);
+            eprintln!(
+                "({} excluded sources hidden, use --include-excluded to show)",
+                excluded_count
+            );
         }
         return Ok(());
     }
 
     // Print each duplicate group
     let mut total_sources = 0usize;
-    for (hash, size, sources) in &duplicate_groups {
+    for (hash, size, dup_sources) in &duplicate_groups {
         let short_hash = if hash.len() > 12 { &hash[..12] } else { hash };
         let size_str = format_size(*size);
-        println!("[{}...] {} sources, {}:", short_hash, sources.len(), size_str);
-        for (path, source_id) in sources {
+        println!(
+            "[{}...] {} sources, {}:",
+            short_hash,
+            dup_sources.len(),
+            size_str
+        );
+        for (path, source_id) in dup_sources {
             let display_path = format_path(path, cwd.as_deref());
             println!("  {} (id: {})", display_path, source_id);
         }
         println!();
-        total_sources += sources.len();
+        total_sources += dup_sources.len();
     }
 
     // Summary
-    println!("Found {} duplicate groups ({} sources)", duplicate_groups.len(), total_sources);
+    println!(
+        "Found {} duplicate groups ({} sources)",
+        duplicate_groups.len(),
+        total_sources
+    );
     if !include_excluded && excluded_count > 0 {
-        eprintln!("({} excluded sources hidden, use --include-excluded to show)", excluded_count);
+        eprintln!(
+            "({} excluded sources hidden, use --include-excluded to show)",
+            excluded_count
+        );
     }
 
     Ok(())
@@ -478,7 +448,8 @@ fn find_duplicate_groups(
     let mut object_map: HashMap<i64, (String, i64, Vec<(String, i64)>)> = HashMap::new();
 
     // Batch fetch source info including object_id, hash, and size
-    for chunk in source_ids.chunks(BATCH_SIZE as usize) {
+    // Note: This query needs hash_value from objects table, which isn't in Source struct
+    for chunk in source_ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
         let sql = format!(
             "SELECT s.id, s.object_id, o.hash_value, s.size, r.path, s.rel_path
@@ -530,7 +501,9 @@ fn find_duplicate_groups(
     }
     // Sort groups by first path (so related duplicates appear near each other)
     groups.sort_by(|a, b| {
-        a.2.first().map(|(p, _)| p.as_str()).cmp(&b.2.first().map(|(p, _)| p.as_str()))
+        a.2.first()
+            .map(|(p, _)| p.as_str())
+            .cmp(&b.2.first().map(|(p, _)| p.as_str()))
     });
 
     Ok(groups)
