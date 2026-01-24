@@ -10,6 +10,7 @@ mod exclude;
 mod expr;
 mod fact;
 mod fact_repo;
+mod fact_value;
 mod facts;
 mod filter;
 mod import_facts;

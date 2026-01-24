@@ -396,6 +396,65 @@ pub fn is_builtin_key(key: &str) -> bool {
     BuiltinKey::from_str(key).is_some()
 }
 
+// ============================================================================
+// ParsedFactKey
+// ============================================================================
+
+/// A parsed fact key with optional accessor and modifiers.
+///
+/// Wraps the result of `parse_key_with_modifiers()` into a reusable struct.
+/// Used when the same parsed key needs to be applied to multiple sources,
+/// such as in grouped distribution or manifest generation.
+///
+/// ## Example
+///
+/// ```ignore
+/// use canon::expr::ParsedFactKey;
+///
+/// let key = ParsedFactKey::parse("source.mtime|year")?;
+/// assert_eq!(key.base_key, "source.mtime");
+/// assert!(key.is_builtin());
+/// assert!(key.has_transforms());
+/// ```
+#[derive(Debug, Clone)]
+pub struct ParsedFactKey {
+    /// Original key string for display (e.g., "source.mtime|year")
+    pub raw: String,
+    /// Base fact key after normalization (e.g., "source.mtime")
+    pub base_key: String,
+    /// Optional path accessor (e.g., [-1] for last segment)
+    pub accessor: Option<PathAccessor>,
+    /// Modifiers to apply (e.g., [Year])
+    pub modifiers: Vec<ModifierCall>,
+}
+
+impl ParsedFactKey {
+    /// Parse a key string into its components.
+    ///
+    /// Keys without a namespace prefix are normalized to `content.*`
+    /// (e.g., "Make" becomes "content.Make"). Built-in keys (source.*, filename, etc.)
+    /// are not modified.
+    pub fn parse(key: &str) -> Result<Self> {
+        let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
+        Ok(Self {
+            raw: key.to_string(),
+            base_key,
+            accessor,
+            modifiers,
+        })
+    }
+
+    /// Check if this key refers to a built-in fact.
+    pub fn is_builtin(&self) -> bool {
+        BuiltinKey::from_str(&self.base_key).is_some()
+    }
+
+    /// Check if this key has transforms (accessor or modifiers).
+    pub fn has_transforms(&self) -> bool {
+        self.accessor.is_some() || !self.modifiers.is_empty()
+    }
+}
+
 /// Get pattern expansion for an alias (if it exists)
 fn expand_alias(name: &str) -> Option<&'static str> {
     BuiltinKey::from_str(name).and_then(|k| k.expansion())
@@ -1365,5 +1424,77 @@ mod tests {
         assert_eq!(format_bucket_num(1000000000.0), "1G");
         assert_eq!(format_bucket_num(0.5), "0.5");
         assert_eq!(format_bucket_num(0.123), "0.123");
+    }
+
+    // =========================================================================
+    // ParsedFactKey tests
+    // =========================================================================
+
+    #[test]
+    fn parsed_key_simple() {
+        let key = ParsedFactKey::parse("source.ext").unwrap();
+        assert_eq!(key.raw, "source.ext");
+        assert_eq!(key.base_key, "source.ext");
+        assert!(key.accessor.is_none());
+        assert!(key.modifiers.is_empty());
+        assert!(key.is_builtin());
+        assert!(!key.has_transforms());
+    }
+
+    #[test]
+    fn parsed_key_with_accessor() {
+        let key = ParsedFactKey::parse("source.rel_path[-1]").unwrap();
+        assert_eq!(key.raw, "source.rel_path[-1]");
+        assert_eq!(key.base_key, "source.rel_path");
+        assert!(matches!(key.accessor, Some(PathAccessor::Index(-1))));
+        assert!(key.modifiers.is_empty());
+        assert!(key.is_builtin());
+        assert!(key.has_transforms());
+    }
+
+    #[test]
+    fn parsed_key_with_modifier() {
+        let key = ParsedFactKey::parse("source.mtime|year").unwrap();
+        assert_eq!(key.raw, "source.mtime|year");
+        assert_eq!(key.base_key, "source.mtime");
+        assert!(key.accessor.is_none());
+        assert_eq!(key.modifiers.len(), 1);
+        assert_eq!(key.modifiers[0].modifier, Modifier::Year);
+        assert!(key.is_builtin());
+        assert!(key.has_transforms());
+    }
+
+    #[test]
+    fn parsed_key_complex() {
+        let key = ParsedFactKey::parse("source.rel_path[-1]|stem").unwrap();
+        assert_eq!(key.raw, "source.rel_path[-1]|stem");
+        assert_eq!(key.base_key, "source.rel_path");
+        assert!(matches!(key.accessor, Some(PathAccessor::Index(-1))));
+        assert_eq!(key.modifiers.len(), 1);
+        assert_eq!(key.modifiers[0].modifier, Modifier::Stem);
+        assert!(key.is_builtin());
+        assert!(key.has_transforms());
+    }
+
+    #[test]
+    fn parsed_key_stored_fact_normalized() {
+        // A stored fact key without prefix gets content. added
+        let key = ParsedFactKey::parse("Make").unwrap();
+        assert_eq!(key.raw, "Make");
+        assert_eq!(key.base_key, "content.Make");
+        assert!(!key.is_builtin());
+        assert!(!key.has_transforms());
+    }
+
+    #[test]
+    fn parsed_key_stored_fact_with_modifier() {
+        let key = ParsedFactKey::parse("DateTimeOriginal|yearmonth").unwrap();
+        assert_eq!(key.raw, "DateTimeOriginal|yearmonth");
+        assert_eq!(key.base_key, "content.DateTimeOriginal");
+        assert!(key.accessor.is_none());
+        assert_eq!(key.modifiers.len(), 1);
+        assert_eq!(key.modifiers[0].modifier, Modifier::YearMonth);
+        assert!(!key.is_builtin());
+        assert!(key.has_transforms());
     }
 }

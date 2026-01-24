@@ -20,6 +20,8 @@
 //! let sources = source_repo::batch_fetch_by_roots(conn, &[1, 2, 3])?;
 //! ```
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use rusqlite::types::Value;
 
@@ -107,6 +109,43 @@ pub fn batch_fetch_by_roots(conn: &Connection, root_ids: &[i64]) -> Result<Vec<S
 
         for row in rows {
             sources.push(row?);
+        }
+    }
+
+    Ok(sources)
+}
+
+/// Fetch sources by their IDs, returning a HashMap for O(1) lookup.
+///
+/// This is useful when you have a list of source IDs (e.g., from filter results)
+/// and need to fetch the full Source data for each.
+///
+/// Only present sources are returned. If an ID doesn't exist or the source
+/// is not present, it won't appear in the result map.
+pub fn batch_fetch_by_ids(conn: &Connection, source_ids: &[i64]) -> Result<HashMap<i64, Source>> {
+    if source_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut sources = HashMap::with_capacity(source_ids.len());
+
+    // Process source_ids in batches
+    for chunk in source_ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT {} {} WHERE s.present = 1 AND s.id IN ({})",
+            SOURCE_COLUMNS,
+            SOURCE_FROM,
+            placeholders.join(",")
+        );
+
+        let params: Vec<Value> = chunk.iter().map(|&id| Value::from(id)).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), source_from_row)?;
+
+        for row in rows {
+            let source = row?;
+            sources.insert(source.id, source);
         }
     }
 
@@ -314,6 +353,67 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert!(sources[0].root_suspended);
         assert!(!sources[0].is_active()); // domain predicate
+    }
+
+    // =========================================================================
+    // batch_fetch_by_ids tests
+    // =========================================================================
+
+    #[test]
+    fn batch_fetch_by_ids_empty_ids() {
+        let conn = setup_test_db();
+        let result = batch_fetch_by_ids(&conn, &[]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn batch_fetch_by_ids_no_matching_ids() {
+        let conn = setup_test_db();
+        let result = batch_fetch_by_ids(&conn, &[999, 1000]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn batch_fetch_by_ids_returns_hashmap() {
+        let conn = setup_test_db();
+
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let id1 = insert_source(&conn, root_id, "a.jpg", None, true, false);
+        let id2 = insert_source(&conn, root_id, "b.jpg", None, true, false);
+
+        let sources = batch_fetch_by_ids(&conn, &[id1, id2]).unwrap();
+        assert_eq!(sources.len(), 2);
+
+        // Verify O(1) lookup works
+        assert_eq!(sources.get(&id1).unwrap().rel_path, "a.jpg");
+        assert_eq!(sources.get(&id2).unwrap().rel_path, "b.jpg");
+    }
+
+    #[test]
+    fn batch_fetch_by_ids_excludes_non_present() {
+        let conn = setup_test_db();
+
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let present_id = insert_source(&conn, root_id, "present.jpg", None, true, false);
+        let deleted_id = insert_source(&conn, root_id, "deleted.jpg", None, false, false);
+
+        let sources = batch_fetch_by_ids(&conn, &[present_id, deleted_id]).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert!(sources.contains_key(&present_id));
+        assert!(!sources.contains_key(&deleted_id));
+    }
+
+    #[test]
+    fn batch_fetch_by_ids_partial_match() {
+        let conn = setup_test_db();
+
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let id1 = insert_source(&conn, root_id, "exists.jpg", None, true, false);
+
+        // Query for mix of existing and non-existing IDs
+        let sources = batch_fetch_by_ids(&conn, &[id1, 999, 1000]).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert!(sources.contains_key(&id1));
     }
 
 }

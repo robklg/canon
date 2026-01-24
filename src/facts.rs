@@ -3,34 +3,18 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::db::{populate_temp_sources, Connection, Db};
-use crate::expr::{self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, ModifierCall, PathAccessor};
+use crate::expr::{self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, ModifierCall, ParsedFactKey, PathAccessor};
+use crate::fact::FactEntry;
 use crate::fact_repo;
+use crate::fact_value;
 use crate::filter::{self, Filter};
 use crate::path::canonicalize_scopes;
 use crate::scope::ScopeMatch;
 use crate::source_repo;
 
-/// Represents a parsed grouping key
-struct GroupingKey {
-    raw: String,                      // Original key string for display
-    base_key: String,                 // Base fact key
-    accessor: Option<PathAccessor>,
-    modifiers: Vec<ModifierCall>,
-    is_root: bool,                    // Special handling for source.root
-}
-
-impl GroupingKey {
-    fn parse(key: &str) -> Result<Self> {
-        let is_root = key == "source.root";
-        let (base_key, accessor, modifiers) = expr::parse_key_with_modifiers(key)?;
-        Ok(GroupingKey {
-            raw: key.to_string(),
-            base_key,
-            accessor,
-            modifiers,
-            is_root,
-        })
-    }
+/// Check if a parsed key represents source.root (for special display formatting)
+fn is_root_key(key: &ParsedFactKey) -> bool {
+    key.raw == "source.root" || key.raw == "root_id"
 }
 
 fn get_fact_category(key: &str) -> BuiltinKeyCategory {
@@ -96,12 +80,12 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, scope_paths: &[PathBuf], filter_s
     }
 
     // Build grouping keys list
-    let mut grouping_keys: Vec<GroupingKey> = Vec::new();
+    let mut grouping_keys: Vec<ParsedFactKey> = Vec::new();
     if by_root {
-        grouping_keys.push(GroupingKey::parse("source.root")?);
+        grouping_keys.push(ParsedFactKey::parse("source.root")?);
     }
     for key in group_by {
-        grouping_keys.push(GroupingKey::parse(key)?);
+        grouping_keys.push(ParsedFactKey::parse(key)?);
     }
 
     let conn = db.conn_mut();
@@ -133,20 +117,19 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, scope_paths: &[PathBuf], filter_s
 
     if let Some(fact_key) = key_arg {
         // Parse key for accessor and modifiers
-        let (base_key, accessor, modifiers) = expr::parse_key_with_modifiers(fact_key)?;
-        let has_transforms = accessor.is_some() || !modifiers.is_empty();
+        let main_key = ParsedFactKey::parse(fact_key)?;
 
         if !grouping_keys.is_empty() {
             // Grouped distribution
-            show_grouped_distribution(conn, &source_ids, &base_key, fact_key, &accessor, &modifiers, &grouping_keys, total_sources, limit)?;
-        } else if is_builtin_or_derived(&base_key) {
-            show_builtin_distribution(conn, &source_ids, &base_key, fact_key, &accessor, &modifiers, total_sources, limit)?;
-        } else if has_transforms {
+            show_grouped_distribution(conn, &source_ids, &main_key, &grouping_keys, total_sources, limit)?;
+        } else if is_builtin_or_derived(&main_key.base_key) {
+            show_builtin_distribution(conn, &source_ids, &main_key.base_key, fact_key, &main_key.accessor, &main_key.modifiers, total_sources, limit)?;
+        } else if main_key.has_transforms() {
             // Stored fact with transforms - need to fetch raw values and apply transforms
-            show_transformed_distribution(conn, &source_ids, &base_key, fact_key, &accessor, &modifiers, total_sources, limit)?;
+            show_transformed_distribution(conn, &source_ids, &main_key.base_key, fact_key, &main_key.accessor, &main_key.modifiers, total_sources, limit)?;
         } else {
             // Stored fact without transforms - use SQL grouping
-            show_value_distribution(conn, &source_ids, &base_key, total_sources, limit)?;
+            show_value_distribution(conn, &source_ids, &main_key.base_key, total_sources, limit)?;
         }
     } else {
         show_all_keys(conn, &source_ids, total_sources, show_all)?;
@@ -665,148 +648,6 @@ fn show_builtin_distribution(
 // Grouped Distribution
 // ============================================================================
 
-/// Data needed for a single source when computing grouped distribution
-struct SourceData {
-    source_id: i64,
-    root_id: i64,
-    root_path: String,
-    rel_path: String,
-    size: i64,
-    mtime: i64,
-    device: Option<i64>,
-    inode: Option<i64>,
-}
-
-/// Fetch raw SourceData for all sources in temp_sources
-fn fetch_source_data(conn: &Connection) -> Result<Vec<SourceData>> {
-    let rows: Vec<SourceData> = conn
-        .prepare(
-            "SELECT ts.id, s.root_id, r.path, s.rel_path, s.size, s.mtime, s.device, s.inode
-             FROM temp_sources ts
-             JOIN sources s ON s.id = ts.id
-             JOIN roots r ON s.root_id = r.id"
-        )?
-        .query_map([], |row| {
-            Ok(SourceData {
-                source_id: row.get(0)?,
-                root_id: row.get(1)?,
-                root_path: row.get(2)?,
-                rel_path: row.get(3)?,
-                size: row.get(4)?,
-                mtime: row.get(5)?,
-                device: row.get(6)?,
-                inode: row.get(7)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
-}
-
-/// Get a FactValue for a built-in key from source data
-fn get_builtin_value(data: &SourceData, builtin: BuiltinKey) -> Option<FactValue> {
-    match builtin {
-        BuiltinKey::SourceExt => {
-            let ext = std::path::Path::new(&data.rel_path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_lowercase())
-                .unwrap_or_default();
-            Some(FactValue::Text(ext))
-        }
-        BuiltinKey::SourceSize | BuiltinKey::Size => {
-            Some(FactValue::Num(data.size as f64))
-        }
-        BuiltinKey::SourceMtime | BuiltinKey::Mtime => {
-            Some(FactValue::Time(data.mtime))
-        }
-        BuiltinKey::SourcePath => {
-            let full_path = if data.rel_path.is_empty() {
-                data.root_path.clone()
-            } else {
-                format!("{}/{}", data.root_path, data.rel_path)
-            };
-            Some(FactValue::Path(full_path))
-        }
-        BuiltinKey::SourceRoot => {
-            Some(FactValue::Path(data.root_path.clone()))
-        }
-        BuiltinKey::SourceRelPath => {
-            Some(FactValue::Path(data.rel_path.clone()))
-        }
-        BuiltinKey::SourceId | BuiltinKey::Id => {
-            Some(FactValue::Num(data.source_id as f64))
-        }
-        BuiltinKey::SourceDevice => {
-            data.device.map(|d| FactValue::Num(d as f64))
-        }
-        BuiltinKey::SourceInode => {
-            data.inode.map(|i| FactValue::Num(i as f64))
-        }
-        BuiltinKey::Filename => {
-            let filename = std::path::Path::new(&data.rel_path)
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or(&data.rel_path)
-                .to_string();
-            Some(FactValue::Text(filename))
-        }
-        BuiltinKey::Stem => {
-            let stem = std::path::Path::new(&data.rel_path)
-                .file_stem()
-                .and_then(|f| f.to_str())
-                .unwrap_or("")
-                .to_string();
-            Some(FactValue::Text(stem))
-        }
-        BuiltinKey::Ext => {
-            let ext = std::path::Path::new(&data.rel_path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_lowercase())
-                .unwrap_or_default();
-            Some(FactValue::Text(ext))
-        }
-        BuiltinKey::RootId => {
-            Some(FactValue::Num(data.root_id as f64))
-        }
-        // Stored facts (hash, content.hash.sha256) need DB lookup
-        BuiltinKey::Hash | BuiltinKey::HashShort | BuiltinKey::ContentHashSha256 => None,
-    }
-}
-
-/// Fetch stored fact values for all sources, returning a map of source_id -> FactValue
-fn fetch_stored_fact_values(conn: &Connection, key: &str) -> Result<HashMap<i64, FactValue>> {
-    let rows: Vec<(i64, Option<String>, Option<f64>, Option<i64>)> = conn
-        .prepare(
-            "SELECT ts.id, f.value_text, f.value_num, f.value_time
-             FROM temp_sources ts
-             LEFT JOIN sources s ON s.id = ts.id
-             LEFT JOIN facts f ON (
-                 (f.entity_type = 'source' AND f.entity_id = ts.id)
-                 OR (f.entity_type = 'object' AND f.entity_id = s.object_id)
-             ) AND f.key = ?1"
-        )?
-        .query_map([key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let mut map = HashMap::new();
-    for (source_id, text_val, num_val, time_val) in rows {
-        let fact_value = if let Some(t) = text_val {
-            Some(FactValue::Text(t))
-        } else if let Some(n) = num_val {
-            Some(FactValue::Num(n))
-        } else if let Some(ts) = time_val {
-            Some(FactValue::Time(ts))
-        } else {
-            None
-        };
-        if let Some(v) = fact_value {
-            map.insert(source_id, v);
-        }
-    }
-    Ok(map)
-}
-
 /// Format root for display: id:N ...truncated_path
 fn format_root_display(root_id: i64, root_path: &str) -> String {
     const MAX_PATH_LEN: usize = 30;
@@ -823,11 +664,8 @@ fn format_root_display(root_id: i64, root_path: &str) -> String {
 fn show_grouped_distribution(
     conn: &mut Connection,
     source_ids: &[i64],
-    main_base_key: &str,
-    main_display_key: &str,
-    main_accessor: &Option<PathAccessor>,
-    main_modifiers: &[ModifierCall],
-    grouping_keys: &[GroupingKey],
+    main_key: &ParsedFactKey,
+    grouping_keys: &[ParsedFactKey],
     total_sources: usize,
     limit: usize,
 ) -> Result<()> {
@@ -835,36 +673,39 @@ fn show_grouped_distribution(
         return Ok(());
     }
 
-    // Build temp table
-    populate_temp_sources(conn, source_ids)?;
+    // 1. FETCH - Use infrastructure layer
+    // Fetch all sources by ID
+    let sources = source_repo::batch_fetch_by_ids(conn, source_ids)?;
 
-    // Fetch source data for built-in keys
-    let source_data = fetch_source_data(conn)?;
-    // Determine if main key is built-in
-    let main_builtin = BuiltinKey::from_str(main_base_key);
-
-    // Fetch stored fact values if needed for main key
-    let main_stored_values: HashMap<i64, FactValue> = if main_builtin.is_none() {
-        fetch_stored_fact_values(conn, main_base_key)?
-    } else {
-        HashMap::new()
-    };
-
-    // Fetch stored fact values for each grouping key that isn't built-in
-    let mut grouping_stored_values: Vec<HashMap<i64, FactValue>> = Vec::new();
+    // Collect all stored fact keys we need to fetch
+    let mut stored_keys: Vec<&str> = Vec::new();
+    if !main_key.is_builtin() {
+        stored_keys.push(&main_key.base_key);
+    }
     for gk in grouping_keys {
-        if BuiltinKey::from_str(&gk.base_key).is_none() {
-            grouping_stored_values.push(fetch_stored_fact_values(conn, &gk.base_key)?);
-        } else {
-            grouping_stored_values.push(HashMap::new());
+        if !gk.is_builtin() && !stored_keys.contains(&gk.base_key.as_str()) {
+            stored_keys.push(&gk.base_key);
         }
     }
 
-    // Clean up temp table
-    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+    // Fetch stored facts for all needed keys
+    let all_facts: HashMap<i64, HashMap<String, FactEntry>> = if stored_keys.is_empty() {
+        HashMap::new()
+    } else {
+        // Fetch each key and merge results per source
+        let mut merged: HashMap<i64, HashMap<String, FactEntry>> = HashMap::new();
+        for key in &stored_keys {
+            let key_facts = fact_repo::batch_fetch_key_for_sources(conn, source_ids, key)?;
+            for (source_id, entry_opt) in key_facts {
+                if let Some(entry) = entry_opt {
+                    merged.entry(source_id).or_default().insert(entry.key.clone(), entry);
+                }
+            }
+        }
+        merged
+    };
 
-    // Aggregate: (main_value, group_values...) -> count
-    // Also track root_id for display when grouping by root
+    // 2. RESOLVE + AGGREGATE
     #[derive(Hash, Eq, PartialEq, Clone)]
     struct GroupKey {
         main_value: String,
@@ -880,53 +721,41 @@ fn show_grouped_distribution(
     let mut aggregated: HashMap<GroupKey, GroupInfo> = HashMap::new();
     let mut sources_with_main_value: i64 = 0;
 
-    for data in &source_data {
-        // Get main value
-        let main_value_opt = if let Some(builtin) = main_builtin {
-            get_builtin_value(data, builtin)
-        } else {
-            main_stored_values.get(&data.source_id).cloned()
+    for source_id in source_ids {
+        let source = match sources.get(source_id) {
+            Some(s) => s,
+            None => continue,
         };
 
-        let main_value = match main_value_opt {
+        // Get stored facts for this source (empty map if none)
+        let empty_facts: HashMap<String, FactEntry> = HashMap::new();
+        let stored_facts = all_facts.get(source_id).unwrap_or(&empty_facts);
+
+        // Resolve main value using domain layer
+        let main_value = match fact_value::resolve_fact_value(source, main_key, stored_facts)? {
             Some(v) => {
                 sources_with_main_value += 1;
-                match apply_transforms(v, main_accessor, main_modifiers, main_display_key) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                }
+                v
             }
             None => continue,
         };
 
-        // Get grouping values
+        // Resolve grouping values
         let mut group_values: Vec<String> = Vec::new();
         let mut root_id_for_display: Option<i64> = None;
         let mut root_path_for_display: Option<String> = None;
 
-        for (i, gk) in grouping_keys.iter().enumerate() {
-            let gk_builtin = BuiltinKey::from_str(&gk.base_key);
-
-            let gk_value_opt = if let Some(builtin) = gk_builtin {
-                get_builtin_value(data, builtin)
-            } else {
-                grouping_stored_values[i].get(&data.source_id).cloned()
-            };
-
-            let gk_value = match gk_value_opt {
-                Some(v) => {
-                    match apply_transforms(v, &gk.accessor, &gk.modifiers, &gk.raw) {
-                        Ok(s) => s,
-                        Err(_) => "(transform error)".to_string(),
-                    }
-                }
-                None => "(no value)".to_string(),
+        for gk in grouping_keys {
+            let gk_value = match fact_value::resolve_fact_value(source, gk, stored_facts) {
+                Ok(Some(v)) => v,
+                Ok(None) => "(no value)".to_string(),
+                Err(_) => "(transform error)".to_string(),
             };
 
             // Track root info for special display
-            if gk.is_root {
-                root_id_for_display = Some(data.root_id);
-                root_path_for_display = Some(data.root_path.clone());
+            if is_root_key(gk) {
+                root_id_for_display = Some(source.root_id);
+                root_path_for_display = Some(source.root_path.clone());
             }
 
             group_values.push(gk_value);
@@ -941,11 +770,11 @@ fn show_grouped_distribution(
         entry.count += 1;
     }
 
-    // Build results: group by main_value, then sort sub-groups
+    // 3. BUILD RESULTS - Group by main_value, then sort sub-groups
     struct MainValueGroup {
         main_value: String,
         total_count: i64,
-        sub_groups: Vec<(Vec<String>, i64, Option<i64>, Option<String>)>, // (group_values, count, root_id, root_path)
+        sub_groups: Vec<(Vec<String>, i64, Option<i64>, Option<String>)>,
     }
 
     let mut by_main_value: HashMap<String, MainValueGroup> = HashMap::new();
@@ -974,8 +803,9 @@ fn show_grouped_distribution(
         mv.sub_groups.sort_by(|a, b| b.1.cmp(&a.1));
     }
 
+    // 4. DISPLAY
     // Build grouping label
-    let grouping_label = if grouping_keys.len() == 1 && grouping_keys[0].is_root {
+    let grouping_label = if grouping_keys.len() == 1 && is_root_key(&grouping_keys[0]) {
         "by root".to_string()
     } else {
         let labels: Vec<&str> = grouping_keys.iter().map(|gk| gk.raw.as_str()).collect();
@@ -983,7 +813,7 @@ fn show_grouped_distribution(
     };
 
     // Print header
-    println!("{} ({})\n", main_display_key, grouping_label);
+    println!("{} ({})\n", main_key.raw, grouping_label);
 
     for mv in &main_values {
         let coverage = (mv.total_count as f64 / total_sources as f64) * 100.0;
@@ -998,7 +828,7 @@ fn show_grouped_distribution(
             let sub_coverage = (*count as f64 / mv.total_count as f64) * 100.0;
 
             // Format group display
-            let group_display = if grouping_keys.len() == 1 && grouping_keys[0].is_root {
+            let group_display = if grouping_keys.len() == 1 && is_root_key(&grouping_keys[0]) {
                 // Special root display
                 if let (Some(rid), Some(rpath)) = (root_id, root_path) {
                     format_root_display(*rid, rpath)
@@ -1008,7 +838,7 @@ fn show_grouped_distribution(
             } else {
                 // Multiple grouping keys or non-root
                 let parts: Vec<String> = grouping_keys.iter().enumerate().map(|(i, gk)| {
-                    if gk.is_root {
+                    if is_root_key(gk) {
                         if let (Some(rid), Some(rpath)) = (root_id, root_path) {
                             format_root_display(*rid, rpath)
                         } else {
