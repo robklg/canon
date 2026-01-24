@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use rusqlite::types::Value;
+use std::collections::HashMap;
 
 use crate::db::{Connection, Db};
 use crate::scope::{build_scope_clause, ScopeMatch};
@@ -9,6 +10,14 @@ use crate::exclude;
 use crate::filter::{self, Filter};
 
 const BATCH_SIZE: i64 = 1000;
+
+/// Source data needed for output
+struct SourceData {
+    path: String,
+    object_id: Option<i64>,
+    size: i64,
+    mtime: i64,
+}
 
 pub fn run(
     db: &mut Db,
@@ -75,22 +84,23 @@ pub fn run(
         0
     };
 
+    // Batch fetch all source data upfront
+    let source_data = batch_fetch_sources(conn, &source_ids)?;
+
     // Apply archived/unarchived/unhashed filter and collect output lines
     // Each entry is (source_path, optional_archive_path, size, mtime)
     let mut output_lines: Vec<(String, Option<String>, i64, i64)> = Vec::new();
     let mut unhashed_count = 0usize;
 
-    // Need size/mtime for long format or when sorting by those fields
-    let need_details = long_format || matches!(sort_by, "size" | "mtime");
-
     for source_id in &source_ids {
-        let (full_path, object_id, size, mtime) = if need_details {
-            get_source_details(conn, *source_id)?
-        } else {
-            let (path, obj_id) = get_source_path(conn, *source_id)?;
-            (path, obj_id, 0, 0)
+        let data = match source_data.get(source_id) {
+            Some(d) => d,
+            None => continue, // Should not happen, but skip if missing
         };
-        let formatted_source = format_path(&full_path, cwd.as_deref());
+        let formatted_source = format_path(&data.path, cwd.as_deref());
+        let object_id = data.object_id;
+        let size = data.size;
+        let mtime = data.mtime;
 
         // Check archive status if filtering
         if archived_only {
@@ -252,43 +262,45 @@ fn get_matching_sources(
     Ok(all_ids)
 }
 
-fn get_source_path(conn: &Connection, source_id: i64) -> Result<(String, Option<i64>)> {
-    let (root_path, rel_path, object_id): (String, String, Option<i64>) = conn.query_row(
-        "SELECT r.path, s.rel_path, s.object_id
-         FROM sources s
-         JOIN roots r ON s.root_id = r.id
-         WHERE s.id = ?",
-        [source_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
+/// Batch fetch source data for all source IDs
+fn batch_fetch_sources(conn: &Connection, source_ids: &[i64]) -> Result<HashMap<i64, SourceData>> {
+    let mut result = HashMap::with_capacity(source_ids.len());
 
-    let full_path = if rel_path.is_empty() {
-        root_path
-    } else {
-        format!("{}/{}", root_path, rel_path)
-    };
+    // Process in batches to avoid huge IN clauses
+    for chunk in source_ids.chunks(BATCH_SIZE as usize) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT s.id, r.path, s.rel_path, s.object_id, s.size, s.mtime
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             WHERE s.id IN ({})",
+            placeholders.join(",")
+        );
 
-    Ok((full_path, object_id))
-}
+        let params: Vec<Value> = chunk.iter().map(|&id| Value::from(id)).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            let id: i64 = row.get(0)?;
+            let root_path: String = row.get(1)?;
+            let rel_path: String = row.get(2)?;
+            let object_id: Option<i64> = row.get(3)?;
+            let size: i64 = row.get(4)?;
+            let mtime: i64 = row.get(5)?;
+            Ok((id, root_path, rel_path, object_id, size, mtime))
+        })?;
 
-/// Get source details including size and mtime for long format
-fn get_source_details(conn: &Connection, source_id: i64) -> Result<(String, Option<i64>, i64, i64)> {
-    let (root_path, rel_path, object_id, size, mtime): (String, String, Option<i64>, i64, i64) = conn.query_row(
-        "SELECT r.path, s.rel_path, s.object_id, s.size, s.mtime
-         FROM sources s
-         JOIN roots r ON s.root_id = r.id
-         WHERE s.id = ?",
-        [source_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-    )?;
+        for row in rows {
+            let (id, root_path, rel_path, object_id, size, mtime) = row?;
+            let path = if rel_path.is_empty() {
+                root_path
+            } else {
+                format!("{}/{}", root_path, rel_path)
+            };
+            result.insert(id, SourceData { path, object_id, size, mtime });
+        }
+    }
 
-    let full_path = if rel_path.is_empty() {
-        root_path
-    } else {
-        format!("{}/{}", root_path, rel_path)
-    };
-
-    Ok((full_path, object_id, size, mtime))
+    Ok(result)
 }
 
 fn check_archived(conn: &Connection, object_id: i64) -> Result<bool> {
@@ -458,8 +470,6 @@ fn find_duplicate_groups(
     conn: &Connection,
     source_ids: &[i64],
 ) -> Result<Vec<(String, i64, Vec<(String, i64)>)>> {
-    use std::collections::HashMap;
-
     if source_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -467,21 +477,33 @@ fn find_duplicate_groups(
     // Build a map of object_id -> (hash, size, sources)
     let mut object_map: HashMap<i64, (String, i64, Vec<(String, i64)>)> = HashMap::new();
 
-    for &source_id in source_ids {
-        // Get source info including object_id, hash, and size
-        let result: Option<(i64, String, i64, String, String)> = conn
-            .query_row(
-                "SELECT s.object_id, o.hash_value, s.size, r.path, s.rel_path
-                 FROM sources s
-                 JOIN roots r ON s.root_id = r.id
-                 JOIN objects o ON s.object_id = o.id
-                 WHERE s.id = ? AND s.object_id IS NOT NULL",
-                [source_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-            )
-            .ok();
+    // Batch fetch source info including object_id, hash, and size
+    for chunk in source_ids.chunks(BATCH_SIZE as usize) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT s.id, s.object_id, o.hash_value, s.size, r.path, s.rel_path
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             JOIN objects o ON s.object_id = o.id
+             WHERE s.id IN ({}) AND s.object_id IS NOT NULL",
+            placeholders.join(",")
+        );
 
-        if let Some((object_id, hash, size, root_path, rel_path)) = result {
+        let params: Vec<Value> = chunk.iter().map(|&id| Value::from(id)).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,    // source_id
+                row.get::<_, i64>(1)?,    // object_id
+                row.get::<_, String>(2)?, // hash_value
+                row.get::<_, i64>(3)?,    // size
+                row.get::<_, String>(4)?, // root_path
+                row.get::<_, String>(5)?, // rel_path
+            ))
+        })?;
+
+        for row in rows {
+            let (source_id, object_id, hash, size, root_path, rel_path) = row?;
             let full_path = if rel_path.is_empty() {
                 root_path
             } else {
