@@ -38,14 +38,6 @@ impl CoverageStats {
         self.total_sources - self.excluded_sources
     }
 
-    fn excluded_pct(&self) -> f64 {
-        if self.total_sources == 0 {
-            0.0
-        } else {
-            (self.excluded_sources as f64 / self.total_sources as f64) * 100.0
-        }
-    }
-
     fn hashed_pct(&self) -> f64 {
         let included = self.included_sources();
         if included == 0 {

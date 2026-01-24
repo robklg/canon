@@ -21,8 +21,6 @@ struct WorklistEntry {
     basis_rev: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     facts: Option<HashMap<String, serde_json::Value>>,
-    #[serde(skip_serializing)]
-    object_id: Option<i64>,
 }
 
 impl WorklistEntry {
@@ -61,7 +59,6 @@ impl WorklistEntry {
             mtime: source.mtime,
             basis_rev: source.basis_rev,
             facts,
-            object_id: source.object_id,
         })
     }
 }

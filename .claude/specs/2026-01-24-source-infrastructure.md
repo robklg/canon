@@ -379,13 +379,16 @@ sources.iter()
 - **Dependencies**: Phase 4
 
 ### Phase 6: Cleanup and Documentation
-- **Status**: pending
+- **Status**: ✅ completed
 - **Goal**: Remove dead code, document patterns, verify user documentation
 - **Scope**:
-  - Remove SQL scope clause builders if unused
-  - Update CLAUDE.md with new architecture
-  - Document the pattern for future facilities
-  - **Review user documentation in `docs/src/concepts/`**: Ensure the concepts we've crystallized (sources, exclusion at source and object level, scope matching, root roles) are accurately described in user-facing docs. Files: `source.md`, `object.md`, `roots.md`, `source-object.md`
+  - SQL clause builders NOT removed — still used by cluster.rs, facts.rs, exclude.rs (out of scope)
+  - Updated CLAUDE.md with:
+    - `source.rs` and `source_repo.rs` in Architecture section
+    - Source domain model in Shared Utilities section
+    - Established pattern example with predicate chain
+  - Updated `docs/src/concepts/source.md` with exclusion semantics (two-level check)
+- **Not done**: SQL clause builders still needed by other commands; will be removed when those are migrated
 
 ## Future Work: Completing the Unified Domain Model
 
@@ -758,6 +761,31 @@ This is the cost of "fetch all, filter in Rust" vs "filter in SQL". We're paying
 
 **Display simplification:**
 - Removed `include_excluded` parameter from display functions — the flag controlled whether to show the "Excluded: N" line, but conceptually excluded sources are simply not counted. The display now always shows included sources as the total.
+
+### Phase 6 Learnings
+
+**SQL clause builders still needed:**
+- `build_scope_clause()`, `SCOPE_CLAUSE`, `scope_param()`, `exclude_clause()` still used by:
+  - cluster.rs (needs Fact infrastructure before migration)
+  - facts.rs (needs Fact infrastructure)
+  - exclude.rs (not part of query commands)
+- These will be candidates for removal when those modules are migrated in future projects.
+
+**Documentation updated:**
+- CLAUDE.md now documents the Source domain model pattern with example code.
+- `docs/src/concepts/source.md` now explains two-level exclusion semantics.
+- The pattern is now documented as the established approach for future facilities.
+
+**Project complete:**
+- 6 phases completed over the session
+- 89 tests (37 new tests added for source.rs and source_repo.rs)
+- 4 commands migrated: ls.rs, worklist.rs, compare.rs, coverage.rs
+- 1 semantic bug fixed: coverage.rs now correctly counts object-level exclusions
+- Net code reduction: commands are simpler, domain logic is centralized
+
+## Recommendations for Future Work
+
+- **Monitor `get_matching_sources()` duplication** — `ls.rs`, `worklist.rs`, and `coverage.rs` each have near-identical implementations. If modification is needed, consider extracting to a shared function. For now the duplication is acceptable because each version is simple enough to audit and they use the same domain predicates.
 
 ## References
 

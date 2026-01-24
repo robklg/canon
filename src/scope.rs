@@ -40,17 +40,6 @@ impl ScopeMatch {
 // SQL Generation (no filesystem I/O)
 // ============================================================================
 
-/// SQL clause for optional scope filtering. Use with scope_param() which provides
-/// the param value. Pass the param twice in your query params.
-/// Example: format!("... AND {} ...", SCOPE_CLAUSE) with params![prefix, prefix, ...]
-pub const SCOPE_CLAUSE: &str = "(? = '' OR (r.path || '/' || s.rel_path) LIKE ? || '/%')";
-
-/// Get the param value for SCOPE_CLAUSE. Returns "" when no scope.
-/// Pass this value twice in query params (once for = '', once for LIKE).
-pub fn scope_param(scope_prefix: &Option<String>) -> &str {
-    scope_prefix.as_deref().unwrap_or("")
-}
-
 /// Build SQL clause for multiple scope matches.
 ///
 /// Returns the clause string and a vector of parameters to bind.
@@ -141,15 +130,4 @@ mod tests {
         assert_eq!(params, vec!["/a", "/b", "/c"]);
     }
 
-    #[test]
-    fn scope_param_with_value() {
-        let scope = Some("/a/b".to_string());
-        assert_eq!(scope_param(&scope), "/a/b");
-    }
-
-    #[test]
-    fn scope_param_without_value() {
-        let scope: Option<String> = None;
-        assert_eq!(scope_param(&scope), "");
-    }
 }

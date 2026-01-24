@@ -18,14 +18,10 @@
 //!
 //! // Fetch all sources for specific roots
 //! let sources = source_repo::batch_fetch_by_roots(conn, &[1, 2, 3])?;
-//!
-//! // Fetch specific sources by ID
-//! let source_map = source_repo::batch_fetch_by_ids(conn, &source_ids)?;
 //! ```
 
 use anyhow::Result;
 use rusqlite::types::Value;
-use std::collections::HashMap;
 
 use crate::db::Connection;
 use crate::source::Source;
@@ -115,75 +111,6 @@ pub fn batch_fetch_by_roots(conn: &Connection, root_ids: &[i64]) -> Result<Vec<S
     }
 
     Ok(sources)
-}
-
-/// Fetch sources by specific IDs.
-///
-/// Returns a HashMap for O(1) lookup by source ID. Missing IDs are
-/// silently skipped (they may have been deleted or not present).
-///
-/// This is useful when you have a list of source IDs from a previous
-/// query (e.g., after applying filters) and need full Source data.
-pub fn batch_fetch_by_ids(conn: &Connection, source_ids: &[i64]) -> Result<HashMap<i64, Source>> {
-    if source_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let mut result = HashMap::with_capacity(source_ids.len());
-
-    // Process in batches
-    for chunk in source_ids.chunks(BATCH_SIZE) {
-        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        let sql = format!(
-            "SELECT {} {} WHERE s.id IN ({})",
-            SOURCE_COLUMNS,
-            SOURCE_FROM,
-            placeholders.join(",")
-        );
-
-        let params: Vec<Value> = chunk.iter().map(|&id| Value::from(id)).collect();
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(params), source_from_row)?;
-
-        for row in rows {
-            let source = row?;
-            result.insert(source.id, source);
-        }
-    }
-
-    Ok(result)
-}
-
-/// Fetch just source IDs for given roots.
-///
-/// This is useful for pagination patterns where you first get IDs,
-/// apply filters, then fetch full data for the filtered set.
-///
-/// Only returns IDs for present sources.
-pub fn fetch_source_ids_by_roots(conn: &Connection, root_ids: &[i64]) -> Result<Vec<i64>> {
-    if root_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut ids = Vec::new();
-
-    for chunk in root_ids.chunks(BATCH_SIZE) {
-        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        let sql = format!(
-            "SELECT s.id FROM sources s WHERE s.present = 1 AND s.root_id IN ({})",
-            placeholders.join(",")
-        );
-
-        let params: Vec<Value> = chunk.iter().map(|&id| Value::from(id)).collect();
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| row.get(0))?;
-
-        for row in rows {
-            ids.push(row?);
-        }
-    }
-
-    Ok(ids)
 }
 
 #[cfg(test)]
@@ -389,93 +316,4 @@ mod tests {
         assert!(!sources[0].is_active()); // domain predicate
     }
 
-    // =========================================================================
-    // batch_fetch_by_ids tests
-    // =========================================================================
-
-    #[test]
-    fn batch_fetch_by_ids_empty() {
-        let conn = setup_test_db();
-        let result = batch_fetch_by_ids(&conn, &[]).unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn batch_fetch_by_ids_found() {
-        let conn = setup_test_db();
-
-        let root_id = insert_root(&conn, "/photos", "source", false);
-        let id1 = insert_source(&conn, root_id, "a.jpg", None, true, false);
-        let id2 = insert_source(&conn, root_id, "b.jpg", None, true, false);
-
-        let result = batch_fetch_by_ids(&conn, &[id1, id2]).unwrap();
-        assert_eq!(result.len(), 2);
-        assert_eq!(result.get(&id1).unwrap().rel_path, "a.jpg");
-        assert_eq!(result.get(&id2).unwrap().rel_path, "b.jpg");
-    }
-
-    #[test]
-    fn batch_fetch_by_ids_partial() {
-        // Some IDs exist, some don't — should return only existing ones
-        let conn = setup_test_db();
-
-        let root_id = insert_root(&conn, "/photos", "source", false);
-        let id1 = insert_source(&conn, root_id, "exists.jpg", None, true, false);
-
-        let result = batch_fetch_by_ids(&conn, &[id1, 999, 1000]).unwrap();
-        assert_eq!(result.len(), 1);
-        assert!(result.contains_key(&id1));
-        assert!(!result.contains_key(&999));
-    }
-
-    #[test]
-    fn batch_fetch_by_ids_includes_non_present() {
-        // Unlike batch_fetch_by_roots, batch_fetch_by_ids does NOT filter by present.
-        // This is intentional — if you have a specific ID, you want it.
-        let conn = setup_test_db();
-
-        let root_id = insert_root(&conn, "/photos", "source", false);
-        let id = insert_source(&conn, root_id, "deleted.jpg", None, false, false);
-
-        let result = batch_fetch_by_ids(&conn, &[id]).unwrap();
-        assert_eq!(result.len(), 1);
-    }
-
-    // =========================================================================
-    // fetch_source_ids_by_roots tests
-    // =========================================================================
-
-    #[test]
-    fn fetch_source_ids_by_roots_empty() {
-        let conn = setup_test_db();
-        let result = fetch_source_ids_by_roots(&conn, &[]).unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn fetch_source_ids_by_roots_returns_ids() {
-        let conn = setup_test_db();
-
-        let root_id = insert_root(&conn, "/photos", "source", false);
-        let id1 = insert_source(&conn, root_id, "a.jpg", None, true, false);
-        let id2 = insert_source(&conn, root_id, "b.jpg", None, true, false);
-
-        let ids = fetch_source_ids_by_roots(&conn, &[root_id]).unwrap();
-        assert_eq!(ids.len(), 2);
-        assert!(ids.contains(&id1));
-        assert!(ids.contains(&id2));
-    }
-
-    #[test]
-    fn fetch_source_ids_by_roots_excludes_non_present() {
-        let conn = setup_test_db();
-
-        let root_id = insert_root(&conn, "/photos", "source", false);
-        let id1 = insert_source(&conn, root_id, "present.jpg", None, true, false);
-        insert_source(&conn, root_id, "deleted.jpg", None, false, false);
-
-        let ids = fetch_source_ids_by_roots(&conn, &[root_id]).unwrap();
-        assert_eq!(ids.len(), 1);
-        assert!(ids.contains(&id1));
-    }
 }

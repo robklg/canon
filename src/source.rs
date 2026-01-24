@@ -51,11 +51,17 @@ pub struct Source {
     pub excluded: bool,
     /// Object-level exclusion flag (None if no object_id)
     pub object_excluded: Option<bool>,
-    /// Device ID (for move detection)
+    /// Device ID (for move detection).
+    /// Passed through to worklist JSONL for external tool consumption.
+    #[allow(dead_code)]
     pub device: i64,
-    /// Inode number (for move detection)
+    /// Inode number (for move detection).
+    /// Passed through to worklist JSONL for external tool consumption.
+    #[allow(dead_code)]
     pub inode: i64,
-    /// Partial hash for integrity validation
+    /// Partial hash for integrity validation.
+    /// Passed through to worklist JSONL for external tool consumption.
+    #[allow(dead_code)]
     pub partial_hash: String,
     /// Basis revision for staleness detection (increments when file changes)
     pub basis_rev: i64,

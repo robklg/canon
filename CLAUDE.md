@@ -29,6 +29,8 @@ Canon is a CLI tool for organizing large media libraries into a "canonical archi
 - `src/path.rs` - Path utilities (pure manipulation + canonicalization)
 - `src/scope.rs` - Scope domain concepts (ScopeMatch enum, SQL clause building)
 - `src/root.rs` - Root domain concepts (RootSpec enum, root resolution)
+- `src/source.rs` - Source domain model (Source struct, predicates like `is_excluded()`, `matches_scope()`)
+- `src/source_repo.rs` - Source repository layer (batch fetch from database, no domain logic)
 - `src/db.rs` - SQLite database infrastructure (connection, schema, transactions)
 - `src/scan.rs` - Directory scanning logic
 - `src/worklist.rs` - JSONL worklist generation for external processing
@@ -143,6 +145,20 @@ In `db.rs`:
 - `Db` struct, `open()` - Database connection and initialization
 - `populate_temp_sources()` - Batch insert pattern for large ID sets
 
+In `source.rs` (domain layer):
+- `Source` struct - The authoritative definition of a source with all fields
+- `source.path()` - Compute full absolute path (handles empty rel_path)
+- `source.matches_scope(&scopes)` - Check if source is under given paths
+- `source.is_excluded()` - Check exclusion (source-level OR object-level)
+- `source.is_from_role(role)` - Check root role ("source" or "archive")
+- `source.is_active()` - Check if root is not suspended
+
+In `source_repo.rs` (infrastructure layer):
+- `batch_fetch_by_roots(conn, root_ids)` - Fetch all present sources for roots
+- `batch_fetch_by_ids(conn, source_ids)` - Fetch specific sources by ID
+- `fetch_source_ids_by_roots(conn, root_ids)` - Get just IDs (for pagination)
+- Uses `BATCH_SIZE = 1000` for SQL IN clause chunking
+
 In other modules:
 - `filter::apply_filters()` - Apply filter expressions to source IDs
 - `exclude::exclude_clause()` - SQL clause for exclusion filtering
@@ -162,10 +178,21 @@ The codebase is evolving toward a clean architecture with separated concerns, pr
 - **Infrastructure layer**: Storage and filesystem adapters (`db.rs`, canonicalization)
 - **Application layer**: Command modules orchestrating domain + infrastructure
 
-**Established pattern** (see `scope.rs`, `root.rs`):
-1. Extract domain concepts as enums and pure functions (no I/O, unit-testable)
-2. Keep orchestration functions in the same module (combine domain + infrastructure)
-3. Callers do I/O first, then pass results to pure domain functions
+**Established pattern** (see `source.rs`, `source_repo.rs`):
+1. **Domain module** (`source.rs`): Struct + pure predicate functions (no I/O, unit-testable)
+2. **Repository module** (`source_repo.rs`): Simple batch fetch from database, no domain logic
+3. **Commands** use pattern: fetch sources → filter with domain predicates → transform → output
+
+Example from `ls.rs`, `worklist.rs`, `compare.rs`, `coverage.rs`:
+```rust
+let sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
+let filtered: Vec<Source> = sources.into_iter()
+    .filter(|s| s.is_active())
+    .filter(|s| s.is_from_role("source"))
+    .filter(|s| s.matches_scope(&scopes))
+    .filter(|s| !s.is_excluded())
+    .collect();
+```
 
 **Why this matters for reliability:**
 - Pure domain functions can be thoroughly unit-tested with known inputs/outputs
@@ -173,7 +200,12 @@ The codebase is evolving toward a clean architecture with separated concerns, pr
 - Bugs in core logic (path matching, scope resolution) are caught by tests, not users
 - New commands automatically benefit from battle-tested domain functions
 
-This separation also enables future flexibility (e.g., different storage backends, cloud filesystem support) without requiring rewrites. The refactoring started with `db.rs` to establish the pattern. See `.claude/specs/2026-01-21-db-refactoring.md` for the refactoring history and design decisions.
+**Key invariants** (defined in `source.rs`):
+- `is_excluded()` checks BOTH source-level AND object-level exclusion
+- `matches_scope()` handles edge case: `/a/bc` is NOT under `/a/b`
+- `path()` correctly handles empty `rel_path` (returns just root_path)
+
+This separation also enables future flexibility (e.g., different storage backends, cloud filesystem support) without requiring rewrites. See `.claude/specs/2026-01-24-source-infrastructure.md` for the full refactoring spec.
 
 ### CLI Conventions
 

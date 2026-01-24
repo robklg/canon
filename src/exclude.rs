@@ -219,39 +219,6 @@ pub fn exclude_clause(include_excluded: bool) -> &'static str {
     }
 }
 
-/// Count excluded sources in scope
-pub fn count_excluded(conn: &Connection, scope_prefix: Option<&str>, include_archived: bool) -> Result<i64> {
-    let role_clause = if include_archived { "r.suspended = 0" } else { "r.role = 'source' AND r.suspended = 0" };
-
-    let count: i64 = if let Some(prefix) = scope_prefix {
-        conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM sources s
-                 JOIN roots r ON s.root_id = r.id
-                 WHERE s.present = 1 AND {}
-                   AND (r.path || '/' || s.rel_path) LIKE ? || '/%'
-                   AND s.excluded = 1",
-                role_clause
-            ),
-            [prefix],
-            |row| row.get(0),
-        )?
-    } else {
-        conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM sources s
-                 JOIN roots r ON s.root_id = r.id
-                 WHERE s.present = 1 AND {}
-                   AND s.excluded = 1",
-                role_clause
-            ),
-            [],
-            |row| row.get(0),
-        )?
-    };
-    Ok(count)
-}
-
 fn get_matching_sources(
     conn: &mut Connection,
     scope_prefixes: &[String],
