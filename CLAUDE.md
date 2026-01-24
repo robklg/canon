@@ -31,6 +31,8 @@ Canon is a CLI tool for organizing large media libraries into a "canonical archi
 - `src/root.rs` - Root domain concepts (RootSpec enum, root resolution)
 - `src/source.rs` - Source domain model (Source struct, predicates like `is_excluded()`, `matches_scope()`)
 - `src/source_repo.rs` - Source repository layer (batch fetch from database, no domain logic)
+- `src/fact.rs` - Fact domain model (FactEntry struct, re-exports FactValue/FactType from expr.rs)
+- `src/fact_repo.rs` - Fact repository layer (batch fetch facts for sources, handles source+object facts transparently)
 - `src/db.rs` - SQLite database infrastructure (connection, schema, transactions)
 - `src/scan.rs` - Directory scanning logic
 - `src/worklist.rs` - JSONL worklist generation for external processing
@@ -159,6 +161,15 @@ In `source_repo.rs` (infrastructure layer):
 - `fetch_source_ids_by_roots(conn, root_ids)` - Get just IDs (for pagination)
 - Uses `BATCH_SIZE = 1000` for SQL IN clause chunking
 
+In `fact.rs` (domain layer):
+- `FactEntry` struct - A fact associated with a source (key, value, entity_type, entity_id)
+- Re-exports `FactValue`, `FactType` from `expr.rs` for convenience
+
+In `fact_repo.rs` (infrastructure layer):
+- `batch_fetch_key_for_sources(conn, source_ids, key)` - Fetch specific key (returns `HashMap<i64, Option<FactEntry>>`)
+- `count_fact_keys(conn, source_ids)` - Count distinct fact keys with types
+- Transparently merges source facts + object facts, keyed by source_id
+
 In other modules:
 - `filter::apply_filters()` - Apply filter expressions to source IDs
 - `exclude::exclude_clause()` - SQL clause for exclusion filtering
@@ -178,12 +189,12 @@ The codebase is evolving toward a clean architecture with separated concerns, pr
 - **Infrastructure layer**: Storage and filesystem adapters (`db.rs`, canonicalization)
 - **Application layer**: Command modules orchestrating domain + infrastructure
 
-**Established pattern** (see `source.rs`, `source_repo.rs`):
-1. **Domain module** (`source.rs`): Struct + pure predicate functions (no I/O, unit-testable)
-2. **Repository module** (`source_repo.rs`): Simple batch fetch from database, no domain logic
-3. **Commands** use pattern: fetch sources → filter with domain predicates → transform → output
+**Established pattern** (see `source.rs`, `source_repo.rs`, `fact.rs`, `fact_repo.rs`):
+1. **Domain module** (`source.rs`, `fact.rs`): Struct + pure predicate functions (no I/O, unit-testable)
+2. **Repository module** (`source_repo.rs`, `fact_repo.rs`): Simple batch fetch from database, no domain logic
+3. **Commands** use pattern: fetch → filter with domain predicates → transform → output
 
-Example from `ls.rs`, `worklist.rs`, `compare.rs`, `coverage.rs`:
+Example from `ls.rs`, `worklist.rs`, `compare.rs`, `coverage.rs`, `facts.rs`:
 ```rust
 let sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
 let filtered: Vec<Source> = sources.into_iter()

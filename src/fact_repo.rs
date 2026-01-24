@@ -16,11 +16,11 @@
 //! ```ignore
 //! use canon::fact_repo;
 //!
-//! // Fetch all facts for sources
-//! let facts = fact_repo::batch_fetch_for_sources(conn, &source_ids)?;
-//! for (source_id, entries) in &facts {
-//!     for entry in entries {
-//!         println!("{}: {} = {:?}", source_id, entry.key, entry.value);
+//! // Fetch a specific fact key for sources
+//! let facts = fact_repo::batch_fetch_key_for_sources(conn, &source_ids, "content.Make")?;
+//! for (source_id, entry) in &facts {
+//!     if let Some(fact) = entry {
+//!         println!("{}: {:?}", source_id, fact.value);
 //!     }
 //! }
 //! ```
@@ -35,81 +35,10 @@ use crate::fact::{FactEntry, FactType, FactValue};
 // Note: We use temp tables (populate_temp_sources) instead of IN clause chunking,
 // so BATCH_SIZE is not needed here. The temp table pattern handles large sets better.
 
-/// Fetch all facts for the given source IDs.
-///
-/// Returns a map from source_id to list of FactEntry.
-/// Each source's facts include:
-/// - Direct source facts (entity_type = 'source', entity_id = source_id)
-/// - Object facts (entity_type = 'object', entity_id = object_id) if source has object_id
-///
-/// Object facts are associated with the SOURCE id in the result map,
-/// making it easy to get "all facts for this source" without separate lookups.
-///
-/// ## Performance Note
-///
-/// For large source sets, this uses a temp table pattern to avoid
-/// SQL IN clause limits. The temp table is cleaned up after the query.
-pub fn batch_fetch_for_sources(
-    conn: &mut Connection,
-    source_ids: &[i64],
-) -> Result<HashMap<i64, Vec<FactEntry>>> {
-    if source_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    // Populate temp table with source IDs
-    populate_temp_sources(conn, source_ids)?;
-
-    // Query facts using UNION ALL for efficiency
-    // First part: source facts (entity_type = 'source')
-    // Second part: object facts (entity_type = 'object') via source's object_id
-    let query = r#"
-        SELECT ts.id as source_id, f.key, f.value_text, f.value_num, f.value_time,
-               f.entity_type, f.entity_id
-        FROM temp_sources ts
-        JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id
-
-        UNION ALL
-
-        SELECT ts.id as source_id, f.key, f.value_text, f.value_num, f.value_time,
-               f.entity_type, f.entity_id
-        FROM temp_sources ts
-        JOIN sources s ON s.id = ts.id
-        JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id
-        WHERE s.object_id IS NOT NULL
-    "#;
-
-    let mut stmt = conn.prepare(query)?;
-    let rows = stmt.query_map([], |row| {
-        let source_id: i64 = row.get(0)?;
-        let key: String = row.get(1)?;
-        let value_text: Option<String> = row.get(2)?;
-        let value_num: Option<f64> = row.get(3)?;
-        let value_time: Option<i64> = row.get(4)?;
-        let entity_type: String = row.get(5)?;
-        let entity_id: i64 = row.get(6)?;
-
-        let value = fact_value_from_columns(value_text, value_num, value_time);
-
-        Ok((source_id, FactEntry::new(key, value, entity_type, entity_id)))
-    })?;
-
-    let mut result: HashMap<i64, Vec<FactEntry>> = HashMap::new();
-    for row in rows {
-        let (source_id, entry) = row?;
-        result.entry(source_id).or_default().push(entry);
-    }
-
-    // Clean up temp table
-    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
-
-    Ok(result)
-}
-
 /// Fetch facts for a specific key only.
 ///
-/// More efficient than `batch_fetch_for_sources` when you only need one fact key
-/// across many sources. Returns map from source_id to Option<FactEntry>.
+/// Efficient for fetching one fact key across many sources.
+/// Returns map from source_id to Option<FactEntry>.
 /// None indicates the source lacks this fact.
 pub fn batch_fetch_key_for_sources(
     conn: &mut Connection,
@@ -377,143 +306,6 @@ mod tests {
             rusqlite::params![entity_type, entity_id, key, value],
         )
         .unwrap();
-    }
-
-    // =========================================================================
-    // batch_fetch_for_sources tests
-    // =========================================================================
-
-    #[test]
-    fn batch_fetch_for_sources_empty_ids() {
-        let mut conn = setup_test_db();
-        let result = batch_fetch_for_sources(&mut conn, &[]).unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn batch_fetch_for_sources_no_facts() {
-        let mut conn = setup_test_db();
-        insert_root(&conn, 1, "/root");
-        insert_source(&conn, 1, 1, "file.txt", None);
-
-        let result = batch_fetch_for_sources(&mut conn, &[1]).unwrap();
-        // Source exists but has no facts
-        assert!(result.get(&1).is_none() || result.get(&1).unwrap().is_empty());
-    }
-
-    #[test]
-    fn batch_fetch_for_sources_source_facts() {
-        let mut conn = setup_test_db();
-        insert_root(&conn, 1, "/root");
-        insert_source(&conn, 1, 1, "file.txt", None);
-        insert_fact_text(&conn, "source", 1, "source.policy", "approved");
-
-        let result = batch_fetch_for_sources(&mut conn, &[1]).unwrap();
-        let facts = result.get(&1).unwrap();
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].key, "source.policy");
-        assert!(facts[0].is_source_fact());
-        match &facts[0].value {
-            FactValue::Text(s) => assert_eq!(s, "approved"),
-            _ => panic!("Expected Text variant"),
-        }
-    }
-
-    #[test]
-    fn batch_fetch_for_sources_object_facts() {
-        let mut conn = setup_test_db();
-        insert_root(&conn, 1, "/root");
-        insert_object(&conn, 100, "abc123");
-        insert_source(&conn, 1, 1, "file.txt", Some(100));
-        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
-
-        let result = batch_fetch_for_sources(&mut conn, &[1]).unwrap();
-        let facts = result.get(&1).unwrap();
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].key, "content.Make");
-        assert!(facts[0].is_object_fact());
-        assert_eq!(facts[0].entity_id, 100); // Object ID preserved
-        match &facts[0].value {
-            FactValue::Text(s) => assert_eq!(s, "Canon"),
-            _ => panic!("Expected Text variant"),
-        }
-    }
-
-    #[test]
-    fn batch_fetch_for_sources_mixed_facts() {
-        let mut conn = setup_test_db();
-        insert_root(&conn, 1, "/root");
-        insert_object(&conn, 100, "abc123");
-        insert_source(&conn, 1, 1, "file.txt", Some(100));
-        insert_fact_text(&conn, "source", 1, "source.policy", "approved");
-        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
-        insert_fact_num(&conn, "object", 100, "content.Width", 4000.0);
-
-        let result = batch_fetch_for_sources(&mut conn, &[1]).unwrap();
-        let facts = result.get(&1).unwrap();
-        assert_eq!(facts.len(), 3);
-
-        // Check we have both source and object facts
-        let source_facts: Vec<_> = facts.iter().filter(|f| f.is_source_fact()).collect();
-        let object_facts: Vec<_> = facts.iter().filter(|f| f.is_object_fact()).collect();
-        assert_eq!(source_facts.len(), 1);
-        assert_eq!(object_facts.len(), 2);
-    }
-
-    #[test]
-    fn batch_fetch_for_sources_no_object_id() {
-        let mut conn = setup_test_db();
-        insert_root(&conn, 1, "/root");
-        insert_source(&conn, 1, 1, "file.txt", None); // No object_id
-        insert_fact_text(&conn, "source", 1, "source.policy", "approved");
-
-        // Also insert an object fact that shouldn't be returned
-        insert_object(&conn, 100, "abc123");
-        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
-
-        let result = batch_fetch_for_sources(&mut conn, &[1]).unwrap();
-        let facts = result.get(&1).unwrap();
-        // Should only have source fact, not object fact (no object_id link)
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].key, "source.policy");
-    }
-
-    #[test]
-    fn batch_fetch_for_sources_multiple_sources() {
-        let mut conn = setup_test_db();
-        insert_root(&conn, 1, "/root");
-        insert_object(&conn, 100, "abc123");
-        insert_source(&conn, 1, 1, "file1.txt", Some(100));
-        insert_source(&conn, 2, 1, "file2.txt", Some(100));
-        insert_fact_text(&conn, "source", 1, "source.tag", "first");
-        insert_fact_text(&conn, "source", 2, "source.tag", "second");
-        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
-
-        let result = batch_fetch_for_sources(&mut conn, &[1, 2]).unwrap();
-
-        // Source 1 should have its source fact + object fact
-        let facts1 = result.get(&1).unwrap();
-        assert_eq!(facts1.len(), 2);
-
-        // Source 2 should have its source fact + same object fact
-        let facts2 = result.get(&2).unwrap();
-        assert_eq!(facts2.len(), 2);
-    }
-
-    #[test]
-    fn batch_fetch_for_sources_time_value() {
-        let mut conn = setup_test_db();
-        insert_root(&conn, 1, "/root");
-        insert_object(&conn, 100, "abc123");
-        insert_source(&conn, 1, 1, "file.txt", Some(100));
-        insert_fact_time(&conn, "object", 100, "content.DateTimeOriginal", 1704067200);
-
-        let result = batch_fetch_for_sources(&mut conn, &[1]).unwrap();
-        let facts = result.get(&1).unwrap();
-        match &facts[0].value {
-            FactValue::Time(ts) => assert_eq!(*ts, 1704067200),
-            _ => panic!("Expected Time variant"),
-        }
     }
 
     // =========================================================================

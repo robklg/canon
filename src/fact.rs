@@ -18,12 +18,14 @@
 //! use canon::fact::{FactEntry, FactValue, FactType};
 //! use canon::fact_repo;
 //!
-//! // Fetch facts for sources
-//! let facts_by_source = fact_repo::batch_fetch_for_sources(conn, &source_ids)?;
+//! // Fetch a specific fact key for sources
+//! let facts = fact_repo::batch_fetch_key_for_sources(conn, &source_ids, "content.Make")?;
 //!
-//! // Iterate over a source's facts
-//! for entry in facts_by_source.get(&source_id).unwrap_or(&vec![]) {
-//!     println!("{}: {:?}", entry.key, entry.value);
+//! // Check each source's fact value
+//! for (source_id, entry) in &facts {
+//!     if let Some(fact) = entry {
+//!         println!("{}: {:?}", source_id, fact.value);
+//!     }
 //! }
 //! ```
 
@@ -68,15 +70,6 @@ impl FactEntry {
         }
     }
 
-    /// Check if this fact is stored on a source (vs object).
-    pub fn is_source_fact(&self) -> bool {
-        self.entity_type == "source"
-    }
-
-    /// Check if this fact is stored on an object (vs source).
-    pub fn is_object_fact(&self) -> bool {
-        self.entity_type == "object"
-    }
 }
 
 #[cfg(test)]
@@ -148,36 +141,6 @@ mod tests {
             FactValue::Path(p) => assert_eq!(p, "/photos/2024/image.jpg"),
             _ => panic!("Expected Path variant"),
         }
-    }
-
-    // =========================================================================
-    // FactEntry predicate tests
-    // =========================================================================
-
-    #[test]
-    fn is_source_fact_returns_true_for_source() {
-        let entry = FactEntry::new(
-            "source.policy".to_string(),
-            FactValue::Text("approved".to_string()),
-            "source".to_string(),
-            1,
-        );
-
-        assert!(entry.is_source_fact());
-        assert!(!entry.is_object_fact());
-    }
-
-    #[test]
-    fn is_object_fact_returns_true_for_object() {
-        let entry = FactEntry::new(
-            "content.Make".to_string(),
-            FactValue::Text("Nikon".to_string()),
-            "object".to_string(),
-            42,
-        );
-
-        assert!(entry.is_object_fact());
-        assert!(!entry.is_source_fact());
     }
 
     // =========================================================================
