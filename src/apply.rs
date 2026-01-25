@@ -269,6 +269,27 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     eprintln!("Checking destination write permissions...");
     check_destination_writable(&base_dir)?;
 
+    // Validate all pattern expansions succeed before any file operations
+    eprint!("Validating pattern expansions for {} sources...", filtered_sources.len());
+    let expansion_failures = validate_pattern_expansions(&filtered_sources, &pattern, &needed_keys, scope_prefix, conn, &root_paths);
+    if !expansion_failures.is_empty() {
+        eprintln!();
+        eprintln!(
+            "Error: {} sources failed pattern expansion:",
+            expansion_failures.len()
+        );
+        for (path, error) in expansion_failures.iter().take(10) {
+            eprintln!("  {}: {}", path, error);
+        }
+        if expansion_failures.len() > 10 {
+            eprintln!("  ... and {} more", expansion_failures.len() - 10);
+        }
+        eprintln!("\nPattern requires facts that are missing for these sources.");
+        eprintln!("Use 'canon facts' to check fact coverage, or adjust the pattern.");
+        bail!("Aborting due to pattern expansion failures");
+    }
+    eprintln!(" ok");
+
     eprint!("Checking {} sources for collisions and accessibility...", filtered_sources.len());
     if options.dry_run {
         eprintln!(" (skipping source checks for speed in dry-run mode)");
@@ -368,23 +389,9 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         }
     }
 
-    // Preflight: validate pattern-relevant facts haven't changed
-    eprintln!("Validating snapshot facts...");
-    let fact_mismatches = validate_snapshot_facts(conn, &filtered_sources, &needed_keys)?;
-    if !fact_mismatches.is_empty() {
-        eprintln!(
-            "Error: {} pattern-relevant facts have changed since manifest was generated:",
-            fact_mismatches.len()
-        );
-        for (path, key, old, new) in fact_mismatches.iter().take(5) {
-            eprintln!("  {}: {} was {:?}, now {:?}", path, key, old, new);
-        }
-        if fact_mismatches.len() > 5 {
-            eprintln!("  ... and {} more", fact_mismatches.len() - 5);
-        }
-        eprintln!("\nRun `cluster refresh` to regenerate the lock file.");
-        bail!("Aborting due to fact validation failure");
-    }
+    // Note: Snapshot fact validation removed. DB is source of truth for facts.
+    // Apply looks up current fact values at runtime. If a fact changed, the new value is used.
+    // Pattern expansion validation happens earlier (after "Checking destination write permissions").
 
     // Preflight: validate source file states
     // dry-run: fast DB check; real apply: thorough disk check
@@ -636,6 +643,38 @@ fn filter_by_roots<'a>(
     }
 
     Ok(sources.iter().filter(|s| root_ids.contains(&s.root_id)).collect())
+}
+
+/// Validate that all sources can successfully expand the output pattern.
+/// Returns list of (source_path, error_message) for sources that fail expansion.
+fn validate_pattern_expansions(
+    sources: &[&LockEntry],
+    pattern: &Pattern,
+    needed_keys: &[String],
+    scope_prefix: Option<&str>,
+    conn: &Connection,
+    root_paths: &HashMap<i64, String>,
+) -> Vec<(String, String)> {
+    let mut failures = Vec::new();
+    let total = sources.len();
+    let progress_interval = std::cmp::max(total / 20, 1);
+
+    for (i, source) in sources.iter().enumerate() {
+        if i > 0 && i % progress_interval == 0 {
+            let pct = (i * 100) / total;
+            eprint!("\r  {}% ({}/{})", pct, i, total);
+        }
+
+        if let Err(e) = evaluate_pattern(pattern, source, needed_keys, scope_prefix, conn, root_paths) {
+            failures.push((source.path.clone(), e.to_string()));
+        }
+    }
+
+    if total > progress_interval {
+        eprint!("\r  100% ({}/{})\n", total, total);
+    }
+
+    failures
 }
 
 fn check_destination_collisions_filtered(
@@ -972,74 +1011,6 @@ fn check_source_states_disk(sources: &[&LockEntry]) -> Vec<SkippedStaleSource> {
     }
 
     stale
-}
-
-/// Convert a FactValue to serde_json::Value for comparison with lock file
-fn fact_value_to_json(value: &FactValue) -> serde_json::Value {
-    match value {
-        FactValue::Text(t) => serde_json::Value::String(t.clone()),
-        FactValue::Num(n) => serde_json::json!(*n),
-        FactValue::Time(t) => serde_json::json!(*t),
-        FactValue::Path(p) => serde_json::Value::String(p.clone()),
-    }
-}
-
-/// Validate that pattern-relevant facts haven't changed since manifest was generated.
-/// Only checks stored facts (not built-in source.*/scope.*/object.hash).
-/// Returns list of mismatches: (path, key, old_value, new_value)
-fn validate_snapshot_facts(
-    conn: &Connection,
-    sources: &[&LockEntry],
-    needed_keys: &[String],
-) -> Result<Vec<(String, String, Option<serde_json::Value>, Option<serde_json::Value>)>> {
-    // Filter to only stored facts (not built-in facts)
-    let stored_keys: Vec<&String> = needed_keys
-        .iter()
-        .filter(|k| !k.starts_with("source.") && !k.starts_with("scope.") && *k != "object.hash")
-        .collect();
-
-    if stored_keys.is_empty() {
-        return Ok(Vec::new()); // Pattern only uses built-in facts
-    }
-
-    let mut mismatches = Vec::new();
-    let total = sources.len();
-    let progress_interval = std::cmp::max(total / 20, 1);
-
-    for (i, source) in sources.iter().enumerate() {
-        if i > 0 && i % progress_interval == 0 {
-            let pct = (i * 100) / total;
-            eprint!("\r  {}% ({}/{})", pct, i, total);
-        }
-
-        for key in &stored_keys {
-            let snapshot_value = source.facts.get(*key);
-            let current = fetch_typed_fact(conn, source.id, source.object_id, key)?;
-            let current_json = current.as_ref().map(fact_value_to_json);
-
-            // Compare: snapshot should match current DB value
-            let mismatch = match (&snapshot_value, &current_json) {
-                (None, None) => false,
-                (Some(a), Some(b)) => *a != b,
-                _ => true,
-            };
-
-            if mismatch {
-                mismatches.push((
-                    source.path.clone(),
-                    (*key).clone(),
-                    snapshot_value.cloned(),
-                    current_json,
-                ));
-            }
-        }
-    }
-
-    if total > progress_interval {
-        eprint!("\r  100% ({}/{})\n", total, total);
-    }
-
-    Ok(mismatches)
 }
 
 /// Batch validate source file states against DB values. Returns list of stale sources.

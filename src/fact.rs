@@ -51,8 +51,12 @@ pub struct FactEntry {
     pub key: String,
     /// The typed fact value
     pub value: FactValue,
+    // Fields below are part of the domain model API but not currently used.
+    // Kept for debugging/introspection and future use cases.
+    #[allow(dead_code)]
     /// Where this fact is stored: "source" or "object"
     pub entity_type: String,
+    #[allow(dead_code)]
     /// The entity ID (source_id or object_id depending on entity_type)
     pub entity_id: i64,
 }

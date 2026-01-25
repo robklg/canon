@@ -42,8 +42,8 @@ Canon is a CLI tool for organizing large media libraries into a "canonical archi
 - `src/facts.rs` - Fact inspection and management
 - `src/coverage.rs` - Archive coverage statistics
 - `src/compare.rs` - Compare folders by content hash
-- `src/cluster.rs` - Manifest generation with query filters
-- `src/apply.rs` - File copying/moving based on manifests
+- `src/cluster.rs` - Manifest generation with query filters; uses source_repo + domain predicates for source selection, fact_repo for batch fact fetching
+- `src/apply.rs` - File copying/moving based on manifests; validates pattern expansions upfront, looks up facts at runtime from DB
 - `src/exclude.rs` - Source exclusion management
 - `src/roots.rs` - Root management (list, suspend/unsuspend, comment, remove)
 - `src/expr.rs` - Pattern expression evaluation for manifest output; defines Modifier enum, FactValue types, and modifier application logic. Supports alias expansion and Python-style path accessors.
@@ -70,6 +70,10 @@ Default location: `~/.canon/canon.db` (override with `--db` flag)
 Key tables: `roots`, `sources`, `objects`, `facts`
 
 Roots table columns include `suspended` (integer, default 0) for temporarily hiding roots from operations, `comment` for user notes, and `last_scanned_at` timestamp.
+
+**SQL Batching Requirement:** Any SQL with `WHERE ... IN (...)` clauses MUST handle large ID lists. SQLite has a variable limit (~999-32K depending on version). Use one of these patterns:
+- **Chunking:** `for chunk in ids.chunks(BATCH_SIZE)` with `BATCH_SIZE = 1000` (see `source_repo.rs`)
+- **Temp table:** `db::populate_temp_sources()` then JOIN (see `fact_repo.rs`)
 
 ### Filter Expressions (filter.rs)
 
@@ -189,6 +193,27 @@ In other modules:
 - Incremental workflow (scan -> enrich -> cluster -> apply)
 - Human-editable manifest files (.toml)
 - basis_rev tracks file state changes for staleness detection
+
+### Cluster/Apply Workflow
+
+The `cluster generate` and `apply` commands work together:
+
+**cluster generate**:
+- Uses `source_repo::batch_fetch_by_roots()` + domain predicates for source selection
+- Uses `fact_repo::batch_fetch_for_sources()` for batch fact fetching
+- Computes 100% coverage facts in-memory from the batch result
+- Lock file contains source identity + staleness data only (no fact snapshots)
+
+**apply**:
+- Validates all pattern expansions upfront before any file operations
+- Looks up facts at runtime from DB (DB is source of truth)
+- If a fact changed since manifest generation, the new value is used
+- Staleness validation uses size+mtime+partial_hash (not facts)
+
+**Key design decisions**:
+- Lock file does NOT store fact snapshots — simplifies format, avoids "refresh required" friction
+- Pattern expansion failures are collected and reported together (not fail-fast)
+- All validation happens before any file operations begin
 
 ### Architectural Direction
 

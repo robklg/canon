@@ -1,18 +1,20 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::types::Value;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::db::{Connection, Db};
+use crate::fact::{FactEntry, FactValue};
+use crate::fact_repo;
 use crate::root::resolve_archive_path;
-use crate::scope::{build_scope_clause, ScopeMatch};
+use crate::scope::ScopeMatch;
 use crate::path::canonicalize_scopes;
-use crate::exclude;
+use crate::source::Source;
+use crate::source_repo;
 use crate::expr::{BuiltinKey, BuiltinKeyVisibility, FactType, Modifier, ModifierCategory};
 use crate::filter::{self, Filter};
 
@@ -59,8 +61,27 @@ pub struct LockEntry {
     pub object_id: Option<i64>,
     pub hash_type: Option<String>,
     pub hash_value: Option<String>,
-    // Snapshot facts (only 100% coverage facts - eligible for pattern use)
-    pub facts: HashMap<String, serde_json::Value>,
+    // Note: `facts` field was removed. Apply looks up facts at runtime from DB.
+    // Old lock files with `facts` field are still readable (serde ignores unknown fields).
+}
+
+impl LockEntry {
+    /// Build a LockEntry from a Source and object hash info.
+    pub fn from_source(source: &Source, hash_type: Option<String>, hash_value: Option<String>) -> Self {
+        Self {
+            id: source.id,
+            root_id: source.root_id,
+            path: source.path(),
+            device: source.device,
+            inode: source.inode,
+            size: source.size,
+            mtime: source.mtime,
+            partial_hash: source.partial_hash.clone(),
+            object_id: source.object_id,
+            hash_type,
+            hash_value,
+        }
+    }
 }
 
 pub struct GenerateOptions {
@@ -85,7 +106,7 @@ fn generate_lock(
     lock_path: &Path,
     options: &GenerateOptions,
 ) -> Result<Option<LockGenerationResult>> {
-    let (sources, archived, excluded_count, unhashed_count) =
+    let (sources, archived, excluded_count, unhashed_count, all_facts) =
         query_sources(conn, scope_prefixes, filters, options.include_archived)?;
 
     // Report excluded files (hard gate - always skipped)
@@ -134,11 +155,11 @@ fn generate_lock(
         }
     }
 
-    // Collect facts with 100% coverage
-    let full_coverage_facts = collect_full_coverage_facts(conn, &sources)?;
+    // Collect facts with 100% coverage (using typed facts from batch fetch)
+    let full_coverage_facts = collect_full_coverage_facts(&sources, &all_facts);
 
-    // Write JSONL lock file
-    write_lock_file(lock_path, &sources, &full_coverage_facts)?;
+    // Write JSONL lock file (no facts — apply looks them up at runtime)
+    write_lock_file(lock_path, &sources)?;
 
     Ok(Some(LockGenerationResult {
         source_count: sources.len(),
@@ -307,45 +328,13 @@ pub fn refresh(db: &mut Db, config_path: &Path, options: &GenerateOptions) -> Re
 }
 
 /// Write a JSONL lock file with sources filtered to 100% coverage facts
-fn write_lock_file(
-    lock_path: &Path,
-    sources: &[LockEntry],
-    full_coverage_facts: &[(String, FactType, String)],
-) -> Result<()> {
+fn write_lock_file(lock_path: &Path, sources: &[LockEntry]) -> Result<()> {
     let lock_file = File::create(lock_path)
         .with_context(|| format!("Failed to create lock file: {}", lock_path.display()))?;
     let mut writer = BufWriter::new(lock_file);
 
-    // Get 100% coverage fact keys
-    let full_coverage_keys: std::collections::HashSet<&str> = full_coverage_facts
-        .iter()
-        .map(|(k, _, _)| k.as_str())
-        .collect();
-
     for source in sources {
-        // Filter facts to only 100% coverage facts
-        let filtered_facts: HashMap<String, serde_json::Value> = source
-            .facts
-            .iter()
-            .filter(|(k, _)| full_coverage_keys.contains(k.as_str()))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        let entry = LockEntry {
-            id: source.id,
-            root_id: source.root_id,
-            path: source.path.clone(),
-            device: source.device,
-            inode: source.inode,
-            size: source.size,
-            mtime: source.mtime,
-            partial_hash: source.partial_hash.clone(),
-            object_id: source.object_id,
-            hash_type: source.hash_type.clone(),
-            hash_value: source.hash_value.clone(),
-            facts: filtered_facts,
-        };
-        serde_json::to_writer(&mut writer, &entry)
+        serde_json::to_writer(&mut writer, source)
             .with_context(|| format!("Failed to write lock entry for {}", source.path))?;
         writeln!(writer)?;
     }
@@ -373,82 +362,160 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Returns (included_sources, archived_sources, excluded_count, unhashed_count)
+/// Returns (included_sources, archived_sources, excluded_count, unhashed_count, all_facts)
 /// archived_sources is a list of (source_path, archive_path) for files already in an archive
 /// excluded_count is the number of sources skipped due to exclusion (hard gate)
 /// unhashed_count is the number of sources skipped due to missing content hash
+/// all_facts contains typed FactEntry values keyed by source_id (for 100% coverage computation)
 fn query_sources(
     conn: &mut Connection,
     scope_prefixes: &[String],
     filters: &[Filter],
     include_archived: bool,
-) -> Result<(Vec<LockEntry>, Vec<(String, String)>, usize, usize)> {
-    // Build query based on filters
-    // By default only source roots, with --include-archived also include archive roots
-    let role_clause = if include_archived {
-        "r.suspended = 0" // Include all roles, but not suspended
-    } else {
-        "r.role = 'source' AND r.suspended = 0"
-    };
-
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
-    let (scope_clause, scope_params) = build_scope_clause(&scopes);
-    let params: Vec<Value> = scope_params.iter().map(|s| Value::from(s.clone())).collect();
-
-    let mut source_ids: Vec<i64> = conn
-        .prepare(&format!(
-            "SELECT s.id FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE s.present = 1 AND {} AND {}",
-            role_clause, scope_clause
-        ))?
-        .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
+) -> Result<(Vec<LockEntry>, Vec<(String, String)>, usize, usize, HashMap<i64, Vec<FactEntry>>)> {
+    // 1. Get all root IDs
+    let root_ids: Vec<i64> = conn
+        .prepare("SELECT id FROM roots")?
+        .query_map([], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Apply filters
-    source_ids = filter::apply_filters(conn, &source_ids, filters)?;
+    // 2. Batch fetch all present sources for those roots
+    let all_sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
 
-    // Check which sources are already archived (same object_id exists in an archive root)
-    // Also apply hard gates for excluded and unhashed sources
+    // 3. Classify scopes for matching
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
+
+    // 4. Filter using domain predicates, tracking excluded count
+    let mut excluded_count = 0usize;
+    let filtered: Vec<_> = all_sources
+        .into_iter()
+        .filter(|s| s.is_active())
+        .filter(|s| include_archived || s.is_from_role("source"))
+        .filter(|s| s.matches_scope(&scopes))
+        .filter(|s| {
+            if s.is_excluded() {
+                excluded_count += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    // 5. Apply --where filters if present
+    let filtered_sources = if filters.is_empty() {
+        filtered
+    } else {
+        let source_ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
+        let filtered_ids = filter::apply_filters(conn, &source_ids, filters)?;
+        let filtered_id_set: HashSet<i64> = filtered_ids.into_iter().collect();
+        filtered
+            .into_iter()
+            .filter(|s| filtered_id_set.contains(&s.id))
+            .collect()
+    };
+
+    // 6. Separate hashed from unhashed sources
+    let mut unhashed_count = 0;
+    let hashed_sources: Vec<Source> = filtered_sources
+        .into_iter()
+        .filter(|s| {
+            if s.object_id.is_none() {
+                unhashed_count += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    // 7. Batch fetch object hashes for all sources with object_id
+    let object_ids: Vec<i64> = hashed_sources
+        .iter()
+        .filter_map(|s| s.object_id)
+        .collect();
+    let object_hashes = batch_fetch_object_hashes(conn, &object_ids)?;
+
+    // 8. Batch fetch all facts for all sources
+    let source_ids: Vec<i64> = hashed_sources.iter().map(|s| s.id).collect();
+    let all_facts = fact_repo::batch_fetch_for_sources(conn, &source_ids)?;
+
+    // 9. Build LockEntry for each source, check archive status
     let mut sources = Vec::new();
     let mut archived = Vec::new();
-    let mut excluded_count = 0;
-    let mut unhashed_count = 0;
 
-    for source_id in source_ids {
-        // HARD GATE: Skip excluded sources (no override flag)
-        if exclude::is_excluded(conn, source_id)? {
-            excluded_count += 1;
-            continue;
-        }
+    for source in hashed_sources {
+        // Get hash info from batch result
+        let (hash_type, hash_value) = source
+            .object_id
+            .and_then(|oid| object_hashes.get(&oid).cloned())
+            .map(|(ht, hv)| (Some(ht), Some(hv)))
+            .unwrap_or((None, None));
 
-        if let Some(source) = fetch_source(conn, source_id)? {
-            // Skip sources without content hash
-            if source.object_id.is_none() {
-                unhashed_count += 1;
-                continue;
-            }
+        // Check if this content is already in an archive
+        let archive_path = if let Some(ref hash) = hash_value {
+            find_in_archive(conn, hash)?
+        } else {
+            None
+        };
 
-            // Check if this content is already in an archive
-            let archive_path = if let Some(ref hash) = source.hash_value {
-                find_in_archive(conn, hash)?
+        // Build LockEntry from Source + hash info (no facts — apply looks them up at runtime)
+        let lock_entry = LockEntry::from_source(&source, hash_type, hash_value.clone());
+
+        if let Some(arch_path) = archive_path {
+            if include_archived {
+                sources.push(lock_entry);
             } else {
-                None
-            };
-
-            if let Some(arch_path) = archive_path {
-                if include_archived {
-                    sources.push(source);
-                } else {
-                    archived.push((source.path.clone(), arch_path));
-                }
-            } else {
-                sources.push(source);
+                archived.push((lock_entry.path.clone(), arch_path));
             }
+        } else {
+            sources.push(lock_entry);
         }
     }
 
-    Ok((sources, archived, excluded_count, unhashed_count))
+    Ok((sources, archived, excluded_count, unhashed_count, all_facts))
+}
+
+/// Batch fetch object hash info (hash_type, hash_value) for the given object IDs.
+/// Batch size for SQL IN clauses (matches source_repo::BATCH_SIZE)
+const BATCH_SIZE: usize = 1000;
+
+/// Returns HashMap<object_id, (hash_type, hash_value)>
+fn batch_fetch_object_hashes(
+    conn: &Connection,
+    object_ids: &[i64],
+) -> Result<HashMap<i64, (String, String)>> {
+    if object_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut result = HashMap::new();
+
+    // Process in chunks to avoid SQLite variable limit
+    for chunk in object_ids.chunks(BATCH_SIZE) {
+        let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query = format!(
+            "SELECT id, hash_type, hash_value FROM objects WHERE id IN ({})",
+            placeholders
+        );
+
+        let mut stmt = conn.prepare(&query)?;
+        let params: Vec<&dyn rusqlite::ToSql> = chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            let id: i64 = row.get(0)?;
+            let hash_type: String = row.get(1)?;
+            let hash_value: String = row.get(2)?;
+            Ok((id, hash_type, hash_value))
+        })?;
+
+        for row in rows {
+            let (id, hash_type, hash_value) = row?;
+            result.insert(id, (hash_type, hash_value));
+        }
+    }
+
+    Ok(result)
 }
 
 /// Find if a hash exists in any archive root, return the path if found
@@ -473,122 +540,6 @@ fn find_in_archive(conn: &Connection, hash_value: &str) -> Result<Option<String>
             format!("{}/{}", root, rel)
         }
     }))
-}
-
-fn fetch_source(conn: &Connection, source_id: i64) -> Result<Option<LockEntry>> {
-    let row: Option<(i64, i64, String, String, i64, i64, i64, i64, Option<String>, Option<i64>)> = conn
-        .query_row(
-            "SELECT s.id, s.root_id, r.path, s.rel_path, s.device, s.inode, s.size, s.mtime, s.partial_hash, s.object_id
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE s.id = ?",
-            [source_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?)),
-        )
-        .ok();
-
-    let (id, root_id, root_path, rel_path, device, inode, size, mtime, partial_hash, object_id) = match row {
-        Some(r) => r,
-        None => return Ok(None),
-    };
-
-    // Require partial_hash - sources without it need to be rescanned
-    let partial_hash = partial_hash.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Source {} has no partial_hash. Run `canon scan <path>` to rescan.",
-            source_id
-        )
-    })?;
-
-    let full_path = if rel_path.is_empty() {
-        root_path
-    } else {
-        format!("{}/{}", root_path, rel_path)
-    };
-
-    // Get hash if available
-    let (hash_type, hash_value): (Option<String>, Option<String>) = if let Some(obj_id) = object_id {
-        conn.query_row(
-            "SELECT hash_type, hash_value FROM objects WHERE id = ?",
-            [obj_id],
-            |row| Ok((Some(row.get(0)?), Some(row.get(1)?))),
-        )
-        .unwrap_or((None, None))
-    } else {
-        (None, None)
-    };
-
-    // Collect facts
-    let mut facts = HashMap::new();
-
-    // Source facts
-    let mut stmt = conn.prepare(
-        "SELECT key, value_text, value_num, value_time
-         FROM facts WHERE entity_type = 'source' AND entity_id = ?"
-    )?;
-    for row in stmt.query_map([source_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<f64>>(2)?,
-            row.get::<_, Option<i64>>(3)?,
-        ))
-    })? {
-        let (key, text, num, time) = row?;
-        let value = fact_to_json(text, num, time);
-        facts.insert(key, value);
-    }
-
-    // Object facts
-    if let Some(obj_id) = object_id {
-        let mut stmt = conn.prepare(
-            "SELECT key, value_text, value_num, value_time
-             FROM facts WHERE entity_type = 'object' AND entity_id = ?"
-        )?;
-        for row in stmt.query_map([obj_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<f64>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-            ))
-        })? {
-            let (key, text, num, time) = row?;
-            let value = fact_to_json(text, num, time);
-            facts.insert(key, value);
-        }
-    }
-
-    Ok(Some(LockEntry {
-        id,
-        root_id,
-        path: full_path,
-        device,
-        inode,
-        size,
-        mtime,
-        partial_hash,
-        object_id,
-        hash_type,
-        hash_value,
-        facts,
-    }))
-}
-
-fn fact_to_json(
-    text: Option<String>,
-    num: Option<f64>,
-    time: Option<i64>,
-) -> serde_json::Value {
-    if let Some(t) = text {
-        serde_json::Value::String(t)
-    } else if let Some(n) = num {
-        serde_json::json!(n)
-    } else if let Some(t) = time {
-        serde_json::json!(t)
-    } else {
-        serde_json::Value::Null
-    }
 }
 
 fn current_timestamp() -> String {
@@ -647,86 +598,42 @@ impl FactTypeTracker {
     }
 }
 
-/// Collect facts with 100% coverage across all sources in the manifest
-fn collect_full_coverage_facts(conn: &Connection, sources: &[LockEntry]) -> Result<Vec<(String, FactType, String)>> {
+/// Collect facts with 100% coverage across all sources in the manifest.
+/// Uses pre-fetched typed facts from `all_facts` (keyed by source_id).
+fn collect_full_coverage_facts(
+    sources: &[LockEntry],
+    all_facts: &HashMap<i64, Vec<FactEntry>>,
+) -> Vec<(String, FactType, String)> {
     use std::collections::HashSet;
 
     if sources.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
     let source_count = sources.len();
-    let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
 
     // Count facts by key across all sources, tracking type consistency
     let mut fact_counts: HashMap<String, FactTypeTracker> = HashMap::new();
     let mut seen_keys: HashSet<String> = HashSet::new();
 
-    // Query source facts
-    for source_id in &source_ids {
-        let mut stmt = conn.prepare(
-            "SELECT key, value_text, value_num, value_time
-             FROM facts WHERE entity_type = 'source' AND entity_id = ?"
-        )?;
+    // Iterate over pre-fetched facts (already merged source + object facts by source_id)
+    for source in sources {
+        if let Some(facts) = all_facts.get(&source.id) {
+            for fact in facts {
+                // Derive FactType from the typed FactValue (preserves Time vs Num distinction)
+                let fact_type = match &fact.value {
+                    FactValue::Text(_) => FactType::Text,
+                    FactValue::Num(_) => FactType::Num,
+                    FactValue::Time(_) => FactType::Time,
+                    FactValue::Path(_) => FactType::Path,
+                };
 
-        for row in stmt.query_map([source_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<f64>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-            ))
-        })? {
-            let (key, text, num, time) = row?;
-            let fact_type = if text.is_some() {
-                FactType::Text
-            } else if num.is_some() {
-                FactType::Num
-            } else if time.is_some() {
-                FactType::Time
-            } else {
-                continue;
-            };
-
-            let seen_key = format!("{}:{}", source_id, key);
-            if !seen_keys.contains(&seen_key) {
-                fact_counts.entry(key.clone()).or_default().add(fact_type);
-                seen_keys.insert(seen_key);
-            }
-        }
-    }
-
-    // Query object facts (only for sources that have objects)
-    for (source, object_id) in sources.iter().filter_map(|s| s.object_id.map(|oid| (s, oid))) {
-        let mut stmt = conn.prepare(
-            "SELECT key, value_text, value_num, value_time
-             FROM facts WHERE entity_type = 'object' AND entity_id = ?"
-        )?;
-
-        for row in stmt.query_map([object_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<f64>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-            ))
-        })? {
-            let (key, text, num, time) = row?;
-            let fact_type = if text.is_some() {
-                FactType::Text
-            } else if num.is_some() {
-                FactType::Num
-            } else if time.is_some() {
-                FactType::Time
-            } else {
-                continue;
-            };
-
-            // Use source.id for uniqueness, not object_id (since we want per-source coverage)
-            let seen_key = format!("{}:{}", source.id, key);
-            if !seen_keys.contains(&seen_key) {
-                fact_counts.entry(key.clone()).or_default().add(fact_type);
-                seen_keys.insert(seen_key);
+                // Track uniqueness per source (a source might have same key from both source and object)
+                let seen_key = format!("{}:{}", source.id, fact.key);
+                if !seen_keys.contains(&seen_key) {
+                    fact_counts.entry(fact.key.clone()).or_default().add(fact_type);
+                    seen_keys.insert(seen_key);
+                }
             }
         }
     }
@@ -762,7 +669,7 @@ fn collect_full_coverage_facts(conn: &Connection, sources: &[LockEntry]) -> Resu
     // Sort by key for consistent output
     full_coverage.sort_by(|a, b| a.0.cmp(&b.0));
 
-    Ok(full_coverage)
+    full_coverage
 }
 
 /// Get a human-readable description for a fact key

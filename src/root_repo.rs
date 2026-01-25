@@ -69,6 +69,8 @@ pub fn fetch_all(conn: &Connection) -> Result<Vec<Root>> {
 /// the full Root data for each.
 ///
 /// If an ID doesn't exist, it won't appear in the result map.
+// Part of the domain model API but not currently used. Kept for API completeness.
+#[allow(dead_code)]
 pub fn batch_fetch_by_ids(conn: &Connection, root_ids: &[i64]) -> Result<HashMap<i64, Root>> {
     if root_ids.is_empty() {
         return Ok(HashMap::new());

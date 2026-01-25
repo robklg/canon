@@ -109,12 +109,17 @@ impl Root {
         !self.suspended
     }
 
+    // Role predicates below are part of the domain model API but not currently used.
+    // Kept for API completeness and future use cases.
+
     /// Check if this root has the "source" role.
+    #[allow(dead_code)]
     pub fn is_source(&self) -> bool {
         self.role == "source"
     }
 
     /// Check if this root has the "archive" role.
+    #[allow(dead_code)]
     pub fn is_archive(&self) -> bool {
         self.role == "archive"
     }
