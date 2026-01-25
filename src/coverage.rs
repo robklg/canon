@@ -507,3 +507,144 @@ fn format_number(n: i64) -> String {
     }
     result.chars().rev().collect()
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection as RusqliteConnection;
+
+    fn setup_test_db() -> RusqliteConnection {
+        let conn = RusqliteConnection::open_in_memory().unwrap();
+
+        conn.execute_batch(
+            r#"
+            CREATE TABLE roots (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                role TEXT NOT NULL DEFAULT 'source',
+                comment TEXT,
+                last_scanned_at INTEGER,
+                suspended INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE objects (
+                id INTEGER PRIMARY KEY,
+                hash_type TEXT NOT NULL,
+                hash_value TEXT NOT NULL,
+                excluded INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE sources (
+                id INTEGER PRIMARY KEY,
+                root_id INTEGER NOT NULL REFERENCES roots(id),
+                rel_path TEXT NOT NULL,
+                object_id INTEGER REFERENCES objects(id),
+                size INTEGER NOT NULL,
+                mtime INTEGER NOT NULL,
+                device INTEGER NOT NULL DEFAULT 0,
+                inode INTEGER NOT NULL DEFAULT 0,
+                partial_hash TEXT NOT NULL DEFAULT '',
+                basis_rev INTEGER NOT NULL DEFAULT 0,
+                present INTEGER NOT NULL DEFAULT 1,
+                excluded INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE facts (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value_type TEXT NOT NULL,
+                value_text TEXT,
+                value_num REAL,
+                value_time INTEGER
+            );
+            "#,
+        )
+        .unwrap();
+
+        conn
+    }
+
+    fn insert_root(conn: &RusqliteConnection, path: &str, role: &str, _suspended: bool) -> i64 {
+        conn.execute(
+            "INSERT INTO roots (path, role, suspended) VALUES (?, ?, 0)",
+            rusqlite::params![path, role],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_object(conn: &RusqliteConnection, hash: &str, excluded: bool) -> i64 {
+        conn.execute(
+            "INSERT INTO objects (hash_type, hash_value, excluded) VALUES ('sha256', ?, ?)",
+            rusqlite::params![hash, excluded as i64],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_source(
+        conn: &RusqliteConnection,
+        root_id: i64,
+        rel_path: &str,
+        object_id: Option<i64>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime)
+             VALUES (?, ?, ?, 1000, 1704067200)",
+            rusqlite::params![root_id, rel_path, object_id],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// Test that archived_sources counts sources, not unique objects.
+    ///
+    /// This guards against the Object Infrastructure bug pattern where
+    /// archived_set.len() was used instead of counting sources.
+    #[test]
+    fn test_coverage_archived_counts_sources_not_objects() {
+        let mut conn = setup_test_db();
+
+        // Create source root and archive root
+        let source_root = insert_root(&conn, "/photos", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        // Create ONE object that will be archived
+        let archived_obj = insert_object(&conn, "abc123archived", false);
+
+        // Create 3 source files pointing to the SAME object
+        insert_source(&conn, source_root, "photo1.jpg", Some(archived_obj));
+        insert_source(&conn, source_root, "photo2.jpg", Some(archived_obj));
+        insert_source(&conn, source_root, "photo3.jpg", Some(archived_obj));
+
+        // Create another object that is NOT archived
+        let unarchived_obj = insert_object(&conn, "def456unarchived", false);
+        insert_source(&conn, source_root, "photo4.jpg", Some(unarchived_obj));
+
+        // Put the archived object in the archive root
+        insert_source(&conn, archive_root, "backup.jpg", Some(archived_obj));
+
+        // Fetch sources from source root only (simulating what coverage does)
+        let sources = source_repo::batch_fetch_by_roots(&conn, &[source_root]).unwrap();
+        assert_eq!(sources.len(), 4, "Should have 4 sources in source root");
+
+        // Compute stats using the actual function
+        let stats = compute_stats_from_sources(&mut conn, &sources, None).unwrap();
+
+        // The critical assertion: archived_sources should be 3 (sources), not 1 (object)
+        assert_eq!(
+            stats.archived_sources, 3,
+            "Should count 3 SOURCES with archived objects, not 1 unique object"
+        );
+
+        // Verify other stats are correct
+        assert_eq!(stats.total_sources, 4);
+        assert_eq!(stats.hashed_sources, 4);
+    }
+}

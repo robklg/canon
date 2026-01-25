@@ -705,3 +705,199 @@ fn find_source_duplicates(sources: &[LockEntry]) -> Vec<(i64, Vec<i64>)> {
         .filter(|(_, ids)| ids.len() > 1)
         .collect()
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection as RusqliteConnection;
+
+    fn setup_test_db() -> RusqliteConnection {
+        let conn = RusqliteConnection::open_in_memory().unwrap();
+
+        conn.execute_batch(
+            r#"
+            CREATE TABLE roots (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                role TEXT NOT NULL DEFAULT 'source',
+                comment TEXT,
+                last_scanned_at INTEGER,
+                suspended INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE objects (
+                id INTEGER PRIMARY KEY,
+                hash_type TEXT NOT NULL,
+                hash_value TEXT NOT NULL,
+                excluded INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE sources (
+                id INTEGER PRIMARY KEY,
+                root_id INTEGER NOT NULL REFERENCES roots(id),
+                rel_path TEXT NOT NULL,
+                object_id INTEGER REFERENCES objects(id),
+                size INTEGER NOT NULL,
+                mtime INTEGER NOT NULL,
+                device INTEGER NOT NULL DEFAULT 0,
+                inode INTEGER NOT NULL DEFAULT 0,
+                partial_hash TEXT NOT NULL DEFAULT '',
+                basis_rev INTEGER NOT NULL DEFAULT 0,
+                present INTEGER NOT NULL DEFAULT 1,
+                excluded INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE facts (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value_type TEXT NOT NULL,
+                value_text TEXT,
+                value_num REAL,
+                value_time INTEGER
+            );
+            "#,
+        )
+        .unwrap();
+
+        conn
+    }
+
+    fn insert_root(conn: &RusqliteConnection, path: &str, role: &str, suspended: bool) -> i64 {
+        conn.execute(
+            "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",
+            rusqlite::params![path, role, suspended as i64],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_object(conn: &RusqliteConnection, hash: &str, excluded: bool) -> i64 {
+        conn.execute(
+            "INSERT INTO objects (hash_type, hash_value, excluded) VALUES ('sha256', ?, ?)",
+            rusqlite::params![hash, excluded as i64],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_source(
+        conn: &RusqliteConnection,
+        root_id: i64,
+        rel_path: &str,
+        object_id: Option<i64>,
+        excluded: bool,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, excluded)
+             VALUES (?, ?, ?, 1000, 1704067200, ?)",
+            rusqlite::params![root_id, rel_path, object_id, excluded as i64],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// Test that sources from suspended roots are excluded from manifest generation.
+    #[test]
+    fn test_cluster_excludes_suspended_roots() {
+        let mut conn = setup_test_db();
+
+        // Create active and suspended source roots
+        let active_root = insert_root(&conn, "/active", "source", false);
+        let suspended_root = insert_root(&conn, "/suspended", "source", true);
+
+        // Create objects for hashing
+        let obj1 = insert_object(&conn, "hash1", false);
+        let obj2 = insert_object(&conn, "hash2", false);
+
+        // Insert sources in both roots
+        insert_source(&conn, active_root, "file1.jpg", Some(obj1), false);
+        insert_source(&conn, suspended_root, "file2.jpg", Some(obj2), false);
+
+        // Query sources (this is what cluster generate does)
+        let (sources, _archived, _excluded_count, _unhashed_count, _facts) =
+            query_sources(&mut conn, &[], &[], false).unwrap();
+
+        // Should only include source from active root
+        assert_eq!(sources.len(), 1, "Should exclude sources from suspended roots");
+        assert_eq!(sources[0].path, "/active/file1.jpg");
+    }
+
+    /// Test that excluded sources are filtered out at both source and object level.
+    #[test]
+    fn test_cluster_excludes_excluded_sources() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+
+        // Normal source
+        let normal_obj = insert_object(&conn, "normal_hash", false);
+        insert_source(&conn, root, "normal.jpg", Some(normal_obj), false);
+
+        // Source-level excluded
+        let source_excl_obj = insert_object(&conn, "source_excl_hash", false);
+        insert_source(&conn, root, "source_excluded.jpg", Some(source_excl_obj), true);
+
+        // Object-level excluded (source not excluded, but object is)
+        let object_excl_obj = insert_object(&conn, "object_excl_hash", true);
+        insert_source(&conn, root, "object_excluded.jpg", Some(object_excl_obj), false);
+
+        // Query sources
+        let (sources, _archived, excluded_count, _unhashed_count, _facts) =
+            query_sources(&mut conn, &[], &[], false).unwrap();
+
+        // Should only include the normal source
+        assert_eq!(sources.len(), 1, "Should exclude both source-level and object-level excluded");
+        assert_eq!(sources[0].path, "/photos/normal.jpg");
+        assert_eq!(excluded_count, 2, "Should count both excluded sources");
+    }
+
+    /// Test that archive detection handles multiple sources pointing to same object.
+    ///
+    /// When 3 sources point to 1 archived object, all 3 should be marked as
+    /// "already archived" (not just 1).
+    #[test]
+    fn test_cluster_archive_detection_counts_sources_not_objects() {
+        let mut conn = setup_test_db();
+
+        // Create source root and archive root
+        let source_root = insert_root(&conn, "/photos", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        // Create ONE object that will be archived
+        let archived_obj = insert_object(&conn, "archived_hash", false);
+
+        // Create 3 source files pointing to the SAME object
+        insert_source(&conn, source_root, "photo1.jpg", Some(archived_obj), false);
+        insert_source(&conn, source_root, "photo2.jpg", Some(archived_obj), false);
+        insert_source(&conn, source_root, "photo3.jpg", Some(archived_obj), false);
+
+        // Create another object that is NOT archived
+        let unarchived_obj = insert_object(&conn, "unarchived_hash", false);
+        insert_source(&conn, source_root, "photo4.jpg", Some(unarchived_obj), false);
+
+        // Put the first object in archive
+        insert_source(&conn, archive_root, "backup.jpg", Some(archived_obj), false);
+
+        // Query sources WITHOUT include_archived flag (default behavior)
+        let (sources, archived, _excluded_count, _unhashed_count, _facts) =
+            query_sources(&mut conn, &[], &[], false).unwrap();
+
+        // The critical assertion: all 3 sources pointing to archived object should be
+        // in the "archived" list, not just 1
+        assert_eq!(
+            archived.len(),
+            3,
+            "Should detect 3 SOURCES as already archived, not 1 unique object"
+        );
+
+        // Only the unarchived source should be in the main sources list
+        assert_eq!(sources.len(), 1, "Only unarchived source should be in sources");
+        assert_eq!(sources[0].path, "/photos/photo4.jpg");
+    }
+}
