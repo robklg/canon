@@ -2,8 +2,8 @@ use anyhow::{bail, Result};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 
-use crate::db::populate_temp_sources;
-use crate::expr;
+use crate::repo::db::populate_temp_sources;
+use super::eval as expr;
 
 // ============================================================================
 // Expression AST

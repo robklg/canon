@@ -24,7 +24,7 @@
 //!     .filter(|s| !s.is_excluded())
 //! ```
 
-use crate::scope::ScopeMatch;
+use super::scope::ScopeMatch;
 
 /// Core source data — sufficient for most read operations.
 ///

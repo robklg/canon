@@ -2,12 +2,11 @@ use anyhow::{bail, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::db::Db;
-use crate::filter::{self, Filter};
-use crate::path::canonicalize_scope;
-use crate::scope::ScopeMatch;
-use crate::source::Source;
-use crate::source_repo;
+use crate::repo::{self, Db};
+use crate::expr::filter::{self, Filter};
+use crate::domain::path::canonicalize_scope;
+use crate::domain::scope::ScopeMatch;
+use crate::domain::source::Source;
 
 pub struct CompareOptions {
     pub include_excluded: bool,
@@ -113,7 +112,7 @@ pub fn run(
 /// Note: compare does NOT filter by role. When comparing folders, all sources
 /// are included regardless of whether root is "source" or "archive".
 fn get_sources_in_scope(
-    conn: &mut crate::db::Connection,
+    conn: &mut crate::repo::Connection,
     scope_prefix: &str,
     filters: &[Filter],
     include_excluded: bool,
@@ -128,7 +127,7 @@ fn get_sources_in_scope(
         .collect::<Result<Vec<_>, _>>()?;
 
     // Fetch all present sources
-    let all_sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
+    let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 
     // Filter using domain predicates
     // Note: No role filtering - compare works across all root types

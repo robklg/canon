@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
-use crate::db::{Connection, Db};
-use crate::root::resolve_root_path_any;
+use crate::repo::{Connection, Db};
+use crate::domain::resolve_root_path_any;
 
 /// Outcome for a source during scan - determines what action to take
 enum SourceOutcome {

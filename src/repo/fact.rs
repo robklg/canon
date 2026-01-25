@@ -29,8 +29,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::db::{populate_temp_sources, Connection};
-use crate::fact::{FactEntry, FactType, FactValue};
+use super::db::{populate_temp_sources, Connection};
+use crate::domain::fact::{FactEntry, FactType, FactValue};
 
 // Note: We use temp tables (populate_temp_sources) instead of IN clause chunking,
 // so BATCH_SIZE is not needed here. The temp table pattern handles large sets better.

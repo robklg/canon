@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use std::fs;
 use std::path::Path;
 
-use crate::path::{canonicalize_maybe_missing, path_strip_prefix};
+use super::path::{canonicalize_maybe_missing, path_strip_prefix};
 
 // ============================================================================
 // Domain Concepts (pure, no I/O)

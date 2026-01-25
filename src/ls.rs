@@ -3,13 +3,12 @@ use chrono::{TimeZone, Utc};
 use rusqlite::types::Value;
 use std::collections::{HashMap, HashSet};
 
-use crate::db::{Connection, Db};
-use crate::filter::{self, Filter};
-use crate::object_repo;
-use crate::path::{canonicalize_scopes, path_strip_prefix};
-use crate::scope::ScopeMatch;
-use crate::source::Source;
-use crate::source_repo::{self, BATCH_SIZE};
+use crate::repo::{self, Connection, Db};
+use crate::repo::source::BATCH_SIZE;
+use crate::expr::filter::{self, Filter};
+use crate::domain::path::{canonicalize_scopes, path_strip_prefix};
+use crate::domain::scope::ScopeMatch;
+use crate::domain::source::Source;
 
 pub fn run(
     db: &mut Db,
@@ -76,12 +75,12 @@ pub fn run(
     // Batch fetch archive status for all sources with object_ids (eliminates N+1)
     let object_ids: Vec<i64> = sources.iter().filter_map(|s| s.object_id).collect();
     let archived_set: HashSet<i64> = if archived_only || unarchived_only {
-        object_repo::batch_check_archived(conn, &object_ids, None)?
+        repo::object::batch_check_archived(conn, &object_ids, None)?
     } else {
         HashSet::new()
     };
     let archive_paths_map: HashMap<i64, Vec<String>> = if show_archive_paths {
-        object_repo::batch_find_archive_paths(conn, &object_ids)?
+        repo::object::batch_find_archive_paths(conn, &object_ids)?
     } else {
         HashMap::new()
     };
@@ -235,7 +234,7 @@ fn get_matching_sources(
         .collect::<Result<Vec<_>, _>>()?;
 
     // 2. Fetch all present sources for those roots
-    let all_sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
+    let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 
     // 3. Filter using domain predicates, tracking excluded count
     let mut excluded_count = 0usize;
@@ -610,7 +609,7 @@ mod tests {
 
         // Get archived status using the same function ls.rs uses
         let object_ids = vec![archived_obj, unarchived_obj];
-        let archived_set = object_repo::batch_check_archived(&conn, &object_ids, None).unwrap();
+        let archived_set = repo::object::batch_check_archived(&conn, &object_ids, None).unwrap();
 
         // Verify archived_set contains only the archived object
         assert!(archived_set.contains(&archived_obj));

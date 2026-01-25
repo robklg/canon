@@ -1,30 +1,22 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+// Infrastructure layers
+mod domain;
+mod expr;
+mod repo;
+
+// Command modules
 mod apply;
 mod cluster;
 mod compare;
 mod coverage;
-mod db;
 mod exclude;
-mod expr;
-mod fact;
-mod fact_repo;
-mod fact_value;
 mod facts;
-mod filter;
 mod import_facts;
 mod ls;
-mod object;
-mod object_repo;
-mod path;
-mod root;
-mod root_repo;
 mod roots;
 mod scan;
-mod scope;
-mod source;
-mod source_repo;
 mod worklist;
 
 #[derive(Parser)]
@@ -483,9 +475,9 @@ fn main() -> anyhow::Result<()> {
         path
     });
 
-    let mut db = db::open_with_options(
+    let mut db = repo::open_with_options(
         &db_path,
-        db::DbOptions {
+        repo::DbOptions {
             debug_sql: cli.debug_sql,
             profile: cli.profile,
         },
@@ -531,7 +523,7 @@ fn main() -> anyhow::Result<()> {
             // Also detect if scope is inside an archive root to auto-include archived sources
             let (scope_paths, use_relative, auto_include_archived) = if paths.is_empty() {
                 let cwd = std::env::current_dir()?;
-                match root::resolve_root_path(db.conn(), &cwd)? {
+                match domain::resolve_root_path(db.conn(), &cwd)? {
                     Some((_, _, role, _)) => (vec![cwd], true, role == "archive"),
                     None => (vec![], false, false),
                 }
@@ -539,7 +531,7 @@ fn main() -> anyhow::Result<()> {
                 let use_rel = !paths.first().map(|p| p.starts_with("/")).unwrap_or(false);
                 // Check if any explicit path is inside an archive root
                 let any_archive = paths.iter().any(|p| {
-                    root::resolve_root_path(db.conn(), p)
+                    domain::resolve_root_path(db.conn(), p)
                         .ok()
                         .flatten()
                         .map(|(_, _, role, _)| role == "archive")
@@ -733,7 +725,7 @@ fn main() -> anyhow::Result<()> {
     let _ = db.maybe_analyze();
 
     // Print profile summary if profiling was enabled
-    db::print_profile_summary(db.conn());
+    repo::print_profile_summary(db.conn());
 
     Ok(())
 }

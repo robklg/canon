@@ -31,8 +31,8 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
-use crate::db::Connection;
-use crate::object::Object;
+use super::db::Connection;
+use crate::domain::object::Object;
 
 /// Batch size for SQL IN clauses (consistent with other repos).
 pub const BATCH_SIZE: usize = 1000;

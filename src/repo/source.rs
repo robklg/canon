@@ -25,8 +25,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 use rusqlite::types::Value;
 
-use crate::db::Connection;
-use crate::source::Source;
+use super::db::Connection;
+use crate::domain::source::Source;
 
 /// Batch size for SQL IN clauses. Consistent across all repositories.
 pub const BATCH_SIZE: usize = 1000;

@@ -4,12 +4,11 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use crate::db::{Connection, Db};
-use crate::filter::{self, get_fact_value, Filter};
-use crate::path::canonicalize_scopes;
-use crate::scope::ScopeMatch;
-use crate::source::Source;
-use crate::source_repo;
+use crate::repo::{self, Connection, Db};
+use crate::expr::filter::{self, get_fact_value, Filter};
+use crate::domain::path::canonicalize_scopes;
+use crate::domain::scope::ScopeMatch;
+use crate::domain::source::Source;
 
 #[derive(Serialize)]
 struct WorklistEntry {
@@ -149,7 +148,7 @@ fn get_matching_sources(
         .collect::<Result<Vec<_>, _>>()?;
 
     // 2. Fetch all present sources for those roots
-    let all_sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
+    let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 
     // 3. Filter using domain predicates, tracking excluded count
     let mut excluded_count = 0usize;

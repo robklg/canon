@@ -2,15 +2,13 @@ use anyhow::{bail, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use crate::db::{populate_temp_sources, Connection, Db};
+use crate::repo::{self, populate_temp_sources, Connection, Db};
 use crate::expr::{self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, ModifierCall, ParsedFactKey, PathAccessor};
-use crate::fact::FactEntry;
-use crate::fact_repo;
-use crate::fact_value;
-use crate::filter::{self, Filter};
-use crate::path::canonicalize_scopes;
-use crate::scope::ScopeMatch;
-use crate::source_repo;
+use crate::domain::fact::FactEntry;
+use crate::expr::value as fact_value;
+use crate::expr::filter::{self, Filter};
+use crate::domain::path::canonicalize_scopes;
+use crate::domain::scope::ScopeMatch;
 
 /// Check if a parsed key represents source.root (for special display formatting)
 fn is_root_key(key: &ParsedFactKey) -> bool {
@@ -161,7 +159,7 @@ fn get_matching_sources(
         .collect::<Result<Vec<_>, _>>()?;
 
     // 2. Fetch all present sources for those roots
-    let all_sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
+    let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 
     // 3. Filter using domain predicates, tracking excluded count
     let mut excluded_count = 0usize;
@@ -205,7 +203,7 @@ fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize
     }
 
     // Use fact_repo to count fact keys
-    let results = fact_repo::count_fact_keys(conn, source_ids)?;
+    let results = repo::fact::count_fact_keys(conn, source_ids)?;
 
     // Add built-in and derived facts at the top (they always have 100% coverage)
     use strum::IntoEnumIterator;
@@ -267,7 +265,7 @@ fn show_value_distribution(
     }
 
     // Fetch values using fact_repo
-    let fact_map = fact_repo::batch_fetch_key_for_sources(conn, source_ids, key)?;
+    let fact_map = repo::fact::batch_fetch_key_for_sources(conn, source_ids, key)?;
 
     // Group values and count
     let mut counts: HashMap<String, i64> = HashMap::new();
@@ -330,7 +328,7 @@ fn show_transformed_distribution(
     }
 
     // Fetch values using fact_repo
-    let fact_map = fact_repo::batch_fetch_key_for_sources(conn, source_ids, base_key)?;
+    let fact_map = repo::fact::batch_fetch_key_for_sources(conn, source_ids, base_key)?;
 
     let mut counts: HashMap<String, i64> = HashMap::new();
     let mut sources_with_fact: i64 = 0;
@@ -675,7 +673,7 @@ fn show_grouped_distribution(
 
     // 1. FETCH - Use infrastructure layer
     // Fetch all sources by ID
-    let sources = source_repo::batch_fetch_by_ids(conn, source_ids)?;
+    let sources = repo::source::batch_fetch_by_ids(conn, source_ids)?;
 
     // Collect all stored fact keys we need to fetch
     let mut stored_keys: Vec<&str> = Vec::new();
@@ -695,7 +693,7 @@ fn show_grouped_distribution(
         // Fetch each key and merge results per source
         let mut merged: HashMap<i64, HashMap<String, FactEntry>> = HashMap::new();
         for key in &stored_keys {
-            let key_facts = fact_repo::batch_fetch_key_for_sources(conn, source_ids, key)?;
+            let key_facts = repo::fact::batch_fetch_key_for_sources(conn, source_ids, key)?;
             for (source_id, entry_opt) in key_facts {
                 if let Some(entry) = entry_opt {
                     merged.entry(source_id).or_default().insert(entry.key.clone(), entry);

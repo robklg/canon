@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::{Connection, Db};
+use crate::repo::{Connection, Db};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

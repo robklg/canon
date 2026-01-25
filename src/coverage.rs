@@ -2,14 +2,12 @@ use anyhow::Result;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::db::Db;
-use crate::filter::{self, Filter};
-use crate::object_repo;
-use crate::path::canonicalize_scopes;
-use crate::root::parse_root_spec;
-use crate::scope::ScopeMatch;
-use crate::source::Source;
-use crate::source_repo;
+use crate::repo::{self, Db};
+use crate::expr::filter::{self, Filter};
+use crate::domain::path::canonicalize_scopes;
+use crate::domain::root::parse_root_spec;
+use crate::domain::scope::ScopeMatch;
+use crate::domain::source::Source;
 
 /// Statistics for a single root or overall
 struct CoverageStats {
@@ -144,7 +142,7 @@ fn get_matching_sources(
         .collect::<Result<Vec<_>, _>>()?;
 
     // Fetch all present sources
-    let all_sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
+    let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 
     // Filter using domain predicates
     let filtered: Vec<Source> = all_sources
@@ -276,7 +274,7 @@ fn compute_stats_from_source_refs(
             .collect();
 
         // Batch check which objects are archived
-        let archived_set = object_repo::batch_check_archived(conn, &object_ids, archive_root_id)?;
+        let archived_set = repo::object::batch_check_archived(conn, &object_ids, archive_root_id)?;
 
         // Count sources whose object_id is in the archived set
         // (not unique objects — multiple sources can have the same object)
@@ -631,7 +629,7 @@ mod tests {
         insert_source(&conn, archive_root, "backup.jpg", Some(archived_obj));
 
         // Fetch sources from source root only (simulating what coverage does)
-        let sources = source_repo::batch_fetch_by_roots(&conn, &[source_root]).unwrap();
+        let sources = repo::source::batch_fetch_by_roots(&conn, &[source_root]).unwrap();
         assert_eq!(sources.len(), 4, "Should have 4 sources in source root");
 
         // Compute stats using the actual function

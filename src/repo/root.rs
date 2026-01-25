@@ -28,8 +28,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::db::Connection;
-use crate::root::Root;
+use super::db::Connection;
+use crate::domain::root::Root;
 
 /// The columns we SELECT for Root construction.
 const ROOT_COLUMNS: &str = "id, path, role, comment, last_scanned_at, suspended";

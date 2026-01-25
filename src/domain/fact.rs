@@ -32,7 +32,7 @@
 // Re-export types from expr.rs for convenience.
 // FactType will be used by fact_repo::count_fact_keys() in Phase 2.
 #[allow(unused_imports)]
-pub use crate::expr::{FactType, FactValue};
+pub use crate::expr::eval::{FactType, FactValue};
 
 /// A single fact entry associated with a source.
 ///

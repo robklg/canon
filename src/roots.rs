@@ -6,9 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
 
-use crate::db::Db;
-use crate::root::{parse_root_spec, parse_root_spec_any, Root};
-use crate::root_repo;
+use crate::repo::{self, Db};
+use crate::domain::{parse_root_spec, parse_root_spec_any, Root};
 
 pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
     let conn = db.conn();
@@ -25,7 +24,7 @@ pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
     };
 
     // Fetch all roots using repository layer
-    let all_roots = root_repo::fetch_all(conn)?;
+    let all_roots = repo::root::fetch_all(conn)?;
 
     // Apply domain predicates for filtering
     let filtered_roots: Vec<&Root> = all_roots

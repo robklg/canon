@@ -2,13 +2,10 @@ use anyhow::{Context, Result};
 use rusqlite::params;
 use std::path::{Path, PathBuf};
 
-use crate::db::{Connection, Db};
-use crate::filter::{self, Filter};
-use crate::object_repo;
-use crate::path::{canonicalize_scopes, path_is_under};
-use crate::root_repo;
-use crate::scope::ScopeMatch;
-use crate::source_repo;
+use crate::repo::{self, Connection, Db};
+use crate::expr::filter::{self, Filter};
+use crate::domain::path::{canonicalize_scopes, path_is_under};
+use crate::domain::scope::ScopeMatch;
 
 // ============================================================================
 // Options
@@ -215,7 +212,7 @@ fn get_matching_sources(
     include_excluded: bool,
 ) -> Result<Vec<i64>> {
     // Get all source root IDs (active, source role only)
-    let roots = root_repo::fetch_all(conn)?;
+    let roots = repo::root::fetch_all(conn)?;
     let source_root_ids: Vec<i64> = roots
         .iter()
         .filter(|r| r.is_active() && r.is_source())
@@ -227,7 +224,7 @@ fn get_matching_sources(
     }
 
     // Batch fetch all present sources from source roots
-    let sources = source_repo::batch_fetch_by_roots(conn, &source_root_ids)?;
+    let sources = repo::source::batch_fetch_by_roots(conn, &source_root_ids)?;
 
     // Classify scopes for matching
     let scopes = ScopeMatch::classify_all(scope_prefixes);
@@ -253,7 +250,7 @@ fn get_excluded_sources(
     filters: &[Filter],
 ) -> Result<Vec<(i64, String)>> {
     // Get all source root IDs (active, source role only)
-    let roots = root_repo::fetch_all(conn)?;
+    let roots = repo::root::fetch_all(conn)?;
     let source_root_ids: Vec<i64> = roots
         .iter()
         .filter(|r| r.is_active() && r.is_source())
@@ -265,7 +262,7 @@ fn get_excluded_sources(
     }
 
     // Batch fetch all present sources from source roots
-    let sources = source_repo::batch_fetch_by_roots(conn, &source_root_ids)?;
+    let sources = repo::source::batch_fetch_by_roots(conn, &source_root_ids)?;
 
     // Classify scopes for matching
     let scopes = ScopeMatch::classify_all(scope_prefixes);
@@ -912,7 +909,7 @@ fn get_object_excluded_sources(
     // Returns (source_id, path, hash_short)
 
     // Get all source root IDs (active, source role only)
-    let roots = root_repo::fetch_all(conn)?;
+    let roots = repo::root::fetch_all(conn)?;
     let source_root_ids: Vec<i64> = roots
         .iter()
         .filter(|r| r.is_active() && r.is_source())
@@ -924,7 +921,7 @@ fn get_object_excluded_sources(
     }
 
     // Batch fetch all present sources from source roots
-    let sources = source_repo::batch_fetch_by_roots(conn, &source_root_ids)?;
+    let sources = repo::source::batch_fetch_by_roots(conn, &source_root_ids)?;
 
     // Classify scopes for matching
     let scopes = ScopeMatch::classify_all(scope_prefixes);
@@ -943,7 +940,7 @@ fn get_object_excluded_sources(
 
     // Fetch objects to check exclusion status and get hash
     let object_ids: Vec<i64> = candidates.iter().filter_map(|s| s.object_id).collect();
-    let objects = object_repo::batch_fetch_by_ids(conn, &object_ids)?;
+    let objects = repo::object::batch_fetch_by_ids(conn, &object_ids)?;
 
     // Filter for sources where object IS excluded
     let filtered: Vec<(i64, String, String)> = candidates

@@ -25,31 +25,41 @@ Canon is a CLI tool for organizing large media libraries into a "canonical archi
 
 ### Architecture
 
-- `src/main.rs` - CLI entry point using clap
-- `src/path.rs` - Path utilities (pure manipulation + canonicalization)
-- `src/scope.rs` - Scope domain concepts (ScopeMatch enum, SQL clause building)
-- `src/root.rs` - Root domain model (Root struct, RootSpec enum, predicates like `is_suspended()`, `is_source()`)
-- `src/root_repo.rs` - Root repository layer (batch fetch from database, no domain logic)
-- `src/source.rs` - Source domain model (Source struct, predicates like `is_excluded()`, `matches_scope()`)
-- `src/source_repo.rs` - Source repository layer (batch fetch from database, no domain logic)
-- `src/fact.rs` - Fact domain model (FactEntry struct, re-exports FactValue/FactType from expr.rs)
-- `src/fact_repo.rs` - Fact repository layer (batch fetch facts for sources, handles source+object facts transparently)
-- `src/object.rs` - Object domain model (Object struct, `is_excluded()` predicate)
-- `src/object_repo.rs` - Object repository layer (batch fetch objects, archive detection)
-- `src/db.rs` - SQLite database infrastructure (connection, schema, transactions)
-- `src/scan.rs` - Directory scanning logic
-- `src/worklist.rs` - JSONL worklist generation for external processing
-- `src/import_facts.rs` - Fact import with staleness validation
-- `src/ls.rs` - List and query sources
-- `src/facts.rs` - Fact inspection and management
-- `src/coverage.rs` - Archive coverage statistics
-- `src/compare.rs` - Compare folders by content hash
-- `src/cluster.rs` - Manifest generation with query filters; uses source_repo + domain predicates for source selection, fact_repo for batch fact fetching
-- `src/apply.rs` - File copying/moving based on manifests; validates pattern expansions upfront, looks up facts at runtime from DB
-- `src/exclude.rs` - Source exclusion management
-- `src/roots.rs` - Root management (list, suspend/unsuspend, comment, remove)
-- `src/expr.rs` - Pattern expression evaluation for manifest output; defines Modifier enum, FactValue types, and modifier application logic. Supports alias expansion and Python-style path accessors.
-- `src/filter.rs` - Filter expression parsing; depends on expr.rs for modifier handling. Has hardcoded built-ins for derived facts. New derived facts require code changes here.
+The codebase is organized into three namespaces (domain/, repo/, expr/) plus command modules:
+
+**Domain Layer** (`src/domain/`) - Pure concepts, no I/O:
+- `source.rs` - Source struct and predicates (`is_excluded()`, `matches_scope()`, etc.)
+- `root.rs` - Root struct, RootSpec enum, predicates (`is_suspended()`, `is_source()`)
+- `object.rs` - Object struct and `is_excluded()` predicate
+- `fact.rs` - FactEntry struct, re-exports FactValue/FactType
+- `scope.rs` - ScopeMatch enum for file vs directory scope matching
+- `path.rs` - Pure path utilities (`path_is_under()`, `path_strip_prefix()`)
+
+**Repository Layer** (`src/repo/`) - Database access:
+- `db.rs` - Connection, schema, transactions (`Db`, `open_with_options()`)
+- `source.rs` - Source batch fetching (`batch_fetch_by_roots()`, `batch_fetch_by_ids()`)
+- `root.rs` - Root batch fetching (`fetch_all()`, `batch_fetch_by_ids()`)
+- `object.rs` - Object batch fetching, archive detection (`batch_check_archived()`)
+- `fact.rs` - Fact batch fetching (`batch_fetch_for_sources()`, `batch_fetch_key_for_sources()`)
+
+**Expression System** (`src/expr/`) - Pattern and filter handling:
+- `eval.rs` - Pattern evaluation, modifiers, accessors, FactValue types
+- `filter.rs` - Filter expression parsing for `--where` clauses
+- `value.rs` - Fact value resolution for sources
+
+**Command Modules** (flat in `src/`):
+- `main.rs` - CLI entry point using clap
+- `ls.rs` - List and query sources
+- `coverage.rs` - Archive coverage statistics
+- `cluster.rs` - Manifest generation with query filters
+- `apply.rs` - File copying/moving based on manifests
+- `exclude.rs` - Source exclusion management
+- `facts.rs` - Fact inspection and management
+- `roots.rs` - Root management (list, suspend/unsuspend, comment, remove)
+- `compare.rs` - Compare folders by content hash
+- `scan.rs` - Directory scanning logic
+- `worklist.rs` - JSONL worklist generation for external processing
+- `import_facts.rs` - Fact import with staleness validation
 
 ### Commands
 
@@ -74,10 +84,10 @@ Key tables: `roots`, `sources`, `objects`, `facts`
 Roots table columns include `suspended` (integer, default 0) for temporarily hiding roots from operations, `comment` for user notes, and `last_scanned_at` timestamp.
 
 **SQL Batching Requirement:** Any SQL with `WHERE ... IN (...)` clauses MUST handle large ID lists. SQLite has a variable limit (~999-32K depending on version). Use one of these patterns:
-- **Chunking:** `for chunk in ids.chunks(BATCH_SIZE)` with `BATCH_SIZE = 1000` (see `source_repo.rs`)
-- **Temp table:** `db::populate_temp_sources()` then JOIN (see `fact_repo.rs`)
+- **Chunking:** `for chunk in ids.chunks(BATCH_SIZE)` with `BATCH_SIZE = 1000` (see `repo/source.rs`)
+- **Temp table:** `repo::db::populate_temp_sources()` then JOIN (see `repo/fact.rs`)
 
-### Filter Expressions (filter.rs)
+### Filter Expressions (expr/filter.rs)
 
 Used with `--where`. Supports full boolean logic:
 
@@ -99,13 +109,13 @@ Note: `=` and `!=` are case-sensitive. Use `|lowercase` modifier for case-insens
 
 **Path accessors**: Python-style indexing works in filters: `source.rel_path[-1]|stem=photo`
 
-**Built-in derived facts**: filter.rs has hardcoded built-ins (like `filename`, `source.ext`) derived at query time for efficiency. These achieve the same result as the equivalent path accessor expressions (e.g., `filename` vs `source.rel_path[-1]`). Adding new derived facts requires modifying filter.rs.
+**Built-in derived facts**: `expr/filter.rs` has hardcoded built-ins (like `filename`, `source.ext`) derived at query time for efficiency. These achieve the same result as the equivalent path accessor expressions (e.g., `filename` vs `source.rel_path[-1]`). Adding new derived facts requires modifying `expr/filter.rs`.
 
 **Database facts**: Any fact stored via `import-facts` can also be used in filters.
 
 **Content prefix is optional**: The `content.` prefix is optional when specifying fact keys. Keys without a namespace prefix are automatically normalized to `content.*`. For example, `Make` becomes `content.Make`. This applies to `--where`, `--key`, `--group-by`, and manifest patterns. Built-in keys (`source.*`, `filename`, etc.) and keys with explicit prefixes (`policy.*`, `object.*`) are not modified.
 
-### Manifest Patterns (expr.rs)
+### Manifest Patterns (expr/eval.rs)
 
 Output patterns in manifests use `{expr}` syntax:
 
@@ -132,17 +142,16 @@ Used with `--root`, `--archive` flags:
 
 ### Shared Utilities
 
-In `path.rs`:
+In `domain/path.rs`:
 - `path_is_under()`, `path_strip_prefix()` - Pure path manipulation (no I/O)
 - `canonicalize_scope()`, `canonicalize_scopes()` - Path canonicalization (filesystem I/O)
 
-In `scope.rs`:
+In `domain/scope.rs`:
 - `ScopeMatch` enum - Domain concept for file vs directory scope matching
 - `ScopeMatch::classify_all()` - Classify paths as exact file or directory matches
 - `build_scope_clause()` - SQL clause building (takes `&[ScopeMatch]`, no I/O)
-- `SCOPE_CLAUSE`, `scope_param()` - Helpers for single optional scope
 
-In `root.rs` (domain layer):
+In `domain/root.rs`:
 - `Root` struct - The authoritative definition of a root with all fields
 - `root.is_suspended()`, `root.is_active()` - Suspension state predicates
 - `root.is_source()`, `root.is_archive()` - Role predicates
@@ -154,15 +163,15 @@ In `root.rs` (domain layer):
 - `resolve_root_path()`, `resolve_root_path_any()` - Find roots containing paths (orchestration)
 - `resolve_archive_path()` - Find archive root containing a path
 
-In `root_repo.rs` (infrastructure layer):
+In `repo/root.rs`:
 - `fetch_all(conn)` - Fetch all roots ordered by ID
 - `batch_fetch_by_ids(conn, root_ids)` - Fetch specific roots by ID (HashMap)
 
-In `db.rs`:
-- `Db` struct, `open()` - Database connection and initialization
+In `repo/db.rs`:
+- `Db` struct, `open_with_options()` - Database connection and initialization
 - `populate_temp_sources()` - Batch insert pattern for large ID sets
 
-In `source.rs` (domain layer):
+In `domain/source.rs`:
 - `Source` struct - The authoritative definition of a source with all fields
 - `source.path()` - Compute full absolute path (handles empty rel_path)
 - `source.matches_scope(&scopes)` - Check if source is under given paths
@@ -170,33 +179,33 @@ In `source.rs` (domain layer):
 - `source.is_from_role(role)` - Check root role ("source" or "archive")
 - `source.is_active()` - Check if root is not suspended
 
-In `source_repo.rs` (infrastructure layer):
+In `repo/source.rs`:
 - `batch_fetch_by_roots(conn, root_ids)` - Fetch all present sources for roots
 - `batch_fetch_by_ids(conn, source_ids)` - Fetch specific sources by ID
 - `fetch_source_ids_by_roots(conn, root_ids)` - Get just IDs (for pagination)
 - Uses `BATCH_SIZE = 1000` for SQL IN clause chunking
 
-In `fact.rs` (domain layer):
+In `domain/fact.rs`:
 - `FactEntry` struct - A fact associated with a source (key, value, entity_type, entity_id)
-- Re-exports `FactValue`, `FactType` from `expr.rs` for convenience
+- Re-exports `FactValue`, `FactType` from `expr/eval.rs` for convenience
 
-In `fact_repo.rs` (infrastructure layer):
+In `repo/fact.rs`:
 - `batch_fetch_key_for_sources(conn, source_ids, key)` - Fetch specific key (returns `HashMap<i64, Option<FactEntry>>`)
 - `count_fact_keys(conn, source_ids)` - Count distinct fact keys with types
 - Transparently merges source facts + object facts, keyed by source_id
 
-In `object.rs` (domain layer):
+In `domain/object.rs`:
 - `Object` struct - Content identified by hash (id, hash_type, hash_value, excluded)
 - `object.is_excluded()` - Check if object is excluded (excludes ALL linked sources)
 
-In `object_repo.rs` (infrastructure layer):
+In `repo/object.rs`:
 - `batch_fetch_by_ids(conn, object_ids)` - Fetch objects by ID (returns `HashMap<i64, Object>`)
 - `batch_check_archived(conn, object_ids, archive_root_id)` - Check which objects are in archive(s) (returns `HashSet<i64>`)
 - `batch_find_archive_paths(conn, object_ids)` - Get archive paths for objects (returns `HashMap<i64, Vec<String>>`)
 - Uses `BATCH_SIZE = 1000` for SQL IN clause chunking
 
-In other modules:
-- `filter::apply_filters()` - Apply filter expressions to source IDs
+In `expr/filter.rs`:
+- `apply_filters()` - Apply filter expressions to source IDs
 
 ### Design Principles
 
@@ -210,8 +219,8 @@ In other modules:
 The `cluster generate` and `apply` commands work together:
 
 **cluster generate**:
-- Uses `source_repo::batch_fetch_by_roots()` + domain predicates for source selection
-- Uses `fact_repo::batch_fetch_for_sources()` for batch fact fetching
+- Uses `repo::source::batch_fetch_by_roots()` + domain predicates for source selection
+- Uses `repo::fact::batch_fetch_for_sources()` for batch fact fetching
 - Computes 100% coverage facts in-memory from the batch result
 - Lock file contains source identity + staleness data only (no fact snapshots)
 
@@ -234,14 +243,14 @@ The codebase is evolving toward a clean architecture with separated concerns, pr
 - **Infrastructure layer**: Storage and filesystem adapters (`db.rs`, canonicalization)
 - **Application layer**: Command modules orchestrating domain + infrastructure
 
-**Established pattern** (see `source.rs`, `source_repo.rs`, `fact.rs`, `fact_repo.rs`):
-1. **Domain module** (`source.rs`, `fact.rs`): Struct + pure predicate functions (no I/O, unit-testable)
-2. **Repository module** (`source_repo.rs`, `fact_repo.rs`): Simple batch fetch from database, no domain logic
+**Established pattern** (see `domain/source.rs`, `repo/source.rs`, `domain/fact.rs`, `repo/fact.rs`):
+1. **Domain module** (`domain/source.rs`, `domain/fact.rs`): Struct + pure predicate functions (no I/O, unit-testable)
+2. **Repository module** (`repo/source.rs`, `repo/fact.rs`): Simple batch fetch from database, no domain logic
 3. **Commands** use pattern: fetch → filter with domain predicates → transform → output
 
 Example from `ls.rs`, `worklist.rs`, `compare.rs`, `coverage.rs`, `facts.rs`:
 ```rust
-let sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
+let sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 let filtered: Vec<Source> = sources.into_iter()
     .filter(|s| s.is_active())
     .filter(|s| s.is_from_role("source"))
@@ -256,7 +265,7 @@ let filtered: Vec<Source> = sources.into_iter()
 - Bugs in core logic (path matching, scope resolution) are caught by tests, not users
 - New commands automatically benefit from battle-tested domain functions
 
-**Key invariants** (defined in `source.rs`):
+**Key invariants** (defined in `domain/source.rs`):
 - `is_excluded()` checks BOTH source-level AND object-level exclusion
 - `matches_scope()` handles edge case: `/a/bc` is NOT under `/a/b`
 - `path()` correctly handles empty `rel_path` (returns just root_path)
@@ -267,9 +276,9 @@ This separation also enables future flexibility (e.g., different storage backend
 
 - `canon roots` and `canon roots list` must behave identically. When adding flags to `RootsAction::List`, also add them to the top-level `Roots` command so both forms work the same way.
 
-### Type System for Facts (expr.rs)
+### Type System for Facts (expr/eval.rs)
 
-The fact system uses several key types defined in `expr.rs`:
+The fact system uses several key types defined in `expr/eval.rs`:
 
 **BuiltinKey enum** - Represents all built-in fact keys (derived from source columns or well-known facts):
 

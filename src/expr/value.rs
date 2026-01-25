@@ -26,9 +26,9 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::expr::{self, BuiltinKey, FactValue, ParsedFactKey};
-use crate::fact::FactEntry;
-use crate::source::Source;
+use super::eval::{self as expr, BuiltinKey, FactValue, ParsedFactKey};
+use crate::domain::fact::FactEntry;
+use crate::domain::source::Source;
 
 /// Resolve a fact value for a source.
 ///

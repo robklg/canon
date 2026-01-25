@@ -6,17 +6,14 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::db::{Connection, Db};
-use crate::fact::{FactEntry, FactValue};
-use crate::fact_repo;
-use crate::object_repo;
-use crate::root::resolve_archive_path;
-use crate::scope::ScopeMatch;
-use crate::path::canonicalize_scopes;
-use crate::source::Source;
-use crate::source_repo;
+use crate::repo::{self, Connection, Db};
+use crate::domain::{FactEntry, FactValue};
+use crate::domain::root::resolve_archive_path;
+use crate::domain::scope::ScopeMatch;
+use crate::domain::path::canonicalize_scopes;
+use crate::domain::source::Source;
 use crate::expr::{BuiltinKey, BuiltinKeyVisibility, FactType, Modifier, ModifierCategory};
-use crate::filter::{self, Filter};
+use crate::expr::filter::{self, Filter};
 
 /// TOML config file (without sources)
 #[derive(Serialize, Deserialize)]
@@ -380,7 +377,7 @@ fn query_sources(
         .collect::<Result<Vec<_>, _>>()?;
 
     // 2. Batch fetch all present sources for those roots
-    let all_sources = source_repo::batch_fetch_by_roots(conn, &root_ids)?;
+    let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 
     // 3. Classify scopes for matching
     let scopes = ScopeMatch::classify_all(scope_prefixes);
@@ -434,14 +431,14 @@ fn query_sources(
         .iter()
         .filter_map(|s| s.object_id)
         .collect();
-    let objects = object_repo::batch_fetch_by_ids(conn, &object_ids)?;
+    let objects = repo::object::batch_fetch_by_ids(conn, &object_ids)?;
 
     // 8. Batch fetch archive paths for all objects (eliminates N+1 query)
-    let archive_paths = object_repo::batch_find_archive_paths(conn, &object_ids)?;
+    let archive_paths = repo::object::batch_find_archive_paths(conn, &object_ids)?;
 
     // 9. Batch fetch all facts for all sources
     let source_ids: Vec<i64> = hashed_sources.iter().map(|s| s.id).collect();
-    let all_facts = fact_repo::batch_fetch_for_sources(conn, &source_ids)?;
+    let all_facts = repo::fact::batch_fetch_for_sources(conn, &source_ids)?;
 
     // 10. Build LockEntry for each source, check archive status
     let mut sources = Vec::new();
