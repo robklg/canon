@@ -47,6 +47,8 @@ impl ScopeMatch {
 ///
 /// This function is pure — no filesystem I/O. The classification
 /// of paths into file vs directory happens via `ScopeMatch::classify`.
+// Currently unused — all callers migrated to domain predicates. Kept for potential future SQL use.
+#[allow(dead_code)]
 pub fn build_scope_clause(scopes: &[ScopeMatch]) -> (String, Vec<String>) {
     if scopes.is_empty() {
         return ("1=1".to_string(), vec![]);

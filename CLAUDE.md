@@ -197,7 +197,6 @@ In `object_repo.rs` (infrastructure layer):
 
 In other modules:
 - `filter::apply_filters()` - Apply filter expressions to source IDs
-- `exclude::exclude_clause()` - SQL clause for exclusion filtering
 
 ### Design Principles
 

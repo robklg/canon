@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
 use rusqlite::params;
-use rusqlite::types::Value;
 use std::path::{Path, PathBuf};
 
 use crate::db::{Connection, Db};
-use crate::scope::{build_scope_clause, ScopeMatch};
-use crate::path::{canonicalize_scopes, path_is_under};
 use crate::filter::{self, Filter};
-
-const BATCH_SIZE: i64 = 1000;
+use crate::object_repo;
+use crate::path::{canonicalize_scopes, path_is_under};
+use crate::root_repo;
+use crate::scope::ScopeMatch;
+use crate::source_repo;
 
 // ============================================================================
 // Options
@@ -208,60 +208,43 @@ pub fn is_object_excluded(conn: &Connection, object_id: i64) -> Result<bool> {
     Ok(excluded)
 }
 
-/// SQL clause for excluding excluded sources (checks both source and object exclusions)
-pub fn exclude_clause(include_excluded: bool) -> &'static str {
-    if include_excluded {
-        "1=1"
-    } else {
-        // Check both source-level and object-level exclusions
-        // NOTE: Queries using this clause must LEFT JOIN objects o ON s.object_id = o.id
-        "s.excluded = 0 AND (s.object_id IS NULL OR o.excluded = 0)"
-    }
-}
-
 fn get_matching_sources(
     conn: &mut Connection,
     scope_prefixes: &[String],
     filters: &[Filter],
     include_excluded: bool,
 ) -> Result<Vec<i64>> {
-    let mut all_sources = Vec::new();
-    let mut last_id: i64 = 0;
+    // Get all source root IDs (active, source role only)
+    let roots = root_repo::fetch_all(conn)?;
+    let source_root_ids: Vec<i64> = roots
+        .iter()
+        .filter(|r| r.is_active() && r.is_source())
+        .map(|r| r.id)
+        .collect();
 
-    let exclude_sql = exclude_clause(include_excluded);
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
-    let (scope_clause, scope_params) = build_scope_clause(&scopes);
-
-    loop {
-        // Build params: scope params + last_id + batch_size
-        let mut params: Vec<Value> = scope_params.iter().map(|s| Value::from(s.clone())).collect();
-        params.push(Value::from(last_id));
-        params.push(Value::from(BATCH_SIZE));
-
-        let source_ids: Vec<i64> = conn
-            .prepare(&format!(
-                "SELECT s.id FROM sources s
-                 JOIN roots r ON s.root_id = r.id
-                 LEFT JOIN objects o ON s.object_id = o.id
-                 WHERE s.present = 1 AND r.role = 'source' AND r.suspended = 0 AND {} AND {} AND s.id > ?
-                 ORDER BY s.id LIMIT ?",
-                exclude_sql, scope_clause
-            ))?
-            .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if source_ids.is_empty() {
-            break;
-        }
-
-        last_id = *source_ids.last().unwrap();
-
-        // Apply filters
-        let filtered_ids = filter::apply_filters(conn, &source_ids, filters)?;
-        all_sources.extend(filtered_ids);
+    if source_root_ids.is_empty() {
+        return Ok(Vec::new());
     }
 
-    Ok(all_sources)
+    // Batch fetch all present sources from source roots
+    let sources = source_repo::batch_fetch_by_roots(conn, &source_root_ids)?;
+
+    // Classify scopes for matching
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
+
+    // Apply domain predicates
+    let filtered: Vec<i64> = sources
+        .into_iter()
+        .filter(|s| scopes.is_empty() || s.matches_scope(&scopes))
+        .filter(|s| include_excluded || !s.is_excluded())
+        .map(|s| s.id)
+        .collect();
+
+    // Apply --where filters if present
+    if filters.is_empty() {
+        return Ok(filtered);
+    }
+    filter::apply_filters(conn, &filtered, filters)
 }
 
 fn get_excluded_sources(
@@ -269,56 +252,47 @@ fn get_excluded_sources(
     scope_prefixes: &[String],
     filters: &[Filter],
 ) -> Result<Vec<(i64, String)>> {
-    let mut all_excluded = Vec::new();
-    let mut last_id: i64 = 0;
+    // Get all source root IDs (active, source role only)
+    let roots = root_repo::fetch_all(conn)?;
+    let source_root_ids: Vec<i64> = roots
+        .iter()
+        .filter(|r| r.is_active() && r.is_source())
+        .map(|r| r.id)
+        .collect();
 
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
-    let (scope_clause, scope_params) = build_scope_clause(&scopes);
-
-    loop {
-        // Build params: last_id + scope params + batch_size
-        let mut params: Vec<Value> = Vec::new();
-        params.push(Value::from(last_id));
-        for s in &scope_params {
-            params.push(Value::from(s.clone()));
-        }
-        params.push(Value::from(BATCH_SIZE));
-
-        let batch: Vec<(i64, String)> = conn
-            .prepare(&format!(
-                "SELECT s.id, r.path || '/' || s.rel_path as full_path
-                 FROM sources s
-                 JOIN roots r ON s.root_id = r.id
-                 WHERE s.present = 1 AND r.role = 'source' AND r.suspended = 0 AND s.id > ?
-                   AND {}
-                   AND s.excluded = 1
-                 ORDER BY s.id LIMIT ?",
-                scope_clause
-            ))?
-            .query_map(rusqlite::params_from_iter(params), |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if batch.is_empty() {
-            break;
-        }
-
-        last_id = batch.last().map(|(id, _)| *id).unwrap();
-
-        // Apply additional filters
-        let ids: Vec<i64> = batch.iter().map(|(id, _)| *id).collect();
-        let filtered_ids = filter::apply_filters(conn, &ids, filters)?;
-
-        // Keep only filtered results
-        for (id, path) in batch {
-            if filtered_ids.contains(&id) {
-                all_excluded.push((id, path));
-            }
-        }
+    if source_root_ids.is_empty() {
+        return Ok(Vec::new());
     }
 
-    Ok(all_excluded)
+    // Batch fetch all present sources from source roots
+    let sources = source_repo::batch_fetch_by_roots(conn, &source_root_ids)?;
+
+    // Classify scopes for matching
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
+
+    // Filter for DIRECTLY excluded sources only (s.excluded = true)
+    // NOT s.is_excluded() which would include object-level exclusions
+    let filtered: Vec<(i64, String)> = sources
+        .into_iter()
+        .filter(|s| scopes.is_empty() || s.matches_scope(&scopes))
+        .filter(|s| s.excluded) // Source-level exclusion only
+        .map(|s| (s.id, s.path()))
+        .collect();
+
+    // Apply --where filters if present
+    if filters.is_empty() {
+        return Ok(filtered);
+    }
+
+    // Apply filters and preserve paths
+    let ids: Vec<i64> = filtered.iter().map(|(id, _)| *id).collect();
+    let filtered_ids: std::collections::HashSet<i64> =
+        filter::apply_filters(conn, &ids, filters)?.into_iter().collect();
+
+    Ok(filtered
+        .into_iter()
+        .filter(|(id, _)| filtered_ids.contains(id))
+        .collect())
 }
 
 fn get_source_path(conn: &Connection, source_id: i64) -> Result<Option<String>> {
@@ -936,55 +910,413 @@ fn get_object_excluded_sources(
     filters: &[Filter],
 ) -> Result<Vec<(i64, String, String)>> {
     // Returns (source_id, path, hash_short)
-    let mut all_excluded = Vec::new();
-    let mut last_id: i64 = 0;
 
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
-    let (scope_clause, scope_params) = build_scope_clause(&scopes);
+    // Get all source root IDs (active, source role only)
+    let roots = root_repo::fetch_all(conn)?;
+    let source_root_ids: Vec<i64> = roots
+        .iter()
+        .filter(|r| r.is_active() && r.is_source())
+        .map(|r| r.id)
+        .collect();
 
-    loop {
-        let mut params: Vec<Value> = Vec::new();
-        params.push(Value::from(last_id));
-        for s in &scope_params {
-            params.push(Value::from(s.clone()));
-        }
-        params.push(Value::from(BATCH_SIZE));
-
-        let batch: Vec<(i64, String, String)> = conn
-            .prepare(&format!(
-                "SELECT s.id, r.path || '/' || s.rel_path as full_path, o.hash_value
-                 FROM sources s
-                 JOIN roots r ON s.root_id = r.id
-                 JOIN objects o ON s.object_id = o.id
-                 WHERE s.present = 1 AND r.role = 'source' AND r.suspended = 0 AND s.id > ?
-                   AND {}
-                   AND o.excluded = 1
-                   AND s.excluded = 0
-                 ORDER BY s.id LIMIT ?",
-                scope_clause
-            ))?
-            .query_map(rusqlite::params_from_iter(params), |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if batch.is_empty() {
-            break;
-        }
-
-        last_id = batch.last().map(|(id, _, _)| *id).unwrap();
-
-        // Apply additional filters
-        let ids: Vec<i64> = batch.iter().map(|(id, _, _)| *id).collect();
-        let filtered_ids = filter::apply_filters(conn, &ids, filters)?;
-
-        for (id, path, hash) in batch {
-            if filtered_ids.contains(&id) {
-                let hash_short = hash[..16.min(hash.len())].to_string();
-                all_excluded.push((id, path, hash_short));
-            }
-        }
+    if source_root_ids.is_empty() {
+        return Ok(Vec::new());
     }
 
-    Ok(all_excluded)
+    // Batch fetch all present sources from source roots
+    let sources = source_repo::batch_fetch_by_roots(conn, &source_root_ids)?;
+
+    // Classify scopes for matching
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
+
+    // First pass: filter sources that are NOT directly excluded and have an object
+    let candidates: Vec<_> = sources
+        .into_iter()
+        .filter(|s| scopes.is_empty() || s.matches_scope(&scopes))
+        .filter(|s| !s.excluded) // NOT directly excluded
+        .filter(|s| s.object_id.is_some()) // Must have an object
+        .collect();
+
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Fetch objects to check exclusion status and get hash
+    let object_ids: Vec<i64> = candidates.iter().filter_map(|s| s.object_id).collect();
+    let objects = object_repo::batch_fetch_by_ids(conn, &object_ids)?;
+
+    // Filter for sources where object IS excluded
+    let filtered: Vec<(i64, String, String)> = candidates
+        .into_iter()
+        .filter_map(|s| {
+            let object_id = s.object_id?;
+            let obj = objects.get(&object_id)?;
+            if obj.excluded {
+                let hash_short = obj.hash_value[..16.min(obj.hash_value.len())].to_string();
+                Some((s.id, s.path(), hash_short))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Apply --where filters if present
+    if filters.is_empty() {
+        return Ok(filtered);
+    }
+
+    // Apply filters and preserve paths/hashes
+    let ids: Vec<i64> = filtered.iter().map(|(id, _, _)| *id).collect();
+    let filtered_ids: std::collections::HashSet<i64> =
+        filter::apply_filters(conn, &ids, filters)?.into_iter().collect();
+
+    Ok(filtered
+        .into_iter()
+        .filter(|(id, _, _)| filtered_ids.contains(id))
+        .collect())
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection as RusqliteConnection;
+
+    /// Create an in-memory database with the canon schema and test data.
+    fn setup_test_db() -> RusqliteConnection {
+        let conn = RusqliteConnection::open_in_memory().unwrap();
+
+        // Create minimal schema needed for tests
+        conn.execute_batch(
+            r#"
+            CREATE TABLE roots (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                role TEXT NOT NULL DEFAULT 'source',
+                comment TEXT,
+                last_scanned_at INTEGER,
+                suspended INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE objects (
+                id INTEGER PRIMARY KEY,
+                hash_type TEXT NOT NULL,
+                hash_value TEXT NOT NULL,
+                excluded INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE sources (
+                id INTEGER PRIMARY KEY,
+                root_id INTEGER NOT NULL REFERENCES roots(id),
+                rel_path TEXT NOT NULL,
+                object_id INTEGER REFERENCES objects(id),
+                size INTEGER NOT NULL,
+                mtime INTEGER NOT NULL,
+                device INTEGER NOT NULL DEFAULT 0,
+                inode INTEGER NOT NULL DEFAULT 0,
+                partial_hash TEXT NOT NULL DEFAULT '',
+                basis_rev INTEGER NOT NULL DEFAULT 0,
+                present INTEGER NOT NULL DEFAULT 1,
+                excluded INTEGER NOT NULL DEFAULT 0
+            );
+
+            -- Needed for filter::apply_filters (facts table)
+            CREATE TABLE facts (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value_type TEXT NOT NULL,
+                value_text TEXT,
+                value_num REAL,
+                value_time INTEGER
+            );
+            "#,
+        )
+        .unwrap();
+
+        conn
+    }
+
+    /// Insert a test root and return its ID
+    fn insert_root(conn: &RusqliteConnection, path: &str, role: &str, suspended: bool) -> i64 {
+        conn.execute(
+            "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",
+            rusqlite::params![path, role, suspended as i64],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// Insert a test object and return its ID
+    fn insert_object(conn: &RusqliteConnection, hash: &str, excluded: bool) -> i64 {
+        conn.execute(
+            "INSERT INTO objects (hash_type, hash_value, excluded) VALUES ('sha256', ?, ?)",
+            rusqlite::params![hash, excluded as i64],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// Insert a test source and return its ID
+    fn insert_source(
+        conn: &RusqliteConnection,
+        root_id: i64,
+        rel_path: &str,
+        object_id: Option<i64>,
+        present: bool,
+        excluded: bool,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, present, excluded)
+             VALUES (?, ?, ?, 1000, 1704067200, ?, ?)",
+            rusqlite::params![root_id, rel_path, object_id, present as i64, excluded as i64],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    // =========================================================================
+    // get_matching_sources tests
+    // =========================================================================
+
+    #[test]
+    fn test_get_matching_sources_excludes_suspended_roots() {
+        let mut conn = setup_test_db();
+
+        // Active source root
+        let active_root = insert_root(&conn, "/active", "source", false);
+        let active_id = insert_source(&conn, active_root, "file.txt", None, true, false);
+
+        // Suspended source root
+        let suspended_root = insert_root(&conn, "/suspended", "source", true);
+        let _suspended_id = insert_source(&conn, suspended_root, "file.txt", None, true, false);
+
+        let result = get_matching_sources(&mut conn, &[], &[], false).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&active_id));
+    }
+
+    #[test]
+    fn test_get_matching_sources_excludes_archive_roots() {
+        let mut conn = setup_test_db();
+
+        // Source root
+        let source_root = insert_root(&conn, "/source", "source", false);
+        let source_id = insert_source(&conn, source_root, "file.txt", None, true, false);
+
+        // Archive root
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+        let _archive_id = insert_source(&conn, archive_root, "file.txt", None, true, false);
+
+        let result = get_matching_sources(&mut conn, &[], &[], false).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&source_id));
+    }
+
+    #[test]
+    fn test_get_matching_sources_respects_scope() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+        let in_scope_id = insert_source(&conn, root, "2024/photo.jpg", None, true, false);
+        let _out_of_scope_id = insert_source(&conn, root, "2023/photo.jpg", None, true, false);
+
+        // Scope to /photos/2024
+        let scopes = vec!["/photos/2024".to_string()];
+        let result = get_matching_sources(&mut conn, &scopes, &[], false).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&in_scope_id));
+    }
+
+    #[test]
+    fn test_get_matching_sources_excludes_source_level_excluded() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+        let normal_id = insert_source(&conn, root, "normal.jpg", None, true, false);
+        let _excluded_id = insert_source(&conn, root, "excluded.jpg", None, true, true); // source-level excluded
+
+        let result = get_matching_sources(&mut conn, &[], &[], false).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&normal_id));
+    }
+
+    #[test]
+    fn test_get_matching_sources_excludes_object_level_excluded() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+        let normal_id = insert_source(&conn, root, "normal.jpg", None, true, false);
+
+        // Source not excluded, but linked to excluded object
+        let excluded_obj = insert_object(&conn, "abc123excluded", true);
+        let _obj_excluded_id = insert_source(&conn, root, "obj_excluded.jpg", Some(excluded_obj), true, false);
+
+        let result = get_matching_sources(&mut conn, &[], &[], false).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&normal_id));
+    }
+
+    #[test]
+    fn test_get_matching_sources_includes_excluded_when_flag_set() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+        let normal_id = insert_source(&conn, root, "normal.jpg", None, true, false);
+        let source_excluded_id = insert_source(&conn, root, "source_excluded.jpg", None, true, true);
+
+        let excluded_obj = insert_object(&conn, "abc123excluded", true);
+        let obj_excluded_id = insert_source(&conn, root, "obj_excluded.jpg", Some(excluded_obj), true, false);
+
+        // With include_excluded = true
+        let result = get_matching_sources(&mut conn, &[], &[], true).unwrap();
+
+        assert_eq!(result.len(), 3);
+        assert!(result.contains(&normal_id));
+        assert!(result.contains(&source_excluded_id));
+        assert!(result.contains(&obj_excluded_id));
+    }
+
+    // =========================================================================
+    // get_excluded_sources tests
+    // =========================================================================
+
+    #[test]
+    fn test_get_excluded_sources_returns_source_level_only() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+        let excluded_id = insert_source(&conn, root, "excluded.jpg", None, true, true); // source-level excluded
+
+        let result = get_excluded_sources(&mut conn, &[], &[]).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, excluded_id);
+    }
+
+    #[test]
+    fn test_get_excluded_sources_ignores_object_level_excluded() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+
+        // Source NOT excluded, but object IS excluded
+        let excluded_obj = insert_object(&conn, "abc123excluded", true);
+        let _obj_excluded_id = insert_source(&conn, root, "obj_excluded.jpg", Some(excluded_obj), true, false);
+
+        // This is the critical distinction: get_excluded_sources should NOT return this
+        let result = get_excluded_sources(&mut conn, &[], &[]).unwrap();
+
+        assert!(result.is_empty(), "Object-level excluded sources should NOT appear in get_excluded_sources");
+    }
+
+    #[test]
+    fn test_get_excluded_sources_respects_scope() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+        let in_scope_id = insert_source(&conn, root, "2024/excluded.jpg", None, true, true);
+        let _out_of_scope_id = insert_source(&conn, root, "2023/excluded.jpg", None, true, true);
+
+        // Scope to /photos/2024
+        let scopes = vec!["/photos/2024".to_string()];
+        let result = get_excluded_sources(&mut conn, &scopes, &[]).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, in_scope_id);
+    }
+
+    #[test]
+    fn test_get_excluded_sources_returns_correct_path() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+        let excluded_id = insert_source(&conn, root, "subdir/excluded.jpg", None, true, true);
+
+        let result = get_excluded_sources(&mut conn, &[], &[]).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, excluded_id);
+        assert_eq!(result[0].1, "/photos/subdir/excluded.jpg");
+    }
+
+    // =========================================================================
+    // get_object_excluded_sources tests
+    // =========================================================================
+
+    #[test]
+    fn test_get_object_excluded_sources_returns_object_level_only() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+
+        // Source NOT excluded, but object IS excluded
+        let excluded_obj = insert_object(&conn, "abc123excluded", true);
+        let obj_excluded_id = insert_source(&conn, root, "obj_excluded.jpg", Some(excluded_obj), true, false);
+
+        let result = get_object_excluded_sources(&mut conn, &[], &[]).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, obj_excluded_id);
+    }
+
+    #[test]
+    fn test_get_object_excluded_sources_ignores_source_level_excluded() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+
+        // Source IS excluded AND object IS excluded
+        let excluded_obj = insert_object(&conn, "abc123excluded", true);
+        let _both_excluded_id = insert_source(&conn, root, "both_excluded.jpg", Some(excluded_obj), true, true);
+
+        // This is the critical distinction: when BOTH are excluded, it should NOT appear
+        // (because the source is directly excluded)
+        let result = get_object_excluded_sources(&mut conn, &[], &[]).unwrap();
+
+        assert!(result.is_empty(), "Sources with source-level exclusion should NOT appear in get_object_excluded_sources");
+    }
+
+    #[test]
+    fn test_get_object_excluded_sources_returns_hash_prefix() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+        let hash = "abcdef1234567890abcdef1234567890abcdef1234567890";
+        let excluded_obj = insert_object(&conn, hash, true);
+        let _id = insert_source(&conn, root, "file.jpg", Some(excluded_obj), true, false);
+
+        let result = get_object_excluded_sources(&mut conn, &[], &[]).unwrap();
+
+        assert_eq!(result.len(), 1);
+        // Hash prefix should be first 16 characters
+        assert_eq!(result[0].2, "abcdef1234567890");
+    }
+
+    #[test]
+    fn test_get_object_excluded_sources_respects_scope() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+        let excluded_obj = insert_object(&conn, "abc123excluded", true);
+
+        let in_scope_id = insert_source(&conn, root, "2024/file.jpg", Some(excluded_obj), true, false);
+        let _out_of_scope_id = insert_source(&conn, root, "2023/file.jpg", Some(excluded_obj), true, false);
+
+        // Scope to /photos/2024
+        let scopes = vec!["/photos/2024".to_string()];
+        let result = get_object_excluded_sources(&mut conn, &scopes, &[]).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, in_scope_id);
+    }
 }
