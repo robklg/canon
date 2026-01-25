@@ -15,6 +15,8 @@ mod facts;
 mod filter;
 mod import_facts;
 mod ls;
+mod object;
+mod object_repo;
 mod path;
 mod root;
 mod root_repo;

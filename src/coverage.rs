@@ -2,8 +2,9 @@ use anyhow::Result;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::db::{populate_temp_sources, Db};
+use crate::db::Db;
 use crate::filter::{self, Filter};
+use crate::object_repo;
 use crate::path::canonicalize_scopes;
 use crate::root::parse_root_spec;
 use crate::scope::ScopeMatch;
@@ -266,57 +267,26 @@ fn compute_stats_from_source_refs(
         .collect();
     stats.hashed_sources = hashed_sources.len() as i64;
 
-    // Archived sources - need SQL EXISTS query (Object infrastructure)
+    // Archived sources - use batch archive detection
     if stats.hashed_sources > 0 {
-        // Collect source IDs that are hashed and not excluded
-        let hashed_ids: Vec<i64> = hashed_sources.iter().map(|s| s.id).collect();
+        // Collect object IDs from hashed sources
+        let object_ids: Vec<i64> = hashed_sources
+            .iter()
+            .filter_map(|s| s.object_id)
+            .collect();
 
-        // Populate temp table
-        populate_temp_sources(conn, &hashed_ids)?;
+        // Batch check which objects are archived
+        let archived_set = object_repo::batch_check_archived(conn, &object_ids, archive_root_id)?;
 
-        // Count archived using EXISTS query
-        stats.archived_sources = count_archived_from_temp(conn, archive_root_id)?;
+        // Count sources whose object_id is in the archived set
+        // (not unique objects — multiple sources can have the same object)
+        stats.archived_sources = hashed_sources
+            .iter()
+            .filter(|s| s.object_id.map_or(false, |oid| archived_set.contains(&oid)))
+            .count() as i64;
     }
 
     Ok(stats)
-}
-
-/// Count how many sources in temp_sources have their content in an archive.
-/// This uses SQL EXISTS because archive checking is Object infrastructure.
-fn count_archived_from_temp(
-    conn: &rusqlite::Connection,
-    archive_root_id: Option<i64>,
-) -> Result<i64> {
-    let count: i64 = if let Some(root_id) = archive_root_id {
-        // Specific archive root
-        conn.query_row(
-            "SELECT COUNT(*) FROM temp_sources ts
-             JOIN sources s ON s.id = ts.id
-             WHERE EXISTS (
-                 SELECT 1 FROM sources arch_s
-                 WHERE arch_s.root_id = ?1 AND arch_s.present = 1
-                   AND arch_s.object_id = s.object_id
-             )",
-            [root_id],
-            |row| row.get(0),
-        )?
-    } else {
-        // Any archive root
-        conn.query_row(
-            "SELECT COUNT(*) FROM temp_sources ts
-             JOIN sources s ON s.id = ts.id
-             WHERE EXISTS (
-                 SELECT 1 FROM sources arch_s
-                 JOIN roots r ON arch_s.root_id = r.id
-                 WHERE r.role = 'archive' AND arch_s.present = 1
-                   AND arch_s.object_id = s.object_id
-             )",
-            [],
-            |row| row.get(0),
-        )?
-    };
-
-    Ok(count)
 }
 
 fn display_compact_scoped(stats: &CoverageStats, scope: Option<&str>) {

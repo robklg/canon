@@ -1,10 +1,11 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use rusqlite::types::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::db::{Connection, Db};
 use crate::filter::{self, Filter};
+use crate::object_repo;
 use crate::path::{canonicalize_scopes, path_strip_prefix};
 use crate::scope::ScopeMatch;
 use crate::source::Source;
@@ -72,6 +73,19 @@ pub fn run(
         return Ok(());
     }
 
+    // Batch fetch archive status for all sources with object_ids (eliminates N+1)
+    let object_ids: Vec<i64> = sources.iter().filter_map(|s| s.object_id).collect();
+    let archived_set: HashSet<i64> = if archived_only || unarchived_only {
+        object_repo::batch_check_archived(conn, &object_ids, None)?
+    } else {
+        HashSet::new()
+    };
+    let archive_paths_map: HashMap<i64, Vec<String>> = if show_archive_paths {
+        object_repo::batch_find_archive_paths(conn, &object_ids)?
+    } else {
+        HashMap::new()
+    };
+
     // Apply archived/unarchived/unhashed filter and collect output lines
     // Each entry is (source_path, optional_archive_path, size, mtime)
     let mut output_lines: Vec<(String, Option<String>, i64, i64)> = Vec::new();
@@ -92,17 +106,18 @@ pub fn run(
                 }
                 Some(obj_id) => {
                     if show_archive_paths {
-                        // Get all archive locations for this object
-                        let archive_paths = get_archive_paths(conn, obj_id)?;
-                        for archive_path in archive_paths {
-                            output_lines.push((
-                                formatted_source.clone(),
-                                Some(archive_path),
-                                size,
-                                mtime,
-                            ));
+                        // Get all archive locations for this object (from batch result)
+                        if let Some(paths) = archive_paths_map.get(&obj_id) {
+                            for archive_path in paths {
+                                output_lines.push((
+                                    formatted_source.clone(),
+                                    Some(archive_path.clone()),
+                                    size,
+                                    mtime,
+                                ));
+                            }
                         }
-                    } else if check_archived(conn, obj_id)? {
+                    } else if archived_set.contains(&obj_id) {
                         output_lines.push((formatted_source, None, size, mtime));
                     }
                 }
@@ -114,7 +129,7 @@ pub fn run(
                     unhashed_count += 1;
                 }
                 Some(obj_id) => {
-                    if !check_archived(conn, obj_id)? {
+                    if !archived_set.contains(&obj_id) {
                         output_lines.push((formatted_source, None, size, mtime));
                     }
                 }
@@ -259,44 +274,6 @@ fn get_matching_sources(
         .collect();
 
     Ok((result, excluded_count))
-}
-
-fn check_archived(conn: &Connection, object_id: i64) -> Result<bool> {
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(
-            SELECT 1 FROM sources s
-            JOIN roots r ON s.root_id = r.id
-            WHERE s.object_id = ? AND r.role = 'archive' AND s.present = 1
-        )",
-        [object_id],
-        |row| row.get(0),
-    )?;
-
-    Ok(exists)
-}
-
-fn get_archive_paths(conn: &Connection, object_id: i64) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT r.path, s.rel_path
-         FROM sources s
-         JOIN roots r ON s.root_id = r.id
-         WHERE s.object_id = ? AND r.role = 'archive' AND s.present = 1
-         ORDER BY r.path, s.rel_path",
-    )?;
-
-    let paths: Vec<String> = stmt
-        .query_map([object_id], |row| {
-            let root_path: String = row.get(0)?;
-            let rel_path: String = row.get(1)?;
-            if rel_path.is_empty() {
-                Ok(root_path)
-            } else {
-                Ok(format!("{}/{}", root_path, rel_path))
-            }
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(paths)
 }
 
 fn format_path(full_path: &str, cwd: Option<&str>) -> String {

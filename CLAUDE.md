@@ -34,6 +34,8 @@ Canon is a CLI tool for organizing large media libraries into a "canonical archi
 - `src/source_repo.rs` - Source repository layer (batch fetch from database, no domain logic)
 - `src/fact.rs` - Fact domain model (FactEntry struct, re-exports FactValue/FactType from expr.rs)
 - `src/fact_repo.rs` - Fact repository layer (batch fetch facts for sources, handles source+object facts transparently)
+- `src/object.rs` - Object domain model (Object struct, `is_excluded()` predicate)
+- `src/object_repo.rs` - Object repository layer (batch fetch objects, archive detection)
 - `src/db.rs` - SQLite database infrastructure (connection, schema, transactions)
 - `src/scan.rs` - Directory scanning logic
 - `src/worklist.rs` - JSONL worklist generation for external processing
@@ -182,6 +184,16 @@ In `fact_repo.rs` (infrastructure layer):
 - `batch_fetch_key_for_sources(conn, source_ids, key)` - Fetch specific key (returns `HashMap<i64, Option<FactEntry>>`)
 - `count_fact_keys(conn, source_ids)` - Count distinct fact keys with types
 - Transparently merges source facts + object facts, keyed by source_id
+
+In `object.rs` (domain layer):
+- `Object` struct - Content identified by hash (id, hash_type, hash_value, excluded)
+- `object.is_excluded()` - Check if object is excluded (excludes ALL linked sources)
+
+In `object_repo.rs` (infrastructure layer):
+- `batch_fetch_by_ids(conn, object_ids)` - Fetch objects by ID (returns `HashMap<i64, Object>`)
+- `batch_check_archived(conn, object_ids, archive_root_id)` - Check which objects are in archive(s) (returns `HashSet<i64>`)
+- `batch_find_archive_paths(conn, object_ids)` - Get archive paths for objects (returns `HashMap<i64, Vec<String>>`)
+- Uses `BATCH_SIZE = 1000` for SQL IN clause chunking
 
 In other modules:
 - `filter::apply_filters()` - Apply filter expressions to source IDs

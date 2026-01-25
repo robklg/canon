@@ -1,5 +1,4 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -10,6 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::db::{Connection, Db};
 use crate::fact::{FactEntry, FactValue};
 use crate::fact_repo;
+use crate::object_repo;
 use crate::root::resolve_archive_path;
 use crate::scope::ScopeMatch;
 use crate::path::canonicalize_scopes;
@@ -429,18 +429,21 @@ fn query_sources(
         })
         .collect();
 
-    // 7. Batch fetch object hashes for all sources with object_id
+    // 7. Batch fetch objects for all sources with object_id
     let object_ids: Vec<i64> = hashed_sources
         .iter()
         .filter_map(|s| s.object_id)
         .collect();
-    let object_hashes = batch_fetch_object_hashes(conn, &object_ids)?;
+    let objects = object_repo::batch_fetch_by_ids(conn, &object_ids)?;
 
-    // 8. Batch fetch all facts for all sources
+    // 8. Batch fetch archive paths for all objects (eliminates N+1 query)
+    let archive_paths = object_repo::batch_find_archive_paths(conn, &object_ids)?;
+
+    // 9. Batch fetch all facts for all sources
     let source_ids: Vec<i64> = hashed_sources.iter().map(|s| s.id).collect();
     let all_facts = fact_repo::batch_fetch_for_sources(conn, &source_ids)?;
 
-    // 9. Build LockEntry for each source, check archive status
+    // 10. Build LockEntry for each source, check archive status
     let mut sources = Vec::new();
     let mut archived = Vec::new();
 
@@ -448,19 +451,19 @@ fn query_sources(
         // Get hash info from batch result
         let (hash_type, hash_value) = source
             .object_id
-            .and_then(|oid| object_hashes.get(&oid).cloned())
-            .map(|(ht, hv)| (Some(ht), Some(hv)))
+            .and_then(|oid| objects.get(&oid))
+            .map(|obj| (Some(obj.hash_type.clone()), Some(obj.hash_value.clone())))
             .unwrap_or((None, None));
 
-        // Check if this content is already in an archive
-        let archive_path = if let Some(ref hash) = hash_value {
-            find_in_archive(conn, hash)?
-        } else {
-            None
-        };
+        // Check if this content is already in an archive (from batch result)
+        let archive_path = source
+            .object_id
+            .and_then(|oid| archive_paths.get(&oid))
+            .and_then(|paths| paths.first())
+            .cloned();
 
         // Build LockEntry from Source + hash info (no facts — apply looks them up at runtime)
-        let lock_entry = LockEntry::from_source(&source, hash_type, hash_value.clone());
+        let lock_entry = LockEntry::from_source(&source, hash_type, hash_value);
 
         if let Some(arch_path) = archive_path {
             if include_archived {
@@ -474,72 +477,6 @@ fn query_sources(
     }
 
     Ok((sources, archived, excluded_count, unhashed_count, all_facts))
-}
-
-/// Batch fetch object hash info (hash_type, hash_value) for the given object IDs.
-/// Batch size for SQL IN clauses (matches source_repo::BATCH_SIZE)
-const BATCH_SIZE: usize = 1000;
-
-/// Returns HashMap<object_id, (hash_type, hash_value)>
-fn batch_fetch_object_hashes(
-    conn: &Connection,
-    object_ids: &[i64],
-) -> Result<HashMap<i64, (String, String)>> {
-    if object_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let mut result = HashMap::new();
-
-    // Process in chunks to avoid SQLite variable limit
-    for chunk in object_ids.chunks(BATCH_SIZE) {
-        let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let query = format!(
-            "SELECT id, hash_type, hash_value FROM objects WHERE id IN ({})",
-            placeholders
-        );
-
-        let mut stmt = conn.prepare(&query)?;
-        let params: Vec<&dyn rusqlite::ToSql> = chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-
-        let rows = stmt.query_map(params.as_slice(), |row| {
-            let id: i64 = row.get(0)?;
-            let hash_type: String = row.get(1)?;
-            let hash_value: String = row.get(2)?;
-            Ok((id, hash_type, hash_value))
-        })?;
-
-        for row in rows {
-            let (id, hash_type, hash_value) = row?;
-            result.insert(id, (hash_type, hash_value));
-        }
-    }
-
-    Ok(result)
-}
-
-/// Find if a hash exists in any archive root, return the path if found
-fn find_in_archive(conn: &Connection, hash_value: &str) -> Result<Option<String>> {
-    let result: Option<(String, String)> = conn
-        .query_row(
-            "SELECT r.path, s.rel_path
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             JOIN objects o ON s.object_id = o.id
-             WHERE r.role = 'archive' AND o.hash_value = ? AND s.present = 1
-             LIMIT 1",
-            [hash_value],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-
-    Ok(result.map(|(root, rel)| {
-        if rel.is_empty() {
-            root
-        } else {
-            format!("{}/{}", root, rel)
-        }
-    }))
 }
 
 fn current_timestamp() -> String {
