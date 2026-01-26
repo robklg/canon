@@ -121,6 +121,7 @@ struct ScanStats {
     unchanged: u64,
     missing: u64,
     disconnected: u64,
+    skipped: u64,
     hashed: u64,
     unexpected_hash_changes: u64,
 }
@@ -263,6 +264,7 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
         total_stats.unchanged += result.stats.unchanged;
         total_stats.missing += result.stats.missing;
         total_stats.disconnected += result.stats.disconnected;
+        total_stats.skipped += result.stats.skipped;
 
         // Collect files for hashing
         all_files_to_hash.extend(result.files_to_hash);
@@ -278,6 +280,9 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
         total_stats.unchanged,
         total_stats.missing
     );
+    if total_stats.skipped > 0 {
+        summary.push_str(&format!(", {} skipped (read errors)", total_stats.skipped));
+    }
     if total_stats.disconnected > 0 {
         summary.push_str(&format!(", {} skipped (disconnected)", total_stats.disconnected));
     }
@@ -486,7 +491,7 @@ fn scan_root(
 
         stats.scanned += 1;
 
-        let result = process_file(
+        let result = match process_file(
             conn,
             root_id,
             rel_path_str,
@@ -496,7 +501,14 @@ fn scan_root(
             size,
             mtime,
             now,
-        )?;
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Warning: Failed to process {}: {}", full_path.display(), e);
+                stats.skipped += 1;
+                continue;
+            }
+        };
 
         seen_source_ids.insert(result.source_id);
         outcomes.push((result.source_id, SourceOutcome::Seen));
