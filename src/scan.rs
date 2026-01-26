@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 
 use crate::repo::{Connection, Db};
 use crate::domain::resolve_root_path_any;
+use crate::progress::Progress;
 
 /// Outcome for a source during scan - determines what action to take
 enum SourceOutcome {
@@ -291,15 +292,11 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
     // Hash collected files with progress indicator
     if !all_files_to_hash.is_empty() {
         let total = all_files_to_hash.len();
-        let progress_interval = std::cmp::max(total / 20, 1);
+        let progress = Progress::new(total);
         eprintln!("Computing hashes for {} files...", total);
 
         for (i, file) in all_files_to_hash.iter().enumerate() {
-            // Progress indicator
-            if i > 0 && i % progress_interval == 0 {
-                let pct = (i * 100) / total;
-                eprint!("\r  {}% ({}/{})", pct, i, total);
-            }
+            progress.update(i);
 
             // Compute full SHA256 hash
             let hash_value = match compute_full_hash(&file.full_path) {
@@ -338,10 +335,7 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
             total_stats.hashed += 1;
         }
 
-        // Clear progress line
-        if total > progress_interval {
-            eprint!("\r  100% ({}/{})\n", total, total);
-        }
+        progress.finish();
 
         println!("Hashed {} files", total_stats.hashed);
     }

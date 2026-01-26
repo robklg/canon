@@ -6,6 +6,9 @@ mod domain;
 mod expr;
 mod repo;
 
+// Utilities
+mod progress;
+
 // Command modules
 mod apply;
 mod cluster;

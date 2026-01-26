@@ -14,6 +14,7 @@ use crate::domain::root::parse_root_spec;
 use crate::domain::path::path_strip_prefix;
 use crate::exclude;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
+use crate::progress::Progress;
 use crate::scan::compute_partial_hash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,15 +426,11 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     let mut stale_during_transfer: Vec<SkippedStaleSource> = Vec::new();
 
     let total = filtered_sources.len();
-    let progress_interval = std::cmp::max(total / 20, 1); // Update every 5%
+    let progress = Progress::new(total);
     eprintln!("Processing {} sources...", total);
 
     for (i, source) in filtered_sources.iter().enumerate() {
-        // Progress indicator
-        if i > 0 && i % progress_interval == 0 {
-            let pct = (i * 100) / total;
-            eprint!("\r  {}% ({}/{})", pct, i, total);
-        }
+        progress.update(i);
 
         match process_source(
             source,
@@ -467,10 +464,7 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         }
     }
 
-    // Clear progress line
-    if total > progress_interval {
-        eprint!("\r  100% ({}/{})\n", total, total);
-    }
+    progress.finish();
 
     // Summary of files that became stale during transfer (race conditions)
     if !stale_during_transfer.is_empty() {
@@ -657,22 +651,17 @@ fn validate_pattern_expansions(
 ) -> Vec<(String, String)> {
     let mut failures = Vec::new();
     let total = sources.len();
-    let progress_interval = std::cmp::max(total / 20, 1);
+    let progress = Progress::new(total);
 
     for (i, source) in sources.iter().enumerate() {
-        if i > 0 && i % progress_interval == 0 {
-            let pct = (i * 100) / total;
-            eprint!("\r  {}% ({}/{})", pct, i, total);
-        }
+        progress.update(i);
 
         if let Err(e) = evaluate_pattern(pattern, source, needed_keys, scope_prefix, conn, root_paths) {
             failures.push((source.path.clone(), e.to_string()));
         }
     }
 
-    if total > progress_interval {
-        eprint!("\r  100% ({}/{})\n", total, total);
-    }
+    progress.finish();
 
     failures
 }
@@ -690,14 +679,10 @@ fn check_destination_collisions_filtered(
     let mut dest_to_sources: HashMap<PathBuf, Vec<String>> = HashMap::new();
     let mut unreadable: Vec<(String, String)> = Vec::new();
     let total = sources.len();
-    let progress_interval = std::cmp::max(total / 20, 1); // Update every 5%
+    let progress = Progress::new(total);
 
     for (i, source) in sources.iter().enumerate() {
-        // Progress indicator
-        if i > 0 && i % progress_interval == 0 {
-            let pct = (i * 100) / total;
-            eprint!("\r  {}% ({}/{})", pct, i, total);
-        }
+        progress.update(i);
 
         // Check source accessibility (existence + read permission in one syscall)
         // In dry-run mode, skip this check for speed
@@ -729,10 +714,7 @@ fn check_destination_collisions_filtered(
             .push(source.path.clone());
     }
 
-    // Clear progress line
-    if total > progress_interval {
-        eprint!("\r  100% ({}/{})\n", total, total);
-    }
+    progress.finish();
 
     // Filter to only collisions (more than one source per destination)
     let mut collisions: Vec<(PathBuf, Vec<String>)> = dest_to_sources
@@ -757,14 +739,10 @@ fn check_archive_conflicts_filtered(
     };
 
     let total = sources.len();
-    let progress_interval = std::cmp::max(total / 20, 1); // Update every 5%
+    let progress = Progress::new(total);
 
     for (i, source) in sources.iter().enumerate() {
-        // Progress indicator
-        if i > 0 && i % progress_interval == 0 {
-            let pct = (i * 100) / total;
-            eprint!("\r  {}% ({}/{})", pct, i, total);
-        }
+        progress.update(i);
 
         if let Some(ref hash) = source.hash_value {
             // Check if this hash exists in any archive
@@ -797,10 +775,7 @@ fn check_archive_conflicts_filtered(
         }
     }
 
-    // Clear progress line
-    if total > progress_interval {
-        eprint!("\r  100% ({}/{})\n", total, total);
-    }
+    progress.finish();
 
     Ok(conflicts)
 }
@@ -860,24 +835,17 @@ fn check_excluded_sources_filtered(
 ) -> Result<Vec<(i64, String)>> {
     let mut excluded = Vec::new();
     let total = sources.len();
-    let progress_interval = std::cmp::max(total / 20, 1); // Update every 5%
+    let progress = Progress::new(total);
 
     for (i, source) in sources.iter().enumerate() {
-        // Progress indicator
-        if i > 0 && i % progress_interval == 0 {
-            let pct = (i * 100) / total;
-            eprint!("\r  {}% ({}/{})", pct, i, total);
-        }
+        progress.update(i);
 
         if exclude::is_excluded(conn, source.id)? {
             excluded.push((source.id, source.path.clone()));
         }
     }
 
-    // Clear progress line
-    if total > progress_interval {
-        eprint!("\r  100% ({}/{})\n", total, total);
-    }
+    progress.finish();
 
     Ok(excluded)
 }
@@ -888,14 +856,10 @@ fn check_suspended_sources_filtered(
 ) -> Result<Vec<(i64, String)>> {
     let mut suspended = Vec::new();
     let total = sources.len();
-    let progress_interval = std::cmp::max(total / 20, 1); // Update every 5%
+    let progress = Progress::new(total);
 
     for (i, source) in sources.iter().enumerate() {
-        // Progress indicator
-        if i > 0 && i % progress_interval == 0 {
-            let pct = (i * 100) / total;
-            eprint!("\r  {}% ({}/{})", pct, i, total);
-        }
+        progress.update(i);
 
         // Check if source's root is suspended
         let is_suspended: bool = conn
@@ -913,10 +877,7 @@ fn check_suspended_sources_filtered(
         }
     }
 
-    // Clear progress line
-    if total > progress_interval {
-        eprint!("\r  100% ({}/{})\n", total, total);
-    }
+    progress.finish();
 
     Ok(suspended)
 }
@@ -990,13 +951,10 @@ fn validate_source_state(source: &LockEntry) -> std::result::Result<(), String> 
 fn check_source_states_disk(sources: &[&LockEntry]) -> Vec<SkippedStaleSource> {
     let mut stale = Vec::new();
     let total = sources.len();
-    let progress_interval = std::cmp::max(total / 20, 1);
+    let progress = Progress::new(total);
 
     for (i, source) in sources.iter().enumerate() {
-        if i > 0 && i % progress_interval == 0 {
-            let pct = (i * 100) / total;
-            eprint!("\r  {}% ({}/{})", pct, i, total);
-        }
+        progress.update(i);
 
         if let Err(reason) = validate_source_state(source) {
             stale.push(SkippedStaleSource {
@@ -1006,9 +964,7 @@ fn check_source_states_disk(sources: &[&LockEntry]) -> Vec<SkippedStaleSource> {
         }
     }
 
-    if total > progress_interval {
-        eprint!("\r  100% ({}/{})\n", total, total);
-    }
+    progress.finish();
 
     stale
 }
@@ -1018,13 +974,10 @@ fn check_source_states_disk(sources: &[&LockEntry]) -> Vec<SkippedStaleSource> {
 fn check_source_states_db(conn: &Connection, sources: &[&LockEntry]) -> Result<Vec<SkippedStaleSource>> {
     let mut stale = Vec::new();
     let total = sources.len();
-    let progress_interval = std::cmp::max(total / 20, 1);
+    let progress = Progress::new(total);
 
     for (i, source) in sources.iter().enumerate() {
-        if i > 0 && i % progress_interval == 0 {
-            let pct = (i * 100) / total;
-            eprint!("\r  {}% ({}/{})", pct, i, total);
-        }
+        progress.update(i);
 
         // Get current DB values for this source
         let db_state: Option<(i64, i64, Option<String>, bool)> = conn
@@ -1081,9 +1034,7 @@ fn check_source_states_db(conn: &Connection, sources: &[&LockEntry]) -> Result<V
         }
     }
 
-    if total > progress_interval {
-        eprint!("\r  100% ({}/{})\n", total, total);
-    }
+    progress.finish();
 
     Ok(stale)
 }
