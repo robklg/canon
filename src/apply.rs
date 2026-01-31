@@ -324,6 +324,38 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         bail!("Aborting due to destination collisions");
     }
 
+    // Check for stale destination records (present=1 but file deleted, archive not rescanned)
+    eprint!("Checking for stale destination records...");
+    let stale_records = check_stale_destination_records(
+        conn,
+        &filtered_sources,
+        &pattern,
+        &needed_keys,
+        scope_prefix,
+        &config.output.base_dir,
+        config.output.archive_root_id,
+        &root_paths,
+    )?;
+
+    if !stale_records.is_empty() {
+        eprintln!();
+        eprintln!(
+            "Error: {} destination paths have stale database records:",
+            stale_records.len()
+        );
+        for path in stale_records.iter().take(10) {
+            eprintln!("  {}", path);
+        }
+        if stale_records.len() > 10 {
+            eprintln!("  ... and {} more", stale_records.len() - 10);
+        }
+        eprintln!();
+        eprintln!("These paths are marked as present in the database but the files are missing.");
+        eprintln!("Run 'canon scan <archive-path>' to update the database, then retry.");
+        bail!("Aborting due to stale destination records");
+    }
+    eprintln!(" ok");
+
     // Check archive conflicts
     eprintln!("Checking archive conflicts...");
     let conflicts = check_archive_conflicts_filtered(conn, &filtered_sources, config.output.archive_root_id)?;
@@ -728,6 +760,67 @@ fn check_destination_collisions_filtered(
     Ok(SourceAccessCheck { collisions, unreadable })
 }
 
+/// Check for stale destination records in the database.
+/// These are records with present=1 for paths we're about to copy to, but the file
+/// doesn't exist on disk. This usually means the file was deleted but the archive
+/// wasn't rescanned.
+fn check_stale_destination_records(
+    conn: &Connection,
+    sources: &[&LockEntry],
+    pattern: &Pattern,
+    needed_keys: &[String],
+    scope_prefix: Option<&str>,
+    base_dir_rel: &str,
+    archive_root_id: i64,
+    root_paths: &HashMap<i64, String>,
+) -> Result<Vec<String>> {
+    let mut stale_paths = Vec::new();
+    let total = sources.len();
+    let progress = Progress::new(total);
+
+    // Collect destination rel_paths
+    let mut dest_rel_paths: Vec<String> = Vec::with_capacity(sources.len());
+    for (i, source) in sources.iter().enumerate() {
+        progress.update(i);
+
+        let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, conn, root_paths)?;
+        let archive_rel_path = if base_dir_rel.is_empty() {
+            dest_rel
+        } else {
+            format!("{}/{}", base_dir_rel, dest_rel)
+        };
+        dest_rel_paths.push(archive_rel_path);
+    }
+    progress.finish();
+
+    // Batch query for present=1 records matching these paths
+    const BATCH_SIZE: usize = 500;
+    for chunk in dest_rel_paths.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT rel_path FROM sources WHERE root_id = ? AND present = 1 AND rel_path IN ({})",
+            placeholders.join(", ")
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+
+        // Build params: root_id first, then all rel_paths
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+        params_vec.push(&archive_root_id);
+        for path in chunk {
+            params_vec.push(path);
+        }
+
+        let rows = stmt.query_map(params_vec.as_slice(), |row| row.get::<_, String>(0))?;
+        for row in rows {
+            stale_paths.push(row?);
+        }
+    }
+
+    stale_paths.sort();
+    Ok(stale_paths)
+}
+
 fn check_archive_conflicts_filtered(
     conn: &Connection,
     sources: &[&LockEntry],
@@ -812,7 +905,7 @@ fn check_unhashed_sources(sources: &[LockEntry]) -> Result<()> {
 fn check_archive_hash_coverage(conn: &Connection, archive_root_id: i64) -> Result<()> {
     let (total, unhashed): (i64, i64) = conn
         .query_row(
-            "SELECT COUNT(*), SUM(CASE WHEN object_id IS NULL THEN 1 ELSE 0 END)
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN object_id IS NULL THEN 1 ELSE 0 END), 0)
              FROM sources WHERE root_id = ? AND present = 1",
             [archive_root_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -1120,7 +1213,7 @@ fn process_source(
             fs::copy(src_path, &dest_path)
                 .with_context(|| format!("Failed to copy {} to {}", source.path, dest_path.display()))?;
             preserve_metadata(&dest_path, &src_meta)?;
-            register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id)?;
+            register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id, &source.partial_hash)?;
             if options.verbose {
                 println!("Copied: {} -> {}", source.path, dest_path.display());
             }
@@ -1173,7 +1266,7 @@ fn process_source(
                     // Mark old source as not present (file was deleted)
                     mark_source_not_present(conn, source.id)?;
                     // Register new destination (new inode on different device)
-                    register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id)?;
+                    register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id, &source.partial_hash)?;
                     if options.verbose {
                         println!("Moved: {} -> {}", source.path, dest_path.display());
                     }
@@ -1242,6 +1335,7 @@ fn register_destination(
     dest_path: &Path,
     rel_path: &str,
     object_id: Option<i64>,
+    partial_hash: &str,
 ) -> Result<()> {
     let meta = fs::metadata(dest_path)
         .with_context(|| format!("Failed to read metadata for registration: {}", dest_path.display()))?;
@@ -1254,12 +1348,26 @@ fn register_destination(
         .expect("Time went backwards")
         .as_secs() as i64;
 
-    conn.execute(
-        "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime,
-         object_id, basis_rev, scanned_at, last_seen_at, present)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1)",
-        params![archive_root_id, rel_path, device, inode, size, mtime, object_id, now, now],
+    // First try to update an existing stale record (present=0).
+    // This preserves the row and increments basis_rev to reflect new content at this path.
+    let updated = conn.execute(
+        "UPDATE sources SET device = ?, inode = ?, size = ?, mtime = ?, partial_hash = ?,
+         object_id = ?, basis_rev = basis_rev + 1, scanned_at = ?, last_seen_at = ?, present = 1
+         WHERE root_id = ? AND rel_path = ? AND present = 0",
+        params![device, inode, size, mtime, partial_hash, object_id, now, now, archive_root_id, rel_path],
     )?;
+
+    if updated == 0 {
+        // No stale record exists, insert new record.
+        // If a present=1 record exists, this fails with UNIQUE constraint
+        // (pre-flight check should have caught this).
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
+             object_id, basis_rev, scanned_at, last_seen_at, present)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1)",
+            params![archive_root_id, rel_path, device, inode, size, mtime, partial_hash, object_id, now, now],
+        )?;
+    }
     Ok(())
 }
 
@@ -1270,6 +1378,7 @@ fn register_destination(
     dest_path: &Path,
     rel_path: &str,
     object_id: Option<i64>,
+    partial_hash: &str,
 ) -> Result<()> {
     let meta = fs::metadata(dest_path)
         .with_context(|| format!("Failed to read metadata for registration: {}", dest_path.display()))?;
@@ -1284,13 +1393,26 @@ fn register_destination(
         .expect("Time went backwards")
         .as_secs() as i64;
 
-    // No device/inode on non-Unix
-    conn.execute(
-        "INSERT INTO sources (root_id, rel_path, size, mtime,
-         object_id, basis_rev, scanned_at, last_seen_at, present)
-         VALUES (?, ?, ?, ?, ?, 0, ?, ?, 1)",
-        params![archive_root_id, rel_path, size, mtime, object_id, now, now],
+    // First try to update an existing stale record (present=0).
+    // This preserves the row and increments basis_rev to reflect new content at this path.
+    let updated = conn.execute(
+        "UPDATE sources SET size = ?, mtime = ?, partial_hash = ?,
+         object_id = ?, basis_rev = basis_rev + 1, scanned_at = ?, last_seen_at = ?, present = 1
+         WHERE root_id = ? AND rel_path = ? AND present = 0",
+        params![size, mtime, partial_hash, object_id, now, now, archive_root_id, rel_path],
     )?;
+
+    if updated == 0 {
+        // No stale record exists, insert new record.
+        // If a present=1 record exists, this fails with UNIQUE constraint
+        // (pre-flight check should have caught this).
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, size, mtime, partial_hash,
+             object_id, basis_rev, scanned_at, last_seen_at, present)
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 1)",
+            params![archive_root_id, rel_path, size, mtime, partial_hash, object_id, now, now],
+        )?;
+    }
     Ok(())
 }
 
