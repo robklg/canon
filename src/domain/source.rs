@@ -26,6 +26,51 @@
 
 use super::scope::ScopeMatch;
 
+/// Input data for inserting a new source (destination) record.
+///
+/// This struct represents the data needed to register a file that has been
+/// copied/moved to an archive. It contains only the fields that the caller
+/// provides; database-generated fields (id, timestamps) are handled by the
+/// repo layer.
+///
+/// ## Usage
+///
+/// ```ignore
+/// use canon::domain::source::NewSource;
+///
+/// let new_source = NewSource {
+///     root_id: archive_root_id,
+///     rel_path: "2024/photo.jpg".to_string(),
+///     size: metadata.len() as i64,
+///     mtime: metadata.mtime(),
+///     partial_hash: computed_hash,
+///     object_id: Some(obj_id),
+///     device: Some(metadata.dev()),
+///     inode: Some(metadata.ino()),
+/// };
+///
+/// let created = repo::source::insert_destination(conn, &new_source)?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct NewSource {
+    /// ID of the root this source belongs to
+    pub root_id: i64,
+    /// Path relative to root
+    pub rel_path: String,
+    /// File size in bytes
+    pub size: i64,
+    /// Modification time (Unix timestamp)
+    pub mtime: i64,
+    /// Partial hash for integrity validation
+    pub partial_hash: String,
+    /// ID of the content object (should always be Some for destinations)
+    pub object_id: Option<i64>,
+    /// Device ID (Unix only, for move detection)
+    pub device: Option<i64>,
+    /// Inode number (Unix only, for move detection)
+    pub inode: Option<i64>,
+}
+
 /// Core source data — sufficient for most read operations.
 ///
 /// This struct contains all fields needed for source queries, including

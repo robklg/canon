@@ -173,6 +173,7 @@ In `repo/db.rs`:
 
 In `domain/source.rs`:
 - `Source` struct - The authoritative definition of a source with all fields
+- `NewSource` struct - Input data for inserting a new source (destination) record
 - `source.path()` - Compute full absolute path (handles empty rel_path)
 - `source.matches_scope(&scopes)` - Check if source is under given paths
 - `source.is_excluded()` - Check exclusion (source-level OR object-level)
@@ -183,6 +184,7 @@ In `repo/source.rs`:
 - `batch_fetch_by_roots(conn, root_ids)` - Fetch all present sources for roots
 - `batch_fetch_by_ids(conn, source_ids)` - Fetch specific sources by ID
 - `fetch_source_ids_by_roots(conn, root_ids)` - Get just IDs (for pagination)
+- `insert_destination(conn, &NewSource)` - Insert/update destination source, returns complete `Source`
 - Uses `BATCH_SIZE = 1000` for SQL IN clause chunking
 
 In `domain/fact.rs`:

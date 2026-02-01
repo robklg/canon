@@ -24,4 +24,4 @@ pub use root::{
     resolve_root_path, resolve_root_path_any, Root, RootSpec,
 };
 pub use scope::{build_scope_clause, ScopeMatch};
-pub use source::Source;
+pub use source::{NewSource, Source};

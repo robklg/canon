@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cluster::{LockEntry, ManifestConfig};
-use crate::repo::{Connection, Db};
+use crate::repo::{self, Connection, Db};
 use crate::domain::root::parse_root_spec;
+use crate::domain::source::NewSource;
 use crate::domain::path::path_strip_prefix;
 use crate::exclude;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
@@ -1213,7 +1214,8 @@ fn process_source(
             fs::copy(src_path, &dest_path)
                 .with_context(|| format!("Failed to copy {} to {}", source.path, dest_path.display()))?;
             preserve_metadata(&dest_path, &src_meta)?;
-            register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id, &source.partial_hash)?;
+            let new_source = build_new_source(&dest_path, archive_root_id, &archive_rel_path, source.object_id, &source.partial_hash)?;
+            repo::source::insert_destination(conn, &new_source)?;
             if options.verbose {
                 println!("Copied: {} -> {}", source.path, dest_path.display());
             }
@@ -1266,7 +1268,8 @@ fn process_source(
                     // Mark old source as not present (file was deleted)
                     mark_source_not_present(conn, source.id)?;
                     // Register new destination (new inode on different device)
-                    register_destination(conn, archive_root_id, &dest_path, &archive_rel_path, source.object_id, &source.partial_hash)?;
+                    let new_source = build_new_source(&dest_path, archive_root_id, &archive_rel_path, source.object_id, &source.partial_hash)?;
+                    repo::source::insert_destination(conn, &new_source)?;
                     if options.verbose {
                         println!("Moved: {} -> {}", source.path, dest_path.display());
                     }
@@ -1328,91 +1331,62 @@ fn mark_source_not_present(conn: &Connection, source_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Build a NewSource from destination file metadata for registration.
+///
+/// Reads metadata from the destination file and constructs a NewSource
+/// struct suitable for passing to repo::source::insert_destination().
 #[cfg(unix)]
-fn register_destination(
-    conn: &Connection,
-    archive_root_id: i64,
+fn build_new_source(
     dest_path: &Path,
+    archive_root_id: i64,
     rel_path: &str,
     object_id: Option<i64>,
     partial_hash: &str,
-) -> Result<()> {
+) -> Result<NewSource> {
     let meta = fs::metadata(dest_path)
         .with_context(|| format!("Failed to read metadata for registration: {}", dest_path.display()))?;
-    let device = meta.dev() as i64;
-    let inode = meta.ino() as i64;
-    let size = meta.size() as i64;
-    let mtime = meta.mtime();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64;
 
-    // First try to update an existing stale record (present=0).
-    // This preserves the row and increments basis_rev to reflect new content at this path.
-    let updated = conn.execute(
-        "UPDATE sources SET device = ?, inode = ?, size = ?, mtime = ?, partial_hash = ?,
-         object_id = ?, basis_rev = basis_rev + 1, scanned_at = ?, last_seen_at = ?, present = 1
-         WHERE root_id = ? AND rel_path = ? AND present = 0",
-        params![device, inode, size, mtime, partial_hash, object_id, now, now, archive_root_id, rel_path],
-    )?;
-
-    if updated == 0 {
-        // No stale record exists, insert new record.
-        // If a present=1 record exists, this fails with UNIQUE constraint
-        // (pre-flight check should have caught this).
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
-             object_id, basis_rev, scanned_at, last_seen_at, present)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1)",
-            params![archive_root_id, rel_path, device, inode, size, mtime, partial_hash, object_id, now, now],
-        )?;
-    }
-    Ok(())
+    Ok(NewSource {
+        root_id: archive_root_id,
+        rel_path: rel_path.to_string(),
+        size: meta.size() as i64,
+        mtime: meta.mtime(),
+        partial_hash: partial_hash.to_string(),
+        object_id,
+        device: Some(meta.dev() as i64),
+        inode: Some(meta.ino() as i64),
+    })
 }
 
+/// Build a NewSource from destination file metadata for registration.
+///
+/// Non-Unix version: device and inode are not available.
 #[cfg(not(unix))]
-fn register_destination(
-    conn: &Connection,
-    archive_root_id: i64,
+fn build_new_source(
     dest_path: &Path,
+    archive_root_id: i64,
     rel_path: &str,
     object_id: Option<i64>,
     partial_hash: &str,
-) -> Result<()> {
+) -> Result<NewSource> {
     let meta = fs::metadata(dest_path)
         .with_context(|| format!("Failed to read metadata for registration: {}", dest_path.display()))?;
-    let size = meta.len() as i64;
+
     let mtime = meta.modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64;
 
-    // First try to update an existing stale record (present=0).
-    // This preserves the row and increments basis_rev to reflect new content at this path.
-    let updated = conn.execute(
-        "UPDATE sources SET size = ?, mtime = ?, partial_hash = ?,
-         object_id = ?, basis_rev = basis_rev + 1, scanned_at = ?, last_seen_at = ?, present = 1
-         WHERE root_id = ? AND rel_path = ? AND present = 0",
-        params![size, mtime, partial_hash, object_id, now, now, archive_root_id, rel_path],
-    )?;
-
-    if updated == 0 {
-        // No stale record exists, insert new record.
-        // If a present=1 record exists, this fails with UNIQUE constraint
-        // (pre-flight check should have caught this).
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, size, mtime, partial_hash,
-             object_id, basis_rev, scanned_at, last_seen_at, present)
-             VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 1)",
-            params![archive_root_id, rel_path, size, mtime, partial_hash, object_id, now, now],
-        )?;
-    }
-    Ok(())
+    Ok(NewSource {
+        root_id: archive_root_id,
+        rel_path: rel_path.to_string(),
+        size: meta.len() as i64,
+        mtime,
+        partial_hash: partial_hash.to_string(),
+        object_id,
+        device: None,
+        inode: None,
+    })
 }
 
