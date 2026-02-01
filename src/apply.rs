@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cluster::{LockEntry, ManifestConfig};
 use crate::repo::{self, Connection, Db};
+use crate::domain::fact::FactEntry;
 use crate::domain::root::parse_root_spec;
 use crate::domain::source::NewSource;
 use crate::domain::path::path_strip_prefix;
@@ -52,64 +53,16 @@ pub struct ApplyOptions {
     pub yes: bool,
 }
 
-/// Fetch a fact value with its proper type from the database
-fn fetch_typed_fact(conn: &Connection, source_id: i64, object_id: Option<i64>, key: &str) -> Result<Option<FactValue>> {
-    // Check source facts first
-    let row: Option<(Option<String>, Option<f64>, Option<i64>)> = conn
-        .query_row(
-            "SELECT value_text, value_num, value_time
-             FROM facts WHERE entity_type = 'source' AND entity_id = ? AND key = ?",
-            params![source_id, key],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
-
-    if let Some((text, num, time)) = row {
-        if let Some(t) = text {
-            return Ok(Some(FactValue::Text(t)));
-        }
-        if let Some(n) = num {
-            return Ok(Some(FactValue::Num(n)));
-        }
-        if let Some(ts) = time {
-            return Ok(Some(FactValue::Time(ts)));
-        }
-    }
-
-    // Check object facts if source has object_id
-    if let Some(obj_id) = object_id {
-        let row: Option<(Option<String>, Option<f64>, Option<i64>)> = conn
-            .query_row(
-                "SELECT value_text, value_num, value_time
-                 FROM facts WHERE entity_type = 'object' AND entity_id = ? AND key = ?",
-                params![obj_id, key],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
-
-        if let Some((text, num, time)) = row {
-            if let Some(t) = text {
-                return Ok(Some(FactValue::Text(t)));
-            }
-            if let Some(n) = num {
-                return Ok(Some(FactValue::Num(n)));
-            }
-            if let Some(ts) = time {
-                return Ok(Some(FactValue::Time(ts)));
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-/// Build an EvalContext for a source using cached root paths
+/// Build an EvalContext for a source using pre-fetched facts and cached root paths.
+///
+/// Uses the all_facts map (built via repo::fact::batch_fetch_for_sources) instead of
+/// per-source queries. This follows the same pattern as cluster.rs.
 fn build_eval_context(
-    conn: &Connection,
     source: &LockEntry,
     needed_keys: &[String],
     scope_prefix: Option<&str>,
     root_paths: &HashMap<i64, String>,
+    all_facts: &HashMap<i64, Vec<FactEntry>>,
 ) -> Result<EvalContext> {
     let mut ctx = EvalContext::new();
 
@@ -133,15 +86,18 @@ fn build_eval_context(
     // Set scope prefix if provided
     ctx.set_scope_prefix(scope_prefix.map(|s| s.to_string()));
 
-    // Fetch needed facts from database with proper types
-    for key in needed_keys {
-        // Skip derived facts (handled by EvalContext)
-        if key.starts_with("source.") || key.starts_with("scope.") || key == "object.hash" {
-            continue;
-        }
+    // Look up facts from pre-fetched map (no per-source queries)
+    if let Some(source_facts) = all_facts.get(&source.id) {
+        for key in needed_keys {
+            // Skip derived facts (handled by EvalContext)
+            if key.starts_with("source.") || key.starts_with("scope.") || key == "object.hash" {
+                continue;
+            }
 
-        if let Some(value) = fetch_typed_fact(conn, source.id, source.object_id, key)? {
-            ctx.set_fact(key, value);
+            // Find the fact with matching key in this source's facts
+            if let Some(entry) = source_facts.iter().find(|f| f.key == *key) {
+                ctx.set_fact(key, entry.value.clone());
+            }
         }
     }
 
@@ -159,14 +115,14 @@ fn evaluate_pattern(
     source: &LockEntry,
     needed_keys: &[String],
     scope_prefix: Option<&str>,
-    conn: &Connection,
     root_paths: &HashMap<i64, String>,
+    all_facts: &HashMap<i64, Vec<FactEntry>>,
 ) -> Result<String> {
-    let ctx = build_eval_context(conn, source, needed_keys, scope_prefix, root_paths)?;
+    let ctx = build_eval_context(source, needed_keys, scope_prefix, root_paths, all_facts)?;
     expr::evaluate(pattern, &ctx)
 }
 
-pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> {
+pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> {
     // Platform checks: --rename and --move are Unix-only
     #[cfg(not(unix))]
     if options.transfer_mode == TransferMode::Rename || options.transfer_mode == TransferMode::Move {
@@ -217,13 +173,13 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         );
     }
 
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     // Early preflight: Check for unhashed sources in manifest
     check_unhashed_sources(&sources)?;
 
     // Early preflight: Check archive has complete hash coverage
-    check_archive_hash_coverage(conn, config.output.archive_root_id)?;
+    check_archive_hash_coverage(&*conn, config.output.archive_root_id)?;
 
     // Parse the pattern once upfront
     let pattern = expr::parse_pattern(&config.output.pattern)
@@ -233,11 +189,9 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     // Get scope prefix from config if available
     let scope_prefix = config.meta.scope.as_deref();
 
-    // Cache all root paths (single query, avoids per-source lookups)
-    let root_paths: HashMap<i64, String> = conn
-        .prepare("SELECT id, path FROM roots")?
-        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
-        .collect::<Result<HashMap<_, _>, _>>()?;
+    // Cache all root paths (single query via repo layer)
+    let roots = repo::root::fetch_all(conn)?;
+    let root_paths: HashMap<i64, String> = roots.iter().map(|r| (r.id, r.path.clone())).collect();
 
     // Look up archive root path from manifest's archive_root_id
     let archive_root_path: String = conn
@@ -267,13 +221,30 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         return Ok(());
     }
 
+    // Batch fetch facts for pattern evaluation (eliminates N+1 queries)
+    // Fetch only the keys needed by the pattern, one batch query per key
+    let source_ids: Vec<i64> = filtered_sources.iter().map(|s| s.id).collect();
+    let mut all_facts: HashMap<i64, Vec<FactEntry>> = HashMap::new();
+    for key in &needed_keys {
+        // Skip derived keys (handled by EvalContext, not from facts table)
+        if key.starts_with("source.") || key.starts_with("scope.") || key == "object.hash" {
+            continue;
+        }
+        let key_facts = repo::fact::batch_fetch_key_for_sources(conn, &source_ids, key)?;
+        for (source_id, entry_opt) in key_facts {
+            if let Some(entry) = entry_opt {
+                all_facts.entry(source_id).or_default().push(entry);
+            }
+        }
+    }
+
     // Pre-flight checks (mandatory, always run)
     eprintln!("Checking destination write permissions...");
     check_destination_writable(&base_dir)?;
 
     // Validate all pattern expansions succeed before any file operations
     eprint!("Validating pattern expansions for {} sources...", filtered_sources.len());
-    let expansion_failures = validate_pattern_expansions(&filtered_sources, &pattern, &needed_keys, scope_prefix, conn, &root_paths);
+    let expansion_failures = validate_pattern_expansions(&filtered_sources, &pattern, &needed_keys, scope_prefix, &root_paths, &all_facts);
     if !expansion_failures.is_empty() {
         eprintln!();
         eprintln!(
@@ -298,7 +269,7 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     } else {
         eprintln!();
     }
-    let access_check = check_destination_collisions_filtered(&filtered_sources, &pattern, &needed_keys, scope_prefix, &base_dir, conn, &root_paths, options.dry_run)?;
+    let access_check = check_destination_collisions_filtered(&filtered_sources, &pattern, &needed_keys, scope_prefix, &base_dir, &root_paths, &all_facts, options.dry_run)?;
 
     if !access_check.unreadable.is_empty() {
         eprintln!(
@@ -328,7 +299,7 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
     // Check for stale destination records (present=1 but file deleted, archive not rescanned)
     eprint!("Checking for stale destination records...");
     let stale_records = check_stale_destination_records(
-        conn,
+        &*conn,
         &filtered_sources,
         &pattern,
         &needed_keys,
@@ -336,6 +307,7 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
         &config.output.base_dir,
         config.output.archive_root_id,
         &root_paths,
+        &all_facts,
     )?;
 
     if !stale_records.is_empty() {
@@ -473,9 +445,10 @@ pub fn run(db: &Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> 
             &base_dir,
             &config.output.base_dir,
             options,
-            conn,
+            &*conn,
             config.output.archive_root_id,
             &root_paths,
+            &all_facts,
         ) {
             Ok(action) => match action {
                 ApplyAction::Copied => stats.copied += 1,
@@ -679,8 +652,8 @@ fn validate_pattern_expansions(
     pattern: &Pattern,
     needed_keys: &[String],
     scope_prefix: Option<&str>,
-    conn: &Connection,
     root_paths: &HashMap<i64, String>,
+    all_facts: &HashMap<i64, Vec<FactEntry>>,
 ) -> Vec<(String, String)> {
     let mut failures = Vec::new();
     let total = sources.len();
@@ -689,7 +662,7 @@ fn validate_pattern_expansions(
     for (i, source) in sources.iter().enumerate() {
         progress.update(i);
 
-        if let Err(e) = evaluate_pattern(pattern, source, needed_keys, scope_prefix, conn, root_paths) {
+        if let Err(e) = evaluate_pattern(pattern, source, needed_keys, scope_prefix, root_paths, all_facts) {
             failures.push((source.path.clone(), e.to_string()));
         }
     }
@@ -705,8 +678,8 @@ fn check_destination_collisions_filtered(
     needed_keys: &[String],
     scope_prefix: Option<&str>,
     base_dir: &Path,
-    conn: &Connection,
     root_paths: &HashMap<i64, String>,
+    all_facts: &HashMap<i64, Vec<FactEntry>>,
     dry_run: bool,
 ) -> Result<SourceAccessCheck> {
     let mut dest_to_sources: HashMap<PathBuf, Vec<String>> = HashMap::new();
@@ -738,7 +711,7 @@ fn check_destination_collisions_filtered(
         }
 
         // Evaluate pattern to get destination path
-        let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, conn, root_paths)?;
+        let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, root_paths, all_facts)?;
         let dest_path = base_dir.join(&dest_rel);
 
         dest_to_sources
@@ -774,6 +747,7 @@ fn check_stale_destination_records(
     base_dir_rel: &str,
     archive_root_id: i64,
     root_paths: &HashMap<i64, String>,
+    all_facts: &HashMap<i64, Vec<FactEntry>>,
 ) -> Result<Vec<String>> {
     let mut stale_paths = Vec::new();
     let total = sources.len();
@@ -784,7 +758,7 @@ fn check_stale_destination_records(
     for (i, source) in sources.iter().enumerate() {
         progress.update(i);
 
-        let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, conn, root_paths)?;
+        let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, root_paths, all_facts)?;
         let archive_rel_path = if base_dir_rel.is_empty() {
             dest_rel
         } else {
@@ -1152,6 +1126,7 @@ fn process_source(
     conn: &Connection,
     archive_root_id: i64,
     root_paths: &HashMap<i64, String>,
+    all_facts: &HashMap<i64, Vec<FactEntry>>,
 ) -> Result<ApplyAction> {
     let src_path = Path::new(&source.path);
 
@@ -1164,7 +1139,7 @@ fn process_source(
     }
 
     // Evaluate pattern to get destination path
-    let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, conn, root_paths)?;
+    let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, root_paths, all_facts)?;
     let dest_path = base_dir.join(&dest_rel);
 
     // Compute relative path within archive root for registration

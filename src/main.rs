@@ -656,7 +656,7 @@ fn main() -> anyhow::Result<()> {
                 transfer_mode,
                 yes,
             };
-            apply::run(&db, &manifest, &options)?;
+            apply::run(&mut db, &manifest, &options)?;
         }
         Commands::Exclude { action } => match action {
             ExcludeAction::Set { paths, filters, id, dry_run } => {

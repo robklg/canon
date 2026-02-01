@@ -170,6 +170,56 @@ pub fn insert_destination(conn: &Connection, new: &NewSource) -> Result<Source>
 - Write functions may reuse existing fetch helpers internally
 - Tests can assert on returned object completeness
 
+### D9: Use established repo batch functions — no command-local caching types
+
+**Decision:** Command modules use existing `repo::` batch fetch functions directly and pass their return types through. Do not introduce command-local type aliases or wrapper functions for caching.
+
+**Rationale:**
+- The repo layer already provides well-tested batch fetch functions (`batch_fetch_for_sources`, `batch_fetch_by_roots`, etc.)
+- Command-local caching types (e.g., `type FactCache = HashMap<...>`) duplicate infrastructure concerns
+- Command-local wrapper functions that transform repo results add indirection without value
+- The established pattern (see `cluster.rs`) fetches once and threads the result through
+
+**Established pattern:**
+```rust
+// DO: Use repo function directly, pass result through
+let all_facts = repo::fact::batch_fetch_for_sources(conn, &source_ids)?;
+// ... pass all_facts to functions that need it
+
+// DO: Combine multiple repo calls into a single map (when fetching per-key)
+let mut all_facts: HashMap<i64, Vec<FactEntry>> = HashMap::new();
+for key in &needed_keys {
+    let key_facts = repo::fact::batch_fetch_key_for_sources(conn, &source_ids, key)?;
+    for (source_id, entry_opt) in key_facts {
+        if let Some(entry) = entry_opt {
+            all_facts.entry(source_id).or_default().push(entry);
+        }
+    }
+}
+
+// DON'T: Create command-local type aliases or wrapper functions
+type FactCache = HashMap<i64, HashMap<String, FactValue>>;  // Avoid
+fn batch_fetch_facts(...) -> FactCache { ... }              // Avoid
+```
+
+**Implications:**
+- Functions accept `&HashMap<i64, Vec<FactEntry>>` (matching repo return structure)
+- Combining repo results inline is fine; creating abstractions around it is not
+- Lookups happen at point of use, not via intermediate cache structure
+
+### D10: Defer structural refactors that eliminate redundant computation
+
+**Decision:** When batch fetching eliminates N+1 queries but redundant in-memory computation remains (e.g., pattern evaluation happening 4x per source), defer structural refactors unless profiling shows a bottleneck.
+
+**Rationale:**
+- N+1 database queries are the real performance problem (I/O bound)
+- Redundant CPU work (string operations, HashMap lookups) is typically negligible
+- Structural refactors (e.g., pre-computing all destination paths upfront) are higher risk
+- Can revisit when improving separation of concerns in command modules
+
+**Example deferred refactor:**
+`apply.rs` evaluates patterns 4 times per source (validate, collision check, stale check, apply). Pre-computing paths once would be cleaner but requires larger structural change. Acceptable to defer.
+
 ---
 
 ## Validation Responsibilities
@@ -209,18 +259,25 @@ pub fn insert_destination(conn: &Connection, new: &NewSource) -> Result<Source>
 
 ### Phase B: Read Batch Migration
 
-**Status:** pending
+**Status:** in progress
 
 **Goal:** Eliminate N+1 query patterns using existing repo functions.
 
 **Scope:**
-- Batch fact fetching: Replace per-source `fetch_typed_fact()` with `repo::fact::batch_fetch_key_for_sources()`
+- Root path lookups: Replace inline SQL with `repo::root::fetch_all()`
+- Batch fact fetching: Replace per-source `fetch_typed_fact()` with per-key batch fetching
+  - Use `repo::fact::batch_fetch_key_for_sources()` once per pattern key
+  - Fetch only the facts needed by the manifest pattern (data minimization)
+  - Combine results into `HashMap<i64, Vec<FactEntry>>` keyed by source_id
+  - Thread combined map through functions (per D9 — no command-local wrapper types)
+  - K queries for K pattern keys is acceptable (K is typically 2-5)
+- Change `apply::run` signature to `&mut Db` (consistent with `cluster::generate`)
 - Batch archive conflict checking (approach per D3 — decision deferred)
-- Root path lookups: Use `repo::root::fetch_all()` for consistency
 
 **Non-goals:**
 - Suspended root checks (acceptable N+1 for validation)
 - Changing `LockEntry` structure or manifest format
+- Eliminating redundant pattern evaluation (per D10 — deferred)
 
 **Dependencies:** Phase A complete (establishes the working pattern)
 
