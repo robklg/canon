@@ -37,9 +37,9 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 
 **Repository Layer** (`src/repo/`) - Database access:
 - `db.rs` - Connection, schema, transactions (`Db`, `open_with_options()`)
-- `source.rs` - Source batch fetching (`batch_fetch_by_roots()`, `batch_fetch_by_ids()`)
+- `source.rs` - Source batch fetching and writes (`batch_fetch_by_roots()`, `insert_destination()`)
 - `root.rs` - Root batch fetching (`fetch_all()`, `batch_fetch_by_ids()`)
-- `object.rs` - Object batch fetching, archive detection (`batch_check_archived()`)
+- `object.rs` - Object batch fetching, archive detection (`batch_check_archived()`, `batch_find_archive_info_by_hash()`)
 - `fact.rs` - Fact batch fetching (`batch_fetch_for_sources()`, `batch_fetch_key_for_sources()`)
 
 **Expression System** (`src/expr/`) - Pattern and filter handling:
@@ -203,7 +203,8 @@ In `domain/object.rs`:
 In `repo/object.rs`:
 - `batch_fetch_by_ids(conn, object_ids)` - Fetch objects by ID (returns `HashMap<i64, Object>`)
 - `batch_check_archived(conn, object_ids, archive_root_id)` - Check which objects are in archive(s) (returns `HashSet<i64>`)
-- `batch_find_archive_paths(conn, object_ids)` - Get archive paths for objects (returns `HashMap<i64, Vec<String>>`)
+- `batch_find_archive_paths(conn, object_ids)` - Get archive paths for objects by object_id (returns `HashMap<i64, Vec<String>>`)
+- `batch_find_archive_info_by_hash(conn, hash_values)` - Get archive info by content hash for manifest workflows (returns `HashMap<String, Vec<(i64, String)>>` — archive_root_id + path)
 - Uses `BATCH_SIZE = 1000` for SQL IN clause chunking
 
 In `expr/filter.rs`:

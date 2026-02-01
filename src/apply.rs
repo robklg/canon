@@ -796,6 +796,13 @@ fn check_stale_destination_records(
     Ok(stale_paths)
 }
 
+/// Check for duplicate content that already exists in archives.
+///
+/// Returns two categories of conflicts:
+/// - `in_dest_archive`: Sources whose content is already in the destination archive
+/// - `in_other_archives`: Sources whose content is in a different archive
+///
+/// Uses batch fetching to check all hashes in a single query (eliminates N+1).
 fn check_archive_conflicts_filtered(
     conn: &Connection,
     sources: &[&LockEntry],
@@ -806,44 +813,34 @@ fn check_archive_conflicts_filtered(
         in_other_archives: Vec::new(),
     };
 
-    let total = sources.len();
-    let progress = Progress::new(total);
+    // Collect all hash values that need checking
+    let hash_values: Vec<&str> = sources
+        .iter()
+        .filter_map(|s| s.hash_value.as_deref())
+        .collect();
 
-    for (i, source) in sources.iter().enumerate() {
-        progress.update(i);
+    if hash_values.is_empty() {
+        return Ok(conflicts);
+    }
 
+    // Batch fetch archive info for all hashes (eliminates N+1 queries)
+    let archive_info = repo::object::batch_find_archive_info_by_hash(conn, &hash_values)?;
+
+    // Check each source against the batch results
+    for source in sources {
         if let Some(ref hash) = source.hash_value {
-            // Check if this hash exists in any archive
-            let archive_match: Option<(i64, String, String)> = conn
-                .query_row(
-                    "SELECT r.id, r.path, s.rel_path
-                     FROM sources s
-                     JOIN roots r ON s.root_id = r.id
-                     JOIN objects o ON s.object_id = o.id
-                     WHERE r.role = 'archive' AND o.hash_value = ? AND s.present = 1
-                     LIMIT 1",
-                    [hash],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?;
-
-            if let Some((archive_id, root_path, rel_path)) = archive_match {
-                let archive_path = if rel_path.is_empty() {
-                    root_path
-                } else {
-                    format!("{}/{}", root_path, rel_path)
-                };
-
-                if archive_id == dest_archive_id {
-                    conflicts.in_dest_archive.push((source.path.clone(), archive_path));
-                } else {
-                    conflicts.in_other_archives.push((source.path.clone(), archive_path));
+            if let Some(info_list) = archive_info.get(hash) {
+                // Use first match (consistent with previous LIMIT 1 behavior)
+                if let Some(&(archive_id, ref archive_path)) = info_list.first() {
+                    if archive_id == dest_archive_id {
+                        conflicts.in_dest_archive.push((source.path.clone(), archive_path.clone()));
+                    } else {
+                        conflicts.in_other_archives.push((source.path.clone(), archive_path.clone()));
+                    }
                 }
             }
         }
     }
-
-    progress.finish();
 
     Ok(conflicts)
 }

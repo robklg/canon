@@ -55,10 +55,11 @@ These decisions guide this spec and inform future refactoring work.
 
 **Rationale:** `LockEntry.hash_value` is the manifest's content key. Converting to `object_id` just for repo function calls adds complexity.
 
-**Implications for future work:**
-- Archive conflict checking should support lookup by hash (not just object_id)
-- Consider `batch_find_archive_paths_by_hash()` when migrating conflict checks
-- Two approaches exist: (A) hash-native function, (B) hash→object_id→paths. Decision deferred to Phase B.
+**Resolution (Phase B):** Chose Option A — hash-native function `batch_find_archive_info_by_hash()` that:
+- Takes hash values directly (no object_id lookup needed)
+- Returns `HashMap<String, Vec<(i64, String)>>` — archive_root_id + full_path per hash
+- Single query vs 2-step approach
+- Enables caller to distinguish destination archive from other archives
 
 ### D4: Domain types for write inputs
 
@@ -259,7 +260,7 @@ fn batch_fetch_facts(...) -> FactCache { ... }              // Avoid
 
 ### Phase B: Read Batch Migration
 
-**Status:** in progress
+**Status:** completed
 
 **Goal:** Eliminate N+1 query patterns using existing repo functions.
 
@@ -272,7 +273,7 @@ fn batch_fetch_facts(...) -> FactCache { ... }              // Avoid
   - Thread combined map through functions (per D9 — no command-local wrapper types)
   - K queries for K pattern keys is acceptable (K is typically 2-5)
 - Change `apply::run` signature to `&mut Db` (consistent with `cluster::generate`)
-- Batch archive conflict checking (approach per D3 — decision deferred)
+- Batch archive conflict checking via `batch_find_archive_info_by_hash()` (D3 resolved)
 
 **Non-goals:**
 - Suspended root checks (acceptable N+1 for validation)
@@ -314,9 +315,15 @@ For reference when planning future phases. Not in scope for this spec.
 
 | Test Case | Description |
 |-----------|-------------|
-| `batch_fact_fetch_matches_single` | Batch result equals N single fetches |
-| `batch_fact_fetch_large` | >1000 sources (chunking boundary) |
-| `archive_conflict_batch` | Multiple sources, dest vs other archives |
+| `batch_find_archive_info_by_hash_empty_returns_empty` | Empty input returns empty map |
+| `batch_find_archive_info_by_hash_single_hash_single_archive` | Basic single hash lookup |
+| `batch_find_archive_info_by_hash_returns_archive_root_id` | Verify archive_root_id returned for dest vs other |
+| `batch_find_archive_info_by_hash_multiple_archives_per_hash` | Same hash in multiple archives |
+| `batch_find_archive_info_by_hash_empty_rel_path` | Handles sources at archive root |
+| `batch_find_archive_info_by_hash_excludes_non_archive_roots` | Only archive-role roots |
+| `batch_find_archive_info_by_hash_excludes_non_present` | Only present=1 sources |
+| `batch_find_archive_info_by_hash_not_found_hashes_excluded` | Missing hashes not in result |
+| `batch_find_archive_info_by_hash_handles_large_hash_sets` | >1000 hashes (chunking boundary) |
 
 ---
 

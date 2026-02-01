@@ -23,8 +23,11 @@
 //! // Check which objects are in a specific archive
 //! let in_archive = object_repo::batch_check_archived(conn, &object_ids, Some(archive_root_id))?;
 //!
-//! // Get archive paths for objects
+//! // Get archive paths for objects (by object_id)
 //! let paths = object_repo::batch_find_archive_paths(conn, &object_ids)?;
+//!
+//! // Get archive info by content hash (for manifest workflows)
+//! let info = object_repo::batch_find_archive_info_by_hash(conn, &["abc123", "def456"])?;
 //! ```
 
 use std::collections::{HashMap, HashSet};
@@ -201,6 +204,80 @@ pub fn batch_find_archive_paths(
                 format!("{}/{}", root_path, rel_path)
             };
             result.entry(object_id).or_default().push(full_path);
+        }
+    }
+
+    Ok(result)
+}
+
+/// Find archive info for objects identified by content hash.
+///
+/// This function is designed for manifest workflows where `hash_value` is the
+/// content identifier (see D3 in write-infrastructure spec). It returns archive
+/// location information needed for conflict detection.
+///
+/// # Behavior
+/// - Looks up objects by hash_value (sha256), finds all archive copies
+/// - Returns the archive root_id along with the full path
+/// - Only includes present sources in archive-role roots
+/// - Handles large inputs via chunking (BATCH_SIZE)
+///
+/// # Returns
+/// Map from hash_value to list of (archive_root_id, full_path) tuples.
+/// Hashes not found in any archive are not included in the result.
+/// Results are ordered by archive root_id, then rel_path within each hash.
+///
+/// # Caller Responsibilities
+/// - Filter out sources without hash values before calling
+/// - Use the archive_root_id to distinguish destination archive from others
+pub fn batch_find_archive_info_by_hash(
+    conn: &Connection,
+    hash_values: &[&str],
+) -> Result<HashMap<String, Vec<(i64, String)>>> {
+    if hash_values.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut result: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+
+    for chunk in hash_values.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT o.hash_value, r.id, r.path, s.rel_path
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             JOIN objects o ON s.object_id = o.id
+             WHERE r.role = 'archive' AND s.present = 1
+               AND o.hash_value IN ({})
+             ORDER BY o.hash_value, r.id, s.rel_path",
+            placeholders.join(",")
+        );
+
+        let params: Vec<rusqlite::types::Value> = chunk
+            .iter()
+            .map(|&h| rusqlite::types::Value::from(h.to_string()))
+            .collect();
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            let hash_value: String = row.get(0)?;
+            let archive_root_id: i64 = row.get(1)?;
+            let root_path: String = row.get(2)?;
+            let rel_path: String = row.get(3)?;
+            Ok((hash_value, archive_root_id, root_path, rel_path))
+        })?;
+
+        for row in rows {
+            let (hash_value, archive_root_id, root_path, rel_path) = row?;
+            let full_path = if rel_path.is_empty() {
+                root_path
+            } else {
+                format!("{}/{}", root_path, rel_path)
+            };
+            result
+                .entry(hash_value)
+                .or_default()
+                .push((archive_root_id, full_path));
         }
     }
 
@@ -569,5 +646,166 @@ mod tests {
         let result = batch_find_archive_paths(&conn, &[obj_id]).unwrap();
 
         assert!(result.is_empty());
+    }
+
+    // =========================================================================
+    // batch_find_archive_info_by_hash tests
+    // =========================================================================
+
+    #[test]
+    fn batch_find_archive_info_by_hash_empty_returns_empty() {
+        let conn = setup_test_db();
+        let result = batch_find_archive_info_by_hash(&conn, &[]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn batch_find_archive_info_by_hash_single_hash_single_archive() {
+        let conn = setup_test_db();
+
+        // Setup: archive with source
+        let archive_id = insert_root(&conn, "/archive", "archive");
+        let obj_id = insert_object(&conn, "abc123", false);
+        insert_source(&conn, archive_id, "subdir/file.jpg", Some(obj_id), true);
+
+        let result = batch_find_archive_info_by_hash(&conn, &["abc123"]).unwrap();
+
+        assert_eq!(result.len(), 1);
+        let info = result.get("abc123").unwrap();
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].0, archive_id); // archive_root_id
+        assert_eq!(info[0].1, "/archive/subdir/file.jpg"); // full_path
+    }
+
+    #[test]
+    fn batch_find_archive_info_by_hash_returns_archive_root_id() {
+        let conn = setup_test_db();
+
+        // Setup: two archives with different content
+        let archive1_id = insert_root(&conn, "/archive1", "archive");
+        let archive2_id = insert_root(&conn, "/archive2", "archive");
+        let obj1_id = insert_object(&conn, "hash1", false);
+        let obj2_id = insert_object(&conn, "hash2", false);
+        insert_source(&conn, archive1_id, "file1.jpg", Some(obj1_id), true);
+        insert_source(&conn, archive2_id, "file2.jpg", Some(obj2_id), true);
+
+        let result = batch_find_archive_info_by_hash(&conn, &["hash1", "hash2"]).unwrap();
+
+        // Verify we can distinguish which archive each hash is in
+        let info1 = result.get("hash1").unwrap();
+        assert_eq!(info1[0].0, archive1_id);
+
+        let info2 = result.get("hash2").unwrap();
+        assert_eq!(info2[0].0, archive2_id);
+    }
+
+    #[test]
+    fn batch_find_archive_info_by_hash_multiple_archives_per_hash() {
+        let conn = setup_test_db();
+
+        // Setup: same hash in two archives
+        let archive1_id = insert_root(&conn, "/archive1", "archive");
+        let archive2_id = insert_root(&conn, "/archive2", "archive");
+        let obj_id = insert_object(&conn, "abc123", false);
+        insert_source(&conn, archive1_id, "file.jpg", Some(obj_id), true);
+        insert_source(&conn, archive2_id, "copy.jpg", Some(obj_id), true);
+
+        let result = batch_find_archive_info_by_hash(&conn, &["abc123"]).unwrap();
+
+        assert_eq!(result.len(), 1);
+        let info = result.get("abc123").unwrap();
+        assert_eq!(info.len(), 2);
+        // Ordered by archive root_id
+        assert_eq!(info[0].0, archive1_id);
+        assert_eq!(info[0].1, "/archive1/file.jpg");
+        assert_eq!(info[1].0, archive2_id);
+        assert_eq!(info[1].1, "/archive2/copy.jpg");
+    }
+
+    #[test]
+    fn batch_find_archive_info_by_hash_empty_rel_path() {
+        let conn = setup_test_db();
+
+        // Setup: source at root of archive (empty rel_path)
+        let archive_id = insert_root(&conn, "/archive", "archive");
+        let obj_id = insert_object(&conn, "abc123", false);
+        insert_source(&conn, archive_id, "", Some(obj_id), true);
+
+        let result = batch_find_archive_info_by_hash(&conn, &["abc123"]).unwrap();
+
+        let info = result.get("abc123").unwrap();
+        assert_eq!(info[0].1, "/archive"); // No trailing slash
+    }
+
+    #[test]
+    fn batch_find_archive_info_by_hash_excludes_non_archive_roots() {
+        let conn = setup_test_db();
+
+        // Setup: source in non-archive root
+        let source_root_id = insert_root(&conn, "/photos", "source");
+        let obj_id = insert_object(&conn, "abc123", false);
+        insert_source(&conn, source_root_id, "file.jpg", Some(obj_id), true);
+
+        let result = batch_find_archive_info_by_hash(&conn, &["abc123"]).unwrap();
+
+        // Should not include the source root
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn batch_find_archive_info_by_hash_excludes_non_present() {
+        let conn = setup_test_db();
+
+        // Setup: non-present source in archive
+        let archive_id = insert_root(&conn, "/archive", "archive");
+        let obj_id = insert_object(&conn, "abc123", false);
+        insert_source(&conn, archive_id, "file.jpg", Some(obj_id), false); // present=false
+
+        let result = batch_find_archive_info_by_hash(&conn, &["abc123"]).unwrap();
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn batch_find_archive_info_by_hash_not_found_hashes_excluded() {
+        let conn = setup_test_db();
+
+        // Setup: one hash exists, one doesn't
+        let archive_id = insert_root(&conn, "/archive", "archive");
+        let obj_id = insert_object(&conn, "exists", false);
+        insert_source(&conn, archive_id, "file.jpg", Some(obj_id), true);
+
+        let result = batch_find_archive_info_by_hash(&conn, &["exists", "missing"]).unwrap();
+
+        // Only the existing hash should be in results
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key("exists"));
+        assert!(!result.contains_key("missing"));
+    }
+
+    #[test]
+    fn batch_find_archive_info_by_hash_handles_large_hash_sets() {
+        let conn = setup_test_db();
+
+        // Setup: one archive with many objects
+        let archive_id = insert_root(&conn, "/archive", "archive");
+
+        // Create more than BATCH_SIZE hashes (1000+)
+        let mut hashes: Vec<String> = Vec::new();
+        for i in 0..1050 {
+            let hash = format!("hash_{}", i);
+            let obj_id = insert_object(&conn, &hash, false);
+            hashes.push(hash);
+            // Put every 10th object in archive
+            if i % 10 == 0 {
+                insert_source(&conn, archive_id, &format!("file_{}.jpg", i), Some(obj_id), true);
+            }
+        }
+
+        let hash_refs: Vec<&str> = hashes.iter().map(|s| s.as_str()).collect();
+        let result = batch_find_archive_info_by_hash(&conn, &hash_refs).unwrap();
+
+        // Should find 105 hashes (every 10th from 0 to 1040)
+        assert_eq!(result.len(), 105);
     }
 }
