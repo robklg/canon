@@ -1,6 +1,6 @@
 [package]
 name = "canon-archive"
-version = "0.1.1"
+version = "0.2.0"
 description = "A CLI tool for organizing large media libraries into a canonical archive"
 documentation = "https://robklg.github.io/canon/"
 repository = "https://github.com/robklg/canon"
