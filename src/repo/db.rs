@@ -388,6 +388,18 @@ fn normalize_sql(sql: &str) -> String {
     result
 }
 
+/// Create an in-memory database with the full canon schema for testing.
+///
+/// This uses the same SCHEMA as production, ensuring tests validate against
+/// the real schema rather than a potentially stale copy.
+#[cfg(test)]
+pub fn open_in_memory_for_test() -> Connection {
+    let conn = Connection::open_in_memory().expect("Failed to open in-memory database");
+    conn.execute_batch(SCHEMA)
+        .expect("Failed to initialize test database schema");
+    conn
+}
+
 /// Get EXPLAIN QUERY PLAN output for a SQL statement
 fn get_query_plan(conn: &Connection, sql: &str) -> Option<String> {
     // Skip non-SELECT statements and statements with temp tables

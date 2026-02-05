@@ -27,6 +27,7 @@ use rusqlite::types::Value;
 use rusqlite::OptionalExtension;
 
 use super::db::Connection;
+use crate::domain::scan::{FileObservation, Reconciliation};
 use crate::domain::source::{NewSource, Source};
 
 /// Batch size for SQL IN clauses. Consistent across all repositories.
@@ -156,8 +157,8 @@ pub fn batch_fetch_by_ids(conn: &Connection, source_ids: &[i64]) -> Result<HashM
 /// Fetch a single source by root_id and rel_path.
 ///
 /// Returns None if no present source exists at that path.
-/// Used internally after insert/update to return the complete Source.
-fn fetch_by_root_and_path(conn: &Connection, root_id: i64, rel_path: &str) -> Result<Option<Source>> {
+/// Used during scan reconciliation to find existing source at the observed path.
+pub fn fetch_by_path(conn: &Connection, root_id: i64, rel_path: &str) -> Result<Option<Source>> {
     let sql = format!(
         "SELECT {} {} WHERE s.present = 1 AND s.root_id = ? AND s.rel_path = ?",
         SOURCE_COLUMNS,
@@ -166,6 +167,32 @@ fn fetch_by_root_and_path(conn: &Connection, root_id: i64, rel_path: &str) -> Re
 
     let result = conn
         .query_row(&sql, rusqlite::params![root_id, rel_path], source_from_row)
+        .optional()?;
+
+    Ok(result)
+}
+
+/// Fetch a source by its device and inode.
+///
+/// Searches across ALL roots to detect file moves (including cross-root moves).
+/// Returns None if no present source exists with matching device+inode.
+///
+/// # Note
+/// This search is global across all roots because files can be moved between roots.
+/// The caller should use the returned source's root_id to detect cross-root moves.
+pub fn fetch_by_inode(conn: &Connection, device: u64, inode: u64) -> Result<Option<Source>> {
+    let sql = format!(
+        "SELECT {} {} WHERE s.present = 1 AND s.device = ? AND s.inode = ?",
+        SOURCE_COLUMNS,
+        SOURCE_FROM,
+    );
+
+    let result = conn
+        .query_row(
+            &sql,
+            rusqlite::params![device as i64, inode as i64],
+            source_from_row,
+        )
         .optional()?;
 
     Ok(result)
@@ -278,7 +305,7 @@ pub fn insert_destination(conn: &Connection, new: &NewSource) -> Result<Source> 
 
     // Fetch the complete Source record with all joined fields.
     // This ensures the returned Source accurately reflects database state.
-    fetch_by_root_and_path(conn, new.root_id, &new.rel_path)?
+    fetch_by_path(conn, new.root_id, &new.rel_path)?
         .ok_or_else(|| anyhow::anyhow!(
             "Failed to fetch source after insert: root_id={}, rel_path={}",
             new.root_id,
@@ -286,64 +313,301 @@ pub fn insert_destination(conn: &Connection, new: &NewSource) -> Result<Source> 
         ))
 }
 
+/// Apply a reconciliation outcome to the database.
+///
+/// Translates the domain `Reconciliation` into the appropriate SQL operation.
+/// This function does NOT manage transactions — the caller should wrap the call
+/// in a transaction if atomicity with other operations is needed.
+///
+/// # Behavior by Reconciliation variant
+///
+/// - **New**: INSERT source with basis_rev=0, scanned_at=now, present=1
+/// - **Unchanged**: UPDATE last_seen_at=now only
+/// - **Modified**: UPDATE size, mtime, partial_hash, device, inode, basis_rev+1, last_seen_at=now
+/// - **Moved**: UPDATE root_id, rel_path, device, inode, size, mtime, last_seen_at=now
+/// - **Disconnected**: No database operation; returns the existing Source unchanged
+///
+/// # Returns
+///
+/// The complete Source record after the operation (via SELECT).
+/// This ensures the returned Source accurately reflects database state,
+/// including all joined fields (root_path, root_role, object_excluded).
+///
+/// # Caller Responsibilities
+///
+/// - Ensure `observation.partial_hash` is set for New and Modified reconciliations
+/// - Manage transaction boundaries
+/// - Handle Disconnected appropriately (log warning, track in stats)
+pub fn apply_reconciliation(
+    conn: &Connection,
+    observation: &FileObservation,
+    reconciliation: &Reconciliation,
+    now: i64,
+) -> Result<Source> {
+    match reconciliation {
+        Reconciliation::New => {
+            // INSERT new source with basis_rev=0, or revive stale record at same path.
+            //
+            // Two cases lead here:
+            // 1. Truly new file: no record exists at this path
+            // 2. Replaced file: old file was deleted/marked-missing, new file created at same path
+            //
+            // We use the same two-step pattern as insert_destination():
+            // - First try UPDATE WHERE present=0 (revive stale record)
+            // - If no rows updated, INSERT new record
+            let partial_hash = observation
+                .partial_hash
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("partial_hash required for New reconciliation"))?;
+
+            // Step 1: Try to update any existing record at this path (stale or replaced)
+            // - Stale (present=0): file reappeared at previously-used path
+            // - Replaced (present=1, different inode): old file deleted, new file at same path
+            let updated = conn.execute(
+                "UPDATE sources SET
+                    device = ?, inode = ?, size = ?, mtime = ?, partial_hash = ?,
+                    basis_rev = 0, scanned_at = ?, last_seen_at = ?,
+                    present = 1, excluded = 0, object_id = NULL
+                 WHERE root_id = ? AND rel_path = ?",
+                rusqlite::params![
+                    observation.device as i64,
+                    observation.inode as i64,
+                    observation.size,
+                    observation.mtime,
+                    partial_hash,
+                    now,
+                    now,
+                    observation.root_id,
+                    observation.rel_path,
+                ],
+            )?;
+
+            if updated == 0 {
+                // Step 2: No stale record exists, insert new
+                conn.execute(
+                    "INSERT INTO sources (
+                        root_id, rel_path, device, inode, size, mtime, partial_hash,
+                        basis_rev, scanned_at, last_seen_at, present, excluded
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1, 0)",
+                    rusqlite::params![
+                        observation.root_id,
+                        observation.rel_path,
+                        observation.device as i64,
+                        observation.inode as i64,
+                        observation.size,
+                        observation.mtime,
+                        partial_hash,
+                        now,
+                        now,
+                    ],
+                )?;
+            }
+
+            fetch_by_path(conn, observation.root_id, &observation.rel_path)?
+                .ok_or_else(|| anyhow::anyhow!("Failed to fetch source after insert"))
+        }
+
+        Reconciliation::Unchanged { source_id } => {
+            // UPDATE last_seen_at and device/inode metadata
+            // Device/inode may change legitimately (e.g., NAS remount, drive replacement)
+            // Even though content is unchanged, we update current location metadata
+            conn.execute(
+                "UPDATE sources SET device = ?, inode = ?, last_seen_at = ? WHERE id = ?",
+                rusqlite::params![
+                    observation.device as i64,
+                    observation.inode as i64,
+                    now,
+                    source_id
+                ],
+            )?;
+
+            fetch_by_id(conn, *source_id)?
+                .ok_or_else(|| anyhow::anyhow!("Failed to fetch source after update"))
+        }
+
+        Reconciliation::Modified { source_id, .. } => {
+            // UPDATE with new metadata, increment basis_rev
+            let partial_hash = observation
+                .partial_hash
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("partial_hash required for Modified reconciliation"))?;
+
+            conn.execute(
+                "UPDATE sources SET
+                    device = ?, inode = ?, size = ?, mtime = ?,
+                    partial_hash = ?, basis_rev = basis_rev + 1,
+                    last_seen_at = ?, present = 1
+                 WHERE id = ?",
+                rusqlite::params![
+                    observation.device as i64,
+                    observation.inode as i64,
+                    observation.size,
+                    observation.mtime,
+                    partial_hash,
+                    now,
+                    source_id,
+                ],
+            )?;
+
+            fetch_by_id(conn, *source_id)?
+                .ok_or_else(|| anyhow::anyhow!("Failed to fetch source after update"))
+        }
+
+        Reconciliation::Moved { source_id, .. } => {
+            // UPDATE path and location metadata
+            conn.execute(
+                "UPDATE sources SET
+                    root_id = ?, rel_path = ?,
+                    device = ?, inode = ?, size = ?, mtime = ?,
+                    last_seen_at = ?, present = 1
+                 WHERE id = ?",
+                rusqlite::params![
+                    observation.root_id,
+                    observation.rel_path,
+                    observation.device as i64,
+                    observation.inode as i64,
+                    observation.size,
+                    observation.mtime,
+                    now,
+                    source_id,
+                ],
+            )?;
+
+            fetch_by_id(conn, *source_id)?
+                .ok_or_else(|| anyhow::anyhow!("Failed to fetch source after update"))
+        }
+    }
+}
+
+/// Fetch a single source by ID (internal helper).
+fn fetch_by_id(conn: &Connection, source_id: i64) -> Result<Option<Source>> {
+    let sql = format!(
+        "SELECT {} {} WHERE s.id = ?",
+        SOURCE_COLUMNS,
+        SOURCE_FROM,
+    );
+
+    let result = conn
+        .query_row(&sql, rusqlite::params![source_id], source_from_row)
+        .optional()?;
+
+    Ok(result)
+}
+
+/// Mark sources as no longer present (missing from filesystem).
+///
+/// Sets `present=0` for all specified source IDs. This does NOT delete records —
+/// the history is preserved for tracking and potential revival if the file reappears.
+///
+/// # Arguments
+///
+/// - `source_ids`: IDs of sources to mark as missing
+/// - `now`: Timestamp to record as last_seen_at
+///
+/// # Returns
+///
+/// Count of sources that were marked as missing.
+///
+/// # Note
+///
+/// Sources already marked as not present (present=0) are not counted in the return value.
+/// This function handles empty input gracefully (returns 0).
+pub fn mark_missing(conn: &Connection, source_ids: &[i64], now: i64) -> Result<u64> {
+    if source_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut total_updated = 0u64;
+
+    for chunk in source_ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "UPDATE sources SET present = 0, last_seen_at = ? WHERE present = 1 AND id IN ({})",
+            placeholders.join(",")
+        );
+
+        // Build params: now first, then all the IDs
+        let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() + 1);
+        params.push(rusqlite::types::Value::from(now));
+        for &id in chunk {
+            params.push(rusqlite::types::Value::from(id));
+        }
+
+        let updated = conn.execute(&sql, rusqlite::params_from_iter(params))?;
+        total_updated += updated as u64;
+    }
+
+    Ok(total_updated)
+}
+
+/// Fetch source IDs for a given root (for missing detection).
+///
+/// Returns the set of present source IDs for the specified root.
+/// Used at the start of a scan to track which sources should be seen.
+///
+/// # Arguments
+/// - `conn`: Database connection
+/// - `root_id`: The root to fetch sources for
+/// - `scan_prefix`: Optional path prefix to filter sources (e.g., "photos/" only returns
+///   sources whose rel_path starts with "photos/")
+pub fn fetch_source_ids_for_root(
+    conn: &Connection,
+    root_id: i64,
+    scan_prefix: Option<&str>,
+) -> Result<Vec<i64>> {
+    let ids: Vec<i64> = match scan_prefix {
+        Some(prefix) => {
+            let pattern = format!("{}%", prefix);
+            conn.prepare(
+                "SELECT id FROM sources WHERE root_id = ? AND present = 1 AND rel_path LIKE ?"
+            )?
+            .query_map(rusqlite::params![root_id, pattern], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+        }
+        None => {
+            conn.prepare(
+                "SELECT id FROM sources WHERE root_id = ? AND present = 1"
+            )?
+            .query_map(rusqlite::params![root_id], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?
+        }
+    };
+
+    Ok(ids)
+}
+
+/// Insert a source for testing purposes.
+///
+/// This function is only available in test builds. It provides a simple way
+/// to set up test data with specific device/inode values for move detection tests.
+#[cfg(test)]
+pub fn insert_test_source(
+    conn: &Connection,
+    root_id: i64,
+    rel_path: &str,
+    device: i64,
+    inode: i64,
+    size: i64,
+    mtime: i64,
+) -> i64 {
+    conn.execute(
+        "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, scanned_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'testhash', 0, 0)",
+        rusqlite::params![root_id, rel_path, device, inode, size, mtime],
+    )
+    .unwrap();
+    conn.last_insert_rowid()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo::open_in_memory_for_test;
     use rusqlite::Connection as RusqliteConnection;
 
-    /// Create an in-memory database with the canon schema and test data.
+    /// Create an in-memory database with the full schema.
     fn setup_test_db() -> RusqliteConnection {
-        let conn = RusqliteConnection::open_in_memory().unwrap();
-
-        // Create minimal schema needed for tests
-        conn.execute_batch(
-            r#"
-            CREATE TABLE roots (
-                id INTEGER PRIMARY KEY,
-                path TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'source',
-                suspended INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE objects (
-                id INTEGER PRIMARY KEY,
-                hash_type TEXT NOT NULL,
-                hash_value TEXT NOT NULL,
-                excluded INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE sources (
-                id INTEGER PRIMARY KEY,
-                root_id INTEGER NOT NULL REFERENCES roots(id),
-                rel_path TEXT NOT NULL,
-                object_id INTEGER REFERENCES objects(id),
-                size INTEGER NOT NULL,
-                mtime INTEGER NOT NULL,
-                device INTEGER NOT NULL DEFAULT 0,
-                inode INTEGER NOT NULL DEFAULT 0,
-                partial_hash TEXT NOT NULL DEFAULT '',
-                basis_rev INTEGER NOT NULL DEFAULT 0,
-                scanned_at INTEGER NOT NULL DEFAULT 0,
-                last_seen_at INTEGER NOT NULL DEFAULT 0,
-                present INTEGER NOT NULL DEFAULT 1,
-                excluded INTEGER NOT NULL DEFAULT 0,
-                UNIQUE(root_id, rel_path)
-            );
-            "#,
-        )
-        .unwrap();
-
-        conn
-    }
-
-    /// Insert a test root and return its ID
-    fn insert_root(conn: &RusqliteConnection, path: &str, role: &str, suspended: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",
-            rusqlite::params![path, role, suspended as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
+        open_in_memory_for_test()
     }
 
     /// Insert a test object and return its ID
@@ -366,8 +630,8 @@ mod tests {
         excluded: bool,
     ) -> i64 {
         conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, present, excluded)
-             VALUES (?, ?, ?, 1000, 1704067200, ?, ?)",
+            "INSERT INTO sources (root_id, rel_path, object_id, device, inode, size, mtime, partial_hash, scanned_at, last_seen_at, present, excluded)
+             VALUES (?, ?, ?, 0, 0, 1000, 1704067200, 'hash', 0, 0, ?, ?)",
             rusqlite::params![root_id, rel_path, object_id, present as i64, excluded as i64],
         )
         .unwrap();
@@ -397,7 +661,7 @@ mod tests {
     fn batch_fetch_by_roots_single_root() {
         let conn = setup_test_db();
 
-        let root_id = insert_root(&conn, "/photos", "source", false);
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
         insert_source(&conn, root_id, "a.jpg", None, true, false);
         insert_source(&conn, root_id, "b.jpg", None, true, false);
 
@@ -415,8 +679,8 @@ mod tests {
     fn batch_fetch_by_roots_multiple_roots() {
         let conn = setup_test_db();
 
-        let root1 = insert_root(&conn, "/photos", "source", false);
-        let root2 = insert_root(&conn, "/archive", "archive", false);
+        let root1 = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root2 = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
 
         insert_source(&conn, root1, "photo.jpg", None, true, false);
         insert_source(&conn, root2, "backup.jpg", None, true, false);
@@ -436,7 +700,7 @@ mod tests {
     fn batch_fetch_by_roots_excludes_non_present() {
         let conn = setup_test_db();
 
-        let root_id = insert_root(&conn, "/photos", "source", false);
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
         insert_source(&conn, root_id, "present.jpg", None, true, false);
         insert_source(&conn, root_id, "deleted.jpg", None, false, false); // present=false
 
@@ -451,7 +715,7 @@ mod tests {
         // Filtering by exclusion is done in the domain layer.
         let conn = setup_test_db();
 
-        let root_id = insert_root(&conn, "/photos", "source", false);
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
         insert_source(&conn, root_id, "normal.jpg", None, true, false);
         insert_source(&conn, root_id, "excluded.jpg", None, true, true); // excluded=true
 
@@ -466,7 +730,7 @@ mod tests {
     fn batch_fetch_by_roots_includes_object_excluded() {
         let conn = setup_test_db();
 
-        let root_id = insert_root(&conn, "/photos", "source", false);
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
         let obj_id = insert_object(&conn, "abc123", true); // object excluded
         insert_source(&conn, root_id, "file.jpg", Some(obj_id), true, false);
 
@@ -483,7 +747,7 @@ mod tests {
     fn batch_fetch_by_roots_suspended_root() {
         let conn = setup_test_db();
 
-        let root_id = insert_root(&conn, "/photos", "source", true); // suspended
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", true); // suspended
         insert_source(&conn, root_id, "file.jpg", None, true, false);
 
         let sources = batch_fetch_by_roots(&conn, &[root_id]).unwrap();
@@ -514,7 +778,7 @@ mod tests {
     fn batch_fetch_by_ids_returns_hashmap() {
         let conn = setup_test_db();
 
-        let root_id = insert_root(&conn, "/photos", "source", false);
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
         let id1 = insert_source(&conn, root_id, "a.jpg", None, true, false);
         let id2 = insert_source(&conn, root_id, "b.jpg", None, true, false);
 
@@ -530,7 +794,7 @@ mod tests {
     fn batch_fetch_by_ids_excludes_non_present() {
         let conn = setup_test_db();
 
-        let root_id = insert_root(&conn, "/photos", "source", false);
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
         let present_id = insert_source(&conn, root_id, "present.jpg", None, true, false);
         let deleted_id = insert_source(&conn, root_id, "deleted.jpg", None, false, false);
 
@@ -544,7 +808,7 @@ mod tests {
     fn batch_fetch_by_ids_partial_match() {
         let conn = setup_test_db();
 
-        let root_id = insert_root(&conn, "/photos", "source", false);
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
         let id1 = insert_source(&conn, root_id, "exists.jpg", None, true, false);
 
         // Query for mix of existing and non-existing IDs
@@ -561,7 +825,7 @@ mod tests {
     fn insert_destination_fresh_insert() {
         let conn = setup_test_db();
 
-        let root_id = insert_root(&conn, "/archive", "archive", false);
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "abc123hash", false);
 
         let new = NewSource {
@@ -596,14 +860,14 @@ mod tests {
     fn insert_destination_stale_record_update() {
         let conn = setup_test_db();
 
-        let root_id = insert_root(&conn, "/archive", "archive", false);
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "abc123hash", false);
 
         // Insert a stale record (present=0) with basis_rev=5
         conn.execute(
             "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash,
-             basis_rev, present, excluded, device, inode)
-             VALUES (?, ?, ?, 500, 1700000000, 'oldhash', 5, 0, 1, 100, 200)",
+             basis_rev, scanned_at, last_seen_at, present, excluded, device, inode)
+             VALUES (?, ?, ?, 500, 1700000000, 'oldhash', 5, 0, 0, 0, 1, 100, 200)",
             rusqlite::params![root_id, "revived.jpg", obj_id],
         ).unwrap();
 
@@ -648,7 +912,7 @@ mod tests {
     fn insert_destination_null_device_inode() {
         let conn = setup_test_db();
 
-        let root_id = insert_root(&conn, "/archive", "archive", false);
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "abc123hash", false);
 
         // Simulate non-Unix platform where device/inode are not available
@@ -676,7 +940,7 @@ mod tests {
     fn insert_destination_already_present_fails() {
         let conn = setup_test_db();
 
-        let root_id = insert_root(&conn, "/archive", "archive", false);
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "abc123hash", false);
 
         // Insert an active record (present=1)
@@ -707,7 +971,7 @@ mod tests {
         // Verify the returned Source has all joined fields populated
         let conn = setup_test_db();
 
-        let root_id = insert_root(&conn, "/archive", "archive", false);
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "abc123hash", true); // object is excluded
 
         let new = NewSource {
@@ -739,6 +1003,482 @@ mod tests {
 
         // Verify path() works
         assert_eq!(source.path(), "/archive/complete.jpg");
+    }
+
+    // =========================================================================
+    // fetch_by_path tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_by_path_exists() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "found.jpg", None, true, false);
+
+        let result = fetch_by_path(&conn, root_id, "found.jpg").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().rel_path, "found.jpg");
+    }
+
+    #[test]
+    fn fetch_by_path_not_present() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "deleted.jpg", None, false, false); // present=0
+
+        let result = fetch_by_path(&conn, root_id, "deleted.jpg").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn fetch_by_path_not_found() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        let result = fetch_by_path(&conn, root_id, "nonexistent.jpg").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn fetch_by_path_wrong_root() {
+        let conn = setup_test_db();
+
+        let root1 = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root2 = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        insert_source(&conn, root1, "file.jpg", None, true, false);
+
+        // File exists in root1, but we query root2
+        let result = fetch_by_path(&conn, root2, "file.jpg").unwrap();
+        assert!(result.is_none());
+    }
+
+    // =========================================================================
+    // fetch_by_inode tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_by_inode_exists() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        // Insert source with specific device/inode
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, scanned_at, last_seen_at, present)
+             VALUES (?, 'file.jpg', 100, 12345, 1000, 1700000000, 'hash', 0, 0, 1)",
+            rusqlite::params![root_id],
+        ).unwrap();
+
+        let result = fetch_by_inode(&conn, 100, 12345).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().rel_path, "file.jpg");
+    }
+
+    #[test]
+    fn fetch_by_inode_cross_root() {
+        let conn = setup_test_db();
+
+        let root1 = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let _root2 = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+
+        // Insert source in root1 with specific device/inode
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, scanned_at, last_seen_at, present)
+             VALUES (?, 'original.jpg', 100, 12345, 1000, 1700000000, 'hash', 0, 0, 1)",
+            rusqlite::params![root1],
+        ).unwrap();
+
+        // Should find it even though we're not specifying root
+        let result = fetch_by_inode(&conn, 100, 12345).unwrap();
+        assert!(result.is_some());
+        let source = result.unwrap();
+        assert_eq!(source.rel_path, "original.jpg");
+        assert_eq!(source.root_id, root1);
+    }
+
+    #[test]
+    fn fetch_by_inode_not_found() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "file.jpg", None, true, false);
+
+        // Query for non-existent device/inode
+        let result = fetch_by_inode(&conn, 999, 999).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn fetch_by_inode_not_present() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        // Insert non-present source with specific device/inode
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, scanned_at, last_seen_at, present)
+             VALUES (?, 'deleted.jpg', 100, 12345, 1000, 1700000000, 'hash', 0, 0, 0)",
+            rusqlite::params![root_id],
+        ).unwrap();
+
+        // Should not find it (present=0)
+        let result = fetch_by_inode(&conn, 100, 12345).unwrap();
+        assert!(result.is_none());
+    }
+
+    // =========================================================================
+    // apply_reconciliation tests
+    // =========================================================================
+
+    #[test]
+    fn apply_reconciliation_new() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        let observation = FileObservation {
+            root_id,
+            rel_path: "new_file.jpg".to_string(),
+            device: 100,
+            inode: 12345,
+            size: 2048,
+            mtime: 1700000000,
+            partial_hash: Some("abc123".to_string()),
+        };
+
+        let reconciliation = Reconciliation::New;
+        let now = 1700000001;
+
+        let source = apply_reconciliation(&conn, &observation, &reconciliation, now).unwrap();
+
+        assert_eq!(source.rel_path, "new_file.jpg");
+        assert_eq!(source.size, 2048);
+        assert_eq!(source.mtime, 1700000000);
+        assert_eq!(source.device, 100);
+        assert_eq!(source.inode, 12345);
+        assert_eq!(source.partial_hash, "abc123");
+        assert_eq!(source.basis_rev, 0);
+    }
+
+    #[test]
+    fn apply_reconciliation_new_revives_stale_record() {
+        // Test: New reconciliation at path where a stale (present=0) record exists
+        // The stale record should be revived with new attributes
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        // Create a stale source at this path (present=0)
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, basis_rev, scanned_at, last_seen_at, present, excluded)
+             VALUES (?, 'revived.jpg', 1, 1, 500, 1600000000, 'oldhash', 5, 0, 0, 0, 0)",
+            rusqlite::params![root_id],
+        ).unwrap();
+        let old_id = conn.last_insert_rowid();
+
+        let observation = FileObservation {
+            root_id,
+            rel_path: "revived.jpg".to_string(),
+            device: 100,
+            inode: 12345,
+            size: 2048,
+            mtime: 1700000000,
+            partial_hash: Some("newhash".to_string()),
+        };
+
+        let reconciliation = Reconciliation::New;
+        let now = 1700000001;
+
+        let source = apply_reconciliation(&conn, &observation, &reconciliation, now).unwrap();
+
+        // Should revive the same record
+        assert_eq!(source.id, old_id);
+        assert_eq!(source.rel_path, "revived.jpg");
+        // Should have new file's attributes
+        assert_eq!(source.device, 100);
+        assert_eq!(source.inode, 12345);
+        assert_eq!(source.size, 2048);
+        assert_eq!(source.mtime, 1700000000);
+        assert_eq!(source.partial_hash, "newhash");
+        // basis_rev should be reset to 0 (new file)
+        assert_eq!(source.basis_rev, 0);
+        // object_id should be cleared
+        assert_eq!(source.object_id, None);
+
+        // Verify only one record exists
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path = ?",
+            rusqlite::params![root_id, "revived.jpg"],
+            |r| r.get(0)
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn apply_reconciliation_unchanged() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let source_id = insert_source(&conn, root_id, "existing.jpg", None, true, false);
+
+        let observation = FileObservation {
+            root_id,
+            rel_path: "existing.jpg".to_string(),
+            device: 0,
+            inode: 0,
+            size: 1000,
+            mtime: 1704067200,
+            partial_hash: None,
+        };
+
+        let reconciliation = Reconciliation::Unchanged { source_id };
+        let now = 1700000001;
+
+        let source = apply_reconciliation(&conn, &observation, &reconciliation, now).unwrap();
+
+        assert_eq!(source.id, source_id);
+        assert_eq!(source.rel_path, "existing.jpg");
+
+        // Verify last_seen_at was updated
+        let last_seen: i64 = conn.query_row(
+            "SELECT last_seen_at FROM sources WHERE id = ?",
+            rusqlite::params![source_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(last_seen, now);
+    }
+
+    #[test]
+    fn apply_reconciliation_modified() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        // Insert existing source with basis_rev=2
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, basis_rev, scanned_at, last_seen_at, present)
+             VALUES (?, 'modified.jpg', 100, 12345, 1000, 1700000000, 'oldhash', 2, 0, 0, 1)",
+            rusqlite::params![root_id],
+        ).unwrap();
+        let source_id = conn.last_insert_rowid();
+
+        let observation = FileObservation {
+            root_id,
+            rel_path: "modified.jpg".to_string(),
+            device: 100,
+            inode: 12345,
+            size: 2048,  // Changed
+            mtime: 1700000100,  // Changed
+            partial_hash: Some("newhash".to_string()),
+        };
+
+        let reconciliation = Reconciliation::Modified {
+            source_id,
+            old_object_id: None,
+        };
+        let now = 1700000101;
+
+        let source = apply_reconciliation(&conn, &observation, &reconciliation, now).unwrap();
+
+        assert_eq!(source.id, source_id);
+        assert_eq!(source.size, 2048);
+        assert_eq!(source.mtime, 1700000100);
+        assert_eq!(source.partial_hash, "newhash");
+        assert_eq!(source.basis_rev, 3);  // Incremented from 2
+    }
+
+    #[test]
+    fn apply_reconciliation_moved() {
+        let conn = setup_test_db();
+
+        let root1 = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root2 = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+
+        // Insert existing source in root1
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, basis_rev, scanned_at, last_seen_at, present)
+             VALUES (?, 'old_location.jpg', 100, 12345, 1000, 1700000000, 'hash123', 1, 0, 0, 1)",
+            rusqlite::params![root1],
+        ).unwrap();
+        let source_id = conn.last_insert_rowid();
+
+        // Observation at new location in root2
+        let observation = FileObservation {
+            root_id: root2,
+            rel_path: "new_location.jpg".to_string(),
+            device: 100,
+            inode: 12345,
+            size: 1000,
+            mtime: 1700000000,
+            partial_hash: None,
+        };
+
+        let reconciliation = Reconciliation::Moved {
+            source_id,
+            from_root_id: root1,
+            from_path: "old_location.jpg".to_string(),
+            old_object_id: None,
+        };
+        let now = 1700000001;
+
+        let source = apply_reconciliation(&conn, &observation, &reconciliation, now).unwrap();
+
+        assert_eq!(source.id, source_id);
+        assert_eq!(source.root_id, root2);  // Moved to new root
+        assert_eq!(source.rel_path, "new_location.jpg");  // New path
+        assert_eq!(source.root_path, "/archive");  // Joined field updated
+    }
+
+    #[test]
+    fn apply_reconciliation_new_requires_partial_hash() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        let observation = FileObservation {
+            root_id,
+            rel_path: "new_file.jpg".to_string(),
+            device: 100,
+            inode: 12345,
+            size: 2048,
+            mtime: 1700000000,
+            partial_hash: None,  // Missing!
+        };
+
+        let reconciliation = Reconciliation::New;
+        let now = 1700000001;
+
+        let result = apply_reconciliation(&conn, &observation, &reconciliation, now);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("partial_hash"));
+    }
+
+    // =========================================================================
+    // mark_missing tests
+    // =========================================================================
+
+    #[test]
+    fn mark_missing_sets_present_zero() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let id1 = insert_source(&conn, root_id, "missing1.jpg", None, true, false);
+        let id2 = insert_source(&conn, root_id, "missing2.jpg", None, true, false);
+        let _id3 = insert_source(&conn, root_id, "present.jpg", None, true, false);
+
+        let now = 1700000001;
+        let count = mark_missing(&conn, &[id1, id2], now).unwrap();
+
+        assert_eq!(count, 2);
+
+        // Verify they are now present=0
+        let present1: i64 = conn.query_row(
+            "SELECT present FROM sources WHERE id = ?",
+            rusqlite::params![id1],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(present1, 0);
+
+        // Verify present.jpg is still present=1
+        let present3: i64 = conn.query_row(
+            "SELECT present FROM sources WHERE rel_path = 'present.jpg'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(present3, 1);
+    }
+
+    #[test]
+    fn mark_missing_empty_list() {
+        let conn = setup_test_db();
+        let count = mark_missing(&conn, &[], 1700000001).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn mark_missing_returns_count() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let id1 = insert_source(&conn, root_id, "file1.jpg", None, true, false);
+        let id2 = insert_source(&conn, root_id, "file2.jpg", None, false, false);  // already not present
+
+        // Only id1 should be updated (id2 is already present=0)
+        let count = mark_missing(&conn, &[id1, id2], 1700000001).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn mark_missing_updates_last_seen_at() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let id1 = insert_source(&conn, root_id, "file.jpg", None, true, false);
+
+        let now = 1700000001;
+        mark_missing(&conn, &[id1], now).unwrap();
+
+        let last_seen: i64 = conn.query_row(
+            "SELECT last_seen_at FROM sources WHERE id = ?",
+            rusqlite::params![id1],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(last_seen, now);
+    }
+
+    // =========================================================================
+    // fetch_source_ids_for_root tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_source_ids_for_root_returns_present_only() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let id1 = insert_source(&conn, root_id, "present1.jpg", None, true, false);
+        let id2 = insert_source(&conn, root_id, "present2.jpg", None, true, false);
+        let _id3 = insert_source(&conn, root_id, "deleted.jpg", None, false, false);
+
+        let ids = fetch_source_ids_for_root(&conn, root_id, None).unwrap();
+
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
+    }
+
+    #[test]
+    fn fetch_source_ids_for_root_empty() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        let ids = fetch_source_ids_for_root(&conn, root_id, None).unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn fetch_source_ids_for_root_with_prefix() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let id1 = insert_source(&conn, root_id, "2024/photo1.jpg", None, true, false);
+        let id2 = insert_source(&conn, root_id, "2024/photo2.jpg", None, true, false);
+        let id3 = insert_source(&conn, root_id, "2023/old.jpg", None, true, false);
+        let _id4 = insert_source(&conn, root_id, "2024/deleted.jpg", None, false, false);
+
+        // With prefix, only 2024/* present sources
+        let ids = fetch_source_ids_for_root(&conn, root_id, Some("2024/")).unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
+
+        // Without prefix, all present sources
+        let all_ids = fetch_source_ids_for_root(&conn, root_id, None).unwrap();
+        assert_eq!(all_ids.len(), 3);
+        assert!(all_ids.contains(&id3));
     }
 
 }

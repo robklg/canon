@@ -100,30 +100,34 @@ pub fn batch_fetch_by_ids(conn: &Connection, root_ids: &[i64]) -> Result<HashMap
     Ok(roots)
 }
 
+/// Insert a root for testing purposes.
+///
+/// This function is only available in test builds. It provides a simple way
+/// to set up test data without duplicating INSERT SQL across test modules.
+#[cfg(test)]
+pub fn insert_test_root(
+    conn: &Connection,
+    path: &str,
+    role: &str,
+    suspended: bool,
+) -> i64 {
+    conn.execute(
+        "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",
+        rusqlite::params![path, role, suspended as i64],
+    )
+    .unwrap();
+    conn.last_insert_rowid()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo::open_in_memory_for_test;
     use rusqlite::Connection as RusqliteConnection;
 
-    /// Create an in-memory database with the roots schema and optional test data.
+    /// Create an in-memory database with the full schema.
     fn setup_test_db() -> RusqliteConnection {
-        let conn = RusqliteConnection::open_in_memory().unwrap();
-
-        conn.execute_batch(
-            r#"
-            CREATE TABLE roots (
-                id INTEGER PRIMARY KEY,
-                path TEXT NOT NULL UNIQUE,
-                role TEXT NOT NULL DEFAULT 'source',
-                comment TEXT,
-                last_scanned_at INTEGER,
-                suspended INTEGER NOT NULL DEFAULT 0
-            );
-            "#,
-        )
-        .unwrap();
-
-        conn
+        open_in_memory_for_test()
     }
 
     /// Insert a test root and return its ID.

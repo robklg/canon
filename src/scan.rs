@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::params;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
-use crate::repo::{Connection, Db};
 use crate::domain::resolve_root_path_any;
+use crate::domain::scan::{find_missing, reconcile, FileObservation, Reconciliation};
 use crate::progress::Progress;
+use crate::repo::{self, Connection, Db};
 
 /// Outcome for a source during scan - determines what action to take
 enum SourceOutcome {
@@ -80,37 +81,6 @@ fn classify_sources_in_empty_dir(
     }
 
     Ok(results)
-}
-
-/// Identify sources that are missing (not seen during walk, not already handled).
-/// No device check needed - if we walked through the parent dir, the file is gone.
-fn identify_missing_sources(
-    conn: &Connection,
-    root_id: i64,
-    scan_prefix: Option<&str>,
-    seen_ids: &HashSet<i64>,
-    handled_ids: &HashSet<i64>,
-) -> Result<Vec<(i64, SourceOutcome)>> {
-    let candidate_ids: Vec<i64> = match scan_prefix {
-        Some(prefix) => {
-            let pattern = format!("{}%", prefix);
-            conn.prepare(
-                "SELECT id FROM sources WHERE root_id = ? AND present = 1 AND rel_path LIKE ?",
-            )?
-            .query_map(params![root_id, pattern], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?
-        }
-        None => conn
-            .prepare("SELECT id FROM sources WHERE root_id = ? AND present = 1")?
-            .query_map([root_id], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?,
-    };
-
-    Ok(candidate_ids
-        .into_iter()
-        .filter(|id| !seen_ids.contains(id) && !handled_ids.contains(id))
-        .map(|id| (id, SourceOutcome::Missing))
-        .collect())
 }
 
 #[derive(Default)]
@@ -424,6 +394,11 @@ fn scan_root(
     let mut outcomes: Vec<(i64, SourceOutcome)> = Vec::new();
     let mut handled_ids: HashSet<i64> = HashSet::new();
 
+    // Fetch expected source IDs at start (for missing detection via pure function)
+    let expected_ids: HashSet<i64> = repo::source::fetch_source_ids_for_root(conn, root_id, scan_prefix)?
+        .into_iter()
+        .collect();
+
     // Determine the actual path to walk
     let walk_path = match scan_prefix {
         Some(prefix) => root_path.join(prefix),
@@ -504,12 +479,13 @@ fn scan_root(
             }
         };
 
+        // Track seen sources
         seen_source_ids.insert(result.source_id);
         outcomes.push((result.source_id, SourceOutcome::Seen));
 
         match result.action {
             FileAction::New => stats.new += 1,
-            FileAction::Updated => stats.updated += 1,
+            FileAction::Modified => stats.updated += 1,
             FileAction::Moved => stats.moved += 1,
             FileAction::Unchanged => stats.unchanged += 1,
         }
@@ -517,7 +493,7 @@ fn scan_root(
         // Collect files for hashing based on mode
         if should_hash {
             let needs_hash = match result.action {
-                FileAction::New | FileAction::Updated => true, // New/changed files always need hash
+                FileAction::New | FileAction::Modified => true, // New/changed files always need hash
                 FileAction::Moved | FileAction::Unchanged => hash_all, // Only if --compute-hashes=all
             };
             if needs_hash {
@@ -525,19 +501,22 @@ fn scan_root(
                     source_id: result.source_id,
                     full_path: full_path.to_path_buf(),
                     old_object_id: result.old_object_id,
-                    basis_changed: matches!(result.action, FileAction::New | FileAction::Updated),
+                    basis_changed: matches!(result.action, FileAction::New | FileAction::Modified),
                 });
             }
         }
     }
 
-    // Identify sources that are truly missing (not seen, not already handled via empty-dir logic)
-    let missing_outcomes =
-        identify_missing_sources(conn, root_id, scan_prefix, &seen_source_ids, &handled_ids)?;
-    outcomes.extend(missing_outcomes);
+    // Identify sources that are truly missing using pure domain function (D3 in spec)
+    // Sources not seen during walk AND not handled by empty-dir logic are missing
+    let all_accounted: HashSet<i64> = seen_source_ids.union(&handled_ids).copied().collect();
+    let missing_ids = find_missing(&expected_ids, &all_accounted);
+    for id in missing_ids {
+        outcomes.push((id, SourceOutcome::Missing));
+    }
 
     // Mark missing/disconnected files based on outcomes
-    let (missing_count, disconnected_count) = mark_missing(conn, &outcomes, now, ignore_device_id)?;
+    let (missing_count, disconnected_count) = mark_missing_sources(conn, &outcomes, now, ignore_device_id)?;
     stats.missing = missing_count;
     stats.disconnected = disconnected_count;
 
@@ -546,7 +525,7 @@ fn scan_root(
 
 enum FileAction {
     New,
-    Updated,
+    Modified,
     Moved,
     Unchanged,
 }
@@ -568,103 +547,65 @@ fn process_file(
     mtime: i64,
     now: i64,
 ) -> Result<ProcessResult> {
-    // First, check if we have an existing source at this path
-    let existing_by_path: Option<(i64, Option<i64>, Option<i64>, i64, i64, i64, Option<i64>)> = conn
-        .query_row(
-            "SELECT id, device, inode, size, mtime, basis_rev, object_id FROM sources
-             WHERE root_id = ? AND rel_path = ?",
-            params![root_id, rel_path],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
-        )
-        .optional()?;
+    // Create observation from file metadata
+    let mut observation = FileObservation {
+        root_id,
+        rel_path: rel_path.to_string(),
+        device: device as u64,
+        inode: inode as u64,
+        size,
+        mtime,
+        partial_hash: None, // Computed after reconciliation if needed
+    };
 
-    if let Some((id, _old_device, _old_inode, old_size, old_mtime, old_basis_rev, old_object_id)) = existing_by_path {
-        // Source exists at this path
-        // Detect content changes via size/mtime only. Device/inode changes don't
-        // indicate content changes (e.g., NAS remounts) so they don't affect basis_rev.
-        // We skip partial_hash for performance (would read 16KB per file per scan).
-        // Content changes without mtime update are caught during transfer validation
-        // via partial_hash, or flagged as "unexpected hash change" during hashing.
-        let basis_changed = size != old_size || mtime != old_mtime;
+    // Query existing state using repo functions
+    let source_at_path = repo::source::fetch_by_path(conn, root_id, rel_path)?;
+    let source_by_inode = repo::source::fetch_by_inode(conn, device as u64, inode as u64)?;
 
-        if basis_changed {
-            let new_basis_rev = old_basis_rev + 1;
-            let partial_hash = compute_partial_hash(full_path, size as u64)?;
-            conn.execute(
-                "UPDATE sources SET device = ?, inode = ?, size = ?, mtime = ?,
-                 partial_hash = ?, basis_rev = ?, last_seen_at = ?, present = 1 WHERE id = ?",
-                params![device, inode, size, mtime, partial_hash, new_basis_rev, now, id],
-            )?;
-            return Ok(ProcessResult {
-                source_id: id,
-                action: FileAction::Updated,
-                old_object_id,
-            });
-        } else {
-            // Just update last_seen_at
-            conn.execute(
-                "UPDATE sources SET last_seen_at = ?, present = 1 WHERE id = ?",
-                params![now, id],
-            )?;
-            return Ok(ProcessResult {
-                source_id: id,
-                action: FileAction::Unchanged,
-                old_object_id,
-            });
+    // Determine what happened (pure domain logic)
+    let reconciliation = reconcile(
+        &observation,
+        source_at_path.as_ref(),
+        source_by_inode.as_ref(),
+    );
+
+    // Compute partial_hash if needed (for New or Modified)
+    if reconciliation.needs_partial_hash() {
+        observation.partial_hash = Some(compute_partial_hash(full_path, size as u64)?);
+    }
+
+    // Apply reconciliation to database
+    let source = repo::source::apply_reconciliation(conn, &observation, &reconciliation, now)?;
+
+    // Map reconciliation to FileAction and extract old_object_id
+    let (action, old_object_id) = match &reconciliation {
+        Reconciliation::New => (FileAction::New, None),
+        Reconciliation::Unchanged { .. } => {
+            (FileAction::Unchanged, source_at_path.and_then(|s| s.object_id))
         }
-    }
-
-    // Check if we have an existing source with this device+inode (moved file)
-    let existing_by_inode: Option<(i64, i64, String, i64, Option<i64>)> = conn
-        .query_row(
-            "SELECT id, root_id, rel_path, basis_rev, object_id FROM sources
-             WHERE device = ? AND inode = ?",
-            params![device, inode],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-        )
-        .optional()?;
-
-    if let Some((id, _old_root_id, _old_rel_path, _old_basis_rev, old_object_id)) = existing_by_inode {
-        // File was moved (same device+inode found at different path)
-        // Moving a file (even across roots) doesn't invalidate facts. Source facts
-        // describe content, not location - they're often "object facts not yet promoted"
-        // waiting for the content hash. Since content is unchanged, facts remain valid.
-        // We update location and device+inode but preserve basis_rev and partial_hash.
-        conn.execute(
-            "UPDATE sources SET root_id = ?, rel_path = ?, device = ?, inode = ?,
-             size = ?, mtime = ?, last_seen_at = ?, present = 1 WHERE id = ?",
-            params![root_id, rel_path, device, inode, size, mtime, now, id],
-        )?;
-        return Ok(ProcessResult {
-            source_id: id,
-            action: FileAction::Moved,
-            old_object_id,
-        });
-    }
-
-    // New file
-    let partial_hash = compute_partial_hash(full_path, size as u64)?;
-    conn.execute(
-        "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime,
-         partial_hash, basis_rev, scanned_at, last_seen_at, present)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1)",
-        params![root_id, rel_path, device, inode, size, mtime, partial_hash, now, now],
-    )?;
+        Reconciliation::Modified { old_object_id, .. } => {
+            (FileAction::Modified, *old_object_id)
+        }
+        Reconciliation::Moved { old_object_id, .. } => {
+            (FileAction::Moved, *old_object_id)
+        }
+    };
 
     Ok(ProcessResult {
-        source_id: conn.last_insert_rowid(),
-        action: FileAction::New,
-        old_object_id: None,
+        source_id: source.id,
+        action,
+        old_object_id,
     })
 }
 
-fn mark_missing(
+fn mark_missing_sources(
     conn: &Connection,
     outcomes: &[(i64, SourceOutcome)],
     now: i64,
     ignore_device_id: bool,
 ) -> Result<(u64, u64)> {
-    let mut missing_count = 0u64;
+    // Collect IDs to mark as missing
+    let mut missing_ids: Vec<i64> = Vec::new();
     let mut disconnected_count = 0u64;
 
     for (id, outcome) in outcomes {
@@ -673,26 +614,21 @@ fn mark_missing(
                 // Nothing to do - already updated during walk
             }
             SourceOutcome::Missing => {
-                conn.execute(
-                    "UPDATE sources SET present = 0, last_seen_at = ? WHERE id = ?",
-                    params![now, id],
-                )?;
-                missing_count += 1;
+                missing_ids.push(*id);
             }
             SourceOutcome::Disconnected => {
                 if ignore_device_id {
                     // User explicitly opted out of protection
-                    conn.execute(
-                        "UPDATE sources SET present = 0, last_seen_at = ? WHERE id = ?",
-                        params![now, id],
-                    )?;
-                    missing_count += 1;
+                    missing_ids.push(*id);
                 } else {
                     disconnected_count += 1;
                 }
             }
         }
     }
+
+    // Batch mark all missing sources using repo function
+    let missing_count = repo::source::mark_missing(conn, &missing_ids, now)?;
 
     if disconnected_count > 0 {
         eprintln!(
@@ -939,4 +875,307 @@ fn find_common_ancestors(
     let mut result: Vec<_> = ancestors.into_iter().collect();
     result.sort_by(|a, b| a.0.cmp(&b.0));
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    /// Create a temp file with content and return (path, device, inode, size, mtime).
+    fn create_temp_file(dir: &TempDir, name: &str, content: &str) -> (PathBuf, u64, u64, i64, i64) {
+        let path = dir.path().join(name);
+        let mut file = File::create(&path).unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        drop(file);
+
+        let meta = fs::metadata(&path).unwrap();
+        (
+            path,
+            meta.dev(),
+            meta.ino(),
+            meta.len() as i64,
+            meta.modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+        )
+    }
+
+    #[test]
+    fn process_file_new() {
+        let conn = repo::open_in_memory_for_test();
+        let temp_dir = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+
+        let (path, device, inode, size, mtime) = create_temp_file(&temp_dir, "new.txt", "content");
+        let now = current_timestamp();
+
+        let result = process_file(
+            &conn, root_id, "new.txt", &path,
+            device as i64, inode as i64, size, mtime, now,
+        ).unwrap();
+
+        assert!(matches!(result.action, FileAction::New));
+
+        // Verify source was inserted
+        let source = repo::source::fetch_by_path(&conn, root_id, "new.txt").unwrap().unwrap();
+        assert_eq!(source.size, size);
+    }
+
+    #[test]
+    fn process_file_unchanged() {
+        let conn = repo::open_in_memory_for_test();
+        let temp_dir = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+
+        let (path, device, inode, size, mtime) = create_temp_file(&temp_dir, "unchanged.txt", "content");
+
+        // Pre-insert source with matching metadata
+        repo::insert_test_source(&conn, root_id, "unchanged.txt", device as i64, inode as i64, size, mtime);
+
+        let now = current_timestamp();
+        let result = process_file(
+            &conn, root_id, "unchanged.txt", &path,
+            device as i64, inode as i64, size, mtime, now,
+        ).unwrap();
+
+        assert!(matches!(result.action, FileAction::Unchanged));
+    }
+
+    #[test]
+    fn process_file_modified_size() {
+        let conn = repo::open_in_memory_for_test();
+        let temp_dir = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+
+        let (path, device, inode, size, mtime) = create_temp_file(&temp_dir, "modified.txt", "new content");
+
+        // Pre-insert source with different size
+        repo::insert_test_source(&conn, root_id, "modified.txt", device as i64, inode as i64, 5, mtime);
+
+        let now = current_timestamp();
+        let result = process_file(
+            &conn, root_id, "modified.txt", &path,
+            device as i64, inode as i64, size, mtime, now,
+        ).unwrap();
+
+        assert!(matches!(result.action, FileAction::Modified));
+    }
+
+    #[test]
+    fn process_file_moved() {
+        let conn = repo::open_in_memory_for_test();
+        let temp_dir = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+
+        let (path, device, inode, size, mtime) = create_temp_file(&temp_dir, "new_name.txt", "content");
+
+        // Pre-insert source at different path with same inode
+        repo::insert_test_source(&conn, root_id, "old_name.txt", device as i64, inode as i64, size, mtime);
+
+        let now = current_timestamp();
+        let result = process_file(
+            &conn, root_id, "new_name.txt", &path,
+            device as i64, inode as i64, size, mtime, now,
+        ).unwrap();
+
+        assert!(matches!(result.action, FileAction::Moved));
+    }
+
+    #[test]
+    fn process_file_device_changed() {
+        // Test: file exists at path with different device ID (e.g., NAS remount)
+        // Should be processed normally, not skipped as disconnected
+        let conn = repo::open_in_memory_for_test();
+        let temp_dir = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+
+        let (path, device, inode, size, mtime) = create_temp_file(&temp_dir, "file.txt", "content");
+
+        // Pre-insert source with DIFFERENT device but same inode
+        repo::insert_test_source(&conn, root_id, "file.txt", 99999, inode as i64, size, mtime);
+
+        let now = current_timestamp();
+        let result = process_file(
+            &conn, root_id, "file.txt", &path,
+            device as i64, inode as i64, size, mtime, now,
+        ).unwrap();
+
+        // Should be Unchanged - device changes are legitimate metadata updates
+        assert!(matches!(result.action, FileAction::Unchanged));
+
+        // Verify the device was updated in the database
+        let source = repo::source::fetch_by_path(&conn, root_id, "file.txt").unwrap().unwrap();
+        assert_eq!(source.device, device as i64);
+    }
+
+    #[test]
+    fn mark_missing_sources_counts_correctly() {
+        let conn = repo::open_in_memory_for_test();
+        let temp_dir = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+
+        let id1 = repo::insert_test_source(&conn, root_id, "file1.txt", 1, 1, 100, 1000);
+        let id2 = repo::insert_test_source(&conn, root_id, "file2.txt", 1, 2, 100, 1000);
+        let id3 = repo::insert_test_source(&conn, root_id, "file3.txt", 1, 3, 100, 1000);
+
+        let outcomes = vec![
+            (id1, SourceOutcome::Seen),
+            (id2, SourceOutcome::Missing),
+            (id3, SourceOutcome::Disconnected),
+        ];
+
+        let now = current_timestamp();
+        let (missing_count, disconnected_count) =
+            mark_missing_sources(&conn, &outcomes, now, false).unwrap();
+
+        assert_eq!(missing_count, 1);
+        assert_eq!(disconnected_count, 1);
+
+        // Verify id1 is still present (Seen) - fetch_by_path only returns present sources
+        let s1 = repo::source::fetch_by_path(&conn, root_id, "file1.txt").unwrap();
+        assert!(s1.is_some());
+
+        // Verify id2 is not present (Missing)
+        let s2: i64 = conn.query_row("SELECT present FROM sources WHERE id = ?", [id2], |r| r.get(0)).unwrap();
+        assert_eq!(s2, 0);
+
+        // Verify id3 is still present (Disconnected, not marked missing)
+        let s3: i64 = conn.query_row("SELECT present FROM sources WHERE id = ?", [id3], |r| r.get(0)).unwrap();
+        assert_eq!(s3, 1);
+    }
+
+    #[test]
+    fn mark_missing_sources_disconnected_with_ignore_flag() {
+        let conn = repo::open_in_memory_for_test();
+        let temp_dir = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+
+        let id1 = repo::insert_test_source(&conn, root_id, "file1.txt", 1, 1, 100, 1000);
+
+        let outcomes = vec![(id1, SourceOutcome::Disconnected)];
+
+        let now = current_timestamp();
+        let (missing_count, disconnected_count) =
+            mark_missing_sources(&conn, &outcomes, now, true).unwrap();
+
+        // With ignore_device_id=true, disconnected should be treated as missing
+        assert_eq!(missing_count, 1);
+        assert_eq!(disconnected_count, 0);
+    }
+
+    #[test]
+    fn process_file_replaced() {
+        // Test: file at path has different inode (old file deleted, new file created at same path)
+        // The old source record (present=1) gets updated with new file's attributes
+        let conn = repo::open_in_memory_for_test();
+        let temp_dir = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+
+        let (path, device, inode, size, mtime) = create_temp_file(&temp_dir, "replaced.txt", "new content");
+
+        // Pre-insert source at same path but with DIFFERENT inode (simulates file that will be replaced)
+        let old_inode = inode + 99999; // Different inode
+        repo::insert_test_source(&conn, root_id, "replaced.txt", device as i64, old_inode as i64, 50, mtime);
+
+        let now = current_timestamp();
+        let result = process_file(
+            &conn, root_id, "replaced.txt", &path,
+            device as i64, inode as i64, size, mtime, now,
+        ).unwrap();
+
+        // Should be New because inode differs (replacement)
+        assert!(matches!(result.action, FileAction::New));
+
+        // Only one source record should exist (the old one was updated)
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path = ?",
+            rusqlite::params![root_id, "replaced.txt"],
+            |r| r.get(0)
+        ).unwrap();
+        assert_eq!(count, 1);
+
+        // The source should have the NEW file's attributes
+        let source = repo::source::fetch_by_path(&conn, root_id, "replaced.txt").unwrap().unwrap();
+        assert_eq!(source.inode, inode as i64);
+        assert_eq!(source.size, size);
+        assert_eq!(source.basis_rev, 0); // Reset for new file
+    }
+
+    #[test]
+    fn process_file_revives_stale_record() {
+        // Test: file appears at path where a stale (present=0) record exists
+        // The stale record should be revived with new file's attributes
+        let conn = repo::open_in_memory_for_test();
+        let temp_dir = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+
+        let (path, device, inode, size, mtime) = create_temp_file(&temp_dir, "revived.txt", "new content");
+
+        // Pre-insert a STALE source (present=0) at same path - simulates file that was previously missing
+        let old_source_id = repo::insert_test_source(&conn, root_id, "revived.txt", 1, 1, 50, 1000);
+        conn.execute("UPDATE sources SET present = 0 WHERE id = ?", [old_source_id]).unwrap();
+
+        let now = current_timestamp();
+        let result = process_file(
+            &conn, root_id, "revived.txt", &path,
+            device as i64, inode as i64, size, mtime, now,
+        ).unwrap();
+
+        // Should be New (no present source at path, no source with this inode)
+        assert!(matches!(result.action, FileAction::New));
+
+        // The stale record should be revived (same ID, now present=1)
+        let source = repo::source::fetch_by_path(&conn, root_id, "revived.txt").unwrap().unwrap();
+        assert_eq!(source.id, old_source_id); // Same record was revived
+        assert_eq!(source.inode, inode as i64); // Updated to new inode
+        assert_eq!(source.size, size); // Updated to new size
+        assert_eq!(source.basis_rev, 0); // Reset for new file
+
+        // Verify only one record exists
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path = ?",
+            rusqlite::params![root_id, "revived.txt"],
+            |r| r.get(0)
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn process_file_independent_operations() {
+        // Test: multiple file operations are independent (no cross-contamination)
+        // This verifies that each process_file call operates correctly regardless of others
+        let conn = repo::open_in_memory_for_test();
+        let temp_dir = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+
+        // Create three files with different scenarios
+        let (path1, dev1, ino1, size1, mtime1) = create_temp_file(&temp_dir, "new.txt", "new content");
+        let (path2, dev2, ino2, size2, mtime2) = create_temp_file(&temp_dir, "existing.txt", "existing");
+        let (path3, dev3, ino3, size3, mtime3) = create_temp_file(&temp_dir, "modified.txt", "modified content");
+
+        // Pre-insert existing file (unchanged)
+        repo::insert_test_source(&conn, root_id, "existing.txt", dev2 as i64, ino2 as i64, size2, mtime2);
+        // Pre-insert modified file (with different size)
+        repo::insert_test_source(&conn, root_id, "modified.txt", dev3 as i64, ino3 as i64, 5, mtime3);
+
+        let now = current_timestamp();
+
+        // Process all three files
+        let r1 = process_file(&conn, root_id, "new.txt", &path1, dev1 as i64, ino1 as i64, size1, mtime1, now).unwrap();
+        let r2 = process_file(&conn, root_id, "existing.txt", &path2, dev2 as i64, ino2 as i64, size2, mtime2, now).unwrap();
+        let r3 = process_file(&conn, root_id, "modified.txt", &path3, dev3 as i64, ino3 as i64, size3, mtime3, now).unwrap();
+
+        // Each should have the correct action
+        assert!(matches!(r1.action, FileAction::New));
+        assert!(matches!(r2.action, FileAction::Unchanged));
+        assert!(matches!(r3.action, FileAction::Modified));
+
+        // All three sources should exist and be present
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sources WHERE root_id = ? AND present = 1",
+            [root_id],
+            |r| r.get(0)
+        ).unwrap();
+        assert_eq!(count, 3);
+    }
 }

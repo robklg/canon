@@ -34,10 +34,11 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 - `fact.rs` - FactEntry struct, re-exports FactValue/FactType
 - `scope.rs` - ScopeMatch enum for file vs directory scope matching
 - `path.rs` - Pure path utilities (`path_is_under()`, `path_strip_prefix()`)
+- `scan.rs` - Scan reconciliation logic (`FileObservation`, `Reconciliation`, `reconcile()`, `find_missing()`)
 
 **Repository Layer** (`src/repo/`) - Database access:
 - `db.rs` - Connection, schema, transactions (`Db`, `open_with_options()`)
-- `source.rs` - Source batch fetching and writes (`batch_fetch_by_roots()`, `insert_destination()`)
+- `source.rs` - Source batch fetching and writes (`batch_fetch_by_roots()`, `insert_destination()`, `apply_reconciliation()`)
 - `root.rs` - Root batch fetching (`fetch_all()`, `batch_fetch_by_ids()`)
 - `object.rs` - Object batch fetching, archive detection (`batch_check_archived()`, `batch_find_archive_info_by_hash()`)
 - `fact.rs` - Fact batch fetching (`batch_fetch_for_sources()`, `batch_fetch_key_for_sources()`)
@@ -237,6 +238,42 @@ The `cluster generate` and `apply` commands work together:
 - Lock file does NOT store fact snapshots — simplifies format, avoids "refresh required" friction
 - Pattern expansion failures are collected and reported together (not fail-fast)
 - All validation happens before any file operations begin
+
+### Scan Pipeline Architecture
+
+The `scan` command uses a pipeline architecture with pure domain logic:
+
+**Pipeline stages** (per file):
+1. **Observe**: Capture file metadata from filesystem (`FileObservation`)
+2. **Reconcile**: Compare observation to database state, determine action (pure `reconcile()` function)
+3. **Persist**: Apply the reconciliation to database (`apply_reconciliation()`)
+
+**Domain types** (`domain/scan.rs`):
+- `FileObservation` - What scan sees on disk (root_id, rel_path, device, inode, size, mtime, partial_hash)
+- `Reconciliation` - What happened (New, Unchanged, Modified, Moved, Disconnected)
+- `reconcile()` - Pure function: given observation + existing state, returns Reconciliation
+- `find_missing()` - Pure function: given expected IDs and seen IDs, returns missing IDs
+
+**Reconciliation outcomes**:
+| Outcome | Condition | Database Action |
+|---------|-----------|-----------------|
+| `New` | No source at path, no source by inode | INSERT (or UPDATE stale/replaced record) |
+| `Unchanged` | Same path, same size+mtime | UPDATE last_seen_at only |
+| `Modified` | Same path, different size/mtime | UPDATE metadata, increment basis_rev |
+| `Moved` | Different path, same device+inode | UPDATE path (possibly cross-root) |
+| `Disconnected` | Same path, different device | Skip file, don't mark missing |
+
+**Repository functions** (`repo/source.rs`):
+- `fetch_by_path()` - Find source at (root_id, rel_path)
+- `fetch_by_inode()` - Find source by (device, inode) across all roots
+- `apply_reconciliation()` - Translate Reconciliation to SQL
+- `mark_missing()` - Set present=0 for source IDs
+- `fetch_source_ids_for_root()` - Get IDs for missing detection
+
+**Key behaviors**:
+- File replacement (same path, different inode): Old record is updated with new file's attributes
+- Stale record revival (file reappears at old path): Stale record is updated, present=1
+- Device mismatch: Detected as `Disconnected`, file skipped (use `--ignore-device-id` to override)
 
 ### Architectural Direction
 

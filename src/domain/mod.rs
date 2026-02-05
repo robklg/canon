@@ -1,9 +1,10 @@
 //! Domain layer for canon.
 //!
 //! Pure domain concepts with no I/O or side effects. This layer defines:
-//! - Structs: `Source`, `Root`, `Object`, `FactEntry`
+//! - Structs: `Source`, `Root`, `Object`, `FactEntry`, `FileObservation`, `Reconciliation`
 //! - Predicates: `is_excluded()`, `is_active()`, `matches_scope()`, etc.
 //! - Pure utilities: path manipulation, scope matching
+//! - Pure functions: `reconcile()`, `find_missing()`
 
 // Re-exports are intentional for public API convenience
 #![allow(unused_imports)]
@@ -12,6 +13,7 @@ pub mod fact;
 pub mod object;
 pub mod path;
 pub mod root;
+pub mod scan;
 pub mod scope;
 pub mod source;
 
@@ -23,5 +25,6 @@ pub use root::{
     find_containing_root, parse_root_spec, parse_root_spec_any, resolve_archive_path,
     resolve_root_path, resolve_root_path_any, Root, RootSpec,
 };
+pub use scan::{find_missing, reconcile, FileObservation, Reconciliation};
 pub use scope::{build_scope_clause, ScopeMatch};
 pub use source::{NewSource, Source};

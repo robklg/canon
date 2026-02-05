@@ -17,6 +17,14 @@ pub mod source;
 // Re-export database utilities at module level
 pub use db::{open_with_options, populate_temp_sources, print_profile_summary, Db, DbOptions, Connection};
 
+// Test utilities
+#[cfg(test)]
+pub use db::open_in_memory_for_test;
+#[cfg(test)]
+pub use root::insert_test_root;
+#[cfg(test)]
+pub use source::insert_test_source;
+
 // Note: Repository functions are accessed via their submodules, e.g.:
 // - repo::source::batch_fetch_by_roots()
 // - repo::root::fetch_all()
