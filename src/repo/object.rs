@@ -284,6 +284,23 @@ pub fn batch_find_archive_info_by_hash(
     Ok(result)
 }
 
+/// Set the exclusion flag for an object.
+///
+/// # Behavior
+/// - Updates `excluded` column to the specified value
+/// - No error if object doesn't exist (0 rows affected)
+/// - Affects all sources linked to this object (via Source::is_excluded() predicate)
+///
+/// # Returns
+/// Ok(()) on success.
+pub fn set_excluded(conn: &Connection, object_id: i64, excluded: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE objects SET excluded = ? WHERE id = ?",
+        rusqlite::params![excluded as i64, object_id],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -807,5 +824,68 @@ mod tests {
 
         // Should find 105 hashes (every 10th from 0 to 1040)
         assert_eq!(result.len(), 105);
+    }
+
+    // =========================================================================
+    // set_excluded tests
+    // =========================================================================
+
+    #[test]
+    fn set_excluded_marks_object() {
+        let conn = setup_test_db();
+        let obj_id = insert_object(&conn, "abc123", false);
+
+        // Verify initially not excluded
+        let excluded: i64 = conn.query_row(
+            "SELECT excluded FROM objects WHERE id = ?",
+            rusqlite::params![obj_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(excluded, 0);
+
+        // Set excluded
+        set_excluded(&conn, obj_id, true).unwrap();
+
+        // Verify now excluded
+        let excluded: i64 = conn.query_row(
+            "SELECT excluded FROM objects WHERE id = ?",
+            rusqlite::params![obj_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(excluded, 1);
+    }
+
+    #[test]
+    fn set_excluded_clears_object() {
+        let conn = setup_test_db();
+        let obj_id = insert_object(&conn, "abc123", true); // starts excluded
+
+        // Verify initially excluded
+        let excluded: i64 = conn.query_row(
+            "SELECT excluded FROM objects WHERE id = ?",
+            rusqlite::params![obj_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(excluded, 1);
+
+        // Clear excluded
+        set_excluded(&conn, obj_id, false).unwrap();
+
+        // Verify now not excluded
+        let excluded: i64 = conn.query_row(
+            "SELECT excluded FROM objects WHERE id = ?",
+            rusqlite::params![obj_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(excluded, 0);
+    }
+
+    #[test]
+    fn set_excluded_nonexistent_object() {
+        let conn = setup_test_db();
+
+        // Should not error when object doesn't exist
+        let result = set_excluded(&conn, 99999, true);
+        assert!(result.is_ok());
     }
 }

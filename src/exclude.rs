@@ -67,7 +67,7 @@ pub fn set(
 
     // Mark sources as excluded
     for source_id in &to_exclude {
-        conn.execute("UPDATE sources SET excluded = 1 WHERE id = ?", [source_id])?;
+        repo::source::set_excluded(conn, *source_id, true)?;
     }
 
     println!("Excluded {} sources", to_exclude.len());
@@ -113,7 +113,7 @@ pub fn clear(
 
     // Clear exclusions
     for (source_id, _) in &excluded_sources {
-        conn.execute("UPDATE sources SET excluded = 0 WHERE id = ?", [source_id])?;
+        repo::source::set_excluded(conn, *source_id, false)?;
     }
 
     println!("Cleared exclusions for {} sources", excluded_sources.len());
@@ -337,7 +337,7 @@ pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
         return Ok(());
     }
 
-    conn.execute("UPDATE sources SET excluded = 1 WHERE id = ?", [source_id])?;
+    repo::source::set_excluded(db.conn(), source_id, true)?;
 
     println!("Excluded source (id: {}): {}", source_id, path);
     Ok(())
@@ -382,7 +382,7 @@ pub fn set_by_path(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()
         return Ok(());
     }
 
-    conn.execute("UPDATE sources SET excluded = 1 WHERE id = ?", [source_id])?;
+    repo::source::set_excluded(db.conn(), source_id, true)?;
 
     println!("Excluded: {}", path_str);
     Ok(())
@@ -537,7 +537,7 @@ pub fn exclude_duplicates(
             continue;
         }
 
-        conn.execute("UPDATE sources SET excluded = 1 WHERE id = ?", [source_id])?;
+        repo::source::set_excluded(conn, *source_id, true)?;
         excluded_count += 1;
     }
 
@@ -751,7 +751,7 @@ pub fn set_objects_by_filter(
 
     // Execute exclusions
     for (object_id, _, _) in &all_sources {
-        conn.execute("UPDATE objects SET excluded = 1 WHERE id = ?", [object_id])?;
+        repo::object::set_excluded(conn, *object_id, true)?;
     }
 
     println!("Excluded {} objects affecting {} sources ({} in source roots, {} in archives)",
@@ -827,7 +827,7 @@ fn exclude_object_by_id(conn: &Connection, object_id: i64, hash_value: &str, opt
         return Ok(());
     }
 
-    conn.execute("UPDATE objects SET excluded = 1 WHERE id = ?", [object_id])?;
+    repo::object::set_excluded(conn, object_id, true)?;
 
     println!("Excluded object: {}...", &hash_value[..16.min(hash_value.len())]);
     print_source_locations(&sources, options.verbose);
@@ -862,7 +862,7 @@ pub fn clear_object(db: &Db, hash: &str, options: &ClearOptions) -> Result<()> {
         return Ok(());
     }
 
-    conn.execute("UPDATE objects SET excluded = 0 WHERE id = ?", [object_id])?;
+    repo::object::set_excluded(conn, object_id, false)?;
 
     println!("Cleared exclusion from object: {}...", &hash_value[..16.min(hash_value.len())]);
     Ok(())

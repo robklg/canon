@@ -576,6 +576,60 @@ pub fn fetch_source_ids_for_root(
     Ok(ids)
 }
 
+/// Set the exclusion flag for a single source.
+///
+/// # Behavior
+/// - Updates `excluded` column to the specified value
+/// - No error if source doesn't exist (0 rows affected)
+/// - Does NOT affect object-level exclusion
+///
+/// # Returns
+/// Ok(()) on success. To verify the source existed, use batch variant which returns count.
+pub fn set_excluded(conn: &Connection, source_id: i64, excluded: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE sources SET excluded = ? WHERE id = ?",
+        rusqlite::params![excluded as i64, source_id],
+    )?;
+    Ok(())
+}
+
+/// Set the exclusion flag for multiple sources.
+///
+/// # Behavior
+/// - Updates `excluded` column for all specified sources
+/// - Handles large inputs via chunking (BATCH_SIZE = 1000)
+/// - Sources that don't exist are silently skipped
+///
+/// # Returns
+/// Count of rows actually updated (may be less than input if some sources don't exist).
+pub fn batch_set_excluded(conn: &Connection, source_ids: &[i64], excluded: bool) -> Result<u64> {
+    if source_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut total_updated = 0u64;
+
+    for chunk in source_ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "UPDATE sources SET excluded = ? WHERE id IN ({})",
+            placeholders.join(",")
+        );
+
+        // Build params: excluded flag first, then all the IDs
+        let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() + 1);
+        params.push(rusqlite::types::Value::from(excluded as i64));
+        for &id in chunk {
+            params.push(rusqlite::types::Value::from(id));
+        }
+
+        let updated = conn.execute(&sql, rusqlite::params_from_iter(params))?;
+        total_updated += updated as u64;
+    }
+
+    Ok(total_updated)
+}
+
 /// Insert a source for testing purposes.
 ///
 /// This function is only available in test builds. It provides a simple way
@@ -1479,6 +1533,195 @@ mod tests {
         let all_ids = fetch_source_ids_for_root(&conn, root_id, None).unwrap();
         assert_eq!(all_ids.len(), 3);
         assert!(all_ids.contains(&id3));
+    }
+
+    // =========================================================================
+    // set_excluded tests
+    // =========================================================================
+
+    #[test]
+    fn set_excluded_marks_source() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let source_id = insert_source(&conn, root_id, "file.jpg", None, true, false);
+
+        // Verify initially not excluded
+        let excluded: i64 = conn.query_row(
+            "SELECT excluded FROM sources WHERE id = ?",
+            rusqlite::params![source_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(excluded, 0);
+
+        // Set excluded
+        set_excluded(&conn, source_id, true).unwrap();
+
+        // Verify now excluded
+        let excluded: i64 = conn.query_row(
+            "SELECT excluded FROM sources WHERE id = ?",
+            rusqlite::params![source_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(excluded, 1);
+    }
+
+    #[test]
+    fn set_excluded_clears_source() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let source_id = insert_source(&conn, root_id, "file.jpg", None, true, true); // starts excluded
+
+        // Verify initially excluded
+        let excluded: i64 = conn.query_row(
+            "SELECT excluded FROM sources WHERE id = ?",
+            rusqlite::params![source_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(excluded, 1);
+
+        // Clear excluded
+        set_excluded(&conn, source_id, false).unwrap();
+
+        // Verify now not excluded
+        let excluded: i64 = conn.query_row(
+            "SELECT excluded FROM sources WHERE id = ?",
+            rusqlite::params![source_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(excluded, 0);
+    }
+
+    #[test]
+    fn set_excluded_nonexistent_source() {
+        let conn = setup_test_db();
+
+        // Should not error when source doesn't exist
+        let result = set_excluded(&conn, 99999, true);
+        assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // batch_set_excluded tests
+    // =========================================================================
+
+    #[test]
+    fn batch_set_excluded_empty_list() {
+        let conn = setup_test_db();
+        let count = batch_set_excluded(&conn, &[], true).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn batch_set_excluded_multiple() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let id1 = insert_source(&conn, root_id, "file1.jpg", None, true, false);
+        let id2 = insert_source(&conn, root_id, "file2.jpg", None, true, false);
+        let id3 = insert_source(&conn, root_id, "file3.jpg", None, true, false);
+
+        // Exclude id1 and id2, leave id3
+        let count = batch_set_excluded(&conn, &[id1, id2], true).unwrap();
+        assert_eq!(count, 2);
+
+        // Verify exclusion state
+        let excluded1: i64 = conn.query_row(
+            "SELECT excluded FROM sources WHERE id = ?",
+            rusqlite::params![id1],
+            |row| row.get(0),
+        ).unwrap();
+        let excluded2: i64 = conn.query_row(
+            "SELECT excluded FROM sources WHERE id = ?",
+            rusqlite::params![id2],
+            |row| row.get(0),
+        ).unwrap();
+        let excluded3: i64 = conn.query_row(
+            "SELECT excluded FROM sources WHERE id = ?",
+            rusqlite::params![id3],
+            |row| row.get(0),
+        ).unwrap();
+
+        assert_eq!(excluded1, 1);
+        assert_eq!(excluded2, 1);
+        assert_eq!(excluded3, 0); // Not in the batch
+    }
+
+    #[test]
+    fn batch_set_excluded_returns_count() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let id1 = insert_source(&conn, root_id, "file1.jpg", None, true, false);
+        let _id2 = insert_source(&conn, root_id, "file2.jpg", None, true, false);
+
+        // Request update for id1 and a nonexistent id
+        let count = batch_set_excluded(&conn, &[id1, 99999], true).unwrap();
+
+        // Only id1 should be updated
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn batch_set_excluded_skips_nonexistent() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let id1 = insert_source(&conn, root_id, "file.jpg", None, true, false);
+
+        // Mix of existing and nonexistent IDs
+        let count = batch_set_excluded(&conn, &[id1, 99998, 99999], true).unwrap();
+
+        // Only the existing source should be updated
+        assert_eq!(count, 1);
+
+        // Verify it was actually updated
+        let excluded: i64 = conn.query_row(
+            "SELECT excluded FROM sources WHERE id = ?",
+            rusqlite::params![id1],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(excluded, 1);
+    }
+
+    #[test]
+    fn batch_set_excluded_handles_large_batch() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        // Create more than BATCH_SIZE sources (1000+)
+        let mut source_ids = Vec::new();
+        for i in 0..1050 {
+            let id = insert_source(&conn, root_id, &format!("file_{}.jpg", i), None, true, false);
+            source_ids.push(id);
+        }
+
+        // Exclude all of them
+        let count = batch_set_excluded(&conn, &source_ids, true).unwrap();
+        assert_eq!(count, 1050);
+
+        // Verify a sample from each batch chunk
+        let excluded_first: i64 = conn.query_row(
+            "SELECT excluded FROM sources WHERE id = ?",
+            rusqlite::params![source_ids[0]],
+            |row| row.get(0),
+        ).unwrap();
+        let excluded_mid: i64 = conn.query_row(
+            "SELECT excluded FROM sources WHERE id = ?",
+            rusqlite::params![source_ids[500]],
+            |row| row.get(0),
+        ).unwrap();
+        let excluded_last: i64 = conn.query_row(
+            "SELECT excluded FROM sources WHERE id = ?",
+            rusqlite::params![source_ids[1049]],
+            |row| row.get(0),
+        ).unwrap();
+
+        assert_eq!(excluded_first, 1);
+        assert_eq!(excluded_mid, 1);
+        assert_eq!(excluded_last, 1);
     }
 
 }
