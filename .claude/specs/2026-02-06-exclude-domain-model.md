@@ -142,14 +142,28 @@ Extract exclusion write operations to the repository layer with comprehensive te
 
 ### Phase 2: Object Lookup Functions
 
-**Status:** pending
+**Status:** completed
 
 **Goal:** Add repo functions for object lookup by hash.
 
 **Scope:**
-- Add `repo::object::fetch_by_hash(conn, hash) -> Result<Option<Object>>`
-- Migrate hash-based lookups in `set_object_by_hash`, `clear_object`
-- Consider adding `repo::object::fetch_by_hash_with_sources()` for the display use case
+
+1. Add to `repo/object.rs`:
+   ```rust
+   /// Fetch an object by its hash value.
+   ///
+   /// # Returns
+   /// - `Ok(Some(Object))` if found
+   /// - `Ok(None)` if no object with that hash exists
+   pub fn fetch_by_hash(conn: &Connection, hash: &str) -> Result<Option<Object>>
+   ```
+
+2. Migrate inline SQL in `exclude.rs`:
+   - `set_object_by_hash()` → `repo::object::fetch_by_hash()`
+   - `clear_object()` → `repo::object::fetch_by_hash()` + `object.is_excluded()` domain predicate
+
+**Non-goals:**
+- `fetch_by_hash_with_sources()` — deferred as premature; current code fetches sources separately when needed
 
 **Dependencies:** Phase 1 complete
 
@@ -192,6 +206,16 @@ Extract exclusion write operations to the repository layer with comprehensive te
 | `set_excluded_marks_object` | Verify `set_excluded(id, true)` sets excluded=1 |
 | `set_excluded_clears_object` | Verify `set_excluded(id, false)` sets excluded=0 |
 | `set_excluded_nonexistent_object` | No error when object doesn't exist |
+
+### Phase 2 Tests
+
+#### Repo Layer Tests (`repo/object.rs`)
+
+| Test | Description |
+|------|-------------|
+| `fetch_by_hash_returns_object` | Valid hash returns `Some(Object)` with correct fields |
+| `fetch_by_hash_not_found` | Invalid hash returns `None` (no error) |
+| `fetch_by_hash_returns_excluded_flag` | Object with `excluded=1` reflects in result |
 
 ### Existing Tests That Must Pass
 

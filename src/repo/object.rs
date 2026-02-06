@@ -33,6 +33,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+use rusqlite::OptionalExtension;
 
 use super::db::Connection;
 use crate::domain::object::Object;
@@ -84,6 +85,23 @@ pub fn batch_fetch_by_ids(conn: &Connection, object_ids: &[i64]) -> Result<HashM
             result.insert(obj.id, obj);
         }
     }
+
+    Ok(result)
+}
+
+/// Fetch an object by its hash value.
+///
+/// # Returns
+/// - `Ok(Some(Object))` if found
+/// - `Ok(None)` if no object with that hash exists
+///
+/// This is a single-row lookup, not a batch operation.
+pub fn fetch_by_hash(conn: &Connection, hash: &str) -> Result<Option<Object>> {
+    let sql = format!("SELECT {} FROM objects WHERE hash_value = ?", OBJECT_COLUMNS);
+
+    let result = conn
+        .query_row(&sql, [hash], object_from_row)
+        .optional()?;
 
     Ok(result)
 }
@@ -887,5 +905,45 @@ mod tests {
         // Should not error when object doesn't exist
         let result = set_excluded(&conn, 99999, true);
         assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // fetch_by_hash tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_by_hash_returns_object() {
+        let conn = setup_test_db();
+        let obj_id = insert_object(&conn, "abc123def456", false);
+
+        let result = fetch_by_hash(&conn, "abc123def456").unwrap();
+
+        assert!(result.is_some());
+        let obj = result.unwrap();
+        assert_eq!(obj.id, obj_id);
+        assert_eq!(obj.hash_type, "sha256");
+        assert_eq!(obj.hash_value, "abc123def456");
+        assert!(!obj.excluded);
+    }
+
+    #[test]
+    fn fetch_by_hash_not_found() {
+        let conn = setup_test_db();
+
+        let result = fetch_by_hash(&conn, "nonexistent_hash").unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn fetch_by_hash_returns_excluded_flag() {
+        let conn = setup_test_db();
+        insert_object(&conn, "excluded_hash", true);
+
+        let result = fetch_by_hash(&conn, "excluded_hash").unwrap();
+
+        assert!(result.is_some());
+        let obj = result.unwrap();
+        assert!(obj.excluded);
     }
 }

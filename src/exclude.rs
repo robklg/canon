@@ -558,19 +558,11 @@ pub fn set_object_by_hash(db: &Db, hash: &str, options: &SetOptions) -> Result<(
     let conn = db.conn();
 
     // Find the object by hash
-    let object_info: Option<(i64, String)> = conn
-        .query_row(
-            "SELECT id, hash_value FROM objects WHERE hash_value = ?",
-            [hash],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .ok();
-
-    let Some((object_id, hash_value)) = object_info else {
+    let Some(object) = repo::object::fetch_by_hash(conn, hash)? else {
         anyhow::bail!("No object found with hash: {}", hash);
     };
 
-    exclude_object_by_id(conn, object_id, &hash_value, options)
+    exclude_object_by_id(conn, object.id, &object.hash_value, options)
 }
 
 /// Exclude an object by file path. Looks up the source, gets its object, and excludes it.
@@ -839,32 +831,24 @@ pub fn clear_object(db: &Db, hash: &str, options: &ClearOptions) -> Result<()> {
     let conn = db.conn();
 
     // Find the object by hash
-    let object_info: Option<(i64, String)> = conn
-        .query_row(
-            "SELECT id, hash_value FROM objects WHERE hash_value = ?",
-            [hash],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .ok();
-
-    let Some((object_id, hash_value)) = object_info else {
+    let Some(object) = repo::object::fetch_by_hash(conn, hash)? else {
         anyhow::bail!("No object found with hash: {}", hash);
     };
 
-    // Check if excluded
-    if !is_object_excluded(conn, object_id)? {
-        println!("Object is not excluded: {}...", &hash_value[..16.min(hash_value.len())]);
+    // Check if excluded (use domain predicate)
+    if !object.is_excluded() {
+        println!("Object is not excluded: {}...", &object.hash_value[..16.min(object.hash_value.len())]);
         return Ok(());
     }
 
     if options.dry_run {
-        println!("Would clear exclusion from object: {}...", &hash_value[..16.min(hash_value.len())]);
+        println!("Would clear exclusion from object: {}...", &object.hash_value[..16.min(object.hash_value.len())]);
         return Ok(());
     }
 
-    repo::object::set_excluded(conn, object_id, false)?;
+    repo::object::set_excluded(conn, object.id, false)?;
 
-    println!("Cleared exclusion from object: {}...", &hash_value[..16.min(hash_value.len())]);
+    println!("Cleared exclusion from object: {}...", &object.hash_value[..16.min(object.hash_value.len())]);
     Ok(())
 }
 
