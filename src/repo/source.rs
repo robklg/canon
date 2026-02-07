@@ -252,6 +252,69 @@ pub fn fetch_by_inode(conn: &Connection, device: u64, inode: u64) -> Result<Opti
     Ok(result)
 }
 
+/// Check which destination paths are already registered in an archive.
+///
+/// This is used by apply's preflight check to detect destination conflicts
+/// before any file operations begin. In regular mode, any existing paths
+/// are an error. In --resume mode, existing paths are classified for skip/transfer.
+///
+/// # Arguments
+/// * `conn` - Database connection
+/// * `archive_root_id` - The archive root to check within
+/// * `rel_paths` - Relative paths to check (within the archive)
+///
+/// # Returns
+/// Set of rel_paths that exist in the archive with present=1.
+/// Paths not in the result set are available for writing.
+///
+/// # Example
+/// ```ignore
+/// let existing = batch_check_paths_exist(conn, archive_id, &["2024/a.jpg", "2024/b.jpg"])?;
+/// if existing.contains("2024/a.jpg") {
+///     // This path is already occupied
+/// }
+/// ```
+pub fn batch_check_paths_exist(
+    conn: &Connection,
+    archive_root_id: i64,
+    rel_paths: &[&str],
+) -> Result<std::collections::HashSet<String>> {
+    use std::collections::HashSet;
+
+    if rel_paths.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let mut result = HashSet::new();
+
+    // Process rel_paths in batches to avoid SQLite variable limit
+    for chunk in rel_paths.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT rel_path FROM sources WHERE root_id = ? AND present = 1 AND rel_path IN ({})",
+            placeholders.join(", ")
+        );
+
+        // Build params: archive_root_id first, then all rel_paths
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+        params.push(&archive_root_id);
+        for path in chunk {
+            params.push(path);
+        }
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            row.get::<_, String>(0)
+        })?;
+
+        for row in rows {
+            result.insert(row?);
+        }
+    }
+
+    Ok(result)
+}
+
 /// Insert a new source record for a destination file in an archive.
 ///
 /// This function registers a file that has been copied or moved to an archive root.
@@ -1879,6 +1942,151 @@ mod tests {
         assert_eq!(excluded_first, 1);
         assert_eq!(excluded_mid, 1);
         assert_eq!(excluded_last, 1);
+    }
+
+    // =========================================================================
+    // batch_check_paths_exist tests
+    // =========================================================================
+
+    #[test]
+    fn batch_check_paths_exist_empty_input() {
+        let conn = setup_test_db();
+        let _root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let result = batch_check_paths_exist(&conn, 1, &[]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn batch_check_paths_exist_none_found() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+
+        // No sources exist, query for paths that don't exist
+        let result = batch_check_paths_exist(&conn, root_id, &["a.jpg", "b.jpg"]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn batch_check_paths_exist_all_found() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+
+        insert_source(&conn, root_id, "a.jpg", None, true, false);
+        insert_source(&conn, root_id, "b.jpg", None, true, false);
+
+        let result = batch_check_paths_exist(&conn, root_id, &["a.jpg", "b.jpg"]).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.contains("a.jpg"));
+        assert!(result.contains("b.jpg"));
+    }
+
+    #[test]
+    fn batch_check_paths_exist_mixed() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+
+        insert_source(&conn, root_id, "exists.jpg", None, true, false);
+        // "missing.jpg" is not inserted
+
+        let result = batch_check_paths_exist(&conn, root_id, &["exists.jpg", "missing.jpg"]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result.contains("exists.jpg"));
+        assert!(!result.contains("missing.jpg"));
+    }
+
+    #[test]
+    fn batch_check_paths_exist_ignores_not_present() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+
+        insert_source(&conn, root_id, "present.jpg", None, true, false);
+        insert_source(&conn, root_id, "deleted.jpg", None, false, false); // present=0
+
+        let result = batch_check_paths_exist(&conn, root_id, &["present.jpg", "deleted.jpg"]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result.contains("present.jpg"));
+        assert!(!result.contains("deleted.jpg"));
+    }
+
+    #[test]
+    fn batch_check_paths_exist_different_root() {
+        let conn = setup_test_db();
+        let root1 = crate::repo::insert_test_root(&conn, "/archive1", "archive", false);
+        let root2 = crate::repo::insert_test_root(&conn, "/archive2", "archive", false);
+
+        // Insert in root1
+        insert_source(&conn, root1, "file.jpg", None, true, false);
+
+        // Query against root2 - should not find it
+        let result = batch_check_paths_exist(&conn, root2, &["file.jpg"]).unwrap();
+        assert!(result.is_empty());
+
+        // Query against root1 - should find it
+        let result = batch_check_paths_exist(&conn, root1, &["file.jpg"]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result.contains("file.jpg"));
+    }
+
+    #[test]
+    fn batch_check_paths_exist_handles_999_paths() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+
+        // Create 999 sources (just under BATCH_SIZE)
+        let mut paths = Vec::new();
+        for i in 0..999 {
+            let path = format!("file_{}.jpg", i);
+            insert_source(&conn, root_id, &path, None, true, false);
+            paths.push(path);
+        }
+
+        let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+        let result = batch_check_paths_exist(&conn, root_id, &path_refs).unwrap();
+
+        assert_eq!(result.len(), 999);
+    }
+
+    #[test]
+    fn batch_check_paths_exist_handles_1000_paths() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+
+        // Create exactly BATCH_SIZE sources
+        let mut paths = Vec::new();
+        for i in 0..1000 {
+            let path = format!("file_{}.jpg", i);
+            insert_source(&conn, root_id, &path, None, true, false);
+            paths.push(path);
+        }
+
+        let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+        let result = batch_check_paths_exist(&conn, root_id, &path_refs).unwrap();
+
+        assert_eq!(result.len(), 1000);
+    }
+
+    #[test]
+    fn batch_check_paths_exist_handles_1001_paths() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+
+        // Create more than BATCH_SIZE sources (requires 2 batches)
+        let mut paths = Vec::new();
+        for i in 0..1001 {
+            let path = format!("file_{}.jpg", i);
+            insert_source(&conn, root_id, &path, None, true, false);
+            paths.push(path);
+        }
+
+        let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+        let result = batch_check_paths_exist(&conn, root_id, &path_refs).unwrap();
+
+        assert_eq!(result.len(), 1001);
+
+        // Verify samples from both batches
+        assert!(result.contains("file_0.jpg"));
+        assert!(result.contains("file_999.jpg"));
+        assert!(result.contains("file_1000.jpg"));
     }
 
 }

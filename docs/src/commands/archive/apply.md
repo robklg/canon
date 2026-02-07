@@ -12,6 +12,9 @@ canon apply manifest.toml
 # Show per-file progress during transfer
 canon apply manifest.toml --verbose
 
+# Resume a previously interrupted apply
+canon apply manifest.toml --resume
+
 # Rename files instead of copying (Unix only, fails on cross-device)
 canon apply manifest.toml --rename
 
@@ -36,6 +39,34 @@ canon apply manifest.toml --allow-cross-archive-duplicates
 
 All modes use noclobber semantics: if a destination file exists, apply aborts with an error.
 
+**Resume mode (`--resume`):**
+
+Use `--resume` to continue a previously interrupted apply. This is useful when:
+- Apply was interrupted (Ctrl+C, system crash, disk full)
+- Some files failed to transfer due to errors
+
+Resume mode classifies each destination into one of:
+- **Already archived** - Registered in database, skipped
+- **Resumed** - File exists on disk but not in database, skipped (needs `scan` to register)
+- **To transfer** - Not in database, not on disk, will be copied
+
+```bash
+# Resume an interrupted apply
+canon apply manifest.toml --resume
+
+# Preview what --resume would do
+canon apply manifest.toml --resume --dry-run
+```
+
+If `--resume` reports "resumed" files, run `canon scan` on the affected paths to register them:
+
+```bash
+# Scan only the destination directory that was being written to
+canon scan /path/to/archive/2024
+```
+
+If `--resume` detects files with size mismatches (partial copies from interrupted transfers), it will error and ask you to delete those files before continuing.
+
 **Integrity validation:**
 
 During transfer, Canon validates each source file's partial hash (first 8KB + last 8KB) to detect file corruption or modification since the manifest was generated. If validation fails, the transfer is aborted.
@@ -51,9 +82,13 @@ Use `--root` to apply only a subset of sources from the manifest. Useful for sta
 
 1. **Destination collisions** - If multiple sources would map to the same destination path (e.g., using `{filename}` when sources have duplicate names), apply aborts with an error showing which files conflict.
 
-2. **Archive conflicts** - Checks if files already exist in the destination archive or other archives.
+2. **Destination path conflicts** - In regular mode (without `--resume`), checks if any destination paths are already occupied — either registered in the database or existing on disk. If conflicts are found, apply suggests using `--resume` to skip already-copied files.
 
-3. **Excluded sources** - Blocks if any sources in the manifest are marked as excluded.
+3. **Stale destination records** - If the database shows files as present in the archive but they're missing from disk, apply aborts. Run `canon scan <archive>` to update the database before retrying.
+
+4. **Archive conflicts** - Checks if files already exist in the destination archive or other archives.
+
+5. **Excluded sources** - Blocks if any sources in the manifest are marked as excluded.
 
 Edit the manifest's `[output]` section to customize the destination:
 
@@ -69,3 +104,28 @@ Pattern variables use fact keys with optional modifiers (see [Pattern Expression
 - `{source.mtime|year}`, `{source.mtime|month}` - File modification date
 - `{content.DateTimeOriginal|year}` - EXIF date with modifier
 - `{content.Make}`, `{content.Model}` - Any fact key
+
+**Recovering from interrupted apply:**
+
+If apply is interrupted or encounters errors:
+
+1. Fix any reported errors (permissions, disk space, etc.)
+2. Delete any partial files in the archive (files with wrong sizes from interrupted copies)
+3. Re-run with `--resume`:
+   ```bash
+   canon apply manifest.toml --resume
+   ```
+
+The `--resume` flag skips files that already exist and transfers only the remaining files. It will detect and report partial files that need deletion.
+
+If `--resume` reports "resumed" files, scan the destination to register them:
+```bash
+canon scan /path/to/archive/destination-folder
+```
+
+If source files changed during apply, refresh the manifest first:
+```bash
+canon scan <source-paths>
+canon cluster refresh manifest.toml
+canon apply manifest.toml
+```

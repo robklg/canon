@@ -558,9 +558,15 @@ fn process_file(
         partial_hash: None, // Computed after reconciliation if needed
     };
 
+    // Wrap the observe-reconcile-persist cycle in a transaction for atomicity.
+    // Uses unchecked_transaction() because we take &Connection (not &mut).
+    // This ensures the reads (fetch_by_path, fetch_by_inode) and write
+    // (apply_reconciliation) are atomic, preventing TOCTOU race conditions.
+    let tx = conn.unchecked_transaction()?;
+
     // Query existing state using repo functions
-    let source_at_path = repo::source::fetch_by_path(conn, root_id, rel_path)?;
-    let source_by_inode = repo::source::fetch_by_inode(conn, device as u64, inode as u64)?;
+    let source_at_path = repo::source::fetch_by_path(&tx, root_id, rel_path)?;
+    let source_by_inode = repo::source::fetch_by_inode(&tx, device as u64, inode as u64)?;
 
     // Determine what happened (pure domain logic)
     let reconciliation = reconcile(
@@ -570,12 +576,15 @@ fn process_file(
     );
 
     // Compute partial_hash if needed (for New or Modified)
+    // This is filesystem I/O, done inside transaction but doesn't touch DB
     if reconciliation.needs_partial_hash() {
         observation.partial_hash = Some(compute_partial_hash(full_path, size as u64)?);
     }
 
     // Apply reconciliation to database
-    let source = repo::source::apply_reconciliation(conn, &observation, &reconciliation, now)?;
+    let source = repo::source::apply_reconciliation(&tx, &observation, &reconciliation, now)?;
+
+    tx.commit()?;
 
     // Map reconciliation to FileAction and extract old_object_id
     let (action, old_object_id) = match &reconciliation {

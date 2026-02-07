@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cluster::{LockEntry, ManifestConfig};
 use crate::repo::{self, Connection, Db};
+use crate::domain::apply::{classify_destination, DestinationState};
 use crate::domain::fact::FactEntry;
 use crate::domain::root::parse_root_spec;
 use crate::domain::source::NewSource;
@@ -34,6 +35,9 @@ struct ApplyStats {
     skipped_stale: u64,
     skipped_filtered: u64,
     errors: u64,
+    // Resume mode counts (from work planning phase)
+    already_archived: u64,
+    resumed: u64,
 }
 
 /// Tracks sources that were skipped due to state changes
@@ -50,6 +54,24 @@ pub struct ApplyOptions {
     pub roots: Vec<String>,
     pub transfer_mode: TransferMode,
     pub yes: bool,
+    pub resume: bool,
+}
+
+/// Result of work planning phase in resume mode.
+struct WorkPlan<'a> {
+    /// Sources that need to be transferred (not in DB, not on disk)
+    to_transfer: Vec<&'a LockEntry>,
+    /// Count of sources already registered in DB (skipped)
+    already_archived: usize,
+    /// Count of sources on disk but not in DB (skipped, need scan)
+    resumed: usize,
+}
+
+/// A size mismatch found during work planning.
+struct SizeMismatchError {
+    dest_path: String,
+    expected: u64,
+    actual: u64,
 }
 
 /// Build an EvalContext for a source using pre-fetched facts and cached root paths.
@@ -328,6 +350,63 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     }
     eprintln!(" ok");
 
+    // Check for destination path conflicts (paths already occupied)
+    // In resume mode, this check is skipped — work planning handles classification
+    if !options.resume {
+        eprint!("Checking for destination path conflicts...");
+        let dest_conflicts = check_destination_conflicts(
+            &*conn,
+            &filtered_sources,
+            &pattern,
+            &needed_keys,
+            scope_prefix,
+            &base_dir,
+            &config.output.base_dir,
+            config.output.archive_root_id,
+            &root_paths,
+            &all_facts,
+        )?;
+
+        let total_conflicts = dest_conflicts.in_db.len() + dest_conflicts.on_disk_only.len();
+        if total_conflicts > 0 {
+            eprintln!();
+            eprintln!(
+                "Preflight failed: {} destination paths already exist.",
+                total_conflicts
+            );
+            eprintln!();
+            if !dest_conflicts.in_db.is_empty() {
+                eprintln!("Already registered in archive ({}):", dest_conflicts.in_db.len());
+                for path in dest_conflicts.in_db.iter().take(5) {
+                    eprintln!("  {}", path);
+                }
+                if dest_conflicts.in_db.len() > 5 {
+                    eprintln!("  ... and {} more", dest_conflicts.in_db.len() - 5);
+                }
+            }
+            if !dest_conflicts.on_disk_only.is_empty() {
+                eprintln!();
+                eprintln!("Exist on disk but not in database ({}):", dest_conflicts.on_disk_only.len());
+                for path in dest_conflicts.on_disk_only.iter().take(5) {
+                    eprintln!("  {}", path);
+                }
+                if dest_conflicts.on_disk_only.len() > 5 {
+                    eprintln!("  ... and {} more", dest_conflicts.on_disk_only.len() - 5);
+                }
+            }
+            eprintln!();
+            eprintln!("This may be from a previously interrupted apply. To resume:");
+            eprintln!("  canon apply --resume <manifest>");
+            eprintln!();
+            eprintln!("Or to see what would be skipped:");
+            eprintln!("  canon apply --resume --dry-run <manifest>");
+            eprintln!();
+            eprintln!("If these are unexpected conflicts, run `canon scan <archive>` to update the database.");
+            bail!("Aborting due to destination path conflicts");
+        }
+        eprintln!(" ok");
+    }
+
     // Check archive conflicts
     eprintln!("Checking archive conflicts...");
     let conflicts = check_archive_conflicts_filtered(conn, &filtered_sources, config.output.archive_root_id)?;
@@ -397,78 +476,127 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     // Apply looks up current fact values at runtime. If a fact changed, the new value is used.
     // Pattern expansion validation happens earlier (after "Checking destination write permissions").
 
-    // Preflight: validate source file states
-    // dry-run: fast DB check; real apply: thorough disk check
-    eprintln!("Validating source file states...");
-    let stale = if options.dry_run {
-        check_source_states_db(conn, &filtered_sources)?
-    } else {
-        check_source_states_disk(&filtered_sources)
-    };
-    if !stale.is_empty() {
-        eprintln!(
-            "Error: {} sources have changed since manifest was generated:",
-            stale.len()
-        );
-        for s in stale.iter().take(10) {
-            eprintln!("  {}: {}", s.path, s.reason);
-        }
-        if stale.len() > 10 {
-            eprintln!("  ... and {} more", stale.len() - 10);
-        }
-        eprintln!("\nRun `canon scan` then `cluster refresh` to regenerate the lock file.");
-        bail!("Aborting due to stale sources in manifest");
-    }
-
     let mut stats = ApplyStats {
         skipped_filtered: skipped_by_filter as u64,
         ..Default::default()
     };
 
-    // Track stale sources found during transfers (race condition detection)
-    let mut stale_during_transfer: Vec<SkippedStaleSource> = Vec::new();
-
-    let total = filtered_sources.len();
-    let progress = Progress::new(total);
-    eprintln!("Processing {} sources...", total);
-
-    for (i, source) in filtered_sources.iter().enumerate() {
-        progress.update(i);
-
-        match process_source(
-            source,
+    // Phase 2: Work Planning
+    // In resume mode, classify sources and determine what needs transfer
+    // In regular mode, all filtered sources go to transfer
+    // Work planning runs BEFORE source validation so that --resume with --rename/--move
+    // can skip sources whose destinations already exist (source may be gone after rename).
+    let sources_to_transfer: Vec<&LockEntry> = if options.resume {
+        eprint!("Planning transfers (--resume mode)...");
+        let work_plan = plan_transfers(
+            &*conn,
+            &filtered_sources,
             &pattern,
             &needed_keys,
             scope_prefix,
             &base_dir,
             &config.output.base_dir,
-            options,
-            &*conn,
             config.output.archive_root_id,
             &root_paths,
             &all_facts,
-        ) {
-            Ok(action) => match action {
-                ApplyAction::Copied => stats.copied += 1,
-                ApplyAction::Renamed => stats.renamed += 1,
-                ApplyAction::Moved => stats.moved += 1,
-                ApplyAction::SkippedMissing => stats.skipped_missing += 1,
-                ApplyAction::SkippedStale(reason) => {
-                    stats.skipped_stale += 1;
-                    stale_during_transfer.push(SkippedStaleSource {
-                        path: source.path.clone(),
-                        reason,
-                    });
-                }
-            },
-            Err(e) => {
-                eprintln!("Error processing {}: {}", source.path, e);
-                stats.errors += 1;
+        )?;
+        eprintln!(" ok");
+
+        // Report work plan
+        eprintln!();
+        eprintln!("Resume plan:");
+        eprintln!("  Already archived: {}", work_plan.already_archived);
+        eprintln!("  Resumed (need scan): {}", work_plan.resumed);
+        eprintln!("  To transfer: {}", work_plan.to_transfer.len());
+
+        // Record counts in stats
+        stats.already_archived = work_plan.already_archived as u64;
+        stats.resumed = work_plan.resumed as u64;
+
+        work_plan.to_transfer
+    } else {
+        // Regular mode: all sources need transfer
+        filtered_sources.clone()
+    };
+
+    // Validate source file states (only for sources that need transfer)
+    // dry-run: fast DB check; real apply: thorough disk check
+    // This runs after work planning so --resume can skip sources whose destinations
+    // already exist — important for --rename/--move where source may be gone.
+    if !sources_to_transfer.is_empty() {
+        eprintln!("Validating source file states...");
+        let stale = if options.dry_run {
+            check_source_states_db(conn, &sources_to_transfer)?
+        } else {
+            check_source_states_disk(&sources_to_transfer)
+        };
+        if !stale.is_empty() {
+            eprintln!(
+                "Error: {} sources have changed since manifest was generated:",
+                stale.len()
+            );
+            for s in stale.iter().take(10) {
+                eprintln!("  {}: {}", s.path, s.reason);
             }
+            if stale.len() > 10 {
+                eprintln!("  ... and {} more", stale.len() - 10);
+            }
+            eprintln!("\nRun `canon scan` then `cluster refresh` to regenerate the lock file.");
+            bail!("Aborting due to stale sources in manifest");
         }
     }
 
-    progress.finish();
+    // Track stale sources found during transfers (race condition detection)
+    let mut stale_during_transfer: Vec<SkippedStaleSource> = Vec::new();
+
+    // Phase 3: Transfer
+    let total = sources_to_transfer.len();
+    if total > 0 {
+        let progress = Progress::new(total);
+        eprintln!();
+        eprintln!("Processing {} sources...", total);
+
+        for (i, source) in sources_to_transfer.iter().enumerate() {
+            progress.update(i);
+
+            match process_source(
+                source,
+                &pattern,
+                &needed_keys,
+                scope_prefix,
+                &base_dir,
+                &config.output.base_dir,
+                options,
+                &*conn,
+                config.output.archive_root_id,
+                &root_paths,
+                &all_facts,
+            ) {
+                Ok(action) => match action {
+                    ApplyAction::Copied => stats.copied += 1,
+                    ApplyAction::Renamed => stats.renamed += 1,
+                    ApplyAction::Moved => stats.moved += 1,
+                    ApplyAction::SkippedMissing => stats.skipped_missing += 1,
+                    ApplyAction::SkippedStale(reason) => {
+                        stats.skipped_stale += 1;
+                        stale_during_transfer.push(SkippedStaleSource {
+                            path: source.path.clone(),
+                            reason,
+                        });
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Error processing {}: {}", source.path, e);
+                    stats.errors += 1;
+                }
+            }
+        }
+
+        progress.finish();
+    } else if options.resume {
+        eprintln!();
+        eprintln!("No sources need transfer.");
+    }
 
     // Summary of files that became stale during transfer (race conditions)
     if !stale_during_transfer.is_empty() {
@@ -482,11 +610,43 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         eprintln!("Run `canon scan` then `cluster refresh` to regenerate the lock file.");
     }
 
+    // Summary output
     let mode = if options.dry_run { " (dry-run)" } else { "" };
-    println!(
-        "Applied{}: {} copied, {} renamed, {} moved, {} skipped (missing), {} skipped (stale), {} skipped (filtered), {} errors",
-        mode, stats.copied, stats.renamed, stats.moved, stats.skipped_missing, stats.skipped_stale, stats.skipped_filtered, stats.errors
-    );
+    if options.resume {
+        println!(
+            "Applied{} (--resume): {} copied, {} renamed, {} moved, {} already archived, {} resumed, {} errors",
+            mode, stats.copied, stats.renamed, stats.moved, stats.already_archived, stats.resumed, stats.errors
+        );
+
+        // Advisory when resumed files need scan
+        if stats.resumed > 0 {
+            eprintln!();
+            eprintln!(
+                "Note: {} resumed files are not yet registered. Run `canon scan <archive>` to complete.",
+                stats.resumed
+            );
+        }
+    } else {
+        println!(
+            "Applied{}: {} copied, {} renamed, {} moved, {} skipped (missing), {} skipped (stale), {} skipped (filtered), {} errors",
+            mode, stats.copied, stats.renamed, stats.moved, stats.skipped_missing, stats.skipped_stale, stats.skipped_filtered, stats.errors
+        );
+    }
+
+    // Recovery guidance when errors occurred
+    if stats.errors > 0 && !options.dry_run {
+        eprintln!();
+        eprintln!("Some files failed to transfer. To recover:");
+        eprintln!("  1. Fix any reported errors (permissions, disk space, etc.)");
+        eprintln!("  2. Delete any partial files left in the archive");
+        eprintln!("     (--resume will detect and report size mismatches)");
+        eprintln!("  3. Re-run with --resume: canon apply --resume <manifest>");
+        eprintln!();
+        eprintln!("If source files changed during apply:");
+        eprintln!("  1. Scan the sources: canon scan <source-paths>");
+        eprintln!("  2. Refresh manifest: canon cluster refresh <manifest.toml>");
+        eprintln!("  3. Re-apply: canon apply <manifest.lock>");
+    }
 
     // Update query planner statistics after bulk changes (skip for dry-run)
     if !options.dry_run {
@@ -792,6 +952,197 @@ fn check_stale_destination_records(
 
     stale_paths.sort();
     Ok(stale_paths)
+}
+
+/// Result of destination conflict check.
+struct DestinationConflicts {
+    /// Paths that exist in DB with present=1
+    in_db: Vec<String>,
+    /// Paths that exist on disk but not in DB (orphan files)
+    on_disk_only: Vec<String>,
+}
+
+/// Check for destination path conflicts.
+///
+/// In regular mode (no --resume), any destination path that is already occupied
+/// is an error. This includes:
+/// - Paths registered in DB with present=1 (already archived)
+/// - Paths that exist on disk but not in DB (orphan files from interrupted apply)
+///
+/// This check runs in preflight to catch all conflicts before any transfers start,
+/// giving the user a complete picture of what would fail.
+fn check_destination_conflicts(
+    conn: &Connection,
+    sources: &[&LockEntry],
+    pattern: &Pattern,
+    needed_keys: &[String],
+    scope_prefix: Option<&str>,
+    base_dir: &Path,
+    base_dir_rel: &str,
+    archive_root_id: i64,
+    root_paths: &HashMap<i64, String>,
+    all_facts: &HashMap<i64, Vec<FactEntry>>,
+) -> Result<DestinationConflicts> {
+    let total = sources.len();
+    let progress = Progress::new(total);
+
+    // Collect destination rel_paths and full paths
+    let mut dest_rel_paths: Vec<String> = Vec::with_capacity(sources.len());
+    let mut dest_full_paths: Vec<PathBuf> = Vec::with_capacity(sources.len());
+    for (i, source) in sources.iter().enumerate() {
+        progress.update(i);
+
+        let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, root_paths, all_facts)?;
+        let archive_rel_path = if base_dir_rel.is_empty() {
+            dest_rel.clone()
+        } else {
+            format!("{}/{}", base_dir_rel, dest_rel)
+        };
+        dest_rel_paths.push(archive_rel_path);
+        dest_full_paths.push(base_dir.join(&dest_rel));
+    }
+    progress.finish();
+
+    // Check which paths exist in DB
+    let path_refs: Vec<&str> = dest_rel_paths.iter().map(|s| s.as_str()).collect();
+    let in_db_set = repo::source::batch_check_paths_exist(conn, archive_root_id, &path_refs)?;
+
+    let in_db: Vec<String> = in_db_set.into_iter().collect();
+
+    // For paths NOT in DB, check if file exists on disk
+    let mut on_disk_only = Vec::new();
+    for (i, rel_path) in dest_rel_paths.iter().enumerate() {
+        // Skip if already in DB (will be reported separately)
+        if in_db.iter().any(|p| p == rel_path) {
+            continue;
+        }
+        // Check if file exists on disk
+        if dest_full_paths[i].exists() {
+            on_disk_only.push(rel_path.clone());
+        }
+    }
+
+    Ok(DestinationConflicts { in_db, on_disk_only })
+}
+
+/// Plan which transfers need to be executed in resume mode.
+///
+/// Classifies each source into one of:
+/// - `to_transfer`: Not in DB, not on disk — needs copying
+/// - `already_archived`: In DB with present=1 — skip (fully complete)
+/// - `resumed`: On disk but not in DB, size matches — skip (needs scan to register)
+///
+/// If any size mismatches are found (partial/corrupted files), collects all of them
+/// and returns an error after checking all sources.
+fn plan_transfers<'a>(
+    conn: &Connection,
+    sources: &[&'a LockEntry],
+    pattern: &Pattern,
+    needed_keys: &[String],
+    scope_prefix: Option<&str>,
+    base_dir: &Path,
+    base_dir_rel: &str,
+    archive_root_id: i64,
+    root_paths: &HashMap<i64, String>,
+    all_facts: &HashMap<i64, Vec<FactEntry>>,
+) -> Result<WorkPlan<'a>> {
+    let total = sources.len();
+    let progress = Progress::new(total);
+
+    // Collect destination paths for all sources
+    let mut dest_info: Vec<(String, PathBuf, u64)> = Vec::with_capacity(sources.len());
+    for (i, source) in sources.iter().enumerate() {
+        progress.update(i);
+
+        let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, root_paths, all_facts)?;
+        let archive_rel_path = if base_dir_rel.is_empty() {
+            dest_rel.clone()
+        } else {
+            format!("{}/{}", base_dir_rel, dest_rel)
+        };
+        let full_path = base_dir.join(&dest_rel);
+        dest_info.push((archive_rel_path, full_path, source.size as u64));
+    }
+    progress.finish();
+
+    // Check which paths exist in DB
+    let path_refs: Vec<&str> = dest_info.iter().map(|(p, _, _)| p.as_str()).collect();
+    let in_db_set = repo::source::batch_check_paths_exist(conn, archive_root_id, &path_refs)?;
+
+    // Classify each source
+    let mut to_transfer = Vec::new();
+    let mut already_archived = 0usize;
+    let mut resumed = 0usize;
+    let mut size_mismatches = Vec::new();
+
+    for (i, source) in sources.iter().enumerate() {
+        let (ref rel_path, ref full_path, expected_size) = dest_info[i];
+
+        let in_db = in_db_set.contains(rel_path);
+
+        // Only check disk if not in DB (D4: trust DB without disk verification)
+        let on_disk = if in_db {
+            None
+        } else if full_path.exists() {
+            // Get file size
+            match fs::metadata(full_path) {
+                Ok(meta) => Some(meta.len()),
+                Err(_) => None, // Treat read errors as "not on disk"
+            }
+        } else {
+            None
+        };
+
+        let state = classify_destination(in_db, on_disk, expected_size);
+
+        match state {
+            DestinationState::Available => {
+                to_transfer.push(*source);
+            }
+            DestinationState::Archived => {
+                already_archived += 1;
+            }
+            DestinationState::Resumed => {
+                resumed += 1;
+            }
+            DestinationState::SizeMismatch { expected, actual } => {
+                size_mismatches.push(SizeMismatchError {
+                    dest_path: full_path.display().to_string(),
+                    expected,
+                    actual,
+                });
+            }
+        }
+    }
+
+    // If any size mismatches, fail with collected errors
+    if !size_mismatches.is_empty() {
+        eprintln!();
+        eprintln!(
+            "Work planning found {} partial/mismatched files:",
+            size_mismatches.len()
+        );
+        for err in size_mismatches.iter().take(10) {
+            eprintln!(
+                "  {} (expected {} bytes, found {})",
+                err.dest_path, err.expected, err.actual
+            );
+        }
+        if size_mismatches.len() > 10 {
+            eprintln!("  ... and {} more", size_mismatches.len() - 10);
+        }
+        eprintln!();
+        eprintln!("These may be from an interrupted transfer. To resolve:");
+        eprintln!("  1. Delete the partial files");
+        eprintln!("  2. Re-run: canon apply --resume <manifest>");
+        bail!("Aborting due to size mismatches in destination files");
+    }
+
+    Ok(WorkPlan {
+        to_transfer,
+        already_archived,
+        resumed,
+    })
 }
 
 /// Check for duplicate content that already exists in archives.

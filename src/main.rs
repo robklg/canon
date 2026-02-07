@@ -263,6 +263,9 @@ enum Commands {
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
+        /// Resume a previously interrupted apply (skip already-copied files)
+        #[arg(long)]
+        resume: bool,
     },
     /// Manage source exclusions
     Exclude {
@@ -639,6 +642,7 @@ fn main() -> anyhow::Result<()> {
             rename,
             move_files,
             yes,
+            resume,
         } => {
             let transfer_mode = if rename {
                 apply::TransferMode::Rename
@@ -655,6 +659,7 @@ fn main() -> anyhow::Result<()> {
                 roots: root,
                 transfer_mode,
                 yes,
+                resume,
             };
             apply::run(&mut db, &manifest, &options)?;
         }
