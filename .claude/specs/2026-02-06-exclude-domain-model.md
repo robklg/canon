@@ -1,7 +1,7 @@
 # Spec: Exclude Domain Model
 
 **Date:** 2026-02-06
-**Status:** In Progress
+**Status:** Complete
 
 ## Problem Statement
 
@@ -167,18 +167,22 @@ Extract exclusion write operations to the repository layer with comprehensive te
 
 **Dependencies:** Phase 1 complete
 
-### Phase 3: Complex Query Migration (Deferred)
+### Phase 3: Complex Query Migration
 
-**Status:** pending
+**Status:** descoped — see follow-up spec
 
-**Goal:** Migrate the complex duplicate-detection query in `exclude_duplicates`.
+**Original Goal:** Migrate the complex duplicate-detection query in `exclude_duplicates`.
 
-**Scope:**
-- Analyze where path-prefix matching logic belongs (domain vs repo)
-- Consider batch approach vs current per-source iteration
-- Migrate or refactor `exclude_duplicates` query (lines 474-484)
+**Resolution:** After analysis, the panel determined that:
+1. The remaining inline SQL are read queries (not writes), which D2 explicitly allows to remain in command layer
+2. However, `exclude_duplicates` is critical functionality lacking direct tests
+3. A known SQL/Rust inconsistency exists for empty `rel_path` edge case
 
-**Dependencies:** Phases 1 and 2 complete
+**Actions Taken:**
+- Integration tests added to verify current behavior (5 tests)
+- Follow-up spec created with full architectural analysis
+
+**Follow-up:** `.claude/specs/2026-02-07-exclude-duplicates-extraction.md`
 
 ---
 

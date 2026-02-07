@@ -1300,4 +1300,197 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, in_scope_id);
     }
+
+    // =========================================================================
+    // exclude_duplicates integration tests
+    // =========================================================================
+
+    /// Create a Db wrapper for testing exclude_duplicates
+    fn make_test_db() -> repo::Db {
+        let conn = setup_test_db();
+        repo::Db::from_connection(conn)
+    }
+
+    /// Check if a source is excluded in the database
+    fn is_source_excluded(conn: &RusqliteConnection, source_id: i64) -> bool {
+        conn.query_row(
+            "SELECT excluded FROM sources WHERE id = ?",
+            [source_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v == 1)
+        .unwrap_or(false)
+    }
+
+    #[test]
+    fn test_exclude_duplicates_excludes_when_one_copy_in_prefer() {
+        let mut db = make_test_db();
+        let conn = db.conn_mut();
+
+        // Setup: source root with a file, archive root with the same file (duplicate)
+        let source_root = insert_root(conn, "/source", "source", false);
+        let archive_root = insert_root(conn, "/archive", "archive", false);
+
+        // Same object (same content)
+        let obj = insert_object(conn, "same_content_hash", false);
+
+        // Source file (candidate for exclusion)
+        let source_id = insert_source(conn, source_root, "photo.jpg", Some(obj), true, false);
+
+        // Archive copy (the preferred copy)
+        let _archive_id = insert_source(conn, archive_root, "photo.jpg", Some(obj), true, false);
+
+        // Run exclude_duplicates with prefer=/archive, scope=/source
+        let result = exclude_duplicates(
+            &mut db,
+            Path::new("/archive"),
+            Some(Path::new("/source")),
+            &[],
+            false, // not dry run
+        );
+
+        assert!(result.is_ok());
+
+        // The source file should now be excluded
+        assert!(
+            is_source_excluded(db.conn(), source_id),
+            "Source should be excluded when exactly one copy exists in prefer path"
+        );
+    }
+
+    #[test]
+    fn test_exclude_duplicates_skips_when_no_copy_in_prefer() {
+        let mut db = make_test_db();
+        let conn = db.conn_mut();
+
+        // Setup: source root with a file, archive is empty (no duplicate there)
+        let source_root = insert_root(conn, "/source", "source", false);
+        let _archive_root = insert_root(conn, "/archive", "archive", false);
+
+        let obj = insert_object(conn, "unique_content_hash", false);
+        let source_id = insert_source(conn, source_root, "unique.jpg", Some(obj), true, false);
+
+        // Run exclude_duplicates - no copy in /archive
+        let result = exclude_duplicates(
+            &mut db,
+            Path::new("/archive"),
+            Some(Path::new("/source")),
+            &[],
+            false,
+        );
+
+        assert!(result.is_ok());
+
+        // Source should NOT be excluded (no backup exists)
+        assert!(
+            !is_source_excluded(db.conn(), source_id),
+            "Source should NOT be excluded when no copy exists in prefer path"
+        );
+    }
+
+    #[test]
+    fn test_exclude_duplicates_skips_when_multiple_copies_in_prefer() {
+        let mut db = make_test_db();
+        let conn = db.conn_mut();
+
+        // Setup: source with file, archive has TWO copies (ambiguous)
+        let source_root = insert_root(conn, "/source", "source", false);
+        let archive_root = insert_root(conn, "/archive", "archive", false);
+
+        let obj = insert_object(conn, "duplicated_content", false);
+
+        // Source file
+        let source_id = insert_source(conn, source_root, "photo.jpg", Some(obj), true, false);
+
+        // Two copies in archive (ambiguous - which is the canonical one?)
+        let _archive_copy1 = insert_source(conn, archive_root, "copy1.jpg", Some(obj), true, false);
+        let _archive_copy2 = insert_source(conn, archive_root, "copy2.jpg", Some(obj), true, false);
+
+        // Run exclude_duplicates
+        let result = exclude_duplicates(
+            &mut db,
+            Path::new("/archive"),
+            Some(Path::new("/source")),
+            &[],
+            false,
+        );
+
+        assert!(result.is_ok());
+
+        // Source should NOT be excluded (ambiguous - multiple copies)
+        assert!(
+            !is_source_excluded(db.conn(), source_id),
+            "Source should NOT be excluded when multiple copies exist in prefer path"
+        );
+    }
+
+    #[test]
+    fn test_exclude_duplicates_skips_source_already_in_prefer() {
+        let mut db = make_test_db();
+        let conn = db.conn_mut();
+
+        // Setup: file is in the archive (prefer path) itself
+        let archive_root = insert_root(conn, "/archive", "archive", false);
+
+        let obj = insert_object(conn, "archive_file_hash", false);
+
+        // This file IS in the prefer path - should never be excluded
+        let archive_file_id = insert_source(conn, archive_root, "keeper.jpg", Some(obj), true, false);
+
+        // Run exclude_duplicates with scope=/archive (the file is in the prefer path)
+        // Note: This tests the case where scope overlaps with prefer
+        let result = exclude_duplicates(
+            &mut db,
+            Path::new("/archive"),
+            Some(Path::new("/archive")),
+            &[],
+            false,
+        );
+
+        assert!(result.is_ok());
+
+        // File in prefer path should NOT be excluded
+        assert!(
+            !is_source_excluded(db.conn(), archive_file_id),
+            "Source in prefer path should never be excluded"
+        );
+    }
+
+    #[test]
+    fn test_exclude_duplicates_path_prefix_no_false_positive() {
+        let mut db = make_test_db();
+        let conn = db.conn_mut();
+
+        // Setup: Test that /a/bc is NOT under /a/b (different directory names)
+        // This tests the path-prefix matching logic for false positives
+        let source_root = insert_root(conn, "/source", "source", false);
+        let _archive_root = insert_root(conn, "/archive/photos", "archive", false);
+        let other_root = insert_root(conn, "/archive/photos-old", "archive", false);
+
+        let obj = insert_object(conn, "test_content", false);
+
+        // Source file to potentially exclude
+        let source_id = insert_source(conn, source_root, "file.jpg", Some(obj), true, false);
+
+        // Copy in /archive/photos-old (NOT under /archive/photos)
+        let _other_copy = insert_source(conn, other_root, "file.jpg", Some(obj), true, false);
+
+        // Run exclude_duplicates with prefer=/archive/photos
+        // The copy is in /archive/photos-old which should NOT match
+        let result = exclude_duplicates(
+            &mut db,
+            Path::new("/archive/photos"),
+            Some(Path::new("/source")),
+            &[],
+            false,
+        );
+
+        assert!(result.is_ok());
+
+        // Source should NOT be excluded (/archive/photos-old is not under /archive/photos)
+        assert!(
+            !is_source_excluded(db.conn(), source_id),
+            "Path prefix matching should not have false positives: /archive/photos-old is NOT under /archive/photos"
+        );
+    }
 }

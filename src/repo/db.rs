@@ -96,6 +96,15 @@ impl Deref for Db {
     }
 }
 
+#[cfg(test)]
+impl Db {
+    /// Create a Db wrapper around an existing connection.
+    /// For testing only - in production use open_with_options().
+    pub fn from_connection(conn: Connection) -> Self {
+        Db { conn }
+    }
+}
+
 const SCHEMA: &str = r#"
 -- Roots: scanned folder roots
 CREATE TABLE IF NOT EXISTS roots (
