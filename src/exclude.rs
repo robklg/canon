@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::domain::exclusion::find_excludable_duplicates;
 use crate::domain::path::canonicalize_scopes;
+use crate::domain::root::find_containing_root;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::{self, Filter};
 use crate::repo::{self, Connection, Db};
@@ -294,40 +295,25 @@ fn get_excluded_sources(
 }
 
 fn get_source_path(conn: &Connection, source_id: i64) -> Result<Option<String>> {
-    let result: Option<String> = conn
-        .query_row(
-            "SELECT r.path || '/' || s.rel_path
-             FROM sources s JOIN roots r ON s.root_id = r.id
-             WHERE s.id = ?",
-            [source_id],
-            |row| row.get(0),
-        )
-        .ok();
-    Ok(result)
+    let sources = repo::source::batch_fetch_by_ids(conn, &[source_id])?;
+    Ok(sources.get(&source_id).map(|s| s.path()))
 }
 
 /// Exclude a specific source by ID
 pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
     let conn = db.conn();
 
-    // Verify source exists and get its path
-    let path: Option<String> = conn
-        .query_row(
-            "SELECT r.path || '/' || s.rel_path
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE s.id = ? AND s.present = 1",
-            [source_id],
-            |row| row.get(0),
-        )
-        .ok();
-
-    let Some(path) = path else {
+    // Fetch source using repo layer
+    let sources = repo::source::batch_fetch_by_ids(conn, &[source_id])?;
+    let Some(source) = sources.get(&source_id) else {
         anyhow::bail!("Source with id {} not found or not present", source_id);
     };
 
-    // Check if already excluded
-    if is_excluded(conn, source_id)? {
+    // Use Source::path() for display
+    let path = source.path();
+
+    // Check if already excluded using domain predicate
+    if source.is_excluded() {
         println!("Source already excluded: {}", path);
         return Ok(());
     }
@@ -338,7 +324,7 @@ pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
         return Ok(());
     }
 
-    repo::source::set_excluded(db.conn(), source_id, true)?;
+    repo::source::set_excluded(conn, source_id, true)?;
 
     println!("Excluded source (id: {}): {}", source_id, path);
     Ok(())
@@ -348,44 +334,48 @@ pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
 pub fn set_by_path(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()> {
     let conn = db.conn();
 
-    // Canonicalize the path
+    // Canonicalize the path (command boundary I/O)
     let canonical = std::fs::canonicalize(file_path)
         .with_context(|| format!("Failed to resolve path: {}", file_path.display()))?;
     let path_str = canonical
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
 
-    // Look up source by exact path match
-    let source_id: Option<i64> = conn
-        .query_row(
-            "SELECT s.id
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE r.path || '/' || s.rel_path = ? AND s.present = 1",
-            [path_str],
-            |row| row.get(0),
-        )
-        .ok();
+    // Find which root contains this path (domain layer)
+    let roots = repo::root::fetch_all(conn)?;
+    let root_tuples: Vec<(i64, String, String)> = roots
+        .iter()
+        .map(|r| (r.id, r.path.clone(), r.role.clone()))
+        .collect();
 
-    let Some(source_id) = source_id else {
+    let Some((root_id, _root_path, _role, rel_path)) = find_containing_root(path_str, &root_tuples)
+    else {
         anyhow::bail!("No source found for path: {}", file_path.display());
     };
 
-    // Check if already excluded
-    if is_excluded(conn, source_id)? {
-        println!("Source already excluded: {}", path_str);
+    // Fetch the source using repo layer
+    let Some(source) = repo::source::fetch_by_path(conn, root_id, &rel_path)? else {
+        anyhow::bail!("No source found for path: {}", file_path.display());
+    };
+
+    // Use Source::path() for display (consistent path formatting)
+    let display_path = source.path();
+
+    // Check if already excluded using domain predicate
+    if source.is_excluded() {
+        println!("Source already excluded: {}", display_path);
         return Ok(());
     }
 
     if options.dry_run {
         println!("Would exclude:");
-        println!("  {}", path_str);
+        println!("  {}", display_path);
         return Ok(());
     }
 
-    repo::source::set_excluded(db.conn(), source_id, true)?;
+    repo::source::set_excluded(conn, source.id, true)?;
 
-    println!("Excluded: {}", path_str);
+    println!("Excluded: {}", display_path);
     Ok(())
 }
 
@@ -536,40 +526,63 @@ pub fn set_object_by_hash(db: &Db, hash: &str, options: &SetOptions) -> Result<(
 pub fn set_object_by_file(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()> {
     let conn = db.conn();
 
-    // Canonicalize the path
+    // Canonicalize the path (command boundary I/O)
     let canonical = std::fs::canonicalize(file_path)
         .with_context(|| format!("Failed to resolve path: {}", file_path.display()))?;
     let path_str = canonical
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
 
-    // Look up source by exact path match
-    let source_info: Option<(i64, i64, String, i64)> = conn
-        .query_row(
-            "SELECT s.object_id, o.id, o.hash_value, s.size
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             JOIN objects o ON s.object_id = o.id
-             WHERE r.path || '/' || s.rel_path = ? AND s.present = 1",
-            [path_str],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .ok();
+    // Find which root contains this path (domain layer)
+    let roots = repo::root::fetch_all(conn)?;
+    let root_tuples: Vec<(i64, String, String)> = roots
+        .iter()
+        .map(|r| (r.id, r.path.clone(), r.role.clone()))
+        .collect();
 
-    let Some((_object_id_check, object_id, hash_value, size)) = source_info else {
-        anyhow::bail!("No hashed source found for path: {}\n  (File must be scanned and hashed first)", file_path.display());
+    let Some((root_id, _root_path, _role, rel_path)) = find_containing_root(path_str, &root_tuples)
+    else {
+        anyhow::bail!(
+            "No hashed source found for path: {}\n  (File must be scanned and hashed first)",
+            file_path.display()
+        );
+    };
+
+    // Fetch the source using repo layer
+    let Some(source) = repo::source::fetch_by_path(conn, root_id, &rel_path)? else {
+        anyhow::bail!(
+            "No hashed source found for path: {}\n  (File must be scanned and hashed first)",
+            file_path.display()
+        );
+    };
+
+    // Verify source has an object (is hashed)
+    let Some(object_id) = source.object_id else {
+        anyhow::bail!(
+            "No hashed source found for path: {}\n  (File must be scanned and hashed first)",
+            file_path.display()
+        );
+    };
+
+    // Get the object to access hash_value
+    let objects = repo::object::batch_fetch_by_ids(conn, &[object_id])?;
+    let Some(object) = objects.get(&object_id) else {
+        anyhow::bail!(
+            "No hashed source found for path: {}\n  (File must be scanned and hashed first)",
+            file_path.display()
+        );
     };
 
     // Safety check: refuse to exclude empty files via path lookup
-    if size == 0 {
+    if source.size == 0 {
         anyhow::bail!(
             "Cannot exclude empty file via path (all empty files share the same hash).\n  \
              Use --hash {} to explicitly exclude all empty files.",
-            hash_value
+            object.hash_value
         );
     }
 
-    exclude_object_by_id(conn, object_id, &hash_value, options)
+    exclude_object_by_id(conn, object_id, &object.hash_value, options)
 }
 
 /// Exclude objects matching the given scope and filters.
@@ -726,24 +739,27 @@ struct SourceInfo {
 
 /// Fetch source details for an object
 fn get_object_sources(conn: &Connection, object_id: i64) -> Result<Vec<SourceInfo>> {
-    let sources: Vec<SourceInfo> = conn
-        .prepare(
-            "SELECT r.path || '/' || s.rel_path, r.role
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE s.object_id = ? AND s.present = 1
-             ORDER BY r.role DESC, r.path, s.rel_path"  // archives first
-        )?
-        .query_map([object_id], |row| {
-            let path: String = row.get(0)?;
-            let role: String = row.get(1)?;
-            Ok(SourceInfo {
-                path,
-                is_archive: role == "archive",
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(sources)
+    let sources_map = repo::source::fetch_sources_by_object_ids(conn, &[object_id])?;
+    let mut sources: Vec<_> = sources_map
+        .get(&object_id)
+        .cloned()
+        .unwrap_or_default();
+
+    // Sort: same as previous SQL ORDER BY r.role DESC, r.path, s.rel_path
+    // Note: role DESC puts 'source' before 'archive' (s > a alphabetically)
+    sources.sort_by(|a, b| {
+        b.root_role.cmp(&a.root_role) // DESC
+            .then_with(|| a.root_path.cmp(&b.root_path))
+            .then_with(|| a.rel_path.cmp(&b.rel_path))
+    });
+
+    Ok(sources
+        .into_iter()
+        .map(|s| SourceInfo {
+            path: s.path(),
+            is_archive: s.is_from_role("archive"),
+        })
+        .collect())
 }
 
 /// Display source locations for an object
@@ -1496,5 +1512,232 @@ mod tests {
             is_source_excluded(db.conn(), source_id),
             "Source should be excluded when duplicate exists at prefer path with empty rel_path"
         );
+    }
+
+    // =========================================================================
+    // set_by_id tests (Phase 1: path pattern completion)
+    // =========================================================================
+
+    #[test]
+    fn test_set_by_id_excludes_source() {
+        let db = make_test_db();
+        let conn = db.conn();
+
+        let root = insert_root(conn, "/photos", "source", false);
+        let source_id = insert_source(conn, root, "photo.jpg", None, true, false);
+
+        let options = SetOptions {
+            dry_run: false,
+            verbose: false,
+        };
+
+        let result = set_by_id(&db, source_id, &options);
+        assert!(result.is_ok());
+
+        assert!(
+            is_source_excluded(conn, source_id),
+            "Source should be excluded after set_by_id"
+        );
+    }
+
+    #[test]
+    fn test_set_by_id_nonexistent_fails() {
+        let db = make_test_db();
+
+        let options = SetOptions {
+            dry_run: false,
+            verbose: false,
+        };
+
+        let result = set_by_id(&db, 99999, &options);
+        assert!(result.is_err());
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not found"),
+            "Error should mention 'not found', got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_set_by_id_already_excluded_skips() {
+        let db = make_test_db();
+        let conn = db.conn();
+
+        let root = insert_root(conn, "/photos", "source", false);
+        // Create source that's already excluded
+        let source_id = insert_source(conn, root, "photo.jpg", None, true, true);
+
+        let options = SetOptions {
+            dry_run: false,
+            verbose: false,
+        };
+
+        // Should succeed (not error) even though already excluded
+        let result = set_by_id(&db, source_id, &options);
+        assert!(result.is_ok());
+
+        // Should still be excluded
+        assert!(
+            is_source_excluded(conn, source_id),
+            "Source should remain excluded"
+        );
+    }
+
+    #[test]
+    fn test_set_by_id_not_present_fails() {
+        let db = make_test_db();
+        let conn = db.conn();
+
+        let root = insert_root(conn, "/photos", "source", false);
+        // Create source that's not present (present=false)
+        let source_id = insert_source(conn, root, "deleted.jpg", None, false, false);
+
+        let options = SetOptions {
+            dry_run: false,
+            verbose: false,
+        };
+
+        let result = set_by_id(&db, source_id, &options);
+        assert!(result.is_err());
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not found") || err_msg.contains("not present"),
+            "Error should mention source not found/present, got: {}",
+            err_msg
+        );
+    }
+
+    // =========================================================================
+    // set_by_path tests (Phase 1: path pattern completion)
+    // =========================================================================
+
+    #[test]
+    fn test_set_by_path_nonexistent_file_fails() {
+        let db = make_test_db();
+
+        let options = SetOptions {
+            dry_run: false,
+            verbose: false,
+        };
+
+        // Path that definitely doesn't exist
+        let result = set_by_path(&db, Path::new("/nonexistent/path/to/file.jpg"), &options);
+        assert!(result.is_err());
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to resolve path"),
+            "Error should mention path resolution failure, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_set_by_path_not_in_db_fails() {
+        let db = make_test_db();
+
+        let options = SetOptions {
+            dry_run: false,
+            verbose: false,
+        };
+
+        // Use a path that exists on disk but isn't in the database
+        // /tmp should exist on most Unix systems
+        let result = set_by_path(&db, Path::new("/tmp"), &options);
+        assert!(result.is_err());
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("No source found"),
+            "Error should mention no source found, got: {}",
+            err_msg
+        );
+    }
+
+    // =========================================================================
+    // get_object_sources tests (Phase 1: path pattern completion)
+    // =========================================================================
+
+    #[test]
+    fn test_get_object_sources_returns_paths() {
+        let conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "abc123hash", false);
+        insert_source(&conn, root, "2024/photo.jpg", Some(obj), true, false);
+
+        let sources = get_object_sources(&conn, obj).unwrap();
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            sources[0].path, "/photos/2024/photo.jpg",
+            "Path should be correctly constructed from root + rel_path"
+        );
+    }
+
+    #[test]
+    fn test_get_object_sources_includes_role() {
+        let conn = setup_test_db();
+
+        let source_root = insert_root(&conn, "/source", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+        let obj = insert_object(&conn, "abc123hash", false);
+
+        insert_source(&conn, source_root, "photo.jpg", Some(obj), true, false);
+        insert_source(&conn, archive_root, "photo.jpg", Some(obj), true, false);
+
+        let sources = get_object_sources(&conn, obj).unwrap();
+
+        assert_eq!(sources.len(), 2);
+
+        // Archives come first (ORDER BY r.role DESC)
+        let archive_sources: Vec<_> = sources.iter().filter(|s| s.is_archive).collect();
+        let source_sources: Vec<_> = sources.iter().filter(|s| !s.is_archive).collect();
+
+        assert_eq!(archive_sources.len(), 1, "Should have one archive source");
+        assert_eq!(source_sources.len(), 1, "Should have one source source");
+
+        assert_eq!(archive_sources[0].path, "/archive/photo.jpg");
+        assert_eq!(source_sources[0].path, "/source/photo.jpg");
+    }
+
+    #[test]
+    fn test_get_object_sources_empty_rel_path() {
+        let conn = setup_test_db();
+
+        // Root IS the file (empty rel_path)
+        let root = insert_root(&conn, "/archive/photo.jpg", "archive", false);
+        let obj = insert_object(&conn, "abc123hash", false);
+        insert_source(&conn, root, "", Some(obj), true, false);
+
+        let sources = get_object_sources(&conn, obj).unwrap();
+
+        assert_eq!(sources.len(), 1);
+        // Source::path() correctly handles empty rel_path (no trailing slash)
+        // This fixes the R1 inconsistency that existed with inline SQL
+        assert_eq!(
+            sources[0].path, "/archive/photo.jpg",
+            "Empty rel_path should NOT produce trailing slash"
+        );
+    }
+
+    #[test]
+    fn test_get_object_sources_excludes_not_present() {
+        let conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "abc123hash", false);
+
+        // One present, one not present
+        insert_source(&conn, root, "present.jpg", Some(obj), true, false);
+        insert_source(&conn, root, "deleted.jpg", Some(obj), false, false);
+
+        let sources = get_object_sources(&conn, obj).unwrap();
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].path, "/photos/present.jpg");
     }
 }
