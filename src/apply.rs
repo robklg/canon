@@ -14,7 +14,6 @@ use crate::domain::fact::FactEntry;
 use crate::domain::root::parse_root_spec;
 use crate::domain::source::NewSource;
 use crate::domain::path::path_strip_prefix;
-use crate::exclude;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
 use crate::progress::Progress;
 use crate::scan::compute_partial_hash;
@@ -357,9 +356,8 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         bail!("Aborting due to files already in other archives");
     }
 
-    // Defense-in-depth: Check for excluded sources in manifest (hard gate, no override)
-    // This should never happen if the manifest was generated correctly,
-    // but we check anyway to prevent accidentally copying excluded files
+    // Check for excluded sources in manifest (hard gate, no override)
+    // Sources may have been excluded after manifest generation — refuse to apply stale manifests
     eprintln!("Checking for excluded sources...");
     {
         let excluded_sources = check_excluded_sources_filtered(conn, &filtered_sources)?;
@@ -898,19 +896,20 @@ fn check_excluded_sources_filtered(
     conn: &Connection,
     sources: &[&LockEntry],
 ) -> Result<Vec<(i64, String)>> {
-    let mut excluded = Vec::new();
-    let total = sources.len();
-    let progress = Progress::new(total);
+    // Batch fetch sources and check exclusion via domain predicate
+    let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
+    let sources_map = repo::source::batch_fetch_by_ids(conn, &source_ids)?;
 
-    for (i, source) in sources.iter().enumerate() {
-        progress.update(i);
-
-        if exclude::is_excluded(conn, source.id)? {
-            excluded.push((source.id, source.path.clone()));
-        }
-    }
-
-    progress.finish();
+    let excluded: Vec<(i64, String)> = sources
+        .iter()
+        .filter(|lock_entry| {
+            sources_map
+                .get(&lock_entry.id)
+                .map(|s| s.is_excluded())
+                .unwrap_or(false)
+        })
+        .map(|lock_entry| (lock_entry.id, lock_entry.path.clone()))
+        .collect();
 
     Ok(excluded)
 }

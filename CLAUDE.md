@@ -278,46 +278,88 @@ The `scan` command uses a pipeline architecture with pure domain logic:
 
 ### Architectural Direction
 
-The codebase is evolving toward a clean architecture with separated concerns, prioritizing **reliability through testability**:
+The codebase follows a **strict layered architecture** prioritizing reliability, testability, and correct concurrent behavior:
 
-- **Domain layer**: Pure concepts and rules (`ScopeMatch`, `RootSpec`, `find_containing_root`)
-- **Infrastructure layer**: Storage and filesystem adapters (`db.rs`, canonicalization)
-- **Application layer**: Command modules orchestrating domain + infrastructure
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Command Layer (ls.rs, exclude.rs, scan.rs, etc.)            │
+│ - CLI argument parsing and validation                       │
+│ - Transaction boundaries (commands own transactions)        │
+│ - Orchestration: repo fetch → domain logic → repo write     │
+│ - User-facing output formatting                             │
+│ - Path canonicalization (ONLY filesystem I/O for paths)     │
+└─────────────────────────────────────────────────────────────┘
+                          │
+          ┌───────────────┴───────────────┐
+          ▼                               ▼
+┌──────────────────────────────┐   ┌──────────────────────────────┐
+│ Repository Layer (repo/)     │   │ Domain Layer (domain/)       │
+│ - ALL database access        │   │ - Pure structs and predicates│
+│ - Returns domain types       │   │ - Business logic functions   │
+│ - Batch operations           │   │ - NO I/O, fully unit-testable│
+│ - SQL lives HERE ONLY        │   │ - Path computation/comparison│
+│ - NO transaction management  │   │                              │
+└──────────────────────────────┘   └──────────────────────────────┘
+```
 
-**Established pattern** (see `domain/source.rs`, `repo/source.rs`, `domain/fact.rs`, `repo/fact.rs`):
-1. **Domain module** (`domain/source.rs`, `domain/fact.rs`): Struct + pure predicate functions (no I/O, unit-testable)
-2. **Repository module** (`repo/source.rs`, `repo/fact.rs`): Simple batch fetch from database, no domain logic
-3. **Commands** use pattern: fetch → filter with domain predicates → transform → output
+**Layer Responsibilities (STRICT)**:
 
-Example from `ls.rs`, `worklist.rs`, `compare.rs`, `coverage.rs`, `facts.rs`:
+| Layer | Allowed | NOT Allowed |
+|-------|---------|-------------|
+| **Domain** | Pure functions, structs, predicates, business logic | Any I/O (database, filesystem, network) |
+| **Repo** | Database queries, returning domain types | Business logic, path construction, transaction management |
+| **Command** | Orchestration, transactions, CLI parsing, formatting | Inline SQL, business logic that belongs in domain |
+
+**Concurrency Considerations**:
+Users may run multiple canon processes simultaneously (scanning, enriching, applying, excluding). When designing commands, consider:
+- **Transaction scope**: What operations need to be atomic? Per-item, per-batch, or per-command?
+- **Idempotency**: Can users re-run after partial failure? This often reduces the need for transactions.
+- **Contention**: Larger transaction scopes block concurrent processes longer.
+
+Repo functions do NOT manage transactions — commands establish scope when needed.
+
+**The Standard Pattern** (see `domain/source.rs`, `repo/source.rs`, `ls.rs`):
+1. **Domain module**: Struct + pure predicate functions (no I/O, unit-testable)
+2. **Repository module**: Batch fetch/write, returns domain types, SQL lives here
+3. **Command module**: Orchestrates repo → domain → repo, manages transactions, formats output
+
 ```rust
+// Command pattern: fetch → filter with domain predicates → transform → output
 let sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 let filtered: Vec<Source> = sources.into_iter()
-    .filter(|s| s.is_active())
-    .filter(|s| s.is_from_role("source"))
-    .filter(|s| s.matches_scope(&scopes))
-    .filter(|s| !s.is_excluded())
+    .filter(|s| s.is_active())           // domain predicate
+    .filter(|s| s.is_from_role("source")) // domain predicate
+    .filter(|s| s.matches_scope(&scopes)) // domain predicate
+    .filter(|s| !s.is_excluded())         // domain predicate
     .collect();
 ```
 
-**Why this matters for reliability:**
+**Why Strict Separation Matters:**
 - Pure domain functions can be thoroughly unit-tested with known inputs/outputs
-- Command modules depend on a common set of well-tested, proven-correct functions
 - Bugs in core logic (path matching, scope resolution) are caught by tests, not users
 - New commands automatically benefit from battle-tested domain functions
+- Consistent patterns reduce cognitive load and prevent architectural drift
+- Future flexibility (different storage backends, cloud support) without rewrites
+- Clear transaction boundaries ensure correct concurrent behavior
 
-**Key invariants** (defined in `domain/source.rs`):
+**Key Invariants** (defined in `domain/source.rs`):
 - `is_excluded()` checks BOTH source-level AND object-level exclusion
 - `matches_scope()` handles edge case: `/a/bc` is NOT under `/a/b`
 - `path()` correctly handles empty `rel_path` (returns just root_path)
 
-**Path handling principle**: SQL never constructs or compares paths.
+**Path Handling Principle: SQL NEVER constructs or compares paths.**
 - **Repo layer** returns `Source` objects with `root_path` populated (via JOIN)
 - **Domain layer** computes paths using `Source::path()` and compares using `path_is_under()`
 - **Command layer** canonicalizes CLI arguments — this is the ONLY place filesystem I/O happens for paths
-- See `domain/exclusion.rs` and `.claude/specs/2026-02-07-exclude-duplicates-extraction.md` for the reference implementation
+- See `domain/exclusion.rs` for the reference implementation
 
-This separation also enables future flexibility (e.g., different storage backends, cloud filesystem support) without requiring rewrites. See `.claude/specs/2026-01-24-source-infrastructure.md` for the full refactoring spec.
+**When Adding New Features:**
+1. If you need a predicate or business logic → add to domain layer (pure function)
+2. If you need database access → add to repo layer (returns domain types)
+3. Command modules should ONLY orchestrate, never contain inline SQL or business logic
+4. When refactoring existing code, migrate inline SQL to repo layer, logic to domain layer
+
+This separation enables future flexibility (e.g., different storage backends, cloud filesystem support) without requiring rewrites.
 
 ### CLI Conventions
 

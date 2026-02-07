@@ -319,6 +319,24 @@ pub fn set_excluded(conn: &Connection, object_id: i64, excluded: bool) -> Result
     Ok(())
 }
 
+/// Fetch all excluded objects.
+///
+/// Returns a Vec of Object structs where excluded = 1, ordered by id.
+/// Used by `exclude list --objects` to show all excluded objects.
+pub fn fetch_excluded(conn: &Connection) -> Result<Vec<Object>> {
+    let sql = format!(
+        "SELECT {} FROM objects WHERE excluded = 1 ORDER BY id",
+        OBJECT_COLUMNS
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let objects = stmt
+        .query_map([], object_from_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(objects)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -945,5 +963,35 @@ mod tests {
         assert!(result.is_some());
         let obj = result.unwrap();
         assert!(obj.excluded);
+    }
+
+    #[test]
+    fn fetch_excluded_returns_only_excluded() {
+        let conn = setup_test_db();
+
+        // Insert mix of excluded and non-excluded
+        insert_object(&conn, "excluded1", true);
+        insert_object(&conn, "not_excluded", false);
+        insert_object(&conn, "excluded2", true);
+
+        let result = fetch_excluded(&conn).unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|o| o.excluded));
+        // Ordered by id
+        assert_eq!(result[0].hash_value, "excluded1");
+        assert_eq!(result[1].hash_value, "excluded2");
+    }
+
+    #[test]
+    fn fetch_excluded_empty_when_none_excluded() {
+        let conn = setup_test_db();
+
+        insert_object(&conn, "not_excluded1", false);
+        insert_object(&conn, "not_excluded2", false);
+
+        let result = fetch_excluded(&conn).unwrap();
+
+        assert!(result.is_empty());
     }
 }
