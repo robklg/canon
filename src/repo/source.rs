@@ -154,6 +154,60 @@ pub fn batch_fetch_by_ids(conn: &Connection, source_ids: &[i64]) -> Result<HashM
     Ok(sources)
 }
 
+/// Fetch all sources that share the given object IDs, grouped by object_id.
+///
+/// Used for finding duplicates — given content hashes (via object_id), find all
+/// file locations that contain that content.
+///
+/// # Returns
+/// HashMap where key is object_id and value is Vec of all present Sources with
+/// that object. Sources include full root_path for path computation via `Source::path()`.
+///
+/// # Example
+/// ```ignore
+/// let sources_by_object = fetch_sources_by_object_ids(conn, &object_ids)?;
+/// for (object_id, sources) in sources_by_object {
+///     // sources contains all files with this content
+///     for source in sources {
+///         println!("{}", source.path());
+///     }
+/// }
+/// ```
+pub fn fetch_sources_by_object_ids(
+    conn: &Connection,
+    object_ids: &[i64],
+) -> Result<HashMap<i64, Vec<Source>>> {
+    if object_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut result: HashMap<i64, Vec<Source>> = HashMap::new();
+
+    // Process object_ids in batches
+    for chunk in object_ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT {} {} WHERE s.present = 1 AND s.object_id IN ({})",
+            SOURCE_COLUMNS,
+            SOURCE_FROM,
+            placeholders.join(",")
+        );
+
+        let params: Vec<Value> = chunk.iter().map(|&id| Value::from(id)).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), source_from_row)?;
+
+        for row in rows {
+            let source = row?;
+            if let Some(object_id) = source.object_id {
+                result.entry(object_id).or_default().push(source);
+            }
+        }
+    }
+
+    Ok(result)
+}
+
 /// Fetch a single source by root_id and rel_path.
 ///
 /// Returns None if no present source exists at that path.
@@ -869,6 +923,109 @@ mod tests {
         let sources = batch_fetch_by_ids(&conn, &[id1, 999, 1000]).unwrap();
         assert_eq!(sources.len(), 1);
         assert!(sources.contains_key(&id1));
+    }
+
+    // =========================================================================
+    // fetch_sources_by_object_ids tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_sources_by_object_ids_empty_input() {
+        let conn = setup_test_db();
+        let result = fetch_sources_by_object_ids(&conn, &[]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn fetch_sources_by_object_ids_returns_grouped() {
+        let conn = setup_test_db();
+
+        let root1 = crate::repo::insert_test_root(&conn, "/source", "source", false);
+        let root2 = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+
+        // Two objects (different content)
+        let obj1 = insert_object(&conn, "content_hash_1", false);
+        let obj2 = insert_object(&conn, "content_hash_2", false);
+
+        // obj1 has 2 sources (duplicates)
+        let _src1a = insert_source(&conn, root1, "photo.jpg", Some(obj1), true, false);
+        let _src1b = insert_source(&conn, root2, "photo.jpg", Some(obj1), true, false);
+
+        // obj2 has 1 source
+        let _src2 = insert_source(&conn, root1, "unique.jpg", Some(obj2), true, false);
+
+        let result = fetch_sources_by_object_ids(&conn, &[obj1, obj2]).unwrap();
+
+        // Should have 2 keys
+        assert_eq!(result.len(), 2);
+
+        // obj1 should have 2 sources
+        assert_eq!(result.get(&obj1).map(|v| v.len()), Some(2));
+
+        // obj2 should have 1 source
+        assert_eq!(result.get(&obj2).map(|v| v.len()), Some(1));
+    }
+
+    #[test]
+    fn fetch_sources_by_object_ids_includes_root_path() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/my/archive", "archive", false);
+        let obj = insert_object(&conn, "test_hash", false);
+        let _src = insert_source(&conn, root_id, "subdir/file.txt", Some(obj), true, false);
+
+        let result = fetch_sources_by_object_ids(&conn, &[obj]).unwrap();
+        let sources = result.get(&obj).unwrap();
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].root_path, "/my/archive");
+        assert_eq!(sources[0].rel_path, "subdir/file.txt");
+        // Verify Source::path() works correctly
+        assert_eq!(sources[0].path(), "/my/archive/subdir/file.txt");
+    }
+
+    #[test]
+    fn fetch_sources_by_object_ids_excludes_non_present() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/source", "source", false);
+        let obj = insert_object(&conn, "test_hash", false);
+
+        // One present, one deleted
+        let _present = insert_source(&conn, root_id, "present.jpg", Some(obj), true, false);
+        let _deleted = insert_source(&conn, root_id, "deleted.jpg", Some(obj), false, false);
+
+        let result = fetch_sources_by_object_ids(&conn, &[obj]).unwrap();
+        let sources = result.get(&obj).unwrap();
+
+        // Only the present source should be returned
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].rel_path, "present.jpg");
+    }
+
+    #[test]
+    fn fetch_sources_by_object_ids_handles_large_batch() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/source", "source", false);
+
+        // Create more than BATCH_SIZE objects (1000+)
+        let mut object_ids = Vec::new();
+        for i in 0..1050 {
+            let obj = insert_object(&conn, &format!("hash_{}", i), false);
+            insert_source(&conn, root_id, &format!("file_{}.jpg", i), Some(obj), true, false);
+            object_ids.push(obj);
+        }
+
+        let result = fetch_sources_by_object_ids(&conn, &object_ids).unwrap();
+
+        // Should have all 1050 objects
+        assert_eq!(result.len(), 1050);
+
+        // Verify samples from different batch chunks
+        assert!(result.contains_key(&object_ids[0]));
+        assert!(result.contains_key(&object_ids[500]));
+        assert!(result.contains_key(&object_ids[1049]));
     }
 
     // =========================================================================

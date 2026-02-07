@@ -35,10 +35,11 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 - `scope.rs` - ScopeMatch enum for file vs directory scope matching
 - `path.rs` - Pure path utilities (`path_is_under()`, `path_strip_prefix()`)
 - `scan.rs` - Scan reconciliation logic (`FileObservation`, `Reconciliation`, `reconcile()`, `find_missing()`)
+- `exclusion.rs` - Duplicate exclusion logic (`find_excludable_duplicates()`)
 
 **Repository Layer** (`src/repo/`) - Database access:
 - `db.rs` - Connection, schema, transactions (`Db`, `open_with_options()`)
-- `source.rs` - Source batch fetching and writes (`batch_fetch_by_roots()`, `insert_destination()`, `apply_reconciliation()`)
+- `source.rs` - Source batch fetching and writes (`batch_fetch_by_roots()`, `fetch_sources_by_object_ids()`, `insert_destination()`, `apply_reconciliation()`)
 - `root.rs` - Root batch fetching (`fetch_all()`, `batch_fetch_by_ids()`)
 - `object.rs` - Object batch fetching, archive detection (`batch_check_archived()`, `batch_find_archive_info_by_hash()`)
 - `fact.rs` - Fact batch fetching (`batch_fetch_for_sources()`, `batch_fetch_key_for_sources()`)
@@ -309,6 +310,12 @@ let filtered: Vec<Source> = sources.into_iter()
 - `is_excluded()` checks BOTH source-level AND object-level exclusion
 - `matches_scope()` handles edge case: `/a/bc` is NOT under `/a/b`
 - `path()` correctly handles empty `rel_path` (returns just root_path)
+
+**Path handling principle**: SQL never constructs or compares paths.
+- **Repo layer** returns `Source` objects with `root_path` populated (via JOIN)
+- **Domain layer** computes paths using `Source::path()` and compares using `path_is_under()`
+- **Command layer** canonicalizes CLI arguments — this is the ONLY place filesystem I/O happens for paths
+- See `domain/exclusion.rs` and `.claude/specs/2026-02-07-exclude-duplicates-extraction.md` for the reference implementation
 
 This separation also enables future flexibility (e.g., different storage backends, cloud filesystem support) without requiring rewrites. See `.claude/specs/2026-01-24-source-infrastructure.md` for the full refactoring spec.
 
