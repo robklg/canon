@@ -522,7 +522,7 @@ fn main() -> anyhow::Result<()> {
             worklist::run(&mut db, &paths, &filters, include_archived, include_excluded, unique_content, &emit)?;
         }
         Commands::ImportFacts { allow_archived, verbose } => {
-            import_facts::run(&db, allow_archived, verbose)?;
+            import_facts::run(&mut db, allow_archived, verbose)?;
         }
         Commands::Ls { paths, filters, archived, unarchived, unhashed, duplicates, include_archived, include_excluded, long, sort, reverse, null_delim } => {
             // Fetch all roots for path resolution

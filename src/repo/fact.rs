@@ -28,6 +28,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use rusqlite::OptionalExtension;
 
 use super::db::{populate_temp_sources, Connection};
 use crate::domain::fact::{FactEntry, FactType, FactValue};
@@ -284,6 +285,177 @@ pub fn store_object_fact(
            value_text = excluded.value_text,
            observed_at = excluded.observed_at",
         rusqlite::params![object_id, key, value, timestamp],
+    )?;
+    Ok(())
+}
+
+/// Fetch the type map for all existing facts.
+///
+/// Returns a map from fact key to its storage type (Text, Num, or Time).
+/// This is used for type consistency checking during import — if a key
+/// already exists with type X, new values must also be type X.
+///
+/// # Returns
+/// HashMap where key is the fact key (e.g., "content.Make") and value is
+/// the detected FactValueType based on which column has data.
+pub fn fetch_type_map(conn: &Connection) -> Result<HashMap<String, crate::domain::fact::FactValueType>> {
+    use crate::domain::fact::FactValueType;
+
+    let mut type_map = HashMap::new();
+
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT key,
+                CASE
+                    WHEN value_time IS NOT NULL THEN 'time'
+                    WHEN value_num IS NOT NULL THEN 'num'
+                    ELSE 'text'
+                END as type
+         FROM facts"
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    for row in rows {
+        let (key, type_str) = row?;
+        let fact_type = match type_str.as_str() {
+            "time" => FactValueType::Time,
+            "num" => FactValueType::Num,
+            _ => FactValueType::Text,
+        };
+        type_map.insert(key, fact_type);
+    }
+
+    Ok(type_map)
+}
+
+/// Upsert a fact (insert or update on conflict).
+///
+/// Works for both source and object facts. Uses INSERT ON CONFLICT to
+/// atomically insert or update the fact.
+///
+/// # Arguments
+/// * `conn` - Database connection
+/// * `entity_type` - "source" or "object"
+/// * `entity_id` - The source_id or object_id
+/// * `key` - Fact key (e.g., "content.Make")
+/// * `value_text` - Text value (mutually exclusive with value_num/value_time)
+/// * `value_num` - Numeric value
+/// * `value_time` - Timestamp value
+/// * `observed_at` - When this fact was observed
+/// * `observed_basis_rev` - For source facts, the basis_rev at observation time
+pub fn upsert(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: i64,
+    key: &str,
+    value_text: Option<&str>,
+    value_num: Option<f64>,
+    value_time: Option<i64>,
+    observed_at: i64,
+    observed_basis_rev: Option<i64>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO facts (entity_type, entity_id, key, value_text, value_num, value_time, observed_at, observed_basis_rev)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(entity_type, entity_id, key) DO UPDATE SET
+           value_text = excluded.value_text,
+           value_num = excluded.value_num,
+           value_time = excluded.value_time,
+           observed_at = excluded.observed_at,
+           observed_basis_rev = excluded.observed_basis_rev",
+        rusqlite::params![
+            entity_type,
+            entity_id,
+            key,
+            value_text,
+            value_num,
+            value_time,
+            observed_at,
+            observed_basis_rev,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Fetch all facts for a source (entity_type = 'source').
+///
+/// Returns all facts directly attached to the source (not object facts).
+/// Used during fact promotion when linking a source to an object.
+pub fn fetch_source_facts(conn: &Connection, source_id: i64) -> Result<Vec<crate::domain::fact::SourceFact>> {
+    use crate::domain::fact::SourceFact;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, key, value_text, value_num, value_time, observed_at
+         FROM facts
+         WHERE entity_type = 'source' AND entity_id = ?"
+    )?;
+
+    let facts = stmt
+        .query_map([source_id], |row| {
+            Ok(SourceFact {
+                id: row.get(0)?,
+                key: row.get(1)?,
+                value_text: row.get(2)?,
+                value_num: row.get(3)?,
+                value_time: row.get(4)?,
+                observed_at: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(facts)
+}
+
+/// Check if an object has a specific fact key.
+///
+/// Used during fact promotion to avoid creating duplicate facts on the object.
+pub fn object_has_fact(conn: &Connection, object_id: i64, key: &str) -> Result<bool> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM facts WHERE entity_type = 'object' AND entity_id = ? AND key = ?",
+            rusqlite::params![object_id, key],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+
+    Ok(exists)
+}
+
+/// Delete a fact by its ID.
+///
+/// Used during fact promotion to remove the source fact after copying to object.
+pub fn delete_by_id(conn: &Connection, fact_id: i64) -> Result<()> {
+    conn.execute("DELETE FROM facts WHERE id = ?", [fact_id])?;
+    Ok(())
+}
+
+/// Insert a fact on an object (for promotion from source).
+///
+/// Similar to upsert but specifically for object facts during promotion.
+/// Does not update on conflict — callers should check `object_has_fact` first.
+pub fn insert_object_fact(
+    conn: &Connection,
+    object_id: i64,
+    key: &str,
+    value_text: Option<&str>,
+    value_num: Option<f64>,
+    value_time: Option<i64>,
+    observed_at: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO facts (entity_type, entity_id, key, value_text, value_num, value_time, observed_at, observed_basis_rev)
+         VALUES ('object', ?, ?, ?, ?, ?, ?, NULL)",
+        rusqlite::params![
+            object_id,
+            key,
+            value_text,
+            value_num,
+            value_time,
+            observed_at,
+        ],
     )?;
     Ok(())
 }
@@ -681,5 +853,384 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(count, 2);
+    }
+
+    // =========================================================================
+    // fetch_type_map tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_type_map_empty() {
+        let conn = setup_test_db();
+        let result = fetch_type_map(&conn).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn fetch_type_map_detects_text() {
+        let conn = setup_test_db();
+        insert_object(&conn, 100, "abc123");
+        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
+
+        let result = fetch_type_map(&conn).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.get("content.Make"),
+            Some(&crate::domain::fact::FactValueType::Text)
+        );
+    }
+
+    #[test]
+    fn fetch_type_map_detects_num() {
+        let conn = setup_test_db();
+        insert_object(&conn, 100, "abc123");
+        insert_fact_num(&conn, "object", 100, "content.Width", 4000.0);
+
+        let result = fetch_type_map(&conn).unwrap();
+
+        assert_eq!(
+            result.get("content.Width"),
+            Some(&crate::domain::fact::FactValueType::Num)
+        );
+    }
+
+    #[test]
+    fn fetch_type_map_detects_time() {
+        let conn = setup_test_db();
+        insert_object(&conn, 100, "abc123");
+        insert_fact_time(&conn, "object", 100, "content.DateTimeOriginal", 1704067200);
+
+        let result = fetch_type_map(&conn).unwrap();
+
+        assert_eq!(
+            result.get("content.DateTimeOriginal"),
+            Some(&crate::domain::fact::FactValueType::Time)
+        );
+    }
+
+    #[test]
+    fn fetch_type_map_multiple_types() {
+        let conn = setup_test_db();
+        insert_object(&conn, 100, "abc123");
+        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
+        insert_fact_num(&conn, "object", 100, "content.Width", 4000.0);
+        insert_fact_time(&conn, "object", 100, "content.DateTimeOriginal", 1704067200);
+
+        let result = fetch_type_map(&conn).unwrap();
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(
+            result.get("content.Make"),
+            Some(&crate::domain::fact::FactValueType::Text)
+        );
+        assert_eq!(
+            result.get("content.Width"),
+            Some(&crate::domain::fact::FactValueType::Num)
+        );
+        assert_eq!(
+            result.get("content.DateTimeOriginal"),
+            Some(&crate::domain::fact::FactValueType::Time)
+        );
+    }
+
+    // =========================================================================
+    // upsert tests
+    // =========================================================================
+
+    #[test]
+    fn upsert_inserts_text_fact() {
+        let conn = setup_test_db();
+        insert_object(&conn, 100, "abc123");
+
+        upsert(
+            &conn,
+            "object",
+            100,
+            "content.Make",
+            Some("Canon"),
+            None,
+            None,
+            1700000000,
+            None,
+        ).unwrap();
+
+        let value: String = conn.query_row(
+            "SELECT value_text FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.Make'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(value, "Canon");
+    }
+
+    #[test]
+    fn upsert_inserts_num_fact() {
+        let conn = setup_test_db();
+        insert_object(&conn, 100, "abc123");
+
+        upsert(
+            &conn,
+            "object",
+            100,
+            "content.Width",
+            None,
+            Some(4000.0),
+            None,
+            1700000000,
+            None,
+        ).unwrap();
+
+        let value: f64 = conn.query_row(
+            "SELECT value_num FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.Width'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(value, 4000.0);
+    }
+
+    #[test]
+    fn upsert_inserts_time_fact() {
+        let conn = setup_test_db();
+        insert_object(&conn, 100, "abc123");
+
+        upsert(
+            &conn,
+            "object",
+            100,
+            "content.DateTimeOriginal",
+            None,
+            None,
+            Some(1704067200),
+            1700000000,
+            None,
+        ).unwrap();
+
+        let value: i64 = conn.query_row(
+            "SELECT value_time FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.DateTimeOriginal'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(value, 1704067200);
+    }
+
+    #[test]
+    fn upsert_updates_existing() {
+        let conn = setup_test_db();
+        insert_object(&conn, 100, "abc123");
+
+        // Insert initial
+        upsert(&conn, "object", 100, "content.Make", Some("Canon"), None, None, 1700000000, None).unwrap();
+
+        // Update
+        upsert(&conn, "object", 100, "content.Make", Some("Nikon"), None, None, 1700000001, None).unwrap();
+
+        let value: String = conn.query_row(
+            "SELECT value_text FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.Make'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(value, "Nikon");
+
+        // Only one fact
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.Make'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn upsert_source_fact_with_basis_rev() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source(&conn, 1, 1, "file.txt", None);
+
+        upsert(
+            &conn,
+            "source",
+            1,
+            "content.Make",
+            Some("Canon"),
+            None,
+            None,
+            1700000000,
+            Some(5), // basis_rev
+        ).unwrap();
+
+        let (value, basis_rev): (String, i64) = conn.query_row(
+            "SELECT value_text, observed_basis_rev FROM facts WHERE entity_type = 'source' AND entity_id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(value, "Canon");
+        assert_eq!(basis_rev, 5);
+    }
+
+    // =========================================================================
+    // fetch_source_facts tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_source_facts_empty() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source(&conn, 1, 1, "file.txt", None);
+
+        let result = fetch_source_facts(&conn, 1).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn fetch_source_facts_returns_all() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source(&conn, 1, 1, "file.txt", None);
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+        insert_fact_num(&conn, "source", 1, "content.Width", 4000.0);
+
+        let result = fetch_source_facts(&conn, 1).unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|f| f.key == "content.Make"));
+        assert!(result.iter().any(|f| f.key == "content.Width"));
+    }
+
+    #[test]
+    fn fetch_source_facts_excludes_object_facts() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_object(&conn, 100, "abc123");
+        insert_source(&conn, 1, 1, "file.txt", Some(100));
+        insert_fact_text(&conn, "source", 1, "source.policy", "reviewed");
+        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
+
+        let result = fetch_source_facts(&conn, 1).unwrap();
+
+        // Only the source fact should be returned
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].key, "source.policy");
+    }
+
+    // =========================================================================
+    // object_has_fact tests
+    // =========================================================================
+
+    #[test]
+    fn object_has_fact_returns_true() {
+        let conn = setup_test_db();
+        insert_object(&conn, 100, "abc123");
+        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
+
+        let result = object_has_fact(&conn, 100, "content.Make").unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn object_has_fact_returns_false_missing() {
+        let conn = setup_test_db();
+        insert_object(&conn, 100, "abc123");
+
+        let result = object_has_fact(&conn, 100, "content.Make").unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn object_has_fact_returns_false_wrong_entity() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source(&conn, 1, 1, "file.txt", None);
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+
+        // Fact is on source, not object
+        let result = object_has_fact(&conn, 1, "content.Make").unwrap();
+        assert!(!result);
+    }
+
+    // =========================================================================
+    // delete_by_id tests
+    // =========================================================================
+
+    #[test]
+    fn delete_by_id_removes_fact() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source(&conn, 1, 1, "file.txt", None);
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+
+        // Get the fact ID
+        let fact_id: i64 = conn.query_row(
+            "SELECT id FROM facts WHERE entity_type = 'source' AND entity_id = 1",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+
+        delete_by_id(&conn, fact_id).unwrap();
+
+        // Verify fact is gone
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE id = ?",
+            [fact_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn delete_by_id_nonexistent_ok() {
+        let conn = setup_test_db();
+
+        // Should not error even if fact doesn't exist
+        let result = delete_by_id(&conn, 99999);
+        assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // insert_object_fact tests
+    // =========================================================================
+
+    #[test]
+    fn insert_object_fact_creates() {
+        let conn = setup_test_db();
+        insert_object(&conn, 100, "abc123");
+
+        insert_object_fact(&conn, 100, "content.Make", Some("Canon"), None, None, 1700000000).unwrap();
+
+        let value: String = conn.query_row(
+            "SELECT value_text FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.Make'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(value, "Canon");
+    }
+
+    #[test]
+    fn insert_object_fact_with_num() {
+        let conn = setup_test_db();
+        insert_object(&conn, 100, "abc123");
+
+        insert_object_fact(&conn, 100, "content.Width", None, Some(4000.0), None, 1700000000).unwrap();
+
+        let value: f64 = conn.query_row(
+            "SELECT value_num FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.Width'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(value, 4000.0);
+    }
+
+    #[test]
+    fn insert_object_fact_with_time() {
+        let conn = setup_test_db();
+        insert_object(&conn, 100, "abc123");
+
+        insert_object_fact(&conn, 100, "content.DateTimeOriginal", None, None, Some(1704067200), 1700000000).unwrap();
+
+        let value: i64 = conn.query_row(
+            "SELECT value_time FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.DateTimeOriginal'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(value, 1704067200);
     }
 }

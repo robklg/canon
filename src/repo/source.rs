@@ -226,6 +226,27 @@ pub fn fetch_by_path(conn: &Connection, root_id: i64, rel_path: &str) -> Result<
     Ok(result)
 }
 
+/// Fetch a single source by its ID.
+///
+/// Returns the complete Source with all joined fields (root_path, root_role, etc.).
+/// Returns None if the source doesn't exist or is not present.
+///
+/// This is useful for operations that have a source_id and need the full
+/// Source data (e.g., import processing where source_id comes from worklist).
+pub fn fetch_by_id(conn: &Connection, source_id: i64) -> Result<Option<Source>> {
+    let sql = format!(
+        "SELECT {} {} WHERE s.present = 1 AND s.id = ?",
+        SOURCE_COLUMNS,
+        SOURCE_FROM,
+    );
+
+    let result = conn
+        .query_row(&sql, rusqlite::params![source_id], source_from_row)
+        .optional()?;
+
+    Ok(result)
+}
+
 /// Fetch a source by its device and inode.
 ///
 /// Searches across ALL roots to detect file moves (including cross-root moves).
@@ -594,21 +615,6 @@ pub fn apply_reconciliation(
                 .ok_or_else(|| anyhow::anyhow!("Failed to fetch source after update"))
         }
     }
-}
-
-/// Fetch a single source by ID (internal helper).
-fn fetch_by_id(conn: &Connection, source_id: i64) -> Result<Option<Source>> {
-    let sql = format!(
-        "SELECT {} {} WHERE s.id = ?",
-        SOURCE_COLUMNS,
-        SOURCE_FROM,
-    );
-
-    let result = conn
-        .query_row(&sql, rusqlite::params![source_id], source_from_row)
-        .optional()?;
-
-    Ok(result)
 }
 
 /// Mark sources as no longer present (missing from filesystem).
@@ -1079,6 +1085,65 @@ mod tests {
         let sources = batch_fetch_by_ids(&conn, &[id1, 999, 1000]).unwrap();
         assert_eq!(sources.len(), 1);
         assert!(sources.contains_key(&id1));
+    }
+
+    // =========================================================================
+    // fetch_by_id tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_by_id_returns_source() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let obj_id = insert_object(&conn, "abc123", false);
+        let source_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), true, false);
+
+        let result = fetch_by_id(&conn, source_id).unwrap();
+
+        assert!(result.is_some());
+        let source = result.unwrap();
+        assert_eq!(source.id, source_id);
+        assert_eq!(source.root_id, root_id);
+        assert_eq!(source.root_path, "/photos");
+        assert_eq!(source.rel_path, "photo.jpg");
+        assert_eq!(source.object_id, Some(obj_id));
+        assert_eq!(source.root_role, "source");
+    }
+
+    #[test]
+    fn fetch_by_id_not_found() {
+        let conn = setup_test_db();
+
+        let result = fetch_by_id(&conn, 99999).unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn fetch_by_id_excludes_non_present() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let source_id = insert_source(&conn, root_id, "deleted.jpg", None, false, false); // present=false
+
+        let result = fetch_by_id(&conn, source_id).unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn fetch_by_id_includes_excluded_source() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let source_id = insert_source(&conn, root_id, "excluded.jpg", None, true, true); // excluded=true
+
+        let result = fetch_by_id(&conn, source_id).unwrap();
+
+        assert!(result.is_some());
+        let source = result.unwrap();
+        assert!(source.excluded);
     }
 
     // =========================================================================

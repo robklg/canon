@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{self, BufRead};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::repo::{Connection, Db};
+use crate::domain::fact::{is_content_fact, normalize_fact_key, FactValueType};
+use crate::repo::{self, Connection, Db};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,14 +47,6 @@ struct ImportStats {
     facts_promoted: u64,
 }
 
-/// Fact value type for type consistency checking
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum FactValueType {
-    Text,
-    Num,
-    Time,
-}
-
 /// A fact value with optional type hint
 enum TypedValue {
     Plain(Value),
@@ -77,69 +69,19 @@ impl TypedValue {
     }
 }
 
-impl std::fmt::Display for FactValueType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FactValueType::Text => write!(f, "text"),
-            FactValueType::Num => write!(f, "num"),
-            FactValueType::Time => write!(f, "time"),
-        }
-    }
-}
-
 /// Build a map of known fact keys to their established types
 fn build_fact_type_map(conn: &Connection) -> Result<HashMap<String, FactValueType>> {
-    let mut type_map = HashMap::new();
-
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT key,
-                CASE
-                    WHEN value_time IS NOT NULL THEN 'time'
-                    WHEN value_num IS NOT NULL THEN 'num'
-                    ELSE 'text'
-                END as type
-         FROM facts"
-    )?;
-
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-
-    for row in rows {
-        let (key, type_str) = row?;
-        let fact_type = match type_str.as_str() {
-            "time" => FactValueType::Time,
-            "num" => FactValueType::Num,
-            _ => FactValueType::Text,
-        };
-        type_map.insert(key, fact_type);
-    }
-
-    Ok(type_map)
+    repo::fact::fetch_type_map(conn)
 }
 
-/// Normalize a fact key to use the content.* namespace.
-/// - Keys starting with "source." are rejected (reserved namespace)
-/// - Keys already starting with "content." are left as-is
-/// - All other keys are prefixed with "content."
-fn normalize_fact_key(key: &str) -> Result<String, &'static str> {
-    if key.starts_with("source.") {
-        return Err("source.* namespace is reserved for built-in facts");
-    }
-    if key.starts_with("content.") {
-        return Ok(key.to_string());
-    }
-    Ok(format!("content.{}", key))
-}
-
-pub fn run(db: &Db, allow_archived: bool, verbose: bool) -> Result<()> {
-    let conn = db.conn();
+pub fn run(db: &mut Db, allow_archived: bool, verbose: bool) -> Result<()> {
+    let conn = db.conn_mut();
     let stdin = io::stdin();
     let mut stats = ImportStats::default();
 
     // Build type map once at start for efficient type checking
     // This map is updated during import to catch mixed types in the input stream
-    let mut fact_type_map = build_fact_type_map(&conn)?;
+    let mut fact_type_map = build_fact_type_map(conn)?;
 
     // Track which keys had type mismatches (for summary)
     let mut type_mismatch_keys: HashMap<String, (FactValueType, FactValueType)> = HashMap::new();
@@ -160,7 +102,7 @@ pub fn run(db: &Db, allow_archived: bool, verbose: bool) -> Result<()> {
             }
         };
 
-        match process_import(&conn, &import, &mut stats, &mut fact_type_map, &mut type_mismatch_keys, allow_archived, verbose) {
+        match process_import(conn, &import, &mut stats, &mut fact_type_map, &mut type_mismatch_keys, allow_archived, verbose) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!(
@@ -203,7 +145,7 @@ pub fn run(db: &Db, allow_archived: bool, verbose: bool) -> Result<()> {
 }
 
 fn process_import(
-    conn: &Connection,
+    conn: &mut Connection,
     import: &FactImport,
     stats: &mut ImportStats,
     fact_type_map: &mut HashMap<String, FactValueType>,
@@ -211,28 +153,22 @@ fn process_import(
     allow_archived: bool,
     verbose: bool,
 ) -> Result<()> {
-    // Check if source exists and get its basis_rev, role, and paths
-    let current: Option<(i64, Option<i64>, String, String, String)> = conn
-        .query_row(
-            "SELECT s.basis_rev, s.object_id, r.role, r.path, s.rel_path
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             WHERE s.id = ?",
-            [import.source_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-        )
-        .optional()?;
-
-    let (current_basis_rev, current_object_id, role, root_path, rel_path) = match current {
-        Some(c) => c,
+    // Check if source exists and get its data
+    let source = match repo::source::fetch_by_id(conn, import.source_id)? {
+        Some(s) => s,
         None => {
             eprintln!("Warning: source_id {} not found", import.source_id);
             return Ok(());
         }
     };
 
+    let current_basis_rev = source.basis_rev;
+    let current_object_id = source.object_id;
+    let root_path = &source.root_path;
+    let rel_path = &source.rel_path;
+
     // Check if source is in an archive root
-    if role == "archive" && !allow_archived {
+    if source.is_from_role("archive") && !allow_archived {
         stats.skipped_archived += 1;
         return Ok(());
     }
@@ -268,14 +204,24 @@ fn process_import(
 
     if let Some(hash_val) = hash_value {
         if let Some(hash_str) = hash_val.as_str() {
-            object_id = Some(get_or_create_object(conn, "sha256", hash_str, stats)?);
+            let obj = repo::object::get_or_create(conn, "sha256", hash_str)?;
+            // Check if this was a new object (not previously linked to this source)
+            if current_object_id.is_none() || current_object_id != Some(obj.id) {
+                stats.objects_created += 1;
+            }
+            object_id = Some(obj.id);
 
-            // Link source to object if not already linked
-            if current_object_id != object_id {
-                conn.execute(
-                    "UPDATE sources SET object_id = ? WHERE id = ?",
-                    params![object_id, import.source_id],
-                )?;
+            // Link source to object AND promote existing facts in a single transaction
+            // This ensures atomicity: either both succeed or neither does
+            if current_object_id.is_none() {
+                let tx = conn.transaction()?;
+                repo::source::set_object_id(&tx, import.source_id, obj.id)?;
+                let promoted = promote_content_facts(&tx, import.source_id, obj.id)?;
+                tx.commit()?;
+                stats.facts_promoted += promoted;
+            } else if current_object_id != object_id {
+                // Just re-linking to a different object (rare case)
+                repo::source::set_object_id(conn, import.source_id, obj.id)?;
             }
         }
     }
@@ -336,12 +282,12 @@ fn process_import(
                 eprintln!("  {}: {} (on object)", key, value);
             }
             // Store as object fact
-            insert_fact(
+            repo::fact::upsert(
                 conn,
                 "object",
                 object_id.unwrap(),
                 key,
-                value_text,
+                value_text.as_deref(),
                 value_num,
                 value_time,
                 import.observed_at,
@@ -354,12 +300,12 @@ fn process_import(
                 eprintln!("  {}: {} (on source)", key, value);
             }
             // Store as source fact for now (will be promoted later when hash is known)
-            insert_fact(
+            repo::fact::upsert(
                 conn,
                 "source",
                 import.source_id,
                 key,
-                value_text,
+                value_text.as_deref(),
                 value_num,
                 value_time,
                 import.observed_at,
@@ -368,81 +314,6 @@ fn process_import(
             stats.facts_imported += 1;
         }
     }
-
-    // If we just linked an object, promote any existing content facts from source to object
-    if object_id.is_some() && current_object_id.is_none() {
-        let promoted = promote_content_facts(conn, import.source_id, object_id.unwrap())?;
-        stats.facts_promoted += promoted;
-    }
-
-    Ok(())
-}
-
-fn get_or_create_object(
-    conn: &Connection,
-    hash_type: &str,
-    hash_value: &str,
-    stats: &mut ImportStats,
-) -> Result<i64> {
-    // Try to find existing object
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM objects WHERE hash_type = ? AND hash_value = ?",
-            params![hash_type, hash_value],
-            |row| row.get(0),
-        )
-        .optional()?;
-
-    if let Some(id) = existing {
-        return Ok(id);
-    }
-
-    // Create new object
-    conn.execute(
-        "INSERT INTO objects (hash_type, hash_value) VALUES (?, ?)",
-        params![hash_type, hash_value],
-    )?;
-    stats.objects_created += 1;
-    Ok(conn.last_insert_rowid())
-}
-
-fn is_content_fact(key: &str) -> bool {
-    // Content facts use the content.* namespace
-    // All imported facts are content facts (auto-namespaced on import)
-    key.starts_with("content.")
-}
-
-fn insert_fact(
-    conn: &Connection,
-    entity_type: &str,
-    entity_id: i64,
-    key: &str,
-    value_text: Option<String>,
-    value_num: Option<f64>,
-    value_time: Option<i64>,
-    observed_at: i64,
-    observed_basis_rev: Option<i64>,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO facts (entity_type, entity_id, key, value_text, value_num, value_time, observed_at, observed_basis_rev)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(entity_type, entity_id, key) DO UPDATE SET
-           value_text = excluded.value_text,
-           value_num = excluded.value_num,
-           value_time = excluded.value_time,
-           observed_at = excluded.observed_at,
-           observed_basis_rev = excluded.observed_basis_rev",
-        params![
-            entity_type,
-            entity_id,
-            key,
-            value_text,
-            value_num,
-            value_time,
-            observed_at,
-            observed_basis_rev,
-        ],
-    )?;
 
     Ok(())
 }
@@ -652,52 +523,38 @@ fn get_typed_value_type(typed: &TypedValue) -> Option<FactValueType> {
     }
 }
 
+/// Promote content facts from a source to its newly-linked object.
+///
+/// This function is called within a transaction that also links the source to the object,
+/// ensuring atomicity. It:
+/// 1. Fetches all facts on the source
+/// 2. For each content fact (content.* namespace):
+///    - If the object doesn't already have this fact, copies it to the object
+///    - Deletes the source fact
 fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> Result<u64> {
-    // Find content facts on this source that should be promoted
-    let mut stmt = conn.prepare(
-        "SELECT id, key, value_text, value_num, value_time, observed_at
-         FROM facts
-         WHERE entity_type = 'source' AND entity_id = ?"
-    )?;
-
-    let facts: Vec<(i64, String, Option<String>, Option<f64>, Option<i64>, i64)> = stmt
-        .query_map([source_id], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+    // Fetch all facts on this source
+    let facts = repo::fact::fetch_source_facts(conn, source_id)?;
 
     let mut promoted = 0u64;
-    for (fact_id, key, value_text, value_num, value_time, observed_at) in facts {
-        if is_content_fact(&key) {
+    for fact in facts {
+        if is_content_fact(&fact.key) {
             // Check if object already has this fact
-            let exists: bool = conn
-                .query_row(
-                    "SELECT 1 FROM facts WHERE entity_type = 'object' AND entity_id = ? AND key = ?",
-                    params![object_id, key],
-                    |_| Ok(true),
-                )
-                .optional()?
-                .unwrap_or(false);
-
-            if !exists {
+            if !repo::fact::object_has_fact(conn, object_id, &fact.key)? {
                 // Copy to object
-                conn.execute(
-                    "INSERT INTO facts (entity_type, entity_id, key, value_text, value_num, value_time, observed_at, observed_basis_rev)
-                     VALUES ('object', ?, ?, ?, ?, ?, ?, NULL)",
-                    params![object_id, key, value_text, value_num, value_time, observed_at],
+                repo::fact::insert_object_fact(
+                    conn,
+                    object_id,
+                    &fact.key,
+                    fact.value_text.as_deref(),
+                    fact.value_num,
+                    fact.value_time,
+                    fact.observed_at,
                 )?;
                 promoted += 1;
             }
 
             // Delete from source
-            conn.execute("DELETE FROM facts WHERE id = ?", [fact_id])?;
+            repo::fact::delete_by_id(conn, fact.id)?;
         }
     }
 

@@ -54,12 +54,12 @@ A command module is "compliant" when:
 |--------|------------|--------|------------|
 | **roots.rs** | 13 | ✅ Done | [2026-02-08-roots-sql-extraction.md](2026-02-08-roots-sql-extraction.md) |
 | **coverage.rs** | 2 | ✅ Done | [2026-02-08-coverage-sql-extraction.md](2026-02-08-coverage-sql-extraction.md) |
+| **import_facts.rs** | 8 | ✅ Done | [2026-02-08-import-facts-sql-extraction.md](2026-02-08-import-facts-sql-extraction.md) |
 
 ### Pending
 
 | Module | SQL Calls | Priority | Status | Story Spec |
 |--------|-----------|----------|--------|------------|
-| **import_facts.rs** | 12 | High | 🔲 Pending | — |
 | **facts.rs** | 46 | High | 🔲 Pending | — |
 
 ### Recommended Order
@@ -73,7 +73,7 @@ A command module is "compliant" when:
 
 ## Current Story
 
-**None active** — coverage.rs completed. Next: import_facts.rs
+**None active** — import_facts.rs completed. Next: facts.rs
 
 ---
 
@@ -99,6 +99,13 @@ A command module is "compliant" when:
 **coverage.rs story:**
 - When only 2 inline queries remain, no new repo functions are needed — just rewire to use existing `fetch_all()` + domain predicates
 - Integration tests for scope filtering catch bugs that unit tests on individual predicates might miss
+
+**import_facts.rs story:**
+- Check for existing repo functions before adding new ones (e.g., `set_object_id()` already existed)
+- When operations must be atomic, restructure code to put them in same scope for transaction
+- `INSERT ON CONFLICT DO NOTHING` + `SELECT` is safer than `SELECT` + `INSERT` for get-or-create patterns (fixes TOCTOU race)
+- Moving pure types/functions to domain layer enables unit testing and reuse (e.g., `FactValueType`, `normalize_fact_key`, `is_content_fact`)
+- Commands can take `&mut Db` when they need transactions (mutable borrow allows `conn.transaction()`)
 
 ---
 
@@ -126,18 +133,26 @@ A command module is "compliant" when:
 - Already uses `repo::object::batch_check_archived()` — good
 - Minor SQL cleanup needed
 
-### import_facts.rs (12 SQL calls)
+### import_facts.rs (8 SQL calls)
 
 **Current issues:**
 - `build_fact_type_map()` — Queries existing fact types
-- `process_import()` — Queries source state for staleness
-- `get_or_create_object()` — Object upsert logic
-- `promote_content_facts()` — Complex migration SQL
+- `process_import()` — Queries source state for staleness + links object
+- `get_or_create_object()` — Object upsert logic with TOCTOU race condition
+- `insert_fact()` — Inline upsert
+- `promote_content_facts()` — Complex migration SQL, not atomic with link
 
 **Extraction targets:**
-- `repo::fact::fetch_type_map()`
-- `repo::object::get_or_create()` — Return `Object` domain type
-- `repo::fact::promote_to_object_facts()`
+- `repo::source::fetch_by_id()` — Single source lookup
+- `repo::source::link_to_object()` — Set object_id
+- `repo::object::get_or_create()` — Atomic INSERT ON CONFLICT pattern
+- `repo::fact::fetch_type_map()` — Type consistency checking
+- `repo::fact::upsert()` — Fact insert/update
+- `repo::fact::fetch_source_facts()`, `object_has_fact()`, `delete_by_id()` — For promotion
+
+**Correctness fixes:**
+- Transaction around link + promote (atomicity)
+- Atomic get_or_create (race condition)
 
 ### facts.rs (46 SQL calls)
 
@@ -188,3 +203,5 @@ let filtered: Vec<Source> = sources.into_iter()
 | 2026-02-08 | Started roots.rs story. |
 | 2026-02-08 | Completed roots.rs story. 13 SQL calls → 0. Added 4 repo functions + 15 tests. |
 | 2026-02-08 | Completed coverage.rs story. 2 SQL calls → 0. Added 1 integration test. |
+| 2026-02-08 | Created import_facts.rs story spec. Identified atomicity bugs to fix. |
+| 2026-02-08 | Completed import_facts.rs story. 8 SQL calls → 0. Fixed TOCTOU race and added transaction for atomicity. Added 7 repo functions + domain types. |

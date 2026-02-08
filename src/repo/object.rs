@@ -339,8 +339,10 @@ pub fn fetch_excluded(conn: &Connection) -> Result<Vec<Object>> {
 
 /// Get or create an object by hash, returning the complete Object.
 ///
-/// This is an idempotent operation: if an object with the given hash exists,
-/// it is returned; otherwise a new object is created and returned.
+/// This is an idempotent, concurrent-safe operation: if an object with the
+/// given hash exists, it is returned; otherwise a new object is created and
+/// returned. Uses `INSERT ON CONFLICT DO NOTHING` to handle race conditions
+/// where two processes try to create the same hash simultaneously.
 ///
 /// # Arguments
 /// * `conn` - Database connection
@@ -350,30 +352,20 @@ pub fn fetch_excluded(conn: &Connection) -> Result<Vec<Object>> {
 /// # Returns
 /// The existing or newly created Object with all fields populated.
 pub fn get_or_create(conn: &Connection, hash_type: &str, hash_value: &str) -> Result<Object> {
-    // Try to find existing object - return full Object if found
+    // Atomic upsert: INSERT if not exists, do nothing on conflict.
+    // This handles race conditions where two processes try to create the same hash.
+    conn.execute(
+        "INSERT INTO objects (hash_type, hash_value) VALUES (?, ?)
+         ON CONFLICT(hash_type, hash_value) DO NOTHING",
+        rusqlite::params![hash_type, hash_value],
+    )?;
+
+    // Now fetch the object (whether we just created it or it already existed)
     let sql = format!(
         "SELECT {} FROM objects WHERE hash_type = ? AND hash_value = ?",
         OBJECT_COLUMNS
     );
-    let existing = conn
-        .query_row(&sql, rusqlite::params![hash_type, hash_value], object_from_row)
-        .optional()?;
-
-    if let Some(obj) = existing {
-        return Ok(obj);
-    }
-
-    // Create new object
-    conn.execute(
-        "INSERT INTO objects (hash_type, hash_value) VALUES (?, ?)",
-        rusqlite::params![hash_type, hash_value],
-    )?;
-    let id = conn.last_insert_rowid();
-
-    // Fetch the complete Object to ensure consistency with database state.
-    // This follows the insert_destination() pattern from source.rs.
-    let fetch_sql = format!("SELECT {} FROM objects WHERE id = ?", OBJECT_COLUMNS);
-    let obj = conn.query_row(&fetch_sql, [id], object_from_row)?;
+    let obj = conn.query_row(&sql, rusqlite::params![hash_type, hash_value], object_from_row)?;
     Ok(obj)
 }
 
