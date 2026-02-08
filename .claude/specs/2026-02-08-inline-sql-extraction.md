@@ -106,7 +106,7 @@ After refactoring to take `&[Root]`, these functions become pure and can have un
 | L1227-1233 `check_archive_hash_coverage` | Inline COUNT/SUM | `repo::source::count_unhashed_for_root()` | Returns (total, unhashed) counts |
 
 ### Phase 2: apply.rs Domain Object Usage
-- **Status**: pending
+- **Status**: completed
 - **Goal**: Use domain objects and predicates instead of raw SQL values
 - **Dependencies**: Phase 1 complete
 - **Key insight**: This phase is about using the right abstractions, not performance. Whether we fetch one-at-a-time or in batch, the important thing is using `Source` objects and predicates like `is_active()`.

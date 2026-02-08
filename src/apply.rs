@@ -1,5 +1,4 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::OptionalExtension;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, Metadata};
 use std::io::{BufRead, BufReader, ErrorKind};
@@ -214,14 +213,19 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     let roots = repo::root::fetch_all(conn)?;
     let root_paths: HashMap<i64, String> = roots.iter().map(|r| (r.id, r.path.clone())).collect();
 
-    // Look up archive root path from manifest's archive_root_id
-    let archive_root_path: String = conn
-        .query_row(
-            "SELECT path FROM roots WHERE id = ? AND role = 'archive'",
-            [config.output.archive_root_id],
-            |row| row.get(0),
-        )
-        .with_context(|| format!("Archive root id {} not found", config.output.archive_root_id))?;
+    // Look up archive root from cached roots, verify it's an archive
+    let archive_root = roots
+        .iter()
+        .find(|r| r.id == config.output.archive_root_id)
+        .ok_or_else(|| anyhow::anyhow!("Archive root id {} not found", config.output.archive_root_id))?;
+    if !archive_root.is_archive() {
+        bail!(
+            "Root id {} has role '{}', expected 'archive'",
+            config.output.archive_root_id,
+            archive_root.role
+        );
+    }
+    let archive_root_path = &archive_root.path;
 
     // Construct full base_dir from archive root + relative subdir
     let base_dir = if config.output.base_dir.is_empty() {
@@ -1242,30 +1246,20 @@ fn check_suspended_sources_filtered(
     conn: &Connection,
     sources: &[&LockEntry],
 ) -> Result<Vec<(i64, String)>> {
-    let mut suspended = Vec::new();
-    let total = sources.len();
-    let progress = Progress::new(total);
+    // Batch fetch sources and check suspension via domain predicate
+    let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
+    let sources_map = repo::source::batch_fetch_by_ids(conn, &source_ids)?;
 
-    for (i, source) in sources.iter().enumerate() {
-        progress.update(i);
-
-        // Check if source's root is suspended
-        let is_suspended: bool = conn
-            .query_row(
-                "SELECT r.suspended FROM sources s
-                 JOIN roots r ON s.root_id = r.id
-                 WHERE s.id = ?",
-                [source.id],
-                |row| row.get(0),
-            )
-            .unwrap_or(false); // Treat missing source as not suspended (will fail elsewhere)
-
-        if is_suspended {
-            suspended.push((source.id, source.path.clone()));
-        }
-    }
-
-    progress.finish();
+    let suspended: Vec<(i64, String)> = sources
+        .iter()
+        .filter(|lock_entry| {
+            sources_map
+                .get(&lock_entry.id)
+                .map(|s| !s.is_active()) // is_active() checks root_suspended
+                .unwrap_or(false) // Treat missing source as not suspended (will fail elsewhere)
+        })
+        .map(|lock_entry| (lock_entry.id, lock_entry.path.clone()))
+        .collect();
 
     Ok(suspended)
 }
@@ -1360,69 +1354,52 @@ fn check_source_states_disk(sources: &[&LockEntry]) -> Vec<SkippedStaleSource> {
 /// Batch validate source file states against DB values. Returns list of stale sources.
 /// Used in dry-run mode for faster validation without disk access.
 fn check_source_states_db(conn: &Connection, sources: &[&LockEntry]) -> Result<Vec<SkippedStaleSource>> {
+    // Batch fetch all sources from DB
+    let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
+    let sources_map = repo::source::batch_fetch_by_ids(conn, &source_ids)?;
+
     let mut stale = Vec::new();
-    let total = sources.len();
-    let progress = Progress::new(total);
 
-    for (i, source) in sources.iter().enumerate() {
-        progress.update(i);
-
-        // Get current DB values for this source
-        let db_state: Option<(i64, i64, Option<String>, bool)> = conn
-            .query_row(
-                // Validate size+mtime+partial_hash only; device/inode not used for staleness
-                "SELECT size, mtime, partial_hash, present FROM sources WHERE id = ?",
-                [source.id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-
-        match db_state {
+    for lock_entry in sources {
+        match sources_map.get(&lock_entry.id) {
             None => {
+                // batch_fetch_by_ids excludes non-present sources, so this means
+                // either not found OR not present
                 stale.push(SkippedStaleSource {
-                    path: source.path.clone(),
-                    reason: "source not found in DB".to_string(),
+                    path: lock_entry.path.clone(),
+                    reason: "source not found or not present in DB".to_string(),
                 });
             }
-            Some((_, _, _, false)) => {
-                stale.push(SkippedStaleSource {
-                    path: source.path.clone(),
-                    reason: "source marked not present in DB".to_string(),
-                });
-            }
-            Some((db_size, db_mtime, db_partial_hash, true)) => {
+            Some(db_source) => {
+                // Compare lock entry values against Source struct fields
                 let mut mismatches = Vec::new();
 
-                if db_size != source.size {
-                    mismatches.push(format!("size: {} → {}", source.size, db_size));
+                if db_source.size != lock_entry.size {
+                    mismatches.push(format!("size: {} → {}", lock_entry.size, db_source.size));
                 }
-                if db_mtime != source.mtime {
-                    mismatches.push(format!("mtime: {} → {}", source.mtime, db_mtime));
+                if db_source.mtime != lock_entry.mtime {
+                    mismatches.push(format!("mtime: {} → {}", lock_entry.mtime, db_source.mtime));
                 }
                 // Compare partial_hash from lock vs DB
-                if let Some(ref db_hash) = db_partial_hash {
-                    if db_hash != &source.partial_hash {
-                        mismatches.push(format!(
-                            "partial hash: {}... → {}...",
-                            &source.partial_hash[..16.min(source.partial_hash.len())],
-                            &db_hash[..16.min(db_hash.len())]
-                        ));
-                    }
-                } else {
+                if db_source.partial_hash.is_empty() {
                     mismatches.push("partial hash: missing in DB".to_string());
+                } else if db_source.partial_hash != lock_entry.partial_hash {
+                    mismatches.push(format!(
+                        "partial hash: {}... → {}...",
+                        &lock_entry.partial_hash[..16.min(lock_entry.partial_hash.len())],
+                        &db_source.partial_hash[..16.min(db_source.partial_hash.len())]
+                    ));
                 }
 
                 if !mismatches.is_empty() {
                     stale.push(SkippedStaleSource {
-                        path: source.path.clone(),
+                        path: lock_entry.path.clone(),
                         reason: mismatches.join(", "),
                     });
                 }
             }
         }
     }
-
-    progress.finish();
 
     Ok(stale)
 }
