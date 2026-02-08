@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -6,8 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
 
-use crate::repo::{self, Db};
 use crate::domain::{parse_root_spec, parse_root_spec_any, Root};
+use crate::repo::{self, Db};
 
 pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
     let conn = db.conn();
@@ -57,7 +56,7 @@ pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
 
     // Fetch file counts for the filtered roots
     let root_ids: Vec<i64> = filtered_roots.iter().map(|r| r.id).collect();
-    let file_counts = fetch_file_counts(conn, &root_ids)?;
+    let file_counts = repo::root::fetch_file_counts(conn, &root_ids)?;
 
     // Print header
     println!(
@@ -91,42 +90,6 @@ pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
     Ok(())
 }
 
-/// Fetch file counts for a set of root IDs.
-///
-/// Returns a HashMap from root_id to count of present sources.
-fn fetch_file_counts(
-    conn: &rusqlite::Connection,
-    root_ids: &[i64],
-) -> Result<HashMap<i64, i64>> {
-    if root_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let placeholders: Vec<&str> = root_ids.iter().map(|_| "?").collect();
-    let sql = format!(
-        "SELECT root_id, COUNT(*) FROM sources WHERE present = 1 AND root_id IN ({}) GROUP BY root_id",
-        placeholders.join(",")
-    );
-
-    let params: Vec<rusqlite::types::Value> = root_ids
-        .iter()
-        .map(|&id| rusqlite::types::Value::from(id))
-        .collect();
-
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-    })?;
-
-    let mut counts = HashMap::new();
-    for row in rows {
-        let (root_id, count) = row?;
-        counts.insert(root_id, count);
-    }
-
-    Ok(counts)
-}
-
 fn format_time_ago(timestamp: Option<i64>, now: i64) -> String {
     match timestamp {
         None => "never".to_string(),
@@ -156,39 +119,24 @@ pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
     // Parse the spec to get root id and validate it exists
     let root_id = parse_root_spec(&roots, spec, None)?;
 
-    // Get root info for display
-    let (path, role): (String, String) = conn.query_row(
-        "SELECT path, role FROM roots WHERE id = ?",
-        [root_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
+    // Get root info from already-fetched roots
+    let root = roots.iter().find(|r| r.id == root_id).unwrap();
 
-    // Count sources
-    let source_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sources WHERE root_id = ?",
-        [root_id],
-        |row| row.get(0),
-    )?;
+    // Get sources for this root to compute statistics
+    let sources = repo::source::batch_fetch_by_roots(conn, &[root_id])?;
+    let source_count = sources.len() as i64;
 
-    // Count sources whose content is in an archive (same object_id exists in an archive root)
-    let in_archive_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sources s
-         WHERE s.root_id = ?
-           AND s.object_id IS NOT NULL
-           AND EXISTS (
-               SELECT 1 FROM sources s2
-               JOIN roots r2 ON s2.root_id = r2.id
-               WHERE s2.object_id = s.object_id
-                 AND r2.role = 'archive'
-                 AND s2.present = 1
-           )",
-        [root_id],
-        |row| row.get(0),
-    )?;
+    // Check which sources have their content in an archive
+    let object_ids: Vec<i64> = sources.iter().filter_map(|s| s.object_id).collect();
+    let archived_objects = repo::object::batch_check_archived(conn, &object_ids, None)?;
+    let in_archive_count = sources
+        .iter()
+        .filter(|s| s.object_id.map(|id| archived_objects.contains(&id)).unwrap_or(false))
+        .count() as i64;
     let not_in_archive = source_count - in_archive_count;
 
     if !yes {
-        eprintln!("About to remove {} root: {}", role, path);
+        eprintln!("About to remove {} root: {}", root.role, root.path);
         eprintln!(
             "This will forget {} sources ({} in archive, {} not in archive).",
             source_count, in_archive_count, not_in_archive
@@ -196,7 +144,7 @@ pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
         eprintln!("Files on disk will NOT be deleted.");
         eprintln!();
         eprintln!("To see which sources will be forgotten:");
-        eprintln!("  canon ls {}", path);
+        eprintln!("  canon ls {}", root.path);
         eprintln!();
         eprint!("Proceed? [y/N] ");
         io::stderr().flush()?;
@@ -208,19 +156,8 @@ pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
         }
     }
 
-    // Delete facts for sources in this root
-    conn.execute(
-        "DELETE FROM facts WHERE entity_type = 'source' AND entity_id IN (
-            SELECT id FROM sources WHERE root_id = ?
-        )",
-        [root_id],
-    )?;
-
-    // Delete sources
-    let deleted_sources = conn.execute("DELETE FROM sources WHERE root_id = ?", [root_id])?;
-
-    // Delete the root
-    conn.execute("DELETE FROM roots WHERE id = ?", [root_id])?;
+    // Delete facts, sources, and root via repo function
+    let deleted_sources = repo::root::remove(conn, root_id)?;
 
     println!("Removed root {} and {} sources", root_id, deleted_sources);
 
@@ -236,10 +173,7 @@ pub fn set_comment(db: &Db, spec: &str, comment: Option<&str>) -> Result<()> {
     // Parse the spec to get root id and validate it exists
     let root_id = parse_root_spec(&roots, spec, None)?;
 
-    conn.execute(
-        "UPDATE roots SET comment = ? WHERE id = ?",
-        rusqlite::params![comment, root_id],
-    )?;
+    repo::root::set_comment(conn, root_id, comment)?;
 
     match comment {
         Some(c) => println!("Set comment on root {}: {}", root_id, c),
@@ -258,19 +192,16 @@ pub fn suspend(db: &Db, spec: &str) -> Result<()> {
     // Use parse_root_spec_any to allow suspending already-suspended roots (no-op)
     let root_id = parse_root_spec_any(&roots, spec)?;
 
-    // Get root info for display
-    let (path, suspended): (String, bool) =
-        conn.query_row("SELECT path, suspended FROM roots WHERE id = ?", [root_id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
+    // Get root info from already-fetched roots
+    let root = roots.iter().find(|r| r.id == root_id).unwrap();
 
-    if suspended {
-        println!("Root {} is already suspended: {}", root_id, path);
+    if root.is_suspended() {
+        println!("Root {} is already suspended: {}", root_id, root.path);
         return Ok(());
     }
 
-    conn.execute("UPDATE roots SET suspended = 1 WHERE id = ?", [root_id])?;
-    println!("Suspended root {}: {}", root_id, path);
+    repo::root::set_suspended(conn, root_id, true)?;
+    println!("Suspended root {}: {}", root_id, root.path);
     Ok(())
 }
 
@@ -283,18 +214,15 @@ pub fn unsuspend(db: &Db, spec: &str) -> Result<()> {
     // Use parse_root_spec_any to find suspended roots
     let root_id = parse_root_spec_any(&roots, spec)?;
 
-    // Get root info for display
-    let (path, suspended): (String, bool) =
-        conn.query_row("SELECT path, suspended FROM roots WHERE id = ?", [root_id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
+    // Get root info from already-fetched roots
+    let root = roots.iter().find(|r| r.id == root_id).unwrap();
 
-    if !suspended {
-        println!("Root {} is not suspended: {}", root_id, path);
+    if !root.is_suspended() {
+        println!("Root {} is not suspended: {}", root_id, root.path);
         return Ok(());
     }
 
-    conn.execute("UPDATE roots SET suspended = 0 WHERE id = ?", [root_id])?;
-    println!("Unsuspended root {}: {}", root_id, path);
+    repo::root::set_suspended(conn, root_id, false)?;
+    println!("Unsuspended root {}: {}", root_id, root.path);
     Ok(())
 }
