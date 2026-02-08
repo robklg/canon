@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::repo::{self, Db};
 use crate::expr::filter::{self, Filter};
 use crate::domain::path::canonicalize_scopes;
-use crate::domain::root::parse_root_spec;
+use crate::domain::root::{parse_root_spec, Root};
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 
@@ -138,11 +138,9 @@ fn get_matching_sources(
     filters: &[Filter],
     include_archived: bool,
 ) -> Result<Vec<Source>> {
-    // Get all root IDs
-    let root_ids: Vec<i64> = conn
-        .prepare("SELECT id FROM roots")?
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+    // Get all roots and extract IDs
+    let roots = repo::root::fetch_all(conn)?;
+    let root_ids: Vec<i64> = roots.iter().map(|r| r.id).collect();
 
     // Fetch all present sources
     let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
@@ -190,20 +188,13 @@ fn compute_per_root_stats(
     archive_root_id: Option<i64>,
     include_archived: bool,
 ) -> Result<(Vec<CoverageStats>, CoverageStats)> {
-    // Get list of roots
-    let role_clause = if include_archived {
-        "suspended = 0"
-    } else {
-        "role = 'source' AND suspended = 0"
-    };
-
-    let roots: Vec<(i64, String, String)> = conn
-        .prepare(&format!(
-            "SELECT id, path, role FROM roots WHERE {} ORDER BY id",
-            role_clause
-        ))?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
+    // Get list of roots, filtered by role and suspension status
+    let all_roots = repo::root::fetch_all(conn)?;
+    let roots: Vec<&Root> = all_roots
+        .iter()
+        .filter(|r| r.is_active())
+        .filter(|r| include_archived || r.is_source())
+        .collect();
 
     // Get all matching sources (unscoped)
     let all_sources = get_matching_sources(conn, &[], filters, include_archived)?;
@@ -212,17 +203,17 @@ fn compute_per_root_stats(
     let mut per_root_stats = Vec::new();
     let mut overall = CoverageStats::new();
 
-    for (root_id, root_path, root_role) in roots {
+    for root in &roots {
         // Filter sources for this root
         let root_sources: Vec<&Source> = all_sources
             .iter()
-            .filter(|s| s.root_id == root_id)
+            .filter(|s| s.root_id == root.id)
             .collect();
 
         let mut stats = compute_stats_from_source_refs(conn, &root_sources, archive_root_id)?;
-        stats.root_id = Some(root_id);
-        stats.root_path = Some(root_path);
-        stats.root_role = Some(root_role);
+        stats.root_id = Some(root.id);
+        stats.root_path = Some(root.path.clone());
+        stats.root_role = Some(root.role.clone());
 
         // Add to overall totals
         overall.total_sources += stats.total_sources;
@@ -602,6 +593,46 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    /// Test that get_matching_sources respects scope filtering.
+    ///
+    /// This validates the full scope-filtering pipeline:
+    /// - Sources are filtered by path using Source::matches_scope()
+    /// - Empty scopes returns all sources
+    #[test]
+    fn test_get_matching_sources_respects_scope() {
+        use crate::domain::scope::ScopeMatch;
+
+        let mut conn = setup_test_db();
+
+        // Create two roots at different paths
+        let photos_root = insert_root(&conn, "/photos", "source", false);
+        let videos_root = insert_root(&conn, "/videos", "source", false);
+
+        // Add sources to each root
+        let photo1_id = insert_source(&conn, photos_root, "photo1.jpg", None);
+        let photo2_id = insert_source(&conn, photos_root, "photo2.jpg", None);
+        let video1_id = insert_source(&conn, videos_root, "video1.mp4", None);
+
+        // Test 1: Scoped to /photos - should return only photo sources
+        let scopes = vec![ScopeMatch::UnderDirectory("/photos".to_string())];
+        let sources = get_matching_sources(&mut conn, &scopes, &[], false).unwrap();
+        let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
+
+        assert_eq!(source_ids.len(), 2, "Should return 2 photo sources");
+        assert!(source_ids.contains(&photo1_id), "Should contain photo1");
+        assert!(source_ids.contains(&photo2_id), "Should contain photo2");
+        assert!(!source_ids.contains(&video1_id), "Should NOT contain video1");
+
+        // Test 2: Unscoped (empty scopes = all) - should return all sources
+        let sources = get_matching_sources(&mut conn, &[], &[], false).unwrap();
+        let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
+
+        assert_eq!(source_ids.len(), 3, "Should return all 3 sources");
+        assert!(source_ids.contains(&photo1_id), "Should contain photo1");
+        assert!(source_ids.contains(&photo2_id), "Should contain photo2");
+        assert!(source_ids.contains(&video1_id), "Should contain video1");
     }
 
     /// Test that archived_sources counts sources, not unique objects.

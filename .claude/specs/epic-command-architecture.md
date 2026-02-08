@@ -53,12 +53,12 @@ A command module is "compliant" when:
 | Module | SQL Before | Status | Story Spec |
 |--------|------------|--------|------------|
 | **roots.rs** | 13 | ✅ Done | [2026-02-08-roots-sql-extraction.md](2026-02-08-roots-sql-extraction.md) |
+| **coverage.rs** | 2 | ✅ Done | [2026-02-08-coverage-sql-extraction.md](2026-02-08-coverage-sql-extraction.md) |
 
 ### Pending
 
 | Module | SQL Calls | Priority | Status | Story Spec |
 |--------|-----------|----------|--------|------------|
-| **coverage.rs** | 7 | Low | 🔲 Pending | — |
 | **import_facts.rs** | 12 | High | 🔲 Pending | — |
 | **facts.rs** | 46 | High | 🔲 Pending | — |
 
@@ -73,7 +73,7 @@ A command module is "compliant" when:
 
 ## Current Story
 
-**None active** — roots.rs completed. Next: coverage.rs or import_facts.rs
+**None active** — coverage.rs completed. Next: import_facts.rs
 
 ---
 
@@ -95,6 +95,10 @@ A command module is "compliant" when:
 - When commands re-query the database for info they already have (e.g., suspend() querying path after spec resolution), eliminate the query by using the already-fetched Root object
 - For archive count statistics, composing existing repo functions (`batch_fetch_by_roots` + `batch_check_archived`) is cleaner than adding specialized one-off queries
 - Test helpers in repo layers need to match the full schema (including NOT NULL constraints like `partial_hash`, `scanned_at`)
+
+**coverage.rs story:**
+- When only 2 inline queries remain, no new repo functions are needed — just rewire to use existing `fetch_all()` + domain predicates
+- Integration tests for scope filtering catch bugs that unit tests on individual predicates might miss
 
 ---
 
@@ -183,3 +187,4 @@ let filtered: Vec<Source> = sources.into_iter()
 | 2026-02-08 | Epic created. Initial analysis of module compliance. |
 | 2026-02-08 | Started roots.rs story. |
 | 2026-02-08 | Completed roots.rs story. 13 SQL calls → 0. Added 4 repo functions + 15 tests. |
+| 2026-02-08 | Completed coverage.rs story. 2 SQL calls → 0. Added 1 integration test. |
