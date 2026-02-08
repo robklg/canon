@@ -15,6 +15,11 @@ After recent refactoring of `exclude.rs`, `scan.rs`, and `apply.rs`, some inline
 2. Domain layer must be pure — NO database access
 3. Command layer uses domain objects (Source, Root, Object), not raw SQL values
 4. Business logic uses domain predicates (is_active, is_excluded, is_archive), not inline conditions
+5. Keep complexity low — batch operations only when they reduce complexity, not for performance
+
+**Non-goals**:
+- Performance optimization (N+1 queries during scan/transfer are not a concern)
+- The goal is consistency, clarity, and strict separation — not speed
 
 ## Phases
 
@@ -77,22 +82,22 @@ Tests exist in `domain/root.rs` for:
 After refactoring to take `&[Root]`, these functions become pure and can have unit tests added.
 
 ### Phase 1: apply.rs SQL Extractions
-- **Status**: pending
+- **Status**: completed
 - **Goal**: Extract inline SQL to repo layer
 - **Dependencies**: Phase 0 complete
 
-#### 1.1 Batch operations (already batched, just needs repo extraction)
+#### 1.1 Use existing repo function
 
 | Location | Current | Target | Notes |
 |----------|---------|--------|-------|
-| L929-951 `check_stale_destination_records` | Inline batched SQL for present paths | `repo::source::batch_find_present_paths()` | Already handles batching with BATCH_SIZE |
+| L929-951 `check_stale_destination_records` | Inline batched SQL for present paths | `repo::source::batch_check_paths_exist()` | **Function already exists** at repo/source.rs:277-316. Just replace inline SQL with call to existing function. |
 
 #### 1.2 Write operations
 
 | Location | Current | Target | Notes |
 |----------|---------|--------|-------|
-| L1639-1643 `relocate_source` | Inline UPDATE | `repo::source::relocate()` | Updates root_id, rel_path, timestamps |
-| L1649-1652 `mark_source_not_present` | Inline UPDATE | Check if `repo::source::mark_missing()` handles single ID, else add variant | Sets present=0 |
+| L1639-1643 `relocate_source` | Inline UPDATE | `repo::source::update_location()` | Updates root_id, rel_path, timestamps |
+| L1649-1652 `mark_source_not_present` | Inline UPDATE | `repo::source::mark_missing(&[id])` | Use existing batch function with single-item slice. Simpler than adding a variant. |
 
 #### 1.3 Aggregation queries
 
@@ -102,23 +107,26 @@ After refactoring to take `&[Root]`, these functions become pure and can have un
 
 ### Phase 2: apply.rs Domain Object Usage
 - **Status**: pending
-- **Goal**: Replace raw SQL value access with domain objects and predicates
+- **Goal**: Use domain objects and predicates instead of raw SQL values
 - **Dependencies**: Phase 1 complete
+- **Key insight**: This phase is about using the right abstractions, not performance. Whether we fetch one-at-a-time or in batch, the important thing is using `Source` objects and predicates like `is_active()`.
 
-#### 2.1 Use cached data with domain predicates
+#### 2.1 Use already-cached roots
 
-| Location | Current | Target | Benefit |
-|----------|---------|--------|---------|
-| L219-224 archive root lookup | Separate query `SELECT path FROM roots WHERE id = ? AND role = 'archive'` | Look up from cached roots, verify `root.is_archive()` | Eliminates query; role check via domain predicate |
+| Location | Current | Target | Notes |
+|----------|---------|--------|-------|
+| L219-224 archive root lookup | Separate query `SELECT path FROM roots WHERE id = ? AND role = 'archive'` | Look up from `roots` (already fetched at L214), verify `root.is_archive()` | Roots are already cached. Find by ID, use domain predicate. |
 
-#### 2.2 Replace raw value access with domain objects
+#### 2.2 Use domain objects instead of raw values
 
-| Location | Current | Target | Benefit |
-|----------|---------|--------|---------|
-| L1280-1288 `check_suspended_sources_filtered` | N+1 queries returning raw `suspended` boolean | `batch_fetch_by_ids()` → filter with `source.is_active()` | Suspension logic via domain predicate; Source already has `root_suspended` |
-| L1398-1405 `check_source_states_db` | N+1 queries returning `(size, mtime, partial_hash, present)` tuple | `batch_fetch_by_ids()` → compare `source.size`, `source.mtime`, `source.partial_hash` to LockEntry | Uses domain object fields; consistent pattern |
+| Location | Current | Target | Notes |
+|----------|---------|--------|-------|
+| L1280-1288 `check_suspended_sources_filtered` | Inline query returning raw `suspended` boolean | Fetch via repo, use `source.is_active()` predicate | Use domain predicate instead of raw boolean. Batch or loop — choose whichever is simpler. |
+| L1398-1405 `check_source_states_db` | Inline query returning `(size, mtime, partial_hash, present)` tuple | Fetch via repo, compare `source.size`, `source.mtime`, `source.partial_hash`, `source.present` | Use Source struct fields instead of raw tuple. |
 
 **Note on `check_source_states_db`**: Compares DB state (Source) against snapshot state (LockEntry). The comparison logic stays in command layer — this is orchestration. But we use Source struct fields, not raw SQL values.
+
+**Batching is optional**: If fetching sources one-at-a-time in a loop is simpler and clearer than batch fetching, that's fine. The goal is domain object usage, not performance.
 
 ### Phase 3: scan.rs SQL Extractions
 - **Status**: pending
@@ -153,11 +161,12 @@ After refactoring to take `&[Root]`, these functions become pure and can have un
 - **Status**: pending
 - **Goal**: Use cached Root data and domain predicates
 - **Dependencies**: Phase 3 complete
+- **Key insight**: `all_roots` is already fetched via `repo::root::fetch_all()` at L149. After `resolve_root_path_any()` returns a root ID, look up the Root from the cached list instead of querying again.
 
-| Location | Current | Target | Benefit |
-|----------|---------|--------|---------|
-| L161-165 check if root suspended | Separate query `SELECT suspended FROM roots WHERE id = ?` | Use Root from `resolve_root_path_any()` result, check `root.is_suspended()` | No extra query; domain predicate |
-| L758-762 `find_candidates` suspended check | Separate query | Use Root struct from fetch, check `root.is_suspended()` | Same |
+| Location | Current | Target | Notes |
+|----------|---------|--------|-------|
+| L164-168 check if root suspended | Separate query `SELECT suspended FROM roots WHERE id = ?` | `all_roots.iter().find(\|r\| r.id == id)` then `root.is_suspended()` | Roots already cached at L149. Just look up by ID. |
+| L764-768 `find_candidates` suspended check | Separate query | Same pattern: look up from `all_roots`, use `root.is_suspended()` | Roots already cached at L760. |
 
 ## Future Cleanup (Not In This Spec)
 
@@ -194,6 +203,12 @@ Even for "simple" checks, use domain objects:
 - `source.is_active()` instead of checking `suspended` boolean from SQL
 - `root.is_archive()` instead of `role = 'archive'` in SQL
 
+### Simplicity Over Performance
+- Batch operations only when they reduce complexity
+- If a simple loop with single-item fetches is clearer, use that
+- Performance during scan/transfer is not a concern — these are I/O-bound operations
+- The goal is clarity and consistency, not speed
+
 ## Test Requirements
 
 ### Existing Tests
@@ -221,13 +236,13 @@ Even for "simple" checks, use domain objects:
   - Path not under any root fails
 
 **Phase 1:**
-- `repo::source::batch_find_present_paths()` — batch boundaries (0, 1, 500, 1000+)
+- `repo::source::batch_check_paths_exist()` — already has tests (verify coverage)
 - `repo::source::count_unhashed_for_root()` — empty root, all hashed, some unhashed
-- `repo::source::relocate()` — fields updated correctly
+- `repo::source::update_location()` — fields updated correctly (root_id, rel_path, timestamps)
 
 **Phase 2:**
-- `check_suspended_sources_filtered` refactor — correctly identifies suspended via `is_active()`
-- `check_source_states_db` refactor — produces same results using Source fields
+- Existing integration tests should catch regressions
+- No new unit tests needed — we're rewiring to use existing domain objects
 
 **Phase 3:**
 - `repo::source::fetch_device_info_by_prefix()` — prefix matching, empty results
@@ -247,7 +262,7 @@ Even for "simple" checks, use domain objects:
 - `src/cluster.rs` — update `resolve_archive_path()` caller
 
 ### Phase 1
-- `src/repo/source.rs` — add `batch_find_present_paths()`, `count_unhashed_for_root()`, `relocate()`
+- `src/repo/source.rs` — add `count_unhashed_for_root()`, `update_location()` (note: `batch_check_paths_exist()` already exists)
 - `src/apply.rs` — replace inline SQL with repo calls
 
 ### Phase 2

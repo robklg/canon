@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::OptionalExtension;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, Metadata};
 use std::io::{BufRead, BufReader, ErrorKind};
@@ -907,7 +907,6 @@ fn check_stale_destination_records(
     root_paths: &HashMap<i64, String>,
     all_facts: &HashMap<i64, Vec<FactEntry>>,
 ) -> Result<Vec<String>> {
-    let mut stale_paths = Vec::new();
     let total = sources.len();
     let progress = Progress::new(total);
 
@@ -926,30 +925,10 @@ fn check_stale_destination_records(
     }
     progress.finish();
 
-    // Batch query for present=1 records matching these paths
-    const BATCH_SIZE: usize = 500;
-    for chunk in dest_rel_paths.chunks(BATCH_SIZE) {
-        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        let sql = format!(
-            "SELECT rel_path FROM sources WHERE root_id = ? AND present = 1 AND rel_path IN ({})",
-            placeholders.join(", ")
-        );
-
-        let mut stmt = conn.prepare(&sql)?;
-
-        // Build params: root_id first, then all rel_paths
-        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
-        params_vec.push(&archive_root_id);
-        for path in chunk {
-            params_vec.push(path);
-        }
-
-        let rows = stmt.query_map(params_vec.as_slice(), |row| row.get::<_, String>(0))?;
-        for row in rows {
-            stale_paths.push(row?);
-        }
-    }
-
+    // Check which destination paths already exist in archive
+    let path_refs: Vec<&str> = dest_rel_paths.iter().map(|s| s.as_str()).collect();
+    let existing = repo::source::batch_check_paths_exist(conn, archive_root_id, &path_refs)?;
+    let mut stale_paths: Vec<String> = existing.into_iter().collect();
     stale_paths.sort();
     Ok(stale_paths)
 }
@@ -1224,13 +1203,7 @@ fn check_unhashed_sources(sources: &[LockEntry]) -> Result<()> {
 /// Check that destination archive has complete hash coverage.
 /// Without complete coverage, we can't reliably detect duplicates.
 fn check_archive_hash_coverage(conn: &Connection, archive_root_id: i64) -> Result<()> {
-    let (total, unhashed): (i64, i64) = conn
-        .query_row(
-            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN object_id IS NULL THEN 1 ELSE 0 END), 0)
-             FROM sources WHERE root_id = ? AND present = 1",
-            [archive_root_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
+    let (total, unhashed) = repo::source::count_unhashed_for_root(conn, archive_root_id)?;
 
     if unhashed > 0 {
         bail!(
@@ -1636,20 +1609,17 @@ fn relocate_source(
         .expect("Time went backwards")
         .as_secs() as i64;
 
-    conn.execute(
-        "UPDATE sources SET root_id = ?, rel_path = ?, scanned_at = ?, last_seen_at = ?
-         WHERE id = ?",
-        params![archive_root_id, rel_path, now, now, source_id],
-    )?;
-    Ok(())
+    repo::source::update_location(conn, source_id, archive_root_id, rel_path, now)
 }
 
 /// Mark a source as no longer present (for cross-device move after deletion).
 fn mark_source_not_present(conn: &Connection, source_id: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE sources SET present = 0 WHERE id = ?",
-        params![source_id],
-    )?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs() as i64;
+
+    repo::source::mark_missing(conn, &[source_id], now)?;
     Ok(())
 }
 

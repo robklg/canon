@@ -747,6 +747,49 @@ pub fn batch_set_excluded(conn: &Connection, source_ids: &[i64], excluded: bool)
     Ok(total_updated)
 }
 
+/// Count sources in a root by hash status.
+///
+/// Returns (total, unhashed) where:
+/// - `total` is the count of present sources in the root
+/// - `unhashed` is the count of sources without an object_id (no content hash)
+///
+/// Used to verify archive hash coverage before apply operations.
+pub fn count_unhashed_for_root(conn: &Connection, root_id: i64) -> Result<(i64, i64)> {
+    let (total, unhashed): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN object_id IS NULL THEN 1 ELSE 0 END), 0)
+         FROM sources WHERE root_id = ? AND present = 1",
+        [root_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok((total, unhashed))
+}
+
+/// Update a source's location (root and path) after a rename/move operation.
+///
+/// Used when a source file is relocated to an archive. Updates the root_id,
+/// rel_path, and timestamps to reflect the new location.
+///
+/// # Arguments
+/// * `conn` - Database connection
+/// * `source_id` - ID of the source to update
+/// * `new_root_id` - The new root (typically the archive root)
+/// * `new_rel_path` - The new relative path within the root
+/// * `now` - Timestamp to record
+pub fn update_location(
+    conn: &Connection,
+    source_id: i64,
+    new_root_id: i64,
+    new_rel_path: &str,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE sources SET root_id = ?, rel_path = ?, scanned_at = ?, last_seen_at = ?
+         WHERE id = ?",
+        rusqlite::params![new_root_id, new_rel_path, now, now, source_id],
+    )?;
+    Ok(())
+}
+
 /// Insert a source for testing purposes.
 ///
 /// This function is only available in test builds. It provides a simple way
@@ -2087,6 +2130,104 @@ mod tests {
         assert!(result.contains("file_0.jpg"));
         assert!(result.contains("file_999.jpg"));
         assert!(result.contains("file_1000.jpg"));
+    }
+
+    // =========================================================================
+    // count_unhashed_for_root tests
+    // =========================================================================
+
+    #[test]
+    fn count_unhashed_for_root_empty() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+
+        let (total, unhashed) = count_unhashed_for_root(&conn, root_id).unwrap();
+        assert_eq!(total, 0);
+        assert_eq!(unhashed, 0);
+    }
+
+    #[test]
+    fn count_unhashed_for_root_all_hashed() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let obj_id = insert_object(&conn, "abc123", false);
+
+        // Insert 3 sources, all with object_id
+        insert_source(&conn, root_id, "a.jpg", Some(obj_id), true, false);
+        insert_source(&conn, root_id, "b.jpg", Some(obj_id), true, false);
+        insert_source(&conn, root_id, "c.jpg", Some(obj_id), true, false);
+
+        let (total, unhashed) = count_unhashed_for_root(&conn, root_id).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(unhashed, 0);
+    }
+
+    #[test]
+    fn count_unhashed_for_root_some_unhashed() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let obj_id = insert_object(&conn, "abc123", false);
+
+        // 2 hashed, 1 unhashed
+        insert_source(&conn, root_id, "a.jpg", Some(obj_id), true, false);
+        insert_source(&conn, root_id, "b.jpg", Some(obj_id), true, false);
+        insert_source(&conn, root_id, "c.jpg", None, true, false); // No object_id
+
+        let (total, unhashed) = count_unhashed_for_root(&conn, root_id).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(unhashed, 1);
+    }
+
+    #[test]
+    fn count_unhashed_for_root_excludes_not_present() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+
+        // 1 present without hash, 1 not present without hash
+        insert_source(&conn, root_id, "present.jpg", None, true, false);
+        insert_source(&conn, root_id, "deleted.jpg", None, false, false); // present=0
+
+        let (total, unhashed) = count_unhashed_for_root(&conn, root_id).unwrap();
+        assert_eq!(total, 1);  // Only present sources
+        assert_eq!(unhashed, 1);
+    }
+
+    // =========================================================================
+    // update_location tests
+    // =========================================================================
+
+    #[test]
+    fn update_location_updates_fields() {
+        let conn = setup_test_db();
+
+        let source_root = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let archive_root = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let source_id = insert_source(&conn, source_root, "original.jpg", None, true, false);
+
+        let now = 1700000001i64;
+        update_location(&conn, source_id, archive_root, "new/path.jpg", now).unwrap();
+
+        // Verify fields updated
+        let (root_id, rel_path, scanned_at, last_seen_at): (i64, String, i64, i64) = conn.query_row(
+            "SELECT root_id, rel_path, scanned_at, last_seen_at FROM sources WHERE id = ?",
+            rusqlite::params![source_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).unwrap();
+
+        assert_eq!(root_id, archive_root);
+        assert_eq!(rel_path, "new/path.jpg");
+        assert_eq!(scanned_at, now);
+        assert_eq!(last_seen_at, now);
+    }
+
+    #[test]
+    fn update_location_nonexistent_source() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+
+        // Should not error when source doesn't exist (0 rows affected)
+        let result = update_location(&conn, 99999, root_id, "path.jpg", 1700000001);
+        assert!(result.is_ok());
     }
 
 }
