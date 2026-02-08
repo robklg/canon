@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use crate::repo::{self, populate_temp_sources, Connection, Db};
+use crate::repo::{self, Connection, Db};
 use crate::expr::{self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, ModifierCall, ParsedFactKey, PathAccessor};
 use crate::domain::fact::FactEntry;
 use crate::expr::value as fact_value;
@@ -779,16 +779,6 @@ pub struct DeleteOptions {
     pub dry_run: bool,
 }
 
-/// Build SQL clause for value type filter
-fn value_type_clause(value_type: &Option<String>) -> &'static str {
-    match value_type.as_deref() {
-        Some("text") => "AND value_text IS NOT NULL",
-        Some("num") => "AND value_num IS NOT NULL",
-        Some("time") => "AND value_time IS NOT NULL",
-        _ => "",
-    }
-}
-
 /// Check if a fact key is protected from deletion
 fn is_protected_fact(key: &str) -> bool {
     key.starts_with("source.") || key.starts_with("policy.")
@@ -837,112 +827,25 @@ pub fn delete_facts(
         return Ok(());
     }
 
-    // Build temp table for efficiency
-    populate_temp_sources(conn, &source_ids)?;
+    // Count facts matching criteria
+    let (fact_count, entity_count) = repo::fact::count_by_criteria(
+        conn,
+        &source_ids,
+        key,
+        &options.entity_type,
+        options.value_type.as_deref(),
+    )?;
 
-    // Build value type clause for filtering
-    let vt_clause = value_type_clause(&options.value_type);
-
-    // Count and optionally delete based on entity type
-    let (fact_count, entity_count) = if options.entity_type == "source" {
-        // Delete facts on source entities
-        let count: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM facts
-                 WHERE entity_type = 'source'
-                   AND entity_id IN (SELECT id FROM temp_sources)
-                   AND key = ? {}",
-                vt_clause
-            ),
-            [key],
-            |row| row.get(0),
+    // Delete if not dry run
+    if !options.dry_run && fact_count > 0 {
+        repo::fact::delete_by_criteria(
+            conn,
+            &source_ids,
+            key,
+            &options.entity_type,
+            options.value_type.as_deref(),
         )?;
-
-        let entity_count: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(DISTINCT entity_id) FROM facts
-                 WHERE entity_type = 'source'
-                   AND entity_id IN (SELECT id FROM temp_sources)
-                   AND key = ? {}",
-                vt_clause
-            ),
-            [key],
-            |row| row.get(0),
-        )?;
-
-        if !options.dry_run && count > 0 {
-            conn.execute(
-                &format!(
-                    "DELETE FROM facts
-                     WHERE entity_type = 'source'
-                       AND entity_id IN (SELECT id FROM temp_sources)
-                       AND key = ? {}",
-                    vt_clause
-                ),
-                [key],
-            )?;
-        }
-
-        (count, entity_count)
-    } else {
-        // Delete facts on object entities
-        // First get object IDs from sources
-        conn.execute(
-            "CREATE TEMP TABLE IF NOT EXISTS temp_objects (id INTEGER PRIMARY KEY)",
-            [],
-        )?;
-        conn.execute("DELETE FROM temp_objects", [])?;
-        conn.execute(
-            "INSERT OR IGNORE INTO temp_objects (id)
-             SELECT DISTINCT object_id FROM sources
-             WHERE id IN (SELECT id FROM temp_sources) AND object_id IS NOT NULL",
-            [],
-        )?;
-
-        let count: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM facts
-                 WHERE entity_type = 'object'
-                   AND entity_id IN (SELECT id FROM temp_objects)
-                   AND key = ? {}",
-                vt_clause
-            ),
-            [key],
-            |row| row.get(0),
-        )?;
-
-        let entity_count: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(DISTINCT entity_id) FROM facts
-                 WHERE entity_type = 'object'
-                   AND entity_id IN (SELECT id FROM temp_objects)
-                   AND key = ? {}",
-                vt_clause
-            ),
-            [key],
-            |row| row.get(0),
-        )?;
-
-        if !options.dry_run && count > 0 {
-            conn.execute(
-                &format!(
-                    "DELETE FROM facts
-                     WHERE entity_type = 'object'
-                       AND entity_id IN (SELECT id FROM temp_objects)
-                       AND key = ? {}",
-                    vt_clause
-                ),
-                [key],
-            )?;
-        }
-
-        conn.execute("DROP TABLE IF EXISTS temp_objects", [])?;
-
-        (count, entity_count)
-    };
-
-    // Clean up
-    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+    }
 
     // Report results
     let entity_label = if options.entity_type == "source" {

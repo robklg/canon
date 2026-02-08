@@ -460,6 +460,190 @@ pub fn insert_object_fact(
     Ok(())
 }
 
+// ============================================================================
+// Criteria-based deletion (for `canon facts delete`)
+// ============================================================================
+
+/// Build SQL clause for value type filter.
+fn value_type_clause(value_type: Option<&str>) -> &'static str {
+    match value_type {
+        Some("text") => "AND value_text IS NOT NULL",
+        Some("num") => "AND value_num IS NOT NULL",
+        Some("time") => "AND value_time IS NOT NULL",
+        _ => "",
+    }
+}
+
+/// Count facts matching criteria for the given sources.
+///
+/// # Arguments
+/// * `conn` - Database connection (must be mutable for temp table)
+/// * `source_ids` - Source IDs to scope the operation
+/// * `key` - Fact key to match
+/// * `entity_type` - "source" or "object"
+/// * `value_type` - Optional filter: "text", "num", or "time"
+///
+/// # Returns
+/// Tuple of (total_fact_count, distinct_entity_count)
+pub fn count_by_criteria(
+    conn: &mut Connection,
+    source_ids: &[i64],
+    key: &str,
+    entity_type: &str,
+    value_type: Option<&str>,
+) -> Result<(i64, i64)> {
+    if source_ids.is_empty() {
+        return Ok((0, 0));
+    }
+
+    populate_temp_sources(conn, source_ids)?;
+    let vt_clause = value_type_clause(value_type);
+
+    let (fact_count, entity_count) = if entity_type == "source" {
+        let count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM facts
+                 WHERE entity_type = 'source'
+                   AND entity_id IN (SELECT id FROM temp_sources)
+                   AND key = ? {}",
+                vt_clause
+            ),
+            [key],
+            |row| row.get(0),
+        )?;
+
+        let entities: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(DISTINCT entity_id) FROM facts
+                 WHERE entity_type = 'source'
+                   AND entity_id IN (SELECT id FROM temp_sources)
+                   AND key = ? {}",
+                vt_clause
+            ),
+            [key],
+            |row| row.get(0),
+        )?;
+
+        (count, entities)
+    } else {
+        // Object entity type - need to map source IDs to object IDs
+        conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS temp_objects (id INTEGER PRIMARY KEY)",
+            [],
+        )?;
+        conn.execute("DELETE FROM temp_objects", [])?;
+        conn.execute(
+            "INSERT OR IGNORE INTO temp_objects (id)
+             SELECT DISTINCT object_id FROM sources
+             WHERE id IN (SELECT id FROM temp_sources) AND object_id IS NOT NULL",
+            [],
+        )?;
+
+        let count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM facts
+                 WHERE entity_type = 'object'
+                   AND entity_id IN (SELECT id FROM temp_objects)
+                   AND key = ? {}",
+                vt_clause
+            ),
+            [key],
+            |row| row.get(0),
+        )?;
+
+        let entities: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(DISTINCT entity_id) FROM facts
+                 WHERE entity_type = 'object'
+                   AND entity_id IN (SELECT id FROM temp_objects)
+                   AND key = ? {}",
+                vt_clause
+            ),
+            [key],
+            |row| row.get(0),
+        )?;
+
+        conn.execute("DROP TABLE IF EXISTS temp_objects", [])?;
+
+        (count, entities)
+    };
+
+    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+
+    Ok((fact_count, entity_count))
+}
+
+/// Delete facts matching criteria for the given sources.
+///
+/// # Arguments
+/// * `conn` - Database connection (must be mutable for temp table)
+/// * `source_ids` - Source IDs to scope the operation
+/// * `key` - Fact key to match
+/// * `entity_type` - "source" or "object"
+/// * `value_type` - Optional filter: "text", "num", or "time"
+///
+/// # Returns
+/// Number of fact rows deleted
+pub fn delete_by_criteria(
+    conn: &mut Connection,
+    source_ids: &[i64],
+    key: &str,
+    entity_type: &str,
+    value_type: Option<&str>,
+) -> Result<usize> {
+    if source_ids.is_empty() {
+        return Ok(0);
+    }
+
+    populate_temp_sources(conn, source_ids)?;
+    let vt_clause = value_type_clause(value_type);
+
+    let deleted = if entity_type == "source" {
+        conn.execute(
+            &format!(
+                "DELETE FROM facts
+                 WHERE entity_type = 'source'
+                   AND entity_id IN (SELECT id FROM temp_sources)
+                   AND key = ? {}",
+                vt_clause
+            ),
+            [key],
+        )?
+    } else {
+        // Object entity type - need to map source IDs to object IDs
+        conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS temp_objects (id INTEGER PRIMARY KEY)",
+            [],
+        )?;
+        conn.execute("DELETE FROM temp_objects", [])?;
+        conn.execute(
+            "INSERT OR IGNORE INTO temp_objects (id)
+             SELECT DISTINCT object_id FROM sources
+             WHERE id IN (SELECT id FROM temp_sources) AND object_id IS NOT NULL",
+            [],
+        )?;
+
+        let deleted = conn.execute(
+            &format!(
+                "DELETE FROM facts
+                 WHERE entity_type = 'object'
+                   AND entity_id IN (SELECT id FROM temp_objects)
+                   AND key = ? {}",
+                vt_clause
+            ),
+            [key],
+        )?;
+
+        conn.execute("DROP TABLE IF EXISTS temp_objects", [])?;
+
+        deleted
+    };
+
+    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+
+    Ok(deleted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1232,5 +1416,187 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(value, 1704067200);
+    }
+
+    // =========================================================================
+    // count_by_criteria tests
+    // =========================================================================
+
+    #[test]
+    fn count_by_criteria_empty_sources() {
+        let mut conn = setup_test_db();
+        let (count, entities) = count_by_criteria(&mut conn, &[], "content.Make", "source", None).unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(entities, 0);
+    }
+
+    #[test]
+    fn count_by_criteria_source_entity() {
+        let mut conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source(&conn, 1, 1, "file1.txt", None);
+        insert_source(&conn, 2, 1, "file2.txt", None);
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+        insert_fact_text(&conn, "source", 2, "content.Make", "Nikon");
+
+        let (count, entities) = count_by_criteria(&mut conn, &[1, 2], "content.Make", "source", None).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(entities, 2);
+    }
+
+    #[test]
+    fn count_by_criteria_object_entity() {
+        let mut conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_object(&conn, 100, "abc123");
+        insert_object(&conn, 101, "def456");
+        insert_source(&conn, 1, 1, "file1.txt", Some(100));
+        insert_source(&conn, 2, 1, "file2.txt", Some(101));
+        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
+        insert_fact_text(&conn, "object", 101, "content.Make", "Nikon");
+
+        let (count, entities) = count_by_criteria(&mut conn, &[1, 2], "content.Make", "object", None).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(entities, 2);
+    }
+
+    #[test]
+    fn count_by_criteria_value_type_filter() {
+        let mut conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source(&conn, 1, 1, "file.txt", None);
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+        insert_fact_num(&conn, "source", 1, "content.Width", 4000.0);
+        insert_fact_time(&conn, "source", 1, "content.DateTimeOriginal", 1704067200);
+
+        // Only text
+        let (count, _) = count_by_criteria(&mut conn, &[1], "content.Make", "source", Some("text")).unwrap();
+        assert_eq!(count, 1);
+
+        // Only num - should not match text key
+        let (count, _) = count_by_criteria(&mut conn, &[1], "content.Make", "source", Some("num")).unwrap();
+        assert_eq!(count, 0);
+
+        // Num key with num filter
+        let (count, _) = count_by_criteria(&mut conn, &[1], "content.Width", "source", Some("num")).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn count_by_criteria_no_matching_key() {
+        let mut conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source(&conn, 1, 1, "file.txt", None);
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+
+        let (count, entities) = count_by_criteria(&mut conn, &[1], "content.Model", "source", None).unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(entities, 0);
+    }
+
+    // =========================================================================
+    // delete_by_criteria tests
+    // =========================================================================
+
+    #[test]
+    fn delete_by_criteria_empty_sources() {
+        let mut conn = setup_test_db();
+        let deleted = delete_by_criteria(&mut conn, &[], "content.Make", "source", None).unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn delete_by_criteria_source_entity() {
+        let mut conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source(&conn, 1, 1, "file1.txt", None);
+        insert_source(&conn, 2, 1, "file2.txt", None);
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+        insert_fact_text(&conn, "source", 2, "content.Make", "Nikon");
+        insert_fact_text(&conn, "source", 1, "content.Model", "EOS"); // different key, should not be deleted
+
+        let deleted = delete_by_criteria(&mut conn, &[1, 2], "content.Make", "source", None).unwrap();
+        assert_eq!(deleted, 2);
+
+        // Verify deleted
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE key = 'content.Make'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0);
+
+        // Verify other key still exists
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE key = 'content.Model'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn delete_by_criteria_object_entity() {
+        let mut conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_object(&conn, 100, "abc123");
+        insert_source(&conn, 1, 1, "file.txt", Some(100));
+        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
+
+        let deleted = delete_by_criteria(&mut conn, &[1], "content.Make", "object", None).unwrap();
+        assert_eq!(deleted, 1);
+
+        // Verify deleted
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE entity_type = 'object' AND key = 'content.Make'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn delete_by_criteria_value_type_filter() {
+        let mut conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source(&conn, 1, 1, "file.txt", None);
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+        insert_fact_num(&conn, "source", 1, "content.Width", 4000.0);
+
+        // Delete only num facts with key content.Width
+        let deleted = delete_by_criteria(&mut conn, &[1], "content.Width", "source", Some("num")).unwrap();
+        assert_eq!(deleted, 1);
+
+        // Text fact should still exist
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE key = 'content.Make'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn delete_by_criteria_respects_source_scope() {
+        let mut conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source(&conn, 1, 1, "file1.txt", None);
+        insert_source(&conn, 2, 1, "file2.txt", None);
+        insert_source(&conn, 3, 1, "file3.txt", None);
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+        insert_fact_text(&conn, "source", 2, "content.Make", "Nikon");
+        insert_fact_text(&conn, "source", 3, "content.Make", "Sony");
+
+        // Only delete for sources 1 and 2
+        let deleted = delete_by_criteria(&mut conn, &[1, 2], "content.Make", "source", None).unwrap();
+        assert_eq!(deleted, 2);
+
+        // Source 3's fact should still exist
+        let value: String = conn.query_row(
+            "SELECT value_text FROM facts WHERE entity_type = 'source' AND entity_id = 3 AND key = 'content.Make'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(value, "Sony");
     }
 }

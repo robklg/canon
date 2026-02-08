@@ -296,14 +296,14 @@ Consider adding to CLI integration tests:
 - [x] Verify all tests pass — 428 tests pass
 - [x] Update epic spec
 
-### Phase 2: Delete Facts
+### Phase 2: Delete Facts ✅ COMPLETE
 
-- [ ] Add `repo::fact::count_by_criteria()` with tests
-- [ ] Add `repo::fact::delete_by_criteria()` with tests
-- [ ] Refactor `delete_facts()` to use repo functions
-- [ ] Remove temp table management from command layer
-- [ ] Verify all tests pass
-- [ ] Update epic spec
+- [x] Add `repo::fact::count_by_criteria()` with tests
+- [x] Add `repo::fact::delete_by_criteria()` with tests
+- [x] Refactor `delete_facts()` to use repo functions
+- [x] Remove temp table management from command layer
+- [x] Verify all tests pass — 438 tests pass
+- [x] Update epic spec
 
 ### Phase 3: Prune Operations
 
