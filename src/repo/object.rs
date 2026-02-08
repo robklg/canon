@@ -337,6 +337,46 @@ pub fn fetch_excluded(conn: &Connection) -> Result<Vec<Object>> {
     Ok(objects)
 }
 
+/// Get or create an object by hash, returning the complete Object.
+///
+/// This is an idempotent operation: if an object with the given hash exists,
+/// it is returned; otherwise a new object is created and returned.
+///
+/// # Arguments
+/// * `conn` - Database connection
+/// * `hash_type` - Type of hash (e.g., "sha256")
+/// * `hash_value` - The hash value
+///
+/// # Returns
+/// The existing or newly created Object with all fields populated.
+pub fn get_or_create(conn: &Connection, hash_type: &str, hash_value: &str) -> Result<Object> {
+    // Try to find existing object - return full Object if found
+    let sql = format!(
+        "SELECT {} FROM objects WHERE hash_type = ? AND hash_value = ?",
+        OBJECT_COLUMNS
+    );
+    let existing = conn
+        .query_row(&sql, rusqlite::params![hash_type, hash_value], object_from_row)
+        .optional()?;
+
+    if let Some(obj) = existing {
+        return Ok(obj);
+    }
+
+    // Create new object
+    conn.execute(
+        "INSERT INTO objects (hash_type, hash_value) VALUES (?, ?)",
+        rusqlite::params![hash_type, hash_value],
+    )?;
+    let id = conn.last_insert_rowid();
+
+    // Fetch the complete Object to ensure consistency with database state.
+    // This follows the insert_destination() pattern from source.rs.
+    let fetch_sql = format!("SELECT {} FROM objects WHERE id = ?", OBJECT_COLUMNS);
+    let obj = conn.query_row(&fetch_sql, [id], object_from_row)?;
+    Ok(obj)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -993,5 +1033,95 @@ mod tests {
         let result = fetch_excluded(&conn).unwrap();
 
         assert!(result.is_empty());
+    }
+
+    // =========================================================================
+    // get_or_create tests
+    // =========================================================================
+
+    #[test]
+    fn get_or_create_creates_new_returns_complete_object() {
+        let conn = setup_test_db();
+
+        let obj = get_or_create(&conn, "sha256", "abc123").unwrap();
+
+        // Verify returned Object has all fields populated correctly
+        assert!(obj.id > 0);
+        assert_eq!(obj.hash_type, "sha256");
+        assert_eq!(obj.hash_value, "abc123");
+        assert!(!obj.excluded); // New objects are not excluded
+
+        // Verify object was created in database
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM objects WHERE hash_type = 'sha256' AND hash_value = 'abc123'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn get_or_create_returns_existing_with_excluded_flag() {
+        let conn = setup_test_db();
+
+        // Create an excluded object first
+        let id1 = insert_object(&conn, "existing_hash", true);
+
+        // get_or_create should return the same object with excluded=true
+        let obj = get_or_create(&conn, "sha256", "existing_hash").unwrap();
+        assert_eq!(obj.id, id1);
+        assert_eq!(obj.hash_value, "existing_hash");
+        assert!(obj.excluded); // Preserved from existing object
+
+        // Verify only one object exists
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM objects WHERE hash_value = 'existing_hash'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn get_or_create_is_idempotent() {
+        let conn = setup_test_db();
+
+        // Call multiple times with same hash
+        let obj1 = get_or_create(&conn, "sha256", "same_hash").unwrap();
+        let obj2 = get_or_create(&conn, "sha256", "same_hash").unwrap();
+        let obj3 = get_or_create(&conn, "sha256", "same_hash").unwrap();
+
+        // All should return same Object
+        assert_eq!(obj1.id, obj2.id);
+        assert_eq!(obj2.id, obj3.id);
+        assert_eq!(obj1.hash_value, "same_hash");
+
+        // Verify only one object exists
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM objects WHERE hash_value = 'same_hash'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn get_or_create_different_hashes() {
+        let conn = setup_test_db();
+
+        let obj1 = get_or_create(&conn, "sha256", "hash1").unwrap();
+        let obj2 = get_or_create(&conn, "sha256", "hash2").unwrap();
+
+        // Different IDs and hash values
+        assert_ne!(obj1.id, obj2.id);
+        assert_eq!(obj1.hash_value, "hash1");
+        assert_eq!(obj2.hash_value, "hash2");
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM objects",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 2);
     }
 }

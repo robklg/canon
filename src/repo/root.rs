@@ -100,6 +100,41 @@ pub fn batch_fetch_by_ids(conn: &Connection, root_ids: &[i64]) -> Result<HashMap
     Ok(roots)
 }
 
+/// Create a new root in the database.
+///
+/// # Arguments
+/// * `conn` - Database connection
+/// * `path` - Canonical path of the root directory
+/// * `role` - Role of the root ("source" or "archive")
+/// * `comment` - Optional comment/description
+///
+/// # Returns
+/// The newly created Root with all fields populated.
+pub fn create(conn: &Connection, path: &str, role: &str, comment: Option<&str>) -> Result<Root> {
+    conn.execute(
+        "INSERT INTO roots (path, role, comment) VALUES (?, ?, ?)",
+        rusqlite::params![path, role, comment],
+    )?;
+    let id = conn.last_insert_rowid();
+
+    // Fetch the complete Root to ensure consistency with database state.
+    // This follows the insert_destination() pattern from source.rs.
+    let sql = format!("SELECT {} FROM roots WHERE id = ?", ROOT_COLUMNS);
+    let root = conn.query_row(&sql, [id], root_from_row)?;
+    Ok(root)
+}
+
+/// Update the last_scanned_at timestamp for a root.
+///
+/// Called after a full root scan completes (not for subdirectory scans).
+pub fn update_last_scanned_at(conn: &Connection, root_id: i64, timestamp: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE roots SET last_scanned_at = ? WHERE id = ?",
+        rusqlite::params![timestamp, root_id],
+    )?;
+    Ok(())
+}
+
 /// Insert a root for testing purposes.
 ///
 /// This function is only available in test builds. It provides a simple way
@@ -263,5 +298,106 @@ mod tests {
 
         let roots = batch_fetch_by_ids(&conn, &[999, 1000]).unwrap();
         assert!(roots.is_empty());
+    }
+
+    // =========================================================================
+    // create tests
+    // =========================================================================
+
+    #[test]
+    fn create_returns_complete_root() {
+        let conn = setup_test_db();
+
+        let root = create(&conn, "/photos", "source", None).unwrap();
+
+        // Verify returned Root has all fields populated correctly
+        assert!(root.id > 0);
+        assert_eq!(root.path, "/photos");
+        assert_eq!(root.role, "source");
+        assert_eq!(root.comment, None);
+        assert_eq!(root.last_scanned_at, None);
+        assert!(!root.suspended);
+
+        // Verify it matches what's in the database
+        let roots = fetch_all(&conn).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, root.id);
+    }
+
+    #[test]
+    fn create_with_comment() {
+        let conn = setup_test_db();
+
+        let root = create(&conn, "/archive", "archive", Some("My archive")).unwrap();
+
+        // Verify returned Root includes comment
+        assert_eq!(root.path, "/archive");
+        assert_eq!(root.role, "archive");
+        assert_eq!(root.comment, Some("My archive".to_string()));
+
+        // Verify it matches what's in the database
+        let roots = fetch_all(&conn).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, root.id);
+        assert_eq!(roots[0].comment, Some("My archive".to_string()));
+    }
+
+    #[test]
+    fn create_multiple_roots() {
+        let conn = setup_test_db();
+
+        let root1 = create(&conn, "/photos", "source", None).unwrap();
+        let root2 = create(&conn, "/archive", "archive", None).unwrap();
+
+        // Verify different IDs
+        assert_ne!(root1.id, root2.id);
+
+        // Verify returned objects have correct data
+        assert_eq!(root1.path, "/photos");
+        assert_eq!(root2.path, "/archive");
+
+        let roots = fetch_all(&conn).unwrap();
+        assert_eq!(roots.len(), 2);
+    }
+
+    // =========================================================================
+    // update_last_scanned_at tests
+    // =========================================================================
+
+    #[test]
+    fn update_last_scanned_at_sets_timestamp() {
+        let conn = setup_test_db();
+        let id = insert_root(&conn, "/photos", "source", None, None, false);
+
+        // Initially None
+        let roots = fetch_all(&conn).unwrap();
+        assert!(roots[0].last_scanned_at.is_none());
+
+        // Update timestamp
+        update_last_scanned_at(&conn, id, 1700000001).unwrap();
+
+        // Verify updated
+        let roots = fetch_all(&conn).unwrap();
+        assert_eq!(roots[0].last_scanned_at, Some(1700000001));
+    }
+
+    #[test]
+    fn update_last_scanned_at_overwrites() {
+        let conn = setup_test_db();
+        let id = insert_root(&conn, "/photos", "source", None, Some(1700000000), false);
+
+        update_last_scanned_at(&conn, id, 1700000001).unwrap();
+
+        let roots = fetch_all(&conn).unwrap();
+        assert_eq!(roots[0].last_scanned_at, Some(1700000001));
+    }
+
+    #[test]
+    fn update_last_scanned_at_nonexistent_root() {
+        let conn = setup_test_db();
+
+        // Should not error when root doesn't exist
+        let result = update_last_scanned_at(&conn, 99999, 1700000001);
+        assert!(result.is_ok());
     }
 }

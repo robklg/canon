@@ -4,7 +4,7 @@
 
 Extract remaining inline SQL from command modules to the repository layer. The core principle: **all database access goes through repo layer, all business logic uses domain objects and predicates**.
 
-**Status**: Phase 0 completed
+**Status**: All phases completed ✅
 
 ## Context
 
@@ -129,7 +129,7 @@ After refactoring to take `&[Root]`, these functions become pure and can have un
 **Batching is optional**: If fetching sources one-at-a-time in a loop is simpler and clearer than batch fetching, that's fine. The goal is domain object usage, not performance.
 
 ### Phase 3: scan.rs SQL Extractions
-- **Status**: pending
+- **Status**: completed
 - **Goal**: Extract inline SQL to repo layer
 - **Dependencies**: Can run in parallel with Phase 1-2
 
@@ -158,15 +158,15 @@ After refactoring to take `&[Root]`, these functions become pure and can have un
 | L775-777 `find_candidates` unsuspended roots | Inline SELECT | `repo::root::fetch_all()` + filter with `root.is_active()` |
 
 ### Phase 4: scan.rs Domain Object Usage
-- **Status**: pending
+- **Status**: completed (done during Phase 3)
 - **Goal**: Use cached Root data and domain predicates
 - **Dependencies**: Phase 3 complete
-- **Key insight**: `all_roots` is already fetched via `repo::root::fetch_all()` at L149. After `resolve_root_path_any()` returns a root ID, look up the Root from the cached list instead of querying again.
+- **Note**: These items were completed during Phase 3 since they were simpler to do together with the SQL extraction.
 
 | Location | Current | Target | Notes |
 |----------|---------|--------|-------|
-| L164-168 check if root suspended | Separate query `SELECT suspended FROM roots WHERE id = ?` | `all_roots.iter().find(\|r\| r.id == id)` then `root.is_suspended()` | Roots already cached at L149. Just look up by ID. |
-| L764-768 `find_candidates` suspended check | Separate query | Same pattern: look up from `all_roots`, use `root.is_suspended()` | Roots already cached at L760. |
+| ✅ L164-168 check if root suspended | ~~Separate query~~ | `roots.iter().find(\|r\| r.id == id)` then `root.is_suspended()` | Done in Phase 3 |
+| ✅ L764-768 `find_candidates` suspended check | ~~Separate query~~ | Same pattern: look up from `all_roots`, use `root.is_suspended()` | Done in Phase 3 |
 
 ## Future Cleanup (Not In This Spec)
 
@@ -203,6 +203,14 @@ Even for "simple" checks, use domain objects:
 - `source.is_active()` instead of checking `suspended` boolean from SQL
 - `root.is_archive()` instead of `role = 'archive'` in SQL
 
+### Repo Function Return Types
+Creation and get-or-create functions return complete domain objects, not raw IDs:
+- **Create functions** → Return domain object (e.g., `create()` → `Root`)
+- **Get-or-create functions** → Return domain object (e.g., `get_or_create()` → `Object`)
+- **Mutation functions** → Return `Result<()>` (e.g., `set_excluded()`)
+
+This follows the `insert_destination()` pattern — no follow-up fetch required by the command layer.
+
 ### Simplicity Over Performance
 - Batch operations only when they reduce complexity
 - If a simple loop with single-item fetches is clearer, use that
@@ -219,36 +227,34 @@ Even for "simple" checks, use domain objects:
 
 ### New Tests to Add
 
-**Phase 0:**
+**Phase 0:** ✅ Completed (9 tests added)
 - `parse_root_spec_impl()` with `&[Root]`:
-  - Find root by ID (exists, not exists)
-  - Find root by path (exact match, not exists)
-  - Role filtering: `require_role = Some("source")` accepts source, rejects archive
-  - Role filtering: `require_role = Some("archive")` accepts archive, rejects source
-  - Role filtering: `require_role = None` accepts any role
-- `resolve_root_path_impl()` with `&[Root]`:
-  - Path under a root returns `(root, rel_path)`
-  - Path not under any root returns error
-  - Multiple roots: most specific match wins (already tested via `find_containing_root`)
-- `resolve_archive_path()` with `&[Root]`:
-  - Path under archive root succeeds
-  - Path under source root fails (wrong role)
-  - Path not under any root fails
+  - ✅ Find root by ID (exists, not exists)
+  - ⚠️ Find root by path — requires `fs::canonicalize()`, not unit-testable without filesystem
+  - ✅ Role filtering: `require_role = Some("source")` accepts source, rejects archive
+  - ✅ Role filtering: `require_role = Some("archive")` accepts archive, rejects source
+  - ✅ Role filtering: `require_role = None` accepts any role
+  - ✅ Suspension filtering: `parse_root_spec` excludes suspended, `parse_root_spec_any` includes
+- `resolve_root_path_impl()` / `resolve_archive_path()`:
+  - ⚠️ These still require `fs::canonicalize()` so remain integration-testable only
+  - The underlying `find_containing_root()` is tested (6 tests)
 
-**Phase 1:**
-- `repo::source::batch_check_paths_exist()` — already has tests (verify coverage)
-- `repo::source::count_unhashed_for_root()` — empty root, all hashed, some unhashed
-- `repo::source::update_location()` — fields updated correctly (root_id, rel_path, timestamps)
+**Phase 1:** ✅ Completed (6 tests added)
+- ✅ `repo::source::batch_check_paths_exist()` — already has tests (3 boundary tests: 999, 1000, 1001 paths)
+- ✅ `repo::source::count_unhashed_for_root()` — 4 tests (empty, all hashed, some unhashed, excludes not present)
+- ✅ `repo::source::update_location()` — 2 tests (fields updated, nonexistent source)
 
-**Phase 2:**
-- Existing integration tests should catch regressions
-- No new unit tests needed — we're rewiring to use existing domain objects
+**Phase 2:** ✅ Completed
+- Existing integration tests catch regressions
+- No new unit tests needed — rewiring to use existing domain objects
 
-**Phase 3:**
-- `repo::source::fetch_device_info_by_prefix()` — prefix matching, empty results
-- `repo::root::create()` — returns new ID
-- `repo::object::get_or_create()` — get existing, create new, idempotent
-- `repo::fact::store_object_fact()` — insert and upsert
+**Phase 3:** ✅ Completed (20 tests added)
+- ✅ `repo::source::fetch_device_info_by_prefix()` — 5 tests (empty, matches all, matches prefix, excludes not present, returns device)
+- ✅ `repo::source::set_object_id()` — 2 tests (links source, nonexistent source)
+- ✅ `repo::root::create()` — 3 tests (returns new ID, with comment, multiple roots)
+- ✅ `repo::root::update_last_scanned_at()` — 3 tests (sets timestamp, overwrites, nonexistent root)
+- ✅ `repo::object::get_or_create()` — 4 tests (creates new, returns existing, idempotent, different hashes)
+- ✅ `repo::fact::store_object_fact()` — 3 tests (inserts new, upserts existing, different keys)
 
 ## Files to Modify
 

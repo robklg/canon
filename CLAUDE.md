@@ -310,6 +310,17 @@ The codebase follows a **strict layered architecture** prioritizing reliability,
 | **Repo** | Database queries, returning domain types | Business logic, path construction, transaction management |
 | **Command** | Orchestration, transactions, CLI parsing, formatting | Inline SQL, business logic that belongs in domain |
 
+**Repo Function Return Type Conventions:**
+
+| Operation Type | Input | Returns | Example |
+|---------------|-------|---------|---------|
+| **Create** | Domain input type or primitives | Domain object (fetch after insert) | `create()` → `Root` |
+| **Get-or-Create** | Lookup key(s) | Domain object | `get_or_create()` → `Object` |
+| **Fetch/Read** | IDs or query params | Domain object(s) | `fetch_all()` → `Vec<Root>` |
+| **Mutation** | IDs + update values | `Result<()>` | `set_excluded()` → `()` |
+
+*Rationale*: Creation functions return domain objects so the command layer immediately has usable data with all computed/joined fields populated. This follows the `insert_destination()` pattern — no follow-up fetch required.
+
 **Concurrency Considerations**:
 Users may run multiple canon processes simultaneously (scanning, enriching, applying, excluding). When designing commands, consider:
 - **Transaction scope**: What operations need to be atomic? Per-item, per-batch, or per-command?

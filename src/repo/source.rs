@@ -790,6 +790,56 @@ pub fn update_location(
     Ok(())
 }
 
+/// Fetch source IDs and device info for sources matching a path prefix.
+///
+/// Used by scan to detect disconnected sources (sources on a different device
+/// than the current scan). Returns `(source_id, device)` pairs for mount
+/// protection logic.
+///
+/// # Arguments
+/// * `conn` - Database connection
+/// * `root_id` - The root to search within
+/// * `rel_prefix` - Relative path prefix (empty string matches all)
+///
+/// # Returns
+/// Vector of (source_id, device) tuples for present sources matching the prefix.
+pub fn fetch_device_info_by_prefix(
+    conn: &Connection,
+    root_id: i64,
+    rel_prefix: &str,
+) -> Result<Vec<(i64, Option<i64>)>> {
+    // Build LIKE pattern: empty prefix matches all, otherwise "prefix/%"
+    let prefix_pattern = if rel_prefix.is_empty() {
+        "%".to_string()
+    } else {
+        format!("{}/%", rel_prefix)
+    };
+
+    let mut stmt = conn.prepare(
+        "SELECT id, device FROM sources WHERE root_id = ? AND rel_path LIKE ? AND present = 1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![root_id, prefix_pattern], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+/// Set the object_id for a source after hashing.
+///
+/// Links a source to its content object after the file has been hashed.
+pub fn set_object_id(conn: &Connection, source_id: i64, object_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE sources SET object_id = ? WHERE id = ?",
+        rusqlite::params![object_id, source_id],
+    )?;
+    Ok(())
+}
+
 /// Insert a source for testing purposes.
 ///
 /// This function is only available in test builds. It provides a simple way
@@ -2227,6 +2277,105 @@ mod tests {
 
         // Should not error when source doesn't exist (0 rows affected)
         let result = update_location(&conn, 99999, root_id, "path.jpg", 1700000001);
+        assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // fetch_device_info_by_prefix tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_device_info_by_prefix_empty_root() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        let results = fetch_device_info_by_prefix(&conn, root_id, "").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn fetch_device_info_by_prefix_matches_all() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        // Insert sources with different devices
+        insert_test_source(&conn, root_id, "a/1.jpg", 100, 1, 1000, 1700000000);
+        insert_test_source(&conn, root_id, "a/2.jpg", 100, 2, 1000, 1700000000);
+        insert_test_source(&conn, root_id, "b/3.jpg", 200, 3, 1000, 1700000000);
+
+        // Empty prefix matches all
+        let results = fetch_device_info_by_prefix(&conn, root_id, "").unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn fetch_device_info_by_prefix_matches_prefix() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        insert_test_source(&conn, root_id, "a/1.jpg", 100, 1, 1000, 1700000000);
+        insert_test_source(&conn, root_id, "a/2.jpg", 100, 2, 1000, 1700000000);
+        insert_test_source(&conn, root_id, "b/3.jpg", 200, 3, 1000, 1700000000);
+
+        // Prefix "a" matches only files under "a/"
+        let results = fetch_device_info_by_prefix(&conn, root_id, "a").unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn fetch_device_info_by_prefix_excludes_not_present() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        insert_test_source(&conn, root_id, "a/1.jpg", 100, 1, 1000, 1700000000);
+        // Mark as not present
+        conn.execute("UPDATE sources SET present = 0 WHERE rel_path = 'a/1.jpg'", []).unwrap();
+
+        let results = fetch_device_info_by_prefix(&conn, root_id, "").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn fetch_device_info_by_prefix_returns_device() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        insert_test_source(&conn, root_id, "a/1.jpg", 12345, 1, 1000, 1700000000);
+
+        let results = fetch_device_info_by_prefix(&conn, root_id, "").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, Some(12345));
+    }
+
+    // =========================================================================
+    // set_object_id tests
+    // =========================================================================
+
+    #[test]
+    fn set_object_id_links_source() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let source_id = insert_source(&conn, root_id, "photo.jpg", None, true, false);
+        let object_id = insert_object(&conn, "abc123", false);
+
+        set_object_id(&conn, source_id, object_id).unwrap();
+
+        // Verify source is linked to object
+        let stored: i64 = conn.query_row(
+            "SELECT object_id FROM sources WHERE id = ?",
+            [source_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(stored, object_id);
+    }
+
+    #[test]
+    fn set_object_id_nonexistent_source() {
+        let conn = setup_test_db();
+        let object_id = insert_object(&conn, "abc123", false);
+
+        // Should not error when source doesn't exist
+        let result = set_object_id(&conn, 99999, object_id);
         assert!(result.is_ok());
     }
 

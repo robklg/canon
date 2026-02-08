@@ -1,5 +1,4 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::params;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -41,16 +40,7 @@ fn classify_sources_in_empty_dir(
     rel_prefix: &str,
     current_device: i64,
 ) -> Result<Vec<(i64, SourceOutcome)>> {
-    let prefix_pattern = if rel_prefix.is_empty() {
-        "%".to_string()
-    } else {
-        format!("{}/%", rel_prefix)
-    };
-
-    let sources: Vec<(i64, Option<i64>)> = conn
-        .prepare("SELECT id, device FROM sources WHERE root_id = ? AND rel_path LIKE ? AND present = 1")?
-        .query_map(params![root_id, prefix_pattern], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
+    let sources = repo::source::fetch_device_info_by_prefix(conn, root_id, rel_prefix)?;
 
     let mut disconnected_count = 0usize;
     let results: Vec<_> = sources
@@ -116,37 +106,33 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
     let conn = db.conn();
     let now = current_timestamp();
 
-    // If --all, get all root paths from the database (excluding suspended)
-    let paths_to_scan: Vec<PathBuf> = if all_roots {
-        let role_filter = match role {
-            Some(r) => format!("AND role = '{}'", r),
-            None => String::new(),
-        };
-        let query = format!(
-            "SELECT path FROM roots WHERE suspended = 0 {} ORDER BY id",
-            role_filter
-        );
-        let roots: Vec<String> = conn
-            .prepare(&query)?
-            .query_map([], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?;
+    // Fetch all roots for path resolution and --all filtering
+    let roots = repo::root::fetch_all(conn)?;
 
-        if roots.is_empty() {
+    // If --all, get all root paths (excluding suspended, optionally filtered by role)
+    let paths_to_scan: Vec<PathBuf> = if all_roots {
+        let filtered: Vec<&crate::domain::root::Root> = roots
+            .iter()
+            .filter(|r| r.is_active())
+            .filter(|r| match role {
+                Some(role_filter) => r.role == role_filter,
+                None => true,
+            })
+            .collect();
+
+        if filtered.is_empty() {
             println!("No roots to scan.");
             return Ok(());
         }
 
-        println!("Scanning {} roots...", roots.len());
-        roots.into_iter().map(PathBuf::from).collect()
+        println!("Scanning {} roots...", filtered.len());
+        filtered.into_iter().map(|r| PathBuf::from(&r.path)).collect()
     } else {
         paths.to_vec()
     };
 
     let mut total_stats = ScanStats::default();
     let mut all_files_to_hash: Vec<FileToHash> = Vec::new();
-
-    // Fetch all roots for path resolution
-    let all_roots = repo::root::fetch_all(conn)?;
 
     for path in &paths_to_scan {
         let canonical = match fs::canonicalize(path) {
@@ -158,19 +144,17 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
         };
 
         // Check if path is inside an existing root (including suspended)
-        let (root_id, root_path, scan_prefix, _root_role) = match resolve_root_path_any(&all_roots, &canonical)? {
+        let (root_id, root_path, scan_prefix, _root_role) = match resolve_root_path_any(&roots, &canonical)? {
             Some((id, root_path, existing_role, rel_path)) => {
-                // Path is inside an existing root - check if suspended
-                let suspended: bool = conn.query_row(
-                    "SELECT suspended FROM roots WHERE id = ?",
-                    [id],
-                    |row| row.get(0),
-                )?;
-                if suspended {
-                    bail!(
-                        "Root '{}' is suspended. Use 'canon roots unsuspend' to reactivate.",
-                        root_path
-                    );
+                // Path is inside an existing root - check if suspended using cached roots
+                let root = roots.iter().find(|r| r.id == id);
+                if let Some(r) = root {
+                    if r.is_suspended() {
+                        bail!(
+                            "Root '{}' is suspended. Use 'canon roots unsuspend' to reactivate.",
+                            root_path
+                        );
+                    }
                 }
 
                 // Path is inside an existing active root
@@ -210,9 +194,9 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
                 }
                 // role is guaranteed to be Some when add_root is true (validated in main.rs)
                 let new_role = role.expect("--role is required with --add");
-                check_overlapping_roots(&conn, &canonical)?;
-                let root_id = create_root(&conn, &canonical, new_role, comment)?;
-                (root_id, canonical.clone(), None, new_role.to_string())
+                check_overlapping_roots(&roots, &canonical)?;
+                let new_root = create_root(&conn, &canonical, new_role, comment)?;
+                (new_root.id, canonical.clone(), None, new_role.to_string())
             }
         };
 
@@ -225,10 +209,7 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
 
         // Update last_scanned_at only for full root scans (not subdirectory scans)
         if scan_prefix.is_none() {
-            conn.execute(
-                "UPDATE roots SET last_scanned_at = ? WHERE id = ?",
-                params![now, root_id],
-            )?;
+            repo::root::update_last_scanned_at(conn, root_id, now)?;
         }
 
         total_stats.scanned += result.stats.scanned;
@@ -281,12 +262,12 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
             };
 
             // Get or create object
-            let new_object_id = get_or_create_object(conn, "sha256", &hash_value)?;
+            let new_object = get_or_create_object(conn, "sha256", &hash_value)?;
 
             // Check for unexpected hash change (only if basis didn't change and file had existing hash)
             if !file.basis_changed {
                 if let Some(old_oid) = file.old_object_id {
-                    if old_oid != new_object_id {
+                    if old_oid != new_object.id {
                         eprintln!(
                             "\nWarning: hash changed for {} (file may be corrupted or was modified without mtime change)",
                             file.full_path.display()
@@ -297,13 +278,10 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
             }
 
             // Link source to object
-            conn.execute(
-                "UPDATE sources SET object_id = ? WHERE id = ?",
-                params![new_object_id, file.source_id],
-            )?;
+            repo::source::set_object_id(conn, file.source_id, new_object.id)?;
 
             // Store hash as fact on object
-            store_hash_fact(conn, new_object_id, &hash_value)?;
+            repo::fact::store_object_fact(conn, new_object.id, "content.hash.sha256", &hash_value, current_timestamp())?;
 
             total_stats.hashed += 1;
         }
@@ -327,25 +305,16 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
     Ok(())
 }
 
-fn create_root(conn: &Connection, path: &Path, role: &str, comment: Option<&str>) -> Result<i64> {
+fn create_root(conn: &Connection, path: &Path, role: &str, comment: Option<&str>) -> Result<crate::domain::root::Root> {
     let path_str = path.to_str().context("Path is not valid UTF-8")?;
-
-    conn.execute(
-        "INSERT INTO roots (path, role, comment) VALUES (?, ?, ?)",
-        params![path_str, role, comment],
-    )?;
-    Ok(conn.last_insert_rowid())
+    repo::root::create(conn, path_str, role, comment)
 }
 
-fn check_overlapping_roots(conn: &Connection, new_path: &Path) -> Result<()> {
+fn check_overlapping_roots(all_roots: &[crate::domain::root::Root], new_path: &Path) -> Result<()> {
     let new_path_str = new_path.to_str().context("Path is not valid UTF-8")?;
 
-    let mut stmt = conn.prepare("SELECT path FROM roots")?;
-    let roots: Vec<String> = stmt
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    for existing in roots {
+    for root in all_roots {
+        let existing = &root.path;
         if existing == new_path_str {
             continue; // Same path, not overlapping
         }
@@ -711,43 +680,9 @@ fn compute_full_hash(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Get or create an object by hash, returning its ID
-fn get_or_create_object(conn: &Connection, hash_type: &str, hash_value: &str) -> Result<i64> {
-    use rusqlite::OptionalExtension;
-
-    // Try to find existing object
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM objects WHERE hash_type = ? AND hash_value = ?",
-            params![hash_type, hash_value],
-            |row| row.get(0),
-        )
-        .optional()?;
-
-    if let Some(id) = existing {
-        return Ok(id);
-    }
-
-    // Create new object
-    conn.execute(
-        "INSERT INTO objects (hash_type, hash_value) VALUES (?, ?)",
-        params![hash_type, hash_value],
-    )?;
-    Ok(conn.last_insert_rowid())
-}
-
-/// Store the content hash as a fact on the object
-fn store_hash_fact(conn: &Connection, object_id: i64, hash_value: &str) -> Result<()> {
-    let now = current_timestamp();
-    conn.execute(
-        "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at)
-         VALUES ('object', ?, 'content.hash.sha256', ?, ?)
-         ON CONFLICT(entity_type, entity_id, key) DO UPDATE SET
-           value_text = excluded.value_text,
-           observed_at = excluded.observed_at",
-        params![object_id, hash_value, now],
-    )?;
-    Ok(())
+/// Get or create an object by hash, returning the Object
+fn get_or_create_object(conn: &Connection, hash_type: &str, hash_value: &str) -> Result<crate::domain::object::Object> {
+    repo::object::get_or_create(conn, hash_type, hash_value)
 }
 
 /// Find directories with files that aren't under any root
@@ -761,11 +696,9 @@ pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
 
     // Check if scope is already a root or under a root (including suspended)
     if let Some((id, root_path, role, _)) = resolve_root_path_any(&all_roots, &scope)? {
-        let suspended: bool = conn.query_row(
-            "SELECT suspended FROM roots WHERE id = ?",
-            [id],
-            |row| row.get(0),
-        )?;
+        // Look up suspension status from cached roots
+        let root = all_roots.iter().find(|r| r.id == id);
+        let suspended = root.map(|r| r.is_suspended()).unwrap_or(false);
         let suspended_str = if suspended { " (suspended)" } else { "" };
 
         if scope.to_string_lossy() == root_path {
@@ -777,10 +710,11 @@ pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
     }
 
     // Get all existing roots (excluding suspended for candidate discovery)
-    let roots: Vec<PathBuf> = conn
-        .prepare("SELECT path FROM roots WHERE suspended = 0")?
-        .query_map([], |row| Ok(PathBuf::from(row.get::<_, String>(0)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
+    let roots: Vec<PathBuf> = all_roots
+        .iter()
+        .filter(|r| r.is_active())
+        .map(|r| PathBuf::from(&r.path))
+        .collect();
 
     // Find directories with files, skipping tracked subtrees
     let mut dirs_with_files: HashSet<PathBuf> = HashSet::new();
