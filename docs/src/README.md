@@ -1,6 +1,8 @@
 # Introduction
 
 Canon helps you understand and take control of digital assets spread across many drives, backups, and years.
+It helps you build a canonical archive from messy data.
+Think Marie Kondo, but for files.
 
 ## The Problem
 
