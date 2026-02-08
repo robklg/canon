@@ -85,7 +85,10 @@ pub fn batch_fetch_for_sources(
 
         let value = fact_value_from_columns(value_text, value_num, value_time);
 
-        Ok((source_id, FactEntry::new(key, value, entity_type, entity_id)))
+        Ok((
+            source_id,
+            FactEntry::new(key, value, entity_type, entity_id),
+        ))
     })?;
 
     // Group facts by source_id
@@ -147,11 +150,15 @@ pub fn batch_fetch_key_for_sources(
 
         let value = fact_value_from_columns(value_text, value_num, value_time);
 
-        Ok((source_id, FactEntry::new(key, value, entity_type, entity_id)))
+        Ok((
+            source_id,
+            FactEntry::new(key, value, entity_type, entity_id),
+        ))
     })?;
 
     // Initialize result with None for all source IDs
-    let mut result: HashMap<i64, Option<FactEntry>> = source_ids.iter().map(|&id| (id, None)).collect();
+    let mut result: HashMap<i64, Option<FactEntry>> =
+        source_ids.iter().map(|&id| (id, None)).collect();
 
     // Fill in found facts
     for row in rows {
@@ -298,7 +305,9 @@ pub fn store_object_fact(
 /// # Returns
 /// HashMap where key is the fact key (e.g., "content.Make") and value is
 /// the detected FactValueType based on which column has data.
-pub fn fetch_type_map(conn: &Connection) -> Result<HashMap<String, crate::domain::fact::FactValueType>> {
+pub fn fetch_type_map(
+    conn: &Connection,
+) -> Result<HashMap<String, crate::domain::fact::FactValueType>> {
     use crate::domain::fact::FactValueType;
 
     let mut type_map = HashMap::new();
@@ -310,7 +319,7 @@ pub fn fetch_type_map(conn: &Connection) -> Result<HashMap<String, crate::domain
                     WHEN value_num IS NOT NULL THEN 'num'
                     ELSE 'text'
                 END as type
-         FROM facts"
+         FROM facts",
     )?;
 
     let rows = stmt.query_map([], |row| {
@@ -383,13 +392,16 @@ pub fn upsert(
 ///
 /// Returns all facts directly attached to the source (not object facts).
 /// Used during fact promotion when linking a source to an object.
-pub fn fetch_source_facts(conn: &Connection, source_id: i64) -> Result<Vec<crate::domain::fact::SourceFact>> {
+pub fn fetch_source_facts(
+    conn: &Connection,
+    source_id: i64,
+) -> Result<Vec<crate::domain::fact::SourceFact>> {
     use crate::domain::fact::SourceFact;
 
     let mut stmt = conn.prepare(
         "SELECT id, key, value_text, value_num, value_time, observed_at
          FROM facts
-         WHERE entity_type = 'source' AND entity_id = ?"
+         WHERE entity_type = 'source' AND entity_id = ?",
     )?;
 
     let facts = stmt
@@ -505,8 +517,7 @@ pub fn count_by_criteria(
                 "SELECT COUNT(*) FROM facts
                  WHERE entity_type = 'source'
                    AND entity_id IN (SELECT id FROM temp_sources)
-                   AND key = ? {}",
-                vt_clause
+                   AND key = ? {vt_clause}"
             ),
             [key],
             |row| row.get(0),
@@ -517,8 +528,7 @@ pub fn count_by_criteria(
                 "SELECT COUNT(DISTINCT entity_id) FROM facts
                  WHERE entity_type = 'source'
                    AND entity_id IN (SELECT id FROM temp_sources)
-                   AND key = ? {}",
-                vt_clause
+                   AND key = ? {vt_clause}"
             ),
             [key],
             |row| row.get(0),
@@ -544,8 +554,7 @@ pub fn count_by_criteria(
                 "SELECT COUNT(*) FROM facts
                  WHERE entity_type = 'object'
                    AND entity_id IN (SELECT id FROM temp_objects)
-                   AND key = ? {}",
-                vt_clause
+                   AND key = ? {vt_clause}"
             ),
             [key],
             |row| row.get(0),
@@ -556,8 +565,7 @@ pub fn count_by_criteria(
                 "SELECT COUNT(DISTINCT entity_id) FROM facts
                  WHERE entity_type = 'object'
                    AND entity_id IN (SELECT id FROM temp_objects)
-                   AND key = ? {}",
-                vt_clause
+                   AND key = ? {vt_clause}"
             ),
             [key],
             |row| row.get(0),
@@ -604,8 +612,7 @@ pub fn delete_by_criteria(
                 "DELETE FROM facts
                  WHERE entity_type = 'source'
                    AND entity_id IN (SELECT id FROM temp_sources)
-                   AND key = ? {}",
-                vt_clause
+                   AND key = ? {vt_clause}"
             ),
             [key],
         )?
@@ -628,8 +635,7 @@ pub fn delete_by_criteria(
                 "DELETE FROM facts
                  WHERE entity_type = 'object'
                    AND entity_id IN (SELECT id FROM temp_objects)
-                   AND key = ? {}",
-                vt_clause
+                   AND key = ? {vt_clause}"
             ),
             [key],
         )?;
@@ -856,7 +862,13 @@ mod tests {
         .unwrap();
     }
 
-    fn insert_source(conn: &Connection, id: i64, root_id: i64, rel_path: &str, object_id: Option<i64>) {
+    fn insert_source(
+        conn: &Connection,
+        id: i64,
+        root_id: i64,
+        rel_path: &str,
+        object_id: Option<i64>,
+    ) {
         conn.execute(
             "INSERT INTO sources (id, root_id, rel_path, object_id) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![id, root_id, rel_path, object_id],
@@ -864,7 +876,13 @@ mod tests {
         .unwrap();
     }
 
-    fn insert_fact_text(conn: &Connection, entity_type: &str, entity_id: i64, key: &str, value: &str) {
+    fn insert_fact_text(
+        conn: &Connection,
+        entity_type: &str,
+        entity_id: i64,
+        key: &str,
+        value: &str,
+    ) {
         conn.execute(
             "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev)
              VALUES (?1, ?2, ?3, ?4, 0, CASE WHEN ?1 = 'source' THEN 0 ELSE NULL END)",
@@ -873,7 +891,13 @@ mod tests {
         .unwrap();
     }
 
-    fn insert_fact_num(conn: &Connection, entity_type: &str, entity_id: i64, key: &str, value: f64) {
+    fn insert_fact_num(
+        conn: &Connection,
+        entity_type: &str,
+        entity_id: i64,
+        key: &str,
+        value: f64,
+    ) {
         conn.execute(
             "INSERT INTO facts (entity_type, entity_id, key, value_num, observed_at, observed_basis_rev)
              VALUES (?1, ?2, ?3, ?4, 0, CASE WHEN ?1 = 'source' THEN 0 ELSE NULL END)",
@@ -882,7 +906,13 @@ mod tests {
         .unwrap();
     }
 
-    fn insert_fact_time(conn: &Connection, entity_type: &str, entity_id: i64, key: &str, value: i64) {
+    fn insert_fact_time(
+        conn: &Connection,
+        entity_type: &str,
+        entity_id: i64,
+        key: &str,
+        value: i64,
+    ) {
         conn.execute(
             "INSERT INTO facts (entity_type, entity_id, key, value_time, observed_at, observed_basis_rev)
              VALUES (?1, ?2, ?3, ?4, 0, CASE WHEN ?1 = 'source' THEN 0 ELSE NULL END)",
@@ -1066,10 +1096,16 @@ mod tests {
         let make = result.iter().find(|(k, _, _)| k == "content.Make").unwrap();
         assert!(matches!(make.2, FactType::Text));
 
-        let width = result.iter().find(|(k, _, _)| k == "content.Width").unwrap();
+        let width = result
+            .iter()
+            .find(|(k, _, _)| k == "content.Width")
+            .unwrap();
         assert!(matches!(width.2, FactType::Num));
 
-        let date = result.iter().find(|(k, _, _)| k == "content.DateTimeOriginal").unwrap();
+        let date = result
+            .iter()
+            .find(|(k, _, _)| k == "content.DateTimeOriginal")
+            .unwrap();
         assert!(matches!(date.2, FactType::Time));
     }
 
@@ -1163,11 +1199,13 @@ mod tests {
         store_object_fact(&conn, 100, "content.Make", "Canon", 1700000000).unwrap();
 
         // Verify both facts exist
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE entity_type = 'object' AND entity_id = 100",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE entity_type = 'object' AND entity_id = 100",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 2);
     }
 
@@ -1269,7 +1307,8 @@ mod tests {
             None,
             1700000000,
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         let value: String = conn.query_row(
             "SELECT value_text FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.Make'",
@@ -1294,7 +1333,8 @@ mod tests {
             None,
             1700000000,
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         let value: f64 = conn.query_row(
             "SELECT value_num FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.Width'",
@@ -1319,7 +1359,8 @@ mod tests {
             Some(1704067200),
             1700000000,
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         let value: i64 = conn.query_row(
             "SELECT value_time FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.DateTimeOriginal'",
@@ -1335,10 +1376,32 @@ mod tests {
         insert_object(&conn, 100, "abc123");
 
         // Insert initial
-        upsert(&conn, "object", 100, "content.Make", Some("Canon"), None, None, 1700000000, None).unwrap();
+        upsert(
+            &conn,
+            "object",
+            100,
+            "content.Make",
+            Some("Canon"),
+            None,
+            None,
+            1700000000,
+            None,
+        )
+        .unwrap();
 
         // Update
-        upsert(&conn, "object", 100, "content.Make", Some("Nikon"), None, None, 1700000001, None).unwrap();
+        upsert(
+            &conn,
+            "object",
+            100,
+            "content.Make",
+            Some("Nikon"),
+            None,
+            None,
+            1700000001,
+            None,
+        )
+        .unwrap();
 
         let value: String = conn.query_row(
             "SELECT value_text FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.Make'",
@@ -1372,7 +1435,8 @@ mod tests {
             None,
             1700000000,
             Some(5), // basis_rev
-        ).unwrap();
+        )
+        .unwrap();
 
         let (value, basis_rev): (String, i64) = conn.query_row(
             "SELECT value_text, observed_basis_rev FROM facts WHERE entity_type = 'source' AND entity_id = 1",
@@ -1475,20 +1539,24 @@ mod tests {
         insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
 
         // Get the fact ID
-        let fact_id: i64 = conn.query_row(
-            "SELECT id FROM facts WHERE entity_type = 'source' AND entity_id = 1",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let fact_id: i64 = conn
+            .query_row(
+                "SELECT id FROM facts WHERE entity_type = 'source' AND entity_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         delete_by_id(&conn, fact_id).unwrap();
 
         // Verify fact is gone
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE id = ?",
-            [fact_id],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE id = ?",
+                [fact_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0);
     }
 
@@ -1510,7 +1578,16 @@ mod tests {
         let conn = setup_test_db();
         insert_object(&conn, 100, "abc123");
 
-        insert_object_fact(&conn, 100, "content.Make", Some("Canon"), None, None, 1700000000).unwrap();
+        insert_object_fact(
+            &conn,
+            100,
+            "content.Make",
+            Some("Canon"),
+            None,
+            None,
+            1700000000,
+        )
+        .unwrap();
 
         let value: String = conn.query_row(
             "SELECT value_text FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.Make'",
@@ -1525,7 +1602,16 @@ mod tests {
         let conn = setup_test_db();
         insert_object(&conn, 100, "abc123");
 
-        insert_object_fact(&conn, 100, "content.Width", None, Some(4000.0), None, 1700000000).unwrap();
+        insert_object_fact(
+            &conn,
+            100,
+            "content.Width",
+            None,
+            Some(4000.0),
+            None,
+            1700000000,
+        )
+        .unwrap();
 
         let value: f64 = conn.query_row(
             "SELECT value_num FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.Width'",
@@ -1540,7 +1626,16 @@ mod tests {
         let conn = setup_test_db();
         insert_object(&conn, 100, "abc123");
 
-        insert_object_fact(&conn, 100, "content.DateTimeOriginal", None, None, Some(1704067200), 1700000000).unwrap();
+        insert_object_fact(
+            &conn,
+            100,
+            "content.DateTimeOriginal",
+            None,
+            None,
+            Some(1704067200),
+            1700000000,
+        )
+        .unwrap();
 
         let value: i64 = conn.query_row(
             "SELECT value_time FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.DateTimeOriginal'",
@@ -1557,7 +1652,8 @@ mod tests {
     #[test]
     fn count_by_criteria_empty_sources() {
         let mut conn = setup_test_db();
-        let (count, entities) = count_by_criteria(&mut conn, &[], "content.Make", "source", None).unwrap();
+        let (count, entities) =
+            count_by_criteria(&mut conn, &[], "content.Make", "source", None).unwrap();
         assert_eq!(count, 0);
         assert_eq!(entities, 0);
     }
@@ -1571,7 +1667,8 @@ mod tests {
         insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
         insert_fact_text(&conn, "source", 2, "content.Make", "Nikon");
 
-        let (count, entities) = count_by_criteria(&mut conn, &[1, 2], "content.Make", "source", None).unwrap();
+        let (count, entities) =
+            count_by_criteria(&mut conn, &[1, 2], "content.Make", "source", None).unwrap();
         assert_eq!(count, 2);
         assert_eq!(entities, 2);
     }
@@ -1587,7 +1684,8 @@ mod tests {
         insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
         insert_fact_text(&conn, "object", 101, "content.Make", "Nikon");
 
-        let (count, entities) = count_by_criteria(&mut conn, &[1, 2], "content.Make", "object", None).unwrap();
+        let (count, entities) =
+            count_by_criteria(&mut conn, &[1, 2], "content.Make", "object", None).unwrap();
         assert_eq!(count, 2);
         assert_eq!(entities, 2);
     }
@@ -1602,15 +1700,18 @@ mod tests {
         insert_fact_time(&conn, "source", 1, "content.DateTimeOriginal", 1704067200);
 
         // Only text
-        let (count, _) = count_by_criteria(&mut conn, &[1], "content.Make", "source", Some("text")).unwrap();
+        let (count, _) =
+            count_by_criteria(&mut conn, &[1], "content.Make", "source", Some("text")).unwrap();
         assert_eq!(count, 1);
 
         // Only num - should not match text key
-        let (count, _) = count_by_criteria(&mut conn, &[1], "content.Make", "source", Some("num")).unwrap();
+        let (count, _) =
+            count_by_criteria(&mut conn, &[1], "content.Make", "source", Some("num")).unwrap();
         assert_eq!(count, 0);
 
         // Num key with num filter
-        let (count, _) = count_by_criteria(&mut conn, &[1], "content.Width", "source", Some("num")).unwrap();
+        let (count, _) =
+            count_by_criteria(&mut conn, &[1], "content.Width", "source", Some("num")).unwrap();
         assert_eq!(count, 1);
     }
 
@@ -1621,7 +1722,8 @@ mod tests {
         insert_source(&conn, 1, 1, "file.txt", None);
         insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
 
-        let (count, entities) = count_by_criteria(&mut conn, &[1], "content.Model", "source", None).unwrap();
+        let (count, entities) =
+            count_by_criteria(&mut conn, &[1], "content.Model", "source", None).unwrap();
         assert_eq!(count, 0);
         assert_eq!(entities, 0);
     }
@@ -1647,23 +1749,28 @@ mod tests {
         insert_fact_text(&conn, "source", 2, "content.Make", "Nikon");
         insert_fact_text(&conn, "source", 1, "content.Model", "EOS"); // different key, should not be deleted
 
-        let deleted = delete_by_criteria(&mut conn, &[1, 2], "content.Make", "source", None).unwrap();
+        let deleted =
+            delete_by_criteria(&mut conn, &[1, 2], "content.Make", "source", None).unwrap();
         assert_eq!(deleted, 2);
 
         // Verify deleted
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE key = 'content.Make'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE key = 'content.Make'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0);
 
         // Verify other key still exists
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE key = 'content.Model'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE key = 'content.Model'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -1679,11 +1786,13 @@ mod tests {
         assert_eq!(deleted, 1);
 
         // Verify deleted
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE entity_type = 'object' AND key = 'content.Make'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE entity_type = 'object' AND key = 'content.Make'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0);
     }
 
@@ -1696,15 +1805,18 @@ mod tests {
         insert_fact_num(&conn, "source", 1, "content.Width", 4000.0);
 
         // Delete only num facts with key content.Width
-        let deleted = delete_by_criteria(&mut conn, &[1], "content.Width", "source", Some("num")).unwrap();
+        let deleted =
+            delete_by_criteria(&mut conn, &[1], "content.Width", "source", Some("num")).unwrap();
         assert_eq!(deleted, 1);
 
         // Text fact should still exist
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE key = 'content.Make'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE key = 'content.Make'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -1720,7 +1832,8 @@ mod tests {
         insert_fact_text(&conn, "source", 3, "content.Make", "Sony");
 
         // Only delete for sources 1 and 2
-        let deleted = delete_by_criteria(&mut conn, &[1, 2], "content.Make", "source", None).unwrap();
+        let deleted =
+            delete_by_criteria(&mut conn, &[1, 2], "content.Make", "source", None).unwrap();
         assert_eq!(deleted, 2);
 
         // Source 3's fact should still exist
@@ -1737,7 +1850,13 @@ mod tests {
     // =========================================================================
 
     /// Helper to insert a source with a specific basis_rev
-    fn insert_source_with_basis_rev(conn: &Connection, id: i64, root_id: i64, rel_path: &str, basis_rev: i64) {
+    fn insert_source_with_basis_rev(
+        conn: &Connection,
+        id: i64,
+        root_id: i64,
+        rel_path: &str,
+        basis_rev: i64,
+    ) {
         conn.execute(
             "INSERT INTO sources (id, root_id, rel_path, basis_rev) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![id, root_id, rel_path, basis_rev],
@@ -1746,7 +1865,13 @@ mod tests {
     }
 
     /// Helper to insert a source fact with a specific observed_basis_rev
-    fn insert_fact_with_basis_rev(conn: &Connection, source_id: i64, key: &str, value: &str, observed_basis_rev: Option<i64>) {
+    fn insert_fact_with_basis_rev(
+        conn: &Connection,
+        source_id: i64,
+        key: &str,
+        value: &str,
+        observed_basis_rev: Option<i64>,
+    ) {
         conn.execute(
             "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev)
              VALUES ('source', ?1, ?2, ?3, 0, ?4)",
@@ -1779,7 +1904,7 @@ mod tests {
         let conn = setup_test_db();
         insert_root(&conn, 1, "/root");
         insert_source_with_basis_rev(&conn, 1, 1, "file.txt", 10); // Current basis_rev = 10
-        // Fact was observed at basis_rev = 5 (stale)
+                                                                   // Fact was observed at basis_rev = 5 (stale)
         insert_fact_with_basis_rev(&conn, 1, "content.Make", "Canon", Some(5));
 
         let count = count_stale(&conn).unwrap();
@@ -1845,11 +1970,13 @@ mod tests {
         assert_eq!(deleted, 1);
 
         // Verify fact is gone
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE entity_type = 'source' AND entity_id = 1",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE entity_type = 'source' AND entity_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0);
     }
 
@@ -1868,18 +1995,22 @@ mod tests {
         assert_eq!(deleted, 1);
 
         // Verify only source 2's fact remains
-        let remaining: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE entity_type = 'source'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE entity_type = 'source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(remaining, 1);
 
-        let value: String = conn.query_row(
-            "SELECT value_text FROM facts WHERE entity_type = 'source' AND entity_id = 2",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let value: String = conn
+            .query_row(
+                "SELECT value_text FROM facts WHERE entity_type = 'source' AND entity_id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(value, "Nikon");
     }
 
@@ -1895,11 +2026,13 @@ mod tests {
         assert_eq!(deleted, 0);
 
         // Verify fact still exists
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE entity_type = 'source' AND entity_id = 1",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE entity_type = 'source' AND entity_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -1916,11 +2049,13 @@ mod tests {
         assert_eq!(deleted, 0);
 
         // Verify object fact still exists
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE entity_type = 'object'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE entity_type = 'object'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -2030,11 +2165,13 @@ mod tests {
         assert_eq!(object_deleted, 0);
 
         // Object fact should still exist
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE entity_type = 'object'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE entity_type = 'object'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -2053,11 +2190,13 @@ mod tests {
         assert_eq!(object_deleted, 1);
 
         // Source fact should still exist
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE entity_type = 'source'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE entity_type = 'source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -2076,11 +2215,9 @@ mod tests {
         assert_eq!(object_deleted, 1);
 
         // All facts should be gone
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM facts", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(count, 0);
     }
 
@@ -2102,11 +2239,13 @@ mod tests {
         assert_eq!(source_deleted, 1);
 
         // Non-excluded fact should still exist
-        let value: String = conn.query_row(
-            "SELECT value_text FROM facts WHERE entity_id = 1",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let value: String = conn
+            .query_row(
+                "SELECT value_text FROM facts WHERE entity_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(value, "Canon");
     }
 }

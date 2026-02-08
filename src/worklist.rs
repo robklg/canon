@@ -4,11 +4,11 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use crate::repo::{self, Connection, Db};
-use crate::expr::filter::{self, get_fact_value, Filter};
 use crate::domain::path::canonicalize_scopes;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
+use crate::expr::filter::{self, get_fact_value, Filter};
+use crate::repo::{self, Connection, Db};
 
 #[derive(Serialize)]
 struct WorklistEntry {
@@ -24,11 +24,7 @@ struct WorklistEntry {
 
 impl WorklistEntry {
     /// Create a WorklistEntry from a Source, optionally fetching facts.
-    fn from_source(
-        source: &Source,
-        emit_keys: &[String],
-        conn: &Connection,
-    ) -> Result<Self> {
+    fn from_source(source: &Source, emit_keys: &[String], conn: &Connection) -> Result<Self> {
         let facts = if emit_keys.is_empty() {
             None
         } else {
@@ -111,19 +107,18 @@ pub fn run(
 
         let entry = WorklistEntry::from_source(source, emit_keys, conn)?;
         let json = serde_json::to_string(&entry)?;
-        writeln!(handle, "{}", json)?;
+        writeln!(handle, "{json}")?;
     }
 
     // Report stats to stderr
     if include_excluded && excluded_count > 0 {
-        eprintln!("Included {} excluded sources", excluded_count);
+        eprintln!("Included {excluded_count} excluded sources");
     } else if !include_excluded && excluded_count > 0 {
-        eprintln!("Skipped {} excluded sources", excluded_count);
+        eprintln!("Skipped {excluded_count} excluded sources");
     }
     if unique_content && (skipped_unhashed > 0 || skipped_duplicate > 0) {
         eprintln!(
-            "Skipped {} unhashed, {} duplicate sources",
-            skipped_unhashed, skipped_duplicate
+            "Skipped {skipped_unhashed} unhashed, {skipped_duplicate} duplicate sources"
         );
     }
 
@@ -158,12 +153,11 @@ fn get_matching_sources(
         .filter(|s| include_archived || s.is_from_role("source"))
         .filter(|s| s.matches_scope(scopes))
         .filter(|s| {
-            if s.is_excluded() {
-                if !include_excluded {
+            if s.is_excluded()
+                && !include_excluded {
                     excluded_count += 1;
                     return false;
                 }
-            }
             true
         })
         .collect();

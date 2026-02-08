@@ -97,12 +97,23 @@ pub fn run(db: &mut Db, allow_archived: bool, verbose: bool) -> Result<()> {
         let import: FactImport = match serde_json::from_str(&line) {
             Ok(i) => i,
             Err(e) => {
-                eprintln!("Warning: Failed to parse line {}: {}", stats.lines_processed, e);
+                eprintln!(
+                    "Warning: Failed to parse line {}: {}",
+                    stats.lines_processed, e
+                );
                 continue;
             }
         };
 
-        match process_import(conn, &import, &mut stats, &mut fact_type_map, &mut type_mismatch_keys, allow_archived, verbose) {
+        match process_import(
+            conn,
+            &import,
+            &mut stats,
+            &mut fact_type_map,
+            &mut type_mismatch_keys,
+            allow_archived,
+            verbose,
+        ) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!(
@@ -119,7 +130,9 @@ pub fn run(db: &mut Db, allow_archived: bool, verbose: bool) -> Result<()> {
         let mut keys: Vec<_> = type_mismatch_keys.iter().collect();
         keys.sort_by_key(|(k, _)| *k);
         for (key, (existing, attempted)) in keys {
-            eprintln!("  {}: existing type is {}, attempted to import {}", key, existing, attempted);
+            eprintln!(
+                "  {key}: existing type is {existing}, attempted to import {attempted}"
+            );
         }
         eprintln!("\nTo change the type, first delete existing facts:");
         eprintln!("  canon facts delete --key <key>");
@@ -188,7 +201,7 @@ fn process_import(
         match normalize_fact_key(key) {
             Ok(normalized_key) => normalized_facts.push((normalized_key, value)),
             Err(msg) => {
-                eprintln!("Warning: skipping fact '{}': {}", key, msg);
+                eprintln!("Warning: skipping fact '{key}': {msg}");
                 stats.skipped_reserved += 1;
             }
         }
@@ -228,7 +241,7 @@ fn process_import(
 
     // Import facts - all imported facts are content facts (stored on object when available)
     if verbose && !normalized_facts.is_empty() {
-        eprintln!("[{}] {}", root_path, rel_path);
+        eprintln!("[{root_path}] {rel_path}");
     }
     for (key, value) in &normalized_facts {
         // Parse as typed value (plain or with hint)
@@ -240,7 +253,7 @@ fn process_import(
             None => {
                 // Type hint parsing failed - classify_typed_value will give details
                 if let Err(e) = classify_typed_value(&typed) {
-                    eprintln!("Warning: {} for '{}' in {}/{}", e, key, root_path, rel_path);
+                    eprintln!("Warning: {e} for '{key}' in {root_path}/{rel_path}");
                 }
                 stats.skipped_type_mismatch += 1;
                 continue;
@@ -251,12 +264,13 @@ fn process_import(
             if existing_type != new_type {
                 // Type mismatch - skip this fact
                 let is_new_key = !type_mismatch_keys.contains_key(key);
-                type_mismatch_keys.entry(key.clone()).or_insert((existing_type, new_type));
+                type_mismatch_keys
+                    .entry(key.clone())
+                    .or_insert((existing_type, new_type));
                 if is_new_key {
                     // First occurrence of this mismatch - show the path and value
                     eprintln!(
-                        "Warning: type mismatch for '{}' in {}/{}: existing {}, got {} (value: {})",
-                        key, root_path, rel_path, existing_type, new_type, value
+                        "Warning: type mismatch for '{key}' in {root_path}/{rel_path}: existing {existing_type}, got {new_type} (value: {value})"
                     );
                 }
                 stats.skipped_type_mismatch += 1;
@@ -271,7 +285,7 @@ fn process_import(
         let (value_text, value_num, value_time) = match classify_typed_value(&typed) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("Warning: {}", e);
+                eprintln!("Warning: {e}");
                 stats.skipped_type_mismatch += 1;
                 continue;
             }
@@ -279,7 +293,7 @@ fn process_import(
 
         if object_id.is_some() {
             if verbose {
-                eprintln!("  {}: {} (on object)", key, value);
+                eprintln!("  {key}: {value} (on object)");
             }
             // Store as object fact
             repo::fact::upsert(
@@ -297,7 +311,7 @@ fn process_import(
             stats.facts_promoted += 1;
         } else {
             if verbose {
-                eprintln!("  {}: {} (on source)", key, value);
+                eprintln!("  {key}: {value} (on source)");
             }
             // Store as source fact for now (will be promoted later when hash is known)
             repo::fact::upsert(
@@ -337,8 +351,8 @@ fn try_parse_datetime(s: &str) -> Option<i64> {
             .chars()
             .enumerate()
             .map(|(i, c)| match i {
-                4 | 7 => '-',            // date colons → dashes
-                10 if c == ' ' => 'T',   // space → T
+                4 | 7 => '-',          // date colons → dashes
+                10 if c == ' ' => 'T', // space → T
                 _ => c,
             })
             .collect();
@@ -372,7 +386,8 @@ fn year_to_timestamp(year: i32) -> Option<i64> {
     use chrono::TimeZone;
     // Sanity check for reasonable year range
     if (1900..=2100).contains(&year) {
-        chrono::Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0)
+        chrono::Utc
+            .with_ymd_and_hms(year, 1, 1, 0, 0, 0)
             .single()
             .map(|dt| dt.timestamp())
     } else {
@@ -437,7 +452,9 @@ fn classify_value(value: &Value) -> (Option<String>, Option<f64>, Option<i64>) {
 }
 
 /// Classify a value with optional type hint
-fn classify_typed_value(typed: &TypedValue) -> Result<(Option<String>, Option<f64>, Option<i64>), String> {
+fn classify_typed_value(
+    typed: &TypedValue,
+) -> Result<(Option<String>, Option<f64>, Option<i64>), String> {
     match typed {
         TypedValue::Plain(v) => Ok(classify_value(v)),
         TypedValue::Hinted { value, type_hint } => match type_hint.as_str() {
@@ -445,7 +462,7 @@ fn classify_typed_value(typed: &TypedValue) -> Result<(Option<String>, Option<f6
                 if let Some(secs) = try_parse_duration(value) {
                     Ok((None, Some(secs), None))
                 } else {
-                    Err(format!("cannot parse as duration: {}", value))
+                    Err(format!("cannot parse as duration: {value}"))
                 }
             }
             "datetime" => {
@@ -453,7 +470,7 @@ fn classify_typed_value(typed: &TypedValue) -> Result<(Option<String>, Option<f6
                     if let Some(ts) = try_parse_datetime(s) {
                         Ok((None, None, Some(ts)))
                     } else {
-                        Err(format!("cannot parse as datetime: {}", value))
+                        Err(format!("cannot parse as datetime: {value}"))
                     }
                 } else if let Value::Number(n) = value {
                     // Handle numeric year (e.g., 2005 from audio metadata)
@@ -461,16 +478,16 @@ fn classify_typed_value(typed: &TypedValue) -> Result<(Option<String>, Option<f6
                         if let Some(ts) = year_to_timestamp(year as i32) {
                             Ok((None, None, Some(ts)))
                         } else {
-                            Err(format!("year out of range: {}", year))
+                            Err(format!("year out of range: {year}"))
                         }
                     } else {
-                        Err(format!("datetime requires integer year, got: {}", value))
+                        Err(format!("datetime requires integer year, got: {value}"))
                     }
                 } else {
-                    Err(format!("datetime requires string or year, got: {}", value))
+                    Err(format!("datetime requires string or year, got: {value}"))
                 }
             }
-            unknown => Err(format!("unknown type hint: {}", unknown)),
+            unknown => Err(format!("unknown type hint: {unknown}")),
         },
     }
 }

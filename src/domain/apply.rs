@@ -18,6 +18,7 @@ pub enum DestinationState {
     SizeMismatch { expected: u64, actual: u64 },
 }
 
+#[allow(dead_code)] // Used in tests, kept as complete API
 impl DestinationState {
     /// Returns true if this destination needs a file transfer.
     pub fn needs_transfer(&self) -> bool {

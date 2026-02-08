@@ -47,7 +47,7 @@ struct InputEntry {
 #[derive(Serialize)]
 struct FactOutput {
     source_id: i64,
-    path: String,  // Include path to enable chaining
+    path: String, // Include path to enable chaining
     basis_rev: i64,
     observed_at: i64,
     facts: HashMap<String, serde_json::Value>,
@@ -58,7 +58,10 @@ fn main() -> Result<()> {
 
     // Validate that exactly one mode is specified
     let mode = if let Some(ref key) = cli.fact {
-        OutputMode::SingleFact { key: key.clone(), type_hint: cli.r#type.clone() }
+        OutputMode::SingleFact {
+            key: key.clone(),
+            type_hint: cli.r#type.clone(),
+        }
     } else if cli.kv {
         OutputMode::KeyValue
     } else if cli.json {
@@ -100,7 +103,10 @@ fn main() -> Result<()> {
 }
 
 enum OutputMode {
-    SingleFact { key: String, type_hint: Option<String> },
+    SingleFact {
+        key: String,
+        type_hint: Option<String>,
+    },
     KeyValue,
     Json,
 }
@@ -140,8 +146,7 @@ fn process_entry(
         );
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .context("Command output is not valid UTF-8")?;
+    let stdout = String::from_utf8(output.stdout).context("Command output is not valid UTF-8")?;
 
     // Parse output based on mode
     let new_facts = parse_output(&stdout, mode)?;
@@ -169,7 +174,7 @@ fn typed_value(value: &str, type_hint: &str) -> serde_json::Value {
     if type_hint == "number" {
         if let Ok(n) = value.parse::<f64>() {
             return serde_json::Value::Number(
-                serde_json::Number::from_f64(n).unwrap_or_else(|| serde_json::Number::from(0))
+                serde_json::Number::from_f64(n).unwrap_or_else(|| serde_json::Number::from(0)),
             );
         }
         // Fall through to typed hint if parsing fails
@@ -224,8 +229,8 @@ fn parse_output(stdout: &str, mode: &OutputMode) -> Result<HashMap<String, serde
             }
         }
         OutputMode::Json => {
-            let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
-                .context("Failed to parse JSON output")?;
+            let parsed: serde_json::Value =
+                serde_json::from_str(stdout.trim()).context("Failed to parse JSON output")?;
 
             match parsed {
                 serde_json::Value::Object(map) => {

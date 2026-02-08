@@ -75,7 +75,7 @@ mod tests {
         Object {
             id,
             hash_type: "sha256".to_string(),
-            hash_value: format!("abc123def456_{}", id),
+            hash_value: format!("abc123def456_{id}"),
             excluded,
         }
     }

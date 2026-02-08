@@ -2,12 +2,12 @@ use anyhow::Result;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::repo::{self, Db};
-use crate::expr::filter::{self, Filter};
 use crate::domain::path::canonicalize_scopes;
 use crate::domain::root::{parse_root_spec, Root};
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
+use crate::expr::filter::{self, Filter};
+use crate::repo::{self, Db};
 
 /// Statistics for a single root or overall
 struct CoverageStats {
@@ -96,13 +96,8 @@ pub fn run(
     // Compute and display stats
     if !scope_prefixes.is_empty() {
         // Scoped mode
-        let stats = compute_scoped_stats(
-            conn,
-            &scopes,
-            &filters,
-            archive_root_id,
-            include_archived,
-        )?;
+        let stats =
+            compute_scoped_stats(conn, &scopes, &filters, archive_root_id, include_archived)?;
         let scope_display = if scope_prefixes.len() == 1 {
             Some(scope_prefixes[0].as_str())
         } else {
@@ -115,12 +110,8 @@ pub fn run(
         }
     } else {
         // Per-root breakdown mode
-        let (per_root_stats, overall) = compute_per_root_stats(
-            conn,
-            &filters,
-            archive_root_id,
-            include_archived,
-        )?;
+        let (per_root_stats, overall) =
+            compute_per_root_stats(conn, &filters, archive_root_id, include_archived)?;
         if compact {
             display_compact_per_root(&per_root_stats, &overall);
         } else {
@@ -262,10 +253,7 @@ fn compute_stats_from_source_refs(
     // Archived sources - use batch archive detection
     if stats.hashed_sources > 0 {
         // Collect object IDs from hashed sources
-        let object_ids: Vec<i64> = hashed_sources
-            .iter()
-            .filter_map(|s| s.object_id)
-            .collect();
+        let object_ids: Vec<i64> = hashed_sources.iter().filter_map(|s| s.object_id).collect();
 
         // Batch check which objects are archived
         let archived_set = repo::object::batch_check_archived(conn, &object_ids, archive_root_id)?;
@@ -274,7 +262,7 @@ fn compute_stats_from_source_refs(
         // (not unique objects — multiple sources can have the same object)
         stats.archived_sources = hashed_sources
             .iter()
-            .filter(|s| s.object_id.map_or(false, |oid| archived_set.contains(&oid)))
+            .filter(|s| s.object_id.is_some_and(|oid| archived_set.contains(&oid)))
             .count() as i64;
     }
 
@@ -310,14 +298,14 @@ fn display_compact_per_root(per_root: &[CoverageStats], overall: &CoverageStats)
 
 fn format_compact_label(id: &str, path: &str) -> String {
     const MAX_PATH_LEN: usize = 35;
-    let id_prefix = format!("id:{:<2}", id);
+    let id_prefix = format!("id:{id:<2}");
 
     if path.len() <= MAX_PATH_LEN {
-        format!("{} {}", id_prefix, path)
+        format!("{id_prefix} {path}")
     } else {
         // Show ...last_n_chars
         let truncated = &path[path.len() - MAX_PATH_LEN + 3..];
-        format!("{} ...{}", id_prefix, truncated)
+        format!("{id_prefix} ...{truncated}")
     }
 }
 
@@ -344,13 +332,13 @@ fn print_compact_line(label: &str, stats: &CoverageStats, show_legend: bool) {
 
 fn display_scoped_stats(stats: &CoverageStats, scope: Option<&str>, archive: Option<&str>) {
     if let Some(arch) = archive {
-        println!("Archive Coverage (relative to {})", arch);
+        println!("Archive Coverage (relative to {arch})");
     } else {
         println!("Archive Coverage");
     }
 
     if let Some(s) = scope {
-        println!("Scope: {}\n", s);
+        println!("Scope: {s}\n");
     } else {
         println!();
     }
@@ -387,7 +375,10 @@ fn display_scoped_stats(stats: &CoverageStats, scope: Option<&str>, archive: Opt
             format_number(stats.archived_sources),
             stats.archived_pct()
         );
-        println!("  Unarchived:      {:>8}", format_number(stats.unarchived()));
+        println!(
+            "  Unarchived:      {:>8}",
+            format_number(stats.unarchived())
+        );
     }
 }
 
@@ -397,7 +388,7 @@ fn display_per_root_stats(
     archive: Option<&str>,
 ) {
     if let Some(arch) = archive {
-        println!("Archive Coverage Report (relative to {})\n", arch);
+        println!("Archive Coverage Report (relative to {arch})\n");
     } else {
         println!("Archive Coverage Report\n");
     }
@@ -418,7 +409,7 @@ fn display_per_root_stats(
             .unwrap_or_else(|| "?".to_string());
         let root_path = stats.root_path.as_deref().unwrap_or("unknown");
         let root_role = stats.root_role.as_deref().unwrap_or("unknown");
-        println!("Root {}: {} ({})", root_id, root_path, root_role);
+        println!("Root {root_id}: {root_path} ({root_role})");
 
         println!(
             "  Total sources:   {:>8}",
@@ -446,7 +437,10 @@ fn display_per_root_stats(
                 format_number(stats.archived_sources),
                 stats.archived_pct()
             );
-            println!("  Unarchived:      {:>8}", format_number(stats.unarchived()));
+            println!(
+                "  Unarchived:      {:>8}",
+                format_number(stats.unarchived())
+            );
         }
         println!();
     }
@@ -623,7 +617,10 @@ mod tests {
         assert_eq!(source_ids.len(), 2, "Should return 2 photo sources");
         assert!(source_ids.contains(&photo1_id), "Should contain photo1");
         assert!(source_ids.contains(&photo2_id), "Should contain photo2");
-        assert!(!source_ids.contains(&video1_id), "Should NOT contain video1");
+        assert!(
+            !source_ids.contains(&video1_id),
+            "Should NOT contain video1"
+        );
 
         // Test 2: Unscoped (empty scopes = all) - should return all sources
         let sources = get_matching_sources(&mut conn, &[], &[], false).unwrap();

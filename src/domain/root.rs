@@ -43,7 +43,7 @@ impl RootSpec {
         } else if let Some(path) = spec.strip_prefix("path:") {
             Ok(RootSpec::ByPath(path.to_string()))
         } else {
-            bail!("Invalid root spec '{}'. Use id:<N> or path:<path>", spec)
+            bail!("Invalid root spec '{spec}'. Use id:<N> or path:<path>")
         }
     }
 }
@@ -68,7 +68,12 @@ pub fn find_containing_root(
             return Some((root.id, root.path.clone(), root.role.clone(), String::new()));
         }
         if let Some(rel) = path_strip_prefix(canonical_path, &root.path) {
-            return Some((root.id, root.path.clone(), root.role.clone(), rel.to_string()));
+            return Some((
+                root.id,
+                root.path.clone(),
+                root.role.clone(),
+                rel.to_string(),
+            ));
         }
     }
     None
@@ -172,13 +177,13 @@ fn parse_root_spec_impl(
             let root = candidates
                 .iter()
                 .find(|r| r.id == id)
-                .ok_or_else(|| anyhow::anyhow!("No root with id {}", id))?;
+                .ok_or_else(|| anyhow::anyhow!("No root with id {id}"))?;
             (root.id, root.role.clone())
         }
         RootSpec::ByPath(path) => {
             // Canonicalize (filesystem I/O - only infrastructure in this function)
             let realpath = fs::canonicalize(&path)
-                .with_context(|| format!("Failed to resolve path: {}", path))?;
+                .with_context(|| format!("Failed to resolve path: {path}"))?;
             let realpath_str = realpath
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
@@ -186,7 +191,7 @@ fn parse_root_spec_impl(
             let root = candidates
                 .iter()
                 .find(|r| r.path == realpath_str)
-                .ok_or_else(|| anyhow::anyhow!("No root for path: {}", path))?;
+                .ok_or_else(|| anyhow::anyhow!("No root for path: {path}"))?;
             (root.id, root.role.clone())
         }
     };
@@ -194,7 +199,7 @@ fn parse_root_spec_impl(
     // Validate role (domain logic)
     if let Some(req_role) = required_role {
         if role != req_role {
-            bail!("Root {} has role '{}', expected '{}'", id, role, req_role);
+            bail!("Root {id} has role '{role}', expected '{req_role}'");
         }
     }
     Ok(id)
@@ -206,7 +211,10 @@ fn parse_root_spec_impl(
 /// Callers must fetch roots via `repo::root::fetch_all()` first.
 ///
 /// Returns Some((root_id, root_path, role, relative_subdir)) if inside a root, None otherwise.
-pub fn resolve_root_path(roots: &[Root], path: &Path) -> Result<Option<(i64, String, String, String)>> {
+pub fn resolve_root_path(
+    roots: &[Root],
+    path: &Path,
+) -> Result<Option<(i64, String, String, String)>> {
     resolve_root_path_impl(roots, path, false)
 }
 
@@ -214,7 +222,10 @@ pub fn resolve_root_path(roots: &[Root], path: &Path) -> Result<Option<(i64, Str
 /// Used for internal operations like unsuspend and overlap checking.
 ///
 /// Callers must fetch roots via `repo::root::fetch_all()` first.
-pub fn resolve_root_path_any(roots: &[Root], path: &Path) -> Result<Option<(i64, String, String, String)>> {
+pub fn resolve_root_path_any(
+    roots: &[Root],
+    path: &Path,
+) -> Result<Option<(i64, String, String, String)>> {
     resolve_root_path_impl(roots, path, true)
 }
 
@@ -363,7 +374,12 @@ mod tests {
         let result = find_containing_root("/a/b/c/d", &roots);
         assert_eq!(
             result,
-            Some((1, "/a/b".to_string(), "source".to_string(), "c/d".to_string()))
+            Some((
+                1,
+                "/a/b".to_string(),
+                "source".to_string(),
+                "c/d".to_string()
+            ))
         );
     }
 
@@ -565,7 +581,10 @@ mod tests {
         let roots = vec![make_root_with(1, "/a", "source")];
         let result = parse_root_spec(&roots, "id:999", None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No root with id 999"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No root with id 999"));
     }
 
     #[test]
@@ -580,7 +599,10 @@ mod tests {
         let roots = vec![make_root_with(1, "/a", "archive")];
         let result = parse_root_spec(&roots, "id:1", Some("source"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("role 'archive', expected 'source'"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("role 'archive', expected 'source'"));
     }
 
     #[test]
@@ -595,7 +617,10 @@ mod tests {
         let roots = vec![make_root_with(1, "/a", "source")];
         let result = parse_root_spec(&roots, "id:1", Some("archive"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("role 'source', expected 'archive'"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("role 'source', expected 'archive'"));
     }
 
     #[test]

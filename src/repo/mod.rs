@@ -15,7 +15,9 @@ pub mod root;
 pub mod source;
 
 // Re-export database utilities at module level
-pub use db::{open_with_options, populate_temp_sources, print_profile_summary, Db, DbOptions, Connection};
+pub use db::{
+    open_with_options, populate_temp_sources, print_profile_summary, Connection, Db, DbOptions,
+};
 
 // Test utilities
 #[cfg(test)]

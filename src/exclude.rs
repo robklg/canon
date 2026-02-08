@@ -66,8 +66,8 @@ pub fn set(
     if options.dry_run {
         println!("Would exclude {} sources:", to_exclude.len());
         for &id in &to_exclude {
-            if let Some(path) = get_source_path(&conn, id)? {
-                println!("  {}", path);
+            if let Some(path) = get_source_path(conn, id)? {
+                println!("  {path}");
             }
         }
         return Ok(());
@@ -112,9 +112,12 @@ pub fn clear(
     }
 
     if options.dry_run {
-        println!("Would clear exclusions for {} sources:", excluded_sources.len());
+        println!(
+            "Would clear exclusions for {} sources:",
+            excluded_sources.len()
+        );
         for (_, path) in &excluded_sources {
-            println!("  {}", path);
+            println!("  {path}");
         }
         return Ok(());
     }
@@ -132,11 +135,7 @@ pub fn clear(
 // List Command
 // ============================================================================
 
-pub fn list(
-    db: &mut Db,
-    scope_paths: &[PathBuf],
-    filter_strs: &[String],
-) -> Result<()> {
+pub fn list(db: &mut Db, scope_paths: &[PathBuf], filter_strs: &[String]) -> Result<()> {
     let conn = db.conn_mut();
 
     // Parse filters
@@ -162,7 +161,7 @@ pub fn list(
     if !direct_excluded.is_empty() {
         println!("Directly excluded ({}):", direct_excluded.len());
         for (id, path) in &direct_excluded {
-            println!("  {} (id: {})", path, id);
+            println!("  {path} (id: {id})");
         }
     }
 
@@ -172,7 +171,7 @@ pub fn list(
         }
         println!("Excluded via object ({}):", object_excluded.len());
         for (id, path, hash_short) in &object_excluded {
-            println!("  {} (id: {}, object: {}...)", path, id, hash_short);
+            println!("  {path} (id: {id}, object: {hash_short}...)");
         }
     }
 
@@ -261,8 +260,9 @@ fn get_excluded_sources(
 
     // Apply filters and preserve paths
     let ids: Vec<i64> = filtered.iter().map(|(id, _)| *id).collect();
-    let filtered_ids: std::collections::HashSet<i64> =
-        filter::apply_filters(conn, &ids, filters)?.into_iter().collect();
+    let filtered_ids: std::collections::HashSet<i64> = filter::apply_filters(conn, &ids, filters)?
+        .into_iter()
+        .collect();
 
     Ok(filtered
         .into_iter()
@@ -282,7 +282,7 @@ pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
     // Fetch source using repo layer
     let sources = repo::source::batch_fetch_by_ids(conn, &[source_id])?;
     let Some(source) = sources.get(&source_id) else {
-        anyhow::bail!("Source with id {} not found or not present", source_id);
+        anyhow::bail!("Source with id {source_id} not found or not present");
     };
 
     // Use Source::path() for display
@@ -290,19 +290,19 @@ pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
 
     // Check if already excluded using domain predicate
     if source.is_excluded() {
-        println!("Source already excluded: {}", path);
+        println!("Source already excluded: {path}");
         return Ok(());
     }
 
     if options.dry_run {
-        println!("Would exclude source (id: {}):", source_id);
-        println!("  {}", path);
+        println!("Would exclude source (id: {source_id}):");
+        println!("  {path}");
         return Ok(());
     }
 
     repo::source::set_excluded(conn, source_id, true)?;
 
-    println!("Excluded source (id: {}): {}", source_id, path);
+    println!("Excluded source (id: {source_id}): {path}");
     Ok(())
 }
 
@@ -335,19 +335,19 @@ pub fn set_by_path(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()
 
     // Check if already excluded using domain predicate
     if source.is_excluded() {
-        println!("Source already excluded: {}", display_path);
+        println!("Source already excluded: {display_path}");
         return Ok(());
     }
 
     if options.dry_run {
         println!("Would exclude:");
-        println!("  {}", display_path);
+        println!("  {display_path}");
         return Ok(());
     }
 
     repo::source::set_excluded(conn, source.id, true)?;
 
-    println!("Excluded: {}", display_path);
+    println!("Excluded: {display_path}");
     Ok(())
 }
 
@@ -423,9 +423,7 @@ pub fn exclude_duplicates(
     let to_exclude_with_paths: Vec<(i64, String)> = result
         .to_exclude
         .iter()
-        .filter_map(|id| {
-            scope_sources_map.get(id).map(|s| (*id, s.path()))
-        })
+        .filter_map(|id| scope_sources_map.get(id).map(|s| (*id, s.path())))
         .collect();
 
     // Summary header
@@ -435,10 +433,19 @@ pub fn exclude_duplicates(
         result.skipped_no_hash
     );
     println!("  Will exclude: {}", to_exclude_with_paths.len());
-    println!("  Skipped (no copy in --prefer): {}", result.skipped_not_covered);
-    println!("  Skipped (multiple copies in --prefer): {}", result.skipped_multiple);
+    println!(
+        "  Skipped (no copy in --prefer): {}",
+        result.skipped_not_covered
+    );
+    println!(
+        "  Skipped (multiple copies in --prefer): {}",
+        result.skipped_multiple
+    );
     if result.skipped_in_prefer > 0 {
-        println!("  Skipped (already in --prefer): {}", result.skipped_in_prefer);
+        println!(
+            "  Skipped (already in --prefer): {}",
+            result.skipped_in_prefer
+        );
     }
     println!();
 
@@ -450,7 +457,7 @@ pub fn exclude_duplicates(
     if dry_run {
         println!("Would exclude {} sources:", to_exclude_with_paths.len());
         for (_, path) in &to_exclude_with_paths {
-            println!("  {}", path);
+            println!("  {path}");
         }
         println!();
         println!("Use `canon ls --duplicates` to see remaining duplicates.");
@@ -472,7 +479,7 @@ pub fn exclude_duplicates(
         excluded_count += 1;
     }
 
-    println!("Excluded {} sources", excluded_count);
+    println!("Excluded {excluded_count} sources");
     println!();
     println!("Use `canon ls --duplicates` to see remaining duplicates.");
 
@@ -490,7 +497,7 @@ pub fn set_object_by_hash(db: &Db, hash: &str, options: &SetOptions) -> Result<(
 
     // Find the object by hash
     let Some(object) = repo::object::fetch_by_hash(conn, hash)? else {
-        anyhow::bail!("No object found with hash: {}", hash);
+        anyhow::bail!("No object found with hash: {hash}");
     };
 
     exclude_object_by_id(conn, object.id, &object.hash_value, options)
@@ -617,10 +624,12 @@ pub fn set_objects_by_filter(
     if object_ids_to_check.is_empty() {
         println!("No objects to exclude.");
         if no_hash > 0 {
-            println!("  {} sources have no hash yet", no_hash);
+            println!("  {no_hash} sources have no hash yet");
         }
         if empty_skipped > 0 {
-            println!("  {} empty files skipped (use --hash to exclude explicitly)", empty_skipped);
+            println!(
+                "  {empty_skipped} empty files skipped (use --hash to exclude explicitly)"
+            );
         }
         return Ok(());
     }
@@ -658,13 +667,15 @@ pub fn set_objects_by_filter(
     if objects_to_exclude.is_empty() {
         println!("No objects to exclude.");
         if no_hash > 0 {
-            println!("  {} sources have no hash yet", no_hash);
+            println!("  {no_hash} sources have no hash yet");
         }
         if empty_skipped > 0 {
-            println!("  {} empty files skipped (use --hash to exclude explicitly)", empty_skipped);
+            println!(
+                "  {empty_skipped} empty files skipped (use --hash to exclude explicitly)"
+            );
         }
         if already_excluded > 0 {
-            println!("  {} objects already excluded", already_excluded);
+            println!("  {already_excluded} objects already excluded");
         }
         return Ok(());
     }
@@ -686,12 +697,22 @@ pub fn set_objects_by_filter(
 
     // Summary
     if options.dry_run {
-        println!("Would exclude {} objects affecting {} sources ({} in source roots, {} in archives):",
-            objects_to_exclude.len(), total_source_count, total_in_source_roots, total_archive_count);
+        println!(
+            "Would exclude {} objects affecting {} sources ({} in source roots, {} in archives):",
+            objects_to_exclude.len(),
+            total_source_count,
+            total_in_source_roots,
+            total_archive_count
+        );
         for (_, hash, sources) in &all_sources {
             let archive_count = sources.iter().filter(|s| s.is_archive).count();
             let src_count = sources.len() - archive_count;
-            println!("  {}... ({} source, {} archive)", &hash[..16.min(hash.len())], src_count, archive_count);
+            println!(
+                "  {}... ({} source, {} archive)",
+                &hash[..16.min(hash.len())],
+                src_count,
+                archive_count
+            );
             if options.verbose {
                 for source in sources {
                     let marker = if source.is_archive { " (archive)" } else { "" };
@@ -700,13 +721,15 @@ pub fn set_objects_by_filter(
             }
         }
         if no_hash > 0 {
-            println!("\n  {} sources skipped (no hash)", no_hash);
+            println!("\n  {no_hash} sources skipped (no hash)");
         }
         if empty_skipped > 0 {
-            println!("  {} empty files skipped (use --hash to exclude explicitly)", empty_skipped);
+            println!(
+                "  {empty_skipped} empty files skipped (use --hash to exclude explicitly)"
+            );
         }
         if already_excluded > 0 {
-            println!("  {} objects already excluded", already_excluded);
+            println!("  {already_excluded} objects already excluded");
         }
         println!("\nUse --yes to execute.");
         return Ok(());
@@ -717,8 +740,13 @@ pub fn set_objects_by_filter(
         repo::object::set_excluded(conn, *object_id, true)?;
     }
 
-    println!("Excluded {} objects affecting {} sources ({} in source roots, {} in archives)",
-        all_sources.len(), total_source_count, total_in_source_roots, total_archive_count);
+    println!(
+        "Excluded {} objects affecting {} sources ({} in source roots, {} in archives)",
+        all_sources.len(),
+        total_source_count,
+        total_in_source_roots,
+        total_archive_count
+    );
     Ok(())
 }
 
@@ -731,15 +759,13 @@ struct SourceInfo {
 /// Fetch source details for an object
 fn get_object_sources(conn: &Connection, object_id: i64) -> Result<Vec<SourceInfo>> {
     let sources_map = repo::source::fetch_sources_by_object_ids(conn, &[object_id])?;
-    let mut sources: Vec<_> = sources_map
-        .get(&object_id)
-        .cloned()
-        .unwrap_or_default();
+    let mut sources: Vec<_> = sources_map.get(&object_id).cloned().unwrap_or_default();
 
     // Sort: same as previous SQL ORDER BY r.role DESC, r.path, s.rel_path
     // Note: role DESC puts 'source' before 'archive' (s > a alphabetically)
     sources.sort_by(|a, b| {
-        b.root_role.cmp(&a.root_role) // DESC
+        b.root_role
+            .cmp(&a.root_role) // DESC
             .then_with(|| a.root_path.cmp(&b.root_path))
             .then_with(|| a.rel_path.cmp(&b.rel_path))
     });
@@ -758,11 +784,17 @@ fn print_source_locations(sources: &[SourceInfo], verbose: bool) {
     let archive_count = sources.iter().filter(|s| s.is_archive).count();
     let source_count = sources.len() - archive_count;
 
-    println!("  Sources: {} in source roots, {} in archive roots", source_count, archive_count);
+    println!(
+        "  Sources: {source_count} in source roots, {archive_count} in archive roots"
+    );
 
     // Show paths (limited unless verbose)
     const DEFAULT_LIMIT: usize = 3;
-    let show_count = if verbose { sources.len() } else { DEFAULT_LIMIT };
+    let show_count = if verbose {
+        sources.len()
+    } else {
+        DEFAULT_LIMIT
+    };
     let truncated = sources.len() > show_count && !verbose;
 
     for source in sources.iter().take(show_count) {
@@ -771,17 +803,28 @@ fn print_source_locations(sources: &[SourceInfo], verbose: bool) {
     }
 
     if truncated {
-        println!("    ... and {} more (use --verbose to show all)", sources.len() - show_count);
+        println!(
+            "    ... and {} more (use --verbose to show all)",
+            sources.len() - show_count
+        );
     }
 }
 
 /// Internal helper to exclude an object by its ID
-fn exclude_object_by_id(conn: &Connection, object_id: i64, hash_value: &str, options: &SetOptions) -> Result<()> {
+fn exclude_object_by_id(
+    conn: &Connection,
+    object_id: i64,
+    hash_value: &str,
+    options: &SetOptions,
+) -> Result<()> {
     // Check if already excluded using domain predicate
     let objects = repo::object::batch_fetch_by_ids(conn, &[object_id])?;
     if let Some(object) = objects.get(&object_id) {
         if object.is_excluded() {
-            println!("Object already excluded: {}...", &hash_value[..16.min(hash_value.len())]);
+            println!(
+                "Object already excluded: {}...",
+                &hash_value[..16.min(hash_value.len())]
+            );
             return Ok(());
         }
     }
@@ -790,7 +833,10 @@ fn exclude_object_by_id(conn: &Connection, object_id: i64, hash_value: &str, opt
     let sources = get_object_sources(conn, object_id)?;
 
     if options.dry_run {
-        println!("Would exclude object: {}...", &hash_value[..16.min(hash_value.len())]);
+        println!(
+            "Would exclude object: {}...",
+            &hash_value[..16.min(hash_value.len())]
+        );
         print_source_locations(&sources, options.verbose);
         println!("\nUse --yes to execute.");
         return Ok(());
@@ -798,7 +844,10 @@ fn exclude_object_by_id(conn: &Connection, object_id: i64, hash_value: &str, opt
 
     repo::object::set_excluded(conn, object_id, true)?;
 
-    println!("Excluded object: {}...", &hash_value[..16.min(hash_value.len())]);
+    println!(
+        "Excluded object: {}...",
+        &hash_value[..16.min(hash_value.len())]
+    );
     print_source_locations(&sources, options.verbose);
     Ok(())
 }
@@ -809,23 +858,32 @@ pub fn clear_object(db: &Db, hash: &str, options: &ClearOptions) -> Result<()> {
 
     // Find the object by hash
     let Some(object) = repo::object::fetch_by_hash(conn, hash)? else {
-        anyhow::bail!("No object found with hash: {}", hash);
+        anyhow::bail!("No object found with hash: {hash}");
     };
 
     // Check if excluded (use domain predicate)
     if !object.is_excluded() {
-        println!("Object is not excluded: {}...", &object.hash_value[..16.min(object.hash_value.len())]);
+        println!(
+            "Object is not excluded: {}...",
+            &object.hash_value[..16.min(object.hash_value.len())]
+        );
         return Ok(());
     }
 
     if options.dry_run {
-        println!("Would clear exclusion from object: {}...", &object.hash_value[..16.min(object.hash_value.len())]);
+        println!(
+            "Would clear exclusion from object: {}...",
+            &object.hash_value[..16.min(object.hash_value.len())]
+        );
         return Ok(());
     }
 
     repo::object::set_excluded(conn, object.id, false)?;
 
-    println!("Cleared exclusion from object: {}...", &object.hash_value[..16.min(object.hash_value.len())]);
+    println!(
+        "Cleared exclusion from object: {}...",
+        &object.hash_value[..16.min(object.hash_value.len())]
+    );
     Ok(())
 }
 
@@ -852,7 +910,10 @@ pub fn list_objects(db: &Db) -> Result<()> {
             .get(&object.id)
             .map(|sources| sources.len())
             .unwrap_or(0);
-        println!("  {}... (id: {}, {} sources)", hash_short, object.id, source_count);
+        println!(
+            "  {}... (id: {}, {} sources)",
+            hash_short, object.id, source_count
+        );
     }
 
     Ok(())
@@ -922,8 +983,9 @@ fn get_object_excluded_sources(
 
     // Apply filters and preserve paths/hashes
     let ids: Vec<i64> = filtered.iter().map(|(id, _, _)| *id).collect();
-    let filtered_ids: std::collections::HashSet<i64> =
-        filter::apply_filters(conn, &ids, filters)?.into_iter().collect();
+    let filtered_ids: std::collections::HashSet<i64> = filter::apply_filters(conn, &ids, filters)?
+        .into_iter()
+        .collect();
 
     Ok(filtered
         .into_iter()
@@ -1028,7 +1090,13 @@ mod tests {
         conn.execute(
             "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, present, excluded)
              VALUES (?, ?, ?, 1000, 1704067200, ?, ?)",
-            rusqlite::params![root_id, rel_path, object_id, present as i64, excluded as i64],
+            rusqlite::params![
+                root_id,
+                rel_path,
+                object_id,
+                present as i64,
+                excluded as i64
+            ],
         )
         .unwrap();
         conn.last_insert_rowid()
@@ -1113,7 +1181,14 @@ mod tests {
 
         // Source not excluded, but linked to excluded object
         let excluded_obj = insert_object(&conn, "abc123excluded", true);
-        let _obj_excluded_id = insert_source(&conn, root, "obj_excluded.jpg", Some(excluded_obj), true, false);
+        let _obj_excluded_id = insert_source(
+            &conn,
+            root,
+            "obj_excluded.jpg",
+            Some(excluded_obj),
+            true,
+            false,
+        );
 
         let result = get_matching_sources(&mut conn, &[], &[], false).unwrap();
 
@@ -1127,10 +1202,18 @@ mod tests {
 
         let root = insert_root(&conn, "/photos", "source", false);
         let normal_id = insert_source(&conn, root, "normal.jpg", None, true, false);
-        let source_excluded_id = insert_source(&conn, root, "source_excluded.jpg", None, true, true);
+        let source_excluded_id =
+            insert_source(&conn, root, "source_excluded.jpg", None, true, true);
 
         let excluded_obj = insert_object(&conn, "abc123excluded", true);
-        let obj_excluded_id = insert_source(&conn, root, "obj_excluded.jpg", Some(excluded_obj), true, false);
+        let obj_excluded_id = insert_source(
+            &conn,
+            root,
+            "obj_excluded.jpg",
+            Some(excluded_obj),
+            true,
+            false,
+        );
 
         // With include_excluded = true
         let result = get_matching_sources(&mut conn, &[], &[], true).unwrap();
@@ -1166,12 +1249,22 @@ mod tests {
 
         // Source NOT excluded, but object IS excluded
         let excluded_obj = insert_object(&conn, "abc123excluded", true);
-        let _obj_excluded_id = insert_source(&conn, root, "obj_excluded.jpg", Some(excluded_obj), true, false);
+        let _obj_excluded_id = insert_source(
+            &conn,
+            root,
+            "obj_excluded.jpg",
+            Some(excluded_obj),
+            true,
+            false,
+        );
 
         // This is the critical distinction: get_excluded_sources should NOT return this
         let result = get_excluded_sources(&mut conn, &[], &[]).unwrap();
 
-        assert!(result.is_empty(), "Object-level excluded sources should NOT appear in get_excluded_sources");
+        assert!(
+            result.is_empty(),
+            "Object-level excluded sources should NOT appear in get_excluded_sources"
+        );
     }
 
     #[test]
@@ -1216,7 +1309,14 @@ mod tests {
 
         // Source NOT excluded, but object IS excluded
         let excluded_obj = insert_object(&conn, "abc123excluded", true);
-        let obj_excluded_id = insert_source(&conn, root, "obj_excluded.jpg", Some(excluded_obj), true, false);
+        let obj_excluded_id = insert_source(
+            &conn,
+            root,
+            "obj_excluded.jpg",
+            Some(excluded_obj),
+            true,
+            false,
+        );
 
         let result = get_object_excluded_sources(&mut conn, &[], &[]).unwrap();
 
@@ -1232,13 +1332,23 @@ mod tests {
 
         // Source IS excluded AND object IS excluded
         let excluded_obj = insert_object(&conn, "abc123excluded", true);
-        let _both_excluded_id = insert_source(&conn, root, "both_excluded.jpg", Some(excluded_obj), true, true);
+        let _both_excluded_id = insert_source(
+            &conn,
+            root,
+            "both_excluded.jpg",
+            Some(excluded_obj),
+            true,
+            true,
+        );
 
         // This is the critical distinction: when BOTH are excluded, it should NOT appear
         // (because the source is directly excluded)
         let result = get_object_excluded_sources(&mut conn, &[], &[]).unwrap();
 
-        assert!(result.is_empty(), "Sources with source-level exclusion should NOT appear in get_object_excluded_sources");
+        assert!(
+            result.is_empty(),
+            "Sources with source-level exclusion should NOT appear in get_object_excluded_sources"
+        );
     }
 
     #[test]
@@ -1264,8 +1374,22 @@ mod tests {
         let root = insert_root(&conn, "/photos", "source", false);
         let excluded_obj = insert_object(&conn, "abc123excluded", true);
 
-        let in_scope_id = insert_source(&conn, root, "2024/file.jpg", Some(excluded_obj), true, false);
-        let _out_of_scope_id = insert_source(&conn, root, "2023/file.jpg", Some(excluded_obj), true, false);
+        let in_scope_id = insert_source(
+            &conn,
+            root,
+            "2024/file.jpg",
+            Some(excluded_obj),
+            true,
+            false,
+        );
+        let _out_of_scope_id = insert_source(
+            &conn,
+            root,
+            "2023/file.jpg",
+            Some(excluded_obj),
+            true,
+            false,
+        );
 
         // Scope to /photos/2024
         let scopes = vec!["/photos/2024".to_string()];
@@ -1409,7 +1533,8 @@ mod tests {
         let obj = insert_object(conn, "archive_file_hash", false);
 
         // This file IS in the prefer path - should never be excluded
-        let archive_file_id = insert_source(conn, archive_root, "keeper.jpg", Some(obj), true, false);
+        let archive_file_id =
+            insert_source(conn, archive_root, "keeper.jpg", Some(obj), true, false);
 
         // Run exclude_duplicates with scope=/archive (the file is in the prefer path)
         // Note: This tests the case where scope overlaps with prefer
@@ -1546,8 +1671,7 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("not found"),
-            "Error should mention 'not found', got: {}",
-            err_msg
+            "Error should mention 'not found', got: {err_msg}"
         );
     }
 
@@ -1596,8 +1720,7 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("not found") || err_msg.contains("not present"),
-            "Error should mention source not found/present, got: {}",
-            err_msg
+            "Error should mention source not found/present, got: {err_msg}"
         );
     }
 
@@ -1621,8 +1744,7 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Failed to resolve path"),
-            "Error should mention path resolution failure, got: {}",
-            err_msg
+            "Error should mention path resolution failure, got: {err_msg}"
         );
     }
 
@@ -1643,8 +1765,7 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("No source found"),
-            "Error should mention no source found, got: {}",
-            err_msg
+            "Error should mention no source found, got: {err_msg}"
         );
     }
 
@@ -1759,7 +1880,8 @@ mod tests {
             "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, present, excluded)
              VALUES (?, ?, ?, 1000, 1704067200, 1, 0)",
             rusqlite::params![root, "photo.jpg", obj],
-        ).unwrap();
+        )
+        .unwrap();
 
         let options = SetOptions {
             dry_run: false,
@@ -1768,8 +1890,8 @@ mod tests {
 
         let result = set_objects_by_filter(
             &mut db,
-            &[],  // no scope restriction
-            &[],  // no filters
+            &[], // no scope restriction
+            &[], // no filters
             &options,
         );
 
@@ -1792,19 +1914,15 @@ mod tests {
             "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, present, excluded)
              VALUES (?, ?, ?, 0, 1704067200, 1, 0)",
             rusqlite::params![root, "empty.txt", obj],
-        ).unwrap();
+        )
+        .unwrap();
 
         let options = SetOptions {
             dry_run: false,
             verbose: false,
         };
 
-        let result = set_objects_by_filter(
-            &mut db,
-            &[],
-            &[],
-            &options,
-        );
+        let result = set_objects_by_filter(&mut db, &[], &[], &options);
 
         assert!(result.is_ok());
         assert!(
@@ -1825,7 +1943,8 @@ mod tests {
             "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, present, excluded)
              VALUES (?, ?, ?, 1000, 1704067200, 1, 0)",
             rusqlite::params![root, "photo.jpg", obj],
-        ).unwrap();
+        )
+        .unwrap();
 
         let options = SetOptions {
             dry_run: false,
@@ -1833,12 +1952,7 @@ mod tests {
         };
 
         // Should succeed without error (skips already excluded)
-        let result = set_objects_by_filter(
-            &mut db,
-            &[],
-            &[],
-            &options,
-        );
+        let result = set_objects_by_filter(&mut db, &[], &[], &options);
 
         assert!(result.is_ok());
         // Should still be excluded (unchanged)
@@ -1856,7 +1970,8 @@ mod tests {
             "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, present, excluded)
              VALUES (?, ?, NULL, 1000, 1704067200, 1, 0)",
             rusqlite::params![root, "unhashed.jpg"],
-        ).unwrap();
+        )
+        .unwrap();
 
         let options = SetOptions {
             dry_run: false,
@@ -1864,12 +1979,7 @@ mod tests {
         };
 
         // Should succeed (just reports nothing to exclude)
-        let result = set_objects_by_filter(
-            &mut db,
-            &[],
-            &[],
-            &options,
-        );
+        let result = set_objects_by_filter(&mut db, &[], &[], &options);
 
         assert!(result.is_ok());
     }
@@ -1885,19 +1995,15 @@ mod tests {
             "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, present, excluded)
              VALUES (?, ?, ?, 1000, 1704067200, 1, 0)",
             rusqlite::params![root, "photo.jpg", obj],
-        ).unwrap();
+        )
+        .unwrap();
 
         let options = SetOptions {
-            dry_run: true,  // DRY RUN
+            dry_run: true, // DRY RUN
             verbose: false,
         };
 
-        let result = set_objects_by_filter(
-            &mut db,
-            &[],
-            &[],
-            &options,
-        );
+        let result = set_objects_by_filter(&mut db, &[], &[], &options);
 
         assert!(result.is_ok());
         // Object should NOT be excluded (dry run)

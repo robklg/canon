@@ -2,8 +2,8 @@ use anyhow::{bail, Result};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 
-use crate::repo::db::populate_temp_sources;
 use super::eval as expr;
+use crate::repo::db::populate_temp_sources;
 
 // ============================================================================
 // Expression AST
@@ -27,9 +27,18 @@ pub enum Expr {
     And(Vec<Expr>),
     Or(Vec<Expr>),
     Not(Box<Expr>),
-    Exists { key: String },
-    Compare { key: String, op: CompareOp, value: String },
-    In { key: String, values: Vec<String> },
+    Exists {
+        key: String,
+    },
+    Compare {
+        key: String,
+        op: CompareOp,
+        value: String,
+    },
+    In {
+        key: String,
+        values: Vec<String>,
+    },
 }
 
 // Keep Filter as alias for backwards compatibility
@@ -91,11 +100,7 @@ fn prefetch_facts(conn: &mut Connection, source_ids: &[i64], keys: &[String]) ->
     // Parse keys to get base keys (without accessors/modifiers)
     let base_keys: Vec<String> = keys
         .iter()
-        .filter_map(|k| {
-            parse_key_with_modifiers(k)
-                .ok()
-                .map(|(base, _, _)| base)
-        })
+        .filter_map(|k| parse_key_with_modifiers(k).ok().map(|(base, _, _)| base))
         .collect();
 
     // Skip built-in keys (they don't need DB lookups)
@@ -121,7 +126,7 @@ fn prefetch_facts(conn: &mut Connection, source_ids: &[i64], keys: &[String]) ->
             "SELECT ts.id, s.object_id
              FROM temp_sources ts
              JOIN sources s ON s.id = ts.id
-             WHERE s.object_id IS NOT NULL"
+             WHERE s.object_id IS NOT NULL",
         )?
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -160,7 +165,10 @@ fn prefetch_facts(conn: &mut Connection, source_ids: &[i64], keys: &[String]) ->
     if !object_ids.is_empty() {
         // Create temp table for object IDs
         conn.execute("DROP TABLE IF EXISTS temp_objects", [])?;
-        conn.execute("CREATE TEMP TABLE temp_objects (id INTEGER PRIMARY KEY)", [])?;
+        conn.execute(
+            "CREATE TEMP TABLE temp_objects (id INTEGER PRIMARY KEY)",
+            [],
+        )?;
         {
             let mut stmt = conn.prepare("INSERT INTO temp_objects (id) VALUES (?)")?;
             for oid in &object_ids {
@@ -194,16 +202,16 @@ fn prefetch_facts(conn: &mut Connection, source_ids: &[i64], keys: &[String]) ->
 }
 
 /// Convert DB values to FactValue
-fn to_fact_value(text: Option<String>, num: Option<f64>, time: Option<i64>) -> Option<expr::FactValue> {
+fn to_fact_value(
+    text: Option<String>,
+    num: Option<f64>,
+    time: Option<i64>,
+) -> Option<expr::FactValue> {
     if let Some(t) = text {
         Some(expr::FactValue::Text(t))
     } else if let Some(n) = num {
         Some(expr::FactValue::Num(n))
-    } else if let Some(ts) = time {
-        Some(expr::FactValue::Time(ts))
-    } else {
-        None
-    }
+    } else { time.map(expr::FactValue::Time) }
 }
 
 impl Expr {
@@ -216,7 +224,10 @@ impl Expr {
         let mut parser = Parser::new(&tokens);
         let expr = parser.parse_expr()?;
         if parser.pos < tokens.len() {
-            bail!("Unexpected token after expression: {:?}", tokens[parser.pos]);
+            bail!(
+                "Unexpected token after expression: {:?}",
+                tokens[parser.pos]
+            );
         }
         Ok(expr)
     }
@@ -236,7 +247,7 @@ enum Token {
     In,
     Comma,
     Op(CompareOp),
-    Exists,      // The '?' suffix
+    Exists, // The '?' suffix
     Ident(String),
     Value(String),
 }
@@ -255,32 +266,84 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
 
         // Single-char tokens
         match chars[i] {
-            '(' => { tokens.push(Token::LParen); i += 1; continue; }
-            ')' => { tokens.push(Token::RParen); i += 1; continue; }
-            ',' => { tokens.push(Token::Comma); i += 1; continue; }
-            '?' => { tokens.push(Token::Exists); i += 1; continue; }
+            '(' => {
+                tokens.push(Token::LParen);
+                i += 1;
+                continue;
+            }
+            ')' => {
+                tokens.push(Token::RParen);
+                i += 1;
+                continue;
+            }
+            ',' => {
+                tokens.push(Token::Comma);
+                i += 1;
+                continue;
+            }
+            '?' => {
+                tokens.push(Token::Exists);
+                i += 1;
+                continue;
+            }
             _ => {}
         }
 
         // Multi-char operators
         if i + 1 < chars.len() {
-            let two: String = chars[i..i+2].iter().collect();
+            let two: String = chars[i..i + 2].iter().collect();
             match two.as_str() {
-                ">=" => { tokens.push(Token::Op(CompareOp::Ge)); i += 2; continue; }
-                "<=" => { tokens.push(Token::Op(CompareOp::Le)); i += 2; continue; }
-                "!=" => { tokens.push(Token::Op(CompareOp::Ne)); i += 2; continue; }
-                "!~" => { tokens.push(Token::Op(CompareOp::NotGlob)); i += 2; continue; }
+                ">=" => {
+                    tokens.push(Token::Op(CompareOp::Ge));
+                    i += 2;
+                    continue;
+                }
+                "<=" => {
+                    tokens.push(Token::Op(CompareOp::Le));
+                    i += 2;
+                    continue;
+                }
+                "!=" => {
+                    tokens.push(Token::Op(CompareOp::Ne));
+                    i += 2;
+                    continue;
+                }
+                "!~" => {
+                    tokens.push(Token::Op(CompareOp::NotGlob));
+                    i += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
 
         // Single-char operators
         match chars[i] {
-            '>' => { tokens.push(Token::Op(CompareOp::Gt)); i += 1; continue; }
-            '<' => { tokens.push(Token::Op(CompareOp::Lt)); i += 1; continue; }
-            '=' => { tokens.push(Token::Op(CompareOp::Eq)); i += 1; continue; }
-            '~' => { tokens.push(Token::Op(CompareOp::Glob)); i += 1; continue; }
-            '!' => { tokens.push(Token::Not); i += 1; continue; }
+            '>' => {
+                tokens.push(Token::Op(CompareOp::Gt));
+                i += 1;
+                continue;
+            }
+            '<' => {
+                tokens.push(Token::Op(CompareOp::Lt));
+                i += 1;
+                continue;
+            }
+            '=' => {
+                tokens.push(Token::Op(CompareOp::Eq));
+                i += 1;
+                continue;
+            }
+            '~' => {
+                tokens.push(Token::Op(CompareOp::Glob));
+                i += 1;
+                continue;
+            }
+            '!' => {
+                tokens.push(Token::Not);
+                i += 1;
+                continue;
+            }
             _ => {}
         }
 
@@ -288,17 +351,38 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
         // Allow alphanumeric, underscore, dot, pipe, and brackets (for accessors like key[-1] and modifiers like key|year)
         if chars[i].is_alphabetic() || chars[i] == '_' {
             let start = i;
-            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.' || chars[i] == '|' || chars[i] == '[' || chars[i] == ']' || chars[i] == ':' || (chars[i] == '-' && i > 0 && chars[i-1] == '[')) {
+            while i < chars.len()
+                && (chars[i].is_alphanumeric()
+                    || chars[i] == '_'
+                    || chars[i] == '.'
+                    || chars[i] == '|'
+                    || chars[i] == '['
+                    || chars[i] == ']'
+                    || chars[i] == ':'
+                    || (chars[i] == '-' && i > 0 && chars[i - 1] == '['))
+            {
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
             // Only check for keywords if word doesn't contain pipe (modifier syntax) or brackets (accessor syntax)
             if !word.contains('|') && !word.contains('[') {
                 match word.to_uppercase().as_str() {
-                    "AND" => { tokens.push(Token::And); continue; }
-                    "OR" => { tokens.push(Token::Or); continue; }
-                    "NOT" => { tokens.push(Token::Not); continue; }
-                    "IN" => { tokens.push(Token::In); continue; }
+                    "AND" => {
+                        tokens.push(Token::And);
+                        continue;
+                    }
+                    "OR" => {
+                        tokens.push(Token::Or);
+                        continue;
+                    }
+                    "NOT" => {
+                        tokens.push(Token::Not);
+                        continue;
+                    }
+                    "IN" => {
+                        tokens.push(Token::In);
+                        continue;
+                    }
                     _ => {}
                 }
             }
@@ -307,10 +391,20 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
         }
 
         // Numbers (including negative, decimals, and date formats like 2024-01-15)
-        if chars[i].is_ascii_digit() || (chars[i] == '-' && i + 1 < chars.len() && chars[i+1].is_ascii_digit()) {
+        if chars[i].is_ascii_digit()
+            || (chars[i] == '-' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit())
+        {
             let start = i;
-            if chars[i] == '-' { i += 1; }
-            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.' || chars[i] == '-' || chars[i] == ':' || chars[i] == 'T') {
+            if chars[i] == '-' {
+                i += 1;
+            }
+            while i < chars.len()
+                && (chars[i].is_ascii_digit()
+                    || chars[i] == '.'
+                    || chars[i] == '-'
+                    || chars[i] == ':'
+                    || chars[i] == 'T')
+            {
                 i += 1;
             }
             let val: String = chars[start..i].iter().collect();
@@ -361,15 +455,17 @@ impl<'a> Parser<'a> {
 
     fn advance(&mut self) -> Option<&Token> {
         let tok = self.tokens.get(self.pos);
-        if tok.is_some() { self.pos += 1; }
+        if tok.is_some() {
+            self.pos += 1;
+        }
         tok
     }
 
     fn expect(&mut self, expected: &Token) -> Result<()> {
         match self.advance() {
             Some(t) if t == expected => Ok(()),
-            Some(t) => bail!("Expected {:?}, got {:?}", expected, t),
-            None => bail!("Expected {:?}, got end of input", expected),
+            Some(t) => bail!("Expected {expected:?}, got {t:?}"),
+            None => bail!("Expected {expected:?}, got end of input"),
         }
     }
 
@@ -386,7 +482,10 @@ impl<'a> Parser<'a> {
             self.advance(); // consume OR
             let right = self.parse_and_expr()?;
             left = match left {
-                Expr::Or(mut v) => { v.push(right); Expr::Or(v) }
+                Expr::Or(mut v) => {
+                    v.push(right);
+                    Expr::Or(v)
+                }
                 _ => Expr::Or(vec![left, right]),
             };
         }
@@ -402,7 +501,10 @@ impl<'a> Parser<'a> {
             self.advance(); // consume AND
             let right = self.parse_unary_expr()?;
             left = match left {
-                Expr::And(mut v) => { v.push(right); Expr::And(v) }
+                Expr::And(mut v) => {
+                    v.push(right);
+                    Expr::And(v)
+                }
                 _ => Expr::And(vec![left, right]),
             };
         }
@@ -435,7 +537,7 @@ impl<'a> Parser<'a> {
     fn parse_atom(&mut self) -> Result<Expr> {
         let key = match self.advance() {
             Some(Token::Ident(k)) => expr::normalize_key_string(k),
-            Some(t) => bail!("Expected identifier, got {:?}", t),
+            Some(t) => bail!("Expected identifier, got {t:?}"),
             None => bail!("Expected identifier, got end of input"),
         };
 
@@ -472,8 +574,8 @@ impl<'a> Parser<'a> {
         // Comparison: key op value
         let op = match self.advance() {
             Some(Token::Op(op)) => *op,
-            Some(t) => bail!("Expected operator after '{}', got {:?}", key, t),
-            None => bail!("Expected operator after '{}', got end of input", key),
+            Some(t) => bail!("Expected operator after '{key}', got {t:?}"),
+            None => bail!("Expected operator after '{key}', got end of input"),
         };
 
         let value = self.parse_value()?;
@@ -485,7 +587,7 @@ impl<'a> Parser<'a> {
         match self.advance() {
             Some(Token::Value(v)) => Ok(v.clone()),
             Some(Token::Ident(v)) => Ok(v.clone()), // Allow unquoted values
-            Some(t) => bail!("Expected value, got {:?}", t),
+            Some(t) => bail!("Expected value, got {t:?}"),
             None => bail!("Expected value, got end of input"),
         }
     }
@@ -505,7 +607,11 @@ impl<'a> Parser<'a> {
 // ============================================================================
 
 /// Apply a list of filters to a set of source IDs (AND logic between filters)
-pub fn apply_filters(conn: &mut Connection, source_ids: &[i64], filters: &[Filter]) -> Result<Vec<i64>> {
+pub fn apply_filters(
+    conn: &mut Connection,
+    source_ids: &[i64],
+    filters: &[Filter],
+) -> Result<Vec<i64>> {
     if filters.is_empty() {
         return Ok(source_ids.to_vec());
     }
@@ -546,7 +652,9 @@ fn validate_filter_keys(conn: &Connection, filters: &[Filter]) -> Result<()> {
     for key in all_keys {
         let (base_key, _, _) = parse_key_with_modifiers(&key)?;
         if !is_known_key(conn, &base_key)? {
-            bail!("Unknown fact key: '{}'. Use 'canon facts' to see available keys.", base_key);
+            bail!(
+                "Unknown fact key: '{base_key}'. Use 'canon facts' to see available keys."
+            );
         }
     }
     Ok(())
@@ -592,7 +700,13 @@ fn is_known_key(conn: &Connection, base_key: &str) -> Result<bool> {
 
 /// Check fact comparison for built-in keys (derived from source columns)
 /// This is used by the cached version for built-in key fallback
-fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareOp, value: &str) -> Result<bool> {
+fn check_fact_compare(
+    conn: &Connection,
+    source_id: i64,
+    key: &str,
+    op: CompareOp,
+    value: &str,
+) -> Result<bool> {
     use expr::BuiltinKey;
 
     // Parse key, accessor, and modifiers
@@ -613,7 +727,8 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                     .and_then(|e| e.to_str())
                     .unwrap_or("");
                 let fact_value = FactValue::Text(ext.to_string());
-                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                let modified =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
                 return Ok(compare_fact_value(&modified, op, value));
             }
             BuiltinKey::Filename => {
@@ -627,7 +742,8 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                     .and_then(|f| f.to_str())
                     .unwrap_or(&rel_path);
                 let fact_value = FactValue::Text(filename.to_string());
-                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                let modified =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
                 return Ok(compare_fact_value(&modified, op, value));
             }
             BuiltinKey::SourceRoot => {
@@ -637,7 +753,8 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                     |row| row.get(0),
                 )?;
                 let fact_value = FactValue::Text(root_path);
-                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                let modified =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
                 return Ok(compare_fact_value(&modified, op, value));
             }
             BuiltinKey::SourcePath => {
@@ -649,10 +766,11 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                 let full_path = if rel_path.is_empty() {
                     root_path
                 } else {
-                    format!("{}/{}", root_path, rel_path)
+                    format!("{root_path}/{rel_path}")
                 };
                 let fact_value = FactValue::Text(full_path);
-                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                let modified =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
                 return Ok(compare_fact_value(&modified, op, value));
             }
             BuiltinKey::SourceRelPath => {
@@ -662,7 +780,8 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                     |row| row.get(0),
                 )?;
                 let fact_value = FactValue::Text(rel_path);
-                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                let modified =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
                 return Ok(compare_fact_value(&modified, op, value));
             }
 
@@ -674,7 +793,8 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                     |row| row.get(0),
                 )?;
                 let fact_value = FactValue::Num(v as f64);
-                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                let modified =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
                 return Ok(compare_fact_value(&modified, op, value));
             }
             BuiltinKey::SourceMtime | BuiltinKey::Mtime => {
@@ -685,7 +805,8 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                 )?;
                 // mtime is a time value, so use Time type for proper modifier support
                 let fact_value = FactValue::Time(v);
-                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                let modified =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
                 return Ok(compare_fact_value(&modified, op, value));
             }
             BuiltinKey::SourceDevice => {
@@ -696,7 +817,8 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                 )?;
                 if let Some(d) = device {
                     let fact_value = FactValue::Num(d as f64);
-                    let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                    let modified =
+                        apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
                     return Ok(compare_fact_value(&modified, op, value));
                 }
                 return Ok(false);
@@ -709,7 +831,8 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                 )?;
                 if let Some(i) = inode {
                     let fact_value = FactValue::Num(i as f64);
-                    let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                    let modified =
+                        apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
                     return Ok(compare_fact_value(&modified, op, value));
                 }
                 return Ok(false);
@@ -721,13 +844,15 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
                     |row| row.get(0),
                 )?;
                 let fact_value = FactValue::Num(v as f64);
-                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                let modified =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
                 return Ok(compare_fact_value(&modified, op, value));
             }
             BuiltinKey::SourceId | BuiltinKey::Id => {
                 // The source ID is the source_id parameter itself
                 let fact_value = FactValue::Num(source_id as f64);
-                let modified = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
+                let modified =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
                 return Ok(compare_fact_value(&modified, op, value));
             }
 
@@ -758,7 +883,9 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
 
     if let Some(obj_id) = object_id {
         if let Some(fact_value) = get_fact_value(conn, "object", obj_id, &base_key)? {
-            if let Ok(modified) = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key) {
+            if let Ok(modified) =
+                apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
+            {
                 if compare_fact_value(&modified, op, value) {
                     return Ok(true);
                 }
@@ -774,7 +901,12 @@ fn check_fact_compare(conn: &Connection, source_id: i64, key: &str, op: CompareO
 // ============================================================================
 
 /// Evaluate an expression using prefetched fact cache
-fn eval_expr_cached(conn: &Connection, source_id: i64, expr: &Expr, cache: &FactCache) -> Result<bool> {
+fn eval_expr_cached(
+    conn: &Connection,
+    source_id: i64,
+    expr: &Expr,
+    cache: &FactCache,
+) -> Result<bool> {
     match expr {
         Expr::And(exprs) => {
             for e in exprs {
@@ -794,12 +926,19 @@ fn eval_expr_cached(conn: &Connection, source_id: i64, expr: &Expr, cache: &Fact
         }
         Expr::Not(e) => Ok(!eval_expr_cached(conn, source_id, e, cache)?),
         Expr::Exists { key } => check_fact_exists_cached(conn, source_id, key, cache),
-        Expr::Compare { key, op, value } => check_fact_compare_cached(conn, source_id, key, *op, value, cache),
+        Expr::Compare { key, op, value } => {
+            check_fact_compare_cached(conn, source_id, key, *op, value, cache)
+        }
         Expr::In { key, values } => check_fact_in_cached(conn, source_id, key, values, cache),
     }
 }
 
-fn check_fact_exists_cached(_conn: &Connection, source_id: i64, key: &str, cache: &FactCache) -> Result<bool> {
+fn check_fact_exists_cached(
+    _conn: &Connection,
+    source_id: i64,
+    key: &str,
+    cache: &FactCache,
+) -> Result<bool> {
     let (base_key, _accessor, _modifiers) = parse_key_with_modifiers(key)?;
 
     // Check cache for stored facts
@@ -819,7 +958,14 @@ fn check_fact_exists_cached(_conn: &Connection, source_id: i64, key: &str, cache
     Ok(expr::is_builtin_key(&base_key))
 }
 
-fn check_fact_compare_cached(conn: &Connection, source_id: i64, key: &str, op: CompareOp, value: &str, cache: &FactCache) -> Result<bool> {
+fn check_fact_compare_cached(
+    conn: &Connection,
+    source_id: i64,
+    key: &str,
+    op: CompareOp,
+    value: &str,
+    cache: &FactCache,
+) -> Result<bool> {
     use expr::BuiltinKey;
 
     let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
@@ -833,7 +979,8 @@ fn check_fact_compare_cached(conn: &Connection, source_id: i64, key: &str, op: C
     // Use cache for stored facts
     if let Some(fact_value) = cache.get_source_fact(source_id, &base_key) {
         let local_value = to_local_fact_value(fact_value);
-        if let Ok(modified) = apply_accessor_and_modifiers(local_value, &accessor, &modifiers, key) {
+        if let Ok(modified) = apply_accessor_and_modifiers(local_value, &accessor, &modifiers, key)
+        {
             if compare_fact_value(&modified, op, value) {
                 return Ok(true);
             }
@@ -842,7 +989,8 @@ fn check_fact_compare_cached(conn: &Connection, source_id: i64, key: &str, op: C
 
     if let Some(fact_value) = cache.get_object_fact(source_id, &base_key) {
         let local_value = to_local_fact_value(fact_value);
-        if let Ok(modified) = apply_accessor_and_modifiers(local_value, &accessor, &modifiers, key) {
+        if let Ok(modified) = apply_accessor_and_modifiers(local_value, &accessor, &modifiers, key)
+        {
             if compare_fact_value(&modified, op, value) {
                 return Ok(true);
             }
@@ -852,7 +1000,13 @@ fn check_fact_compare_cached(conn: &Connection, source_id: i64, key: &str, op: C
     Ok(false)
 }
 
-fn check_fact_in_cached(conn: &Connection, source_id: i64, key: &str, values: &[String], cache: &FactCache) -> Result<bool> {
+fn check_fact_in_cached(
+    conn: &Connection,
+    source_id: i64,
+    key: &str,
+    values: &[String],
+    cache: &FactCache,
+) -> Result<bool> {
     for value in values {
         if check_fact_compare_cached(conn, source_id, key, CompareOp::Eq, value, cache)? {
             return Ok(true);
@@ -876,7 +1030,9 @@ fn to_local_fact_value(fv: &expr::FactValue) -> FactValue {
 // ============================================================================
 
 // Use expr::parse_key_with_modifiers for parsing - just re-export for local use
-fn parse_key_with_modifiers(key: &str) -> Result<(String, Option<expr::PathAccessor>, Vec<expr::ModifierCall>)> {
+fn parse_key_with_modifiers(
+    key: &str,
+) -> Result<(String, Option<expr::PathAccessor>, Vec<expr::ModifierCall>)> {
     expr::parse_key_with_modifiers(key)
 }
 
@@ -938,7 +1094,12 @@ impl From<FactValue> for serde_json::Value {
     }
 }
 
-pub fn get_fact_value(conn: &Connection, entity_type: &str, entity_id: i64, key: &str) -> Result<Option<FactValue>> {
+pub fn get_fact_value(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: i64,
+    key: &str,
+) -> Result<Option<FactValue>> {
     let result: Option<(Option<String>, Option<f64>, Option<i64>)> = conn
         .query_row(
             "SELECT value_text, value_num, value_time FROM facts
@@ -953,11 +1114,7 @@ pub fn get_fact_value(conn: &Connection, entity_type: &str, entity_id: i64, key:
             Some(FactValue::Text(t))
         } else if let Some(n) = num {
             Some(FactValue::Num(n))
-        } else if let Some(ts) = time {
-            Some(FactValue::Time(ts))
-        } else {
-            None
-        }
+        } else { time.map(FactValue::Time) }
     }))
 }
 

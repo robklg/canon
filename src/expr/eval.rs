@@ -45,7 +45,10 @@ pub enum PathAccessor {
     /// Single index: [2] or [-1]
     Index(i32),
     /// Slice: [1:3] or [-3:-1] or [1:] or [:3]
-    Slice { start: Option<i32>, end: Option<i32> },
+    Slice {
+        start: Option<i32>,
+        end: Option<i32>,
+    },
 }
 
 /// Modifier category for grouping
@@ -67,10 +70,10 @@ pub enum Modifier {
     Hour,
     Minute,
     Second,
-    Date,      // YYYY-MM-DD
-    Time,      // HH:MM:SS
+    Date, // YYYY-MM-DD
+    Time, // HH:MM:SS
     #[strum(serialize = "datetime")]
-    DateTime,  // YYYY-MM-DDTHH:MM:SS
+    DateTime, // YYYY-MM-DDTHH:MM:SS
     #[strum(serialize = "yearmonth")]
     YearMonth, // YYYY-MM
     Week,
@@ -91,16 +94,25 @@ impl Modifier {
     /// Get the category of this modifier
     pub const fn category(&self) -> ModifierCategory {
         match self {
-            Modifier::Year | Modifier::Month | Modifier::Day |
-            Modifier::Hour | Modifier::Minute | Modifier::Second |
-            Modifier::Date | Modifier::Time | Modifier::DateTime |
-            Modifier::YearMonth | Modifier::Week | Modifier::Weekday | Modifier::Quarter => {
-                ModifierCategory::Time
-            }
-            Modifier::Stem | Modifier::Ext | Modifier::Short |
-            Modifier::Lowercase | Modifier::Uppercase | Modifier::Capitalize => {
-                ModifierCategory::String
-            }
+            Modifier::Year
+            | Modifier::Month
+            | Modifier::Day
+            | Modifier::Hour
+            | Modifier::Minute
+            | Modifier::Second
+            | Modifier::Date
+            | Modifier::Time
+            | Modifier::DateTime
+            | Modifier::YearMonth
+            | Modifier::Week
+            | Modifier::Weekday
+            | Modifier::Quarter => ModifierCategory::Time,
+            Modifier::Stem
+            | Modifier::Ext
+            | Modifier::Short
+            | Modifier::Lowercase
+            | Modifier::Uppercase
+            | Modifier::Capitalize => ModifierCategory::String,
             Modifier::Bucket => ModifierCategory::Numeric,
         }
     }
@@ -333,9 +345,9 @@ impl BuiltinKey {
             | BuiltinKey::Ext => BuiltinKeyCategory::Derived,
 
             // Stored: lives in facts table
-            BuiltinKey::Hash
-            | BuiltinKey::HashShort
-            | BuiltinKey::ContentHashSha256 => BuiltinKeyCategory::Stored,
+            BuiltinKey::Hash | BuiltinKey::HashShort | BuiltinKey::ContentHashSha256 => {
+                BuiltinKeyCategory::Stored
+            }
         }
     }
 
@@ -365,16 +377,27 @@ impl BuiltinKey {
     /// Get the fact type for this key
     pub fn fact_type(&self) -> FactType {
         match self {
-            BuiltinKey::SourceExt | BuiltinKey::Filename | BuiltinKey::Stem | BuiltinKey::Ext
-            | BuiltinKey::Hash | BuiltinKey::HashShort | BuiltinKey::ContentHashSha256 => FactType::Text,
+            BuiltinKey::SourceExt
+            | BuiltinKey::Filename
+            | BuiltinKey::Stem
+            | BuiltinKey::Ext
+            | BuiltinKey::Hash
+            | BuiltinKey::HashShort
+            | BuiltinKey::ContentHashSha256 => FactType::Text,
 
-            BuiltinKey::SourceSize | BuiltinKey::Size
-            | BuiltinKey::SourceId | BuiltinKey::SourceDevice | BuiltinKey::SourceInode
-            | BuiltinKey::Id | BuiltinKey::RootId => FactType::Num,
+            BuiltinKey::SourceSize
+            | BuiltinKey::Size
+            | BuiltinKey::SourceId
+            | BuiltinKey::SourceDevice
+            | BuiltinKey::SourceInode
+            | BuiltinKey::Id
+            | BuiltinKey::RootId => FactType::Num,
 
             BuiltinKey::SourceMtime | BuiltinKey::Mtime => FactType::Time,
 
-            BuiltinKey::SourcePath | BuiltinKey::SourceRoot | BuiltinKey::SourceRelPath => FactType::Path,
+            BuiltinKey::SourcePath | BuiltinKey::SourceRoot | BuiltinKey::SourceRelPath => {
+                FactType::Path
+            }
         }
     }
 
@@ -480,7 +503,7 @@ pub fn parse_pattern(pattern: &str) -> Result<Pattern> {
             // Parse expression until closing brace
             let mut expr_str = String::new();
             let mut depth = 1;
-            while let Some(c) = chars.next() {
+            for c in chars.by_ref() {
                 if c == '{' {
                     depth += 1;
                     expr_str.push(c);
@@ -595,7 +618,7 @@ fn parse_accessor(s: &str) -> Result<PathAccessor> {
         // Single index
         let index = s
             .parse::<i32>()
-            .map_err(|_| anyhow::anyhow!("Invalid index: '{}'", s))?;
+            .map_err(|_| anyhow::anyhow!("Invalid index: '{s}'"))?;
         Ok(PathAccessor::Index(index))
     }
 }
@@ -607,7 +630,7 @@ pub fn parse_modifier(s: &str) -> Result<ModifierCall> {
     // Check for function syntax: modifier(arg1,arg2,...)
     let (name, args) = if let Some(paren_pos) = s.find('(') {
         if !s.ends_with(')') {
-            bail!("Unclosed '(' in modifier: '{}'", s);
+            bail!("Unclosed '(' in modifier: '{s}'");
         }
         let name = &s[..paren_pos];
         let args_str = &s[paren_pos + 1..s.len() - 1];
@@ -666,7 +689,7 @@ pub fn normalize_fact_key(key: &str) -> String {
     }
 
     // Add content. prefix
-    format!("content.{}", key)
+    format!("content.{key}")
 }
 
 /// Normalize a full key string that may contain accessors and modifiers.
@@ -701,7 +724,9 @@ pub fn normalize_key_string(key: &str) -> String {
 ///
 /// Keys without a namespace prefix are normalized to `content.*` (e.g., "Make" becomes "content.Make").
 /// Built-in keys (source.*, filename, etc.) are not modified.
-pub fn parse_key_with_modifiers(key: &str) -> Result<(String, Option<PathAccessor>, Vec<ModifierCall>)> {
+pub fn parse_key_with_modifiers(
+    key: &str,
+) -> Result<(String, Option<PathAccessor>, Vec<ModifierCall>)> {
     // Split by | first to separate modifiers
     let parts: Vec<&str> = key.split('|').collect();
     let key_part = parts[0];
@@ -789,7 +814,7 @@ fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
                 let full_path = if rel_path.is_empty() {
                     root.clone()
                 } else {
-                    format!("{}/{}", root, rel_path)
+                    format!("{root}/{rel_path}")
                 };
                 // Strip scope prefix
                 let scope_rel = if full_path.starts_with(scope) {
@@ -801,7 +826,9 @@ fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
                 };
                 return Ok(FactValue::Path(scope_rel));
             }
-            (None, _, _) => bail!("scope.rel_path not available (no scope was specified during manifest generation)"),
+            (None, _, _) => bail!(
+                "scope.rel_path not available (no scope was specified during manifest generation)"
+            ),
             _ => bail!("scope.rel_path not available"),
         }
     }
@@ -828,7 +855,7 @@ fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
                         let full = if rel_path.is_empty() {
                             root.clone()
                         } else {
-                            format!("{}/{}", root, rel_path)
+                            format!("{root}/{rel_path}")
                         };
                         return Ok(FactValue::Path(full));
                     }
@@ -1057,7 +1084,7 @@ fn apply_time_modifier(timestamp: i64, modifier: Modifier) -> Result<FactValue> 
     use chrono::Datelike;
 
     let dt = chrono::DateTime::from_timestamp(timestamp, 0)
-        .ok_or_else(|| anyhow::anyhow!("Invalid timestamp: {}", timestamp))?;
+        .ok_or_else(|| anyhow::anyhow!("Invalid timestamp: {timestamp}"))?;
 
     let result = match modifier {
         Modifier::Year => dt.format("%Y").to_string(),
@@ -1074,7 +1101,7 @@ fn apply_time_modifier(timestamp: i64, modifier: Modifier) -> Result<FactValue> 
         Modifier::Weekday => dt.format("%A").to_string(), // Full weekday name
         Modifier::Quarter => {
             let q = (dt.month() - 1) / 3 + 1;
-            format!("Q{}", q)
+            format!("Q{q}")
         }
         _ => unreachable!(),
     };
@@ -1094,7 +1121,12 @@ fn format_magnitude_bucket(n: f64) -> String {
     let lower = 10_f64.powi(log);
     let upper = 10_f64.powi(log + 1);
 
-    format!("{}{}-{}", sign, format_bucket_num(lower), format_bucket_num(upper))
+    format!(
+        "{}{}-{}",
+        sign,
+        format_bucket_num(lower),
+        format_bucket_num(upper)
+    )
 }
 
 /// Format bucket using custom thresholds
@@ -1121,9 +1153,9 @@ fn format_threshold_bucket(n: f64, thresholds: &[f64], for_display: bool) -> Str
     // Value >= last threshold
     let last = format_threshold_num(*thresholds.last().unwrap());
     if for_display {
-        format!(">{}", last)
+        format!(">{last}")
     } else {
-        format!("{}-Inf", last)
+        format!("{last}-Inf")
     }
 }
 
@@ -1132,7 +1164,7 @@ fn format_threshold_num(v: f64) -> String {
     if v.fract() == 0.0 {
         format!("{}", v as i64)
     } else {
-        format!("{}", v)
+        format!("{v}")
     }
 }
 
@@ -1150,7 +1182,7 @@ fn format_bucket_num(v: f64) -> String {
         "0".to_string()
     } else {
         // For sub-1 values, trim trailing zeros
-        format!("{:.3}", v)
+        format!("{v:.3}")
             .trim_end_matches('0')
             .trim_end_matches('.')
             .to_string()
@@ -1166,7 +1198,7 @@ fn fact_value_to_string(value: &FactValue) -> String {
             if n.fract() == 0.0 {
                 format!("{}", *n as i64)
             } else {
-                format!("{}", n)
+                format!("{n}")
             }
         }
         FactValue::Time(ts) => ts.to_string(),
@@ -1347,18 +1379,26 @@ mod tests {
     fn test_hash_short_alias() {
         let pattern = parse_pattern("{hash_short}").unwrap();
         let mut ctx = EvalContext::new();
-        ctx.set_fact("object.hash", FactValue::Text("abcdef1234567890".to_string()));
+        ctx.set_fact(
+            "object.hash",
+            FactValue::Text("abcdef1234567890".to_string()),
+        );
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "abcdef12");
     }
 
     #[test]
     fn test_complex_pattern() {
-        let pattern = parse_pattern("{source.rel_path[0]}/{source.mtime|year}/{stem}_{hash_short}.{ext}").unwrap();
+        let pattern =
+            parse_pattern("{source.rel_path[0]}/{source.mtime|year}/{stem}_{hash_short}.{ext}")
+                .unwrap();
         let mut ctx = EvalContext::new();
         ctx.set_source_rel_path("vacation/photos/IMG_001.jpg".to_string());
         ctx.set_fact("source.mtime", FactValue::Time(1718452800));
-        ctx.set_fact("object.hash", FactValue::Text("abcdef1234567890".to_string()));
+        ctx.set_fact(
+            "object.hash",
+            FactValue::Text("abcdef1234567890".to_string()),
+        );
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "vacation/2024/IMG_001_abcdef12.jpg");
     }
@@ -1385,7 +1425,10 @@ mod tests {
         let thresholds = vec![60.0, 3600.0, 7200.0];
         assert_eq!(format_threshold_bucket(30.0, &thresholds, true), "<60");
         assert_eq!(format_threshold_bucket(100.0, &thresholds, true), "60-3600");
-        assert_eq!(format_threshold_bucket(5000.0, &thresholds, true), "3600-7200");
+        assert_eq!(
+            format_threshold_bucket(5000.0, &thresholds, true),
+            "3600-7200"
+        );
         assert_eq!(format_threshold_bucket(10000.0, &thresholds, true), ">7200");
     }
 
@@ -1394,9 +1437,18 @@ mod tests {
         // Test format_threshold_bucket with for_display=false (path-safe)
         let thresholds = vec![60.0, 3600.0, 7200.0];
         assert_eq!(format_threshold_bucket(30.0, &thresholds, false), "-Inf-60");
-        assert_eq!(format_threshold_bucket(100.0, &thresholds, false), "60-3600");
-        assert_eq!(format_threshold_bucket(5000.0, &thresholds, false), "3600-7200");
-        assert_eq!(format_threshold_bucket(10000.0, &thresholds, false), "7200-Inf");
+        assert_eq!(
+            format_threshold_bucket(100.0, &thresholds, false),
+            "60-3600"
+        );
+        assert_eq!(
+            format_threshold_bucket(5000.0, &thresholds, false),
+            "3600-7200"
+        );
+        assert_eq!(
+            format_threshold_bucket(10000.0, &thresholds, false),
+            "7200-Inf"
+        );
     }
 
     #[test]

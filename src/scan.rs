@@ -65,8 +65,7 @@ fn classify_sources_in_empty_dir(
             rel_prefix
         };
         eprintln!(
-            "Warning: {} contains {} files on different device (possibly disconnected storage)",
-            path_desc, disconnected_count
+            "Warning: {path_desc} contains {disconnected_count} files on different device (possibly disconnected storage)"
         );
     }
 
@@ -92,14 +91,24 @@ struct FileToHash {
     source_id: i64,
     full_path: PathBuf,
     old_object_id: Option<i64>,
-    basis_changed: bool,  // True if file was new/updated (mtime/size changed)
+    basis_changed: bool, // True if file was new/updated (mtime/size changed)
 }
 
-pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comment: Option<&str>, all_roots: bool, no_hash: bool, verify: bool, ignore_device_id: bool) -> Result<()> {
+pub fn run(
+    db: &Db,
+    paths: &[PathBuf],
+    role: Option<&str>,
+    add_root: bool,
+    comment: Option<&str>,
+    all_roots: bool,
+    no_hash: bool,
+    verify: bool,
+    ignore_device_id: bool,
+) -> Result<()> {
     // Validate role if provided
     if let Some(r) = role {
         if r != "source" && r != "archive" {
-            bail!("Invalid role '{}'. Must be 'source' or 'archive'", r);
+            bail!("Invalid role '{r}'. Must be 'source' or 'archive'");
         }
     }
 
@@ -126,7 +135,10 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
         }
 
         println!("Scanning {} roots...", filtered.len());
-        filtered.into_iter().map(|r| PathBuf::from(&r.path)).collect()
+        filtered
+            .into_iter()
+            .map(|r| PathBuf::from(&r.path))
+            .collect()
     } else {
         paths.to_vec()
     };
@@ -144,15 +156,16 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
         };
 
         // Check if path is inside an existing root (including suspended)
-        let (root_id, root_path, scan_prefix, _root_role) = match resolve_root_path_any(&roots, &canonical)? {
+        let (root_id, root_path, scan_prefix, _root_role) = match resolve_root_path_any(
+            &roots, &canonical,
+        )? {
             Some((id, root_path, existing_role, rel_path)) => {
                 // Path is inside an existing root - check if suspended using cached roots
                 let root = roots.iter().find(|r| r.id == id);
                 if let Some(r) = root {
                     if r.is_suspended() {
                         bail!(
-                            "Root '{}' is suspended. Use 'canon roots unsuspend' to reactivate.",
-                            root_path
+                            "Root '{root_path}' is suspended. Use 'canon roots unsuspend' to reactivate."
                         );
                     }
                 }
@@ -170,10 +183,7 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
                 if let Some(r) = role {
                     if existing_role != r {
                         bail!(
-                            "Root '{}' has role '{}', cannot scan with --role {}",
-                            root_path,
-                            existing_role,
-                            r
+                            "Root '{root_path}' has role '{existing_role}', cannot scan with --role {r}"
                         );
                     }
                 }
@@ -195,7 +205,7 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
                 // role is guaranteed to be Some when add_root is true (validated in main.rs)
                 let new_role = role.expect("--role is required with --add");
                 check_overlapping_roots(&roots, &canonical)?;
-                let new_root = create_root(&conn, &canonical, new_role, comment)?;
+                let new_root = create_root(conn, &canonical, new_role, comment)?;
                 (new_root.id, canonical.clone(), None, new_role.to_string())
             }
         };
@@ -205,7 +215,16 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
         let should_hash = !no_hash;
         let hash_all = verify;
 
-        let result = scan_root(&conn, root_id, &root_path, scan_prefix.as_deref(), now, should_hash, hash_all, ignore_device_id)?;
+        let result = scan_root(
+            conn,
+            root_id,
+            &root_path,
+            scan_prefix.as_deref(),
+            now,
+            should_hash,
+            hash_all,
+            ignore_device_id,
+        )?;
 
         // Update last_scanned_at only for full root scans (not subdirectory scans)
         if scan_prefix.is_none() {
@@ -239,15 +258,18 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
         summary.push_str(&format!(", {} skipped (read errors)", total_stats.skipped));
     }
     if total_stats.disconnected > 0 {
-        summary.push_str(&format!(", {} skipped (disconnected)", total_stats.disconnected));
+        summary.push_str(&format!(
+            ", {} skipped (disconnected)",
+            total_stats.disconnected
+        ));
     }
-    println!("{}", summary);
+    println!("{summary}");
 
     // Hash collected files with progress indicator
     if !all_files_to_hash.is_empty() {
         let total = all_files_to_hash.len();
         let progress = Progress::new(total);
-        eprintln!("Computing hashes for {} files...", total);
+        eprintln!("Computing hashes for {total} files...");
 
         for (i, file) in all_files_to_hash.iter().enumerate() {
             progress.update(i);
@@ -256,7 +278,11 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
             let hash_value = match compute_full_hash(&file.full_path) {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!("\nWarning: Failed to hash {}: {}", file.full_path.display(), e);
+                    eprintln!(
+                        "\nWarning: Failed to hash {}: {}",
+                        file.full_path.display(),
+                        e
+                    );
                     continue;
                 }
             };
@@ -281,7 +307,13 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
             repo::source::set_object_id(conn, file.source_id, new_object.id)?;
 
             // Store hash as fact on object
-            repo::fact::store_object_fact(conn, new_object.id, "content.hash.sha256", &hash_value, current_timestamp())?;
+            repo::fact::store_object_fact(
+                conn,
+                new_object.id,
+                "content.hash.sha256",
+                &hash_value,
+                current_timestamp(),
+            )?;
 
             total_stats.hashed += 1;
         }
@@ -305,7 +337,12 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
     Ok(())
 }
 
-fn create_root(conn: &Connection, path: &Path, role: &str, comment: Option<&str>) -> Result<crate::domain::root::Root> {
+fn create_root(
+    conn: &Connection,
+    path: &Path,
+    role: &str,
+    comment: Option<&str>,
+) -> Result<crate::domain::root::Root> {
     let path_str = path.to_str().context("Path is not valid UTF-8")?;
     repo::root::create(conn, path_str, role, comment)
 }
@@ -367,9 +404,10 @@ fn scan_root(
     let mut handled_ids: HashSet<i64> = HashSet::new();
 
     // Fetch expected source IDs at start (for missing detection via pure function)
-    let expected_ids: HashSet<i64> = repo::source::fetch_source_ids_for_root(conn, root_id, scan_prefix)?
-        .into_iter()
-        .collect();
+    let expected_ids: HashSet<i64> =
+        repo::source::fetch_source_ids_for_root(conn, root_id, scan_prefix)?
+            .into_iter()
+            .collect();
 
     // Determine the actual path to walk
     let walk_path = match scan_prefix {
@@ -381,7 +419,7 @@ fn scan_root(
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("Warning: {}", e);
+                eprintln!("Warning: {e}");
                 continue;
             }
         };
@@ -488,11 +526,15 @@ fn scan_root(
     }
 
     // Mark missing/disconnected files based on outcomes
-    let (missing_count, disconnected_count) = mark_missing_sources(conn, &outcomes, now, ignore_device_id)?;
+    let (missing_count, disconnected_count) =
+        mark_missing_sources(conn, &outcomes, now, ignore_device_id)?;
     stats.missing = missing_count;
     stats.disconnected = disconnected_count;
 
-    Ok(ScanRootResult { stats, files_to_hash })
+    Ok(ScanRootResult {
+        stats,
+        files_to_hash,
+    })
 }
 
 enum FileAction {
@@ -505,7 +547,7 @@ enum FileAction {
 struct ProcessResult {
     source_id: i64,
     action: FileAction,
-    old_object_id: Option<i64>,  // For detecting unexpected hash changes
+    old_object_id: Option<i64>, // For detecting unexpected hash changes
 }
 
 fn process_file(
@@ -561,15 +603,12 @@ fn process_file(
     // Map reconciliation to FileAction and extract old_object_id
     let (action, old_object_id) = match &reconciliation {
         Reconciliation::New => (FileAction::New, None),
-        Reconciliation::Unchanged { .. } => {
-            (FileAction::Unchanged, source_at_path.and_then(|s| s.object_id))
-        }
-        Reconciliation::Modified { old_object_id, .. } => {
-            (FileAction::Modified, *old_object_id)
-        }
-        Reconciliation::Moved { old_object_id, .. } => {
-            (FileAction::Moved, *old_object_id)
-        }
+        Reconciliation::Unchanged { .. } => (
+            FileAction::Unchanged,
+            source_at_path.and_then(|s| s.object_id),
+        ),
+        Reconciliation::Modified { old_object_id, .. } => (FileAction::Modified, *old_object_id),
+        Reconciliation::Moved { old_object_id, .. } => (FileAction::Moved, *old_object_id),
     };
 
     Ok(ProcessResult {
@@ -613,12 +652,9 @@ fn mark_missing_sources(
 
     if disconnected_count > 0 {
         eprintln!(
-            "Skipped {} files (device ID mismatch - possibly disconnected storage)",
-            disconnected_count
+            "Skipped {disconnected_count} files (device ID mismatch - possibly disconnected storage)"
         );
-        eprintln!(
-            "  If device IDs changed (e.g., NAS remount), re-run with --ignore-device-id"
-        );
+        eprintln!("  If device IDs changed (e.g., NAS remount), re-run with --ignore-device-id");
     }
 
     Ok((missing_count, disconnected_count))
@@ -651,12 +687,12 @@ pub fn compute_partial_hash(path: &Path, size: u64) -> Result<String> {
 
         // Read first 8KB
         file.read_exact(&mut buf)?;
-        hasher.update(&buf);
+        hasher.update(buf);
 
         // Seek to last 8KB and read
         file.seek(SeekFrom::End(-(PARTIAL_HASH_CHUNK_SIZE as i64)))?;
         file.read_exact(&mut buf)?;
-        hasher.update(&buf);
+        hasher.update(buf);
     }
 
     Ok(format!("{:x}", hasher.finalize()))
@@ -681,7 +717,11 @@ fn compute_full_hash(path: &Path) -> Result<String> {
 }
 
 /// Get or create an object by hash, returning the Object
-fn get_or_create_object(conn: &Connection, hash_type: &str, hash_value: &str) -> Result<crate::domain::object::Object> {
+fn get_or_create_object(
+    conn: &Connection,
+    hash_type: &str,
+    hash_value: &str,
+) -> Result<crate::domain::object::Object> {
     repo::object::get_or_create(conn, hash_type, hash_value)
 }
 
@@ -702,9 +742,20 @@ pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
         let suspended_str = if suspended { " (suspended)" } else { "" };
 
         if scope.to_string_lossy() == root_path {
-            println!("{} is already a {} root{}", scope.display(), role, suspended_str);
+            println!(
+                "{} is already a {} root{}",
+                scope.display(),
+                role,
+                suspended_str
+            );
         } else {
-            println!("{} is already under {} root {}{}", scope.display(), role, root_path, suspended_str);
+            println!(
+                "{} is already under {} root {}{}",
+                scope.display(),
+                role,
+                root_path,
+                suspended_str
+            );
         }
         return Ok(());
     }
@@ -721,7 +772,10 @@ pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
     scan_for_untracked(&scope, &roots, &mut dirs_with_files)?;
 
     if dirs_with_files.is_empty() {
-        println!("No untracked directories with files found under {}", scope.display());
+        println!(
+            "No untracked directories with files found under {}",
+            scope.display()
+        );
         return Ok(());
     }
 
@@ -741,13 +795,12 @@ pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
 }
 
 /// Recursively scan for untracked directories with files
-fn scan_for_untracked(
-    dir: &Path,
-    roots: &[PathBuf],
-    result: &mut HashSet<PathBuf>,
-) -> Result<()> {
+fn scan_for_untracked(dir: &Path, roots: &[PathBuf], result: &mut HashSet<PathBuf>) -> Result<()> {
     // Skip if this directory is under an existing root
-    if roots.iter().any(|root| dir == root || dir.starts_with(root)) {
+    if roots
+        .iter()
+        .any(|root| dir == root || dir.starts_with(root))
+    {
         return Ok(());
     }
 
@@ -760,12 +813,14 @@ fn scan_for_untracked(
     };
 
     // Check if this directory has any files (stop at first one found)
-    let has_file = entries.iter().any(|e| {
-        e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
-    });
+    let has_file = entries
+        .iter()
+        .any(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false));
 
     // Check if this directory contains any root (can't be added as a root - invariant)
-    let contains_root = roots.iter().any(|root| root.starts_with(dir) && root != dir);
+    let contains_root = roots
+        .iter()
+        .any(|root| root.starts_with(dir) && root != dir);
 
     if has_file && !contains_root {
         // Found a file and directory doesn't contain any roots: record it
@@ -804,7 +859,10 @@ fn find_common_ancestors(
             }
 
             // Stop if we hit a root
-            if roots.iter().any(|root| parent == root || parent.starts_with(root)) {
+            if roots
+                .iter()
+                .any(|root| parent == root || parent.starts_with(root))
+            {
                 break;
             }
 
@@ -845,7 +903,11 @@ mod tests {
             meta.dev(),
             meta.ino(),
             meta.len() as i64,
-            meta.modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            meta.modified()
+                .unwrap()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
         )
     }
 
@@ -853,20 +915,31 @@ mod tests {
     fn process_file_new() {
         let conn = repo::open_in_memory_for_test();
         let temp_dir = TempDir::new().unwrap();
-        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+        let root_id =
+            repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
 
         let (path, device, inode, size, mtime) = create_temp_file(&temp_dir, "new.txt", "content");
         let now = current_timestamp();
 
         let result = process_file(
-            &conn, root_id, "new.txt", &path,
-            device as i64, inode as i64, size, mtime, now,
-        ).unwrap();
+            &conn,
+            root_id,
+            "new.txt",
+            &path,
+            device as i64,
+            inode as i64,
+            size,
+            mtime,
+            now,
+        )
+        .unwrap();
 
         assert!(matches!(result.action, FileAction::New));
 
         // Verify source was inserted
-        let source = repo::source::fetch_by_path(&conn, root_id, "new.txt").unwrap().unwrap();
+        let source = repo::source::fetch_by_path(&conn, root_id, "new.txt")
+            .unwrap()
+            .unwrap();
         assert_eq!(source.size, size);
     }
 
@@ -874,18 +947,36 @@ mod tests {
     fn process_file_unchanged() {
         let conn = repo::open_in_memory_for_test();
         let temp_dir = TempDir::new().unwrap();
-        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+        let root_id =
+            repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
 
-        let (path, device, inode, size, mtime) = create_temp_file(&temp_dir, "unchanged.txt", "content");
+        let (path, device, inode, size, mtime) =
+            create_temp_file(&temp_dir, "unchanged.txt", "content");
 
         // Pre-insert source with matching metadata
-        repo::insert_test_source(&conn, root_id, "unchanged.txt", device as i64, inode as i64, size, mtime);
+        repo::insert_test_source(
+            &conn,
+            root_id,
+            "unchanged.txt",
+            device as i64,
+            inode as i64,
+            size,
+            mtime,
+        );
 
         let now = current_timestamp();
         let result = process_file(
-            &conn, root_id, "unchanged.txt", &path,
-            device as i64, inode as i64, size, mtime, now,
-        ).unwrap();
+            &conn,
+            root_id,
+            "unchanged.txt",
+            &path,
+            device as i64,
+            inode as i64,
+            size,
+            mtime,
+            now,
+        )
+        .unwrap();
 
         assert!(matches!(result.action, FileAction::Unchanged));
     }
@@ -894,18 +985,36 @@ mod tests {
     fn process_file_modified_size() {
         let conn = repo::open_in_memory_for_test();
         let temp_dir = TempDir::new().unwrap();
-        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+        let root_id =
+            repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
 
-        let (path, device, inode, size, mtime) = create_temp_file(&temp_dir, "modified.txt", "new content");
+        let (path, device, inode, size, mtime) =
+            create_temp_file(&temp_dir, "modified.txt", "new content");
 
         // Pre-insert source with different size
-        repo::insert_test_source(&conn, root_id, "modified.txt", device as i64, inode as i64, 5, mtime);
+        repo::insert_test_source(
+            &conn,
+            root_id,
+            "modified.txt",
+            device as i64,
+            inode as i64,
+            5,
+            mtime,
+        );
 
         let now = current_timestamp();
         let result = process_file(
-            &conn, root_id, "modified.txt", &path,
-            device as i64, inode as i64, size, mtime, now,
-        ).unwrap();
+            &conn,
+            root_id,
+            "modified.txt",
+            &path,
+            device as i64,
+            inode as i64,
+            size,
+            mtime,
+            now,
+        )
+        .unwrap();
 
         assert!(matches!(result.action, FileAction::Modified));
     }
@@ -914,18 +1023,36 @@ mod tests {
     fn process_file_moved() {
         let conn = repo::open_in_memory_for_test();
         let temp_dir = TempDir::new().unwrap();
-        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+        let root_id =
+            repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
 
-        let (path, device, inode, size, mtime) = create_temp_file(&temp_dir, "new_name.txt", "content");
+        let (path, device, inode, size, mtime) =
+            create_temp_file(&temp_dir, "new_name.txt", "content");
 
         // Pre-insert source at different path with same inode
-        repo::insert_test_source(&conn, root_id, "old_name.txt", device as i64, inode as i64, size, mtime);
+        repo::insert_test_source(
+            &conn,
+            root_id,
+            "old_name.txt",
+            device as i64,
+            inode as i64,
+            size,
+            mtime,
+        );
 
         let now = current_timestamp();
         let result = process_file(
-            &conn, root_id, "new_name.txt", &path,
-            device as i64, inode as i64, size, mtime, now,
-        ).unwrap();
+            &conn,
+            root_id,
+            "new_name.txt",
+            &path,
+            device as i64,
+            inode as i64,
+            size,
+            mtime,
+            now,
+        )
+        .unwrap();
 
         assert!(matches!(result.action, FileAction::Moved));
     }
@@ -936,7 +1063,8 @@ mod tests {
         // Should be processed normally, not skipped as disconnected
         let conn = repo::open_in_memory_for_test();
         let temp_dir = TempDir::new().unwrap();
-        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+        let root_id =
+            repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
 
         let (path, device, inode, size, mtime) = create_temp_file(&temp_dir, "file.txt", "content");
 
@@ -945,15 +1073,25 @@ mod tests {
 
         let now = current_timestamp();
         let result = process_file(
-            &conn, root_id, "file.txt", &path,
-            device as i64, inode as i64, size, mtime, now,
-        ).unwrap();
+            &conn,
+            root_id,
+            "file.txt",
+            &path,
+            device as i64,
+            inode as i64,
+            size,
+            mtime,
+            now,
+        )
+        .unwrap();
 
         // Should be Unchanged - device changes are legitimate metadata updates
         assert!(matches!(result.action, FileAction::Unchanged));
 
         // Verify the device was updated in the database
-        let source = repo::source::fetch_by_path(&conn, root_id, "file.txt").unwrap().unwrap();
+        let source = repo::source::fetch_by_path(&conn, root_id, "file.txt")
+            .unwrap()
+            .unwrap();
         assert_eq!(source.device, device as i64);
     }
 
@@ -961,7 +1099,8 @@ mod tests {
     fn mark_missing_sources_counts_correctly() {
         let conn = repo::open_in_memory_for_test();
         let temp_dir = TempDir::new().unwrap();
-        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+        let root_id =
+            repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
 
         let id1 = repo::insert_test_source(&conn, root_id, "file1.txt", 1, 1, 100, 1000);
         let id2 = repo::insert_test_source(&conn, root_id, "file2.txt", 1, 2, 100, 1000);
@@ -985,11 +1124,19 @@ mod tests {
         assert!(s1.is_some());
 
         // Verify id2 is not present (Missing)
-        let s2: i64 = conn.query_row("SELECT present FROM sources WHERE id = ?", [id2], |r| r.get(0)).unwrap();
+        let s2: i64 = conn
+            .query_row("SELECT present FROM sources WHERE id = ?", [id2], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(s2, 0);
 
         // Verify id3 is still present (Disconnected, not marked missing)
-        let s3: i64 = conn.query_row("SELECT present FROM sources WHERE id = ?", [id3], |r| r.get(0)).unwrap();
+        let s3: i64 = conn
+            .query_row("SELECT present FROM sources WHERE id = ?", [id3], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(s3, 1);
     }
 
@@ -997,7 +1144,8 @@ mod tests {
     fn mark_missing_sources_disconnected_with_ignore_flag() {
         let conn = repo::open_in_memory_for_test();
         let temp_dir = TempDir::new().unwrap();
-        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+        let root_id =
+            repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
 
         let id1 = repo::insert_test_source(&conn, root_id, "file1.txt", 1, 1, 100, 1000);
 
@@ -1018,33 +1166,55 @@ mod tests {
         // The old source record (present=1) gets updated with new file's attributes
         let conn = repo::open_in_memory_for_test();
         let temp_dir = TempDir::new().unwrap();
-        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+        let root_id =
+            repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
 
-        let (path, device, inode, size, mtime) = create_temp_file(&temp_dir, "replaced.txt", "new content");
+        let (path, device, inode, size, mtime) =
+            create_temp_file(&temp_dir, "replaced.txt", "new content");
 
         // Pre-insert source at same path but with DIFFERENT inode (simulates file that will be replaced)
         let old_inode = inode + 99999; // Different inode
-        repo::insert_test_source(&conn, root_id, "replaced.txt", device as i64, old_inode as i64, 50, mtime);
+        repo::insert_test_source(
+            &conn,
+            root_id,
+            "replaced.txt",
+            device as i64,
+            old_inode as i64,
+            50,
+            mtime,
+        );
 
         let now = current_timestamp();
         let result = process_file(
-            &conn, root_id, "replaced.txt", &path,
-            device as i64, inode as i64, size, mtime, now,
-        ).unwrap();
+            &conn,
+            root_id,
+            "replaced.txt",
+            &path,
+            device as i64,
+            inode as i64,
+            size,
+            mtime,
+            now,
+        )
+        .unwrap();
 
         // Should be New because inode differs (replacement)
         assert!(matches!(result.action, FileAction::New));
 
         // Only one source record should exist (the old one was updated)
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path = ?",
-            rusqlite::params![root_id, "replaced.txt"],
-            |r| r.get(0)
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path = ?",
+                rusqlite::params![root_id, "replaced.txt"],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
 
         // The source should have the NEW file's attributes
-        let source = repo::source::fetch_by_path(&conn, root_id, "replaced.txt").unwrap().unwrap();
+        let source = repo::source::fetch_by_path(&conn, root_id, "replaced.txt")
+            .unwrap()
+            .unwrap();
         assert_eq!(source.inode, inode as i64);
         assert_eq!(source.size, size);
         assert_eq!(source.basis_rev, 0); // Reset for new file
@@ -1056,36 +1226,54 @@ mod tests {
         // The stale record should be revived with new file's attributes
         let conn = repo::open_in_memory_for_test();
         let temp_dir = TempDir::new().unwrap();
-        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+        let root_id =
+            repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
 
-        let (path, device, inode, size, mtime) = create_temp_file(&temp_dir, "revived.txt", "new content");
+        let (path, device, inode, size, mtime) =
+            create_temp_file(&temp_dir, "revived.txt", "new content");
 
         // Pre-insert a STALE source (present=0) at same path - simulates file that was previously missing
         let old_source_id = repo::insert_test_source(&conn, root_id, "revived.txt", 1, 1, 50, 1000);
-        conn.execute("UPDATE sources SET present = 0 WHERE id = ?", [old_source_id]).unwrap();
+        conn.execute(
+            "UPDATE sources SET present = 0 WHERE id = ?",
+            [old_source_id],
+        )
+        .unwrap();
 
         let now = current_timestamp();
         let result = process_file(
-            &conn, root_id, "revived.txt", &path,
-            device as i64, inode as i64, size, mtime, now,
-        ).unwrap();
+            &conn,
+            root_id,
+            "revived.txt",
+            &path,
+            device as i64,
+            inode as i64,
+            size,
+            mtime,
+            now,
+        )
+        .unwrap();
 
         // Should be New (no present source at path, no source with this inode)
         assert!(matches!(result.action, FileAction::New));
 
         // The stale record should be revived (same ID, now present=1)
-        let source = repo::source::fetch_by_path(&conn, root_id, "revived.txt").unwrap().unwrap();
+        let source = repo::source::fetch_by_path(&conn, root_id, "revived.txt")
+            .unwrap()
+            .unwrap();
         assert_eq!(source.id, old_source_id); // Same record was revived
         assert_eq!(source.inode, inode as i64); // Updated to new inode
         assert_eq!(source.size, size); // Updated to new size
         assert_eq!(source.basis_rev, 0); // Reset for new file
 
         // Verify only one record exists
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path = ?",
-            rusqlite::params![root_id, "revived.txt"],
-            |r| r.get(0)
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path = ?",
+                rusqlite::params![root_id, "revived.txt"],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -1095,24 +1283,77 @@ mod tests {
         // This verifies that each process_file call operates correctly regardless of others
         let conn = repo::open_in_memory_for_test();
         let temp_dir = TempDir::new().unwrap();
-        let root_id = repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+        let root_id =
+            repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
 
         // Create three files with different scenarios
-        let (path1, dev1, ino1, size1, mtime1) = create_temp_file(&temp_dir, "new.txt", "new content");
-        let (path2, dev2, ino2, size2, mtime2) = create_temp_file(&temp_dir, "existing.txt", "existing");
-        let (path3, dev3, ino3, size3, mtime3) = create_temp_file(&temp_dir, "modified.txt", "modified content");
+        let (path1, dev1, ino1, size1, mtime1) =
+            create_temp_file(&temp_dir, "new.txt", "new content");
+        let (path2, dev2, ino2, size2, mtime2) =
+            create_temp_file(&temp_dir, "existing.txt", "existing");
+        let (path3, dev3, ino3, size3, mtime3) =
+            create_temp_file(&temp_dir, "modified.txt", "modified content");
 
         // Pre-insert existing file (unchanged)
-        repo::insert_test_source(&conn, root_id, "existing.txt", dev2 as i64, ino2 as i64, size2, mtime2);
+        repo::insert_test_source(
+            &conn,
+            root_id,
+            "existing.txt",
+            dev2 as i64,
+            ino2 as i64,
+            size2,
+            mtime2,
+        );
         // Pre-insert modified file (with different size)
-        repo::insert_test_source(&conn, root_id, "modified.txt", dev3 as i64, ino3 as i64, 5, mtime3);
+        repo::insert_test_source(
+            &conn,
+            root_id,
+            "modified.txt",
+            dev3 as i64,
+            ino3 as i64,
+            5,
+            mtime3,
+        );
 
         let now = current_timestamp();
 
         // Process all three files
-        let r1 = process_file(&conn, root_id, "new.txt", &path1, dev1 as i64, ino1 as i64, size1, mtime1, now).unwrap();
-        let r2 = process_file(&conn, root_id, "existing.txt", &path2, dev2 as i64, ino2 as i64, size2, mtime2, now).unwrap();
-        let r3 = process_file(&conn, root_id, "modified.txt", &path3, dev3 as i64, ino3 as i64, size3, mtime3, now).unwrap();
+        let r1 = process_file(
+            &conn,
+            root_id,
+            "new.txt",
+            &path1,
+            dev1 as i64,
+            ino1 as i64,
+            size1,
+            mtime1,
+            now,
+        )
+        .unwrap();
+        let r2 = process_file(
+            &conn,
+            root_id,
+            "existing.txt",
+            &path2,
+            dev2 as i64,
+            ino2 as i64,
+            size2,
+            mtime2,
+            now,
+        )
+        .unwrap();
+        let r3 = process_file(
+            &conn,
+            root_id,
+            "modified.txt",
+            &path3,
+            dev3 as i64,
+            ino3 as i64,
+            size3,
+            mtime3,
+            now,
+        )
+        .unwrap();
 
         // Each should have the correct action
         assert!(matches!(r1.action, FileAction::New));
@@ -1120,11 +1361,13 @@ mod tests {
         assert!(matches!(r3.action, FileAction::Modified));
 
         // All three sources should exist and be present
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sources WHERE root_id = ? AND present = 1",
-            [root_id],
-            |r| r.get(0)
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE root_id = ? AND present = 1",
+                [root_id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 3);
     }
 }

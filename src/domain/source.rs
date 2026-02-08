@@ -267,9 +267,7 @@ mod tests {
     #[test]
     fn matches_scope_under_directory() {
         let s = make_source("/home/user", "photos/2024/photo.jpg");
-        let scopes = vec![ScopeMatch::UnderDirectory(
-            "/home/user/photos".to_string(),
-        )];
+        let scopes = vec![ScopeMatch::UnderDirectory("/home/user/photos".to_string())];
         assert!(s.matches_scope(&scopes));
     }
 
@@ -278,9 +276,7 @@ mod tests {
         // A file that IS the directory path should match
         // (handles case where a file has same name as would-be directory)
         let s = make_source("/home/user", "photos");
-        let scopes = vec![ScopeMatch::UnderDirectory(
-            "/home/user/photos".to_string(),
-        )];
+        let scopes = vec![ScopeMatch::UnderDirectory("/home/user/photos".to_string())];
         assert!(s.matches_scope(&scopes));
     }
 
@@ -297,9 +293,7 @@ mod tests {
     fn matches_scope_not_under_similar_prefix_deeper() {
         // Another variant: /home/user/photos-backup is NOT under /home/user/photos
         let s = make_source("/home/user", "photos-backup/file.jpg");
-        let scopes = vec![ScopeMatch::UnderDirectory(
-            "/home/user/photos".to_string(),
-        )];
+        let scopes = vec![ScopeMatch::UnderDirectory("/home/user/photos".to_string())];
         assert!(!s.matches_scope(&scopes));
     }
 

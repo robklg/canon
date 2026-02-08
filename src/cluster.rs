@@ -6,14 +6,14 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::repo::{self, Connection, Db};
-use crate::domain::{FactEntry, FactValue};
+use crate::domain::path::canonicalize_scopes;
 use crate::domain::root::resolve_archive_path;
 use crate::domain::scope::ScopeMatch;
-use crate::domain::path::canonicalize_scopes;
 use crate::domain::source::Source;
-use crate::expr::{BuiltinKey, BuiltinKeyVisibility, FactType, Modifier, ModifierCategory};
+use crate::domain::{FactEntry, FactValue};
 use crate::expr::filter::{self, Filter};
+use crate::expr::{BuiltinKey, BuiltinKeyVisibility, FactType, Modifier, ModifierCategory};
+use crate::repo::{self, Connection, Db};
 
 /// TOML config file (without sources)
 #[derive(Serialize, Deserialize)]
@@ -64,7 +64,11 @@ pub struct LockEntry {
 
 impl LockEntry {
     /// Build a LockEntry from a Source and object hash info.
-    pub fn from_source(source: &Source, hash_type: Option<String>, hash_value: Option<String>) -> Self {
+    pub fn from_source(
+        source: &Source,
+        hash_type: Option<String>,
+        hash_value: Option<String>,
+    ) -> Self {
         Self {
             id: source.id,
             root_id: source.root_id,
@@ -108,14 +112,16 @@ fn generate_lock(
 
     // Report excluded files (hard gate - always skipped)
     if excluded_count > 0 {
-        eprintln!("Skipped {} excluded sources", excluded_count);
+        eprintln!("Skipped {excluded_count} excluded sources");
     }
 
     // Report unhashed files (hard gate - always skipped)
     if unhashed_count > 0 {
-        eprintln!("Skipped {} sources without content hash", unhashed_count);
+        eprintln!("Skipped {unhashed_count} sources without content hash");
         eprintln!("  To discover: run 'canon ls --unhashed' with your scope/pattern");
-        eprintln!("  To include: import hashes via worklist pipeline, then run 'canon cluster refresh'");
+        eprintln!(
+            "  To include: import hashes via worklist pipeline, then run 'canon cluster refresh'"
+        );
         eprintln!("  To permanently exclude: use 'canon exclude set' with your pattern AND 'NOT content.hash.sha256?'");
     }
 
@@ -125,7 +131,7 @@ fn generate_lock(
         if options.show_archived {
             eprintln!("Archived files:");
             for (source_path, archive_path) in &archived {
-                eprintln!("  {} -> {}", source_path, archive_path);
+                eprintln!("  {source_path} -> {archive_path}");
             }
         } else {
             eprintln!("Use --show-archived to list them");
@@ -372,7 +378,13 @@ fn query_sources(
     scope_prefixes: &[String],
     filters: &[Filter],
     include_archived: bool,
-) -> Result<(Vec<LockEntry>, Vec<(String, String)>, usize, usize, HashMap<i64, Vec<FactEntry>>)> {
+) -> Result<(
+    Vec<LockEntry>,
+    Vec<(String, String)>,
+    usize,
+    usize,
+    HashMap<i64, Vec<FactEntry>>,
+)> {
     // 1. Get all root IDs
     let root_ids: Vec<i64> = conn
         .prepare("SELECT id FROM roots")?
@@ -430,10 +442,7 @@ fn query_sources(
         .collect();
 
     // 7. Batch fetch objects for all sources with object_id
-    let object_ids: Vec<i64> = hashed_sources
-        .iter()
-        .filter_map(|s| s.object_id)
-        .collect();
+    let object_ids: Vec<i64> = hashed_sources.iter().filter_map(|s| s.object_id).collect();
     let objects = repo::object::batch_fetch_by_ids(conn, &object_ids)?;
 
     // 8. Batch fetch archive paths for all objects (eliminates N+1 query)
@@ -482,7 +491,6 @@ fn query_sources(
 fn current_timestamp() -> String {
     chrono::Utc::now().to_rfc3339()
 }
-
 
 /// Track types seen for a fact key
 #[derive(Default)]
@@ -568,7 +576,10 @@ fn collect_full_coverage_facts(
                 // Track uniqueness per source (a source might have same key from both source and object)
                 let seen_key = format!("{}:{}", source.id, fact.key);
                 if !seen_keys.contains(&seen_key) {
-                    fact_counts.entry(fact.key.clone()).or_default().add(fact_type);
+                    fact_counts
+                        .entry(fact.key.clone())
+                        .or_default()
+                        .add(fact_type);
                     seen_keys.insert(seen_key);
                 }
             }
@@ -587,7 +598,7 @@ fn collect_full_coverage_facts(
         mixed_type_warnings.sort_by(|a, b| a.0.cmp(&b.0));
         eprintln!("Warning: some facts have inconsistent types across sources:");
         for (key, breakdown) in &mixed_type_warnings {
-            eprintln!("  {}: {}", key, breakdown);
+            eprintln!("  {key}: {breakdown}");
         }
         eprintln!("  Type-specific modifiers (|year, |month, etc.) may fail on mismatched values.");
         eprintln!("  To fix: delete outliers with 'canon facts delete <key> --on object --value-type <minority-type>'");
@@ -618,7 +629,10 @@ fn get_fact_description(key: &str) -> String {
 }
 
 /// Generate fact help comments for the manifest
-fn generate_fact_help(source_count: usize, full_coverage_facts: &[(String, FactType, String)]) -> String {
+fn generate_fact_help(
+    source_count: usize,
+    full_coverage_facts: &[(String, FactType, String)],
+) -> String {
     use strum::IntoEnumIterator;
 
     if source_count == 0 {
@@ -626,7 +640,9 @@ fn generate_fact_help(source_count: usize, full_coverage_facts: &[(String, FactT
     }
 
     let mut help = String::new();
-    help.push_str(&format!("# Available facts for pattern (100% coverage on {} sources in this cluster):\n", source_count));
+    help.push_str(&format!(
+        "# Available facts for pattern (100% coverage on {source_count} sources in this cluster):\n"
+    ));
     help.push_str("#\n");
 
     // Built-in facts (auto-generated from BuiltinKey enum)
@@ -638,9 +654,17 @@ fn generate_fact_help(source_count: usize, full_coverage_facts: &[(String, FactT
         }
         let name: &'static str = key.into();
         let desc = key.description().unwrap_or("");
-        help.push_str(&format!("#   {:18} {:6} - {}\n", name, key.fact_type().as_str(), desc));
+        help.push_str(&format!(
+            "#   {:18} {:6} - {}\n",
+            name,
+            key.fact_type().as_str(),
+            desc
+        ));
     }
-    help.push_str(&format!("#   {:18} {:6} - {}\n", "object.hash", "text", "Content hash (if hashed)"));
+    help.push_str(&format!(
+        "#   {:18} {:6} - {}\n",
+        "object.hash", "text", "Content hash (if hashed)"
+    ));
     help.push_str("#\n");
 
     // User facts with 100% coverage
@@ -650,9 +674,14 @@ fn generate_fact_help(source_count: usize, full_coverage_facts: &[(String, FactT
             let desc_part = if description.is_empty() {
                 String::new()
             } else {
-                format!(" - {}", description)
+                format!(" - {description}")
             };
-            help.push_str(&format!("#   {:18} {:6}{}\n", key, fact_type.as_str(), desc_part));
+            help.push_str(&format!(
+                "#   {:18} {:6}{}\n",
+                key,
+                fact_type.as_str(),
+                desc_part
+            ));
         }
         help.push_str("#\n");
     }
@@ -660,11 +689,17 @@ fn generate_fact_help(source_count: usize, full_coverage_facts: &[(String, FactT
     // Modifiers reference (auto-generated from Modifier enum)
     let time_mods: Vec<_> = Modifier::iter()
         .filter(|m| m.category() == ModifierCategory::Time)
-        .map(|m| { let name: &'static str = m.into(); format!("|{}", name) })
+        .map(|m| {
+            let name: &'static str = m.into();
+            format!("|{name}")
+        })
         .collect();
     let string_mods: Vec<_> = Modifier::iter()
         .filter(|m| m.category() == ModifierCategory::String)
-        .map(|m| { let name: &'static str = m.into(); format!("|{}", name) })
+        .map(|m| {
+            let name: &'static str = m.into();
+            format!("|{name}")
+        })
         .collect();
     help.push_str("# Modifiers:\n");
     help.push_str(&format!("#   Time: {}\n", time_mods.join(" ")));
@@ -677,10 +712,10 @@ fn generate_fact_help(source_count: usize, full_coverage_facts: &[(String, FactT
     for key in BuiltinKey::iter() {
         if let Some(expansion) = key.expansion() {
             let name: &'static str = key.into();
-            help.push_str(&format!("#   {{{}}}  →  {{{}}}\n", name, expansion));
+            help.push_str(&format!("#   {{{name}}}  →  {{{expansion}}}\n"));
         }
     }
-    help.push_str("\n");
+    help.push('\n');
 
     help
 }
@@ -692,10 +727,7 @@ fn find_source_duplicates(sources: &[LockEntry]) -> Vec<(i64, Vec<i64>)> {
 
     for source in sources {
         if let Some(object_id) = source.object_id {
-            object_map
-                .entry(object_id)
-                .or_default()
-                .push(source.id);
+            object_map.entry(object_id).or_default().push(source.id);
         }
     }
 
@@ -824,7 +856,11 @@ mod tests {
             query_sources(&mut conn, &[], &[], false).unwrap();
 
         // Should only include source from active root
-        assert_eq!(sources.len(), 1, "Should exclude sources from suspended roots");
+        assert_eq!(
+            sources.len(),
+            1,
+            "Should exclude sources from suspended roots"
+        );
         assert_eq!(sources[0].path, "/active/file1.jpg");
     }
 
@@ -841,18 +877,34 @@ mod tests {
 
         // Source-level excluded
         let source_excl_obj = insert_object(&conn, "source_excl_hash", false);
-        insert_source(&conn, root, "source_excluded.jpg", Some(source_excl_obj), true);
+        insert_source(
+            &conn,
+            root,
+            "source_excluded.jpg",
+            Some(source_excl_obj),
+            true,
+        );
 
         // Object-level excluded (source not excluded, but object is)
         let object_excl_obj = insert_object(&conn, "object_excl_hash", true);
-        insert_source(&conn, root, "object_excluded.jpg", Some(object_excl_obj), false);
+        insert_source(
+            &conn,
+            root,
+            "object_excluded.jpg",
+            Some(object_excl_obj),
+            false,
+        );
 
         // Query sources
         let (sources, _archived, excluded_count, _unhashed_count, _facts) =
             query_sources(&mut conn, &[], &[], false).unwrap();
 
         // Should only include the normal source
-        assert_eq!(sources.len(), 1, "Should exclude both source-level and object-level excluded");
+        assert_eq!(
+            sources.len(),
+            1,
+            "Should exclude both source-level and object-level excluded"
+        );
         assert_eq!(sources[0].path, "/photos/normal.jpg");
         assert_eq!(excluded_count, 2, "Should count both excluded sources");
     }
@@ -879,7 +931,13 @@ mod tests {
 
         // Create another object that is NOT archived
         let unarchived_obj = insert_object(&conn, "unarchived_hash", false);
-        insert_source(&conn, source_root, "photo4.jpg", Some(unarchived_obj), false);
+        insert_source(
+            &conn,
+            source_root,
+            "photo4.jpg",
+            Some(unarchived_obj),
+            false,
+        );
 
         // Put the first object in archive
         insert_source(&conn, archive_root, "backup.jpg", Some(archived_obj), false);
@@ -897,7 +955,11 @@ mod tests {
         );
 
         // Only the unarchived source should be in the main sources list
-        assert_eq!(sources.len(), 1, "Only unarchived source should be in sources");
+        assert_eq!(
+            sources.len(),
+            1,
+            "Only unarchived source should be in sources"
+        );
         assert_eq!(sources[0].path, "/photos/photo4.jpg");
     }
 }

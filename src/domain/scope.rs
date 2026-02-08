@@ -35,4 +35,3 @@ impl ScopeMatch {
         paths.iter().map(|p| Self::classify(p)).collect()
     }
 }
-

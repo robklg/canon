@@ -97,11 +97,11 @@ pub fn batch_fetch_by_ids(conn: &Connection, object_ids: &[i64]) -> Result<HashM
 ///
 /// This is a single-row lookup, not a batch operation.
 pub fn fetch_by_hash(conn: &Connection, hash: &str) -> Result<Option<Object>> {
-    let sql = format!("SELECT {} FROM objects WHERE hash_value = ?", OBJECT_COLUMNS);
+    let sql = format!(
+        "SELECT {OBJECT_COLUMNS} FROM objects WHERE hash_value = ?"
+    );
 
-    let result = conn
-        .query_row(&sql, [hash], object_from_row)
-        .optional()?;
+    let result = conn.query_row(&sql, [hash], object_from_row).optional()?;
 
     Ok(result)
 }
@@ -131,37 +131,40 @@ pub fn batch_check_archived(
     for chunk in object_ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
 
-        let (sql, params): (String, Vec<rusqlite::types::Value>) = if let Some(root_id) = archive_root_id {
-            // Specific archive root - no need to join roots table
-            let sql = format!(
-                "SELECT DISTINCT s.object_id
+        let (sql, params): (String, Vec<rusqlite::types::Value>) =
+            if let Some(root_id) = archive_root_id {
+                // Specific archive root - no need to join roots table
+                let sql = format!(
+                    "SELECT DISTINCT s.object_id
                  FROM sources s
                  WHERE s.root_id = ? AND s.present = 1
                    AND s.object_id IN ({})",
-                placeholders.join(",")
-            );
-            let mut params = vec![rusqlite::types::Value::from(root_id)];
-            params.extend(chunk.iter().map(|&id| rusqlite::types::Value::from(id)));
-            (sql, params)
-        } else {
-            // Any archive root - need to join roots table
-            let sql = format!(
-                "SELECT DISTINCT s.object_id
+                    placeholders.join(",")
+                );
+                let mut params = vec![rusqlite::types::Value::from(root_id)];
+                params.extend(chunk.iter().map(|&id| rusqlite::types::Value::from(id)));
+                (sql, params)
+            } else {
+                // Any archive root - need to join roots table
+                let sql = format!(
+                    "SELECT DISTINCT s.object_id
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
                  WHERE r.role = 'archive' AND s.present = 1
                    AND s.object_id IN ({})",
-                placeholders.join(",")
-            );
-            let params: Vec<rusqlite::types::Value> = chunk
-                .iter()
-                .map(|&id| rusqlite::types::Value::from(id))
-                .collect();
-            (sql, params)
-        };
+                    placeholders.join(",")
+                );
+                let params: Vec<rusqlite::types::Value> = chunk
+                    .iter()
+                    .map(|&id| rusqlite::types::Value::from(id))
+                    .collect();
+                (sql, params)
+            };
 
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| row.get::<_, i64>(0))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            row.get::<_, i64>(0)
+        })?;
 
         for row in rows {
             result.insert(row?);
@@ -219,7 +222,7 @@ pub fn batch_find_archive_paths(
             let full_path = if rel_path.is_empty() {
                 root_path
             } else {
-                format!("{}/{}", root_path, rel_path)
+                format!("{root_path}/{rel_path}")
             };
             result.entry(object_id).or_default().push(full_path);
         }
@@ -290,7 +293,7 @@ pub fn batch_find_archive_info_by_hash(
             let full_path = if rel_path.is_empty() {
                 root_path
             } else {
-                format!("{}/{}", root_path, rel_path)
+                format!("{root_path}/{rel_path}")
             };
             result
                 .entry(hash_value)
@@ -325,8 +328,7 @@ pub fn set_excluded(conn: &Connection, object_id: i64, excluded: bool) -> Result
 /// Used by `exclude list --objects` to show all excluded objects.
 pub fn fetch_excluded(conn: &Connection) -> Result<Vec<Object>> {
     let sql = format!(
-        "SELECT {} FROM objects WHERE excluded = 1 ORDER BY id",
-        OBJECT_COLUMNS
+        "SELECT {OBJECT_COLUMNS} FROM objects WHERE excluded = 1 ORDER BY id"
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -548,10 +550,13 @@ pub fn get_or_create(conn: &Connection, hash_type: &str, hash_value: &str) -> Re
 
     // Now fetch the object (whether we just created it or it already existed)
     let sql = format!(
-        "SELECT {} FROM objects WHERE hash_type = ? AND hash_value = ?",
-        OBJECT_COLUMNS
+        "SELECT {OBJECT_COLUMNS} FROM objects WHERE hash_type = ? AND hash_value = ?"
     );
-    let obj = conn.query_row(&sql, rusqlite::params![hash_type, hash_value], object_from_row)?;
+    let obj = conn.query_row(
+        &sql,
+        rusqlite::params![hash_type, hash_value],
+        object_from_row,
+    )?;
     Ok(obj)
 }
 
@@ -825,11 +830,17 @@ mod tests {
         // Create more than BATCH_SIZE objects (1000+)
         let mut object_ids = Vec::new();
         for i in 0..1050 {
-            let obj_id = insert_object(&conn, &format!("hash_{}", i), false);
+            let obj_id = insert_object(&conn, &format!("hash_{i}"), false);
             object_ids.push(obj_id);
             // Put every 10th object in archive
             if i % 10 == 0 {
-                insert_source(&conn, archive_id, &format!("file_{}.jpg", i), Some(obj_id), true);
+                insert_source(
+                    &conn,
+                    archive_id,
+                    &format!("file_{i}.jpg"),
+                    Some(obj_id),
+                    true,
+                );
             }
         }
 
@@ -1077,12 +1088,18 @@ mod tests {
         // Create more than BATCH_SIZE hashes (1000+)
         let mut hashes: Vec<String> = Vec::new();
         for i in 0..1050 {
-            let hash = format!("hash_{}", i);
+            let hash = format!("hash_{i}");
             let obj_id = insert_object(&conn, &hash, false);
             hashes.push(hash);
             // Put every 10th object in archive
             if i % 10 == 0 {
-                insert_source(&conn, archive_id, &format!("file_{}.jpg", i), Some(obj_id), true);
+                insert_source(
+                    &conn,
+                    archive_id,
+                    &format!("file_{i}.jpg"),
+                    Some(obj_id),
+                    true,
+                );
             }
         }
 
@@ -1103,22 +1120,26 @@ mod tests {
         let obj_id = insert_object(&conn, "abc123", false);
 
         // Verify initially not excluded
-        let excluded: i64 = conn.query_row(
-            "SELECT excluded FROM objects WHERE id = ?",
-            rusqlite::params![obj_id],
-            |row| row.get(0),
-        ).unwrap();
+        let excluded: i64 = conn
+            .query_row(
+                "SELECT excluded FROM objects WHERE id = ?",
+                rusqlite::params![obj_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(excluded, 0);
 
         // Set excluded
         set_excluded(&conn, obj_id, true).unwrap();
 
         // Verify now excluded
-        let excluded: i64 = conn.query_row(
-            "SELECT excluded FROM objects WHERE id = ?",
-            rusqlite::params![obj_id],
-            |row| row.get(0),
-        ).unwrap();
+        let excluded: i64 = conn
+            .query_row(
+                "SELECT excluded FROM objects WHERE id = ?",
+                rusqlite::params![obj_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(excluded, 1);
     }
 
@@ -1128,22 +1149,26 @@ mod tests {
         let obj_id = insert_object(&conn, "abc123", true); // starts excluded
 
         // Verify initially excluded
-        let excluded: i64 = conn.query_row(
-            "SELECT excluded FROM objects WHERE id = ?",
-            rusqlite::params![obj_id],
-            |row| row.get(0),
-        ).unwrap();
+        let excluded: i64 = conn
+            .query_row(
+                "SELECT excluded FROM objects WHERE id = ?",
+                rusqlite::params![obj_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(excluded, 1);
 
         // Clear excluded
         set_excluded(&conn, obj_id, false).unwrap();
 
         // Verify now not excluded
-        let excluded: i64 = conn.query_row(
-            "SELECT excluded FROM objects WHERE id = ?",
-            rusqlite::params![obj_id],
-            |row| row.get(0),
-        ).unwrap();
+        let excluded: i64 = conn
+            .query_row(
+                "SELECT excluded FROM objects WHERE id = ?",
+                rusqlite::params![obj_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(excluded, 0);
     }
 
@@ -1243,11 +1268,13 @@ mod tests {
         assert!(!obj.excluded); // New objects are not excluded
 
         // Verify object was created in database
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM objects WHERE hash_type = 'sha256' AND hash_value = 'abc123'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM objects WHERE hash_type = 'sha256' AND hash_value = 'abc123'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -1265,11 +1292,13 @@ mod tests {
         assert!(obj.excluded); // Preserved from existing object
 
         // Verify only one object exists
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM objects WHERE hash_value = 'existing_hash'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM objects WHERE hash_value = 'existing_hash'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -1288,11 +1317,13 @@ mod tests {
         assert_eq!(obj1.hash_value, "same_hash");
 
         // Verify only one object exists
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM objects WHERE hash_value = 'same_hash'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM objects WHERE hash_value = 'same_hash'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -1308,11 +1339,9 @@ mod tests {
         assert_eq!(obj1.hash_value, "hash1");
         assert_eq!(obj2.hash_value, "hash2");
 
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM objects",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(count, 2);
     }
 
@@ -1321,12 +1350,19 @@ mod tests {
     // =========================================================================
 
     /// Insert a fact for testing
-    fn insert_fact(conn: &RusqliteConnection, entity_type: &str, entity_id: i64, key: &str, value: &str) {
+    fn insert_fact(
+        conn: &RusqliteConnection,
+        entity_type: &str,
+        entity_id: i64,
+        key: &str,
+        value: &str,
+    ) {
         conn.execute(
             "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at)
              VALUES (?, ?, ?, ?, 0)",
             rusqlite::params![entity_type, entity_id, key, value],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1437,11 +1473,9 @@ mod tests {
         assert_eq!(stats.object_count, 0);
 
         // Verify nothing was deleted
-        let obj_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM objects",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let obj_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(obj_count, 1);
     }
 
@@ -1457,11 +1491,9 @@ mod tests {
         assert_eq!(stats.object_count, 1);
 
         // Verify object was deleted
-        let obj_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM objects",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let obj_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(obj_count, 0);
     }
 
@@ -1485,9 +1517,15 @@ mod tests {
         assert_eq!(stats.object_fact_count, 1);
 
         // Verify all deleted
-        let obj_count: i64 = conn.query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0)).unwrap();
-        let src_count: i64 = conn.query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0)).unwrap();
-        let fact_count: i64 = conn.query_row("SELECT COUNT(*) FROM facts", [], |row| row.get(0)).unwrap();
+        let obj_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
+            .unwrap();
+        let src_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))
+            .unwrap();
+        let fact_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM facts", [], |row| row.get(0))
+            .unwrap();
 
         assert_eq!(obj_count, 0);
         assert_eq!(src_count, 0);
@@ -1501,15 +1539,23 @@ mod tests {
 
         // Active object (should be preserved)
         let active_obj_id = insert_object(&conn, "active_hash", false);
-        let active_source_id = insert_source(&conn, root_id, "active.jpg", Some(active_obj_id), true);
+        let active_source_id =
+            insert_source(&conn, root_id, "active.jpg", Some(active_obj_id), true);
         insert_fact(&conn, "object", active_obj_id, "content.Make", "Canon");
         insert_fact(&conn, "source", active_source_id, "source.policy", "keep");
 
         // Orphaned object (should be deleted)
         let orphaned_obj_id = insert_object(&conn, "orphaned_hash", false);
-        let orphaned_source_id = insert_source(&conn, root_id, "orphaned.jpg", Some(orphaned_obj_id), false);
+        let orphaned_source_id =
+            insert_source(&conn, root_id, "orphaned.jpg", Some(orphaned_obj_id), false);
         insert_fact(&conn, "object", orphaned_obj_id, "content.Make", "Nikon");
-        insert_fact(&conn, "source", orphaned_source_id, "source.policy", "delete");
+        insert_fact(
+            &conn,
+            "source",
+            orphaned_source_id,
+            "source.policy",
+            "delete",
+        );
 
         let stats = delete_orphaned(&conn).unwrap();
 
@@ -1520,9 +1566,15 @@ mod tests {
         assert_eq!(stats.object_fact_count, 1);
 
         // Active preserved
-        let obj_count: i64 = conn.query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0)).unwrap();
-        let src_count: i64 = conn.query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0)).unwrap();
-        let fact_count: i64 = conn.query_row("SELECT COUNT(*) FROM facts", [], |row| row.get(0)).unwrap();
+        let obj_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
+            .unwrap();
+        let src_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))
+            .unwrap();
+        let fact_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM facts", [], |row| row.get(0))
+            .unwrap();
 
         assert_eq!(obj_count, 1);
         assert_eq!(src_count, 1);
@@ -1545,7 +1597,9 @@ mod tests {
         assert_eq!(stats.object_count, 0);
 
         // Both sources still exist (non-present source is preserved because object is not orphaned)
-        let src_count: i64 = conn.query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0)).unwrap();
+        let src_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(src_count, 2);
     }
 }

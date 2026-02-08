@@ -214,9 +214,7 @@ pub fn fetch_sources_by_object_ids(
 /// Used during scan reconciliation to find existing source at the observed path.
 pub fn fetch_by_path(conn: &Connection, root_id: i64, rel_path: &str) -> Result<Option<Source>> {
     let sql = format!(
-        "SELECT {} {} WHERE s.present = 1 AND s.root_id = ? AND s.rel_path = ?",
-        SOURCE_COLUMNS,
-        SOURCE_FROM,
+        "SELECT {SOURCE_COLUMNS} {SOURCE_FROM} WHERE s.present = 1 AND s.root_id = ? AND s.rel_path = ?",
     );
 
     let result = conn
@@ -235,9 +233,7 @@ pub fn fetch_by_path(conn: &Connection, root_id: i64, rel_path: &str) -> Result<
 /// Source data (e.g., import processing where source_id comes from worklist).
 pub fn fetch_by_id(conn: &Connection, source_id: i64) -> Result<Option<Source>> {
     let sql = format!(
-        "SELECT {} {} WHERE s.present = 1 AND s.id = ?",
-        SOURCE_COLUMNS,
-        SOURCE_FROM,
+        "SELECT {SOURCE_COLUMNS} {SOURCE_FROM} WHERE s.present = 1 AND s.id = ?",
     );
 
     let result = conn
@@ -257,9 +253,7 @@ pub fn fetch_by_id(conn: &Connection, source_id: i64) -> Result<Option<Source>> 
 /// The caller should use the returned source's root_id to detect cross-root moves.
 pub fn fetch_by_inode(conn: &Connection, device: u64, inode: u64) -> Result<Option<Source>> {
     let sql = format!(
-        "SELECT {} {} WHERE s.present = 1 AND s.device = ? AND s.inode = ?",
-        SOURCE_COLUMNS,
-        SOURCE_FROM,
+        "SELECT {SOURCE_COLUMNS} {SOURCE_FROM} WHERE s.present = 1 AND s.device = ? AND s.inode = ?",
     );
 
     let result = conn
@@ -324,9 +318,7 @@ pub fn batch_check_paths_exist(
         }
 
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params.as_slice(), |row| {
-            row.get::<_, String>(0)
-        })?;
+        let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, String>(0))?;
 
         for row in rows {
             result.insert(row?);
@@ -443,12 +435,13 @@ pub fn insert_destination(conn: &Connection, new: &NewSource) -> Result<Source> 
 
     // Fetch the complete Source record with all joined fields.
     // This ensures the returned Source accurately reflects database state.
-    fetch_by_path(conn, new.root_id, &new.rel_path)?
-        .ok_or_else(|| anyhow::anyhow!(
+    fetch_by_path(conn, new.root_id, &new.rel_path)?.ok_or_else(|| {
+        anyhow::anyhow!(
             "Failed to fetch source after insert: root_id={}, rel_path={}",
             new.root_id,
             new.rel_path
-        ))
+        )
+    })
 }
 
 /// Apply a reconciliation outcome to the database.
@@ -565,10 +558,9 @@ pub fn apply_reconciliation(
 
         Reconciliation::Modified { source_id, .. } => {
             // UPDATE with new metadata, increment basis_rev
-            let partial_hash = observation
-                .partial_hash
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("partial_hash required for Modified reconciliation"))?;
+            let partial_hash = observation.partial_hash.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("partial_hash required for Modified reconciliation")
+            })?;
 
             conn.execute(
                 "UPDATE sources SET
@@ -680,20 +672,17 @@ pub fn fetch_source_ids_for_root(
 ) -> Result<Vec<i64>> {
     let ids: Vec<i64> = match scan_prefix {
         Some(prefix) => {
-            let pattern = format!("{}%", prefix);
+            let pattern = format!("{prefix}%");
             conn.prepare(
-                "SELECT id FROM sources WHERE root_id = ? AND present = 1 AND rel_path LIKE ?"
+                "SELECT id FROM sources WHERE root_id = ? AND present = 1 AND rel_path LIKE ?",
             )?
             .query_map(rusqlite::params![root_id, pattern], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?
         }
-        None => {
-            conn.prepare(
-                "SELECT id FROM sources WHERE root_id = ? AND present = 1"
-            )?
+        None => conn
+            .prepare("SELECT id FROM sources WHERE root_id = ? AND present = 1")?
             .query_map(rusqlite::params![root_id], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?
-        }
+            .collect::<Result<Vec<_>, _>>()?,
     };
 
     Ok(ids)
@@ -725,6 +714,7 @@ pub fn set_excluded(conn: &Connection, source_id: i64, excluded: bool) -> Result
 ///
 /// # Returns
 /// Count of rows actually updated (may be less than input if some sources don't exist).
+#[allow(dead_code)] // Part of repo API, may be used in future
 pub fn batch_set_excluded(conn: &Connection, source_ids: &[i64], excluded: bool) -> Result<u64> {
     if source_ids.is_empty() {
         return Ok(0);
@@ -818,7 +808,7 @@ pub fn fetch_device_info_by_prefix(
     let prefix_pattern = if rel_prefix.is_empty() {
         "%".to_string()
     } else {
-        format!("{}/%", rel_prefix)
+        format!("{rel_prefix}/%")
     };
 
     let mut stmt = conn.prepare(
@@ -992,7 +982,10 @@ mod tests {
         let sources = batch_fetch_by_roots(&conn, &[root_id]).unwrap();
         assert_eq!(sources.len(), 2);
 
-        let excluded = sources.iter().find(|s| s.rel_path == "excluded.jpg").unwrap();
+        let excluded = sources
+            .iter()
+            .find(|s| s.rel_path == "excluded.jpg")
+            .unwrap();
         assert!(excluded.excluded);
     }
 
@@ -1233,8 +1226,15 @@ mod tests {
         // Create more than BATCH_SIZE objects (1000+)
         let mut object_ids = Vec::new();
         for i in 0..1050 {
-            let obj = insert_object(&conn, &format!("hash_{}", i), false);
-            insert_source(&conn, root_id, &format!("file_{}.jpg", i), Some(obj), true, false);
+            let obj = insert_object(&conn, &format!("hash_{i}"), false);
+            insert_source(
+                &conn,
+                root_id,
+                &format!("file_{i}.jpg"),
+                Some(obj),
+                true,
+                false,
+            );
             object_ids.push(obj);
         }
 
@@ -1301,7 +1301,8 @@ mod tests {
              basis_rev, scanned_at, last_seen_at, present, excluded, device, inode)
              VALUES (?, ?, ?, 500, 1700000000, 'oldhash', 5, 0, 0, 0, 1, 100, 200)",
             rusqlite::params![root_id, "revived.jpg", obj_id],
-        ).unwrap();
+        )
+        .unwrap();
 
         let new = NewSource {
             root_id,
@@ -1355,8 +1356,8 @@ mod tests {
             mtime: 1704067200,
             partial_hash: "partial123".to_string(),
             object_id: Some(obj_id),
-            device: None,  // Not available
-            inode: None,   // Not available
+            device: None, // Not available
+            inode: None,  // Not available
         };
 
         let source = insert_destination(&conn, &new).unwrap();
@@ -1430,7 +1431,7 @@ mod tests {
 
         // Verify domain predicate works with joined data
         assert!(source.is_excluded()); // object is excluded
-        assert!(source.is_active());   // root is not suspended
+        assert!(source.is_active()); // root is not suspended
         assert!(source.is_from_role("archive"));
 
         // Verify path() works
@@ -1641,11 +1642,13 @@ mod tests {
         assert_eq!(source.object_id, None);
 
         // Verify only one record exists
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path = ?",
-            rusqlite::params![root_id, "revived.jpg"],
-            |r| r.get(0)
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path = ?",
+                rusqlite::params![root_id, "revived.jpg"],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -1675,11 +1678,13 @@ mod tests {
         assert_eq!(source.rel_path, "existing.jpg");
 
         // Verify last_seen_at was updated
-        let last_seen: i64 = conn.query_row(
-            "SELECT last_seen_at FROM sources WHERE id = ?",
-            rusqlite::params![source_id],
-            |row| row.get(0),
-        ).unwrap();
+        let last_seen: i64 = conn
+            .query_row(
+                "SELECT last_seen_at FROM sources WHERE id = ?",
+                rusqlite::params![source_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(last_seen, now);
     }
 
@@ -1702,8 +1707,8 @@ mod tests {
             rel_path: "modified.jpg".to_string(),
             device: 100,
             inode: 12345,
-            size: 2048,  // Changed
-            mtime: 1700000100,  // Changed
+            size: 2048,        // Changed
+            mtime: 1700000100, // Changed
             partial_hash: Some("newhash".to_string()),
         };
 
@@ -1719,7 +1724,7 @@ mod tests {
         assert_eq!(source.size, 2048);
         assert_eq!(source.mtime, 1700000100);
         assert_eq!(source.partial_hash, "newhash");
-        assert_eq!(source.basis_rev, 3);  // Incremented from 2
+        assert_eq!(source.basis_rev, 3); // Incremented from 2
     }
 
     #[test]
@@ -1759,9 +1764,9 @@ mod tests {
         let source = apply_reconciliation(&conn, &observation, &reconciliation, now).unwrap();
 
         assert_eq!(source.id, source_id);
-        assert_eq!(source.root_id, root2);  // Moved to new root
-        assert_eq!(source.rel_path, "new_location.jpg");  // New path
-        assert_eq!(source.root_path, "/archive");  // Joined field updated
+        assert_eq!(source.root_id, root2); // Moved to new root
+        assert_eq!(source.rel_path, "new_location.jpg"); // New path
+        assert_eq!(source.root_path, "/archive"); // Joined field updated
     }
 
     #[test]
@@ -1777,7 +1782,7 @@ mod tests {
             inode: 12345,
             size: 2048,
             mtime: 1700000000,
-            partial_hash: None,  // Missing!
+            partial_hash: None, // Missing!
         };
 
         let reconciliation = Reconciliation::New;
@@ -1807,19 +1812,23 @@ mod tests {
         assert_eq!(count, 2);
 
         // Verify they are now present=0
-        let present1: i64 = conn.query_row(
-            "SELECT present FROM sources WHERE id = ?",
-            rusqlite::params![id1],
-            |row| row.get(0),
-        ).unwrap();
+        let present1: i64 = conn
+            .query_row(
+                "SELECT present FROM sources WHERE id = ?",
+                rusqlite::params![id1],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(present1, 0);
 
         // Verify present.jpg is still present=1
-        let present3: i64 = conn.query_row(
-            "SELECT present FROM sources WHERE rel_path = 'present.jpg'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let present3: i64 = conn
+            .query_row(
+                "SELECT present FROM sources WHERE rel_path = 'present.jpg'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(present3, 1);
     }
 
@@ -1836,7 +1845,7 @@ mod tests {
 
         let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
         let id1 = insert_source(&conn, root_id, "file1.jpg", None, true, false);
-        let id2 = insert_source(&conn, root_id, "file2.jpg", None, false, false);  // already not present
+        let id2 = insert_source(&conn, root_id, "file2.jpg", None, false, false); // already not present
 
         // Only id1 should be updated (id2 is already present=0)
         let count = mark_missing(&conn, &[id1, id2], 1700000001).unwrap();
@@ -1853,11 +1862,13 @@ mod tests {
         let now = 1700000001;
         mark_missing(&conn, &[id1], now).unwrap();
 
-        let last_seen: i64 = conn.query_row(
-            "SELECT last_seen_at FROM sources WHERE id = ?",
-            rusqlite::params![id1],
-            |row| row.get(0),
-        ).unwrap();
+        let last_seen: i64 = conn
+            .query_row(
+                "SELECT last_seen_at FROM sources WHERE id = ?",
+                rusqlite::params![id1],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(last_seen, now);
     }
 
@@ -1925,22 +1936,26 @@ mod tests {
         let source_id = insert_source(&conn, root_id, "file.jpg", None, true, false);
 
         // Verify initially not excluded
-        let excluded: i64 = conn.query_row(
-            "SELECT excluded FROM sources WHERE id = ?",
-            rusqlite::params![source_id],
-            |row| row.get(0),
-        ).unwrap();
+        let excluded: i64 = conn
+            .query_row(
+                "SELECT excluded FROM sources WHERE id = ?",
+                rusqlite::params![source_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(excluded, 0);
 
         // Set excluded
         set_excluded(&conn, source_id, true).unwrap();
 
         // Verify now excluded
-        let excluded: i64 = conn.query_row(
-            "SELECT excluded FROM sources WHERE id = ?",
-            rusqlite::params![source_id],
-            |row| row.get(0),
-        ).unwrap();
+        let excluded: i64 = conn
+            .query_row(
+                "SELECT excluded FROM sources WHERE id = ?",
+                rusqlite::params![source_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(excluded, 1);
     }
 
@@ -1952,22 +1967,26 @@ mod tests {
         let source_id = insert_source(&conn, root_id, "file.jpg", None, true, true); // starts excluded
 
         // Verify initially excluded
-        let excluded: i64 = conn.query_row(
-            "SELECT excluded FROM sources WHERE id = ?",
-            rusqlite::params![source_id],
-            |row| row.get(0),
-        ).unwrap();
+        let excluded: i64 = conn
+            .query_row(
+                "SELECT excluded FROM sources WHERE id = ?",
+                rusqlite::params![source_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(excluded, 1);
 
         // Clear excluded
         set_excluded(&conn, source_id, false).unwrap();
 
         // Verify now not excluded
-        let excluded: i64 = conn.query_row(
-            "SELECT excluded FROM sources WHERE id = ?",
-            rusqlite::params![source_id],
-            |row| row.get(0),
-        ).unwrap();
+        let excluded: i64 = conn
+            .query_row(
+                "SELECT excluded FROM sources WHERE id = ?",
+                rusqlite::params![source_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(excluded, 0);
     }
 
@@ -2005,21 +2024,27 @@ mod tests {
         assert_eq!(count, 2);
 
         // Verify exclusion state
-        let excluded1: i64 = conn.query_row(
-            "SELECT excluded FROM sources WHERE id = ?",
-            rusqlite::params![id1],
-            |row| row.get(0),
-        ).unwrap();
-        let excluded2: i64 = conn.query_row(
-            "SELECT excluded FROM sources WHERE id = ?",
-            rusqlite::params![id2],
-            |row| row.get(0),
-        ).unwrap();
-        let excluded3: i64 = conn.query_row(
-            "SELECT excluded FROM sources WHERE id = ?",
-            rusqlite::params![id3],
-            |row| row.get(0),
-        ).unwrap();
+        let excluded1: i64 = conn
+            .query_row(
+                "SELECT excluded FROM sources WHERE id = ?",
+                rusqlite::params![id1],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let excluded2: i64 = conn
+            .query_row(
+                "SELECT excluded FROM sources WHERE id = ?",
+                rusqlite::params![id2],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let excluded3: i64 = conn
+            .query_row(
+                "SELECT excluded FROM sources WHERE id = ?",
+                rusqlite::params![id3],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         assert_eq!(excluded1, 1);
         assert_eq!(excluded2, 1);
@@ -2055,11 +2080,13 @@ mod tests {
         assert_eq!(count, 1);
 
         // Verify it was actually updated
-        let excluded: i64 = conn.query_row(
-            "SELECT excluded FROM sources WHERE id = ?",
-            rusqlite::params![id1],
-            |row| row.get(0),
-        ).unwrap();
+        let excluded: i64 = conn
+            .query_row(
+                "SELECT excluded FROM sources WHERE id = ?",
+                rusqlite::params![id1],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(excluded, 1);
     }
 
@@ -2072,7 +2099,14 @@ mod tests {
         // Create more than BATCH_SIZE sources (1000+)
         let mut source_ids = Vec::new();
         for i in 0..1050 {
-            let id = insert_source(&conn, root_id, &format!("file_{}.jpg", i), None, true, false);
+            let id = insert_source(
+                &conn,
+                root_id,
+                &format!("file_{i}.jpg"),
+                None,
+                true,
+                false,
+            );
             source_ids.push(id);
         }
 
@@ -2081,21 +2115,27 @@ mod tests {
         assert_eq!(count, 1050);
 
         // Verify a sample from each batch chunk
-        let excluded_first: i64 = conn.query_row(
-            "SELECT excluded FROM sources WHERE id = ?",
-            rusqlite::params![source_ids[0]],
-            |row| row.get(0),
-        ).unwrap();
-        let excluded_mid: i64 = conn.query_row(
-            "SELECT excluded FROM sources WHERE id = ?",
-            rusqlite::params![source_ids[500]],
-            |row| row.get(0),
-        ).unwrap();
-        let excluded_last: i64 = conn.query_row(
-            "SELECT excluded FROM sources WHERE id = ?",
-            rusqlite::params![source_ids[1049]],
-            |row| row.get(0),
-        ).unwrap();
+        let excluded_first: i64 = conn
+            .query_row(
+                "SELECT excluded FROM sources WHERE id = ?",
+                rusqlite::params![source_ids[0]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let excluded_mid: i64 = conn
+            .query_row(
+                "SELECT excluded FROM sources WHERE id = ?",
+                rusqlite::params![source_ids[500]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let excluded_last: i64 = conn
+            .query_row(
+                "SELECT excluded FROM sources WHERE id = ?",
+                rusqlite::params![source_ids[1049]],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         assert_eq!(excluded_first, 1);
         assert_eq!(excluded_mid, 1);
@@ -2146,7 +2186,8 @@ mod tests {
         insert_source(&conn, root_id, "exists.jpg", None, true, false);
         // "missing.jpg" is not inserted
 
-        let result = batch_check_paths_exist(&conn, root_id, &["exists.jpg", "missing.jpg"]).unwrap();
+        let result =
+            batch_check_paths_exist(&conn, root_id, &["exists.jpg", "missing.jpg"]).unwrap();
         assert_eq!(result.len(), 1);
         assert!(result.contains("exists.jpg"));
         assert!(!result.contains("missing.jpg"));
@@ -2160,7 +2201,8 @@ mod tests {
         insert_source(&conn, root_id, "present.jpg", None, true, false);
         insert_source(&conn, root_id, "deleted.jpg", None, false, false); // present=0
 
-        let result = batch_check_paths_exist(&conn, root_id, &["present.jpg", "deleted.jpg"]).unwrap();
+        let result =
+            batch_check_paths_exist(&conn, root_id, &["present.jpg", "deleted.jpg"]).unwrap();
         assert_eq!(result.len(), 1);
         assert!(result.contains("present.jpg"));
         assert!(!result.contains("deleted.jpg"));
@@ -2193,7 +2235,7 @@ mod tests {
         // Create 999 sources (just under BATCH_SIZE)
         let mut paths = Vec::new();
         for i in 0..999 {
-            let path = format!("file_{}.jpg", i);
+            let path = format!("file_{i}.jpg");
             insert_source(&conn, root_id, &path, None, true, false);
             paths.push(path);
         }
@@ -2212,7 +2254,7 @@ mod tests {
         // Create exactly BATCH_SIZE sources
         let mut paths = Vec::new();
         for i in 0..1000 {
-            let path = format!("file_{}.jpg", i);
+            let path = format!("file_{i}.jpg");
             insert_source(&conn, root_id, &path, None, true, false);
             paths.push(path);
         }
@@ -2231,7 +2273,7 @@ mod tests {
         // Create more than BATCH_SIZE sources (requires 2 batches)
         let mut paths = Vec::new();
         for i in 0..1001 {
-            let path = format!("file_{}.jpg", i);
+            let path = format!("file_{i}.jpg");
             insert_source(&conn, root_id, &path, None, true, false);
             paths.push(path);
         }
@@ -2303,7 +2345,7 @@ mod tests {
         insert_source(&conn, root_id, "deleted.jpg", None, false, false); // present=0
 
         let (total, unhashed) = count_unhashed_for_root(&conn, root_id).unwrap();
-        assert_eq!(total, 1);  // Only present sources
+        assert_eq!(total, 1); // Only present sources
         assert_eq!(unhashed, 1);
     }
 
@@ -2323,11 +2365,13 @@ mod tests {
         update_location(&conn, source_id, archive_root, "new/path.jpg", now).unwrap();
 
         // Verify fields updated
-        let (root_id, rel_path, scanned_at, last_seen_at): (i64, String, i64, i64) = conn.query_row(
-            "SELECT root_id, rel_path, scanned_at, last_seen_at FROM sources WHERE id = ?",
-            rusqlite::params![source_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        ).unwrap();
+        let (root_id, rel_path, scanned_at, last_seen_at): (i64, String, i64, i64) = conn
+            .query_row(
+                "SELECT root_id, rel_path, scanned_at, last_seen_at FROM sources WHERE id = ?",
+                rusqlite::params![source_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
 
         assert_eq!(root_id, archive_root);
         assert_eq!(rel_path, "new/path.jpg");
@@ -2394,7 +2438,11 @@ mod tests {
 
         insert_test_source(&conn, root_id, "a/1.jpg", 100, 1, 1000, 1700000000);
         // Mark as not present
-        conn.execute("UPDATE sources SET present = 0 WHERE rel_path = 'a/1.jpg'", []).unwrap();
+        conn.execute(
+            "UPDATE sources SET present = 0 WHERE rel_path = 'a/1.jpg'",
+            [],
+        )
+        .unwrap();
 
         let results = fetch_device_info_by_prefix(&conn, root_id, "").unwrap();
         assert!(results.is_empty());
@@ -2426,11 +2474,13 @@ mod tests {
         set_object_id(&conn, source_id, object_id).unwrap();
 
         // Verify source is linked to object
-        let stored: i64 = conn.query_row(
-            "SELECT object_id FROM sources WHERE id = ?",
-            [source_id],
-            |row| row.get(0),
-        ).unwrap();
+        let stored: i64 = conn
+            .query_row(
+                "SELECT object_id FROM sources WHERE id = ?",
+                [source_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(stored, object_id);
     }
 
@@ -2443,5 +2493,4 @@ mod tests {
         let result = set_object_id(&conn, 99999, object_id);
         assert!(result.is_ok());
     }
-
 }

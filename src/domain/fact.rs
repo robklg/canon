@@ -101,7 +101,7 @@ pub fn normalize_fact_key(key: &str) -> Result<String, &'static str> {
     if key.starts_with("content.") {
         return Ok(key.to_string());
     }
-    Ok(format!("content.{}", key))
+    Ok(format!("content.{key}"))
 }
 
 /// Check if a key is a content fact (starts with "content.").
@@ -151,7 +151,6 @@ impl FactEntry {
             entity_id,
         }
     }
-
 }
 
 #[cfg(test)]

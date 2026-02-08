@@ -60,8 +60,8 @@ pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
 
     // Print header
     println!(
-        "{:<4} {:<8} {:>8}  {:<16}  {}",
-        "ID", "ROLE", "FILES", "LAST SCAN", "PATH"
+        "{:<4} {:<8} {:>8}  {:<16}  PATH",
+        "ID", "ROLE", "FILES", "LAST SCAN"
     );
 
     let now = SystemTime::now()
@@ -98,7 +98,7 @@ fn format_time_ago(timestamp: Option<i64>, now: i64) -> String {
             if secs < 0 {
                 "just now".to_string()
             } else if secs < 60 {
-                format!("{}s ago", secs)
+                format!("{secs}s ago")
             } else if secs < 3600 {
                 format!("{}m ago", secs / 60)
             } else if secs < 86400 {
@@ -131,15 +131,18 @@ pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
     let archived_objects = repo::object::batch_check_archived(conn, &object_ids, None)?;
     let in_archive_count = sources
         .iter()
-        .filter(|s| s.object_id.map(|id| archived_objects.contains(&id)).unwrap_or(false))
+        .filter(|s| {
+            s.object_id
+                .map(|id| archived_objects.contains(&id))
+                .unwrap_or(false)
+        })
         .count() as i64;
     let not_in_archive = source_count - in_archive_count;
 
     if !yes {
         eprintln!("About to remove {} root: {}", root.role, root.path);
         eprintln!(
-            "This will forget {} sources ({} in archive, {} not in archive).",
-            source_count, in_archive_count, not_in_archive
+            "This will forget {source_count} sources ({in_archive_count} in archive, {not_in_archive} not in archive)."
         );
         eprintln!("Files on disk will NOT be deleted.");
         eprintln!();
@@ -159,7 +162,7 @@ pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
     // Delete facts, sources, and root via repo function
     let deleted_sources = repo::root::remove(conn, root_id)?;
 
-    println!("Removed root {} and {} sources", root_id, deleted_sources);
+    println!("Removed root {root_id} and {deleted_sources} sources");
 
     Ok(())
 }
@@ -176,8 +179,8 @@ pub fn set_comment(db: &Db, spec: &str, comment: Option<&str>) -> Result<()> {
     repo::root::set_comment(conn, root_id, comment)?;
 
     match comment {
-        Some(c) => println!("Set comment on root {}: {}", root_id, c),
-        None => println!("Cleared comment on root {}", root_id),
+        Some(c) => println!("Set comment on root {root_id}: {c}"),
+        None => println!("Cleared comment on root {root_id}"),
     }
 
     Ok(())

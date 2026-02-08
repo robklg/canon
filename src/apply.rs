@@ -8,14 +8,14 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cluster::{LockEntry, ManifestConfig};
-use crate::repo::{self, Connection, Db};
 use crate::domain::apply::{classify_destination, DestinationState};
 use crate::domain::fact::FactEntry;
+use crate::domain::path::path_strip_prefix;
 use crate::domain::root::parse_root_spec;
 use crate::domain::source::NewSource;
-use crate::domain::path::path_strip_prefix;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
 use crate::progress::Progress;
+use crate::repo::{self, Connection, Db};
 use crate::scan::compute_partial_hash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +87,8 @@ fn build_eval_context(
     let mut ctx = EvalContext::new();
 
     // Get root path from cache (looked up once at apply start)
-    let root_path = root_paths.get(&source.root_id)
+    let root_path = root_paths
+        .get(&source.root_id)
         .ok_or_else(|| anyhow::anyhow!("Root {} not found in cache", source.root_id))?;
 
     // Derive rel_path from full path - root_path
@@ -145,7 +146,8 @@ fn evaluate_pattern(
 pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> {
     // Platform checks: --rename and --move are Unix-only
     #[cfg(not(unix))]
-    if options.transfer_mode == TransferMode::Rename || options.transfer_mode == TransferMode::Move {
+    if options.transfer_mode == TransferMode::Rename || options.transfer_mode == TransferMode::Move
+    {
         bail!("--rename and --move are only supported on Unix platforms");
     }
 
@@ -156,11 +158,18 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     }
 
     // Determine config path and lock path
-    let (config_path, lock_path) = if manifest_path.extension().and_then(|e| e.to_str()) == Some("lock") {
-        (manifest_path.with_extension("toml"), manifest_path.to_path_buf())
-    } else {
-        (manifest_path.to_path_buf(), manifest_path.with_extension("lock"))
-    };
+    let (config_path, lock_path) =
+        if manifest_path.extension().and_then(|e| e.to_str()) == Some("lock") {
+            (
+                manifest_path.with_extension("toml"),
+                manifest_path.to_path_buf(),
+            )
+        } else {
+            (
+                manifest_path.to_path_buf(),
+                manifest_path.with_extension("lock"),
+            )
+        };
 
     // Read TOML config
     let config_content = fs::read_to_string(&config_path)
@@ -175,7 +184,8 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         .lines()
         .enumerate()
         .map(|(i, line)| {
-            let line = line.with_context(|| format!("Failed to read line {} of lock file", i + 1))?;
+            let line =
+                line.with_context(|| format!("Failed to read line {} of lock file", i + 1))?;
             serde_json::from_str(&line)
                 .with_context(|| format!("Failed to parse line {} of lock file", i + 1))
         })
@@ -217,7 +227,12 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     let archive_root = roots
         .iter()
         .find(|r| r.id == config.output.archive_root_id)
-        .ok_or_else(|| anyhow::anyhow!("Archive root id {} not found", config.output.archive_root_id))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Archive root id {} not found",
+                config.output.archive_root_id
+            )
+        })?;
     if !archive_root.is_archive() {
         bail!(
             "Root id {} has role '{}', expected 'archive'",
@@ -268,8 +283,18 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     check_destination_writable(&base_dir)?;
 
     // Validate all pattern expansions succeed before any file operations
-    eprint!("Validating pattern expansions for {} sources...", filtered_sources.len());
-    let expansion_failures = validate_pattern_expansions(&filtered_sources, &pattern, &needed_keys, scope_prefix, &root_paths, &all_facts);
+    eprint!(
+        "Validating pattern expansions for {} sources...",
+        filtered_sources.len()
+    );
+    let expansion_failures = validate_pattern_expansions(
+        &filtered_sources,
+        &pattern,
+        &needed_keys,
+        scope_prefix,
+        &root_paths,
+        &all_facts,
+    );
     if !expansion_failures.is_empty() {
         eprintln!();
         eprintln!(
@@ -277,7 +302,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
             expansion_failures.len()
         );
         for (path, error) in expansion_failures.iter().take(10) {
-            eprintln!("  {}: {}", path, error);
+            eprintln!("  {path}: {error}");
         }
         if expansion_failures.len() > 10 {
             eprintln!("  ... and {} more", expansion_failures.len() - 10);
@@ -288,13 +313,25 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     }
     eprintln!(" ok");
 
-    eprint!("Checking {} sources for collisions and accessibility...", filtered_sources.len());
+    eprint!(
+        "Checking {} sources for collisions and accessibility...",
+        filtered_sources.len()
+    );
     if options.dry_run {
         eprintln!(" (skipping source checks for speed in dry-run mode)");
     } else {
         eprintln!();
     }
-    let access_check = check_destination_collisions_filtered(&filtered_sources, &pattern, &needed_keys, scope_prefix, &base_dir, &root_paths, &all_facts, options.dry_run)?;
+    let access_check = check_destination_collisions_filtered(
+        &filtered_sources,
+        &pattern,
+        &needed_keys,
+        scope_prefix,
+        &base_dir,
+        &root_paths,
+        &all_facts,
+        options.dry_run,
+    )?;
 
     if !access_check.unreadable.is_empty() {
         eprintln!(
@@ -302,7 +339,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
             access_check.unreadable.len()
         );
         for (path, reason) in &access_check.unreadable {
-            eprintln!("  {} ({})", path, reason);
+            eprintln!("  {path} ({reason})");
         }
         bail!("Aborting due to unreadable sources");
     }
@@ -315,7 +352,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         for (dest, sources) in &access_check.collisions {
             eprintln!("  {} <- {} files:", dest.display(), sources.len());
             for src in sources {
-                eprintln!("    {}", src);
+                eprintln!("    {src}");
             }
         }
         bail!("Aborting due to destination collisions");
@@ -342,7 +379,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
             stale_records.len()
         );
         for path in stale_records.iter().take(10) {
-            eprintln!("  {}", path);
+            eprintln!("  {path}");
         }
         if stale_records.len() > 10 {
             eprintln!("  ... and {} more", stale_records.len() - 10);
@@ -375,14 +412,16 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         if total_conflicts > 0 {
             eprintln!();
             eprintln!(
-                "Preflight failed: {} destination paths already exist.",
-                total_conflicts
+                "Preflight failed: {total_conflicts} destination paths already exist."
             );
             eprintln!();
             if !dest_conflicts.in_db.is_empty() {
-                eprintln!("Already registered in archive ({}):", dest_conflicts.in_db.len());
+                eprintln!(
+                    "Already registered in archive ({}):",
+                    dest_conflicts.in_db.len()
+                );
                 for path in dest_conflicts.in_db.iter().take(5) {
-                    eprintln!("  {}", path);
+                    eprintln!("  {path}");
                 }
                 if dest_conflicts.in_db.len() > 5 {
                     eprintln!("  ... and {} more", dest_conflicts.in_db.len() - 5);
@@ -390,9 +429,12 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
             }
             if !dest_conflicts.on_disk_only.is_empty() {
                 eprintln!();
-                eprintln!("Exist on disk but not in database ({}):", dest_conflicts.on_disk_only.len());
+                eprintln!(
+                    "Exist on disk but not in database ({}):",
+                    dest_conflicts.on_disk_only.len()
+                );
                 for path in dest_conflicts.on_disk_only.iter().take(5) {
-                    eprintln!("  {}", path);
+                    eprintln!("  {path}");
                 }
                 if dest_conflicts.on_disk_only.len() > 5 {
                     eprintln!("  ... and {} more", dest_conflicts.on_disk_only.len() - 5);
@@ -413,7 +455,8 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
 
     // Check archive conflicts
     eprintln!("Checking archive conflicts...");
-    let conflicts = check_archive_conflicts_filtered(conn, &filtered_sources, config.output.archive_root_id)?;
+    let conflicts =
+        check_archive_conflicts_filtered(conn, &filtered_sources, config.output.archive_root_id)?;
 
     if !conflicts.in_dest_archive.is_empty() && !options.allow_duplicates {
         eprintln!(
@@ -421,7 +464,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
             conflicts.in_dest_archive.len()
         );
         for (src, dst) in &conflicts.in_dest_archive {
-            eprintln!("  {} -> {}", src, dst);
+            eprintln!("  {src} -> {dst}");
         }
         eprintln!("\nUse --allow-duplicates to copy anyway (to different paths)");
         bail!("Aborting due to files already in destination archive");
@@ -433,7 +476,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
             conflicts.in_other_archives.len()
         );
         for (src, dst) in &conflicts.in_other_archives {
-            eprintln!("  {} -> {}", src, dst);
+            eprintln!("  {src} -> {dst}");
         }
         eprintln!("\nUse --allow-cross-archive-duplicates to copy anyway");
         bail!("Aborting due to files already in other archives");
@@ -450,7 +493,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
                 excluded_sources.len()
             );
             for (id, path) in &excluded_sources {
-                eprintln!("  {} (id: {})", path, id);
+                eprintln!("  {path} (id: {id})");
             }
             eprintln!("\nExcluded sources cannot be applied. Regenerate the manifest after clearing exclusions.");
             bail!("Aborting due to excluded sources in manifest");
@@ -468,10 +511,12 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
                 suspended_sources.len()
             );
             for (id, path) in &suspended_sources {
-                eprintln!("  {} (id: {})", path, id);
+                eprintln!("  {path} (id: {id})");
             }
             eprintln!("\nSources from suspended roots cannot be applied.");
-            eprintln!("Use 'canon roots unsuspend' to reactivate the root, or regenerate the manifest.");
+            eprintln!(
+                "Use 'canon roots unsuspend' to reactivate the root, or regenerate the manifest."
+            );
             bail!("Aborting due to sources from suspended roots");
         }
     }
@@ -558,7 +603,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     if total > 0 {
         let progress = Progress::new(total);
         eprintln!();
-        eprintln!("Processing {} sources...", total);
+        eprintln!("Processing {total} sources...");
 
         for (i, source) in sources_to_transfer.iter().enumerate() {
             progress.update(i);
@@ -604,7 +649,10 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
 
     // Summary of files that became stale during transfer (race conditions)
     if !stale_during_transfer.is_empty() {
-        eprintln!("\nSkipped {} files that changed during apply:", stale_during_transfer.len());
+        eprintln!(
+            "\nSkipped {} files that changed during apply:",
+            stale_during_transfer.len()
+        );
         for s in stale_during_transfer.iter().take(10) {
             eprintln!("  {}: {}", s.path, s.reason);
         }
@@ -661,13 +709,13 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
 }
 
 struct ArchiveConflicts {
-    in_dest_archive: Vec<(String, String)>,   // (source_path, archive_path)
+    in_dest_archive: Vec<(String, String)>, // (source_path, archive_path)
     in_other_archives: Vec<(String, String)>, // (source_path, archive_path)
 }
 
 struct SourceAccessCheck {
-    collisions: Vec<(PathBuf, Vec<String>)>,  // (dest_path, source_paths)
-    unreadable: Vec<(String, String)>,        // (source_path, error_message)
+    collisions: Vec<(PathBuf, Vec<String>)>, // (dest_path, source_paths)
+    unreadable: Vec<(String, String)>,       // (source_path, error_message)
 }
 
 // ============================================================================
@@ -690,7 +738,7 @@ fn print_apply_summary(
         TransferMode::Rename => "rename",
         TransferMode::Move => "move",
     };
-    eprintln!("Mode: {}", mode_name);
+    eprintln!("Mode: {mode_name}");
     eprintln!("Files: {}", sources.len());
 
     // Show destination preview if exists
@@ -720,7 +768,10 @@ fn show_directory_preview(dir: &Path, max_items: usize) {
     let mut count = 0;
     for entry in entries.iter().take(max_items) {
         let name = entry.file_name();
-        let suffix = entry.file_type().map(|ft| if ft.is_dir() { "/" } else { "" }).unwrap_or("");
+        let suffix = entry
+            .file_type()
+            .map(|ft| if ft.is_dir() { "/" } else { "" })
+            .unwrap_or("");
         eprintln!("  {}{}", name.to_string_lossy(), suffix);
         count += 1;
     }
@@ -735,7 +786,7 @@ fn show_directory_preview(dir: &Path, max_items: usize) {
         };
         let remaining = total.saturating_sub(count);
         if remaining > 0 {
-            eprintln!("  ... and {} more", remaining);
+            eprintln!("  ... and {remaining} more");
         }
     }
 }
@@ -768,7 +819,10 @@ fn check_destination_writable(base_dir: &Path) -> Result<()> {
         if let Some(parent) = check_dir.parent() {
             check_dir = parent.to_path_buf();
         } else {
-            bail!("Cannot find existing parent directory for {}", base_dir.display());
+            bail!(
+                "Cannot find existing parent directory for {}",
+                base_dir.display()
+            );
         }
     }
 
@@ -781,10 +835,17 @@ fn check_destination_writable(base_dir: &Path) -> Result<()> {
             Ok(())
         }
         Err(e) if e.kind() == ErrorKind::PermissionDenied => {
-            bail!("No write permission for destination directory: {}", check_dir.display());
+            bail!(
+                "No write permission for destination directory: {}",
+                check_dir.display()
+            );
         }
         Err(e) => {
-            bail!("Cannot write to destination directory {}: {}", check_dir.display(), e);
+            bail!(
+                "Cannot write to destination directory {}: {}",
+                check_dir.display(),
+                e
+            );
         }
     }
 }
@@ -804,7 +865,10 @@ fn filter_by_roots<'a>(
         root_ids.insert(id);
     }
 
-    Ok(sources.iter().filter(|s| root_ids.contains(&s.root_id)).collect())
+    Ok(sources
+        .iter()
+        .filter(|s| root_ids.contains(&s.root_id))
+        .collect())
 }
 
 /// Validate that all sources can successfully expand the output pattern.
@@ -824,7 +888,14 @@ fn validate_pattern_expansions(
     for (i, source) in sources.iter().enumerate() {
         progress.update(i);
 
-        if let Err(e) = evaluate_pattern(pattern, source, needed_keys, scope_prefix, root_paths, all_facts) {
+        if let Err(e) = evaluate_pattern(
+            pattern,
+            source,
+            needed_keys,
+            scope_prefix,
+            root_paths,
+            all_facts,
+        ) {
             failures.push((source.path.clone(), e.to_string()));
         }
     }
@@ -873,7 +944,14 @@ fn check_destination_collisions_filtered(
         }
 
         // Evaluate pattern to get destination path
-        let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, root_paths, all_facts)?;
+        let dest_rel = evaluate_pattern(
+            pattern,
+            source,
+            needed_keys,
+            scope_prefix,
+            root_paths,
+            all_facts,
+        )?;
         let dest_path = base_dir.join(&dest_rel);
 
         dest_to_sources
@@ -893,7 +971,10 @@ fn check_destination_collisions_filtered(
     // Sort for consistent output
     collisions.sort_by(|a, b| a.0.cmp(&b.0));
 
-    Ok(SourceAccessCheck { collisions, unreadable })
+    Ok(SourceAccessCheck {
+        collisions,
+        unreadable,
+    })
 }
 
 /// Check for stale destination records in the database.
@@ -919,11 +1000,18 @@ fn check_stale_destination_records(
     for (i, source) in sources.iter().enumerate() {
         progress.update(i);
 
-        let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, root_paths, all_facts)?;
+        let dest_rel = evaluate_pattern(
+            pattern,
+            source,
+            needed_keys,
+            scope_prefix,
+            root_paths,
+            all_facts,
+        )?;
         let archive_rel_path = if base_dir_rel.is_empty() {
             dest_rel
         } else {
-            format!("{}/{}", base_dir_rel, dest_rel)
+            format!("{base_dir_rel}/{dest_rel}")
         };
         dest_rel_paths.push(archive_rel_path);
     }
@@ -975,11 +1063,18 @@ fn check_destination_conflicts(
     for (i, source) in sources.iter().enumerate() {
         progress.update(i);
 
-        let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, root_paths, all_facts)?;
+        let dest_rel = evaluate_pattern(
+            pattern,
+            source,
+            needed_keys,
+            scope_prefix,
+            root_paths,
+            all_facts,
+        )?;
         let archive_rel_path = if base_dir_rel.is_empty() {
             dest_rel.clone()
         } else {
-            format!("{}/{}", base_dir_rel, dest_rel)
+            format!("{base_dir_rel}/{dest_rel}")
         };
         dest_rel_paths.push(archive_rel_path);
         dest_full_paths.push(base_dir.join(&dest_rel));
@@ -1005,7 +1100,10 @@ fn check_destination_conflicts(
         }
     }
 
-    Ok(DestinationConflicts { in_db, on_disk_only })
+    Ok(DestinationConflicts {
+        in_db,
+        on_disk_only,
+    })
 }
 
 /// Plan which transfers need to be executed in resume mode.
@@ -1037,11 +1135,18 @@ fn plan_transfers<'a>(
     for (i, source) in sources.iter().enumerate() {
         progress.update(i);
 
-        let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, root_paths, all_facts)?;
+        let dest_rel = evaluate_pattern(
+            pattern,
+            source,
+            needed_keys,
+            scope_prefix,
+            root_paths,
+            all_facts,
+        )?;
         let archive_rel_path = if base_dir_rel.is_empty() {
             dest_rel.clone()
         } else {
-            format!("{}/{}", base_dir_rel, dest_rel)
+            format!("{base_dir_rel}/{dest_rel}")
         };
         let full_path = base_dir.join(&dest_rel);
         dest_info.push((archive_rel_path, full_path, source.size as u64));
@@ -1165,9 +1270,13 @@ fn check_archive_conflicts_filtered(
                 // Use first match (consistent with previous LIMIT 1 behavior)
                 if let Some(&(archive_id, ref archive_path)) = info_list.first() {
                     if archive_id == dest_archive_id {
-                        conflicts.in_dest_archive.push((source.path.clone(), archive_path.clone()));
+                        conflicts
+                            .in_dest_archive
+                            .push((source.path.clone(), archive_path.clone()));
                     } else {
-                        conflicts.in_other_archives.push((source.path.clone(), archive_path.clone()));
+                        conflicts
+                            .in_other_archives
+                            .push((source.path.clone(), archive_path.clone()));
                     }
                 }
             }
@@ -1180,10 +1289,7 @@ fn check_archive_conflicts_filtered(
 /// Check that all sources in manifest have content hashes.
 /// Unhashed sources cannot be applied - deduplication requires content hashes.
 fn check_unhashed_sources(sources: &[LockEntry]) -> Result<()> {
-    let unhashed: Vec<_> = sources
-        .iter()
-        .filter(|s| s.object_id.is_none())
-        .collect();
+    let unhashed: Vec<_> = sources.iter().filter(|s| s.object_id.is_none()).collect();
 
     if !unhashed.is_empty() {
         eprintln!(
@@ -1211,10 +1317,9 @@ fn check_archive_hash_coverage(conn: &Connection, archive_root_id: i64) -> Resul
 
     if unhashed > 0 {
         bail!(
-            "Destination archive has {} files without content hash (out of {})\n\
+            "Destination archive has {unhashed} files without content hash (out of {total})\n\
              Cannot reliably detect duplicates without complete hash coverage.\n\
-             Run 'canon scan <archive-path>' to index and hash the archive.",
-            unhashed, total
+             Run 'canon scan <archive-path>' to index and hash the archive."
         );
     }
     Ok(())
@@ -1273,7 +1378,7 @@ fn validate_source_state(source: &LockEntry) -> std::result::Result<(), String> 
             return Err("file not found".to_string());
         }
         Err(e) => {
-            return Err(format!("cannot stat: {}", e));
+            return Err(format!("cannot stat: {e}"));
         }
     };
 
@@ -1297,7 +1402,8 @@ fn validate_source_state(source: &LockEntry) -> std::result::Result<(), String> 
     #[cfg(not(unix))]
     {
         let current_size = meta.len() as i64;
-        let current_mtime = meta.modified()
+        let current_mtime = meta
+            .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
@@ -1313,7 +1419,7 @@ fn validate_source_state(source: &LockEntry) -> std::result::Result<(), String> 
 
     // Partial hash check - recompute from disk and compare to lock
     let current_hash = compute_partial_hash(Path::new(&source.path), source.size as u64)
-        .map_err(|e| format!("failed to compute partial hash: {}", e))?;
+        .map_err(|e| format!("failed to compute partial hash: {e}"))?;
     if current_hash != source.partial_hash {
         mismatches.push(format!(
             "partial hash mismatch: {}... → {}...",
@@ -1353,7 +1459,10 @@ fn check_source_states_disk(sources: &[&LockEntry]) -> Vec<SkippedStaleSource> {
 
 /// Batch validate source file states against DB values. Returns list of stale sources.
 /// Used in dry-run mode for faster validation without disk access.
-fn check_source_states_db(conn: &Connection, sources: &[&LockEntry]) -> Result<Vec<SkippedStaleSource>> {
+fn check_source_states_db(
+    conn: &Connection,
+    sources: &[&LockEntry],
+) -> Result<Vec<SkippedStaleSource>> {
     // Batch fetch all sources from DB
     let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
     let sources_map = repo::source::batch_fetch_by_ids(conn, &source_ids)?;
@@ -1409,7 +1518,7 @@ enum ApplyAction {
     Renamed,
     Moved,
     SkippedMissing,
-    SkippedStale(String),  // reason
+    SkippedStale(String), // reason
 }
 
 fn process_source(
@@ -1436,14 +1545,21 @@ fn process_source(
     }
 
     // Evaluate pattern to get destination path
-    let dest_rel = evaluate_pattern(pattern, source, needed_keys, scope_prefix, root_paths, all_facts)?;
+    let dest_rel = evaluate_pattern(
+        pattern,
+        source,
+        needed_keys,
+        scope_prefix,
+        root_paths,
+        all_facts,
+    )?;
     let dest_path = base_dir.join(&dest_rel);
 
     // Compute relative path within archive root for registration
     let archive_rel_path = if base_dir_rel.is_empty() {
         dest_rel.clone()
     } else {
-        format!("{}/{}", base_dir_rel, dest_rel)
+        format!("{base_dir_rel}/{dest_rel}")
     };
 
     if options.dry_run {
@@ -1453,11 +1569,19 @@ fn process_source(
                 return Ok(ApplyAction::Copied);
             }
             TransferMode::Rename => {
-                println!("[dry-run] RENAME: {} -> {}", source.path, dest_path.display());
+                println!(
+                    "[dry-run] RENAME: {} -> {}",
+                    source.path,
+                    dest_path.display()
+                );
                 return Ok(ApplyAction::Renamed);
             }
             TransferMode::Move => {
-                println!("[dry-run] MOVE: {} -> {} (would delete source; may copy if cross-device)", source.path, dest_path.display());
+                println!(
+                    "[dry-run] MOVE: {} -> {} (would delete source; may copy if cross-device)",
+                    source.path,
+                    dest_path.display()
+                );
                 return Ok(ApplyAction::Moved);
             }
         }
@@ -1483,10 +1607,17 @@ fn process_source(
             }
             let src_meta = fs::metadata(src_path)
                 .with_context(|| format!("Failed to read metadata: {}", source.path))?;
-            fs::copy(src_path, &dest_path)
-                .with_context(|| format!("Failed to copy {} to {}", source.path, dest_path.display()))?;
+            fs::copy(src_path, &dest_path).with_context(|| {
+                format!("Failed to copy {} to {}", source.path, dest_path.display())
+            })?;
             preserve_metadata(&dest_path, &src_meta)?;
-            let new_source = build_new_source(&dest_path, archive_root_id, &archive_rel_path, source.object_id, &source.partial_hash)?;
+            let new_source = build_new_source(
+                &dest_path,
+                archive_root_id,
+                &archive_rel_path,
+                source.object_id,
+                &source.partial_hash,
+            )?;
             repo::source::insert_destination(conn, &new_source)?;
             if options.verbose {
                 println!("Copied: {} -> {}", source.path, dest_path.display());
@@ -1499,8 +1630,13 @@ fn process_source(
                 bail!("Destination already exists: {}", dest_path.display());
             }
             // No metadata read needed - rename preserves all attributes
-            fs::rename(src_path, &dest_path)
-                .with_context(|| format!("Failed to rename {} to {}", source.path, dest_path.display()))?;
+            fs::rename(src_path, &dest_path).with_context(|| {
+                format!(
+                    "Failed to rename {} to {}",
+                    source.path,
+                    dest_path.display()
+                )
+            })?;
             // Update existing source row (inode unchanged on same device)
             relocate_source(conn, source.id, archive_root_id, &archive_rel_path)?;
             if options.verbose {
@@ -1532,15 +1668,22 @@ fn process_source(
                     }
                     let src_meta = fs::metadata(src_path)
                         .with_context(|| format!("Failed to read metadata: {}", source.path))?;
-                    fs::copy(src_path, &dest_path)
-                        .with_context(|| format!("Failed to copy {} to {}", source.path, dest_path.display()))?;
+                    fs::copy(src_path, &dest_path).with_context(|| {
+                        format!("Failed to copy {} to {}", source.path, dest_path.display())
+                    })?;
                     preserve_metadata(&dest_path, &src_meta)?;
                     fs::remove_file(src_path)
                         .with_context(|| format!("Failed to delete source: {}", source.path))?;
                     // Mark old source as not present (file was deleted)
                     mark_source_not_present(conn, source.id)?;
                     // Register new destination (new inode on different device)
-                    let new_source = build_new_source(&dest_path, archive_root_id, &archive_rel_path, source.object_id, &source.partial_hash)?;
+                    let new_source = build_new_source(
+                        &dest_path,
+                        archive_root_id,
+                        &archive_rel_path,
+                        source.object_id,
+                        &source.partial_hash,
+                    )?;
                     repo::source::insert_destination(conn, &new_source)?;
                     if options.verbose {
                         println!("Moved: {} -> {}", source.path, dest_path.display());
@@ -1548,7 +1691,11 @@ fn process_source(
                     Ok(ApplyAction::Moved)
                 }
                 Err(e) => Err(e).with_context(|| {
-                    format!("Failed to rename {} to {}", source.path, dest_path.display())
+                    format!(
+                        "Failed to rename {} to {}",
+                        source.path,
+                        dest_path.display()
+                    )
                 }),
             }
         }
@@ -1612,8 +1759,12 @@ fn build_new_source(
     object_id: Option<i64>,
     partial_hash: &str,
 ) -> Result<NewSource> {
-    let meta = fs::metadata(dest_path)
-        .with_context(|| format!("Failed to read metadata for registration: {}", dest_path.display()))?;
+    let meta = fs::metadata(dest_path).with_context(|| {
+        format!(
+            "Failed to read metadata for registration: {}",
+            dest_path.display()
+        )
+    })?;
 
     Ok(NewSource {
         root_id: archive_root_id,
@@ -1638,10 +1789,15 @@ fn build_new_source(
     object_id: Option<i64>,
     partial_hash: &str,
 ) -> Result<NewSource> {
-    let meta = fs::metadata(dest_path)
-        .with_context(|| format!("Failed to read metadata for registration: {}", dest_path.display()))?;
+    let meta = fs::metadata(dest_path).with_context(|| {
+        format!(
+            "Failed to read metadata for registration: {}",
+            dest_path.display()
+        )
+    })?;
 
-    let mtime = meta.modified()
+    let mtime = meta
+        .modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
@@ -1658,4 +1814,3 @@ fn build_new_source(
         inode: None,
     })
 }
-

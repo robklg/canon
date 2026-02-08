@@ -52,9 +52,7 @@ pub enum Reconciliation {
 
     /// File exists and is unchanged — same path, same size+mtime.
     /// Action: UPDATE last_seen_at only.
-    Unchanged {
-        source_id: i64,
-    },
+    Unchanged { source_id: i64 },
 
     /// File exists but content may have changed — same path, different size or mtime.
     /// Requires: partial_hash must be computed before persistence.
@@ -116,11 +114,12 @@ impl Reconciliation {
 /// # Behavior
 ///
 /// The decision tree:
+///
 /// 1. If source exists at path:
-///    a. If same inode (or inode not tracked): check size+mtime
-///       - Match: Unchanged
-///       - Differ: Modified
-///    b. If different inode: New (replacement, old file handled by mark_missing)
+///     - a. If same inode (or inode not tracked): check size+mtime
+///         - Match: Unchanged
+///         - Differ: Modified
+///     - b. If different inode: New (replacement, old file handled by `mark_missing`)
 /// 2. Else if source exists with same inode (different path): Moved
 /// 3. Else: New
 ///

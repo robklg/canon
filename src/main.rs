@@ -490,7 +490,17 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     match cli.command {
-        Commands::Scan { paths, role, add, comment, all, no_hash, verify, candidates, ignore_device_id } => {
+        Commands::Scan {
+            paths,
+            role,
+            add,
+            comment,
+            all,
+            no_hash,
+            verify,
+            candidates,
+            ignore_device_id,
+        } => {
             if candidates {
                 if paths.is_empty() {
                     anyhow::bail!("--candidates requires a path");
@@ -516,15 +526,56 @@ fn main() -> anyhow::Result<()> {
             if all {
                 anyhow::bail!("--all is not supported on this platform (no device ID detection for mount safety)");
             }
-            scan::run(&db, &paths, role.as_deref(), add, comment.as_deref(), all, no_hash, verify, ignore_device_id)?;
+            scan::run(
+                &db,
+                &paths,
+                role.as_deref(),
+                add,
+                comment.as_deref(),
+                all,
+                no_hash,
+                verify,
+                ignore_device_id,
+            )?;
         }
-        Commands::Worklist { paths, filters, include_archived, include_excluded, unique_content, emit } => {
-            worklist::run(&mut db, &paths, &filters, include_archived, include_excluded, unique_content, &emit)?;
+        Commands::Worklist {
+            paths,
+            filters,
+            include_archived,
+            include_excluded,
+            unique_content,
+            emit,
+        } => {
+            worklist::run(
+                &mut db,
+                &paths,
+                &filters,
+                include_archived,
+                include_excluded,
+                unique_content,
+                &emit,
+            )?;
         }
-        Commands::ImportFacts { allow_archived, verbose } => {
+        Commands::ImportFacts {
+            allow_archived,
+            verbose,
+        } => {
             import_facts::run(&mut db, allow_archived, verbose)?;
         }
-        Commands::Ls { paths, filters, archived, unarchived, unhashed, duplicates, include_archived, include_excluded, long, sort, reverse, null_delim } => {
+        Commands::Ls {
+            paths,
+            filters,
+            archived,
+            unarchived,
+            unhashed,
+            duplicates,
+            include_archived,
+            include_excluded,
+            long,
+            sort,
+            reverse,
+            null_delim,
+        } => {
             // Fetch all roots for path resolution
             let all_roots = repo::root::fetch_all(db.conn())?;
 
@@ -550,18 +601,58 @@ fn main() -> anyhow::Result<()> {
             };
             let include_archived = include_archived || auto_include_archived;
             if duplicates {
-                ls::show_duplicates(&mut db, &scope_paths, &filters, include_archived, include_excluded, use_relative)?;
+                ls::show_duplicates(
+                    &mut db,
+                    &scope_paths,
+                    &filters,
+                    include_archived,
+                    include_excluded,
+                    use_relative,
+                )?;
             } else {
-                ls::run(&mut db, &scope_paths, &filters, archived.as_deref(), unarchived, unhashed, include_archived, include_excluded, use_relative, long, &sort, reverse, null_delim)?;
+                ls::run(
+                    &mut db,
+                    &scope_paths,
+                    &filters,
+                    archived.as_deref(),
+                    unarchived,
+                    unhashed,
+                    include_archived,
+                    include_excluded,
+                    use_relative,
+                    long,
+                    &sort,
+                    reverse,
+                    null_delim,
+                )?;
             }
         }
-        Commands::Facts { action, key, paths, filters, limit, all, show_aliases, include_archived, include_excluded, by_root, group_by } => {
+        Commands::Facts {
+            action,
+            key,
+            paths,
+            filters,
+            limit,
+            all,
+            show_aliases,
+            include_archived,
+            include_excluded,
+            by_root,
+            group_by,
+        } => {
             if show_aliases {
                 facts::show_aliases();
                 return Ok(());
             }
             match action {
-                Some(FactsAction::Delete { key, paths, filters, on, value_type, yes }) => {
+                Some(FactsAction::Delete {
+                    key,
+                    paths,
+                    filters,
+                    on,
+                    value_type,
+                    yes,
+                }) => {
                     let options = facts::DeleteOptions {
                         entity_type: on,
                         value_type,
@@ -570,11 +661,27 @@ fn main() -> anyhow::Result<()> {
                     facts::delete_facts(&mut db, &key, &paths, &filters, &options)?;
                 }
                 None => {
-                    facts::run(&mut db, key.as_deref(), &paths, &filters, limit, all, include_archived, include_excluded, by_root, &group_by)?;
+                    facts::run(
+                        &mut db,
+                        key.as_deref(),
+                        &paths,
+                        &filters,
+                        limit,
+                        all,
+                        include_archived,
+                        include_excluded,
+                        by_root,
+                        &group_by,
+                    )?;
                 }
             }
         }
-        Commands::Prune { orphaned_objects, stale_facts, excluded_facts, yes } => {
+        Commands::Prune {
+            orphaned_objects,
+            stale_facts,
+            excluded_facts,
+            yes,
+        } => {
             if !orphaned_objects && !stale_facts && excluded_facts.is_none() {
                 anyhow::bail!("At least one of --orphaned-objects, --stale-facts, or --excluded-facts is required");
             }
@@ -588,10 +695,31 @@ fn main() -> anyhow::Result<()> {
                 facts::prune_excluded_facts(&db, &scope, !yes)?;
             }
         }
-        Commands::Coverage { paths, filters, archive, include_archived, include_excluded, compact } => {
-            coverage::run(&mut db, &paths, &filters, archive.as_deref(), include_archived, include_excluded, compact)?;
+        Commands::Coverage {
+            paths,
+            filters,
+            archive,
+            include_archived,
+            include_excluded,
+            compact,
+        } => {
+            coverage::run(
+                &mut db,
+                &paths,
+                &filters,
+                archive.as_deref(),
+                include_archived,
+                include_excluded,
+                compact,
+            )?;
         }
-        Commands::Compare { path_a, path_b, filters, include_excluded, verbose } => {
+        Commands::Compare {
+            path_a,
+            path_b,
+            filters,
+            include_excluded,
+            verbose,
+        } => {
             let options = compare::CompareOptions {
                 include_excluded,
                 verbose,
@@ -667,8 +795,16 @@ fn main() -> anyhow::Result<()> {
             apply::run(&mut db, &manifest, &options)?;
         }
         Commands::Exclude { action } => match action {
-            ExcludeAction::Set { paths, filters, id, dry_run } => {
-                let options = exclude::SetOptions { dry_run, verbose: false };
+            ExcludeAction::Set {
+                paths,
+                filters,
+                id,
+                dry_run,
+            } => {
+                let options = exclude::SetOptions {
+                    dry_run,
+                    verbose: false,
+                };
                 if let Some(source_id) = id {
                     exclude::set_by_id(&db, source_id, &options)?;
                 } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {
@@ -678,18 +814,42 @@ fn main() -> anyhow::Result<()> {
                     exclude::set(&mut db, &paths, &filters, &options)?;
                 }
             }
-            ExcludeAction::Clear { paths, filters, dry_run } => {
+            ExcludeAction::Clear {
+                paths,
+                filters,
+                dry_run,
+            } => {
                 let options = exclude::ClearOptions { dry_run };
                 exclude::clear(&mut db, &paths, &filters, &options)?;
             }
             ExcludeAction::List { paths, filters } => {
                 exclude::list(&mut db, &paths, &filters)?;
             }
-            ExcludeAction::Duplicates { path, prefer, filters, dry_run } => {
-                exclude::exclude_duplicates(&mut db, &prefer, Some(path.as_path()), &filters, dry_run)?;
+            ExcludeAction::Duplicates {
+                path,
+                prefer,
+                filters,
+                dry_run,
+            } => {
+                exclude::exclude_duplicates(
+                    &mut db,
+                    &prefer,
+                    Some(path.as_path()),
+                    &filters,
+                    dry_run,
+                )?;
             }
-            ExcludeAction::SetObject { paths, filters, hash, yes, verbose } => {
-                let options = exclude::SetOptions { dry_run: !yes, verbose };
+            ExcludeAction::SetObject {
+                paths,
+                filters,
+                hash,
+                yes,
+                verbose,
+            } => {
+                let options = exclude::SetOptions {
+                    dry_run: !yes,
+                    verbose,
+                };
                 if let Some(h) = hash {
                     exclude::set_object_by_hash(&db, &h, &options)?;
                 } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {
@@ -710,7 +870,11 @@ fn main() -> anyhow::Result<()> {
                 exclude::list_objects(&db)?;
             }
         },
-        Commands::Roots { action, path, suspended } => match action {
+        Commands::Roots {
+            action,
+            path,
+            suspended,
+        } => match action {
             Some(RootsAction::List { path, suspended }) => {
                 roots::list(&db, path.as_deref(), suspended)?;
             }

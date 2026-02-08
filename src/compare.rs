@@ -2,11 +2,11 @@ use anyhow::{bail, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::repo::{self, Db};
-use crate::expr::filter::{self, Filter};
 use crate::domain::path::canonicalize_scope;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
+use crate::expr::filter::{self, Filter};
+use crate::repo::{self, Db};
 
 pub struct CompareOptions {
     pub include_excluded: bool,
@@ -56,16 +56,15 @@ pub fn run(
 
     // Print header
     println!("Comparing:");
-    println!("  A: {}", prefix_a);
-    println!("  B: {}", prefix_b);
+    println!("  A: {prefix_a}");
+    println!("  B: {prefix_b}");
     println!();
 
     // Report unhashed files
     let total_unhashed = unhashed_a + unhashed_b;
     if total_unhashed > 0 {
         eprintln!(
-            "Skipped {} unhashed files (use `canon worklist` to hash them)",
-            total_unhashed
+            "Skipped {total_unhashed} unhashed files (use `canon worklist` to hash them)"
         );
         eprintln!();
     }
@@ -86,7 +85,7 @@ pub fn run(
             .collect();
         paths.sort();
         for path in paths {
-            println!("  {}", path);
+            println!("  {path}");
         }
     }
 
@@ -100,7 +99,7 @@ pub fn run(
             .collect();
         paths.sort();
         for path in paths {
-            println!("  {}", path);
+            println!("  {path}");
         }
     }
 

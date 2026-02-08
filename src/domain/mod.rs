@@ -24,7 +24,10 @@ pub use apply::{classify_destination, DestinationState};
 pub use exclusion::{find_excludable_duplicates, ExcludableDuplicatesResult};
 pub use fact::{FactEntry, FactType, FactValue};
 pub use object::Object;
-pub use path::{canonicalize_maybe_missing, canonicalize_scope, canonicalize_scopes, path_is_under, path_strip_prefix};
+pub use path::{
+    canonicalize_maybe_missing, canonicalize_scope, canonicalize_scopes, path_is_under,
+    path_strip_prefix,
+};
 pub use root::{
     find_containing_root, parse_root_spec, parse_root_spec_any, resolve_archive_path,
     resolve_root_path, resolve_root_path_any, Root, RootSpec,

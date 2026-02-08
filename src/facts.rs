@@ -2,13 +2,16 @@ use anyhow::{bail, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use crate::repo::{self, Connection, Db};
-use crate::expr::{self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, ModifierCall, ParsedFactKey, PathAccessor};
 use crate::domain::fact::FactEntry;
-use crate::expr::value as fact_value;
-use crate::expr::filter::{self, Filter};
 use crate::domain::path::canonicalize_scopes;
 use crate::domain::scope::ScopeMatch;
+use crate::expr::filter::{self, Filter};
+use crate::expr::value as fact_value;
+use crate::expr::{
+    self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, ModifierCall,
+    ParsedFactKey, PathAccessor,
+};
+use crate::repo::{self, Connection, Db};
 
 /// Check if a parsed key represents source.root (for special display formatting)
 fn is_root_key(key: &ParsedFactKey) -> bool {
@@ -36,14 +39,12 @@ fn fact_value_to_display(value: &FactValue) -> String {
             if n.fract() == 0.0 {
                 format!("{}", *n as i64)
             } else {
-                format!("{}", n)
+                format!("{n}")
             }
         }
-        FactValue::Time(ts) => {
-            chrono::DateTime::from_timestamp(*ts, 0)
-                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                .unwrap_or_else(|| ts.to_string())
-        }
+        FactValue::Time(ts) => chrono::DateTime::from_timestamp(*ts, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| ts.to_string()),
     }
 }
 
@@ -70,7 +71,18 @@ fn apply_transforms(
     Ok(fact_value_to_display(&result))
 }
 
-pub fn run(db: &mut Db, key_arg: Option<&str>, scope_paths: &[PathBuf], filter_strs: &[String], limit: usize, show_all: bool, include_archived: bool, include_excluded: bool, by_root: bool, group_by: &[String]) -> Result<()> {
+pub fn run(
+    db: &mut Db,
+    key_arg: Option<&str>,
+    scope_paths: &[PathBuf],
+    filter_strs: &[String],
+    limit: usize,
+    show_all: bool,
+    include_archived: bool,
+    include_excluded: bool,
+    by_root: bool,
+    group_by: &[String],
+) -> Result<()> {
     // Validate grouping requires --key
     let has_grouping = by_root || !group_by.is_empty();
     if has_grouping && key_arg.is_none() {
@@ -99,19 +111,22 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, scope_paths: &[PathBuf], filter_s
 
     // Get all matching source IDs using domain predicates
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
-    let (source_ids, excluded_count) = get_matching_sources(conn, &scopes, &filters, include_archived, include_excluded)?;
+    let (source_ids, excluded_count) =
+        get_matching_sources(conn, &scopes, &filters, include_archived, include_excluded)?;
     let total_sources = source_ids.len();
 
     if total_sources == 0 {
         println!("No sources match the given filters.");
         // Show excluded hint if excluded sources were filtered out
         if !include_excluded && excluded_count > 0 {
-            println!("\n({} excluded sources hidden, use --include-excluded to show)", excluded_count);
+            println!(
+                "\n({excluded_count} excluded sources hidden, use --include-excluded to show)"
+            );
         }
         return Ok(());
     }
 
-    println!("Sources matching filters: {}\n", total_sources);
+    println!("Sources matching filters: {total_sources}\n");
 
     if let Some(fact_key) = key_arg {
         // Parse key for accessor and modifiers
@@ -119,12 +134,37 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, scope_paths: &[PathBuf], filter_s
 
         if !grouping_keys.is_empty() {
             // Grouped distribution
-            show_grouped_distribution(conn, &source_ids, &main_key, &grouping_keys, total_sources, limit)?;
+            show_grouped_distribution(
+                conn,
+                &source_ids,
+                &main_key,
+                &grouping_keys,
+                total_sources,
+                limit,
+            )?;
         } else if is_builtin_or_derived(&main_key.base_key) {
-            show_builtin_distribution(conn, &source_ids, &main_key.base_key, fact_key, &main_key.accessor, &main_key.modifiers, total_sources, limit)?;
+            show_builtin_distribution(
+                conn,
+                &source_ids,
+                &main_key.base_key,
+                fact_key,
+                &main_key.accessor,
+                &main_key.modifiers,
+                total_sources,
+                limit,
+            )?;
         } else if main_key.has_transforms() {
             // Stored fact with transforms - need to fetch raw values and apply transforms
-            show_transformed_distribution(conn, &source_ids, &main_key.base_key, fact_key, &main_key.accessor, &main_key.modifiers, total_sources, limit)?;
+            show_transformed_distribution(
+                conn,
+                &source_ids,
+                &main_key.base_key,
+                fact_key,
+                &main_key.accessor,
+                &main_key.modifiers,
+                total_sources,
+                limit,
+            )?;
         } else {
             // Stored fact without transforms - use SQL grouping
             show_value_distribution(conn, &source_ids, &main_key.base_key, total_sources, limit)?;
@@ -135,7 +175,9 @@ pub fn run(db: &mut Db, key_arg: Option<&str>, scope_paths: &[PathBuf], filter_s
 
     // Report excluded count
     if !include_excluded && excluded_count > 0 {
-        println!("\n({} excluded sources hidden, use --include-excluded to show)", excluded_count);
+        println!(
+            "\n({excluded_count} excluded sources hidden, use --include-excluded to show)"
+        );
     }
 
     Ok(())
@@ -167,12 +209,11 @@ fn get_matching_sources(
         .filter(|s| include_archived || s.is_from_role("source"))
         .filter(|s| s.matches_scope(scopes))
         .filter(|s| {
-            if s.is_excluded() {
-                if !include_excluded {
+            if s.is_excluded()
+                && !include_excluded {
                     excluded_count += 1;
                     return false;
                 }
-            }
             true
         })
         .map(|s| s.id)
@@ -195,7 +236,12 @@ fn get_matching_sources(
     Ok((result, excluded_count))
 }
 
-fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize, show_all: bool) -> Result<()> {
+fn show_all_keys(
+    conn: &mut Connection,
+    source_ids: &[i64],
+    total_sources: usize,
+    show_all: bool,
+) -> Result<()> {
     if source_ids.is_empty() {
         return Ok(());
     }
@@ -217,7 +263,12 @@ fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize
             continue;
         }
         let name: &'static str = key.into();
-        all_results.push((name.to_string(), total_sources as i64, key.category(), key.fact_type()));
+        all_results.push((
+            name.to_string(),
+            total_sources as i64,
+            key.category(),
+            key.fact_type(),
+        ));
     }
 
     // Add stored facts (with Stored category)
@@ -228,7 +279,10 @@ fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize
     all_results.extend(stored_results);
 
     // Print header
-    println!("{:<30} {:>6} {:>10} {:>10}", "Fact", "Type", "Count", "Coverage");
+    println!(
+        "{:<30} {:>6} {:>10} {:>10}",
+        "Fact", "Type", "Count", "Coverage"
+    );
     println!("{}", "─".repeat(60));
 
     for (key, count, category, fact_type) in &all_results {
@@ -238,14 +292,23 @@ fn show_all_keys(conn: &mut Connection, source_ids: &[i64], total_sources: usize
             BuiltinKeyCategory::Derived => "  (derived)",
             BuiltinKeyCategory::Stored => "",
         };
-        println!("{:<30} {:>6} {:>10} {:>9.1}%{}", key, fact_type.as_str(), count, coverage, suffix);
+        println!(
+            "{:<30} {:>6} {:>10} {:>9.1}%{}",
+            key,
+            fact_type.as_str(),
+            count,
+            coverage,
+            suffix
+        );
     }
 
     if !show_all {
         let hidden_count = BuiltinKey::iter()
             .filter(|k| k.visibility() == BuiltinKeyVisibility::Hidden)
             .count();
-        println!("\n({} built-in/derived facts hidden, use --all to show)", hidden_count);
+        println!(
+            "\n({hidden_count} built-in/derived facts hidden, use --all to show)"
+        );
     }
 
     Ok(())
@@ -269,12 +332,10 @@ fn show_value_distribution(
     let mut counts: HashMap<String, i64> = HashMap::new();
     let mut sources_with_fact: i64 = 0;
 
-    for (_source_id, entry_opt) in &fact_map {
-        if let Some(entry) = entry_opt {
-            sources_with_fact += 1;
-            let display_val = fact_value_to_display(&entry.value);
-            *counts.entry(display_val).or_insert(0) += 1;
-        }
+    for entry in fact_map.values().flatten() {
+        sources_with_fact += 1;
+        let display_val = fact_value_to_display(&entry.value);
+        *counts.entry(display_val).or_insert(0) += 1;
     }
 
     // Sort by count descending
@@ -297,14 +358,17 @@ fn show_value_distribution(
             value.clone()
         };
         let coverage = (*count as f64 / total_sources as f64) * 100.0;
-        println!("{:<40} {:>10} {:>9.1}%", display_val, count, coverage);
+        println!("{display_val:<40} {count:>10} {coverage:>9.1}%");
     }
 
     // Show "(no value)" count
     let without_fact = total_sources as i64 - sources_with_fact;
     if without_fact > 0 {
         let coverage = (without_fact as f64 / total_sources as f64) * 100.0;
-        println!("{:<40} {:>10} {:>9.1}%", "(no value)", without_fact, coverage);
+        println!(
+            "{:<40} {:>10} {:>9.1}%",
+            "(no value)", without_fact, coverage
+        );
     }
 
     Ok(())
@@ -332,17 +396,15 @@ fn show_transformed_distribution(
     let mut sources_with_fact: i64 = 0;
     let mut skipped_type_mismatch: i64 = 0;
 
-    for (_source_id, entry_opt) in &fact_map {
-        if let Some(entry) = entry_opt {
-            sources_with_fact += 1;
-            match apply_transforms(entry.value.clone(), accessor, modifiers, display_key) {
-                Ok(transformed) => {
-                    *counts.entry(transformed).or_insert(0) += 1;
-                }
-                Err(_) => {
-                    // Type mismatch (e.g., text value when time modifier expected)
-                    skipped_type_mismatch += 1;
-                }
+    for entry in fact_map.values().flatten() {
+        sources_with_fact += 1;
+        match apply_transforms(entry.value.clone(), accessor, modifiers, display_key) {
+            Ok(transformed) => {
+                *counts.entry(transformed).or_insert(0) += 1;
+            }
+            Err(_) => {
+                // Type mismatch (e.g., text value when time modifier expected)
+                skipped_type_mismatch += 1;
             }
         }
     }
@@ -369,21 +431,23 @@ fn show_transformed_distribution(
             value.clone()
         };
         let coverage = (*count as f64 / total_sources as f64) * 100.0;
-        println!("{:<40} {:>10} {:>9.1}%", display_val, count, coverage);
+        println!("{display_val:<40} {count:>10} {coverage:>9.1}%");
     }
 
     // Show "(no value)" count
     let without_fact = total_sources as i64 - sources_with_fact;
     if without_fact > 0 {
         let coverage = (without_fact as f64 / total_sources as f64) * 100.0;
-        println!("{:<40} {:>10} {:>9.1}%", "(no value)", without_fact, coverage);
+        println!(
+            "{:<40} {:>10} {:>9.1}%",
+            "(no value)", without_fact, coverage
+        );
     }
 
     // Warn about skipped values due to type mismatch
     if skipped_type_mismatch > 0 {
         eprintln!(
-            "Warning: skipped {} values with incompatible type for transform",
-            skipped_type_mismatch
+            "Warning: skipped {skipped_type_mismatch} values with incompatible type for transform"
         );
     }
 
@@ -415,7 +479,7 @@ fn show_builtin_distribution(
         BuiltinKeyCategory::Derived => "derived",
         BuiltinKeyCategory::Stored => "stored",
     };
-    let label = format!("{} ({})", display_key, category_str);
+    let label = format!("{display_key} ({category_str})");
 
     let has_transforms = accessor.is_some() || !modifiers.is_empty();
     let mut counts: HashMap<String, i64> = HashMap::new();
@@ -437,7 +501,12 @@ fn show_builtin_distribution(
             }
             "source.size" => {
                 if has_transforms {
-                    apply_transforms(FactValue::Num(source.size as f64), accessor, modifiers, display_key)?
+                    apply_transforms(
+                        FactValue::Num(source.size as f64),
+                        accessor,
+                        modifiers,
+                        display_key,
+                    )?
                 } else {
                     // Default: size buckets
                     let bucket = if source.size < 1024 {
@@ -458,7 +527,12 @@ fn show_builtin_distribution(
             }
             "source.mtime" => {
                 if has_transforms {
-                    apply_transforms(FactValue::Time(source.mtime), accessor, modifiers, display_key)?
+                    apply_transforms(
+                        FactValue::Time(source.mtime),
+                        accessor,
+                        modifiers,
+                        display_key,
+                    )?
                 } else {
                     // Default: group by year
                     chrono::DateTime::from_timestamp(source.mtime, 0)
@@ -476,28 +550,48 @@ fn show_builtin_distribution(
             }
             "source.root" => {
                 if has_transforms {
-                    apply_transforms(FactValue::Path(source.root_path.clone()), accessor, modifiers, display_key)?
+                    apply_transforms(
+                        FactValue::Path(source.root_path.clone()),
+                        accessor,
+                        modifiers,
+                        display_key,
+                    )?
                 } else {
                     source.root_path.clone()
                 }
             }
             "source.rel_path" => {
                 if has_transforms {
-                    apply_transforms(FactValue::Path(source.rel_path.clone()), accessor, modifiers, display_key)?
+                    apply_transforms(
+                        FactValue::Path(source.rel_path.clone()),
+                        accessor,
+                        modifiers,
+                        display_key,
+                    )?
                 } else {
                     source.rel_path.clone()
                 }
             }
             "source.device" => {
                 if has_transforms {
-                    apply_transforms(FactValue::Num(source.device as f64), accessor, modifiers, display_key)?
+                    apply_transforms(
+                        FactValue::Num(source.device as f64),
+                        accessor,
+                        modifiers,
+                        display_key,
+                    )?
                 } else {
                     source.device.to_string()
                 }
             }
             "source.inode" => {
                 if has_transforms {
-                    apply_transforms(FactValue::Num(source.inode as f64), accessor, modifiers, display_key)?
+                    apply_transforms(
+                        FactValue::Num(source.inode as f64),
+                        accessor,
+                        modifiers,
+                        display_key,
+                    )?
                 } else {
                     source.inode.to_string()
                 }
@@ -541,7 +635,7 @@ fn show_builtin_distribution(
             value.clone()
         };
         let coverage = (*count as f64 / total_sources as f64) * 100.0;
-        println!("{:<40} {:>10} {:>9.1}%", display_val, count, coverage);
+        println!("{display_val:<40} {count:>10} {coverage:>9.1}%");
     }
 
     Ok(())
@@ -554,12 +648,12 @@ fn show_builtin_distribution(
 /// Format root for display: id:N ...truncated_path
 fn format_root_display(root_id: i64, root_path: &str) -> String {
     const MAX_PATH_LEN: usize = 30;
-    let id_prefix = format!("id:{:<2}", root_id);
+    let id_prefix = format!("id:{root_id:<2}");
     if root_path.len() <= MAX_PATH_LEN {
-        format!("{} {}", id_prefix, root_path)
+        format!("{id_prefix} {root_path}")
     } else {
         let truncated = &root_path[root_path.len() - MAX_PATH_LEN + 3..];
-        format!("{} ...{}", id_prefix, truncated)
+        format!("{id_prefix} ...{truncated}")
     }
 }
 
@@ -601,7 +695,10 @@ fn show_grouped_distribution(
             let key_facts = repo::fact::batch_fetch_key_for_sources(conn, source_ids, key)?;
             for (source_id, entry_opt) in key_facts {
                 if let Some(entry) = entry_opt {
-                    merged.entry(source_id).or_default().insert(entry.key.clone(), entry);
+                    merged
+                        .entry(source_id)
+                        .or_default()
+                        .insert(entry.key.clone(), entry);
                 }
             }
         }
@@ -664,7 +761,10 @@ fn show_grouped_distribution(
             group_values.push(gk_value);
         }
 
-        let key = GroupKey { main_value, group_values };
+        let key = GroupKey {
+            main_value,
+            group_values,
+        };
         let entry = aggregated.entry(key).or_insert(GroupInfo {
             count: 0,
             root_id: root_id_for_display,
@@ -683,13 +783,17 @@ fn show_grouped_distribution(
     let mut by_main_value: HashMap<String, MainValueGroup> = HashMap::new();
 
     for (key, info) in aggregated {
-        let entry = by_main_value.entry(key.main_value.clone()).or_insert(MainValueGroup {
-            main_value: key.main_value,
-            total_count: 0,
-            sub_groups: Vec::new(),
-        });
+        let entry = by_main_value
+            .entry(key.main_value.clone())
+            .or_insert(MainValueGroup {
+                main_value: key.main_value,
+                total_count: 0,
+                sub_groups: Vec::new(),
+            });
         entry.total_count += info.count;
-        entry.sub_groups.push((key.group_values, info.count, info.root_id, info.root_path));
+        entry
+            .sub_groups
+            .push((key.group_values, info.count, info.root_id, info.root_path));
     }
 
     // Sort main values by total count descending
@@ -725,7 +829,12 @@ fn show_grouped_distribution(
         } else {
             &mv.main_value
         };
-        println!("{} (total: {:>6}, {:>5.1}%)", main_display, format_number(mv.total_count), coverage);
+        println!(
+            "{} (total: {:>6}, {:>5.1}%)",
+            main_display,
+            format_number(mv.total_count),
+            coverage
+        );
 
         for (group_values, count, root_id, root_path) in &mv.sub_groups {
             let sub_coverage = (*count as f64 / mv.total_count as f64) * 100.0;
@@ -740,21 +849,30 @@ fn show_grouped_distribution(
                 }
             } else {
                 // Multiple grouping keys or non-root
-                let parts: Vec<String> = grouping_keys.iter().enumerate().map(|(i, gk)| {
-                    if is_root_key(gk) {
-                        if let (Some(rid), Some(rpath)) = (root_id, root_path) {
-                            format_root_display(*rid, rpath)
+                let parts: Vec<String> = grouping_keys
+                    .iter()
+                    .enumerate()
+                    .map(|(i, gk)| {
+                        if is_root_key(gk) {
+                            if let (Some(rid), Some(rpath)) = (root_id, root_path) {
+                                format_root_display(*rid, rpath)
+                            } else {
+                                group_values[i].clone()
+                            }
                         } else {
                             group_values[i].clone()
                         }
-                    } else {
-                        group_values[i].clone()
-                    }
-                }).collect();
+                    })
+                    .collect();
                 parts.join(" / ")
             };
 
-            println!("  {:<40} {:>8} {:>6.1}%", group_display, format_number(*count), sub_coverage);
+            println!(
+                "  {:<40} {:>8} {:>6.1}%",
+                group_display,
+                format_number(*count),
+                sub_coverage
+            );
         }
         println!();
     }
@@ -763,7 +881,11 @@ fn show_grouped_distribution(
     let without_main_value = total_sources as i64 - sources_with_main_value;
     if without_main_value > 0 {
         let coverage = (without_main_value as f64 / total_sources as f64) * 100.0;
-        println!("(no value) (total: {:>6}, {:>5.1}%)", format_number(without_main_value), coverage);
+        println!(
+            "(no value) (total: {:>6}, {:>5.1}%)",
+            format_number(without_main_value),
+            coverage
+        );
     }
 
     Ok(())
@@ -774,7 +896,7 @@ fn show_grouped_distribution(
 // ============================================================================
 
 pub struct DeleteOptions {
-    pub entity_type: String, // "source" or "object"
+    pub entity_type: String,        // "source" or "object"
     pub value_type: Option<String>, // "text", "num", or "time"
     pub dry_run: bool,
 }
@@ -794,8 +916,7 @@ pub fn delete_facts(
     // Validate key is not protected
     if is_protected_fact(key) {
         bail!(
-            "Cannot delete protected fact '{}'. Facts in source.* and policy.* namespaces cannot be deleted.",
-            key
+            "Cannot delete protected fact '{key}'. Facts in source.* and policy.* namespaces cannot be deleted."
         );
     }
 
@@ -855,7 +976,7 @@ pub fn delete_facts(
     };
 
     if fact_count == 0 {
-        println!("No '{}' facts found on matching {}.", key, entity_label);
+        println!("No '{key}' facts found on matching {entity_label}.");
     } else if options.dry_run {
         println!(
             "Would delete {} fact rows across {} {}",
@@ -957,7 +1078,9 @@ pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool) -> Result<()> {
         println!();
         println!("Note: Orphaned objects represent content you've seen but no longer have.");
         println!("They may be useful if the content reappears (backup restore, found elsewhere).");
-        println!("Object-level exclusions will also be deleted (use `exclude list-objects` to review).");
+        println!(
+            "Object-level exclusions will also be deleted (use `exclude list-objects` to review)."
+        );
         println!("Use --yes to proceed with deletion.");
     } else {
         // Use transaction for atomicity of cascade delete
@@ -998,8 +1121,7 @@ pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
 
     if !prune_sources && !prune_objects {
         anyhow::bail!(
-            "Invalid scope '{}'. Use 'source', 'object', or omit for both.",
-            scope
+            "Invalid scope '{scope}'. Use 'source', 'object', or omit for both."
         );
     }
 
@@ -1032,7 +1154,9 @@ pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
         );
         println!();
         if scope == "all" {
-            println!("Tip: Use --excluded-facts=source or --excluded-facts=object to narrow scope.");
+            println!(
+                "Tip: Use --excluded-facts=source or --excluded-facts=object to narrow scope."
+            );
         }
         println!("Use --yes to proceed with deletion.");
     } else {
@@ -1078,7 +1202,7 @@ pub fn show_aliases() {
     for key in BuiltinKey::iter() {
         if let Some(expansion) = key.expansion() {
             let name: &'static str = key.into();
-            println!("  {:<15} \u{2192} {}", name, expansion);
+            println!("  {name:<15} \u{2192} {expansion}");
         }
     }
 

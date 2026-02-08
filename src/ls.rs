@@ -3,12 +3,12 @@ use chrono::{TimeZone, Utc};
 use rusqlite::types::Value;
 use std::collections::{HashMap, HashSet};
 
-use crate::repo::{self, Connection, Db};
-use crate::repo::source::BATCH_SIZE;
-use crate::expr::filter::{self, Filter};
 use crate::domain::path::{canonicalize_scopes, path_strip_prefix};
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
+use crate::expr::filter::{self, Filter};
+use crate::repo::source::BATCH_SIZE;
+use crate::repo::{self, Connection, Db};
 
 pub fn run(
     db: &mut Db,
@@ -32,8 +32,7 @@ pub fn run(
     // Validate sort option
     if !matches!(sort_by, "path" | "size" | "mtime" | "name") {
         anyhow::bail!(
-            "Invalid sort option '{}'. Valid options: path, size, mtime, name",
-            sort_by
+            "Invalid sort option '{sort_by}'. Valid options: path, size, mtime, name"
         );
     }
 
@@ -65,8 +64,7 @@ pub fn run(
         eprintln!("No sources match the given filters.");
         if !include_excluded && excluded_count > 0 {
             eprintln!(
-                "({} excluded sources hidden, use --include-excluded to show)",
-                excluded_count
+                "({excluded_count} excluded sources hidden, use --include-excluded to show)"
             );
         }
         return Ok(());
@@ -167,16 +165,15 @@ pub fn run(
             let date_str = format_date(*mtime);
             if let Some(ap) = archive_path {
                 print!(
-                    "{:>8}  {}  {}\t{}{}",
-                    size_str, date_str, source_path, ap, line_end
+                    "{size_str:>8}  {date_str}  {source_path}\t{ap}{line_end}"
                 );
             } else {
-                print!("{:>8}  {}  {}{}", size_str, date_str, source_path, line_end);
+                print!("{size_str:>8}  {date_str}  {source_path}{line_end}");
             }
         } else if let Some(ap) = archive_path {
-            print!("{}\t{}{}", source_path, ap, line_end);
+            print!("{source_path}\t{ap}{line_end}");
         } else {
-            print!("{}{}", source_path, line_end);
+            print!("{source_path}{line_end}");
         }
     }
 
@@ -193,12 +190,11 @@ pub fn run(
     };
     let mut footer_parts = vec![format!("{} sources", source_count)];
     if !include_excluded && excluded_count > 0 {
-        footer_parts.push(format!("{} excluded hidden", excluded_count));
+        footer_parts.push(format!("{excluded_count} excluded hidden"));
     }
     if (archived_only || unarchived_only) && unhashed_count > 0 {
         footer_parts.push(format!(
-            "{} unhashed skipped, use --unhashed to see",
-            unhashed_count
+            "{unhashed_count} unhashed skipped, use --unhashed to see"
         ));
     }
 
@@ -244,12 +240,11 @@ fn get_matching_sources(
         .filter(|s| include_archived || s.is_from_role("source"))
         .filter(|s| s.matches_scope(scopes))
         .filter(|s| {
-            if s.is_excluded() {
-                if !include_excluded {
+            if s.is_excluded()
+                && !include_excluded {
                     excluded_count += 1;
                     return false;
                 }
-            }
             true
         })
         .collect();
@@ -301,7 +296,7 @@ fn format_size(bytes: i64) -> String {
     } else if bytes >= KB {
         format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
@@ -351,8 +346,7 @@ pub fn show_duplicates(
         eprintln!("No sources match the given filters.");
         if !include_excluded && excluded_count > 0 {
             eprintln!(
-                "({} excluded sources hidden, use --include-excluded to show)",
-                excluded_count
+                "({excluded_count} excluded sources hidden, use --include-excluded to show)"
             );
         }
         return Ok(());
@@ -368,8 +362,7 @@ pub fn show_duplicates(
         println!("No duplicates found.");
         if !include_excluded && excluded_count > 0 {
             eprintln!(
-                "({} excluded sources hidden, use --include-excluded to show)",
-                excluded_count
+                "({excluded_count} excluded sources hidden, use --include-excluded to show)"
             );
         }
         return Ok(());
@@ -388,7 +381,7 @@ pub fn show_duplicates(
         );
         for (path, source_id) in dup_sources {
             let display_path = format_path(path, cwd.as_deref());
-            println!("  {} (id: {})", display_path, source_id);
+            println!("  {display_path} (id: {source_id})");
         }
         println!();
         total_sources += dup_sources.len();
@@ -402,8 +395,7 @@ pub fn show_duplicates(
     );
     if !include_excluded && excluded_count > 0 {
         eprintln!(
-            "({} excluded sources hidden, use --include-excluded to show)",
-            excluded_count
+            "({excluded_count} excluded sources hidden, use --include-excluded to show)"
         );
     }
 
@@ -454,7 +446,7 @@ fn find_duplicate_groups(
             let full_path = if rel_path.is_empty() {
                 root_path
             } else {
-                format!("{}/{}", root_path, rel_path)
+                format!("{root_path}/{rel_path}")
             };
 
             object_map
@@ -614,11 +606,15 @@ mod tests {
         // Verify archived_set contains only the archived object
         assert!(archived_set.contains(&archived_obj));
         assert!(!archived_set.contains(&unarchived_obj));
-        assert_eq!(archived_set.len(), 1, "Only 1 unique object should be archived");
+        assert_eq!(
+            archived_set.len(),
+            1,
+            "Only 1 unique object should be archived"
+        );
 
         // NOW THE CRITICAL TEST:
         // If we filter sources by "has archived object", we should get 3 sources, not 1
-        let source_ids = vec![source1, source2, source3];
+        let source_ids = [source1, source2, source3];
         let archived_source_count = source_ids
             .iter()
             .filter(|_| {

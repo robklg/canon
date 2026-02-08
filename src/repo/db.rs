@@ -238,7 +238,10 @@ pub fn open_with_options(path: &Path, options: DbOptions) -> Result<Db> {
 
 /// Populate temp_sources table with source IDs using a transaction for efficiency
 pub fn populate_temp_sources(conn: &mut Connection, source_ids: &[i64]) -> Result<()> {
-    conn.execute("CREATE TEMP TABLE IF NOT EXISTS temp_sources (id INTEGER PRIMARY KEY)", [])?;
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS temp_sources (id INTEGER PRIMARY KEY)",
+        [],
+    )?;
 
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM temp_sources", [])?;
@@ -316,8 +319,7 @@ pub fn print_profile_summary(conn: &Connection) {
 
     // Show top slow queries
     eprintln!(
-        "\nTop {} slowest query patterns (by total time):",
-        TOP_SLOW_QUERIES
+        "\nTop {TOP_SLOW_QUERIES} slowest query patterns (by total time):"
     );
     eprintln!("{}", "-".repeat(70));
 
@@ -340,14 +342,14 @@ pub fn print_profile_summary(conn: &Connection) {
         } else {
             normalized.clone()
         };
-        eprintln!("   {}", display_sql);
+        eprintln!("   {display_sql}");
 
         // Show EXPLAIN QUERY PLAN for slow queries
         if *max_ms >= SLOW_QUERY_THRESHOLD_MS {
             if let Some(plan) = get_query_plan(conn, example_sql) {
                 eprintln!("   Query plan:");
                 for line in plan.lines() {
-                    eprintln!("     {}", line);
+                    eprintln!("     {line}");
                 }
             }
         }
@@ -418,7 +420,7 @@ fn get_query_plan(conn: &Connection, sql: &str) -> Option<String> {
         return None;
     }
 
-    let explain_sql = format!("EXPLAIN QUERY PLAN {}", sql);
+    let explain_sql = format!("EXPLAIN QUERY PLAN {sql}");
     let mut stmt = conn.prepare(&explain_sql).ok()?;
     let rows: Vec<String> = stmt
         .query_map([], |row| {

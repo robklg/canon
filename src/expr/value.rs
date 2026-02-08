@@ -142,7 +142,7 @@ pub fn fact_value_to_display(value: &FactValue) -> String {
             if n.fract() == 0.0 {
                 format!("{}", *n as i64)
             } else {
-                format!("{}", n)
+                format!("{n}")
             }
         }
         FactValue::Time(ts) => chrono::DateTime::from_timestamp(*ts, 0)
@@ -232,7 +232,10 @@ mod tests {
         let source = make_source();
         let key = ParsedFactKey::parse("source.path").unwrap();
         let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
-        assert_eq!(result, Some("/photos/2024/vacation/IMG_001.jpg".to_string()));
+        assert_eq!(
+            result,
+            Some("/photos/2024/vacation/IMG_001.jpg".to_string())
+        );
     }
 
     #[test]
@@ -288,7 +291,8 @@ mod tests {
     #[test]
     fn resolve_stored_text() {
         let source = make_source();
-        let stored = make_stored_facts(vec![("content.Make", FactValue::Text("Canon".to_string()))]);
+        let stored =
+            make_stored_facts(vec![("content.Make", FactValue::Text("Canon".to_string()))]);
         let key = ParsedFactKey::parse("content.Make").unwrap();
         let result = resolve_fact_value(&source, &key, &stored).unwrap();
         assert_eq!(result, Some("Canon".to_string()));

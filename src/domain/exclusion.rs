@@ -180,7 +180,14 @@ mod tests {
     #[test]
     fn find_excludable_skips_already_in_prefer() {
         // Source is already under prefer path
-        let scope = vec![make_source(1, "/archive", "file.txt", Some(100), false, false)];
+        let scope = vec![make_source(
+            1,
+            "/archive",
+            "file.txt",
+            Some(100),
+            false,
+            false,
+        )];
 
         let result = find_excludable_duplicates(&scope, &HashMap::new(), "/archive");
 
@@ -196,10 +203,13 @@ mod tests {
 
         let scope = vec![source];
         let mut by_object = HashMap::new();
-        by_object.insert(100, vec![
-            make_source(1, "/source", "photo.jpg", Some(100), false, false),
-            archive_copy,
-        ]);
+        by_object.insert(
+            100,
+            vec![
+                make_source(1, "/source", "photo.jpg", Some(100), false, false),
+                archive_copy,
+            ],
+        );
 
         let result = find_excludable_duplicates(&scope, &by_object, "/archive");
 
@@ -232,11 +242,14 @@ mod tests {
 
         let scope = vec![source];
         let mut by_object = HashMap::new();
-        by_object.insert(100, vec![
-            make_source(1, "/source", "photo.jpg", Some(100), false, false),
-            archive_copy1,
-            archive_copy2,
-        ]);
+        by_object.insert(
+            100,
+            vec![
+                make_source(1, "/source", "photo.jpg", Some(100), false, false),
+                archive_copy1,
+                archive_copy2,
+            ],
+        );
 
         let result = find_excludable_duplicates(&scope, &by_object, "/archive");
 
@@ -253,11 +266,14 @@ mod tests {
 
         let scope = vec![source];
         let mut by_object = HashMap::new();
-        by_object.insert(100, vec![
-            make_source(1, "/source", "photo.jpg", Some(100), false, false),
-            archive_copy,
-            excluded_copy,
-        ]);
+        by_object.insert(
+            100,
+            vec![
+                make_source(1, "/source", "photo.jpg", Some(100), false, false),
+                archive_copy,
+                excluded_copy,
+            ],
+        );
 
         let result = find_excludable_duplicates(&scope, &by_object, "/archive");
 
@@ -273,10 +289,13 @@ mod tests {
 
         let scope = vec![source];
         let mut by_object = HashMap::new();
-        by_object.insert(100, vec![
-            make_source(1, "/source", "photo.jpg", Some(100), false, false),
-            object_excluded_copy,
-        ]);
+        by_object.insert(
+            100,
+            vec![
+                make_source(1, "/source", "photo.jpg", Some(100), false, false),
+                object_excluded_copy,
+            ],
+        );
 
         let result = find_excludable_duplicates(&scope, &by_object, "/archive");
 
@@ -294,10 +313,13 @@ mod tests {
 
         let scope = vec![source];
         let mut by_object = HashMap::new();
-        by_object.insert(100, vec![
-            make_source(1, "/source", "photo.jpg", Some(100), false, false),
-            archive_file,
-        ]);
+        by_object.insert(
+            100,
+            vec![
+                make_source(1, "/source", "photo.jpg", Some(100), false, false),
+                archive_file,
+            ],
+        );
 
         // prefer path is exactly the archive file
         let result = find_excludable_duplicates(&scope, &by_object, "/archive/photo.jpg");
@@ -341,21 +363,27 @@ mod tests {
         // No backup for 300
         by_object.insert(300, vec![src_no_backup]);
         // One backup for 400
-        by_object.insert(400, vec![
-            src_to_exclude,
-            make_source(10, "/archive", "backup.txt", Some(400), false, false),
-        ]);
+        by_object.insert(
+            400,
+            vec![
+                src_to_exclude,
+                make_source(10, "/archive", "backup.txt", Some(400), false, false),
+            ],
+        );
         // Two backups for 500 (ambiguous)
-        by_object.insert(500, vec![
-            src_ambiguous,
-            make_source(11, "/archive", "backup1.txt", Some(500), false, false),
-            make_source(12, "/archive", "backup2.txt", Some(500), false, false),
-        ]);
+        by_object.insert(
+            500,
+            vec![
+                src_ambiguous,
+                make_source(11, "/archive", "backup1.txt", Some(500), false, false),
+                make_source(12, "/archive", "backup2.txt", Some(500), false, false),
+            ],
+        );
 
         let result = find_excludable_duplicates(&scope, &by_object, "/archive");
 
         assert_eq!(result.to_exclude, vec![4]); // Only src_to_exclude
-        assert_eq!(result.skipped_no_hash, 1);  // src_unhashed
+        assert_eq!(result.skipped_no_hash, 1); // src_unhashed
         assert_eq!(result.skipped_in_prefer, 1); // src_in_prefer
         assert_eq!(result.skipped_not_covered, 1); // src_no_backup
         assert_eq!(result.skipped_multiple, 1); // src_ambiguous

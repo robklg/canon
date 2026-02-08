@@ -51,7 +51,7 @@ fn root_from_row(row: &rusqlite::Row) -> rusqlite::Result<Root> {
 /// Returns roots ordered by ID. No filtering is applied — callers should use
 /// domain predicates like `is_active()`, `is_source()`, etc. to filter.
 pub fn fetch_all(conn: &Connection) -> Result<Vec<Root>> {
-    let sql = format!("SELECT {} FROM roots ORDER BY id", ROOT_COLUMNS);
+    let sql = format!("SELECT {ROOT_COLUMNS} FROM roots ORDER BY id");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], root_from_row)?;
 
@@ -119,7 +119,7 @@ pub fn create(conn: &Connection, path: &str, role: &str, comment: Option<&str>) 
 
     // Fetch the complete Root to ensure consistency with database state.
     // This follows the insert_destination() pattern from source.rs.
-    let sql = format!("SELECT {} FROM roots WHERE id = ?", ROOT_COLUMNS);
+    let sql = format!("SELECT {ROOT_COLUMNS} FROM roots WHERE id = ?");
     let root = conn.query_row(&sql, [id], root_from_row)?;
     Ok(root)
 }
@@ -214,12 +214,7 @@ pub fn remove(conn: &Connection, root_id: i64) -> Result<i64> {
 /// This function is only available in test builds. It provides a simple way
 /// to set up test data without duplicating INSERT SQL across test modules.
 #[cfg(test)]
-pub fn insert_test_root(
-    conn: &Connection,
-    path: &str,
-    role: &str,
-    suspended: bool,
-) -> i64 {
+pub fn insert_test_root(conn: &Connection, path: &str, role: &str, suspended: bool) -> i64 {
     conn.execute(
         "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",
         rusqlite::params![path, role, suspended as i64],
@@ -272,7 +267,14 @@ mod tests {
         let conn = setup_test_db();
 
         insert_root(&conn, "/photos", "source", None, None, false);
-        insert_root(&conn, "/archive", "archive", Some("backup"), Some(1704067200), false);
+        insert_root(
+            &conn,
+            "/archive",
+            "archive",
+            Some("backup"),
+            Some(1704067200),
+            false,
+        );
 
         let roots = fetch_all(&conn).unwrap();
         assert_eq!(roots.len(), 2);
@@ -480,7 +482,12 @@ mod tests {
     // =========================================================================
 
     /// Insert a test source and return its ID.
-    fn insert_source(conn: &RusqliteConnection, root_id: i64, rel_path: &str, present: bool) -> i64 {
+    fn insert_source(
+        conn: &RusqliteConnection,
+        root_id: i64,
+        rel_path: &str,
+        present: bool,
+    ) -> i64 {
         conn.execute(
             "INSERT INTO sources (root_id, rel_path, present, device, inode, size, mtime, partial_hash, scanned_at, last_seen_at)
              VALUES (?, ?, ?, 1, 1, 100, 1700000000, 'testhash', 0, 0)",
