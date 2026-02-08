@@ -56,11 +56,11 @@ A command module is "compliant" when:
 | **coverage.rs** | 2 | ✅ Done | [2026-02-08-coverage-sql-extraction.md](2026-02-08-coverage-sql-extraction.md) |
 | **import_facts.rs** | 8 | ✅ Done | [2026-02-08-import-facts-sql-extraction.md](2026-02-08-import-facts-sql-extraction.md) |
 
-### Pending
+### In Progress
 
-| Module | SQL Calls | Priority | Status | Story Spec |
-|--------|-----------|----------|--------|------------|
-| **facts.rs** | 46 | High | 🔲 Pending | — |
+| Module | SQL Before | SQL After | Status | Story Spec |
+|--------|------------|-----------|--------|------------|
+| **facts.rs** | ~35 | ~25 | 🔄 Phase 1 Complete | [2026-02-08-facts-sql-extraction.md](2026-02-08-facts-sql-extraction.md) |
 
 ### Recommended Order
 
@@ -73,7 +73,7 @@ A command module is "compliant" when:
 
 ## Current Story
 
-**None active** — import_facts.rs completed. Next: facts.rs
+**facts.rs** — Phase 1 complete. Phase 2 (delete_facts) and Phase 3 (prune operations) pending.
 
 ---
 
@@ -205,3 +205,4 @@ let filtered: Vec<Source> = sources.into_iter()
 | 2026-02-08 | Completed coverage.rs story. 2 SQL calls → 0. Added 1 integration test. |
 | 2026-02-08 | Created import_facts.rs story spec. Identified atomicity bugs to fix. |
 | 2026-02-08 | Completed import_facts.rs story. 8 SQL calls → 0. Fixed TOCTOU race and added transaction for atomicity. Added 7 repo functions + domain types. |
+| 2026-02-08 | Started facts.rs story. Phase 1 complete: 11 SQL calls → 0. Used batch_fetch_by_ids for builtin distribution. Added 11 unit tests. |

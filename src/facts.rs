@@ -153,10 +153,8 @@ fn get_matching_sources(
     include_excluded: bool,
 ) -> Result<(Vec<i64>, usize)> {
     // 1. Get all root IDs
-    let root_ids: Vec<i64> = conn
-        .prepare("SELECT id FROM roots")?
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+    let roots = repo::root::fetch_all(conn)?;
+    let root_ids: Vec<i64> = roots.iter().map(|r| r.id).collect();
 
     // 2. Fetch all present sources for those roots
     let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
@@ -408,8 +406,8 @@ fn show_builtin_distribution(
         return Ok(());
     }
 
-    // Build temp table
-    populate_temp_sources(conn, source_ids)?;
+    // Fetch all sources using repo layer
+    let sources = repo::source::batch_fetch_by_ids(conn, source_ids)?;
 
     let category = get_fact_category(base_key);
     let category_str = match category {
@@ -422,197 +420,104 @@ fn show_builtin_distribution(
     let has_transforms = accessor.is_some() || !modifiers.is_empty();
     let mut counts: HashMap<String, i64> = HashMap::new();
 
-    match base_key {
-        "source.ext" => {
-            let rows: Vec<String> = conn
-                .prepare("SELECT rel_path FROM sources WHERE id IN (SELECT id FROM temp_sources)")?
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            for rel_path in rows {
-                let ext = std::path::Path::new(&rel_path)
+    // Extract values from sources based on key, then aggregate
+    for source in sources.values() {
+        let val = match base_key {
+            "source.ext" => {
+                let ext = std::path::Path::new(&source.rel_path)
                     .extension()
                     .and_then(|e| e.to_str())
                     .map(|e| e.to_lowercase())
                     .unwrap_or_default();
-                let val = if has_transforms {
+                if has_transforms {
                     apply_transforms(FactValue::Text(ext), accessor, modifiers, display_key)?
                 } else {
                     ext
-                };
-                *counts.entry(val).or_insert(0) += 1;
+                }
             }
-        }
-        "source.size" => {
-            let rows: Vec<i64> = conn
-                .prepare("SELECT size FROM sources WHERE id IN (SELECT id FROM temp_sources)")?
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            for size in rows {
-                let val = if has_transforms {
-                    apply_transforms(FactValue::Num(size as f64), accessor, modifiers, display_key)?
+            "source.size" => {
+                if has_transforms {
+                    apply_transforms(FactValue::Num(source.size as f64), accessor, modifiers, display_key)?
                 } else {
                     // Default: size buckets
-                    let bucket = if size < 1024 {
+                    let bucket = if source.size < 1024 {
                         "< 1 KB"
-                    } else if size < 1024 * 1024 {
+                    } else if source.size < 1024 * 1024 {
                         "1 KB - 1 MB"
-                    } else if size < 10 * 1024 * 1024 {
+                    } else if source.size < 10 * 1024 * 1024 {
                         "1 MB - 10 MB"
-                    } else if size < 100 * 1024 * 1024 {
+                    } else if source.size < 100 * 1024 * 1024 {
                         "10 MB - 100 MB"
-                    } else if size < 1024 * 1024 * 1024 {
+                    } else if source.size < 1024 * 1024 * 1024 {
                         "100 MB - 1 GB"
                     } else {
                         "> 1 GB"
                     };
                     bucket.to_string()
-                };
-                *counts.entry(val).or_insert(0) += 1;
+                }
             }
-        }
-        "source.mtime" => {
-            let rows: Vec<i64> = conn
-                .prepare("SELECT mtime FROM sources WHERE id IN (SELECT id FROM temp_sources)")?
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            for mtime in rows {
-                let val = if has_transforms {
-                    apply_transforms(FactValue::Time(mtime), accessor, modifiers, display_key)?
+            "source.mtime" => {
+                if has_transforms {
+                    apply_transforms(FactValue::Time(source.mtime), accessor, modifiers, display_key)?
                 } else {
                     // Default: group by year
-                    chrono::DateTime::from_timestamp(mtime, 0)
+                    chrono::DateTime::from_timestamp(source.mtime, 0)
                         .map(|dt| dt.format("%Y").to_string())
                         .unwrap_or_else(|| "(unknown)".to_string())
-                };
-                *counts.entry(val).or_insert(0) += 1;
+                }
             }
-        }
-        "source.path" => {
-            let rows: Vec<(String, String)> = conn
-                .prepare(
-                    "SELECT r.path, s.rel_path FROM sources s
-                     JOIN roots r ON s.root_id = r.id
-                     WHERE s.id IN (SELECT id FROM temp_sources)"
-                )?
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            for (root_path, rel_path) in rows {
-                let full_path = if rel_path.is_empty() {
-                    root_path
-                } else {
-                    format!("{}/{}", root_path, rel_path)
-                };
-                let val = if has_transforms {
+            "source.path" => {
+                let full_path = source.path();
+                if has_transforms {
                     apply_transforms(FactValue::Path(full_path), accessor, modifiers, display_key)?
                 } else {
                     full_path
-                };
-                *counts.entry(val).or_insert(0) += 1;
+                }
             }
-        }
-        "source.root" => {
-            let rows: Vec<String> = conn
-                .prepare(
-                    "SELECT r.path FROM sources s
-                     JOIN roots r ON s.root_id = r.id
-                     WHERE s.id IN (SELECT id FROM temp_sources)"
-                )?
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            for root_path in rows {
-                let val = if has_transforms {
-                    apply_transforms(FactValue::Path(root_path), accessor, modifiers, display_key)?
+            "source.root" => {
+                if has_transforms {
+                    apply_transforms(FactValue::Path(source.root_path.clone()), accessor, modifiers, display_key)?
                 } else {
-                    root_path
-                };
-                *counts.entry(val).or_insert(0) += 1;
+                    source.root_path.clone()
+                }
             }
-        }
-        "source.rel_path" => {
-            let rows: Vec<String> = conn
-                .prepare("SELECT rel_path FROM sources WHERE id IN (SELECT id FROM temp_sources)")?
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            for rel_path in rows {
-                let val = if has_transforms {
-                    apply_transforms(FactValue::Path(rel_path), accessor, modifiers, display_key)?
+            "source.rel_path" => {
+                if has_transforms {
+                    apply_transforms(FactValue::Path(source.rel_path.clone()), accessor, modifiers, display_key)?
                 } else {
-                    rel_path
-                };
-                *counts.entry(val).or_insert(0) += 1;
+                    source.rel_path.clone()
+                }
             }
-        }
-        "source.device" => {
-            let rows: Vec<Option<i64>> = conn
-                .prepare("SELECT device FROM sources WHERE id IN (SELECT id FROM temp_sources)")?
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            for device in rows {
-                let val = match device {
-                    Some(d) => {
-                        if has_transforms {
-                            apply_transforms(FactValue::Num(d as f64), accessor, modifiers, display_key)?
-                        } else {
-                            d.to_string()
-                        }
-                    }
-                    None => "(null)".to_string(),
-                };
-                *counts.entry(val).or_insert(0) += 1;
+            "source.device" => {
+                if has_transforms {
+                    apply_transforms(FactValue::Num(source.device as f64), accessor, modifiers, display_key)?
+                } else {
+                    source.device.to_string()
+                }
             }
-        }
-        "source.inode" => {
-            let rows: Vec<Option<i64>> = conn
-                .prepare("SELECT inode FROM sources WHERE id IN (SELECT id FROM temp_sources)")?
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            for inode in rows {
-                let val = match inode {
-                    Some(i) => {
-                        if has_transforms {
-                            apply_transforms(FactValue::Num(i as f64), accessor, modifiers, display_key)?
-                        } else {
-                            i.to_string()
-                        }
-                    }
-                    None => "(null)".to_string(),
-                };
-                *counts.entry(val).or_insert(0) += 1;
+            "source.inode" => {
+                if has_transforms {
+                    apply_transforms(FactValue::Num(source.inode as f64), accessor, modifiers, display_key)?
+                } else {
+                    source.inode.to_string()
+                }
             }
-        }
-        "filename" => {
-            let rows: Vec<String> = conn
-                .prepare("SELECT rel_path FROM sources WHERE id IN (SELECT id FROM temp_sources)")?
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            for rel_path in rows {
-                let filename = std::path::Path::new(&rel_path)
+            "filename" => {
+                let filename = std::path::Path::new(&source.rel_path)
                     .file_name()
                     .and_then(|f| f.to_str())
-                    .unwrap_or(&rel_path)
+                    .unwrap_or(&source.rel_path)
                     .to_string();
-                let val = if has_transforms {
+                if has_transforms {
                     apply_transforms(FactValue::Text(filename), accessor, modifiers, display_key)?
                 } else {
                     filename
-                };
-                *counts.entry(val).or_insert(0) += 1;
+                }
             }
-        }
-        _ => return Ok(()),
+            _ => return Ok(()),
+        };
+        *counts.entry(val).or_insert(0) += 1;
     }
-
-    // Clean up temp table
-    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
 
     // Sort by count descending
     let mut results: Vec<(String, i64)> = counts.into_iter().collect();
@@ -1447,4 +1352,107 @@ pub fn show_aliases() {
     println!();
     println!("Note: 'filename' and 'ext' also work in --where filters.");
     println!("Other aliases (stem, hash, hash_short, id) only work in manifest patterns.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // format_number tests
+    // =========================================================================
+
+    #[test]
+    fn format_number_small() {
+        assert_eq!(format_number(0), "0");
+        assert_eq!(format_number(1), "1");
+        assert_eq!(format_number(99), "99");
+        assert_eq!(format_number(999), "999");
+    }
+
+    #[test]
+    fn format_number_with_commas() {
+        assert_eq!(format_number(1_000), "1,000");
+        assert_eq!(format_number(10_000), "10,000");
+        assert_eq!(format_number(100_000), "100,000");
+        assert_eq!(format_number(1_000_000), "1,000,000");
+        assert_eq!(format_number(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn format_number_negative() {
+        // Negative numbers should also format correctly
+        assert_eq!(format_number(-1), "-1");
+        assert_eq!(format_number(-1_000), "-1,000");
+    }
+
+    // =========================================================================
+    // format_root_display tests
+    // =========================================================================
+
+    #[test]
+    fn format_root_display_short_path() {
+        // Path that fits within MAX_PATH_LEN (30 chars)
+        let result = format_root_display(1, "/home/user");
+        assert_eq!(result, "id:1  /home/user");
+    }
+
+    #[test]
+    fn format_root_display_exact_length() {
+        // Path exactly at MAX_PATH_LEN (30 chars)
+        let path = "/home/user/exactly30charslongg";
+        assert_eq!(path.len(), 30);
+        let result = format_root_display(1, path);
+        assert_eq!(result, "id:1  /home/user/exactly30charslongg");
+    }
+
+    #[test]
+    fn format_root_display_long_path_truncated() {
+        // Path longer than MAX_PATH_LEN - should be truncated with ...
+        let long_path = "/home/user/very/long/path/that/exceeds/the/limit";
+        let result = format_root_display(42, long_path);
+        // Should start with "id:42 ..."
+        assert!(result.starts_with("id:42 ..."));
+        // Should end with last portion of path
+        assert!(result.ends_with("exceeds/the/limit"));
+    }
+
+    #[test]
+    fn format_root_display_id_formatting() {
+        // ID should be left-aligned in 2-char field
+        assert!(format_root_display(1, "/tmp").starts_with("id:1 "));
+        assert!(format_root_display(99, "/tmp").starts_with("id:99"));
+    }
+
+    // =========================================================================
+    // is_protected_fact tests
+    // =========================================================================
+
+    #[test]
+    fn is_protected_fact_source_namespace() {
+        assert!(is_protected_fact("source.policy"));
+        assert!(is_protected_fact("source.reviewed"));
+        assert!(is_protected_fact("source.anything"));
+    }
+
+    #[test]
+    fn is_protected_fact_policy_namespace() {
+        assert!(is_protected_fact("policy.reviewed"));
+        assert!(is_protected_fact("policy.archive"));
+        assert!(is_protected_fact("policy.anything"));
+    }
+
+    #[test]
+    fn is_protected_fact_content_not_protected() {
+        assert!(!is_protected_fact("content.Make"));
+        assert!(!is_protected_fact("content.Model"));
+        assert!(!is_protected_fact("content.DateTimeOriginal"));
+    }
+
+    #[test]
+    fn is_protected_fact_other_not_protected() {
+        assert!(!is_protected_fact("custom.field"));
+        assert!(!is_protected_fact("Make")); // bare key
+        assert!(!is_protected_fact("object.something"));
+    }
 }
