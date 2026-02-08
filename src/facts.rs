@@ -882,15 +882,8 @@ pub fn delete_facts(
 pub fn prune_stale(db: &Db, dry_run: bool) -> Result<()> {
     let conn = db.conn();
 
-    // Find stale source facts: where observed_basis_rev doesn't match current basis_rev
-    let stale_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM facts f
-         JOIN sources s ON f.entity_type = 'source' AND f.entity_id = s.id
-         WHERE f.observed_basis_rev IS NOT NULL
-           AND f.observed_basis_rev != s.basis_rev",
-        [],
-        |row| row.get(0),
-    )?;
+    // Count stale source facts using repo layer
+    let stale_count = repo::fact::count_stale(conn)?;
 
     if stale_count == 0 {
         println!("No stale facts found.");
@@ -903,21 +896,7 @@ pub fn prune_stale(db: &Db, dry_run: bool) -> Result<()> {
             format_number(stale_count)
         );
     } else {
-        let deleted = conn.execute(
-            "DELETE FROM facts
-             WHERE entity_type = 'source'
-               AND entity_id IN (
-                   SELECT f.entity_id FROM facts f
-                   JOIN sources s ON f.entity_type = 'source' AND f.entity_id = s.id
-                   WHERE f.observed_basis_rev IS NOT NULL
-                     AND f.observed_basis_rev != s.basis_rev
-               )
-               AND observed_basis_rev IS NOT NULL
-               AND observed_basis_rev != (
-                   SELECT basis_rev FROM sources WHERE id = facts.entity_id
-               )",
-            [],
-        )?;
+        let deleted = repo::fact::delete_stale(conn)?;
         println!(
             "Deleted {} stale fact rows (observed_basis_rev mismatch)",
             format_number(deleted as i64)
@@ -957,82 +936,23 @@ fn format_number(n: i64) -> String {
 /// - If the content reappears (restore from backup, found on another drive),
 ///   all the facts (EXIF, hashes, etc.) are already available
 /// - Storage cost is minimal (just metadata rows)
-pub fn prune_orphaned_objects(db: &Db, dry_run: bool) -> Result<()> {
-    let conn = db.conn();
+pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool) -> Result<()> {
+    let conn = db.conn_mut();
 
-    // Find orphaned objects: objects with no present sources
-    let orphaned_object_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM objects o
-         WHERE NOT EXISTS (
-             SELECT 1 FROM sources s
-             WHERE s.object_id = o.id AND s.present = 1
-         )",
-        [],
-        |row| row.get(0),
-    )?;
+    // Find statistics about orphaned objects
+    let stats = repo::object::find_orphaned_stats(conn)?;
 
-    if orphaned_object_count == 0 {
+    if stats.object_count == 0 {
         println!("No orphaned objects found.");
         return Ok(());
     }
 
-    // Count non-present sources that reference orphaned objects
-    let orphaned_source_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sources s
-         WHERE s.present = 0
-           AND s.object_id IN (
-               SELECT o.id FROM objects o
-               WHERE NOT EXISTS (
-                   SELECT 1 FROM sources s2
-                   WHERE s2.object_id = o.id AND s2.present = 1
-               )
-           )",
-        [],
-        |row| row.get(0),
-    )?;
-
-    // Count source facts that would be deleted
-    let source_fact_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM facts f
-         WHERE f.entity_type = 'source'
-           AND f.entity_id IN (
-               SELECT s.id FROM sources s
-               WHERE s.present = 0
-                 AND s.object_id IN (
-                     SELECT o.id FROM objects o
-                     WHERE NOT EXISTS (
-                         SELECT 1 FROM sources s2
-                         WHERE s2.object_id = o.id AND s2.present = 1
-                     )
-                 )
-           )",
-        [],
-        |row| row.get(0),
-    )?;
-
-    // Count object facts that would be deleted
-    let object_fact_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM facts f
-         WHERE f.entity_type = 'object'
-           AND f.entity_id IN (
-               SELECT o.id FROM objects o
-               WHERE NOT EXISTS (
-                   SELECT 1 FROM sources s
-                   WHERE s.object_id = o.id AND s.present = 1
-               )
-           )",
-        [],
-        |row| row.get(0),
-    )?;
-
-    let total_fact_count = source_fact_count + object_fact_count;
-
     if dry_run {
         println!(
             "Would delete {} orphaned objects, {} non-present sources, and {} facts",
-            format_number(orphaned_object_count),
-            format_number(orphaned_source_count),
-            format_number(total_fact_count)
+            format_number(stats.object_count),
+            format_number(stats.source_count),
+            format_number(stats.total_fact_count())
         );
         println!();
         println!("Note: Orphaned objects represent content you've seen but no longer have.");
@@ -1040,69 +960,16 @@ pub fn prune_orphaned_objects(db: &Db, dry_run: bool) -> Result<()> {
         println!("Object-level exclusions will also be deleted (use `exclude list-objects` to review).");
         println!("Use --yes to proceed with deletion.");
     } else {
-        // Delete source facts first
-        let source_facts_deleted = conn.execute(
-            "DELETE FROM facts
-             WHERE entity_type = 'source'
-               AND entity_id IN (
-                   SELECT s.id FROM sources s
-                   WHERE s.present = 0
-                     AND s.object_id IN (
-                         SELECT o.id FROM objects o
-                         WHERE NOT EXISTS (
-                             SELECT 1 FROM sources s2
-                             WHERE s2.object_id = o.id AND s2.present = 1
-                         )
-                     )
-               )",
-            [],
-        )?;
-
-        // Delete non-present sources that reference orphaned objects
-        let sources_deleted = conn.execute(
-            "DELETE FROM sources
-             WHERE present = 0
-               AND object_id IN (
-                   SELECT o.id FROM objects o
-                   WHERE NOT EXISTS (
-                       SELECT 1 FROM sources s
-                       WHERE s.object_id = o.id AND s.present = 1
-                   )
-               )",
-            [],
-        )?;
-
-        // Delete object facts
-        let object_facts_deleted = conn.execute(
-            "DELETE FROM facts
-             WHERE entity_type = 'object'
-               AND entity_id IN (
-                   SELECT o.id FROM objects o
-                   WHERE NOT EXISTS (
-                       SELECT 1 FROM sources s
-                       WHERE s.object_id = o.id AND s.present = 1
-                   )
-               )",
-            [],
-        )?;
-
-        // Delete orphaned objects
-        let objects_deleted = conn.execute(
-            "DELETE FROM objects
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM sources s
-                 WHERE s.object_id = objects.id AND s.present = 1
-             )",
-            [],
-        )?;
-
-        let total_facts_deleted = source_facts_deleted + object_facts_deleted;
+        // Use transaction for atomicity of cascade delete
+        let tx = conn.transaction()?;
+        let deleted = repo::object::delete_orphaned(&tx)?;
+        tx.commit()?;
 
         println!(
             "Deleted {} orphaned objects, {} non-present sources, and {} facts",
-            format_number(objects_deleted as i64),
-            format_number(sources_deleted as i64),
-            format_number(total_facts_deleted as i64)
+            format_number(deleted.object_count),
+            format_number(deleted.source_count),
+            format_number(deleted.total_fact_count())
         );
     }
 
@@ -1125,7 +992,7 @@ pub fn prune_orphaned_objects(db: &Db, dry_run: bool) -> Result<()> {
 pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
     let conn = db.conn();
 
-    // Parse scope
+    // Validate scope
     let prune_sources = scope == "all" || scope == "source";
     let prune_objects = scope == "all" || scope == "object";
 
@@ -1136,32 +1003,8 @@ pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
         );
     }
 
-    // Count source facts for excluded sources
-    let source_fact_count: i64 = if prune_sources {
-        conn.query_row(
-            "SELECT COUNT(*) FROM facts
-             WHERE entity_type = 'source'
-               AND entity_id IN (SELECT id FROM sources WHERE excluded = 1)",
-            [],
-            |row| row.get(0),
-        )?
-    } else {
-        0
-    };
-
-    // Count object facts for excluded objects
-    let object_fact_count: i64 = if prune_objects {
-        conn.query_row(
-            "SELECT COUNT(*) FROM facts
-             WHERE entity_type = 'object'
-               AND entity_id IN (SELECT id FROM objects WHERE excluded = 1)",
-            [],
-            |row| row.get(0),
-        )?
-    } else {
-        0
-    };
-
+    // Count facts for excluded entities using repo layer
+    let (source_fact_count, object_fact_count) = repo::fact::count_excluded(conn, scope)?;
     let total_count = source_fact_count + object_fact_count;
 
     if total_count == 0 {
@@ -1193,36 +1036,23 @@ pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
         }
         println!("Use --yes to proceed with deletion.");
     } else {
-        let mut total_deleted = 0;
+        let (source_deleted, object_deleted) = repo::fact::delete_excluded(conn, scope)?;
 
-        if prune_sources && source_fact_count > 0 {
-            let deleted = conn.execute(
-                "DELETE FROM facts
-                 WHERE entity_type = 'source'
-                   AND entity_id IN (SELECT id FROM sources WHERE excluded = 1)",
-                [],
-            )?;
-            total_deleted += deleted;
+        if source_deleted > 0 {
             println!(
                 "Deleted {} source facts (from excluded sources)",
-                format_number(deleted as i64)
+                format_number(source_deleted as i64)
             );
         }
 
-        if prune_objects && object_fact_count > 0 {
-            let deleted = conn.execute(
-                "DELETE FROM facts
-                 WHERE entity_type = 'object'
-                   AND entity_id IN (SELECT id FROM objects WHERE excluded = 1)",
-                [],
-            )?;
-            total_deleted += deleted;
+        if object_deleted > 0 {
             println!(
                 "Deleted {} object facts (from excluded objects)",
-                format_number(deleted as i64)
+                format_number(object_deleted as i64)
             );
         }
 
+        let total_deleted = source_deleted + object_deleted;
         if total_deleted > 0 {
             println!(
                 "Total: {} facts deleted",

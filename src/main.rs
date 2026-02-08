@@ -582,7 +582,7 @@ fn main() -> anyhow::Result<()> {
                 facts::prune_stale(&db, !yes)?;
             }
             if orphaned_objects {
-                facts::prune_orphaned_objects(&db, !yes)?;
+                facts::prune_orphaned_objects(&mut db, !yes)?;
             }
             if let Some(scope) = excluded_facts {
                 facts::prune_excluded_facts(&db, &scope, !yes)?;

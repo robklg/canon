@@ -50,30 +50,18 @@ A command module is "compliant" when:
 
 ### Completed (This Epic)
 
-| Module | SQL Before | Status | Story Spec |
-|--------|------------|--------|------------|
-| **roots.rs** | 13 | ✅ Done | [2026-02-08-roots-sql-extraction.md](2026-02-08-roots-sql-extraction.md) |
-| **coverage.rs** | 2 | ✅ Done | [2026-02-08-coverage-sql-extraction.md](2026-02-08-coverage-sql-extraction.md) |
-| **import_facts.rs** | 8 | ✅ Done | [2026-02-08-import-facts-sql-extraction.md](2026-02-08-import-facts-sql-extraction.md) |
-
-### In Progress
-
 | Module | SQL Before | SQL After | Status | Story Spec |
 |--------|------------|-----------|--------|------------|
-| **facts.rs** | ~35 | ~14 | 🔄 Phase 2 Complete | [2026-02-08-facts-sql-extraction.md](2026-02-08-facts-sql-extraction.md) |
-
-### Recommended Order
-
-1. **roots.rs** — Quick win, establishes patterns in `repo/root.rs`
-2. **coverage.rs** — Minor cleanup, already uses domain predicates well
-3. **import_facts.rs** — Fact insertion/object creation patterns needed before facts.rs
-4. **facts.rs** — Largest refactoring, benefits from patterns established in earlier stories
+| **roots.rs** | 13 | 0 | ✅ Done | [2026-02-08-roots-sql-extraction.md](2026-02-08-roots-sql-extraction.md) |
+| **coverage.rs** | 2 | 0 | ✅ Done | [2026-02-08-coverage-sql-extraction.md](2026-02-08-coverage-sql-extraction.md) |
+| **import_facts.rs** | 8 | 0 | ✅ Done | [2026-02-08-import-facts-sql-extraction.md](2026-02-08-import-facts-sql-extraction.md) |
+| **facts.rs** | ~35 | 0 | ✅ Done | [2026-02-08-facts-sql-extraction.md](2026-02-08-facts-sql-extraction.md) |
 
 ---
 
-## Current Story
+## Epic Complete
 
-**facts.rs** — Phases 1-2 complete. Phase 3 (prune operations) pending.
+All command modules are now architecturally compliant with zero inline SQL.
 
 ---
 
@@ -207,3 +195,4 @@ let filtered: Vec<Source> = sources.into_iter()
 | 2026-02-08 | Completed import_facts.rs story. 8 SQL calls → 0. Fixed TOCTOU race and added transaction for atomicity. Added 7 repo functions + domain types. |
 | 2026-02-08 | Started facts.rs story. Phase 1 complete: 11 SQL calls → 0. Used batch_fetch_by_ids for builtin distribution. Added 11 unit tests. |
 | 2026-02-08 | facts.rs Phase 2 complete: 11 SQL calls → 0. Added count_by_criteria and delete_by_criteria to repo::fact. Added 10 unit tests. |
+| 2026-02-08 | facts.rs Phase 3 complete: 14 SQL calls → 0. Added count_stale/delete_stale, find_orphaned_stats/delete_orphaned, count_excluded/delete_excluded. Added transaction for orphaned cascade delete. Added 30 unit tests. Epic complete. |

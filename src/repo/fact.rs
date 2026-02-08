@@ -644,6 +644,138 @@ pub fn delete_by_criteria(
     Ok(deleted)
 }
 
+// ============================================================================
+// Stale fact pruning (for `canon facts prune --stale`)
+// ============================================================================
+
+/// Count stale source facts where observed_basis_rev != current basis_rev.
+///
+/// A fact is considered stale when its `observed_basis_rev` (the file's basis_rev
+/// at the time the fact was recorded) doesn't match the source's current `basis_rev`.
+/// This indicates the file has changed since the fact was observed.
+///
+/// Only source facts with non-null observed_basis_rev are considered.
+/// Object facts don't have basis_rev tracking.
+pub fn count_stale(conn: &Connection) -> Result<i64> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM facts f
+         JOIN sources s ON f.entity_type = 'source' AND f.entity_id = s.id
+         WHERE f.observed_basis_rev IS NOT NULL
+           AND f.observed_basis_rev != s.basis_rev",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
+/// Delete stale source facts where observed_basis_rev != current basis_rev.
+///
+/// Returns the number of facts deleted.
+///
+/// See `count_stale()` for the definition of staleness.
+pub fn delete_stale(conn: &Connection) -> Result<usize> {
+    // The DELETE uses a subquery to find stale entity_ids, then verifies
+    // each fact individually to avoid race conditions with concurrent updates.
+    let deleted = conn.execute(
+        "DELETE FROM facts
+         WHERE entity_type = 'source'
+           AND entity_id IN (
+               SELECT f.entity_id FROM facts f
+               JOIN sources s ON f.entity_type = 'source' AND f.entity_id = s.id
+               WHERE f.observed_basis_rev IS NOT NULL
+                 AND f.observed_basis_rev != s.basis_rev
+           )
+           AND observed_basis_rev IS NOT NULL
+           AND observed_basis_rev != (
+               SELECT basis_rev FROM sources WHERE id = facts.entity_id
+           )",
+        [],
+    )?;
+    Ok(deleted)
+}
+
+// ============================================================================
+// Excluded entity fact pruning (for `canon facts prune --excluded-facts`)
+// ============================================================================
+
+/// Count facts for excluded entities.
+///
+/// # Arguments
+/// * `conn` - Database connection
+/// * `scope` - Which facts to count: "source", "object", or "all"
+///
+/// # Returns
+/// Tuple of (source_fact_count, object_fact_count).
+/// If scope is "source", object_fact_count will be 0.
+/// If scope is "object", source_fact_count will be 0.
+pub fn count_excluded(conn: &Connection, scope: &str) -> Result<(i64, i64)> {
+    let count_sources = scope == "all" || scope == "source";
+    let count_objects = scope == "all" || scope == "object";
+
+    let source_fact_count: i64 = if count_sources {
+        conn.query_row(
+            "SELECT COUNT(*) FROM facts
+             WHERE entity_type = 'source'
+               AND entity_id IN (SELECT id FROM sources WHERE excluded = 1)",
+            [],
+            |row| row.get(0),
+        )?
+    } else {
+        0
+    };
+
+    let object_fact_count: i64 = if count_objects {
+        conn.query_row(
+            "SELECT COUNT(*) FROM facts
+             WHERE entity_type = 'object'
+               AND entity_id IN (SELECT id FROM objects WHERE excluded = 1)",
+            [],
+            |row| row.get(0),
+        )?
+    } else {
+        0
+    };
+
+    Ok((source_fact_count, object_fact_count))
+}
+
+/// Delete facts for excluded entities.
+///
+/// # Arguments
+/// * `conn` - Database connection
+/// * `scope` - Which facts to delete: "source", "object", or "all"
+///
+/// # Returns
+/// Tuple of (source_facts_deleted, object_facts_deleted).
+pub fn delete_excluded(conn: &Connection, scope: &str) -> Result<(usize, usize)> {
+    let delete_sources = scope == "all" || scope == "source";
+    let delete_objects = scope == "all" || scope == "object";
+
+    let source_facts_deleted = if delete_sources {
+        conn.execute(
+            "DELETE FROM facts
+             WHERE entity_type = 'source'
+               AND entity_id IN (SELECT id FROM sources WHERE excluded = 1)",
+            [],
+        )?
+    } else {
+        0
+    };
+
+    let object_facts_deleted = if delete_objects {
+        conn.execute(
+            "DELETE FROM facts
+             WHERE entity_type = 'object'
+               AND entity_id IN (SELECT id FROM objects WHERE excluded = 1)",
+            [],
+        )?
+    } else {
+        0
+    };
+
+    Ok((source_facts_deleted, object_facts_deleted))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1598,5 +1730,383 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(value, "Sony");
+    }
+
+    // =========================================================================
+    // count_stale / delete_stale tests
+    // =========================================================================
+
+    /// Helper to insert a source with a specific basis_rev
+    fn insert_source_with_basis_rev(conn: &Connection, id: i64, root_id: i64, rel_path: &str, basis_rev: i64) {
+        conn.execute(
+            "INSERT INTO sources (id, root_id, rel_path, basis_rev) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![id, root_id, rel_path, basis_rev],
+        )
+        .unwrap();
+    }
+
+    /// Helper to insert a source fact with a specific observed_basis_rev
+    fn insert_fact_with_basis_rev(conn: &Connection, source_id: i64, key: &str, value: &str, observed_basis_rev: Option<i64>) {
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev)
+             VALUES ('source', ?1, ?2, ?3, 0, ?4)",
+            rusqlite::params![source_id, key, value, observed_basis_rev],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn count_stale_no_facts() {
+        let conn = setup_test_db();
+        let count = count_stale(&conn).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn count_stale_no_stale_facts() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source_with_basis_rev(&conn, 1, 1, "file.txt", 5);
+        // Fact with matching basis_rev
+        insert_fact_with_basis_rev(&conn, 1, "content.Make", "Canon", Some(5));
+
+        let count = count_stale(&conn).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn count_stale_detects_mismatch() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source_with_basis_rev(&conn, 1, 1, "file.txt", 10); // Current basis_rev = 10
+        // Fact was observed at basis_rev = 5 (stale)
+        insert_fact_with_basis_rev(&conn, 1, "content.Make", "Canon", Some(5));
+
+        let count = count_stale(&conn).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn count_stale_ignores_null_basis_rev() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source_with_basis_rev(&conn, 1, 1, "file.txt", 10);
+        // Fact with null observed_basis_rev (not trackable, shouldn't be counted)
+        insert_fact_with_basis_rev(&conn, 1, "content.Make", "Canon", None);
+
+        let count = count_stale(&conn).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn count_stale_multiple_stale_facts() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source_with_basis_rev(&conn, 1, 1, "file1.txt", 10);
+        insert_source_with_basis_rev(&conn, 2, 1, "file2.txt", 20);
+        // Both facts are stale
+        insert_fact_with_basis_rev(&conn, 1, "content.Make", "Canon", Some(5));
+        insert_fact_with_basis_rev(&conn, 2, "content.Make", "Nikon", Some(15));
+
+        let count = count_stale(&conn).unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn count_stale_mixed_stale_and_fresh() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source_with_basis_rev(&conn, 1, 1, "file1.txt", 10);
+        insert_source_with_basis_rev(&conn, 2, 1, "file2.txt", 20);
+        // Source 1: stale fact
+        insert_fact_with_basis_rev(&conn, 1, "content.Make", "Canon", Some(5));
+        // Source 2: fresh fact
+        insert_fact_with_basis_rev(&conn, 2, "content.Make", "Nikon", Some(20));
+
+        let count = count_stale(&conn).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn delete_stale_no_facts() {
+        let conn = setup_test_db();
+        let deleted = delete_stale(&conn).unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn delete_stale_removes_mismatched() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source_with_basis_rev(&conn, 1, 1, "file.txt", 10);
+        insert_fact_with_basis_rev(&conn, 1, "content.Make", "Canon", Some(5)); // stale
+
+        let deleted = delete_stale(&conn).unwrap();
+        assert_eq!(deleted, 1);
+
+        // Verify fact is gone
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE entity_type = 'source' AND entity_id = 1",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn delete_stale_preserves_fresh_facts() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source_with_basis_rev(&conn, 1, 1, "file1.txt", 10);
+        insert_source_with_basis_rev(&conn, 2, 1, "file2.txt", 20);
+        // Source 1: stale fact
+        insert_fact_with_basis_rev(&conn, 1, "content.Make", "Canon", Some(5));
+        // Source 2: fresh fact
+        insert_fact_with_basis_rev(&conn, 2, "content.Make", "Nikon", Some(20));
+
+        let deleted = delete_stale(&conn).unwrap();
+        assert_eq!(deleted, 1);
+
+        // Verify only source 2's fact remains
+        let remaining: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE entity_type = 'source'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(remaining, 1);
+
+        let value: String = conn.query_row(
+            "SELECT value_text FROM facts WHERE entity_type = 'source' AND entity_id = 2",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(value, "Nikon");
+    }
+
+    #[test]
+    fn delete_stale_preserves_null_basis_rev() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source_with_basis_rev(&conn, 1, 1, "file.txt", 10);
+        // Fact with null observed_basis_rev - should not be deleted
+        insert_fact_with_basis_rev(&conn, 1, "content.Make", "Canon", None);
+
+        let deleted = delete_stale(&conn).unwrap();
+        assert_eq!(deleted, 0);
+
+        // Verify fact still exists
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE entity_type = 'source' AND entity_id = 1",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn delete_stale_ignores_object_facts() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_object(&conn, 100, "abc123");
+        insert_source(&conn, 1, 1, "file.txt", Some(100));
+        // Object fact - should never be considered stale (no basis_rev tracking)
+        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
+
+        let deleted = delete_stale(&conn).unwrap();
+        assert_eq!(deleted, 0);
+
+        // Verify object fact still exists
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE entity_type = 'object'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    // =========================================================================
+    // count_excluded / delete_excluded tests
+    // =========================================================================
+
+    /// Helper to insert an excluded source
+    fn insert_excluded_source(conn: &Connection, id: i64, root_id: i64, rel_path: &str) {
+        conn.execute(
+            "INSERT INTO sources (id, root_id, rel_path, excluded) VALUES (?1, ?2, ?3, 1)",
+            rusqlite::params![id, root_id, rel_path],
+        )
+        .unwrap();
+    }
+
+    /// Helper to insert an excluded object
+    fn insert_excluded_object(conn: &Connection, id: i64, hash: &str) {
+        conn.execute(
+            "INSERT INTO objects (id, hash_value, excluded) VALUES (?1, ?2, 1)",
+            [&id as &dyn rusqlite::ToSql, &hash],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn count_excluded_no_excluded() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_source(&conn, 1, 1, "file.txt", None);
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+
+        let (source_count, object_count) = count_excluded(&conn, "all").unwrap();
+
+        assert_eq!(source_count, 0);
+        assert_eq!(object_count, 0);
+    }
+
+    #[test]
+    fn count_excluded_source_facts() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_excluded_source(&conn, 1, 1, "file.txt");
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+        insert_fact_text(&conn, "source", 1, "content.Model", "EOS");
+
+        let (source_count, object_count) = count_excluded(&conn, "all").unwrap();
+
+        assert_eq!(source_count, 2);
+        assert_eq!(object_count, 0);
+    }
+
+    #[test]
+    fn count_excluded_object_facts() {
+        let conn = setup_test_db();
+        insert_excluded_object(&conn, 100, "abc123");
+        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
+
+        let (source_count, object_count) = count_excluded(&conn, "all").unwrap();
+
+        assert_eq!(source_count, 0);
+        assert_eq!(object_count, 1);
+    }
+
+    #[test]
+    fn count_excluded_source_scope_only() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_excluded_source(&conn, 1, 1, "file.txt");
+        insert_excluded_object(&conn, 100, "abc123");
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+        insert_fact_text(&conn, "object", 100, "content.Model", "EOS");
+
+        let (source_count, object_count) = count_excluded(&conn, "source").unwrap();
+
+        assert_eq!(source_count, 1);
+        assert_eq!(object_count, 0); // Not counted because scope is "source"
+    }
+
+    #[test]
+    fn count_excluded_object_scope_only() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_excluded_source(&conn, 1, 1, "file.txt");
+        insert_excluded_object(&conn, 100, "abc123");
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+        insert_fact_text(&conn, "object", 100, "content.Model", "EOS");
+
+        let (source_count, object_count) = count_excluded(&conn, "object").unwrap();
+
+        assert_eq!(source_count, 0); // Not counted because scope is "object"
+        assert_eq!(object_count, 1);
+    }
+
+    #[test]
+    fn delete_excluded_source_only() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_excluded_source(&conn, 1, 1, "file.txt");
+        insert_excluded_object(&conn, 100, "abc123");
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+        insert_fact_text(&conn, "object", 100, "content.Model", "EOS");
+
+        let (source_deleted, object_deleted) = delete_excluded(&conn, "source").unwrap();
+
+        assert_eq!(source_deleted, 1);
+        assert_eq!(object_deleted, 0);
+
+        // Object fact should still exist
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE entity_type = 'object'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn delete_excluded_object_only() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_excluded_source(&conn, 1, 1, "file.txt");
+        insert_excluded_object(&conn, 100, "abc123");
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+        insert_fact_text(&conn, "object", 100, "content.Model", "EOS");
+
+        let (source_deleted, object_deleted) = delete_excluded(&conn, "object").unwrap();
+
+        assert_eq!(source_deleted, 0);
+        assert_eq!(object_deleted, 1);
+
+        // Source fact should still exist
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE entity_type = 'source'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn delete_excluded_all() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_excluded_source(&conn, 1, 1, "file.txt");
+        insert_excluded_object(&conn, 100, "abc123");
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+        insert_fact_text(&conn, "object", 100, "content.Model", "EOS");
+
+        let (source_deleted, object_deleted) = delete_excluded(&conn, "all").unwrap();
+
+        assert_eq!(source_deleted, 1);
+        assert_eq!(object_deleted, 1);
+
+        // All facts should be gone
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM facts",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn delete_excluded_preserves_non_excluded() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+
+        // Non-excluded source with fact
+        insert_source(&conn, 1, 1, "file1.txt", None);
+        insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
+
+        // Excluded source with fact
+        insert_excluded_source(&conn, 2, 1, "file2.txt");
+        insert_fact_text(&conn, "source", 2, "content.Make", "Nikon");
+
+        let (source_deleted, _) = delete_excluded(&conn, "all").unwrap();
+
+        assert_eq!(source_deleted, 1);
+
+        // Non-excluded fact should still exist
+        let value: String = conn.query_row(
+            "SELECT value_text FROM facts WHERE entity_id = 1",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(value, "Canon");
     }
 }

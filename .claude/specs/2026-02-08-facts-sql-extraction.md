@@ -1,8 +1,9 @@
 # Story: facts.rs SQL Extraction
 
 **Epic**: [Command Module Architectural Compliance](epic-command-architecture.md)
-**Status**: Pending
+**Status**: Complete
 **Created**: 2026-02-08
+**Completed**: 2026-02-08
 
 ## Objective
 
@@ -305,21 +306,21 @@ Consider adding to CLI integration tests:
 - [x] Verify all tests pass — 438 tests pass
 - [x] Update epic spec
 
-### Phase 3: Prune Operations
+### Phase 3: Prune Operations ✅ COMPLETE
 
-- [ ] Add `repo::fact::count_stale()` with tests
-- [ ] Add `repo::fact::delete_stale()` with tests
-- [ ] Add `repo::object::OrphanedStats` struct
-- [ ] Add `repo::object::find_orphaned_stats()` with tests
-- [ ] Add `repo::object::delete_orphaned()` with tests
-- [ ] Add `repo::fact::count_excluded()` with tests
-- [ ] Add `repo::fact::delete_excluded()` with tests
-- [ ] Refactor `prune_stale()` to use repo functions
-- [ ] Refactor `prune_orphaned_objects()` with transaction
-- [ ] Refactor `prune_excluded_facts()` to use repo functions
-- [ ] Remove inline SQL from facts.rs
-- [ ] Verify all tests pass
-- [ ] Update epic spec to mark facts.rs complete
+- [x] Add `repo::fact::count_stale()` with tests
+- [x] Add `repo::fact::delete_stale()` with tests
+- [x] Add `repo::object::OrphanedStats` struct
+- [x] Add `repo::object::find_orphaned_stats()` with tests
+- [x] Add `repo::object::delete_orphaned()` with tests
+- [x] Add `repo::fact::count_excluded()` with tests
+- [x] Add `repo::fact::delete_excluded()` with tests
+- [x] Refactor `prune_stale()` to use repo functions
+- [x] Refactor `prune_orphaned_objects()` with transaction
+- [x] Refactor `prune_excluded_facts()` to use repo functions
+- [x] Remove inline SQL from facts.rs
+- [x] Verify all tests pass — 468 tests pass
+- [x] Update epic spec to mark facts.rs complete
 
 ## Backward Compatibility
 

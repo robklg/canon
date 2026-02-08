@@ -337,6 +337,192 @@ pub fn fetch_excluded(conn: &Connection) -> Result<Vec<Object>> {
     Ok(objects)
 }
 
+// ============================================================================
+// Orphaned object management
+// ============================================================================
+
+/// Statistics about orphaned objects and their associated data.
+///
+/// An object is considered orphaned when no source with `present = 1` references it.
+#[derive(Debug, Clone, Default)]
+pub struct OrphanedStats {
+    /// Number of orphaned objects
+    pub object_count: i64,
+    /// Number of non-present sources referencing orphaned objects
+    pub source_count: i64,
+    /// Number of source facts for those sources
+    pub source_fact_count: i64,
+    /// Number of object facts for orphaned objects
+    pub object_fact_count: i64,
+}
+
+impl OrphanedStats {
+    /// Total number of facts (source + object)
+    pub fn total_fact_count(&self) -> i64 {
+        self.source_fact_count + self.object_fact_count
+    }
+}
+
+/// Find statistics about orphaned objects (objects with no present sources).
+///
+/// Returns counts of orphaned objects, their non-present sources, and associated facts.
+/// Use this for dry-run reporting before calling `delete_orphaned()`.
+pub fn find_orphaned_stats(conn: &Connection) -> Result<OrphanedStats> {
+    // Count orphaned objects
+    let object_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM objects o
+         WHERE NOT EXISTS (
+             SELECT 1 FROM sources s
+             WHERE s.object_id = o.id AND s.present = 1
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if object_count == 0 {
+        return Ok(OrphanedStats::default());
+    }
+
+    // Count non-present sources referencing orphaned objects
+    let source_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sources s
+         WHERE s.present = 0
+           AND s.object_id IN (
+               SELECT o.id FROM objects o
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM sources s2
+                   WHERE s2.object_id = o.id AND s2.present = 1
+               )
+           )",
+        [],
+        |row| row.get(0),
+    )?;
+
+    // Count source facts for those sources
+    let source_fact_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM facts f
+         WHERE f.entity_type = 'source'
+           AND f.entity_id IN (
+               SELECT s.id FROM sources s
+               WHERE s.present = 0
+                 AND s.object_id IN (
+                     SELECT o.id FROM objects o
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM sources s2
+                         WHERE s2.object_id = o.id AND s2.present = 1
+                     )
+                 )
+           )",
+        [],
+        |row| row.get(0),
+    )?;
+
+    // Count object facts for orphaned objects
+    let object_fact_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM facts f
+         WHERE f.entity_type = 'object'
+           AND f.entity_id IN (
+               SELECT o.id FROM objects o
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM sources s
+                   WHERE s.object_id = o.id AND s.present = 1
+               )
+           )",
+        [],
+        |row| row.get(0),
+    )?;
+
+    Ok(OrphanedStats {
+        object_count,
+        source_count,
+        source_fact_count,
+        object_fact_count,
+    })
+}
+
+/// Delete orphaned objects and all associated data.
+///
+/// Deletes in cascade order:
+/// 1. Source facts for non-present sources of orphaned objects
+/// 2. Non-present sources referencing orphaned objects
+/// 3. Object facts for orphaned objects
+/// 4. Orphaned objects
+///
+/// Returns actual counts deleted.
+///
+/// **IMPORTANT**: This function should be called within a transaction for atomicity.
+/// The caller is responsible for transaction management:
+///
+/// ```ignore
+/// let tx = conn.transaction()?;
+/// let stats = repo::object::delete_orphaned(&tx)?;
+/// tx.commit()?;
+/// ```
+pub fn delete_orphaned(conn: &Connection) -> Result<OrphanedStats> {
+    // Delete source facts first
+    let source_fact_count = conn.execute(
+        "DELETE FROM facts
+         WHERE entity_type = 'source'
+           AND entity_id IN (
+               SELECT s.id FROM sources s
+               WHERE s.present = 0
+                 AND s.object_id IN (
+                     SELECT o.id FROM objects o
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM sources s2
+                         WHERE s2.object_id = o.id AND s2.present = 1
+                     )
+                 )
+           )",
+        [],
+    )?;
+
+    // Delete non-present sources referencing orphaned objects
+    let source_count = conn.execute(
+        "DELETE FROM sources
+         WHERE present = 0
+           AND object_id IN (
+               SELECT o.id FROM objects o
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM sources s
+                   WHERE s.object_id = o.id AND s.present = 1
+               )
+           )",
+        [],
+    )?;
+
+    // Delete object facts
+    let object_fact_count = conn.execute(
+        "DELETE FROM facts
+         WHERE entity_type = 'object'
+           AND entity_id IN (
+               SELECT o.id FROM objects o
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM sources s
+                   WHERE s.object_id = o.id AND s.present = 1
+               )
+           )",
+        [],
+    )?;
+
+    // Delete orphaned objects
+    let object_count = conn.execute(
+        "DELETE FROM objects
+         WHERE NOT EXISTS (
+             SELECT 1 FROM sources s
+             WHERE s.object_id = objects.id AND s.present = 1
+         )",
+        [],
+    )?;
+
+    Ok(OrphanedStats {
+        object_count: object_count as i64,
+        source_count: source_count as i64,
+        source_fact_count: source_fact_count as i64,
+        object_fact_count: object_fact_count as i64,
+    })
+}
+
 /// Get or create an object by hash, returning the complete Object.
 ///
 /// This is an idempotent, concurrent-safe operation: if an object with the
@@ -413,6 +599,19 @@ mod tests {
                 object_id INTEGER REFERENCES objects(id),
                 excluded INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(root_id, rel_path)
+            );
+
+            CREATE TABLE facts (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL CHECK (entity_type IN ('source', 'object')),
+                entity_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value_text TEXT,
+                value_num REAL,
+                value_time INTEGER,
+                observed_at INTEGER NOT NULL DEFAULT 0,
+                observed_basis_rev INTEGER,
+                UNIQUE (entity_type, entity_id, key)
             );
             "#,
         )
@@ -1115,5 +1314,238 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(count, 2);
+    }
+
+    // =========================================================================
+    // find_orphaned_stats / delete_orphaned tests
+    // =========================================================================
+
+    /// Insert a fact for testing
+    fn insert_fact(conn: &RusqliteConnection, entity_type: &str, entity_id: i64, key: &str, value: &str) {
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at)
+             VALUES (?, ?, ?, ?, 0)",
+            rusqlite::params![entity_type, entity_id, key, value],
+        ).unwrap();
+    }
+
+    #[test]
+    fn find_orphaned_stats_no_orphans() {
+        let conn = setup_test_db();
+
+        // Object with present source - not orphaned
+        let root_id = insert_root(&conn, "/root", "source");
+        let obj_id = insert_object(&conn, "abc123", false);
+        insert_source(&conn, root_id, "file.jpg", Some(obj_id), true); // present=true
+
+        let stats = find_orphaned_stats(&conn).unwrap();
+
+        assert_eq!(stats.object_count, 0);
+        assert_eq!(stats.source_count, 0);
+        assert_eq!(stats.source_fact_count, 0);
+        assert_eq!(stats.object_fact_count, 0);
+    }
+
+    #[test]
+    fn find_orphaned_stats_object_with_no_sources() {
+        let conn = setup_test_db();
+
+        // Object with no sources at all - orphaned
+        insert_object(&conn, "abc123", false);
+
+        let stats = find_orphaned_stats(&conn).unwrap();
+
+        assert_eq!(stats.object_count, 1);
+        assert_eq!(stats.source_count, 0);
+    }
+
+    #[test]
+    fn find_orphaned_stats_object_with_only_non_present_sources() {
+        let conn = setup_test_db();
+
+        // Object with only non-present sources - orphaned
+        let root_id = insert_root(&conn, "/root", "source");
+        let obj_id = insert_object(&conn, "abc123", false);
+        insert_source(&conn, root_id, "file1.jpg", Some(obj_id), false); // present=false
+        insert_source(&conn, root_id, "file2.jpg", Some(obj_id), false); // present=false
+
+        let stats = find_orphaned_stats(&conn).unwrap();
+
+        assert_eq!(stats.object_count, 1);
+        assert_eq!(stats.source_count, 2);
+    }
+
+    #[test]
+    fn find_orphaned_stats_counts_facts() {
+        let conn = setup_test_db();
+
+        // Orphaned object with facts
+        let root_id = insert_root(&conn, "/root", "source");
+        let obj_id = insert_object(&conn, "abc123", false);
+        let source_id = insert_source(&conn, root_id, "file.jpg", Some(obj_id), false);
+
+        // Add source facts
+        insert_fact(&conn, "source", source_id, "content.Make", "Canon");
+        insert_fact(&conn, "source", source_id, "content.Model", "EOS");
+
+        // Add object facts
+        insert_fact(&conn, "object", obj_id, "content.hash.sha256", "abc123");
+
+        let stats = find_orphaned_stats(&conn).unwrap();
+
+        assert_eq!(stats.object_count, 1);
+        assert_eq!(stats.source_count, 1);
+        assert_eq!(stats.source_fact_count, 2);
+        assert_eq!(stats.object_fact_count, 1);
+        assert_eq!(stats.total_fact_count(), 3);
+    }
+
+    #[test]
+    fn find_orphaned_stats_mixed_orphaned_and_active() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/root", "source");
+
+        // Active object (not orphaned)
+        let active_obj_id = insert_object(&conn, "active_hash", false);
+        insert_source(&conn, root_id, "active.jpg", Some(active_obj_id), true);
+        insert_fact(&conn, "object", active_obj_id, "content.Make", "Canon");
+
+        // Orphaned object
+        let orphaned_obj_id = insert_object(&conn, "orphaned_hash", false);
+        insert_source(&conn, root_id, "orphaned.jpg", Some(orphaned_obj_id), false);
+        insert_fact(&conn, "object", orphaned_obj_id, "content.Make", "Nikon");
+
+        let stats = find_orphaned_stats(&conn).unwrap();
+
+        // Only counts orphaned
+        assert_eq!(stats.object_count, 1);
+        assert_eq!(stats.source_count, 1);
+        assert_eq!(stats.object_fact_count, 1);
+    }
+
+    #[test]
+    fn delete_orphaned_no_orphans() {
+        let conn = setup_test_db();
+
+        // Object with present source - not orphaned
+        let root_id = insert_root(&conn, "/root", "source");
+        let obj_id = insert_object(&conn, "abc123", false);
+        insert_source(&conn, root_id, "file.jpg", Some(obj_id), true);
+
+        let stats = delete_orphaned(&conn).unwrap();
+
+        assert_eq!(stats.object_count, 0);
+
+        // Verify nothing was deleted
+        let obj_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM objects",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(obj_count, 1);
+    }
+
+    #[test]
+    fn delete_orphaned_removes_orphaned_object() {
+        let conn = setup_test_db();
+
+        // Orphaned object (no sources)
+        insert_object(&conn, "abc123", false);
+
+        let stats = delete_orphaned(&conn).unwrap();
+
+        assert_eq!(stats.object_count, 1);
+
+        // Verify object was deleted
+        let obj_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM objects",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(obj_count, 0);
+    }
+
+    #[test]
+    fn delete_orphaned_cascade_deletes_all() {
+        let conn = setup_test_db();
+
+        // Orphaned object with sources and facts
+        let root_id = insert_root(&conn, "/root", "source");
+        let obj_id = insert_object(&conn, "abc123", false);
+        let source_id = insert_source(&conn, root_id, "file.jpg", Some(obj_id), false);
+
+        insert_fact(&conn, "source", source_id, "content.Make", "Canon");
+        insert_fact(&conn, "object", obj_id, "content.hash.sha256", "abc123");
+
+        let stats = delete_orphaned(&conn).unwrap();
+
+        assert_eq!(stats.object_count, 1);
+        assert_eq!(stats.source_count, 1);
+        assert_eq!(stats.source_fact_count, 1);
+        assert_eq!(stats.object_fact_count, 1);
+
+        // Verify all deleted
+        let obj_count: i64 = conn.query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0)).unwrap();
+        let src_count: i64 = conn.query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0)).unwrap();
+        let fact_count: i64 = conn.query_row("SELECT COUNT(*) FROM facts", [], |row| row.get(0)).unwrap();
+
+        assert_eq!(obj_count, 0);
+        assert_eq!(src_count, 0);
+        assert_eq!(fact_count, 0);
+    }
+
+    #[test]
+    fn delete_orphaned_preserves_active_objects() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/root", "source");
+
+        // Active object (should be preserved)
+        let active_obj_id = insert_object(&conn, "active_hash", false);
+        let active_source_id = insert_source(&conn, root_id, "active.jpg", Some(active_obj_id), true);
+        insert_fact(&conn, "object", active_obj_id, "content.Make", "Canon");
+        insert_fact(&conn, "source", active_source_id, "source.policy", "keep");
+
+        // Orphaned object (should be deleted)
+        let orphaned_obj_id = insert_object(&conn, "orphaned_hash", false);
+        let orphaned_source_id = insert_source(&conn, root_id, "orphaned.jpg", Some(orphaned_obj_id), false);
+        insert_fact(&conn, "object", orphaned_obj_id, "content.Make", "Nikon");
+        insert_fact(&conn, "source", orphaned_source_id, "source.policy", "delete");
+
+        let stats = delete_orphaned(&conn).unwrap();
+
+        // Only orphaned deleted
+        assert_eq!(stats.object_count, 1);
+        assert_eq!(stats.source_count, 1);
+        assert_eq!(stats.source_fact_count, 1);
+        assert_eq!(stats.object_fact_count, 1);
+
+        // Active preserved
+        let obj_count: i64 = conn.query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0)).unwrap();
+        let src_count: i64 = conn.query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0)).unwrap();
+        let fact_count: i64 = conn.query_row("SELECT COUNT(*) FROM facts", [], |row| row.get(0)).unwrap();
+
+        assert_eq!(obj_count, 1);
+        assert_eq!(src_count, 1);
+        assert_eq!(fact_count, 2); // Both facts for active object/source
+    }
+
+    #[test]
+    fn delete_orphaned_handles_object_with_mixed_present_sources() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/root", "source");
+
+        // Object with both present and non-present sources - NOT orphaned
+        let obj_id = insert_object(&conn, "abc123", false);
+        insert_source(&conn, root_id, "present.jpg", Some(obj_id), true);
+        insert_source(&conn, root_id, "not_present.jpg", Some(obj_id), false);
+
+        let stats = delete_orphaned(&conn).unwrap();
+
+        // Object is not orphaned because it has a present source
+        assert_eq!(stats.object_count, 0);
+
+        // Both sources still exist (non-present source is preserved because object is not orphaned)
+        let src_count: i64 = conn.query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0)).unwrap();
+        assert_eq!(src_count, 2);
     }
 }
