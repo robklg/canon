@@ -231,7 +231,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     };
 
     // Filter sources by root if specified
-    let filtered_sources = filter_by_roots(&sources, &options.roots, conn)?;
+    let filtered_sources = filter_by_roots(&sources, &options.roots, &roots)?;
     let skipped_by_filter = sources.len() - filtered_sources.len();
 
     // Show summary and confirm (unless --yes)
@@ -787,16 +787,16 @@ fn check_destination_writable(base_dir: &Path) -> Result<()> {
 
 fn filter_by_roots<'a>(
     sources: &'a [LockEntry],
-    roots: &[String],
-    conn: &Connection,
+    root_specs: &[String],
+    all_roots: &[crate::domain::root::Root],
 ) -> Result<Vec<&'a LockEntry>> {
-    if roots.is_empty() {
+    if root_specs.is_empty() {
         return Ok(sources.iter().collect());
     }
 
     let mut root_ids = HashSet::new();
-    for spec in roots {
-        let id = parse_root_spec(conn, spec, None)?;
+    for spec in root_specs {
+        let id = parse_root_spec(all_roots, spec, None)?;
         root_ids.insert(id);
     }
 

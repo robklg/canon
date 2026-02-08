@@ -188,8 +188,11 @@ pub fn generate(
 
     let conn = db.conn_mut();
 
+    // Fetch all roots for path resolution
+    let all_roots = repo::root::fetch_all(conn)?;
+
     // Resolve destination to archive root + relative subdir
-    let (archive_root_id, _archive_root_path, base_dir) = resolve_archive_path(conn, dest)?;
+    let (archive_root_id, _archive_root_path, base_dir) = resolve_archive_path(&all_roots, dest)?;
 
     // Resolve scope paths to realpaths
     let scope_prefixes = canonicalize_scopes(scope_paths)?;

@@ -80,9 +80,12 @@ pub fn run(
     let scope_prefixes = canonicalize_scopes(scope_paths)?;
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
 
+    // Fetch all roots for spec resolution
+    let roots = repo::root::fetch_all(conn)?;
+
     // Parse and validate archive spec (must be archive role)
     let archive_root_id = if let Some(spec) = archive_spec {
-        Some(parse_root_spec(conn, spec, Some("archive"))?)
+        Some(parse_root_spec(&roots, spec, Some("archive"))?)
     } else {
         None
     };

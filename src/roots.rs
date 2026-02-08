@@ -150,8 +150,11 @@ fn format_time_ago(timestamp: Option<i64>, now: i64) -> String {
 pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
     let conn = db.conn();
 
+    // Fetch all roots for spec resolution
+    let roots = repo::root::fetch_all(conn)?;
+
     // Parse the spec to get root id and validate it exists
-    let root_id = parse_root_spec(conn, spec, None)?;
+    let root_id = parse_root_spec(&roots, spec, None)?;
 
     // Get root info for display
     let (path, role): (String, String) = conn.query_row(
@@ -227,8 +230,11 @@ pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
 pub fn set_comment(db: &Db, spec: &str, comment: Option<&str>) -> Result<()> {
     let conn = db.conn();
 
+    // Fetch all roots for spec resolution
+    let roots = repo::root::fetch_all(conn)?;
+
     // Parse the spec to get root id and validate it exists
-    let root_id = parse_root_spec(conn, spec, None)?;
+    let root_id = parse_root_spec(&roots, spec, None)?;
 
     conn.execute(
         "UPDATE roots SET comment = ? WHERE id = ?",
@@ -246,8 +252,11 @@ pub fn set_comment(db: &Db, spec: &str, comment: Option<&str>) -> Result<()> {
 pub fn suspend(db: &Db, spec: &str) -> Result<()> {
     let conn = db.conn();
 
+    // Fetch all roots for spec resolution
+    let roots = repo::root::fetch_all(conn)?;
+
     // Use parse_root_spec_any to allow suspending already-suspended roots (no-op)
-    let root_id = parse_root_spec_any(conn, spec)?;
+    let root_id = parse_root_spec_any(&roots, spec)?;
 
     // Get root info for display
     let (path, suspended): (String, bool) =
@@ -268,8 +277,11 @@ pub fn suspend(db: &Db, spec: &str) -> Result<()> {
 pub fn unsuspend(db: &Db, spec: &str) -> Result<()> {
     let conn = db.conn();
 
+    // Fetch all roots for spec resolution
+    let roots = repo::root::fetch_all(conn)?;
+
     // Use parse_root_spec_any to find suspended roots
-    let root_id = parse_root_spec_any(conn, spec)?;
+    let root_id = parse_root_spec_any(&roots, spec)?;
 
     // Get root info for display
     let (path, suspended): (String, bool) =

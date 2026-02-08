@@ -525,11 +525,14 @@ fn main() -> anyhow::Result<()> {
             import_facts::run(&db, allow_archived, verbose)?;
         }
         Commands::Ls { paths, filters, archived, unarchived, unhashed, duplicates, include_archived, include_excluded, long, sort, reverse, null_delim } => {
+            // Fetch all roots for path resolution
+            let all_roots = repo::root::fetch_all(db.conn())?;
+
             // If no paths given, check if cwd is inside a root
             // Also detect if scope is inside an archive root to auto-include archived sources
             let (scope_paths, use_relative, auto_include_archived) = if paths.is_empty() {
                 let cwd = std::env::current_dir()?;
-                match domain::resolve_root_path(db.conn(), &cwd)? {
+                match domain::resolve_root_path(&all_roots, &cwd)? {
                     Some((_, _, role, _)) => (vec![cwd], true, role == "archive"),
                     None => (vec![], false, false),
                 }
@@ -537,7 +540,7 @@ fn main() -> anyhow::Result<()> {
                 let use_rel = !paths.first().map(|p| p.starts_with("/")).unwrap_or(false);
                 // Check if any explicit path is inside an archive root
                 let any_archive = paths.iter().any(|p| {
-                    domain::resolve_root_path(db.conn(), p)
+                    domain::resolve_root_path(&all_roots, p)
                         .ok()
                         .flatten()
                         .map(|(_, _, role, _)| role == "archive")

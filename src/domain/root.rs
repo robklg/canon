@@ -2,15 +2,14 @@
 //!
 //! This module defines how roots are identified and resolved:
 //! - Domain types: Root struct, RootSpec enum
-//! - Domain functions: find_containing_root(), predicates
-//! - Orchestration: parse_root_spec(), resolve_root_path()
+//! - Pure domain functions: find_containing_root(), predicates, resolve_*
 //!
-//! The domain types and functions are pure (no I/O) and can be unit tested.
-//! The orchestration functions combine domain logic with filesystem
-//! and database operations.
+//! All functions in this module are pure (no database I/O). Functions that
+//! need filesystem access (path canonicalization) are clearly documented.
+//! Callers must fetch roots via `repo::root::fetch_all()` before calling
+//! resolution functions.
 
 use anyhow::{bail, Context, Result};
-use rusqlite::Connection;
 use std::fs;
 use std::path::Path;
 
@@ -51,25 +50,25 @@ impl RootSpec {
 
 /// Find which root contains the given canonical path.
 ///
-/// Pure function - no I/O, no database access. Takes pre-fetched root data.
+/// Pure function - no I/O, no database access. Takes pre-fetched Root objects.
 ///
 /// # Arguments
 /// * `canonical_path` - The canonicalized path to look up
-/// * `roots` - List of (id, path, role) tuples representing candidate roots
+/// * `roots` - Slice of Root domain objects (typically from `repo::root::fetch_all()`)
 ///
 /// # Returns
 /// Some((root_id, root_path, role, relative_path)) if the path is under a root,
 /// None otherwise.
 pub fn find_containing_root(
     canonical_path: &str,
-    roots: &[(i64, String, String)],
+    roots: &[Root],
 ) -> Option<(i64, String, String, String)> {
-    for (id, root_path, role) in roots {
-        if canonical_path == root_path {
-            return Some((*id, root_path.clone(), role.clone(), String::new()));
+    for root in roots {
+        if canonical_path == root.path {
+            return Some((root.id, root.path.clone(), root.role.clone(), String::new()));
         }
-        if let Some(rel) = path_strip_prefix(canonical_path, root_path) {
-            return Some((*id, root_path.clone(), role.clone(), rel.to_string()));
+        if let Some(rel) = path_strip_prefix(canonical_path, &root.path) {
+            return Some((root.id, root.path.clone(), root.role.clone(), rel.to_string()));
         }
     }
     None
@@ -134,58 +133,61 @@ impl Root {
 }
 
 // ============================================================================
-// Orchestration (combines domain + infrastructure)
+// Root Resolution Functions (pure domain + filesystem only, no database)
 // ============================================================================
 
 /// Parse root spec (id:N or path:/path) with optional role validation.
 /// Excludes suspended roots. Use parse_root_spec_any() to include them.
-pub fn parse_root_spec(conn: &Connection, spec: &str, required_role: Option<&str>) -> Result<i64> {
-    parse_root_spec_impl(conn, spec, required_role, false)
+///
+/// Callers must fetch roots via `repo::root::fetch_all()` first.
+pub fn parse_root_spec(roots: &[Root], spec: &str, required_role: Option<&str>) -> Result<i64> {
+    parse_root_spec_impl(roots, spec, required_role, false)
 }
 
 /// Parse root spec including suspended roots. Used for suspend/unsuspend commands.
-pub fn parse_root_spec_any(conn: &Connection, spec: &str) -> Result<i64> {
-    parse_root_spec_impl(conn, spec, None, true)
+///
+/// Callers must fetch roots via `repo::root::fetch_all()` first.
+pub fn parse_root_spec_any(roots: &[Root], spec: &str) -> Result<i64> {
+    parse_root_spec_impl(roots, spec, None, true)
 }
 
 fn parse_root_spec_impl(
-    conn: &Connection,
+    roots: &[Root],
     spec: &str,
     required_role: Option<&str>,
     include_suspended: bool,
 ) -> Result<i64> {
-    let suspended_clause = if include_suspended { "" } else { " AND suspended = 0" };
-
     // Parse the spec (pure domain logic)
     let parsed = RootSpec::parse(spec)?;
 
-    // Look up in database (infrastructure)
+    // Filter roots by suspension status
+    let candidates: Vec<&Root> = roots
+        .iter()
+        .filter(|r| include_suspended || r.is_active())
+        .collect();
+
+    // Find matching root
     let (id, role) = match parsed {
         RootSpec::ById(id) => {
-            let query = format!("SELECT role FROM roots WHERE id = ?{}", suspended_clause);
-            let role: String = conn
-                .query_row(&query, [id], |row| row.get(0))
-                .with_context(|| format!("No root with id {}", id))?;
-            (id, role)
+            let root = candidates
+                .iter()
+                .find(|r| r.id == id)
+                .ok_or_else(|| anyhow::anyhow!("No root with id {}", id))?;
+            (root.id, root.role.clone())
         }
         RootSpec::ByPath(path) => {
-            // Canonicalize (filesystem infrastructure)
+            // Canonicalize (filesystem I/O - only infrastructure in this function)
             let realpath = fs::canonicalize(&path)
                 .with_context(|| format!("Failed to resolve path: {}", path))?;
             let realpath_str = realpath
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
 
-            let query = format!(
-                "SELECT id, role FROM roots WHERE path = ?{}",
-                suspended_clause
-            );
-            let (id, role): (i64, String) = conn
-                .query_row(&query, [realpath_str], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })
-                .with_context(|| format!("No root for path: {}", path))?;
-            (id, role)
+            let root = candidates
+                .iter()
+                .find(|r| r.path == realpath_str)
+                .ok_or_else(|| anyhow::anyhow!("No root for path: {}", path))?;
+            (root.id, root.role.clone())
         }
     };
 
@@ -200,79 +202,80 @@ fn parse_root_spec_impl(
 
 /// Resolve a path to its containing root (any role) and relative subdir.
 /// Excludes suspended roots. Use resolve_root_path_any() to include them.
+///
+/// Callers must fetch roots via `repo::root::fetch_all()` first.
+///
 /// Returns Some((root_id, root_path, role, relative_subdir)) if inside a root, None otherwise.
-pub fn resolve_root_path(conn: &Connection, path: &Path) -> Result<Option<(i64, String, String, String)>> {
-    resolve_root_path_impl(conn, path, false)
+pub fn resolve_root_path(roots: &[Root], path: &Path) -> Result<Option<(i64, String, String, String)>> {
+    resolve_root_path_impl(roots, path, false)
 }
 
 /// Resolve a path to its containing root, including suspended roots.
 /// Used for internal operations like unsuspend and overlap checking.
-pub fn resolve_root_path_any(conn: &Connection, path: &Path) -> Result<Option<(i64, String, String, String)>> {
-    resolve_root_path_impl(conn, path, true)
+///
+/// Callers must fetch roots via `repo::root::fetch_all()` first.
+pub fn resolve_root_path_any(roots: &[Root], path: &Path) -> Result<Option<(i64, String, String, String)>> {
+    resolve_root_path_impl(roots, path, true)
 }
 
 fn resolve_root_path_impl(
-    conn: &Connection,
+    roots: &[Root],
     path: &Path,
     include_suspended: bool,
 ) -> Result<Option<(i64, String, String, String)>> {
-    // Canonicalize (filesystem infrastructure)
+    // Canonicalize (filesystem I/O - only infrastructure in this function)
     let canon_path = fs::canonicalize(path)
         .with_context(|| format!("Failed to resolve path: {}", path.display()))?;
     let path_str = canon_path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
 
-    // Fetch candidate roots (database infrastructure)
-    let query = if include_suspended {
-        "SELECT id, path, role FROM roots"
-    } else {
-        "SELECT id, path, role FROM roots WHERE suspended = 0"
-    };
-    let mut stmt = conn.prepare(query)?;
-    let roots: Vec<(i64, String, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
+    // Filter roots by suspension status
+    let candidates: Vec<Root> = roots
+        .iter()
+        .filter(|r| include_suspended || r.is_active())
+        .cloned()
+        .collect();
 
     // Find containing root (pure domain logic)
-    Ok(find_containing_root(path_str, &roots))
+    Ok(find_containing_root(path_str, &candidates))
 }
 
 /// Resolve a path to its containing archive root and relative subdir.
 /// Unlike parse_root_spec which requires exact root match, this accepts any path
 /// inside an archive root and extracts the relative portion.
 /// The path does not need to exist - only an ancestor within an archive root must exist.
+///
+/// Callers must fetch roots via `repo::root::fetch_all()` first.
+///
 /// Returns (root_id, root_path, relative_subdir) or error if not in an archive.
-pub fn resolve_archive_path(conn: &Connection, path: &Path) -> Result<(i64, String, String)> {
-    // Canonicalize path (allowing non-existent subdirs)
+pub fn resolve_archive_path(roots: &[Root], path: &Path) -> Result<(i64, String, String)> {
+    // Canonicalize path (allowing non-existent subdirs) - filesystem I/O
     let path_str = canonicalize_maybe_missing(path)?;
 
-    // Find matching archive root
-    let mut stmt = conn.prepare("SELECT id, path, role FROM roots WHERE suspended = 0")?;
-    let roots: Vec<(i64, String, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
+    // Filter to active roots only
+    let candidates: Vec<&Root> = roots.iter().filter(|r| r.is_active()).collect();
 
-    for (id, root_path, role) in roots {
-        if path_str == root_path {
-            if role != "archive" {
+    for root in candidates {
+        if path_str == root.path {
+            if !root.is_archive() {
                 bail!(
                     "Path '{}' is inside a {} root, not an archive",
                     path.display(),
-                    role
+                    root.role
                 );
             }
-            return Ok((id, root_path, String::new()));
+            return Ok((root.id, root.path.clone(), String::new()));
         }
-        if let Some(rel) = path_strip_prefix(&path_str, &root_path) {
-            if role != "archive" {
+        if let Some(rel) = path_strip_prefix(&path_str, &root.path) {
+            if !root.is_archive() {
                 bail!(
                     "Path '{}' is inside a {} root, not an archive",
                     path.display(),
-                    role
+                    root.role
                 );
             }
-            return Ok((id, root_path, rel.to_string()));
+            return Ok((root.id, root.path.clone(), rel.to_string()));
         }
     }
 
@@ -332,9 +335,21 @@ mod tests {
     // find_containing_root() tests
     // ========================================================================
 
+    /// Helper to create a Root with a specific id, path, and role.
+    fn make_root_with(id: i64, path: &str, role: &str) -> Root {
+        Root {
+            id,
+            path: path.to_string(),
+            role: role.to_string(),
+            comment: None,
+            last_scanned_at: None,
+            suspended: false,
+        }
+    }
+
     #[test]
     fn find_containing_root_exact_match() {
-        let roots = vec![(1, "/a/b".to_string(), "source".to_string())];
+        let roots = vec![make_root_with(1, "/a/b", "source")];
         let result = find_containing_root("/a/b", &roots);
         assert_eq!(
             result,
@@ -344,7 +359,7 @@ mod tests {
 
     #[test]
     fn find_containing_root_under_root() {
-        let roots = vec![(1, "/a/b".to_string(), "source".to_string())];
+        let roots = vec![make_root_with(1, "/a/b", "source")];
         let result = find_containing_root("/a/b/c/d", &roots);
         assert_eq!(
             result,
@@ -354,7 +369,7 @@ mod tests {
 
     #[test]
     fn find_containing_root_not_found() {
-        let roots = vec![(1, "/a/b".to_string(), "source".to_string())];
+        let roots = vec![make_root_with(1, "/a/b", "source")];
         let result = find_containing_root("/x/y/z", &roots);
         assert_eq!(result, None);
     }
@@ -362,7 +377,7 @@ mod tests {
     #[test]
     fn find_containing_root_not_under_similar_prefix() {
         // /a/bc is NOT under /a/b (different directory)
-        let roots = vec![(1, "/a/b".to_string(), "source".to_string())];
+        let roots = vec![make_root_with(1, "/a/b", "source")];
         let result = find_containing_root("/a/bc/d", &roots);
         assert_eq!(result, None);
     }
@@ -370,8 +385,8 @@ mod tests {
     #[test]
     fn find_containing_root_multiple_roots_first_match() {
         let roots = vec![
-            (1, "/a".to_string(), "source".to_string()),
-            (2, "/a/b".to_string(), "archive".to_string()),
+            make_root_with(1, "/a", "source"),
+            make_root_with(2, "/a/b", "archive"),
         ];
         // First matching root wins
         let result = find_containing_root("/a/b/c", &roots);
@@ -383,7 +398,7 @@ mod tests {
 
     #[test]
     fn find_containing_root_empty_roots() {
-        let roots: Vec<(i64, String, String)> = vec![];
+        let roots: Vec<Root> = vec![];
         let result = find_containing_root("/a/b", &roots);
         assert_eq!(result, None);
     }
@@ -529,5 +544,90 @@ mod tests {
         // Current behavior: starts_with matches similar prefixes
         // This matches how roots.rs:list() currently works
         assert!(root.matches_scope("/a/b"));
+    }
+
+    // ========================================================================
+    // parse_root_spec() tests (with &[Root] input)
+    // ========================================================================
+
+    #[test]
+    fn parse_root_spec_impl_by_id_found() {
+        let roots = vec![
+            make_root_with(1, "/a", "source"),
+            make_root_with(2, "/b", "archive"),
+        ];
+        let result = parse_root_spec(&roots, "id:2", None);
+        assert_eq!(result.unwrap(), 2);
+    }
+
+    #[test]
+    fn parse_root_spec_impl_by_id_not_found() {
+        let roots = vec![make_root_with(1, "/a", "source")];
+        let result = parse_root_spec(&roots, "id:999", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No root with id 999"));
+    }
+
+    #[test]
+    fn parse_root_spec_impl_role_filter_source_accepts_source() {
+        let roots = vec![make_root_with(1, "/a", "source")];
+        let result = parse_root_spec(&roots, "id:1", Some("source"));
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_root_spec_impl_role_filter_source_rejects_archive() {
+        let roots = vec![make_root_with(1, "/a", "archive")];
+        let result = parse_root_spec(&roots, "id:1", Some("source"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("role 'archive', expected 'source'"));
+    }
+
+    #[test]
+    fn parse_root_spec_impl_role_filter_archive_accepts_archive() {
+        let roots = vec![make_root_with(1, "/a", "archive")];
+        let result = parse_root_spec(&roots, "id:1", Some("archive"));
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_root_spec_impl_role_filter_archive_rejects_source() {
+        let roots = vec![make_root_with(1, "/a", "source")];
+        let result = parse_root_spec(&roots, "id:1", Some("archive"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("role 'source', expected 'archive'"));
+    }
+
+    #[test]
+    fn parse_root_spec_impl_role_filter_none_accepts_any() {
+        let roots = vec![
+            make_root_with(1, "/a", "source"),
+            make_root_with(2, "/b", "archive"),
+        ];
+        // None means accept any role
+        assert_eq!(parse_root_spec(&roots, "id:1", None).unwrap(), 1);
+        assert_eq!(parse_root_spec(&roots, "id:2", None).unwrap(), 2);
+    }
+
+    #[test]
+    fn parse_root_spec_impl_excludes_suspended() {
+        let mut suspended_root = make_root_with(1, "/a", "source");
+        suspended_root.suspended = true;
+        let roots = vec![suspended_root];
+
+        // parse_root_spec (not _any) should exclude suspended roots
+        let result = parse_root_spec(&roots, "id:1", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_root_spec_any_includes_suspended() {
+        let mut suspended_root = make_root_with(1, "/a", "source");
+        suspended_root.suspended = true;
+        let roots = vec![suspended_root];
+
+        // parse_root_spec_any should include suspended roots
+        let result = parse_root_spec_any(&roots, "id:1");
+        assert_eq!(result.unwrap(), 1);
     }
 }

@@ -145,6 +145,9 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
     let mut total_stats = ScanStats::default();
     let mut all_files_to_hash: Vec<FileToHash> = Vec::new();
 
+    // Fetch all roots for path resolution
+    let all_roots = repo::root::fetch_all(conn)?;
+
     for path in &paths_to_scan {
         let canonical = match fs::canonicalize(path) {
             Ok(p) => p,
@@ -155,7 +158,7 @@ pub fn run(db: &Db, paths: &[PathBuf], role: Option<&str>, add_root: bool, comme
         };
 
         // Check if path is inside an existing root (including suspended)
-        let (root_id, root_path, scan_prefix, _root_role) = match resolve_root_path_any(conn, &canonical)? {
+        let (root_id, root_path, scan_prefix, _root_role) = match resolve_root_path_any(&all_roots, &canonical)? {
             Some((id, root_path, existing_role, rel_path)) => {
                 // Path is inside an existing root - check if suspended
                 let suspended: bool = conn.query_row(
@@ -753,8 +756,11 @@ pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
     let scope = fs::canonicalize(scope_path)
         .with_context(|| format!("Failed to canonicalize path: {}", scope_path.display()))?;
 
+    // Fetch all roots for path resolution
+    let all_roots = repo::root::fetch_all(conn)?;
+
     // Check if scope is already a root or under a root (including suspended)
-    if let Some((id, root_path, role, _)) = resolve_root_path_any(conn, &scope)? {
+    if let Some((id, root_path, role, _)) = resolve_root_path_any(&all_roots, &scope)? {
         let suspended: bool = conn.query_row(
             "SELECT suspended FROM roots WHERE id = ?",
             [id],

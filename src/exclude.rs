@@ -319,12 +319,8 @@ pub fn set_by_path(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()
 
     // Find which root contains this path (domain layer)
     let roots = repo::root::fetch_all(conn)?;
-    let root_tuples: Vec<(i64, String, String)> = roots
-        .iter()
-        .map(|r| (r.id, r.path.clone(), r.role.clone()))
-        .collect();
 
-    let Some((root_id, _root_path, _role, rel_path)) = find_containing_root(path_str, &root_tuples)
+    let Some((root_id, _root_path, _role, rel_path)) = find_containing_root(path_str, &roots)
     else {
         anyhow::bail!("No source found for path: {}", file_path.display());
     };
@@ -513,12 +509,8 @@ pub fn set_object_by_file(db: &Db, file_path: &Path, options: &SetOptions) -> Re
 
     // Find which root contains this path (domain layer)
     let roots = repo::root::fetch_all(conn)?;
-    let root_tuples: Vec<(i64, String, String)> = roots
-        .iter()
-        .map(|r| (r.id, r.path.clone(), r.role.clone()))
-        .collect();
 
-    let Some((root_id, _root_path, _role, rel_path)) = find_containing_root(path_str, &root_tuples)
+    let Some((root_id, _root_path, _role, rel_path)) = find_containing_root(path_str, &roots)
     else {
         anyhow::bail!(
             "No hashed source found for path: {}\n  (File must be scanned and hashed first)",
