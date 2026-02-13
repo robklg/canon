@@ -1000,62 +1000,11 @@ fn get_object_excluded_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo::open_in_memory_for_test;
     use rusqlite::Connection as RusqliteConnection;
 
-    /// Create an in-memory database with the canon schema and test data.
     fn setup_test_db() -> RusqliteConnection {
-        let conn = RusqliteConnection::open_in_memory().unwrap();
-
-        // Create minimal schema needed for tests
-        conn.execute_batch(
-            r#"
-            CREATE TABLE roots (
-                id INTEGER PRIMARY KEY,
-                path TEXT NOT NULL UNIQUE,
-                role TEXT NOT NULL DEFAULT 'source',
-                comment TEXT,
-                last_scanned_at INTEGER,
-                suspended INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE objects (
-                id INTEGER PRIMARY KEY,
-                hash_type TEXT NOT NULL,
-                hash_value TEXT NOT NULL,
-                excluded INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE sources (
-                id INTEGER PRIMARY KEY,
-                root_id INTEGER NOT NULL REFERENCES roots(id),
-                rel_path TEXT NOT NULL,
-                object_id INTEGER REFERENCES objects(id),
-                size INTEGER NOT NULL,
-                mtime INTEGER NOT NULL,
-                device INTEGER NOT NULL DEFAULT 0,
-                inode INTEGER NOT NULL DEFAULT 0,
-                partial_hash TEXT NOT NULL DEFAULT '',
-                basis_rev INTEGER NOT NULL DEFAULT 0,
-                present INTEGER NOT NULL DEFAULT 1,
-                excluded INTEGER NOT NULL DEFAULT 0
-            );
-
-            -- Needed for filter::apply_filters (facts table)
-            CREATE TABLE facts (
-                id INTEGER PRIMARY KEY,
-                entity_type TEXT NOT NULL,
-                entity_id INTEGER NOT NULL,
-                key TEXT NOT NULL,
-                value_type TEXT NOT NULL,
-                value_text TEXT,
-                value_num REAL,
-                value_time INTEGER
-            );
-            "#,
-        )
-        .unwrap();
-
-        conn
+        open_in_memory_for_test()
     }
 
     /// Insert a test root and return its ID
@@ -1088,8 +1037,8 @@ mod tests {
         excluded: bool,
     ) -> i64 {
         conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, present, excluded)
-             VALUES (?, ?, ?, 1000, 1704067200, ?, ?)",
+            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, present, excluded)
+             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0, ?, ?)",
             rusqlite::params![
                 root_id,
                 rel_path,
@@ -1877,8 +1826,8 @@ mod tests {
         let obj = insert_object(conn, "abc123hash", false);
         // Size must be > 0 (empty files are skipped)
         conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, present, excluded)
-             VALUES (?, ?, ?, 1000, 1704067200, 1, 0)",
+            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, present, excluded)
+             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0, 1, 0)",
             rusqlite::params![root, "photo.jpg", obj],
         )
         .unwrap();
@@ -1911,8 +1860,8 @@ mod tests {
         let obj = insert_object(conn, "empty_file_hash", false);
         // Size = 0 (empty file)
         conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, present, excluded)
-             VALUES (?, ?, ?, 0, 1704067200, 1, 0)",
+            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, present, excluded)
+             VALUES (?, ?, ?, 0, 1704067200, '', 0, 0, 0, 0, 1, 0)",
             rusqlite::params![root, "empty.txt", obj],
         )
         .unwrap();
@@ -1940,8 +1889,8 @@ mod tests {
         // Object is already excluded
         let obj = insert_object(conn, "already_excluded_hash", true);
         conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, present, excluded)
-             VALUES (?, ?, ?, 1000, 1704067200, 1, 0)",
+            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, present, excluded)
+             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0, 1, 0)",
             rusqlite::params![root, "photo.jpg", obj],
         )
         .unwrap();
@@ -1967,8 +1916,8 @@ mod tests {
         let root = insert_root(conn, "/photos", "source", false);
         // Source without object_id (unhashed)
         conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, present, excluded)
-             VALUES (?, ?, NULL, 1000, 1704067200, 1, 0)",
+            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, present, excluded)
+             VALUES (?, ?, NULL, 1000, 1704067200, '', 0, 0, 0, 0, 1, 0)",
             rusqlite::params![root, "unhashed.jpg"],
         )
         .unwrap();
@@ -1992,8 +1941,8 @@ mod tests {
         let root = insert_root(conn, "/photos", "source", false);
         let obj = insert_object(conn, "dry_run_hash", false);
         conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, present, excluded)
-             VALUES (?, ?, ?, 1000, 1704067200, 1, 0)",
+            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, present, excluded)
+             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0, 1, 0)",
             rusqlite::params![root, "photo.jpg", obj],
         )
         .unwrap();

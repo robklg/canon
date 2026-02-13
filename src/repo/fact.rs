@@ -785,65 +785,10 @@ pub fn delete_excluded(conn: &Connection, scope: &str) -> Result<(usize, usize)>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection as RawConnection;
+    use crate::repo::open_in_memory_for_test;
 
-    /// Set up an in-memory database with schema for testing
     fn setup_test_db() -> Connection {
-        let conn = RawConnection::open_in_memory().unwrap();
-
-        conn.execute_batch(
-            r#"
-            CREATE TABLE roots (
-                id INTEGER PRIMARY KEY,
-                path TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'source',
-                suspended INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE objects (
-                id INTEGER PRIMARY KEY,
-                hash_value TEXT,
-                excluded INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE sources (
-                id INTEGER PRIMARY KEY,
-                root_id INTEGER NOT NULL,
-                rel_path TEXT NOT NULL,
-                object_id INTEGER,
-                present INTEGER NOT NULL DEFAULT 1,
-                excluded INTEGER NOT NULL DEFAULT 0,
-                size INTEGER NOT NULL DEFAULT 0,
-                mtime INTEGER NOT NULL DEFAULT 0,
-                device INTEGER NOT NULL DEFAULT 0,
-                inode INTEGER NOT NULL DEFAULT 0,
-                partial_hash TEXT NOT NULL DEFAULT '',
-                basis_rev INTEGER NOT NULL DEFAULT 0,
-                FOREIGN KEY (root_id) REFERENCES roots(id),
-                FOREIGN KEY (object_id) REFERENCES objects(id)
-            );
-
-            CREATE TABLE facts (
-                id INTEGER PRIMARY KEY,
-                entity_type TEXT NOT NULL CHECK (entity_type IN ('source', 'object')),
-                entity_id INTEGER NOT NULL,
-                key TEXT NOT NULL,
-                value_text TEXT,
-                value_num REAL,
-                value_time INTEGER,
-                observed_at INTEGER NOT NULL DEFAULT 0,
-                observed_basis_rev INTEGER,
-                CHECK (
-                    (value_text IS NOT NULL) + (value_num IS NOT NULL) +
-                    (value_time IS NOT NULL) = 1
-                ),
-                UNIQUE (entity_type, entity_id, key)
-            );
-            "#,
-        )
-        .unwrap();
-
-        conn
+        open_in_memory_for_test()
     }
 
     fn insert_root(conn: &Connection, id: i64, path: &str) {
@@ -856,7 +801,7 @@ mod tests {
 
     fn insert_object(conn: &Connection, id: i64, hash: &str) {
         conn.execute(
-            "INSERT INTO objects (id, hash_value) VALUES (?1, ?2)",
+            "INSERT INTO objects (id, hash_type, hash_value) VALUES (?1, 'sha256', ?2)",
             [&id as &dyn rusqlite::ToSql, &hash],
         )
         .unwrap();
@@ -870,7 +815,8 @@ mod tests {
         object_id: Option<i64>,
     ) {
         conn.execute(
-            "INSERT INTO sources (id, root_id, rel_path, object_id) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO sources (id, root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
+             VALUES (?1, ?2, ?3, ?4, 0, 0, '', 0, 0, 0, 0)",
             rusqlite::params![id, root_id, rel_path, object_id],
         )
         .unwrap();
@@ -1858,7 +1804,8 @@ mod tests {
         basis_rev: i64,
     ) {
         conn.execute(
-            "INSERT INTO sources (id, root_id, rel_path, basis_rev) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO sources (id, root_id, rel_path, basis_rev, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
+             VALUES (?1, ?2, ?3, ?4, 0, 0, '', 0, 0, 0, 0)",
             rusqlite::params![id, root_id, rel_path, basis_rev],
         )
         .unwrap();
@@ -1911,17 +1858,8 @@ mod tests {
         assert_eq!(count, 1);
     }
 
-    #[test]
-    fn count_stale_ignores_null_basis_rev() {
-        let conn = setup_test_db();
-        insert_root(&conn, 1, "/root");
-        insert_source_with_basis_rev(&conn, 1, 1, "file.txt", 10);
-        // Fact with null observed_basis_rev (not trackable, shouldn't be counted)
-        insert_fact_with_basis_rev(&conn, 1, "content.Make", "Canon", None);
-
-        let count = count_stale(&conn).unwrap();
-        assert_eq!(count, 0);
-    }
+    // Note: count_stale_ignores_null_basis_rev was removed because the production
+    // schema's CHECK constraint prevents source facts with NULL observed_basis_rev.
 
     #[test]
     fn count_stale_multiple_stale_facts() {
@@ -2014,27 +1952,8 @@ mod tests {
         assert_eq!(value, "Nikon");
     }
 
-    #[test]
-    fn delete_stale_preserves_null_basis_rev() {
-        let conn = setup_test_db();
-        insert_root(&conn, 1, "/root");
-        insert_source_with_basis_rev(&conn, 1, 1, "file.txt", 10);
-        // Fact with null observed_basis_rev - should not be deleted
-        insert_fact_with_basis_rev(&conn, 1, "content.Make", "Canon", None);
-
-        let deleted = delete_stale(&conn).unwrap();
-        assert_eq!(deleted, 0);
-
-        // Verify fact still exists
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM facts WHERE entity_type = 'source' AND entity_id = 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 1);
-    }
+    // Note: delete_stale_preserves_null_basis_rev was removed because the production
+    // schema's CHECK constraint prevents source facts with NULL observed_basis_rev.
 
     #[test]
     fn delete_stale_ignores_object_facts() {
@@ -2066,16 +1985,16 @@ mod tests {
     /// Helper to insert an excluded source
     fn insert_excluded_source(conn: &Connection, id: i64, root_id: i64, rel_path: &str) {
         conn.execute(
-            "INSERT INTO sources (id, root_id, rel_path, excluded) VALUES (?1, ?2, ?3, 1)",
+            "INSERT INTO sources (id, root_id, rel_path, excluded, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
+             VALUES (?1, ?2, ?3, 1, 0, 0, '', 0, 0, 0, 0)",
             rusqlite::params![id, root_id, rel_path],
         )
         .unwrap();
     }
 
-    /// Helper to insert an excluded object
     fn insert_excluded_object(conn: &Connection, id: i64, hash: &str) {
         conn.execute(
-            "INSERT INTO objects (id, hash_value, excluded) VALUES (?1, ?2, 1)",
+            "INSERT INTO objects (id, hash_type, hash_value, excluded) VALUES (?1, 'sha256', ?2, 1)",
             [&id as &dyn rusqlite::ToSql, &hash],
         )
         .unwrap();

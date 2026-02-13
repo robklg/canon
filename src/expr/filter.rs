@@ -1365,59 +1365,11 @@ fn parse_filter_value(value: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo::open_in_memory_for_test;
     use rusqlite::Connection as RawConnection;
 
     fn setup_test_db() -> RawConnection {
-        let conn = RawConnection::open_in_memory().unwrap();
-        conn.execute_batch(
-            r#"
-            CREATE TABLE roots (
-                id INTEGER PRIMARY KEY,
-                path TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'source',
-                suspended INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE objects (
-                id INTEGER PRIMARY KEY,
-                hash_value TEXT,
-                excluded INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE sources (
-                id INTEGER PRIMARY KEY,
-                root_id INTEGER NOT NULL,
-                rel_path TEXT NOT NULL,
-                object_id INTEGER,
-                present INTEGER NOT NULL DEFAULT 1,
-                excluded INTEGER NOT NULL DEFAULT 0,
-                size INTEGER NOT NULL DEFAULT 0,
-                mtime INTEGER NOT NULL DEFAULT 0,
-                device INTEGER,
-                inode INTEGER,
-                partial_hash TEXT NOT NULL DEFAULT '',
-                basis_rev INTEGER NOT NULL DEFAULT 0,
-                FOREIGN KEY (root_id) REFERENCES roots(id),
-                FOREIGN KEY (object_id) REFERENCES objects(id)
-            );
-            CREATE TABLE facts (
-                id INTEGER PRIMARY KEY,
-                entity_type TEXT NOT NULL CHECK (entity_type IN ('source', 'object')),
-                entity_id INTEGER NOT NULL,
-                key TEXT NOT NULL,
-                value_text TEXT,
-                value_num REAL,
-                value_time INTEGER,
-                observed_at INTEGER NOT NULL DEFAULT 0,
-                observed_basis_rev INTEGER,
-                CHECK (
-                    (value_text IS NOT NULL) + (value_num IS NOT NULL) +
-                    (value_time IS NOT NULL) = 1
-                ),
-                UNIQUE (entity_type, entity_id, key)
-            );
-            "#,
-        )
-        .unwrap();
-        conn
+        open_in_memory_for_test()
     }
 
     fn insert_root(conn: &RawConnection, path: &str) -> i64 {
@@ -1428,7 +1380,8 @@ mod tests {
 
     fn insert_source(conn: &RawConnection, root_id: i64, rel_path: &str) -> i64 {
         conn.execute(
-            "INSERT INTO sources (root_id, rel_path, size, mtime) VALUES (?, ?, 1000, 1704067200)",
+            "INSERT INTO sources (root_id, rel_path, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
+             VALUES (?, ?, 1000, 1704067200, '', 0, 0, 0, 0)",
             rusqlite::params![root_id, rel_path],
         )
         .unwrap();

@@ -501,59 +501,11 @@ fn format_number(n: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo::open_in_memory_for_test;
     use rusqlite::Connection as RusqliteConnection;
 
     fn setup_test_db() -> RusqliteConnection {
-        let conn = RusqliteConnection::open_in_memory().unwrap();
-
-        conn.execute_batch(
-            r#"
-            CREATE TABLE roots (
-                id INTEGER PRIMARY KEY,
-                path TEXT NOT NULL UNIQUE,
-                role TEXT NOT NULL DEFAULT 'source',
-                comment TEXT,
-                last_scanned_at INTEGER,
-                suspended INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE objects (
-                id INTEGER PRIMARY KEY,
-                hash_type TEXT NOT NULL,
-                hash_value TEXT NOT NULL,
-                excluded INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE sources (
-                id INTEGER PRIMARY KEY,
-                root_id INTEGER NOT NULL REFERENCES roots(id),
-                rel_path TEXT NOT NULL,
-                object_id INTEGER REFERENCES objects(id),
-                size INTEGER NOT NULL,
-                mtime INTEGER NOT NULL,
-                device INTEGER NOT NULL DEFAULT 0,
-                inode INTEGER NOT NULL DEFAULT 0,
-                partial_hash TEXT NOT NULL DEFAULT '',
-                basis_rev INTEGER NOT NULL DEFAULT 0,
-                present INTEGER NOT NULL DEFAULT 1,
-                excluded INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE facts (
-                id INTEGER PRIMARY KEY,
-                entity_type TEXT NOT NULL,
-                entity_id INTEGER NOT NULL,
-                key TEXT NOT NULL,
-                value_type TEXT NOT NULL,
-                value_text TEXT,
-                value_num REAL,
-                value_time INTEGER
-            );
-            "#,
-        )
-        .unwrap();
-
-        conn
+        open_in_memory_for_test()
     }
 
     fn insert_root(conn: &RusqliteConnection, path: &str, role: &str, _suspended: bool) -> i64 {
@@ -581,8 +533,8 @@ mod tests {
         object_id: Option<i64>,
     ) -> i64 {
         conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime)
-             VALUES (?, ?, ?, 1000, 1704067200)",
+            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
+             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0)",
             rusqlite::params![root_id, rel_path, object_id],
         )
         .unwrap();

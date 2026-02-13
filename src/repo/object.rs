@@ -563,66 +563,11 @@ pub fn get_or_create(conn: &Connection, hash_type: &str, hash_value: &str) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo::open_in_memory_for_test;
     use rusqlite::Connection as RusqliteConnection;
 
-    /// Create an in-memory database with the required schema.
     fn setup_test_db() -> RusqliteConnection {
-        let conn = RusqliteConnection::open_in_memory().unwrap();
-
-        conn.execute_batch(
-            r#"
-            CREATE TABLE roots (
-                id INTEGER PRIMARY KEY,
-                path TEXT NOT NULL UNIQUE,
-                role TEXT NOT NULL DEFAULT 'source',
-                comment TEXT,
-                last_scanned_at INTEGER,
-                suspended INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE objects (
-                id INTEGER PRIMARY KEY,
-                hash_type TEXT NOT NULL,
-                hash_value TEXT NOT NULL,
-                excluded INTEGER NOT NULL DEFAULT 0,
-                UNIQUE(hash_type, hash_value)
-            );
-
-            CREATE TABLE sources (
-                id INTEGER PRIMARY KEY,
-                root_id INTEGER NOT NULL REFERENCES roots(id),
-                rel_path TEXT NOT NULL,
-                device INTEGER NOT NULL DEFAULT 0,
-                inode INTEGER NOT NULL DEFAULT 0,
-                size INTEGER NOT NULL DEFAULT 0,
-                mtime INTEGER NOT NULL DEFAULT 0,
-                partial_hash TEXT NOT NULL DEFAULT '',
-                basis_rev INTEGER NOT NULL DEFAULT 0,
-                scanned_at INTEGER NOT NULL DEFAULT 0,
-                last_seen_at INTEGER NOT NULL DEFAULT 0,
-                present INTEGER NOT NULL DEFAULT 1,
-                object_id INTEGER REFERENCES objects(id),
-                excluded INTEGER NOT NULL DEFAULT 0,
-                UNIQUE(root_id, rel_path)
-            );
-
-            CREATE TABLE facts (
-                id INTEGER PRIMARY KEY,
-                entity_type TEXT NOT NULL CHECK (entity_type IN ('source', 'object')),
-                entity_id INTEGER NOT NULL,
-                key TEXT NOT NULL,
-                value_text TEXT,
-                value_num REAL,
-                value_time INTEGER,
-                observed_at INTEGER NOT NULL DEFAULT 0,
-                observed_basis_rev INTEGER,
-                UNIQUE (entity_type, entity_id, key)
-            );
-            "#,
-        )
-        .unwrap();
-
-        conn
+        open_in_memory_for_test()
     }
 
     /// Insert a test root and return its ID.
@@ -654,7 +599,8 @@ mod tests {
         present: bool,
     ) -> i64 {
         conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, present) VALUES (?, ?, ?, ?)",
+            "INSERT INTO sources (root_id, rel_path, object_id, present, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
+             VALUES (?, ?, ?, ?, 0, 0, '', 0, 0, 0, 0)",
             rusqlite::params![root_id, rel_path, object_id, present as i64],
         )
         .unwrap();
@@ -1349,7 +1295,6 @@ mod tests {
     // find_orphaned_stats / delete_orphaned tests
     // =========================================================================
 
-    /// Insert a fact for testing
     fn insert_fact(
         conn: &RusqliteConnection,
         entity_type: &str,
@@ -1358,9 +1303,9 @@ mod tests {
         value: &str,
     ) {
         conn.execute(
-            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at)
-             VALUES (?, ?, ?, ?, 0)",
-            rusqlite::params![entity_type, entity_id, key, value],
+            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev)
+             VALUES (?, ?, ?, ?, 0, CASE WHEN ? = 'source' THEN 0 ELSE NULL END)",
+            rusqlite::params![entity_type, entity_id, key, value, entity_type],
         )
         .unwrap();
     }

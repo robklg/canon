@@ -112,6 +112,8 @@ Roots table columns include `suspended` (integer, default 0) for temporarily hid
 - **Chunking:** `for chunk in ids.chunks(BATCH_SIZE)` with `BATCH_SIZE = 1000` (see `repo/source.rs`)
 - **Temp table:** `repo::db::populate_temp_sources()` then JOIN (see `repo/fact.rs`)
 
+**Test Database Setup:** Always use `repo::open_in_memory_for_test()` for test databases. This creates an in-memory SQLite database with the production schema, ensuring tests run against the real schema with all constraints, indexes, and CHECK clauses. **Do NOT define custom test schemas** — they drift from production and mask bugs. Test insert helpers must provide all NOT NULL columns that lack defaults (notably `size`, `mtime`, `partial_hash`, `scanned_at`, `last_seen_at`, `device`, `inode` for sources).
+
 ### Filter Expressions (expr/filter.rs)
 
 Used with `--where`. Supports full boolean logic:
