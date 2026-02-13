@@ -45,12 +45,14 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 - `fact.rs` - Fact batch fetching (`batch_fetch_for_sources()`, `batch_fetch_key_for_sources()`)
 
 **Expression System** (`src/expr/`) - Pattern and filter handling:
+- `alias.rs` - Pure alias expansion logic (`expand_aliases()`, `has_alias_references()`)
 - `eval.rs` - Pattern evaluation, modifiers, accessors, FactValue types
 - `filter.rs` - Filter expression parsing for `--where` clauses
 - `value.rs` - Fact value resolution for sources
 
 **Command Modules** (flat in `src/`):
-- `main.rs` - CLI entry point using clap
+- `main.rs` - CLI entry point using clap (canon home resolution, alias expansion dispatch)
+- `alias.rs` - Alias file I/O and filter expansion orchestration (`expand_filter_strings()`)
 - `ls.rs` - List and query sources
 - `coverage.rs` - Archive coverage statistics
 - `cluster.rs` - Manifest generation with query filters
@@ -77,9 +79,30 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 - `apply` - Apply manifest to copy/move/rename files
 - `exclude set/clear/list/duplicates` - Manage source exclusions
 
+### Canon Home Directory
+
+All Canon state lives under a single "canon home" directory:
+- Default: `~/.canon/`
+- Override with `CANON_HOME` env var or `--canon-home` flag
+- Precedence: `--canon-home` flag > `CANON_HOME` env var > `~/.canon/`
+- Contains: `canon.db` (database), `aliases.toml` (expression aliases)
+
+### Expression Aliases
+
+Named aliases for `--where` filter expressions, defined in `$CANON_HOME/aliases.toml`:
+
+```toml
+image = "content.mime IN ('image/jpeg', 'image/png', 'image/gif')"
+tens = "source.mtime|year >= 2010 AND source.mtime|year < 2020"
+```
+
+Usage: `canon ls --where "@image AND @tens"`. The `@name` syntax expands before filter parsing — the filter engine never sees `@`. Expansion wraps each alias value in parentheses unconditionally. `@` inside quoted strings is treated as literal.
+
+Alias expansion happens in `main.rs` before command dispatch. The pure expansion logic lives in `expr/alias.rs`; file I/O lives in `alias.rs`.
+
 ### Database
 
-Default location: `~/.canon/canon.db` (override with `--db` flag)
+Default location: `$CANON_HOME/canon.db`
 
 Key tables: `roots`, `sources`, `objects`, `facts`
 

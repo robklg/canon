@@ -1,5 +1,6 @@
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Infrastructure layers
 mod domain;
@@ -7,6 +8,7 @@ mod expr;
 mod repo;
 
 // Utilities
+mod alias;
 mod progress;
 
 // Command modules
@@ -26,9 +28,9 @@ mod worklist;
 #[command(name = "canon")]
 #[command(about = "Organize large media libraries into a canonical archive")]
 struct Cli {
-    /// Path to the database file
+    /// Canon home directory (default: ~/.canon/, env: CANON_HOME)
     #[arg(long, global = true)]
-    db: Option<PathBuf>,
+    canon_home: Option<PathBuf>,
 
     /// Print SQL queries with timing for debugging
     #[arg(long, global = true)]
@@ -471,15 +473,29 @@ enum ClusterAction {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+fn resolve_canon_home(flag: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = flag {
+        return Ok(path.to_path_buf());
+    }
+    if let Ok(val) = std::env::var("CANON_HOME") {
+        return Ok(PathBuf::from(val));
+    }
+    let mut path = dirs::home_dir().context("Could not determine home directory")?;
+    path.push(".canon");
+    Ok(path)
+}
+
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let db_path = cli.db.unwrap_or_else(|| {
-        let mut path = dirs::home_dir().expect("Could not determine home directory");
-        path.push(".canon");
-        path.push("canon.db");
-        path
-    });
+    let canon_home = resolve_canon_home(cli.canon_home.as_deref())?;
+    if canon_home.exists() && !canon_home.is_dir() {
+        bail!(
+            "CANON_HOME path is not a directory: {}",
+            canon_home.display()
+        );
+    }
+    let db_path = canon_home.join("canon.db");
 
     let mut db = repo::open_with_options(
         &db_path,
@@ -546,6 +562,7 @@ fn main() -> anyhow::Result<()> {
             unique_content,
             emit,
         } => {
+            let filters = alias::expand_filter_strings(&filters, &canon_home)?;
             worklist::run(
                 &mut db,
                 &paths,
@@ -576,6 +593,7 @@ fn main() -> anyhow::Result<()> {
             reverse,
             null_delim,
         } => {
+            let filters = alias::expand_filter_strings(&filters, &canon_home)?;
             // Fetch all roots for path resolution
             let all_roots = repo::root::fetch_all(db.conn())?;
 
@@ -653,6 +671,7 @@ fn main() -> anyhow::Result<()> {
                     value_type,
                     yes,
                 }) => {
+                    let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                     let options = facts::DeleteOptions {
                         entity_type: on,
                         value_type,
@@ -661,6 +680,7 @@ fn main() -> anyhow::Result<()> {
                     facts::delete_facts(&mut db, &key, &paths, &filters, &options)?;
                 }
                 None => {
+                    let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                     facts::run(
                         &mut db,
                         key.as_deref(),
@@ -703,6 +723,7 @@ fn main() -> anyhow::Result<()> {
             include_excluded,
             compact,
         } => {
+            let filters = alias::expand_filter_strings(&filters, &canon_home)?;
             coverage::run(
                 &mut db,
                 &paths,
@@ -720,6 +741,7 @@ fn main() -> anyhow::Result<()> {
             include_excluded,
             verbose,
         } => {
+            let filters = alias::expand_filter_strings(&filters, &canon_home)?;
             let options = compare::CompareOptions {
                 include_excluded,
                 verbose,
@@ -740,13 +762,14 @@ fn main() -> anyhow::Result<()> {
                 show_archived,
                 allow_duplicates,
             } => {
+                let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = cluster::GenerateOptions {
                     force,
                     include_archived,
                     show_archived,
                     allow_duplicates,
                 };
-                cluster::generate(&mut db, &paths, &filters, &dest, &output, &options)?;
+                cluster::generate(&mut db, &paths, &filters, &expanded, &dest, &output, &options)?;
             }
             ClusterAction::Refresh {
                 manifest,
@@ -801,6 +824,7 @@ fn main() -> anyhow::Result<()> {
                 id,
                 dry_run,
             } => {
+                let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::SetOptions {
                     dry_run,
                     verbose: false,
@@ -819,10 +843,12 @@ fn main() -> anyhow::Result<()> {
                 filters,
                 dry_run,
             } => {
+                let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::ClearOptions { dry_run };
                 exclude::clear(&mut db, &paths, &filters, &options)?;
             }
             ExcludeAction::List { paths, filters } => {
+                let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 exclude::list(&mut db, &paths, &filters)?;
             }
             ExcludeAction::Duplicates {
@@ -831,6 +857,7 @@ fn main() -> anyhow::Result<()> {
                 filters,
                 dry_run,
             } => {
+                let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 exclude::exclude_duplicates(
                     &mut db,
                     &prefer,
@@ -846,6 +873,7 @@ fn main() -> anyhow::Result<()> {
                 yes,
                 verbose,
             } => {
+                let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::SetOptions {
                     dry_run: !yes,
                     verbose,

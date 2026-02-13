@@ -58,6 +58,47 @@ The `~` operator supports shell-style glob patterns:
 
 Operator precedence (highest to lowest): NOT, AND, OR. Use parentheses to override.
 
+## Aliases
+
+You can define named aliases for frequently used filter expressions in `$CANON_HOME/aliases.toml` (by default `~/.canon/aliases.toml`):
+
+```toml
+image = "content.mime IN ('image/jpeg', 'image/png', 'image/gif', 'image/tiff', 'image/webp', 'image/heic')"
+video = "content.mime IN ('video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska')"
+tens = "source.mtime|year >= 2010 AND source.mtime|year < 2020"
+large = "source.size > 10000000"
+screenshot = "source.rel_path[0] ~ 'Screenshots*'"
+```
+
+Reference aliases with `@name` in any `--where` expression:
+
+```bash
+# Simple alias
+canon ls --where '@image'
+
+# Compose with boolean logic
+canon ls --where '@image OR @video'
+
+# Mix aliases with regular expressions
+canon ls --where '@image AND @tens'
+
+# Negate an alias
+canon ls --where 'NOT @screenshot'
+```
+
+Each alias is wrapped in parentheses when expanded, so boolean logic inside aliases composes safely. For example, `@image AND @tens` expands to:
+
+```
+(content.mime IN (...)) AND (source.mtime|year >= 2010 AND source.mtime|year < 2020)
+```
+
+**Rules:**
+- Alias names must start with a letter and can contain letters, digits, underscores, and hyphens
+- `@` inside quoted strings is treated as a literal character, not an alias reference
+- Nested aliases are not supported (`@` in alias values is literal)
+- The aliases file is only loaded when `@` appears in a `--where` argument
+- If the file doesn't exist and no `@` aliases are used, no error is raised
+
 ## Using Modifiers
 
 Modifiers can be applied to fact keys using the `|` syntax. See [Facts](facts.md#modifiers) for the complete list.

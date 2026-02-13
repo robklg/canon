@@ -8,6 +8,7 @@
 // Re-exports are intentional for public API convenience
 #![allow(unused_imports)]
 
+pub mod alias;
 pub mod eval;
 pub mod filter;
 pub mod value;

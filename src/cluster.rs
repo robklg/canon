@@ -173,7 +173,8 @@ fn generate_lock(
 pub fn generate(
     db: &mut Db,
     scope_paths: &[PathBuf],
-    filters: &[String],
+    original_filters: &[String],
+    expanded_filters: &[String],
     dest: &Path,
     output_path: &Path,
     options: &GenerateOptions,
@@ -188,7 +189,7 @@ pub fn generate(
     }
 
     // Require at least one of path scope or filters
-    if scope_paths.is_empty() && filters.is_empty() {
+    if scope_paths.is_empty() && expanded_filters.is_empty() {
         bail!("At least one of path or --where filter is required");
     }
 
@@ -203,7 +204,7 @@ pub fn generate(
     // Resolve scope paths to realpaths
     let scope_prefixes = canonicalize_scopes(scope_paths)?;
 
-    let parsed_filters: Vec<Filter> = filters
+    let parsed_filters: Vec<Filter> = expanded_filters
         .iter()
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
@@ -226,10 +227,10 @@ pub fn generate(
     // Generate fact help from full coverage facts
     let fact_help = generate_fact_help(result.source_count, &result.full_coverage_facts);
 
-    // Build config (TOML without sources)
+    // Build config (TOML without sources) — store expanded filters as the query
     let config = ManifestConfig {
         meta: ManifestMeta {
-            query: filters.to_vec(),
+            query: expanded_filters.to_vec(),
             scope: if scope_prefixes.len() == 1 {
                 Some(scope_prefixes[0].clone())
             } else if scope_prefixes.is_empty() {
@@ -247,9 +248,20 @@ pub fn generate(
         },
     };
 
-    // Write TOML config file
+    // Write TOML config file, with original filter comments if aliases were expanded
     let toml_str =
         toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
+    let comment_lines: Vec<String> = original_filters
+        .iter()
+        .zip(expanded_filters.iter())
+        .filter(|(orig, exp)| orig != exp)
+        .map(|(orig, _)| format!("# Original: {orig}"))
+        .collect();
+    let toml_str = if comment_lines.is_empty() {
+        toml_str
+    } else {
+        inject_comments_before_key(&toml_str, "query", &comment_lines)
+    };
     let toml_with_help = format!("{}\n\n{}", toml_str.trim_end(), fact_help);
     fs::write(output_path, &toml_with_help)
         .with_context(|| format!("Failed to write manifest to {}", output_path.display()))?;
@@ -736,6 +748,24 @@ fn find_source_duplicates(sources: &[LockEntry]) -> Vec<(i64, Vec<i64>)> {
         .into_iter()
         .filter(|(_, ids)| ids.len() > 1)
         .collect()
+}
+
+/// Insert comment lines before a key in a TOML string.
+/// Finds the first line starting with `key = ` and inserts comments above it.
+fn inject_comments_before_key(toml_str: &str, key: &str, comments: &[String]) -> String {
+    let prefix = format!("{key} = ");
+    let mut result = String::with_capacity(toml_str.len() + comments.len() * 40);
+    for line in toml_str.lines() {
+        if line.starts_with(&prefix) {
+            for comment in comments {
+                result.push_str(comment);
+                result.push('\n');
+            }
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+    result
 }
 
 // ============================================================================

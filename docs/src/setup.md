@@ -20,22 +20,33 @@ cd canon
 cargo install --path .
 ```
 
-## Database
+## Canon Home Directory
 
-Canon stores all state in a SQLite database. The default location is `~/.canon/canon.db`.
+Canon stores all state in a single directory called the **canon home**. The default location is `~/.canon/`.
 
-You can override this with the `--db` flag:
+It contains:
+
+| File | Purpose |
+|------|---------|
+| `canon.db` | SQLite database (roots, sources, objects, facts) |
+| `aliases.toml` | Expression aliases (optional — see [Aliases](reference/filter.md#aliases)) |
+
+The directory is created automatically on first use.
+
+### Overriding the Location
+
+You can relocate canon home with the `CANON_HOME` environment variable or the `--canon-home` flag:
 
 ```bash
-canon --db /path/to/custom.db scan ...
+# Via environment variable
+export CANON_HOME=/mnt/archive/.canon
+canon scan /photos
+
+# Via flag (takes precedence over environment variable)
+canon --canon-home /tmp/test-canon scan /photos
 ```
 
-The database is created automatically on first use. It contains:
-
-- Registered roots and their scan state
-- All indexed sources with metadata
-- Content hashes and object references
-- Imported facts from enrichment
+Precedence: `--canon-home` flag > `CANON_HOME` env var > `~/.canon/`
 
 ## Verify Installation
 

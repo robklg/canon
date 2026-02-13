@@ -348,7 +348,7 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
         }
 
         // Keywords and identifiers
-        // Allow alphanumeric, underscore, dot, pipe, and brackets (for accessors like key[-1] and modifiers like key|year)
+        // Allow alphanumeric, underscore, dot, pipe, brackets, slash (for accessors like key[-1], modifiers like key|year, and MIME types like image/jpeg)
         if chars[i].is_alphabetic() || chars[i] == '_' {
             let start = i;
             while i < chars.len()
@@ -359,6 +359,7 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
                     || chars[i] == '['
                     || chars[i] == ']'
                     || chars[i] == ':'
+                    || chars[i] == '/'
                     || (chars[i] == '-' && i > 0 && chars[i - 1] == '['))
             {
                 i += 1;
