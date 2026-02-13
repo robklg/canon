@@ -728,9 +728,12 @@ fn check_fact_compare(
                     .and_then(|e| e.to_str())
                     .unwrap_or("");
                 let fact_value = FactValue::Text(ext.to_string());
-                let modified =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-                return Ok(compare_fact_value(&modified, op, value));
+                if let Ok(modified) =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
+                {
+                    return Ok(compare_fact_value(&modified, op, value));
+                }
+                return Ok(false);
             }
             BuiltinKey::Filename => {
                 let rel_path: String = conn.query_row(
@@ -743,9 +746,12 @@ fn check_fact_compare(
                     .and_then(|f| f.to_str())
                     .unwrap_or(&rel_path);
                 let fact_value = FactValue::Text(filename.to_string());
-                let modified =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-                return Ok(compare_fact_value(&modified, op, value));
+                if let Ok(modified) =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
+                {
+                    return Ok(compare_fact_value(&modified, op, value));
+                }
+                return Ok(false);
             }
             BuiltinKey::SourceRoot => {
                 let root_path: String = conn.query_row(
@@ -754,9 +760,12 @@ fn check_fact_compare(
                     |row| row.get(0),
                 )?;
                 let fact_value = FactValue::Text(root_path);
-                let modified =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-                return Ok(compare_fact_value(&modified, op, value));
+                if let Ok(modified) =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
+                {
+                    return Ok(compare_fact_value(&modified, op, value));
+                }
+                return Ok(false);
             }
             BuiltinKey::SourcePath => {
                 let (root_path, rel_path): (String, String) = conn.query_row(
@@ -770,9 +779,12 @@ fn check_fact_compare(
                     format!("{root_path}/{rel_path}")
                 };
                 let fact_value = FactValue::Text(full_path);
-                let modified =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-                return Ok(compare_fact_value(&modified, op, value));
+                if let Ok(modified) =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
+                {
+                    return Ok(compare_fact_value(&modified, op, value));
+                }
+                return Ok(false);
             }
             BuiltinKey::SourceRelPath => {
                 let rel_path: String = conn.query_row(
@@ -781,9 +793,12 @@ fn check_fact_compare(
                     |row| row.get(0),
                 )?;
                 let fact_value = FactValue::Text(rel_path);
-                let modified =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-                return Ok(compare_fact_value(&modified, op, value));
+                if let Ok(modified) =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
+                {
+                    return Ok(compare_fact_value(&modified, op, value));
+                }
+                return Ok(false);
             }
 
             // Numeric fields
@@ -794,9 +809,12 @@ fn check_fact_compare(
                     |row| row.get(0),
                 )?;
                 let fact_value = FactValue::Num(v as f64);
-                let modified =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-                return Ok(compare_fact_value(&modified, op, value));
+                if let Ok(modified) =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
+                {
+                    return Ok(compare_fact_value(&modified, op, value));
+                }
+                return Ok(false);
             }
             BuiltinKey::SourceMtime | BuiltinKey::Mtime => {
                 let v: i64 = conn.query_row(
@@ -806,9 +824,12 @@ fn check_fact_compare(
                 )?;
                 // mtime is a time value, so use Time type for proper modifier support
                 let fact_value = FactValue::Time(v);
-                let modified =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-                return Ok(compare_fact_value(&modified, op, value));
+                if let Ok(modified) =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
+                {
+                    return Ok(compare_fact_value(&modified, op, value));
+                }
+                return Ok(false);
             }
             BuiltinKey::SourceDevice => {
                 let device: Option<i64> = conn.query_row(
@@ -818,9 +839,11 @@ fn check_fact_compare(
                 )?;
                 if let Some(d) = device {
                     let fact_value = FactValue::Num(d as f64);
-                    let modified =
-                        apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-                    return Ok(compare_fact_value(&modified, op, value));
+                    if let Ok(modified) =
+                        apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
+                    {
+                        return Ok(compare_fact_value(&modified, op, value));
+                    }
                 }
                 return Ok(false);
             }
@@ -832,9 +855,11 @@ fn check_fact_compare(
                 )?;
                 if let Some(i) = inode {
                     let fact_value = FactValue::Num(i as f64);
-                    let modified =
-                        apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-                    return Ok(compare_fact_value(&modified, op, value));
+                    if let Ok(modified) =
+                        apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
+                    {
+                        return Ok(compare_fact_value(&modified, op, value));
+                    }
                 }
                 return Ok(false);
             }
@@ -845,16 +870,22 @@ fn check_fact_compare(
                     |row| row.get(0),
                 )?;
                 let fact_value = FactValue::Num(v as f64);
-                let modified =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-                return Ok(compare_fact_value(&modified, op, value));
+                if let Ok(modified) =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
+                {
+                    return Ok(compare_fact_value(&modified, op, value));
+                }
+                return Ok(false);
             }
             BuiltinKey::SourceId | BuiltinKey::Id => {
                 // The source ID is the source_id parameter itself
                 let fact_value = FactValue::Num(source_id as f64);
-                let modified =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)?;
-                return Ok(compare_fact_value(&modified, op, value));
+                if let Ok(modified) =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
+                {
+                    return Ok(compare_fact_value(&modified, op, value));
+                }
+                return Ok(false);
             }
 
             // Other builtin keys (aliases, etc.) fall through to fact lookup
@@ -1325,4 +1356,148 @@ fn parse_filter_value(value: &str) -> Option<f64> {
     }
 
     None
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection as RawConnection;
+
+    fn setup_test_db() -> RawConnection {
+        let conn = RawConnection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE roots (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'source',
+                suspended INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE objects (
+                id INTEGER PRIMARY KEY,
+                hash_value TEXT,
+                excluded INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE sources (
+                id INTEGER PRIMARY KEY,
+                root_id INTEGER NOT NULL,
+                rel_path TEXT NOT NULL,
+                object_id INTEGER,
+                present INTEGER NOT NULL DEFAULT 1,
+                excluded INTEGER NOT NULL DEFAULT 0,
+                size INTEGER NOT NULL DEFAULT 0,
+                mtime INTEGER NOT NULL DEFAULT 0,
+                device INTEGER,
+                inode INTEGER,
+                partial_hash TEXT NOT NULL DEFAULT '',
+                basis_rev INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (root_id) REFERENCES roots(id),
+                FOREIGN KEY (object_id) REFERENCES objects(id)
+            );
+            CREATE TABLE facts (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL CHECK (entity_type IN ('source', 'object')),
+                entity_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value_text TEXT,
+                value_num REAL,
+                value_time INTEGER,
+                observed_at INTEGER NOT NULL DEFAULT 0,
+                observed_basis_rev INTEGER,
+                CHECK (
+                    (value_text IS NOT NULL) + (value_num IS NOT NULL) +
+                    (value_time IS NOT NULL) = 1
+                ),
+                UNIQUE (entity_type, entity_id, key)
+            );
+            "#,
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_root(conn: &RawConnection, path: &str) -> i64 {
+        conn.execute("INSERT INTO roots (path) VALUES (?)", [path])
+            .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_source(conn: &RawConnection, root_id: i64, rel_path: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, size, mtime) VALUES (?, ?, 1000, 1704067200)",
+            rusqlite::params![root_id, rel_path],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn filter_out_of_bounds_index_is_non_match() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+
+        // 1-segment path: "image.jpg" (index [1] is out of bounds)
+        let s1 = insert_source(&conn, root, "image.jpg");
+        // 3-segment path: "2024/vacation/photo.jpg" (index [1] = "vacation")
+        let s2 = insert_source(&conn, root, "2024/vacation/photo.jpg");
+        // 2-segment path: "2024/doc.txt" (index [1] = "doc.txt")
+        let s3 = insert_source(&conn, root, "2024/doc.txt");
+
+        let filter = Expr::parse("source.rel_path[1]~'*tion*'").unwrap();
+        let result = apply_filters(&mut conn, &[s1, s2, s3], &[filter]).unwrap();
+
+        // s1 silently skipped (out of bounds), s2 matches, s3 doesn't match glob
+        assert_eq!(result, vec![s2]);
+    }
+
+    #[test]
+    fn filter_out_of_bounds_negative_index_is_non_match() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+
+        // 1-segment path: [-3] is out of bounds
+        let s1 = insert_source(&conn, root, "image.jpg");
+        // 3-segment path: [-3] = "2024"
+        let s2 = insert_source(&conn, root, "2024/vacation/photo.jpg");
+
+        let filter = Expr::parse("source.rel_path[-3]=2024").unwrap();
+        let result = apply_filters(&mut conn, &[s1, s2], &[filter]).unwrap();
+
+        assert_eq!(result, vec![s2]);
+    }
+
+    #[test]
+    fn filter_out_of_bounds_slice_is_non_match() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+
+        // 1-segment path: [2:4] is out of bounds
+        let s1 = insert_source(&conn, root, "image.jpg");
+        // 4-segment path: [2:4] = "c/d"
+        let s2 = insert_source(&conn, root, "a/b/c/d");
+
+        let filter = Expr::parse("source.rel_path[2:4]~'c*'").unwrap();
+        let result = apply_filters(&mut conn, &[s1, s2], &[filter]).unwrap();
+
+        assert_eq!(result, vec![s2]);
+    }
+
+    #[test]
+    fn filter_modifier_failure_on_builtin_is_non_match() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+
+        // source.ext is a text value; |year modifier should fail on it
+        let s1 = insert_source(&conn, root, "photo.jpg");
+
+        let filter = Expr::parse("source.ext|year=2024").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+
+        // Modifier failure treated as non-match, not error
+        assert!(result.is_empty());
+    }
 }
