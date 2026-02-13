@@ -29,9 +29,9 @@ pub fn has_alias_references(input: &str) -> bool {
 
 /// Expand `@name` alias references in a filter expression string.
 ///
-/// - `@name` outside quotes is replaced with `(value)` from the aliases map
+/// - `@name` outside quotes is replaced with the alias value from the aliases map
 /// - `@` inside single or double quoted strings is treated as literal
-/// - Parenthesis wrapping is unconditional
+/// - Values are substituted literally (caller is responsible for any wrapping)
 /// - Unknown aliases produce an error referencing the aliases file path
 pub fn expand_aliases(
     input: &str,
@@ -84,9 +84,7 @@ pub fn expand_aliases(
 
             match aliases.get(&name) {
                 Some(value) => {
-                    result.push('(');
                     result.push_str(value);
-                    result.push(')');
                 }
                 None => {
                     if aliases.is_empty() {
@@ -126,11 +124,6 @@ mod tests {
         let mut m = HashMap::new();
         m.insert("image".to_string(), "source.ext=jpg".to_string());
         m.insert("video".to_string(), "source.ext=mp4".to_string());
-        m.insert(
-            "tens".to_string(),
-            "source.mtime|year >= 2010 AND source.mtime|year < 2020".to_string(),
-        );
-        m.insert("large".to_string(), "source.size > 10000000".to_string());
         m.insert("my-alias".to_string(), "source.ext=png".to_string());
         m.insert("my_alias".to_string(), "source.ext=gif".to_string());
         m
@@ -144,14 +137,14 @@ mod tests {
     fn test_expand_single_alias() {
         let aliases = test_aliases();
         let result = expand_aliases("@image", &aliases, &test_path()).unwrap();
-        assert_eq!(result, "(source.ext=jpg)");
+        assert_eq!(result, "source.ext=jpg");
     }
 
     #[test]
     fn test_expand_multiple_aliases() {
         let aliases = test_aliases();
         let result = expand_aliases("@image OR @video", &aliases, &test_path()).unwrap();
-        assert_eq!(result, "(source.ext=jpg) OR (source.ext=mp4)");
+        assert_eq!(result, "source.ext=jpg OR source.ext=mp4");
     }
 
     #[test]
@@ -159,17 +152,7 @@ mod tests {
         let aliases = test_aliases();
         let result =
             expand_aliases("@image AND source.size>1000", &aliases, &test_path()).unwrap();
-        assert_eq!(result, "(source.ext=jpg) AND source.size>1000");
-    }
-
-    #[test]
-    fn test_expand_alias_with_boolean_logic() {
-        let aliases = test_aliases();
-        let result = expand_aliases("@tens", &aliases, &test_path()).unwrap();
-        assert_eq!(
-            result,
-            "(source.mtime|year >= 2010 AND source.mtime|year < 2020)"
-        );
+        assert_eq!(result, "source.ext=jpg AND source.size>1000");
     }
 
     #[test]
@@ -185,14 +168,6 @@ mod tests {
         let aliases = test_aliases();
         let result = expand_aliases("", &aliases, &test_path()).unwrap();
         assert_eq!(result, "");
-    }
-
-    #[test]
-    fn test_parentheses_always_applied() {
-        // Even a simple single-condition alias gets wrapped
-        let aliases = test_aliases();
-        let result = expand_aliases("@large", &aliases, &test_path()).unwrap();
-        assert_eq!(result, "(source.size > 10000000)");
     }
 
     // ======================================================================
@@ -224,7 +199,7 @@ mod tests {
             &test_path(),
         )
         .unwrap();
-        assert_eq!(result, "(source.ext=jpg) AND source.path ~ '*@2x*'");
+        assert_eq!(result, "source.ext=jpg AND source.path ~ '*@2x*'");
     }
 
     // ======================================================================
@@ -297,14 +272,23 @@ mod tests {
     fn test_alias_name_with_hyphens() {
         let aliases = test_aliases();
         let result = expand_aliases("@my-alias", &aliases, &test_path()).unwrap();
-        assert_eq!(result, "(source.ext=png)");
+        assert_eq!(result, "source.ext=png");
     }
 
     #[test]
     fn test_alias_name_with_underscores() {
         let aliases = test_aliases();
         let result = expand_aliases("@my_alias", &aliases, &test_path()).unwrap();
-        assert_eq!(result, "(source.ext=gif)");
+        assert_eq!(result, "source.ext=gif");
+    }
+
+    #[test]
+    fn test_expand_pre_wrapped_value() {
+        // Simulates what the command layer provides for expression aliases
+        let mut aliases = HashMap::new();
+        aliases.insert("image".to_string(), "(source.ext=jpg)".to_string());
+        let result = expand_aliases("@image", &aliases, &test_path()).unwrap();
+        assert_eq!(result, "(source.ext=jpg)");
     }
 
     #[test]
@@ -312,6 +296,6 @@ mod tests {
         let aliases = test_aliases();
         // @image) should read "image" and leave the ")" in output
         let result = expand_aliases("(@image)", &aliases, &test_path()).unwrap();
-        assert_eq!(result, "((source.ext=jpg))");
+        assert_eq!(result, "(source.ext=jpg)");
     }
 }

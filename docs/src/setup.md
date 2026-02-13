@@ -29,7 +29,7 @@ It contains:
 | File | Purpose |
 |------|---------|
 | `canon.db` | SQLite database (roots, sources, objects, facts) |
-| `aliases.toml` | Expression aliases (optional — see [Aliases](reference/filter.md#aliases)) |
+| `aliases.toml` | Filter aliases (optional — see [Aliases](reference/filter.md#aliases)) |
 
 The directory is created automatically on first use.
 

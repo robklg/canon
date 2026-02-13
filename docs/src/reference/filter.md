@@ -60,37 +60,76 @@ Operator precedence (highest to lowest): NOT, AND, OR. Use parentheses to overri
 
 ## Aliases
 
-You can define named aliases for frequently used filter expressions in `$CANON_HOME/aliases.toml` (by default `~/.canon/aliases.toml`):
+You can define named aliases in `$CANON_HOME/aliases.toml` (by default `~/.canon/aliases.toml`). There are two kinds of aliases, and Canon classifies them automatically — just define the value and use it:
+
+### Expression Aliases
+
+Shorthand for complete filter predicates. These are values that contain an operator (like `=`, `>`, `IN`, etc.):
 
 ```toml
 image = "content.mime IN ('image/jpeg', 'image/png', 'image/gif', 'image/tiff', 'image/webp', 'image/heic')"
 video = "content.mime IN ('video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska')"
 tens = "source.mtime|year >= 2010 AND source.mtime|year < 2020"
 large = "source.size > 10000000"
-screenshot = "source.rel_path[0] ~ 'Screenshots*'"
 ```
+
+Expression aliases are wrapped in parentheses when expanded, so boolean logic inside them composes safely:
+
+```bash
+canon ls --where '@image AND @tens'
+# Expands to: (content.mime IN (...)) AND (source.mtime|year >= 2010 AND source.mtime|year < 2020)
+```
+
+### Key Aliases
+
+Shorthand for verbose key paths — accessors, modifiers, and namespaces. These are values that are just a key (no operator):
+
+```toml
+filename = "source.rel_path[-1]"
+parent = "source.rel_path[-2]"
+ext = "source.ext|lowercase"
+year = "source.mtime|year"
+taken = "content.DateTimeOriginal"
+yearmonth = "content.DateTimeOriginal|yearmonth"
+```
+
+Key aliases are substituted literally and used with operators in your filter:
+
+```bash
+canon ls --where '@filename = "photo.jpg"'
+# Expands to: source.rel_path[-1] = "photo.jpg"
+
+canon ls --where '@yearmonth >= 202301'
+# Expands to: content.DateTimeOriginal|yearmonth >= 202301
+
+canon ls --where '@ext = "jpg" AND @year >= 2020'
+# Expands to: source.ext|lowercase = "jpg" AND source.mtime|year >= 2020
+```
+
+### Using Aliases
 
 Reference aliases with `@name` in any `--where` expression:
 
 ```bash
-# Simple alias
+# Expression alias standalone
 canon ls --where '@image'
 
-# Compose with boolean logic
+# Compose expression aliases
 canon ls --where '@image OR @video'
 
-# Mix aliases with regular expressions
-canon ls --where '@image AND @tens'
+# Key alias with operator
+canon ls --where '@filename ~ "IMG_*"'
 
-# Negate an alias
-canon ls --where 'NOT @screenshot'
+# Mix both kinds
+canon ls --where '@image AND @year >= 2020'
+
+# Negate an expression alias
+canon ls --where 'NOT @large'
 ```
 
-Each alias is wrapped in parentheses when expanded, so boolean logic inside aliases composes safely. For example, `@image AND @tens` expands to:
+### How Classification Works
 
-```
-(content.mime IN (...)) AND (source.mtime|year >= 2010 AND source.mtime|year < 2020)
-```
+Canon automatically determines whether each alias is a key or an expression by parsing the value. If the value is a valid filter expression (contains an operator), it's an expression alias and gets wrapped in parentheses. If not (it's just a key path), it's a key alias and gets substituted literally. You don't need to think about this — just define your alias and use it.
 
 **Rules:**
 - Alias names must start with a letter and can contain letters, digits, underscores, and hyphens
