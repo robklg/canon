@@ -1824,13 +1824,7 @@ mod tests {
 
         let root = insert_root(conn, "/photos", "source", false);
         let obj = insert_object(conn, "abc123hash", false);
-        // Size must be > 0 (empty files are skipped)
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, present, excluded)
-             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0, 1, 0)",
-            rusqlite::params![root, "photo.jpg", obj],
-        )
-        .unwrap();
+        insert_source(conn, root, "photo.jpg", Some(obj), true, false);
 
         let options = SetOptions {
             dry_run: false,
@@ -1888,12 +1882,7 @@ mod tests {
         let root = insert_root(conn, "/photos", "source", false);
         // Object is already excluded
         let obj = insert_object(conn, "already_excluded_hash", true);
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, present, excluded)
-             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0, 1, 0)",
-            rusqlite::params![root, "photo.jpg", obj],
-        )
-        .unwrap();
+        insert_source(conn, root, "photo.jpg", Some(obj), true, false);
 
         let options = SetOptions {
             dry_run: false,
@@ -1915,12 +1904,7 @@ mod tests {
 
         let root = insert_root(conn, "/photos", "source", false);
         // Source without object_id (unhashed)
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, present, excluded)
-             VALUES (?, ?, NULL, 1000, 1704067200, '', 0, 0, 0, 0, 1, 0)",
-            rusqlite::params![root, "unhashed.jpg"],
-        )
-        .unwrap();
+        insert_source(conn, root, "unhashed.jpg", None, true, false);
 
         let options = SetOptions {
             dry_run: false,
@@ -1940,12 +1924,7 @@ mod tests {
 
         let root = insert_root(conn, "/photos", "source", false);
         let obj = insert_object(conn, "dry_run_hash", false);
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, present, excluded)
-             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0, 1, 0)",
-            rusqlite::params![root, "photo.jpg", obj],
-        )
-        .unwrap();
+        insert_source(conn, root, "photo.jpg", Some(obj), true, false);
 
         let options = SetOptions {
             dry_run: true, // DRY RUN

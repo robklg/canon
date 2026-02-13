@@ -508,10 +508,10 @@ mod tests {
         open_in_memory_for_test()
     }
 
-    fn insert_root(conn: &RusqliteConnection, path: &str, role: &str, _suspended: bool) -> i64 {
+    fn insert_root(conn: &RusqliteConnection, path: &str, role: &str, suspended: bool) -> i64 {
         conn.execute(
-            "INSERT INTO roots (path, role, suspended) VALUES (?, ?, 0)",
-            rusqlite::params![path, role],
+            "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",
+            rusqlite::params![path, role, suspended as i64],
         )
         .unwrap();
         conn.last_insert_rowid()
