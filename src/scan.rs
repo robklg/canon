@@ -579,32 +579,26 @@ fn process_file(
         partial_hash: None, // Computed after reconciliation if needed
     };
 
-    // Wrap the observe-reconcile-persist cycle in a transaction for atomicity.
-    // Uses Immediate to acquire the write lock upfront — with Deferred, the
-    // lock upgrade from read→write can fail with SQLITE_BUSY without invoking
-    // the busy handler, causing instant failures under concurrent scans.
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    // Read DB state to determine what happened (no write lock held)
+    let source_at_path = repo::source::fetch_by_path(conn, root_id, rel_path)?;
+    let source_by_inode = repo::source::fetch_by_inode(conn, device as u64, inode as u64)?;
 
-    // Query existing state using repo functions
-    let source_at_path = repo::source::fetch_by_path(&tx, root_id, rel_path)?;
-    let source_by_inode = repo::source::fetch_by_inode(&tx, device as u64, inode as u64)?;
-
-    // Determine what happened (pure domain logic)
     let reconciliation = reconcile(
         &observation,
         source_at_path.as_ref(),
         source_by_inode.as_ref(),
     );
 
-    // Compute partial_hash if needed (for New or Modified)
-    // This is filesystem I/O, done inside transaction but doesn't touch DB
+    // Compute partial_hash outside the transaction — filesystem I/O can be slow
+    // on NAS/network storage and must not hold the write lock
     if reconciliation.needs_partial_hash() {
         observation.partial_hash = Some(compute_partial_hash(full_path, size as u64)?);
     }
 
-    // Apply reconciliation to database
+    // Short write transaction (DB-only, no filesystem I/O).
+    // Uses Immediate for reliable busy-handler support under concurrency.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let source = repo::source::apply_reconciliation(&tx, &observation, &reconciliation, now)?;
-
     tx.commit()?;
 
     // Map reconciliation to FileAction and extract old_object_id
