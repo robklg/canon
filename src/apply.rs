@@ -466,7 +466,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         for (src, dst) in &conflicts.in_dest_archive {
             eprintln!("  {src} -> {dst}");
         }
-        eprintln!("\nUse --allow duplicates to copy anyway (to different paths)");
+        eprintln!("\nUse --allow duplicates to proceed with duplicates included");
         bail!("Aborting due to files already in destination archive");
     }
 
@@ -478,7 +478,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         for (src, dst) in &conflicts.in_other_archives {
             eprintln!("  {src} -> {dst}");
         }
-        eprintln!("\nUse --allow cross-archive-duplicates to copy anyway");
+        eprintln!("\nUse --allow cross-archive-duplicates to proceed");
         bail!("Aborting due to files already in other archives");
     }
 

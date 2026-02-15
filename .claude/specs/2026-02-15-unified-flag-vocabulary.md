@@ -6,11 +6,11 @@
 
 ## Objective
 
-Canon's CLI flags for controlling source visibility and safety guards use inconsistent vocabulary that conflates two different user intents. `--include-archived` means "show me more" on query commands but "override a safety guard" on effectful commands. This directly resolves the "CLI doesn't fully click yet" friction identified in the vision (priority #1: interface coherence).
+Canon's CLI flags for controlling source visibility and awareness use inconsistent vocabulary that conflates two different user intents. `--include-archived` means "show me more" on query commands but means something different on effectful commands. This directly resolves the "CLI doesn't fully click yet" friction identified in the vision (priority #1: interface coherence).
 
 This story establishes a vocabulary that all future commands follow:
 - **`--include`** — query commands only. Expands what you see. Always safe.
-- **`--allow`** — effectful commands only. Overrides a safety guard. Care warranted.
+- **`--allow`** — effectful commands only. Acknowledges non-default source selection. Canon's defaults surface information so the user can decide consciously; `--allow` is the user saying "I'm aware, proceed."
 
 Plus `--excluded` as a filter mode on `ls` (replacing `exclude list`), status indicators in long format, and manifest `[options]` for reproducible refresh.
 

@@ -152,7 +152,7 @@ enum Commands {
     },
     /// Import facts from JSONL on stdin
     ImportFacts {
-        /// Override safety guards: archived
+        /// Allow: archived
         #[arg(long, value_delimiter = ',')]
         allow: Vec<ImportFactsAllow>,
         /// Show each fact as it's imported
@@ -280,7 +280,7 @@ enum Commands {
         /// Show detailed output for each file transfer
         #[arg(long, short = 'v')]
         verbose: bool,
-        /// Override safety guards: duplicates, cross-archive-duplicates
+        /// Allow: duplicates, cross-archive-duplicates
         #[arg(long, value_delimiter = ',')]
         allow: Vec<ApplyAllow>,
         /// Only apply sources from these roots (id:N or path:/foo/bar, can repeat)
@@ -469,7 +469,7 @@ enum ClusterAction {
         /// Overwrite existing output file
         #[arg(short, long)]
         force: bool,
-        /// Override safety guards: archived, duplicates
+        /// Allow: archived, duplicates
         #[arg(long, value_delimiter = ',')]
         allow: Vec<ClusterAllow>,
         /// Show which files were excluded because they're already archived

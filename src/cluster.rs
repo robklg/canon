@@ -159,7 +159,7 @@ fn generate_lock(
                 "Found {} duplicate groups ({} sources with identical content)\n\
                  Use `canon ls --duplicates` to see details (supports [path] and --where filters).\n\
                  Use `canon exclude duplicates --prefer <path>` to resolve.\n\
-                 Use --allow duplicates to include them anyway.",
+                 Use --allow duplicates to include them.",
                 duplicate_groups.len(),
                 total_dup_sources
             );

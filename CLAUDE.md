@@ -82,10 +82,10 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 
 ### CLI Flag Vocabulary
 
-Two unified flags control visibility and safety across all commands:
+Two unified flags control visibility and awareness across all commands:
 
 - **`--include`** (query commands: `ls`, `facts`, `coverage`, `worklist`, `compare`): Expands what you see. Values: `excluded`, `archived`, `all`. Comma-separated and repeatable. Always safe — no side effects. Compare only accepts `excluded`.
-- **`--allow`** (effectful commands: `cluster generate`, `apply`, `import-facts`): Overrides safety guards. Per-command values. Not available on `cluster refresh` (reads from manifest `[options]`).
+- **`--allow`** (effectful commands: `cluster generate`, `apply`, `import-facts`): Acknowledges non-default source selection. Canon's defaults surface information (e.g., duplicates present); `--allow` is the user saying "I'm aware, proceed." Per-command values. Not available on `cluster refresh` (reads from manifest `[options]`).
 
 **Filter modes on `ls`**: `--archived`, `--unarchived`, `--unhashed`, `--duplicates`, `--excluded` are mutually exclusive filter modes. `--excluded` implicitly includes excluded sources and shows both source-level and object-level excluded.
 
