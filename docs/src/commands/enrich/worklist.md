@@ -16,7 +16,13 @@ canon worklist --where 'source.ext=jpg'
 canon worklist /path/to/photos
 
 # Include sources from archive roots (for backfilling facts)
-canon worklist --include-archived
+canon worklist --include archived
+
+# Include excluded sources
+canon worklist --include excluded
+
+# Include both
+canon worklist --include all
 
 # Include existing facts in output (for chained enrichment)
 canon worklist --emit content.geo.lat --emit content.geo.lon

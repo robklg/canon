@@ -5,11 +5,12 @@ use std::path::Path;
 use crate::domain::path::canonicalize_scope;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
+use crate::domain::IncludeSet;
 use crate::expr::filter::{self, Filter};
 use crate::repo::{self, Db};
 
 pub struct CompareOptions {
-    pub include_excluded: bool,
+    pub include: IncludeSet,
     pub verbose: bool,
 }
 
@@ -41,9 +42,9 @@ pub fn run(
 
     // Query sources in each scope
     let (sources_a, unhashed_a) =
-        get_sources_in_scope(conn, prefix_a, &filters, options.include_excluded)?;
+        get_sources_in_scope(conn, prefix_a, &filters, &options.include)?;
     let (sources_b, unhashed_b) =
-        get_sources_in_scope(conn, prefix_b, &filters, options.include_excluded)?;
+        get_sources_in_scope(conn, prefix_b, &filters, &options.include)?;
 
     // Build object_id sets
     let objects_a: HashSet<i64> = sources_a.keys().copied().collect();
@@ -58,6 +59,9 @@ pub fn run(
     println!("Comparing:");
     println!("  A: {prefix_a}");
     println!("  B: {prefix_b}");
+    if options.include.includes_excluded() {
+        println!("  [including excluded]");
+    }
     println!();
 
     // Report unhashed files
@@ -114,7 +118,7 @@ fn get_sources_in_scope(
     conn: &mut crate::repo::Connection,
     scope_prefix: &str,
     filters: &[Filter],
-    include_excluded: bool,
+    include: &IncludeSet,
 ) -> Result<(HashMap<i64, String>, usize)> {
     // Classify the scope
     let scopes = ScopeMatch::classify_all(&[scope_prefix.to_string()]);
@@ -134,7 +138,7 @@ fn get_sources_in_scope(
         .into_iter()
         .filter(|s| s.is_active())
         .filter(|s| s.matches_scope(&scopes))
-        .filter(|s| include_excluded || !s.is_excluded())
+        .filter(|s| include.includes_excluded() || !s.is_excluded())
         .collect();
 
     // Apply --where filters if present

@@ -6,7 +6,7 @@ Import facts from JSONL on stdin. Designed to receive output from a processor th
 canon worklist | some-processor | canon import-facts
 
 # Allow importing facts for sources in archive roots
-canon worklist --include-archived | some-processor | canon import-facts --allow-archived
+canon worklist --include archived | some-processor | canon import-facts --allow archived
 ```
 
 ## Input Format
@@ -74,4 +74,4 @@ Then re-run your processor with proper type hints.
 
 ## Archive Sources
 
-By default, importing facts for sources in archive roots is skipped. Use `--allow-archived` to enable this (useful for backfilling metadata on already-archived files).
+By default, importing facts for sources in archive roots is skipped. Use `--allow archived` to enable this (useful for backfilling metadata on already-archived files).

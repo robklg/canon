@@ -19,7 +19,15 @@ use crate::repo::{self, Connection, Db};
 #[derive(Serialize, Deserialize)]
 pub struct ManifestConfig {
     pub meta: ManifestMeta,
+    #[serde(default)]
+    pub options: ManifestOptions,
     pub output: ManifestOutput,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub struct ManifestOptions {
+    #[serde(default)]
+    pub allow: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -87,9 +95,9 @@ impl LockEntry {
 
 pub struct GenerateOptions {
     pub force: bool,
-    pub include_archived: bool,
-    pub show_archived: bool,
+    pub allow_archived: bool,
     pub allow_duplicates: bool,
+    pub show_archived: bool,
 }
 
 /// Result from generating a lock file
@@ -108,7 +116,7 @@ fn generate_lock(
     options: &GenerateOptions,
 ) -> Result<Option<LockGenerationResult>> {
     let (sources, archived, excluded_count, unhashed_count, all_facts) =
-        query_sources(conn, scope_prefixes, filters, options.include_archived)?;
+        query_sources(conn, scope_prefixes, filters, options.allow_archived)?;
 
     // Report excluded files (hard gate - always skipped)
     if excluded_count > 0 {
@@ -151,7 +159,7 @@ fn generate_lock(
                 "Found {} duplicate groups ({} sources with identical content)\n\
                  Use `canon ls --duplicates` to see details (supports [path] and --where filters).\n\
                  Use `canon exclude duplicates --prefer <path>` to resolve.\n\
-                 Use --allow-duplicates to include them anyway.",
+                 Use --allow duplicates to include them anyway.",
                 duplicate_groups.len(),
                 total_dup_sources
             );
@@ -241,6 +249,9 @@ pub fn generate(
             generated_at: current_timestamp(),
             lock_hash,
         },
+        options: ManifestOptions {
+            allow: allow_values_to_strings(options),
+        },
         output: ManifestOutput {
             pattern: "{filename}".to_string(),
             archive_root_id,
@@ -276,7 +287,7 @@ pub fn generate(
     Ok(())
 }
 
-pub fn refresh(db: &mut Db, config_path: &Path, options: &GenerateOptions) -> Result<()> {
+pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool) -> Result<()> {
     let conn = db.conn_mut();
 
     // Read existing TOML config
@@ -284,6 +295,21 @@ pub fn refresh(db: &mut Db, config_path: &Path, options: &GenerateOptions) -> Re
         .with_context(|| format!("Failed to read config: {}", config_path.display()))?;
     let mut config: ManifestConfig = toml::from_str(&config_content)
         .with_context(|| format!("Failed to parse config: {}", config_path.display()))?;
+
+    // Parse allow options from manifest
+    let (allow_archived, allow_duplicates) = parse_manifest_allow(&config.options.allow)?;
+
+    let options = GenerateOptions {
+        force: false,
+        allow_archived,
+        allow_duplicates,
+        show_archived,
+    };
+
+    // Report which options are in effect
+    if !config.options.allow.is_empty() {
+        eprintln!("Options from manifest: allow {}", config.options.allow.join(", "));
+    }
 
     // Parse scope from config
     let scope_prefixes: Vec<String> = match &config.meta.scope {
@@ -301,7 +327,7 @@ pub fn refresh(db: &mut Db, config_path: &Path, options: &GenerateOptions) -> Re
 
     // Generate lock file using shared logic
     let lock_path = config_path.with_extension("lock");
-    let result = generate_lock(conn, &scope_prefixes, &parsed_filters, &lock_path, options)?;
+    let result = generate_lock(conn, &scope_prefixes, &parsed_filters, &lock_path, &options)?;
 
     match result {
         Some(r) => {
@@ -389,7 +415,7 @@ fn query_sources(
     conn: &mut Connection,
     scope_prefixes: &[String],
     filters: &[Filter],
-    include_archived: bool,
+    allow_archived: bool,
 ) -> Result<(
     Vec<LockEntry>,
     Vec<(String, String)>,
@@ -414,7 +440,7 @@ fn query_sources(
     let filtered: Vec<_> = all_sources
         .into_iter()
         .filter(|s| s.is_active())
-        .filter(|s| include_archived || s.is_from_role("source"))
+        .filter(|s| allow_archived || s.is_from_role("source"))
         .filter(|s| s.matches_scope(&scopes))
         .filter(|s| {
             if s.is_excluded() {
@@ -487,7 +513,7 @@ fn query_sources(
         let lock_entry = LockEntry::from_source(&source, hash_type, hash_value);
 
         if let Some(arch_path) = archive_path {
-            if include_archived {
+            if allow_archived {
                 sources.push(lock_entry);
             } else {
                 archived.push((lock_entry.path.clone(), arch_path));
@@ -498,6 +524,32 @@ fn query_sources(
     }
 
     Ok((sources, archived, excluded_count, unhashed_count, all_facts))
+}
+
+fn allow_values_to_strings(options: &GenerateOptions) -> Vec<String> {
+    let mut v = Vec::new();
+    if options.allow_archived {
+        v.push("archived".to_string());
+    }
+    if options.allow_duplicates {
+        v.push("duplicates".to_string());
+    }
+    v
+}
+
+fn parse_manifest_allow(allow: &[String]) -> Result<(bool, bool)> {
+    let mut archived = false;
+    let mut duplicates = false;
+    for v in allow {
+        match v.as_str() {
+            "archived" => archived = true,
+            "duplicates" => duplicates = true,
+            other => bail!(
+                "Invalid allow value '{other}' in manifest [options]. Valid: archived, duplicates"
+            ),
+        }
+    }
+    Ok((archived, duplicates))
 }
 
 fn current_timestamp() -> String {
@@ -943,5 +995,60 @@ mod tests {
             "Only unarchived source should be in sources"
         );
         assert_eq!(sources[0].path, "/photos/photo4.jpg");
+    }
+
+    #[test]
+    fn test_manifest_options_round_trip() {
+        let config = ManifestConfig {
+            meta: ManifestMeta {
+                query: vec!["source.ext=jpg".to_string()],
+                scope: Some("/photos".to_string()),
+                generated_at: "2026-02-15T12:00:00Z".to_string(),
+                lock_hash: "abc123".to_string(),
+            },
+            options: ManifestOptions {
+                allow: vec!["archived".to_string(), "duplicates".to_string()],
+            },
+            output: ManifestOutput {
+                pattern: "{filename}".to_string(),
+                archive_root_id: 1,
+                base_dir: "photos".to_string(),
+            },
+        };
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: ManifestConfig = toml::from_str(&toml_str).unwrap();
+
+        assert_eq!(parsed.options.allow, vec!["archived", "duplicates"]);
+        assert_eq!(parsed.meta.query, vec!["source.ext=jpg"]);
+        assert_eq!(parsed.output.pattern, "{filename}");
+    }
+
+    #[test]
+    fn test_manifest_options_backward_compat() {
+        // Old manifests without [options] should deserialize with defaults
+        let toml_str = r#"
+[meta]
+query = ["source.ext=jpg"]
+scope = "/photos"
+generated_at = "2026-02-15T12:00:00Z"
+lock_hash = "abc123"
+
+[output]
+pattern = "{filename}"
+archive_root_id = 1
+base_dir = "photos"
+"#;
+        let config: ManifestConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.options.allow.is_empty(), "Options should default to empty");
+    }
+
+    #[test]
+    fn test_manifest_options_invalid_allow() {
+        let result = parse_manifest_allow(&["bogus".to_string()]);
+        assert!(result.is_err(), "Should error on invalid allow value");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("bogus"), "Error should mention the invalid value");
+        assert!(err.contains("archived"), "Error should list valid values");
     }
 }

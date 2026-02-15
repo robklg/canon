@@ -16,9 +16,9 @@ canon exclude set --id 12345
 # Preview what would be excluded
 canon exclude set --where 'source.ext=bak' --dry-run
 
-# List currently excluded sources
-canon exclude list
-canon exclude list /path/to/photos
+# View excluded sources (use ls --excluded instead of the removed exclude list)
+canon ls --excluded
+canon ls --excluded /path/to/photos
 
 # Remove exclusions
 canon exclude clear
@@ -49,9 +49,10 @@ This is useful for deduplicating across backup drives while keeping the "canonic
 
 | Command | Default behavior | Override |
 |---------|------------------|----------|
-| `worklist` | Skips excluded | `--include-excluded` |
-| `facts` | Skips excluded, shows count | `--include-excluded` |
-| `coverage` | Stats on included only | `--include-excluded` shows excluded dimension |
+| `ls` | Skips excluded | `--include excluded` or `--excluded` filter mode |
+| `worklist` | Skips excluded | `--include excluded` |
+| `facts` | Skips excluded, shows count | `--include excluded` |
+| `coverage` | Stats on included only | `--include excluded` shows excluded dimension |
 | `cluster generate` | Always skips excluded | No override (hard gate) |
 | `apply` | Blocks if manifest has excluded | No override (hard gate) |
 

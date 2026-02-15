@@ -17,7 +17,13 @@ canon coverage --archive id:1
 canon coverage --archive path:/path/to/archive
 
 # Include archive roots in analysis
-canon coverage --include-archived
+canon coverage --include archived
+
+# Include excluded sources
+canon coverage --include excluded
+
+# Include both
+canon coverage --include all
 ```
 
 Example output:

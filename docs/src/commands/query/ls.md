@@ -28,11 +28,17 @@ canon ls --unhashed
 # Show duplicate files (same content hash), grouped by hash
 canon ls --duplicates
 
-# Include sources from archive roots (automatic when scope is in an archive)
-canon ls --include-archived
+# Show only excluded sources (source-level and object-level)
+canon ls --excluded
 
-# Include excluded sources
-canon ls --include-excluded
+# Include sources from archive roots (automatic when scope is in an archive)
+canon ls --include archived
+
+# Include excluded sources in results
+canon ls --include excluded
+
+# Include both archived and excluded sources
+canon ls --include all
 
 # Long format with size and date
 canon ls -l
@@ -40,6 +46,10 @@ canon ls -l
 # Null-delimited output for xargs (handles spaces in paths, macOS)
 canon ls -0 --where 'source.ext=jpg' | xargs -0 open -a Preview
 ```
+
+**Filter modes** (`--archived`, `--unarchived`, `--unhashed`, `--duplicates`, `--excluded`) are mutually exclusive -- only one can be active at a time.
+
+**Status column in long format:** When `--include` is used or `--excluded` mode is active, `ls -l` shows a status column indicating source state: `E` (source-level exclusion), `X` (object-level exclusion), `A` (archived), or blank.
 
 **Path display:**
 - Relative path input (`.`, `subdir`) → relative output paths

@@ -15,8 +15,11 @@ canon cluster generate /path/to/photos --dest /Volumes/Archive
 # Custom output file
 canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive -o my-manifest.toml
 
-# Include sources from archive roots
-canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive --include-archived
+# Allow sources from archive roots
+canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive --allow archived
+
+# Allow duplicate content (same hash already in an archive)
+canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive --allow duplicates
 
 # Show which files were excluded (already archived)
 canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive --show-archived
@@ -58,11 +61,16 @@ The generated manifest includes helpful comments listing all available pattern v
 #   Time: |year |month |day |date ...
 #   String: |stem |ext |lowercase ...
 
+[options]
+allow = []                       # e.g. ["archived", "duplicates"]
+
 [output]
 pattern = "{filename}"           # ← Edit this to customize organization
 base_dir = "/Volumes/Archive"
 archive_root_id = 2
 ```
+
+The `[options]` section records which `--allow` flags were used during generation. These are carried forward to `apply` and `cluster refresh`.
 
 **Common output patterns:**
 

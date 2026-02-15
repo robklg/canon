@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use crate::domain::path::canonicalize_scopes;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
+use crate::domain::IncludeSet;
 use crate::expr::filter::{self, get_fact_value, Filter};
 use crate::repo::{self, Connection, Db};
 
@@ -62,8 +63,7 @@ pub fn run(
     db: &mut Db,
     scope_paths: &[PathBuf],
     filter_strs: &[String],
-    include_archived: bool,
-    include_excluded: bool,
+    include: &IncludeSet,
     unique_content: bool,
     emit_keys: &[String],
 ) -> Result<()> {
@@ -81,7 +81,7 @@ pub fn run(
 
     // Fetch all matching sources using domain predicates
     let (sources, excluded_count) =
-        get_matching_sources(conn, &scopes, &filters, include_archived, include_excluded)?;
+        get_matching_sources(conn, &scopes, &filters, include)?;
 
     let stdout = io::stdout();
     let mut handle = stdout.lock();
@@ -111,9 +111,9 @@ pub fn run(
     }
 
     // Report stats to stderr
-    if include_excluded && excluded_count > 0 {
+    if include.includes_excluded() && excluded_count > 0 {
         eprintln!("Included {excluded_count} excluded sources");
-    } else if !include_excluded && excluded_count > 0 {
+    } else if !include.includes_excluded() && excluded_count > 0 {
         eprintln!("Skipped {excluded_count} excluded sources");
     }
     if unique_content && (skipped_unhashed > 0 || skipped_duplicate > 0) {
@@ -133,8 +133,7 @@ fn get_matching_sources(
     conn: &mut Connection,
     scopes: &[ScopeMatch],
     filters: &[Filter],
-    include_archived: bool,
-    include_excluded: bool,
+    include: &IncludeSet,
 ) -> Result<(Vec<Source>, usize)> {
     // 1. Get all root IDs
     let root_ids: Vec<i64> = conn
@@ -150,14 +149,13 @@ fn get_matching_sources(
     let filtered: Vec<Source> = all_sources
         .into_iter()
         .filter(|s| s.is_active())
-        .filter(|s| include_archived || s.is_from_role("source"))
+        .filter(|s| include.includes_archived() || s.is_from_role("source"))
         .filter(|s| s.matches_scope(scopes))
         .filter(|s| {
-            if s.is_excluded()
-                && !include_excluded {
-                    excluded_count += 1;
-                    return false;
-                }
+            if s.is_excluded() && !include.includes_excluded() {
+                excluded_count += 1;
+                return false;
+            }
             true
         })
         .collect();

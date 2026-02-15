@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use crate::domain::path::{canonicalize_scopes, path_strip_prefix};
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
+use crate::domain::IncludeSet;
 use crate::expr::filter::{self, Filter};
 use crate::repo::source::BATCH_SIZE;
 use crate::repo::{self, Connection, Db};
@@ -17,8 +18,8 @@ pub fn run(
     archived_mode: Option<&str>,
     unarchived_only: bool,
     unhashed_only: bool,
-    include_archived: bool,
-    include_excluded: bool,
+    excluded_only: bool,
+    include: &IncludeSet,
     use_relative_paths: bool,
     long_format: bool,
     sort_by: &str,
@@ -58,13 +59,13 @@ pub fn run(
 
     // Fetch all sources and filter using domain predicates
     let (sources, excluded_count) =
-        get_matching_sources(conn, &scopes, &filters, include_archived, include_excluded)?;
+        get_matching_sources(conn, &scopes, &filters, include)?;
 
     if sources.is_empty() {
         eprintln!("No sources match the given filters.");
-        if !include_excluded && excluded_count > 0 {
+        if !include.includes_excluded() && excluded_count > 0 {
             eprintln!(
-                "({excluded_count} excluded sources hidden, use --include-excluded to show)"
+                "({excluded_count} excluded sources hidden, use --include excluded to show)"
             );
         }
         return Ok(());
@@ -83,9 +84,12 @@ pub fn run(
         HashMap::new()
     };
 
-    // Apply archived/unarchived/unhashed filter and collect output lines
-    // Each entry is (source_path, optional_archive_path, size, mtime)
-    let mut output_lines: Vec<(String, Option<String>, i64, i64)> = Vec::new();
+    // Determine whether to show status column
+    let show_status = include.is_expanded() || excluded_only;
+
+    // Apply archived/unarchived/unhashed/excluded filter and collect output lines
+    // Each entry is (source_path, optional_archive_path, size, mtime, status)
+    let mut output_lines: Vec<(String, Option<String>, i64, i64, String)> = Vec::new();
     let mut unhashed_count = 0usize;
 
     for source in &sources {
@@ -93,6 +97,7 @@ pub fn run(
         let object_id = source.object_id;
         let size = source.size;
         let mtime = source.mtime;
+        let status = status_indicator(source);
 
         // Check archive status if filtering
         if archived_only {
@@ -111,11 +116,12 @@ pub fn run(
                                     Some(archive_path.clone()),
                                     size,
                                     mtime,
+                                    status.to_string(),
                                 ));
                             }
                         }
                     } else if archived_set.contains(&obj_id) {
-                        output_lines.push((formatted_source, None, size, mtime));
+                        output_lines.push((formatted_source, None, size, mtime, status.to_string()));
                     }
                 }
             }
@@ -127,17 +133,21 @@ pub fn run(
                 }
                 Some(obj_id) => {
                     if !archived_set.contains(&obj_id) {
-                        output_lines.push((formatted_source, None, size, mtime));
+                        output_lines.push((formatted_source, None, size, mtime, status.to_string()));
                     }
                 }
             }
         } else if unhashed_only {
             if object_id.is_none() {
-                output_lines.push((formatted_source, None, size, mtime));
+                output_lines.push((formatted_source, None, size, mtime, status.to_string()));
+            }
+        } else if excluded_only {
+            if source.is_excluded() {
+                output_lines.push((formatted_source, None, size, mtime, status.to_string()));
             }
         } else {
             // Default: show all
-            output_lines.push((formatted_source, None, size, mtime));
+            output_lines.push((formatted_source, None, size, mtime, status.to_string()));
         }
     }
 
@@ -159,11 +169,19 @@ pub fn run(
 
     // Print output (to stdout for pipe-friendliness)
     let line_end = if null_delim { "\0" } else { "\n" };
-    for (source_path, archive_path, size, mtime) in &output_lines {
+    for (source_path, archive_path, size, mtime, status) in &output_lines {
         if long_format {
             let size_str = format_size(*size);
             let date_str = format_date(*mtime);
-            if let Some(ap) = archive_path {
+            if show_status {
+                if let Some(ap) = archive_path {
+                    print!(
+                        "{status}{size_str:>8}  {date_str}  {source_path}\t{ap}{line_end}"
+                    );
+                } else {
+                    print!("{status}{size_str:>8}  {date_str}  {source_path}{line_end}");
+                }
+            } else if let Some(ap) = archive_path {
                 print!(
                     "{size_str:>8}  {date_str}  {source_path}\t{ap}{line_end}"
                 );
@@ -182,14 +200,14 @@ pub fn run(
     let source_count = if show_archive_paths {
         output_lines
             .iter()
-            .map(|(s, _, _, _)| s)
+            .map(|(s, _, _, _, _)| s)
             .collect::<std::collections::HashSet<_>>()
             .len()
     } else {
         output_lines.len()
     };
     let mut footer_parts = vec![format!("{} sources", source_count)];
-    if !include_excluded && excluded_count > 0 {
+    if !include.includes_excluded() && excluded_count > 0 {
         footer_parts.push(format!("{excluded_count} excluded hidden"));
     }
     if (archived_only || unarchived_only) && unhashed_count > 0 {
@@ -220,8 +238,7 @@ fn get_matching_sources(
     conn: &mut Connection,
     scopes: &[ScopeMatch],
     filters: &[Filter],
-    include_archived: bool,
-    include_excluded: bool,
+    include: &IncludeSet,
 ) -> Result<(Vec<Source>, usize)> {
     // 1. Get all root IDs
     let root_ids: Vec<i64> = conn
@@ -237,14 +254,13 @@ fn get_matching_sources(
     let filtered: Vec<Source> = all_sources
         .into_iter()
         .filter(|s| s.is_active())
-        .filter(|s| include_archived || s.is_from_role("source"))
+        .filter(|s| include.includes_archived() || s.is_from_role("source"))
         .filter(|s| s.matches_scope(scopes))
         .filter(|s| {
-            if s.is_excluded()
-                && !include_excluded {
-                    excluded_count += 1;
-                    return false;
-                }
+            if s.is_excluded() && !include.includes_excluded() {
+                excluded_count += 1;
+                return false;
+            }
             true
         })
         .collect();
@@ -307,13 +323,26 @@ fn format_date(unix_timestamp: i64) -> String {
         .unwrap_or_else(|| "???".to_string())
 }
 
+/// Status indicator for long format output.
+/// E = source-level excluded, X = object-level excluded, A = archive source.
+fn status_indicator(source: &Source) -> &'static str {
+    if source.excluded {
+        " E"
+    } else if source.object_excluded == Some(true) {
+        " X"
+    } else if source.is_from_role("archive") {
+        " A"
+    } else {
+        "  "
+    }
+}
+
 /// Show sources with duplicate content, grouped by hash
 pub fn show_duplicates(
     db: &mut Db,
     scope_paths: &[std::path::PathBuf],
     filter_strs: &[String],
-    include_archived: bool,
-    include_excluded: bool,
+    include: &IncludeSet,
     use_relative_paths: bool,
 ) -> Result<()> {
     let conn = db.conn_mut();
@@ -340,13 +369,13 @@ pub fn show_duplicates(
 
     // Get all matching sources using domain predicates
     let (sources, excluded_count) =
-        get_matching_sources(conn, &scopes, &filters, include_archived, include_excluded)?;
+        get_matching_sources(conn, &scopes, &filters, include)?;
 
     if sources.is_empty() {
         eprintln!("No sources match the given filters.");
-        if !include_excluded && excluded_count > 0 {
+        if !include.includes_excluded() && excluded_count > 0 {
             eprintln!(
-                "({excluded_count} excluded sources hidden, use --include-excluded to show)"
+                "({excluded_count} excluded sources hidden, use --include excluded to show)"
             );
         }
         return Ok(());
@@ -360,9 +389,9 @@ pub fn show_duplicates(
 
     if duplicate_groups.is_empty() {
         println!("No duplicates found.");
-        if !include_excluded && excluded_count > 0 {
+        if !include.includes_excluded() && excluded_count > 0 {
             eprintln!(
-                "({excluded_count} excluded sources hidden, use --include-excluded to show)"
+                "({excluded_count} excluded sources hidden, use --include excluded to show)"
             );
         }
         return Ok(());
@@ -393,9 +422,9 @@ pub fn show_duplicates(
         duplicate_groups.len(),
         total_sources
     );
-    if !include_excluded && excluded_count > 0 {
+    if !include.includes_excluded() && excluded_count > 0 {
         eprintln!(
-            "({excluded_count} excluded sources hidden, use --include-excluded to show)"
+            "({excluded_count} excluded sources hidden, use --include excluded to show)"
         );
     }
 

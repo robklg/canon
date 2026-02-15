@@ -36,6 +36,7 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 - `path.rs` - Pure path utilities (`path_is_under()`, `path_strip_prefix()`)
 - `scan.rs` - Scan reconciliation logic (`FileObservation`, `Reconciliation`, `reconcile()`, `find_missing()`)
 - `exclusion.rs` - Duplicate exclusion logic (`find_excludable_duplicates()`)
+- `include.rs` - `IncludeSet` struct for controlling source visibility (`includes_excluded()`, `includes_archived()`, `is_expanded()`)
 
 **Repository Layer** (`src/repo/`) - Database access:
 - `db.rs` - Connection, schema, transactions (`Db`, `open_with_options()`)
@@ -77,7 +78,18 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 - `compare` - Compare two folders by content hash
 - `cluster generate` - Generate manifest from matching sources
 - `apply` - Apply manifest to copy/move/rename files
-- `exclude set/clear/list/duplicates` - Manage source exclusions
+- `exclude set/clear/duplicates` - Manage source exclusions
+
+### CLI Flag Vocabulary
+
+Two unified flags control visibility and safety across all commands:
+
+- **`--include`** (query commands: `ls`, `facts`, `coverage`, `worklist`, `compare`): Expands what you see. Values: `excluded`, `archived`, `all`. Comma-separated and repeatable. Always safe — no side effects. Compare only accepts `excluded`.
+- **`--allow`** (effectful commands: `cluster generate`, `apply`, `import-facts`): Overrides safety guards. Per-command values. Not available on `cluster refresh` (reads from manifest `[options]`).
+
+**Filter modes on `ls`**: `--archived`, `--unarchived`, `--unhashed`, `--duplicates`, `--excluded` are mutually exclusive filter modes. `--excluded` implicitly includes excluded sources and shows both source-level and object-level excluded.
+
+**Status column in `ls -l`**: When `--include` is used or `--excluded` mode is active, long format shows a status indicator: `E` (source-excluded), `X` (object-excluded), `A` (archive source), or blank.
 
 ### Canon Home Directory
 
@@ -259,6 +271,13 @@ The `cluster generate` and `apply` commands work together:
 - Looks up facts at runtime from DB (DB is source of truth)
 - If a fact changed since manifest generation, the new value is used
 - Staleness validation uses size+mtime+partial_hash (not facts)
+
+**Manifest `[options]` section**:
+- `ManifestOptions` struct with `allow: Vec<String>` — stores `--allow` values (e.g., `["archived", "duplicates"]`)
+- Always written to manifest, even when empty
+- `cluster refresh` reads options from the manifest — no `--allow` flag on refresh
+- `--show-archived` is CLI-only (not stored — it's output verbosity, not semantics)
+- Old manifests without `[options]` work via `#[serde(default)]`
 
 **Key design decisions**:
 - Lock file does NOT store fact snapshots — simplifies format, avoids "refresh required" friction

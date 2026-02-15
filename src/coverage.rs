@@ -6,6 +6,7 @@ use crate::domain::path::canonicalize_scopes;
 use crate::domain::root::{parse_root_spec, Root};
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
+use crate::domain::IncludeSet;
 use crate::expr::filter::{self, Filter};
 use crate::repo::{self, Db};
 
@@ -64,8 +65,7 @@ pub fn run(
     scope_paths: &[PathBuf],
     filter_strs: &[String],
     archive_spec: Option<&str>,
-    include_archived: bool,
-    _include_excluded: bool,
+    include: &IncludeSet,
     compact: bool,
 ) -> Result<()> {
     let conn = db.conn();
@@ -93,11 +93,23 @@ pub fn run(
     // Get mutable reference for operations
     let conn = db.conn_mut();
 
+    // Show annotation when include changes the source set
+    if include.is_expanded() {
+        let mut parts = Vec::new();
+        if include.includes_excluded() {
+            parts.push("excluded");
+        }
+        if include.includes_archived() {
+            parts.push("archived");
+        }
+        eprintln!("[including {}]", parts.join(", "));
+    }
+
     // Compute and display stats
     if !scope_prefixes.is_empty() {
         // Scoped mode
         let stats =
-            compute_scoped_stats(conn, &scopes, &filters, archive_root_id, include_archived)?;
+            compute_scoped_stats(conn, &scopes, &filters, archive_root_id, include)?;
         let scope_display = if scope_prefixes.len() == 1 {
             Some(scope_prefixes[0].as_str())
         } else {
@@ -111,7 +123,7 @@ pub fn run(
     } else {
         // Per-root breakdown mode
         let (per_root_stats, overall) =
-            compute_per_root_stats(conn, &filters, archive_root_id, include_archived)?;
+            compute_per_root_stats(conn, &filters, archive_root_id, include)?;
         if compact {
             display_compact_per_root(&per_root_stats, &overall);
         } else {
@@ -122,12 +134,12 @@ pub fn run(
     Ok(())
 }
 
-/// Get all sources matching scope/role criteria, then apply filters.
+/// Get all sources matching scope/role/exclusion criteria, then apply filters.
 fn get_matching_sources(
     conn: &mut rusqlite::Connection,
     scopes: &[ScopeMatch],
     filters: &[Filter],
-    include_archived: bool,
+    include: &IncludeSet,
 ) -> Result<Vec<Source>> {
     // Get all roots and extract IDs
     let roots = repo::root::fetch_all(conn)?;
@@ -140,8 +152,9 @@ fn get_matching_sources(
     let filtered: Vec<Source> = all_sources
         .into_iter()
         .filter(|s| s.is_active())
-        .filter(|s| include_archived || s.is_from_role("source"))
+        .filter(|s| include.includes_archived() || s.is_from_role("source"))
         .filter(|s| s.matches_scope(scopes))
+        .filter(|s| include.includes_excluded() || !s.is_excluded())
         .collect();
 
     // Apply --where filters if present
@@ -166,9 +179,9 @@ fn compute_scoped_stats(
     scopes: &[ScopeMatch],
     filters: &[Filter],
     archive_root_id: Option<i64>,
-    include_archived: bool,
+    include: &IncludeSet,
 ) -> Result<CoverageStats> {
-    let sources = get_matching_sources(conn, scopes, filters, include_archived)?;
+    let sources = get_matching_sources(conn, scopes, filters, include)?;
     compute_stats_from_sources(conn, &sources, archive_root_id)
 }
 
@@ -177,18 +190,18 @@ fn compute_per_root_stats(
     conn: &mut rusqlite::Connection,
     filters: &[Filter],
     archive_root_id: Option<i64>,
-    include_archived: bool,
+    include: &IncludeSet,
 ) -> Result<(Vec<CoverageStats>, CoverageStats)> {
     // Get list of roots, filtered by role and suspension status
     let all_roots = repo::root::fetch_all(conn)?;
     let roots: Vec<&Root> = all_roots
         .iter()
         .filter(|r| r.is_active())
-        .filter(|r| include_archived || r.is_source())
+        .filter(|r| include.includes_archived() || r.is_source())
         .collect();
 
     // Get all matching sources (unscoped)
-    let all_sources = get_matching_sources(conn, &[], filters, include_archived)?;
+    let all_sources = get_matching_sources(conn, &[], filters, include)?;
 
     // Group by root_id
     let mut per_root_stats = Vec::new();
@@ -563,7 +576,8 @@ mod tests {
 
         // Test 1: Scoped to /photos - should return only photo sources
         let scopes = vec![ScopeMatch::UnderDirectory("/photos".to_string())];
-        let sources = get_matching_sources(&mut conn, &scopes, &[], false).unwrap();
+        let include = IncludeSet::default();
+        let sources = get_matching_sources(&mut conn, &scopes, &[], &include).unwrap();
         let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
 
         assert_eq!(source_ids.len(), 2, "Should return 2 photo sources");
@@ -575,7 +589,7 @@ mod tests {
         );
 
         // Test 2: Unscoped (empty scopes = all) - should return all sources
-        let sources = get_matching_sources(&mut conn, &[], &[], false).unwrap();
+        let sources = get_matching_sources(&mut conn, &[], &[], &include).unwrap();
         let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
 
         assert_eq!(source_ids.len(), 3, "Should return all 3 sources");
@@ -627,5 +641,62 @@ mod tests {
         // Verify other stats are correct
         assert_eq!(stats.total_sources, 4);
         assert_eq!(stats.hashed_sources, 4);
+    }
+
+    /// Test that excluded sources are filtered out when include.excluded is false.
+    /// This verifies the bug fix where _include_excluded was previously unused.
+    #[test]
+    fn test_coverage_excludes_excluded_sources() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+
+        // Create an excluded object and a normal object
+        let excluded_obj = insert_object(&conn, "excluded_hash", true);
+        let normal_obj = insert_object(&conn, "normal_hash", false);
+
+        // Insert sources
+        insert_source(&conn, root, "excluded.jpg", Some(excluded_obj));
+        insert_source(&conn, root, "normal.jpg", Some(normal_obj));
+
+        // Also add a source-level excluded source (excluded on source, not object)
+        let normal_obj2 = insert_object(&conn, "normal_hash2", false);
+        let src_id = insert_source(&conn, root, "src_excluded.jpg", Some(normal_obj2));
+        conn.execute(
+            "UPDATE sources SET excluded = 1 WHERE id = ?",
+            rusqlite::params![src_id],
+        )
+        .unwrap();
+
+        // Default include (excluded=false) should filter out excluded sources
+        let include = IncludeSet::default();
+        let sources = get_matching_sources(&mut conn, &[], &[], &include).unwrap();
+
+        // Only the non-excluded source should remain
+        assert_eq!(sources.len(), 1, "Should only return non-excluded source");
+        assert_eq!(sources[0].rel_path, "normal.jpg");
+    }
+
+    /// Test that excluded sources are included when include.excluded is true.
+    #[test]
+    fn test_coverage_includes_excluded_when_requested() {
+        let mut conn = setup_test_db();
+
+        let root = insert_root(&conn, "/photos", "source", false);
+
+        // Create an excluded object and a normal object
+        let excluded_obj = insert_object(&conn, "excluded_hash", true);
+        let normal_obj = insert_object(&conn, "normal_hash", false);
+
+        // Insert sources
+        insert_source(&conn, root, "excluded.jpg", Some(excluded_obj));
+        insert_source(&conn, root, "normal.jpg", Some(normal_obj));
+
+        // Include excluded sources
+        let include = IncludeSet { excluded: true, archived: false };
+        let sources = get_matching_sources(&mut conn, &[], &[], &include).unwrap();
+
+        // Both sources should be returned
+        assert_eq!(sources.len(), 2, "Should return all sources including excluded");
     }
 }

@@ -12,6 +12,7 @@
 pub mod apply;
 pub mod exclusion;
 pub mod fact;
+pub mod include;
 pub mod object;
 pub mod path;
 pub mod root;
@@ -22,6 +23,7 @@ pub mod source;
 // Re-export primary types for convenient access
 pub use apply::{classify_destination, DestinationState};
 pub use exclusion::{find_excludable_duplicates, ExcludableDuplicatesResult};
+pub use include::IncludeSet;
 pub use fact::{FactEntry, FactType, FactValue};
 pub use object::Object;
 pub use path::{

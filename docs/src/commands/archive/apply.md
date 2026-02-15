@@ -25,8 +25,11 @@ canon apply manifest.toml --move --yes
 canon apply manifest.toml --root id:1 --root id:2
 canon apply manifest.toml --root path:/path/to/source
 
+# Allow duplicates within the destination archive
+canon apply manifest.toml --allow duplicates
+
 # Allow duplicates across archives (but not within destination)
-canon apply manifest.toml --allow-cross-archive-duplicates
+canon apply manifest.toml --allow cross-archive-duplicates
 ```
 
 **Transfer modes:**

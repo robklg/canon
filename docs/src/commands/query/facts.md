@@ -31,7 +31,13 @@ canon facts --all
 canon facts --key content.hash.sha256 --limit 0
 
 # Include sources from archive roots
-canon facts --include-archived
+canon facts --include archived
+
+# Include excluded sources
+canon facts --include excluded
+
+# Include both
+canon facts --include all
 
 # Group by root (see which roots contribute to each value)
 canon facts --key source.ext --by-root

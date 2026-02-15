@@ -2,6 +2,48 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
+use domain::IncludeSet;
+
+#[derive(Clone, PartialEq, clap::ValueEnum)]
+enum IncludeValue {
+    Excluded,
+    Archived,
+    All,
+}
+
+#[derive(Clone, PartialEq, clap::ValueEnum)]
+enum ClusterAllow {
+    Archived,
+    Duplicates,
+}
+
+#[derive(Clone, PartialEq, clap::ValueEnum)]
+enum ApplyAllow {
+    Duplicates,
+    #[value(name = "cross-archive-duplicates")]
+    CrossArchiveDuplicates,
+}
+
+#[derive(Clone, PartialEq, clap::ValueEnum)]
+enum ImportFactsAllow {
+    Archived,
+}
+
+fn include_set_from(values: &[IncludeValue]) -> IncludeSet {
+    let mut set = IncludeSet::default();
+    for v in values {
+        match v {
+            IncludeValue::Excluded => set.excluded = true,
+            IncludeValue::Archived => set.archived = true,
+            IncludeValue::All => {
+                set.excluded = true;
+                set.archived = true;
+            }
+        }
+    }
+    set
+}
+
 // Infrastructure layers
 mod domain;
 mod expr;
@@ -98,12 +140,9 @@ enum Commands {
         /// Filter expressions (e.g., "NOT content.hash.sha256?" or "source.ext=jpg")
         #[arg(long = "where")]
         filters: Vec<String>,
-        /// Include sources from archive roots (by default only source roots)
-        #[arg(long)]
-        include_archived: bool,
-        /// Include excluded sources (by default they are skipped)
-        #[arg(long)]
-        include_excluded: bool,
+        /// Include additional sources: excluded, archived, all
+        #[arg(long, value_delimiter = ',')]
+        include: Vec<IncludeValue>,
         /// Emit only one source per unique content hash (sources without a hash are skipped)
         #[arg(long)]
         unique_content: bool,
@@ -113,9 +152,9 @@ enum Commands {
     },
     /// Import facts from JSONL on stdin
     ImportFacts {
-        /// Allow importing facts for sources in archive roots
-        #[arg(long)]
-        allow_archived: bool,
+        /// Override safety guards: archived
+        #[arg(long, value_delimiter = ',')]
+        allow: Vec<ImportFactsAllow>,
         /// Show each fact as it's imported
         #[arg(short, long)]
         verbose: bool,
@@ -140,12 +179,12 @@ enum Commands {
         /// Show sources with duplicate content (same hash), grouped by hash
         #[arg(long, conflicts_with_all = ["archived", "unarchived", "unhashed"])]
         duplicates: bool,
-        /// Include sources from archive roots (by default only source roots)
-        #[arg(long)]
-        include_archived: bool,
-        /// Include excluded sources (by default they are skipped)
-        #[arg(long)]
-        include_excluded: bool,
+        /// Only show excluded sources (source-level and object-level)
+        #[arg(long, conflicts_with_all = ["archived", "unarchived", "unhashed", "duplicates"])]
+        excluded: bool,
+        /// Include additional sources: excluded, archived, all
+        #[arg(long, value_delimiter = ',')]
+        include: Vec<IncludeValue>,
         /// Use long listing format (size, date, path)
         #[arg(short = 'l', long)]
         long: bool,
@@ -182,12 +221,9 @@ enum Commands {
         /// Show pattern aliases available for manifest patterns
         #[arg(long)]
         show_aliases: bool,
-        /// Include sources from archive roots (by default only source roots)
-        #[arg(long)]
-        include_archived: bool,
-        /// Include excluded sources (by default they are skipped)
-        #[arg(long)]
-        include_excluded: bool,
+        /// Include additional sources: excluded, archived, all
+        #[arg(long, value_delimiter = ',')]
+        include: Vec<IncludeValue>,
         /// Group results by root (requires --key)
         #[arg(long)]
         by_root: bool,
@@ -205,12 +241,9 @@ enum Commands {
         /// Filter coverage relative to a specific archive (id:N or path:/foo/bar)
         #[arg(long)]
         archive: Option<String>,
-        /// Include sources from archive roots (by default only source roots)
-        #[arg(long)]
-        include_archived: bool,
-        /// Include excluded sources (by default they are skipped)
-        #[arg(long)]
-        include_excluded: bool,
+        /// Include additional sources: excluded, archived, all
+        #[arg(long, value_delimiter = ',')]
+        include: Vec<IncludeValue>,
         /// Compact output: one line per root
         #[arg(long)]
         compact: bool,
@@ -224,9 +257,9 @@ enum Commands {
         /// Filter expressions (e.g., "source.ext=jpg")
         #[arg(long = "where")]
         filters: Vec<String>,
-        /// Include excluded sources (by default they are skipped)
-        #[arg(long)]
-        include_excluded: bool,
+        /// Include additional sources: excluded
+        #[arg(long, value_delimiter = ',')]
+        include: Vec<IncludeValue>,
         /// Show file paths for differences
         #[arg(short, long)]
         verbose: bool,
@@ -247,12 +280,9 @@ enum Commands {
         /// Show detailed output for each file transfer
         #[arg(long, short = 'v')]
         verbose: bool,
-        /// Allow copying files that exist in other archives (but not destination archive)
-        #[arg(long)]
-        allow_cross_archive_duplicates: bool,
-        /// Allow copying files that already exist in the destination archive (same content, different path)
-        #[arg(long)]
-        allow_duplicates: bool,
+        /// Override safety guards: duplicates, cross-archive-duplicates
+        #[arg(long, value_delimiter = ',')]
+        allow: Vec<ApplyAllow>,
         /// Only apply sources from these roots (id:N or path:/foo/bar, can repeat)
         #[arg(long)]
         root: Vec<String>,
@@ -317,14 +347,6 @@ enum ExcludeAction {
         /// Show what would be cleared without making changes
         #[arg(long)]
         dry_run: bool,
-    },
-    /// List excluded sources
-    List {
-        /// Directory paths to scope the query (resolved to realpath)
-        paths: Vec<PathBuf>,
-        /// Filter expressions to match excluded sources
-        #[arg(long = "where")]
-        filters: Vec<String>,
     },
     /// Exclude duplicate sources, keeping copies in preferred path
     Duplicates {
@@ -447,29 +469,20 @@ enum ClusterAction {
         /// Overwrite existing output file
         #[arg(short, long)]
         force: bool,
-        /// Include files already in an archive (by default they are excluded)
-        #[arg(long)]
-        include_archived: bool,
+        /// Override safety guards: archived, duplicates
+        #[arg(long, value_delimiter = ',')]
+        allow: Vec<ClusterAllow>,
         /// Show which files were excluded because they're already archived
         #[arg(long)]
         show_archived: bool,
-        /// Allow sources with duplicate content (same hash) in the manifest
-        #[arg(long)]
-        allow_duplicates: bool,
     },
     /// Regenerate lock file from existing manifest config
     Refresh {
         /// Path to manifest TOML file
         manifest: PathBuf,
-        /// Include files already in an archive (by default they are excluded)
-        #[arg(long)]
-        include_archived: bool,
         /// Show which files were excluded because they're already archived
         #[arg(long)]
         show_archived: bool,
-        /// Allow sources with duplicate content (same hash) in the manifest
-        #[arg(long)]
-        allow_duplicates: bool,
     },
 }
 
@@ -557,26 +570,26 @@ fn main() -> Result<()> {
         Commands::Worklist {
             paths,
             filters,
-            include_archived,
-            include_excluded,
+            include,
             unique_content,
             emit,
         } => {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+            let include = include_set_from(&include);
             worklist::run(
                 &mut db,
                 &paths,
                 &filters,
-                include_archived,
-                include_excluded,
+                &include,
                 unique_content,
                 &emit,
             )?;
         }
         Commands::ImportFacts {
-            allow_archived,
+            allow,
             verbose,
         } => {
+            let allow_archived = allow.contains(&ImportFactsAllow::Archived);
             import_facts::run(&mut db, allow_archived, verbose)?;
         }
         Commands::Ls {
@@ -586,14 +599,16 @@ fn main() -> Result<()> {
             unarchived,
             unhashed,
             duplicates,
-            include_archived,
-            include_excluded,
+            excluded,
+            include,
             long,
             sort,
             reverse,
             null_delim,
         } => {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+            let mut include = include_set_from(&include);
+
             // Fetch all roots for path resolution
             let all_roots = repo::root::fetch_all(db.conn())?;
 
@@ -617,14 +632,18 @@ fn main() -> Result<()> {
                 });
                 (paths, use_rel, any_archive)
             };
-            let include_archived = include_archived || auto_include_archived;
+            if auto_include_archived {
+                include.archived = true;
+            }
+            if excluded {
+                include.excluded = true;
+            }
             if duplicates {
                 ls::show_duplicates(
                     &mut db,
                     &scope_paths,
                     &filters,
-                    include_archived,
-                    include_excluded,
+                    &include,
                     use_relative,
                 )?;
             } else {
@@ -635,8 +654,8 @@ fn main() -> Result<()> {
                     archived.as_deref(),
                     unarchived,
                     unhashed,
-                    include_archived,
-                    include_excluded,
+                    excluded,
+                    &include,
                     use_relative,
                     long,
                     &sort,
@@ -653,8 +672,7 @@ fn main() -> Result<()> {
             limit,
             all,
             show_aliases,
-            include_archived,
-            include_excluded,
+            include,
             by_root,
             group_by,
         } => {
@@ -681,6 +699,7 @@ fn main() -> Result<()> {
                 }
                 None => {
                     let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+                    let include = include_set_from(&include);
                     facts::run(
                         &mut db,
                         key.as_deref(),
@@ -688,8 +707,7 @@ fn main() -> Result<()> {
                         &filters,
                         limit,
                         all,
-                        include_archived,
-                        include_excluded,
+                        &include,
                         by_root,
                         &group_by,
                     )?;
@@ -719,18 +737,17 @@ fn main() -> Result<()> {
             paths,
             filters,
             archive,
-            include_archived,
-            include_excluded,
+            include,
             compact,
         } => {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+            let include = include_set_from(&include);
             coverage::run(
                 &mut db,
                 &paths,
                 &filters,
                 archive.as_deref(),
-                include_archived,
-                include_excluded,
+                &include,
                 compact,
             )?;
         }
@@ -738,12 +755,16 @@ fn main() -> Result<()> {
             path_a,
             path_b,
             filters,
-            include_excluded,
+            include,
             verbose,
         } => {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+            let include = include_set_from(&include);
+            if include.includes_archived() {
+                bail!("--include archived is not valid for compare (valid values: excluded)");
+            }
             let options = compare::CompareOptions {
-                include_excluded,
+                include,
                 verbose,
             };
             let identical = compare::run(&mut db, &path_a, &path_b, &filters, &options)?;
@@ -758,40 +779,30 @@ fn main() -> Result<()> {
                 dest,
                 output,
                 force,
-                include_archived,
+                allow,
                 show_archived,
-                allow_duplicates,
             } => {
                 let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = cluster::GenerateOptions {
                     force,
-                    include_archived,
+                    allow_archived: allow.contains(&ClusterAllow::Archived),
+                    allow_duplicates: allow.contains(&ClusterAllow::Duplicates),
                     show_archived,
-                    allow_duplicates,
                 };
                 cluster::generate(&mut db, &paths, &filters, &expanded, &dest, &output, &options)?;
             }
             ClusterAction::Refresh {
                 manifest,
-                include_archived,
                 show_archived,
-                allow_duplicates,
             } => {
-                let options = cluster::GenerateOptions {
-                    force: false, // refresh by definition updates existing file
-                    include_archived,
-                    show_archived,
-                    allow_duplicates,
-                };
-                cluster::refresh(&mut db, &manifest, &options)?;
+                cluster::refresh(&mut db, &manifest, show_archived)?;
             }
         },
         Commands::Apply {
             manifest,
             dry_run,
             verbose,
-            allow_cross_archive_duplicates,
-            allow_duplicates,
+            allow,
             root,
             rename,
             move_files,
@@ -808,8 +819,8 @@ fn main() -> Result<()> {
             let options = apply::ApplyOptions {
                 dry_run,
                 verbose,
-                allow_cross_archive_duplicates,
-                allow_duplicates,
+                allow_cross_archive_duplicates: allow.contains(&ApplyAllow::CrossArchiveDuplicates),
+                allow_duplicates: allow.contains(&ApplyAllow::Duplicates),
                 roots: root,
                 transfer_mode,
                 yes,
@@ -846,10 +857,6 @@ fn main() -> Result<()> {
                 let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::ClearOptions { dry_run };
                 exclude::clear(&mut db, &paths, &filters, &options)?;
-            }
-            ExcludeAction::List { paths, filters } => {
-                let filters = alias::expand_filter_strings(&filters, &canon_home)?;
-                exclude::list(&mut db, &paths, &filters)?;
             }
             ExcludeAction::Duplicates {
                 path,

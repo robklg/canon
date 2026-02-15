@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use crate::domain::fact::FactEntry;
 use crate::domain::path::canonicalize_scopes;
 use crate::domain::scope::ScopeMatch;
+use crate::domain::IncludeSet;
 use crate::expr::filter::{self, Filter};
 use crate::expr::value as fact_value;
 use crate::expr::{
@@ -78,8 +79,7 @@ pub fn run(
     filter_strs: &[String],
     limit: usize,
     show_all: bool,
-    include_archived: bool,
-    include_excluded: bool,
+    include: &IncludeSet,
     by_root: bool,
     group_by: &[String],
 ) -> Result<()> {
@@ -111,22 +111,33 @@ pub fn run(
 
     // Get all matching source IDs using domain predicates
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
-    let (source_ids, excluded_count) =
-        get_matching_sources(conn, &scopes, &filters, include_archived, include_excluded)?;
+    let (source_ids, excluded_count, included_excluded, included_archived) =
+        get_matching_sources(conn, &scopes, &filters, include)?;
     let total_sources = source_ids.len();
 
     if total_sources == 0 {
         println!("No sources match the given filters.");
         // Show excluded hint if excluded sources were filtered out
-        if !include_excluded && excluded_count > 0 {
+        if !include.includes_excluded() && excluded_count > 0 {
             println!(
-                "\n({excluded_count} excluded sources hidden, use --include-excluded to show)"
+                "\n({excluded_count} excluded sources hidden, use --include excluded to show)"
             );
         }
         return Ok(());
     }
 
-    println!("Sources matching filters: {total_sources}\n");
+    if include.is_expanded() && (included_excluded > 0 || included_archived > 0) {
+        let mut parts = Vec::new();
+        if included_excluded > 0 {
+            parts.push(format!("{included_excluded} excluded"));
+        }
+        if included_archived > 0 {
+            parts.push(format!("{included_archived} from archive"));
+        }
+        println!("Sources matching filters: {total_sources} (incl. {})\n", parts.join(", "));
+    } else {
+        println!("Sources matching filters: {total_sources}\n");
+    }
 
     if let Some(fact_key) = key_arg {
         // Parse key for accessor and modifiers
@@ -174,9 +185,9 @@ pub fn run(
     }
 
     // Report excluded count
-    if !include_excluded && excluded_count > 0 {
+    if !include.includes_excluded() && excluded_count > 0 {
         println!(
-            "\n({excluded_count} excluded sources hidden, use --include-excluded to show)"
+            "\n({excluded_count} excluded sources hidden, use --include excluded to show)"
         );
     }
 
@@ -185,15 +196,15 @@ pub fn run(
 
 /// Fetch sources matching scope/role/exclusion criteria, then apply --where filters.
 ///
-/// Returns (source_ids, excluded_count) where excluded_count is the number
-/// of sources that matched scope/role but were excluded.
+/// Returns (source_ids, excluded_count, included_excluded_count, included_archived_count)
+/// where excluded_count is the number of sources that matched scope/role but were excluded,
+/// and the included counts track how many excluded/archived sources were kept (for annotations).
 fn get_matching_sources(
     conn: &mut Connection,
     scopes: &[ScopeMatch],
     filters: &[Filter],
-    include_archived: bool,
-    include_excluded: bool,
-) -> Result<(Vec<i64>, usize)> {
+    include: &IncludeSet,
+) -> Result<(Vec<i64>, usize, usize, usize)> {
     // 1. Get all root IDs
     let roots = repo::root::fetch_all(conn)?;
     let root_ids: Vec<i64> = roots.iter().map(|r| r.id).collect();
@@ -201,19 +212,26 @@ fn get_matching_sources(
     // 2. Fetch all present sources for those roots
     let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 
-    // 3. Filter using domain predicates, tracking excluded count
+    // 3. Filter using domain predicates, tracking excluded and archived counts
     let mut excluded_count = 0usize;
+    let mut included_excluded_count = 0usize;
+    let mut included_archived_count = 0usize;
     let filtered: Vec<i64> = all_sources
         .into_iter()
         .filter(|s| s.is_active())
-        .filter(|s| include_archived || s.is_from_role("source"))
+        .filter(|s| include.includes_archived() || s.is_from_role("source"))
         .filter(|s| s.matches_scope(scopes))
         .filter(|s| {
-            if s.is_excluded()
-                && !include_excluded {
-                    excluded_count += 1;
-                    return false;
-                }
+            if s.is_excluded() && !include.includes_excluded() {
+                excluded_count += 1;
+                return false;
+            }
+            if s.is_excluded() {
+                included_excluded_count += 1;
+            }
+            if s.is_from_role("archive") {
+                included_archived_count += 1;
+            }
             true
         })
         .map(|s| s.id)
@@ -221,7 +239,7 @@ fn get_matching_sources(
 
     // 4. Apply --where filters if present
     if filters.is_empty() {
-        return Ok((filtered, excluded_count));
+        return Ok((filtered, excluded_count, included_excluded_count, included_archived_count));
     }
 
     let filtered_ids = filter::apply_filters(conn, &filtered, filters)?;
@@ -233,7 +251,7 @@ fn get_matching_sources(
         .filter(|id| filtered_id_set.contains(id))
         .collect();
 
-    Ok((result, excluded_count))
+    Ok((result, excluded_count, included_excluded_count, included_archived_count))
 }
 
 fn show_all_keys(
@@ -940,8 +958,9 @@ pub fn delete_facts(
     let scope_prefixes = canonicalize_scopes(scope_paths)?;
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
 
-    // Get matching source IDs (include_archived=true, include_excluded=true for delete)
-    let (source_ids, _excluded_count) = get_matching_sources(conn, &scopes, &filters, true, true)?;
+    // Get matching source IDs (include all for delete operations)
+    let include_all = IncludeSet { excluded: true, archived: true };
+    let (source_ids, ..) = get_matching_sources(conn, &scopes, &filters, &include_all)?;
 
     if source_ids.is_empty() {
         println!("No sources match the given filters.");
