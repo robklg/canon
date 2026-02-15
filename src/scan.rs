@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
+use rusqlite::{Transaction, TransactionBehavior};
+
 use crate::domain::resolve_root_path_any;
 use crate::domain::scan::{find_missing, reconcile, FileObservation, Reconciliation};
 use crate::progress::Progress;
@@ -287,8 +289,13 @@ pub fn run(
                 }
             };
 
-            // Get or create object
-            let new_object = get_or_create_object(conn, "sha256", &hash_value)?;
+            // Wrap object creation + source linking + fact storage in a single
+            // transaction for atomicity. Without this, a crash could leave an
+            // object created but not linked, or linked but without the hash fact.
+            // Uses Immediate for reliable busy-handler support under concurrency.
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+
+            let new_object = get_or_create_object(&tx, "sha256", &hash_value)?;
 
             // Check for unexpected hash change (only if basis didn't change and file had existing hash)
             if !file.basis_changed {
@@ -303,17 +310,17 @@ pub fn run(
                 }
             }
 
-            // Link source to object
-            repo::source::set_object_id(conn, file.source_id, new_object.id)?;
+            repo::source::set_object_id(&tx, file.source_id, new_object.id)?;
 
-            // Store hash as fact on object
             repo::fact::store_object_fact(
-                conn,
+                &tx,
                 new_object.id,
                 "content.hash.sha256",
                 &hash_value,
                 current_timestamp(),
             )?;
+
+            tx.commit()?;
 
             total_stats.hashed += 1;
         }
@@ -573,10 +580,10 @@ fn process_file(
     };
 
     // Wrap the observe-reconcile-persist cycle in a transaction for atomicity.
-    // Uses unchecked_transaction() because we take &Connection (not &mut).
-    // This ensures the reads (fetch_by_path, fetch_by_inode) and write
-    // (apply_reconciliation) are atomic, preventing TOCTOU race conditions.
-    let tx = conn.unchecked_transaction()?;
+    // Uses Immediate to acquire the write lock upfront — with Deferred, the
+    // lock upgrade from read→write can fail with SQLITE_BUSY without invoking
+    // the busy handler, causing instant failures under concurrent scans.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
 
     // Query existing state using repo functions
     let source_at_path = repo::source::fetch_by_path(&tx, root_id, rel_path)?;

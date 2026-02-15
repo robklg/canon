@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 pub use rusqlite::Connection;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -222,13 +222,27 @@ pub fn open_with_options(path: &Path, options: DbOptions) -> Result<Db> {
         conn.profile(Some(sql_profile_callback));
     }
 
+    // Set busy timeout FIRST so subsequent operations (including WAL conversion)
+    // can retry if another process holds a lock
+    conn.busy_timeout(Duration::from_secs(30))
+        .context("Failed to set busy timeout")?;
+
     // Enable WAL mode for concurrent read/write access
     conn.pragma_update(None, "journal_mode", "WAL")
         .context("Failed to enable WAL mode")?;
 
-    // Set busy timeout to 30 seconds (retry instead of failing immediately)
-    conn.busy_timeout(Duration::from_secs(30))
-        .context("Failed to set busy timeout")?;
+    // Verify WAL mode is actually active (pragma_update doesn't check the result;
+    // if WAL fails silently, we'd fall back to DELETE mode where concurrent
+    // writes fail without invoking the busy handler)
+    let journal_mode: String = conn
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .context("Failed to query journal mode")?;
+    if journal_mode != "wal" {
+        bail!(
+            "Failed to enable WAL mode (got '{journal_mode}'). \
+             The database may be on a filesystem that doesn't support WAL."
+        );
+    }
 
     conn.execute_batch(SCHEMA)
         .context("Failed to initialize database schema")?;
@@ -409,6 +423,32 @@ pub fn open_in_memory_for_test() -> Connection {
     conn.execute_batch(SCHEMA)
         .expect("Failed to initialize test database schema");
     conn
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn open_with_options_enables_wal_mode() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = open_with_options(
+            &db_path,
+            DbOptions {
+                debug_sql: false,
+                profile: false,
+            },
+        )
+        .unwrap();
+
+        let mode: String = db
+            .conn()
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+    }
 }
 
 /// Get EXPLAIN QUERY PLAN output for a SQL statement
