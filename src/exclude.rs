@@ -97,7 +97,8 @@ pub fn set(
         repo::source::set_excluded(conn, *source_id, true)?;
     }
 
-    println!("Excluded {} sources", to_exclude.len());
+    let noun = if to_exclude.len() == 1 { "source" } else { "sources" };
+    println!("Excluded {} {noun}", ceremony::format_count(to_exclude.len()));
     Ok(())
 }
 
@@ -163,7 +164,8 @@ pub fn clear(
         repo::source::set_excluded(conn, s.id, false)?;
     }
 
-    println!("Cleared exclusions for {} sources", excluded_sources.len());
+    let noun = if excluded_sources.len() == 1 { "source" } else { "sources" };
+    println!("Cleared exclusions for {} {noun}", ceremony::format_count(excluded_sources.len()));
     Ok(())
 }
 
@@ -547,7 +549,8 @@ pub fn exclude_duplicates(
         excluded_count += 1;
     }
 
-    println!("Excluded {excluded_count} sources");
+    let noun = if excluded_count == 1 { "source" } else { "sources" };
+    println!("Excluded {} {noun}", ceremony::format_count(excluded_count));
     println!();
     println!("Use `canon ls --duplicates` to see remaining duplicates.");
 

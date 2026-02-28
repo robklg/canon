@@ -16,6 +16,9 @@ canon exclude set --id 12345
 # Preview what would be excluded
 canon exclude set --where 'source.ext=bak' --dry-run
 
+# Skip confirmation prompt (for scripting)
+canon exclude set --where 'source.ext=bak' --yes
+
 # View excluded sources (use ls --excluded instead of the removed exclude list)
 canon ls --excluded
 canon ls --excluded /path/to/photos
@@ -26,7 +29,12 @@ canon exclude clear --where 'source.ext=tmp'
 
 # Preview what would be cleared
 canon exclude clear --where 'source.ext=tmp' --dry-run
+
+# Skip confirmation prompt
+canon exclude clear --yes
 ```
+
+When excluding or clearing more than one source, a confirmation prompt shows the count, root spread, and (for `exclude set`) archive coverage before proceeding. Use `--yes` to skip the prompt, or `--dry-run` to preview without executing.
 
 ## canon exclude duplicates
 
@@ -39,11 +47,16 @@ canon exclude duplicates /scope/path --prefer /preferred/path
 # Preview what would be excluded
 canon exclude duplicates /scope/path --prefer /preferred/path --dry-run
 
+# Skip confirmation prompt
+canon exclude duplicates /scope/path --prefer /preferred/path --yes
+
 # With filters
 canon exclude duplicates /scope/path --prefer /preferred/path --where 'source.ext=jpg'
 ```
 
 This is useful for deduplicating across backup drives while keeping the "canonical" copy in your preferred location.
+
+When excluding more than one source, a confirmation prompt shows the count, number of duplicate groups, and skip statistics before proceeding. Use `--yes` to skip the prompt.
 
 **How exclusions affect other commands:**
 

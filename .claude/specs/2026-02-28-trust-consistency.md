@@ -590,10 +590,10 @@ All existing tests in:
 - [x] Phase 2: `exclude set` and `exclude clear` confirmations (`--yes`, archive coverage, root counts)
 - [x] Phase 3: `exclude duplicates` confirmation (`--yes`, statistics presentation modes)
 - [x] Phase 4: Apply summary enrichment (mode line, "Sources from:") + docs fix
-- [ ] Phase 5: Cluster summary comments, notes section, version field, richer stdout
-- [ ] Verify all existing tests pass
-- [ ] Update CLAUDE.md: document `ceremony.rs`, manifest version field, comment sections
-- [ ] Update `docs/` (mdbook): apply command changes, cluster generate/refresh changes, manifest format reference
+- [x] Phase 5: Cluster summary comments, notes section, version field, richer stdout
+- [x] Verify all existing tests pass
+- [x] Update CLAUDE.md: document `ceremony.rs`, manifest version field, comment sections
+- [x] Update `docs/` (mdbook): apply command changes, cluster generate/refresh changes, manifest format reference
 
 ## Documentation Updates
 

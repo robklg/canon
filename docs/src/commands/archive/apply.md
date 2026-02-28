@@ -42,6 +42,16 @@ canon apply manifest.toml --allow cross-archive-duplicates
 
 All modes use noclobber semantics: if a destination file exists, apply aborts with an error.
 
+For `--rename` and `--move`, the confirmation summary shows which source roots will lose files:
+
+```
+Mode: rename (sources will be relocated)
+Files: 150
+Sources from:
+  /Volumes/Drive1  (100 files)
+  /Volumes/Drive2  (50 files)
+```
+
 **Resume mode (`--resume`):**
 
 Use `--resume` to continue a previously interrupted apply. This is useful when:

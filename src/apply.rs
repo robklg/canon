@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ceremony;
-use crate::cluster::{LockEntry, ManifestConfig};
+use crate::cluster::{self, LockEntry, ManifestConfig};
 use crate::domain::apply::{classify_destination, DestinationState};
 use crate::domain::fact::FactEntry;
 use crate::domain::path::path_strip_prefix;
@@ -177,6 +177,9 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         .with_context(|| format!("Failed to read manifest config: {}", config_path.display()))?;
     let config: ManifestConfig = toml::from_str(&config_content)
         .with_context(|| format!("Failed to parse manifest config: {}", config_path.display()))?;
+
+    // Validate manifest version
+    cluster::validate_manifest_version(config.meta.version)?;
 
     // Read JSONL lock file
     let lock_file = File::open(&lock_path)

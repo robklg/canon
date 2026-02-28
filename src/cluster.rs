@@ -32,6 +32,8 @@ pub struct ManifestOptions {
 
 #[derive(Serialize, Deserialize)]
 pub struct ManifestMeta {
+    #[serde(default = "default_version")]
+    pub version: u32,
     pub query: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
@@ -39,6 +41,19 @@ pub struct ManifestMeta {
     pub generated_at: String,
     /// SHA256 hash of the lock file (for integrity validation)
     pub lock_hash: String,
+}
+
+fn default_version() -> u32 {
+    1
+}
+
+const SUPPORTED_MANIFEST_VERSION: u32 = 1;
+
+pub fn validate_manifest_version(version: u32) -> Result<()> {
+    if version > SUPPORTED_MANIFEST_VERSION {
+        bail!("Manifest version {version} is not supported by this version of Canon. Please update Canon.");
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -104,6 +119,10 @@ pub struct GenerateOptions {
 struct LockGenerationResult {
     source_count: usize,
     full_coverage_facts: Vec<(String, FactType, String)>,
+    root_breakdown: Vec<(String, usize)>,  // (root_path, count), sorted by path
+    not_archived_count: usize,             // sources with no archived copy
+    excluded_count: usize,                 // skipped excluded sources
+    unhashed_count: usize,                 // skipped unhashed sources
 }
 
 /// Core logic shared between generate() and refresh()
@@ -115,30 +134,14 @@ fn generate_lock(
     lock_path: &Path,
     options: &GenerateOptions,
 ) -> Result<Option<LockGenerationResult>> {
-    let (sources, archived, excluded_count, unhashed_count, all_facts) =
-        query_sources(conn, scope_prefixes, filters, options.allow_archived)?;
-
-    // Report excluded files (hard gate - always skipped)
-    if excluded_count > 0 {
-        eprintln!("Skipped {excluded_count} excluded sources");
-    }
-
-    // Report unhashed files (hard gate - always skipped)
-    if unhashed_count > 0 {
-        eprintln!("Skipped {unhashed_count} sources without content hash");
-        eprintln!("  To discover: run 'canon ls --unhashed' with your scope/pattern");
-        eprintln!(
-            "  To include: import hashes via worklist pipeline, then run 'canon cluster refresh'"
-        );
-        eprintln!("  To permanently exclude: use 'canon exclude set' with your pattern AND 'NOT content.hash.sha256?'");
-    }
+    let qr = query_sources(conn, scope_prefixes, filters, options.allow_archived)?;
 
     // Report archived files
-    if !archived.is_empty() {
-        eprintln!("Excluded {} files already in archive(s)", archived.len());
+    if !qr.archived.is_empty() {
+        eprintln!("Excluded {} files already in archive(s)", qr.archived.len());
         if options.show_archived {
             eprintln!("Archived files:");
-            for (source_path, archive_path) in &archived {
+            for (source_path, archive_path) in &qr.archived {
                 eprintln!("  {source_path} -> {archive_path}");
             }
         } else {
@@ -146,13 +149,13 @@ fn generate_lock(
         }
     }
 
-    if sources.is_empty() {
+    if qr.sources.is_empty() {
         return Ok(None);
     }
 
     // Check for source duplicates (same content hash)
     if !options.allow_duplicates {
-        let duplicate_groups = find_source_duplicates(&sources);
+        let duplicate_groups = find_source_duplicates(&qr.sources);
         if !duplicate_groups.is_empty() {
             let total_dup_sources: usize = duplicate_groups.iter().map(|(_, v)| v.len()).sum();
             bail!(
@@ -167,14 +170,18 @@ fn generate_lock(
     }
 
     // Collect facts with 100% coverage (using typed facts from batch fetch)
-    let full_coverage_facts = collect_full_coverage_facts(&sources, &all_facts);
+    let full_coverage_facts = collect_full_coverage_facts(&qr.sources, &qr.all_facts);
 
     // Write JSONL lock file (no facts — apply looks them up at runtime)
-    write_lock_file(lock_path, &sources)?;
+    write_lock_file(lock_path, &qr.sources)?;
 
     Ok(Some(LockGenerationResult {
-        source_count: sources.len(),
+        source_count: qr.sources.len(),
         full_coverage_facts,
+        root_breakdown: qr.root_breakdown,
+        not_archived_count: qr.not_archived_count,
+        excluded_count: qr.excluded_count,
+        unhashed_count: qr.unhashed_count,
     }))
 }
 
@@ -238,6 +245,7 @@ pub fn generate(
     // Build config (TOML without sources) — store expanded filters as the query
     let config = ManifestConfig {
         meta: ManifestMeta {
+            version: 1,
             query: expanded_filters.to_vec(),
             scope: if scope_prefixes.len() == 1 {
                 Some(scope_prefixes[0].clone())
@@ -259,7 +267,10 @@ pub fn generate(
         },
     };
 
-    // Write TOML config file, with original filter comments if aliases were expanded
+    // Assemble manifest with summary comments, notes, and TOML config
+    let summary = generate_summary_comments(&result);
+    let notes_block = "# === Notes ===\n#\n";
+
     let toml_str =
         toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
     let comment_lines: Vec<String> = original_filters
@@ -273,15 +284,25 @@ pub fn generate(
     } else {
         inject_comments_before_key(&toml_str, "query", &comment_lines)
     };
-    let toml_with_help = format!("{}\n\n{}", toml_str.trim_end(), fact_help);
-    fs::write(output_path, &toml_with_help)
+
+    let manifest = format!(
+        "{}\n{}\n{}\n\n{}",
+        summary.trim_end(),
+        notes_block.trim_end(),
+        toml_str.trim_end(),
+        fact_help
+    );
+    fs::write(output_path, &manifest)
         .with_context(|| format!("Failed to write manifest to {}", output_path.display()))?;
 
-    println!(
-        "Generated manifest: {} ({} sources in {})",
-        output_path.display(),
-        result.source_count,
-        lock_path.display()
+    print_cluster_stdout(
+        &format!(
+            "Generated manifest: {} ({} sources in {})",
+            output_path.display(),
+            result.source_count,
+            lock_path.display()
+        ),
+        &result,
     );
 
     Ok(())
@@ -290,11 +311,14 @@ pub fn generate(
 pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool) -> Result<()> {
     let conn = db.conn_mut();
 
-    // Read existing TOML config
-    let config_content = fs::read_to_string(config_path)
+    // Read existing manifest content (for notes preservation)
+    let old_content = fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read config: {}", config_path.display()))?;
-    let mut config: ManifestConfig = toml::from_str(&config_content)
+    let mut config: ManifestConfig = toml::from_str(&old_content)
         .with_context(|| format!("Failed to parse config: {}", config_path.display()))?;
+
+    // Validate manifest version
+    validate_manifest_version(config.meta.version)?;
 
     // Parse allow options from manifest
     let (allow_archived, allow_duplicates) = parse_manifest_allow(&config.options.allow)?;
@@ -308,7 +332,10 @@ pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool) -> Result<(
 
     // Report which options are in effect
     if !config.options.allow.is_empty() {
-        eprintln!("Options from manifest: allow {}", config.options.allow.join(", "));
+        eprintln!(
+            "Options from manifest: allow {}",
+            config.options.allow.join(", ")
+        );
     }
 
     // Parse scope from config
@@ -338,18 +365,32 @@ pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool) -> Result<(
             config.meta.lock_hash = lock_hash;
             config.meta.generated_at = current_timestamp();
 
-            // Regenerate fact help and rewrite TOML
+            // Assemble manifest with summary comments, preserved notes, and TOML config
+            let summary = generate_summary_comments(&r);
+            let notes = extract_notes(&old_content).unwrap_or_else(|| "\n#\n".to_string());
+            let notes_block = format!("# === Notes ==={notes}");
+
             let fact_help = generate_fact_help(r.source_count, &r.full_coverage_facts);
             let toml_str =
                 toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
-            let toml_with_help = format!("{}\n\n{}", toml_str.trim_end(), fact_help);
-            fs::write(config_path, &toml_with_help)
+
+            let manifest = format!(
+                "{}\n{}\n{}\n\n{}",
+                summary.trim_end(),
+                notes_block.trim_end(),
+                toml_str.trim_end(),
+                fact_help
+            );
+            fs::write(config_path, &manifest)
                 .with_context(|| format!("Failed to write config: {}", config_path.display()))?;
 
-            println!(
-                "Refreshed lock file: {} ({} sources)",
-                lock_path.display(),
-                r.source_count
+            print_cluster_stdout(
+                &format!(
+                    "Refreshed lock file: {} ({} sources)",
+                    lock_path.display(),
+                    r.source_count
+                ),
+                &r,
             );
         }
         None => {
@@ -406,23 +447,30 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Returns (included_sources, archived_sources, excluded_count, unhashed_count, all_facts)
-/// archived_sources is a list of (source_path, archive_path) for files already in an archive
-/// excluded_count is the number of sources skipped due to exclusion (hard gate)
-/// unhashed_count is the number of sources skipped due to missing content hash
-/// all_facts contains typed FactEntry values keyed by source_id (for 100% coverage computation)
+/// Result from querying and filtering sources for a cluster.
+struct QuerySourcesResult {
+    /// Sources included in the cluster (as lock entries)
+    sources: Vec<LockEntry>,
+    /// Sources excluded because they're already archived: (source_path, archive_path)
+    archived: Vec<(String, String)>,
+    /// Number of sources skipped due to exclusion (hard gate)
+    excluded_count: usize,
+    /// Number of sources skipped due to missing content hash
+    unhashed_count: usize,
+    /// Typed FactEntry values keyed by source_id (for 100% coverage computation)
+    all_facts: HashMap<i64, Vec<FactEntry>>,
+    /// Root breakdown: (root_path, count) sorted by path
+    root_breakdown: Vec<(String, usize)>,
+    /// Number of sources in the cluster with no archived copy
+    not_archived_count: usize,
+}
+
 fn query_sources(
     conn: &mut Connection,
     scope_prefixes: &[String],
     filters: &[Filter],
     allow_archived: bool,
-) -> Result<(
-    Vec<LockEntry>,
-    Vec<(String, String)>,
-    usize,
-    usize,
-    HashMap<i64, Vec<FactEntry>>,
-)> {
+) -> Result<QuerySourcesResult> {
     // 1. Get all root IDs
     let root_ids: Vec<i64> = conn
         .prepare("SELECT id FROM roots")?
@@ -490,7 +538,15 @@ fn query_sources(
     let source_ids: Vec<i64> = hashed_sources.iter().map(|s| s.id).collect();
     let all_facts = repo::fact::batch_fetch_for_sources(conn, &source_ids)?;
 
-    // 10. Build LockEntry for each source, check archive status
+    // 10. Collect root paths from sources (before consuming them)
+    let mut root_path_map: HashMap<i64, String> = HashMap::new();
+    for source in &hashed_sources {
+        root_path_map
+            .entry(source.root_id)
+            .or_insert_with(|| source.root_path.clone());
+    }
+
+    // 11. Build LockEntry for each source, check archive status
     let mut sources = Vec::new();
     let mut archived = Vec::new();
 
@@ -523,7 +579,39 @@ fn query_sources(
         }
     }
 
-    Ok((sources, archived, excluded_count, unhashed_count, all_facts))
+    // 12. Compute root breakdown from final sources
+    let mut root_counts: HashMap<i64, usize> = HashMap::new();
+    for source in &sources {
+        *root_counts.entry(source.root_id).or_insert(0) += 1;
+    }
+    let mut root_breakdown: Vec<(String, usize)> = root_counts
+        .into_iter()
+        .filter_map(|(root_id, count)| {
+            root_path_map.get(&root_id).map(|path| (path.clone(), count))
+        })
+        .collect();
+    root_breakdown.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // 13. Count sources with no archived copy (from final sources list)
+    let not_archived_count = sources
+        .iter()
+        .filter(|s| {
+            s.object_id
+                .and_then(|oid| archive_paths.get(&oid))
+                .map(|paths| paths.is_empty())
+                .unwrap_or(true) // no object_id = not archived
+        })
+        .count();
+
+    Ok(QuerySourcesResult {
+        sources,
+        archived,
+        excluded_count,
+        unhashed_count,
+        all_facts,
+        root_breakdown,
+        not_archived_count,
+    })
 }
 
 fn allow_values_to_strings(options: &GenerateOptions) -> Vec<String> {
@@ -821,6 +909,91 @@ fn inject_comments_before_key(toml_str: &str, key: &str, comments: &[String]) ->
 }
 
 // ============================================================================
+// Cluster summary, notes, and stdout helpers
+// ============================================================================
+
+fn generate_summary_comments(result: &LockGenerationResult) -> String {
+    use crate::ceremony::format_count;
+
+    let mut s = String::new();
+    s.push_str("# === Cluster Summary ===\n");
+
+    let root_word = if result.root_breakdown.len() == 1 {
+        "root"
+    } else {
+        "roots"
+    };
+    s.push_str(&format!(
+        "# {} sources from {} {}:\n",
+        format_count(result.source_count),
+        result.root_breakdown.len(),
+        root_word
+    ));
+    for (path, count) in &result.root_breakdown {
+        s.push_str(&format!("#   {}  ({})\n", path, format_count(*count)));
+    }
+    s.push_str(&format!(
+        "# {} have no archived copy\n",
+        format_count(result.not_archived_count)
+    ));
+
+    // Skipped line (only if there are skipped sources)
+    if result.excluded_count > 0 || result.unhashed_count > 0 {
+        s.push_str("#\n");
+        let mut parts = Vec::new();
+        if result.excluded_count > 0 {
+            parts.push(format!("{} excluded", result.excluded_count));
+        }
+        if result.unhashed_count > 0 {
+            parts.push(format!("{} unhashed", result.unhashed_count));
+        }
+        s.push_str(&format!("# Skipped: {}\n", parts.join(", ")));
+    }
+
+    s
+}
+
+fn extract_notes(content: &str) -> Option<String> {
+    let marker = "# === Notes ===";
+    let start_idx = content.find(marker)?;
+    let after_marker = start_idx + marker.len();
+    let rest = &content[after_marker..];
+
+    // Find end: next "# === " header or first TOML section "[" at line start
+    let end = rest
+        .lines()
+        .enumerate()
+        .skip(1) // skip the marker line itself
+        .find(|(_, line)| line.starts_with("# === ") || line.starts_with('['))
+        .map(|(i, _)| {
+            // Calculate byte offset of this line
+            rest.lines().take(i).map(|l| l.len() + 1).sum::<usize>()
+        })
+        .unwrap_or(rest.len());
+
+    Some(rest[..end].to_string())
+}
+
+fn print_cluster_stdout(header: &str, result: &LockGenerationResult) {
+    use crate::ceremony::format_count;
+
+    println!("{header}");
+    let root_word = if result.root_breakdown.len() == 1 {
+        "root"
+    } else {
+        "roots"
+    };
+    println!("  From {} {}:", result.root_breakdown.len(), root_word);
+    for (path, count) in &result.root_breakdown {
+        println!("    {}  ({})", path, format_count(*count));
+    }
+    println!(
+        "  {} have no archived copy",
+        format_count(result.not_archived_count)
+    );
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -886,16 +1059,15 @@ mod tests {
         insert_source(&conn, suspended_root, "file2.jpg", Some(obj2), false);
 
         // Query sources (this is what cluster generate does)
-        let (sources, _archived, _excluded_count, _unhashed_count, _facts) =
-            query_sources(&mut conn, &[], &[], false).unwrap();
+        let qr = query_sources(&mut conn, &[], &[], false).unwrap();
 
         // Should only include source from active root
         assert_eq!(
-            sources.len(),
+            qr.sources.len(),
             1,
             "Should exclude sources from suspended roots"
         );
-        assert_eq!(sources[0].path, "/active/file1.jpg");
+        assert_eq!(qr.sources[0].path, "/active/file1.jpg");
     }
 
     /// Test that excluded sources are filtered out at both source and object level.
@@ -930,17 +1102,16 @@ mod tests {
         );
 
         // Query sources
-        let (sources, _archived, excluded_count, _unhashed_count, _facts) =
-            query_sources(&mut conn, &[], &[], false).unwrap();
+        let qr = query_sources(&mut conn, &[], &[], false).unwrap();
 
         // Should only include the normal source
         assert_eq!(
-            sources.len(),
+            qr.sources.len(),
             1,
             "Should exclude both source-level and object-level excluded"
         );
-        assert_eq!(sources[0].path, "/photos/normal.jpg");
-        assert_eq!(excluded_count, 2, "Should count both excluded sources");
+        assert_eq!(qr.sources[0].path, "/photos/normal.jpg");
+        assert_eq!(qr.excluded_count, 2, "Should count both excluded sources");
     }
 
     /// Test that archive detection handles multiple sources pointing to same object.
@@ -977,30 +1148,30 @@ mod tests {
         insert_source(&conn, archive_root, "backup.jpg", Some(archived_obj), false);
 
         // Query sources WITHOUT include_archived flag (default behavior)
-        let (sources, archived, _excluded_count, _unhashed_count, _facts) =
-            query_sources(&mut conn, &[], &[], false).unwrap();
+        let qr = query_sources(&mut conn, &[], &[], false).unwrap();
 
         // The critical assertion: all 3 sources pointing to archived object should be
         // in the "archived" list, not just 1
         assert_eq!(
-            archived.len(),
+            qr.archived.len(),
             3,
             "Should detect 3 SOURCES as already archived, not 1 unique object"
         );
 
         // Only the unarchived source should be in the main sources list
         assert_eq!(
-            sources.len(),
+            qr.sources.len(),
             1,
             "Only unarchived source should be in sources"
         );
-        assert_eq!(sources[0].path, "/photos/photo4.jpg");
+        assert_eq!(qr.sources[0].path, "/photos/photo4.jpg");
     }
 
     #[test]
     fn test_manifest_options_round_trip() {
         let config = ManifestConfig {
             meta: ManifestMeta {
+                version: 1,
                 query: vec!["source.ext=jpg".to_string()],
                 scope: Some("/photos".to_string()),
                 generated_at: "2026-02-15T12:00:00Z".to_string(),
@@ -1050,5 +1221,177 @@ base_dir = "photos"
         let err = result.unwrap_err().to_string();
         assert!(err.contains("bogus"), "Error should mention the invalid value");
         assert!(err.contains("archived"), "Error should list valid values");
+    }
+
+    // ======================================================================
+    // Phase 5: format_count, extract_notes, generate_summary_comments,
+    //          version validation, manifest round-trip
+    // ======================================================================
+
+    #[test]
+    fn test_format_count() {
+        use crate::ceremony::format_count;
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(1000), "1,000");
+        assert_eq!(format_count(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn test_extract_notes_empty_placeholder() {
+        let content = "# === Notes ===\n#\n\n[meta]\nversion = 1\n";
+        let notes = extract_notes(content).unwrap();
+        assert_eq!(notes, "\n#\n\n");
+    }
+
+    #[test]
+    fn test_extract_notes_with_content() {
+        let content = "# === Notes ===\n# This cluster has family photos\n# from 2020-2023\n\n[meta]\n";
+        let notes = extract_notes(content).unwrap();
+        assert_eq!(notes, "\n# This cluster has family photos\n# from 2020-2023\n\n");
+    }
+
+    #[test]
+    fn test_extract_notes_missing() {
+        let content = "[meta]\nversion = 1\nquery = []\n";
+        assert!(extract_notes(content).is_none());
+    }
+
+    #[test]
+    fn test_extract_notes_before_meta() {
+        let content = "# === Notes ===\n# Some note\n[meta]\nversion = 1\n";
+        let notes = extract_notes(content).unwrap();
+        assert_eq!(notes, "\n# Some note\n");
+    }
+
+    #[test]
+    fn test_extract_notes_before_next_section() {
+        let content = "# === Notes ===\n# My notes\n# === Cluster Summary ===\n# stuff\n";
+        let notes = extract_notes(content).unwrap();
+        assert_eq!(notes, "\n# My notes\n");
+    }
+
+    #[test]
+    fn test_generate_summary_single_root() {
+        let result = LockGenerationResult {
+            source_count: 42,
+            full_coverage_facts: vec![],
+            root_breakdown: vec![("/photos".to_string(), 42)],
+            not_archived_count: 42,
+            excluded_count: 0,
+            unhashed_count: 0,
+        };
+        let summary = generate_summary_comments(&result);
+        assert!(summary.contains("42 sources from 1 root:"));
+        assert!(summary.contains("#   /photos  (42)"));
+        assert!(summary.contains("# 42 have no archived copy"));
+        assert!(!summary.contains("Skipped"));
+    }
+
+    #[test]
+    fn test_generate_summary_multiple_roots() {
+        let result = LockGenerationResult {
+            source_count: 150,
+            full_coverage_facts: vec![],
+            root_breakdown: vec![
+                ("/backup".to_string(), 50),
+                ("/photos".to_string(), 100),
+            ],
+            not_archived_count: 120,
+            excluded_count: 0,
+            unhashed_count: 0,
+        };
+        let summary = generate_summary_comments(&result);
+        assert!(summary.contains("150 sources from 2 roots:"));
+        // Verify sorted order
+        let backup_pos = summary.find("/backup").unwrap();
+        let photos_pos = summary.find("/photos").unwrap();
+        assert!(backup_pos < photos_pos, "Roots should be sorted by path");
+    }
+
+    #[test]
+    fn test_generate_summary_no_skipped() {
+        let result = LockGenerationResult {
+            source_count: 10,
+            full_coverage_facts: vec![],
+            root_breakdown: vec![("/photos".to_string(), 10)],
+            not_archived_count: 10,
+            excluded_count: 0,
+            unhashed_count: 0,
+        };
+        let summary = generate_summary_comments(&result);
+        assert!(!summary.contains("Skipped"));
+    }
+
+    #[test]
+    fn test_generate_summary_with_skipped() {
+        let result = LockGenerationResult {
+            source_count: 10,
+            full_coverage_facts: vec![],
+            root_breakdown: vec![("/photos".to_string(), 10)],
+            not_archived_count: 10,
+            excluded_count: 3,
+            unhashed_count: 5,
+        };
+        let summary = generate_summary_comments(&result);
+        assert!(summary.contains("# Skipped: 3 excluded, 5 unhashed"));
+    }
+
+    #[test]
+    fn test_version_1_accepted() {
+        assert!(validate_manifest_version(1).is_ok());
+    }
+
+    #[test]
+    fn test_version_future_rejected() {
+        let result = validate_manifest_version(99);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("99"));
+        assert!(err.contains("not supported"));
+    }
+
+    #[test]
+    fn test_manifest_without_version_defaults_to_1() {
+        // Old manifests without version field should deserialize as version 1
+        let toml_str = r#"
+[meta]
+query = ["source.ext=jpg"]
+scope = "/photos"
+generated_at = "2026-02-15T12:00:00Z"
+lock_hash = "abc123"
+
+[output]
+pattern = "{filename}"
+archive_root_id = 1
+base_dir = "photos"
+"#;
+        let config: ManifestConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.meta.version, 1);
+    }
+
+    #[test]
+    fn test_manifest_with_version_round_trip() {
+        let config = ManifestConfig {
+            meta: ManifestMeta {
+                version: 1,
+                query: vec!["source.ext=jpg".to_string()],
+                scope: Some("/photos".to_string()),
+                generated_at: "2026-02-15T12:00:00Z".to_string(),
+                lock_hash: "abc123".to_string(),
+            },
+            options: ManifestOptions {
+                allow: vec![],
+            },
+            output: ManifestOutput {
+                pattern: "{filename}".to_string(),
+                archive_root_id: 1,
+                base_dir: "photos".to_string(),
+            },
+        };
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: ManifestConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.meta.version, 1);
     }
 }

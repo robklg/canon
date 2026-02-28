@@ -54,9 +54,10 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 **Command Modules** (flat in `src/`):
 - `main.rs` - CLI entry point using clap (canon home resolution, alias expansion dispatch)
 - `alias.rs` - Alias file I/O and filter expansion orchestration (`expand_filter_strings()`)
+- `ceremony.rs` - Shared confirmation infrastructure (`confirm()`, `format_count()`)
 - `ls.rs` - List and query sources
 - `coverage.rs` - Archive coverage statistics
-- `cluster.rs` - Manifest generation with query filters
+- `cluster.rs` - Manifest generation with query filters, summary/notes comment sections
 - `apply.rs` - File copying/moving based on manifests
 - `exclude.rs` - Source exclusion management
 - `facts.rs` - Fact inspection and management
@@ -272,12 +273,23 @@ The `cluster generate` and `apply` commands work together:
 - If a fact changed since manifest generation, the new value is used
 - Staleness validation uses size+mtime+partial_hash (not facts)
 
-**Manifest `[options]` section**:
+**Manifest format**:
+- `ManifestMeta` includes `version: u32` — current version is 1. Old manifests without `version` deserialize as 1 via `serde(default)`. `validate_manifest_version()` rejects future versions early in `apply::run()` and `cluster::refresh()`.
 - `ManifestOptions` struct with `allow: Vec<String>` — stores `--allow` values (e.g., `["archived", "duplicates"]`)
 - Always written to manifest, even when empty
 - `cluster refresh` reads options from the manifest — no `--allow` flag on refresh
 - `--show-archived` is CLI-only (not stored — it's output verbosity, not semantics)
 - Old manifests without `[options]` work via `#[serde(default)]`
+
+**Manifest comment sections**:
+- `# === Cluster Summary ===` — generated on `cluster generate` and regenerated on `cluster refresh`. Shows source count, root breakdown, archive coverage, and skipped counts.
+- `# === Notes ===` — empty placeholder on generate. Preserved verbatim on refresh (extracted via string matching since TOML parsers strip comments). Users can add free-form notes here.
+- `extract_notes()` finds notes content between `# === Notes ===` and the next `# === ` or `[` section header.
+
+**Ceremony infrastructure** (`ceremony.rs`):
+- `confirm(yes: bool)` — shared confirmation prompt ("Proceed? [y/N]"). Returns `Ok(false)` on decline (not an error). Used by `roots rm`, `apply`, `exclude set/clear/duplicates`.
+- `format_count(n)` — formats numbers with thousands separators (e.g., 3847 → "3,847"). Used in manifest summary comments and stdout summaries.
+- Confirmation content is gated behind `!yes` — when `--yes` is passed, both content and expensive queries are skipped.
 
 **Key design decisions**:
 - Lock file does NOT store fact snapshots — simplifies format, avoids "refresh required" friction

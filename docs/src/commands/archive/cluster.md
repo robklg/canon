@@ -39,27 +39,38 @@ canon apply manifest.toml --dry-run   # Preview
 canon apply manifest.toml             # Execute
 ```
 
+**Output:**
+
+After generating, the command prints a summary showing root breakdown and archive coverage:
+
+```
+Generated manifest: manifest.toml (1,234 sources in manifest.lock)
+  From 2 roots:
+    /Volumes/Drive1  (800)
+    /Volumes/Drive2  (434)
+  1,234 have no archived copy
+```
+
 **Manifest structure:**
 
-The generated manifest includes helpful comments listing all available pattern variables, modifiers, and aliases based on the facts present in your sources:
+The generated manifest includes a cluster summary, a notes section for your own annotations, and helpful comments listing available pattern variables:
 
 ```toml
-# Available facts for pattern (100% coverage on 1234 sources):
+# === Cluster Summary ===
+# 1,234 sources from 2 roots:
+#   /Volumes/Drive1  (800)
+#   /Volumes/Drive2  (434)
+# 1,234 have no archived copy
+
+# === Notes ===
 #
-# Built-in:
-#   filename           text   - Filename (last path component)
-#   source.ext         text   - File extension
-#   source.mtime       time   - Modification time
-#   ...
-#
-# Content facts:
-#   content.Make       text
-#   content.Model      text
-#   ...
-#
-# Modifiers:
-#   Time: |year |month |day |date ...
-#   String: |stem |ext |lowercase ...
+
+[meta]
+version = 1
+query = ["source.ext IN ('jpg', 'png', 'heic')"]
+scope = "/path/to/photos"
+generated_at = "2026-02-28T12:00:00Z"
+lock_hash = "abc123..."
 
 [options]
 allow = []                       # e.g. ["archived", "duplicates"]
@@ -68,9 +79,15 @@ allow = []                       # e.g. ["archived", "duplicates"]
 pattern = "{filename}"           # ← Edit this to customize organization
 base_dir = "/Volumes/Archive"
 archive_root_id = 2
+
+# Available facts for pattern (100% coverage on 1234 sources):
+# ...
 ```
 
-The `[options]` section records which `--allow` flags were used during generation. These are carried forward to `apply` and `cluster refresh`.
+- **Cluster Summary** is regenerated on each `cluster refresh`, showing current source counts, root breakdown, and archive coverage.
+- **Notes** section is preserved across refreshes — add your own comments here.
+- **`version`** field tracks the manifest format version.
+- **`[options]`** records which `--allow` flags were used during generation. These are carried forward to `apply` and `cluster refresh`.
 
 **Common output patterns:**
 
@@ -105,4 +122,9 @@ Use `canon cluster refresh` to update the lock file if sources have changed sinc
 canon cluster refresh manifest.toml
 ```
 
-This re-runs the manifest's query and updates `manifest.lock` with the current matching sources. The manifest settings remain unchanged.
+This re-runs the manifest's query and updates `manifest.lock` with the current matching sources. The manifest settings (`[options]`, `[output]`) remain unchanged.
+
+On refresh:
+- The **Cluster Summary** is regenerated with current counts
+- The **Notes** section is preserved verbatim
+- The same root breakdown and archive coverage summary is printed to stdout
