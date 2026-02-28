@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::domain::fact::FactEntry;
-use crate::domain::path::canonicalize_scopes;
+use crate::domain::path::resolve_paths;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
 use crate::expr::filter::{self, Filter};
@@ -106,8 +106,9 @@ pub fn run(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths to realpaths
-    let scope_prefixes = canonicalize_scopes(scope_paths)?;
+    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
+    let all_roots = repo::root::fetch_all(conn)?;
+    let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
 
     // Get all matching source IDs using domain predicates
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
@@ -954,8 +955,9 @@ pub fn delete_facts(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths
-    let scope_prefixes = canonicalize_scopes(scope_paths)?;
+    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
+    let all_roots = repo::root::fetch_all(conn)?;
+    let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
 
     // Get matching source IDs (include all for delete operations)

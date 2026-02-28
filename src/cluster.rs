@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::domain::path::canonicalize_scopes;
+use crate::domain::path::resolve_paths;
 use crate::domain::root::resolve_archive_path;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
@@ -216,8 +216,8 @@ pub fn generate(
     // Resolve destination to archive root + relative subdir
     let (archive_root_id, _archive_root_path, base_dir) = resolve_archive_path(&all_roots, dest)?;
 
-    // Resolve scope paths to realpaths
-    let scope_prefixes = canonicalize_scopes(scope_paths)?;
+    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
+    let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
 
     let parsed_filters: Vec<Filter> = expanded_filters
         .iter()

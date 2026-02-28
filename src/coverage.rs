@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::domain::path::canonicalize_scopes;
+use crate::domain::path::resolve_paths;
 use crate::domain::root::{parse_root_spec, Root};
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
@@ -76,12 +76,12 @@ pub fn run(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths
-    let scope_prefixes = canonicalize_scopes(scope_paths)?;
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
-
-    // Fetch all roots for spec resolution
+    // Fetch all roots for path and spec resolution
     let roots = repo::root::fetch_all(conn)?;
+
+    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
+    let scope_prefixes = resolve_paths(scope_paths, &roots)?;
+    let scopes = ScopeMatch::classify_all(&scope_prefixes);
 
     // Parse and validate archive spec (must be archive role)
     let archive_root_id = if let Some(spec) = archive_spec {

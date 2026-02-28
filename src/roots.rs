@@ -1,29 +1,27 @@
-use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 
 use crate::ceremony;
+use crate::domain::path::resolve_path;
 use crate::domain::{parse_root_spec, parse_root_spec_any, Root};
 use crate::repo::{self, Db};
 
 pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
     let conn = db.conn();
 
-    // Canonicalize scope path if provided
-    let scope_str = match scope {
-        Some(p) => Some(
-            fs::canonicalize(p)
-                .map_err(|e| anyhow::anyhow!("Failed to resolve path '{}': {}", p.display(), e))?
-                .to_string_lossy()
-                .to_string(),
-        ),
-        None => None,
-    };
-
     // Fetch all roots using repository layer
     let all_roots = repo::root::fetch_all(conn)?;
+
+    // Resolve scope path if provided (soft resolution: matches known roots, falls back to fs)
+    let scope_str = match scope {
+        Some(p) => {
+            let cwd = std::env::current_dir()?;
+            Some(resolve_path(p, &all_roots, &cwd)?)
+        }
+        None => None,
+    };
 
     // Apply domain predicates for filtering
     let filtered_roots: Vec<&Root> = all_roots

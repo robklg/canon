@@ -1,8 +1,8 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::domain::path::canonicalize_scope;
+use crate::domain::path::resolve_path;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::domain::IncludeSet;
@@ -27,24 +27,19 @@ pub fn run(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Canonicalize both paths
-    let scope_a = canonicalize_scope(Some(path_a))?;
-    let scope_b = canonicalize_scope(Some(path_b))?;
-
-    let Some(ref prefix_a) = scope_a else {
-        bail!("Path A does not exist: {}", path_a.display());
-    };
-    let Some(ref prefix_b) = scope_b else {
-        bail!("Path B does not exist: {}", path_b.display());
-    };
-
     let conn = db.conn_mut();
+
+    // Resolve both paths (soft resolution: matches known roots, falls back to fs)
+    let all_roots = repo::root::fetch_all(conn)?;
+    let cwd = std::env::current_dir()?;
+    let prefix_a = resolve_path(path_a, &all_roots, &cwd)?;
+    let prefix_b = resolve_path(path_b, &all_roots, &cwd)?;
 
     // Query sources in each scope
     let (sources_a, unhashed_a) =
-        get_sources_in_scope(conn, prefix_a, &filters, &options.include)?;
+        get_sources_in_scope(conn, &prefix_a, &filters, &options.include)?;
     let (sources_b, unhashed_b) =
-        get_sources_in_scope(conn, prefix_b, &filters, &options.include)?;
+        get_sources_in_scope(conn, &prefix_b, &filters, &options.include)?;
 
     // Build object_id sets
     let objects_a: HashSet<i64> = sources_a.keys().copied().collect();

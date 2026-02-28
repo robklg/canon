@@ -652,6 +652,7 @@ fn main() -> Result<()> {
                 ls::show_duplicates(
                     &mut db,
                     &scope_paths,
+                    &all_roots,
                     &filters,
                     &include,
                     use_relative,
@@ -660,6 +661,7 @@ fn main() -> Result<()> {
                 ls::run(
                     &mut db,
                     &scope_paths,
+                    &all_roots,
                     &filters,
                     archived.as_deref(),
                     unarchived,

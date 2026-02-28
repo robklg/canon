@@ -8,7 +8,9 @@
 
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+
+use super::root::{find_containing_root, Root};
 
 /// Check if a path is equal to or under a directory prefix.
 /// Uses Path::starts_with which correctly handles directory boundaries.
@@ -31,35 +33,69 @@ pub fn path_strip_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 // ============================================================================
-// Path Canonicalization (Filesystem I/O)
+// Soft Path Resolution (offline-capable)
 // ============================================================================
 
-/// Canonicalize an optional scope path for use in SQL path matching.
-/// Returns the canonical (absolute, resolved) path as a string.
-pub fn canonicalize_scope(scope_path: Option<&Path>) -> Result<Option<String>> {
-    match scope_path {
-        Some(p) => Ok(Some(
-            fs::canonicalize(p)
-                .with_context(|| format!("Failed to resolve path: {}", p.display()))?
-                .to_string_lossy()
-                .to_string(),
-        )),
-        None => Ok(None),
+/// Clean a path lexically: make absolute (relative to cwd), resolve `.` and `..`
+/// without filesystem access. Does NOT resolve symlinks or normalize case.
+pub fn clean_path(path: &Path, cwd: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let mut components = Vec::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Don't pop past the root
+                if components
+                    .last()
+                    .is_some_and(|c| matches!(c, Component::Normal(_)))
+                {
+                    components.pop();
+                }
+            }
+            other => components.push(other),
+        }
+    }
+    components.iter().collect()
+}
+
+/// Resolve a single path against known roots, falling back to fs::canonicalize().
+/// Use for source-querying commands. File-accessing commands (scan) use
+/// fs::canonicalize directly.
+pub fn resolve_path(path: &Path, roots: &[Root], cwd: &Path) -> Result<String> {
+    let cleaned = clean_path(path, cwd);
+    let cleaned_str = cleaned.to_string_lossy();
+
+    // Try matching against known roots first (works offline)
+    if find_containing_root(&cleaned_str, roots).is_some() {
+        return Ok(cleaned_str.into_owned());
+    }
+
+    // Fall back to fs::canonicalize (requires path to exist on disk)
+    match fs::canonicalize(path) {
+        Ok(canonical) => Ok(canonical.to_string_lossy().into_owned()),
+        Err(_) => bail!(
+            "Failed to resolve path: {}\n\
+             Path does not match any known root and is not accessible \
+             on disk (is the storage attached?)",
+            path.display()
+        ),
     }
 }
 
-/// Canonicalize multiple scope paths for use in SQL path matching.
-/// Returns canonical (absolute, resolved) paths as strings.
-pub fn canonicalize_scopes(paths: &[PathBuf]) -> Result<Vec<String>> {
-    paths
-        .iter()
-        .map(|p| {
-            fs::canonicalize(p)
-                .with_context(|| format!("Failed to resolve path: {}", p.display()))
-                .map(|cp| cp.to_string_lossy().to_string())
-        })
-        .collect()
+/// Resolve multiple paths against known roots.
+pub fn resolve_paths(paths: &[PathBuf], roots: &[Root]) -> Result<Vec<String>> {
+    let cwd = std::env::current_dir().context("Failed to determine current directory")?;
+    paths.iter().map(|p| resolve_path(p, roots, &cwd)).collect()
 }
+
+// ============================================================================
+// Path Canonicalization (Filesystem I/O)
+// ============================================================================
 
 /// Canonicalize a path that may not exist yet by finding the nearest existing
 /// ancestor and appending the remaining components.
@@ -160,5 +196,132 @@ mod tests {
     #[test]
     fn path_strip_prefix_unrelated() {
         assert_eq!(path_strip_prefix("/x/y", "/a/b"), None);
+    }
+
+    // ========================================================================
+    // clean_path tests (pure, no filesystem)
+    // ========================================================================
+
+    #[test]
+    fn clean_absolute_no_dots() {
+        let result = clean_path(Path::new("/a/b/c"), Path::new("/any"));
+        assert_eq!(result, PathBuf::from("/a/b/c"));
+    }
+
+    #[test]
+    fn clean_relative_joins_cwd() {
+        let result = clean_path(Path::new("b/c"), Path::new("/a"));
+        assert_eq!(result, PathBuf::from("/a/b/c"));
+    }
+
+    #[test]
+    fn clean_dotdot() {
+        let result = clean_path(Path::new("/a/b/../c"), Path::new("/any"));
+        assert_eq!(result, PathBuf::from("/a/c"));
+    }
+
+    #[test]
+    fn clean_dot() {
+        let result = clean_path(Path::new("/a/./b/c"), Path::new("/any"));
+        assert_eq!(result, PathBuf::from("/a/b/c"));
+    }
+
+    #[test]
+    fn clean_multiple_dotdot() {
+        let result = clean_path(Path::new("/a/b/c/../../d"), Path::new("/any"));
+        assert_eq!(result, PathBuf::from("/a/d"));
+    }
+
+    #[test]
+    fn clean_dotdot_past_root() {
+        let result = clean_path(Path::new("/a/../../b"), Path::new("/any"));
+        assert_eq!(result, PathBuf::from("/b"));
+    }
+
+    #[test]
+    fn clean_relative_with_dotdot() {
+        let result = clean_path(Path::new("../b"), Path::new("/a/c"));
+        assert_eq!(result, PathBuf::from("/a/b"));
+    }
+
+    #[test]
+    fn clean_trailing_slash() {
+        let result = clean_path(Path::new("/a/b/"), Path::new("/any"));
+        assert_eq!(result, PathBuf::from("/a/b"));
+    }
+
+    #[test]
+    fn clean_just_root() {
+        let result = clean_path(Path::new("/"), Path::new("/any"));
+        assert_eq!(result, PathBuf::from("/"));
+    }
+
+    #[test]
+    fn clean_empty_relative() {
+        let result = clean_path(Path::new(""), Path::new("/a/b"));
+        assert_eq!(result, PathBuf::from("/a/b"));
+    }
+
+    // ========================================================================
+    // resolve_path tests (using fake Root structs, no DB)
+    // ========================================================================
+
+    fn make_test_root(id: i64, path: &str) -> Root {
+        Root {
+            id,
+            path: path.to_string(),
+            role: "source".to_string(),
+            comment: None,
+            last_scanned_at: None,
+            suspended: false,
+        }
+    }
+
+    #[test]
+    fn resolve_matches_known_root_exact() {
+        let roots = vec![make_test_root(1, "/a/b")];
+        let result = resolve_path(Path::new("/a/b"), &roots, Path::new("/any"));
+        assert_eq!(result.unwrap(), "/a/b");
+    }
+
+    #[test]
+    fn resolve_matches_under_root() {
+        let roots = vec![make_test_root(1, "/a/b")];
+        let result = resolve_path(Path::new("/a/b/c/d"), &roots, Path::new("/any"));
+        assert_eq!(result.unwrap(), "/a/b/c/d");
+    }
+
+    #[test]
+    fn resolve_relative_matches_root() {
+        let roots = vec![make_test_root(1, "/a/b")];
+        let result = resolve_path(Path::new("b/c"), &roots, Path::new("/a"));
+        assert_eq!(result.unwrap(), "/a/b/c");
+    }
+
+    #[test]
+    fn resolve_dotdot_matches_root() {
+        let roots = vec![make_test_root(1, "/a/b")];
+        let result = resolve_path(Path::new("/a/x/../b/c"), &roots, Path::new("/any"));
+        assert_eq!(result.unwrap(), "/a/b/c");
+    }
+
+    #[test]
+    fn resolve_no_match_returns_error() {
+        let roots = vec![make_test_root(1, "/a/b")];
+        let result = resolve_path(Path::new("/nonexistent/path"), &roots, Path::new("/any"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not accessible on disk"));
+        assert!(err.contains("is the storage attached?"));
+    }
+
+    #[test]
+    fn resolve_suspended_root_still_matches() {
+        let roots = vec![Root {
+            suspended: true,
+            ..make_test_root(1, "/a/b")
+        }];
+        let result = resolve_path(Path::new("/a/b/c"), &roots, Path::new("/any"));
+        assert_eq!(result.unwrap(), "/a/b/c");
     }
 }

@@ -29,3 +29,9 @@ Archive roots:
   /Volumes/Archive/Photos  (canonical photo library)
   /Volumes/Archive/Music   (canonical music library)
 ```
+
+## Offline Access
+
+Query commands (`ls`, `facts`, `coverage`, `worklist`, `compare`, `cluster generate`, `exclude`, `roots`) work even when the underlying storage is detached. Canon resolves path arguments against known roots in the database, so you can explore sources, check coverage, and generate manifests without the storage being physically attached.
+
+Commands that access file contents (`scan`, `apply`) still require the storage to be online.

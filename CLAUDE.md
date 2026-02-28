@@ -184,7 +184,9 @@ Used with `--root`, `--archive` flags:
 
 In `domain/path.rs`:
 - `path_is_under()`, `path_strip_prefix()` - Pure path manipulation (no I/O)
-- `canonicalize_scope()`, `canonicalize_scopes()` - Path canonicalization (filesystem I/O)
+- `clean_path()` - Pure lexical path cleaning: make absolute, resolve `.`/`..` without filesystem access
+- `resolve_path()`, `resolve_paths()` - Soft path resolution: match against known roots (works offline), fall back to `fs::canonicalize`. Use for source-querying commands.
+- `canonicalize_maybe_missing()` - Canonicalize a path where the leaf may not exist yet (walks up to find existing ancestor). Used by `resolve_archive_path`.
 
 In `domain/scope.rs`:
 - `ScopeMatch` enum - Domain concept for file vs directory scope matching
@@ -417,7 +419,9 @@ let filtered: Vec<Source> = sources.into_iter()
 **Path Handling Principle: SQL NEVER constructs or compares paths.**
 - **Repo layer** returns `Source` objects with `root_path` populated (via JOIN)
 - **Domain layer** computes paths using `Source::path()` and compares using `path_is_under()`
-- **Command layer** canonicalizes CLI arguments — this is the ONLY place filesystem I/O happens for paths
+- **Command layer** resolves CLI path arguments — two strategies:
+  - **Source-querying commands** (ls, facts, coverage, worklist, compare, exclude, roots, cluster generate): Use `resolve_paths()` — soft resolution that matches against known roots in the DB (works offline), falling back to `fs::canonicalize` only when no root matches.
+  - **File-accessing commands** (scan): Use `fs::canonicalize` directly — hard resolution that requires the path to exist on disk.
 - See `domain/exclusion.rs` for the reference implementation
 
 **When Adding New Features:**

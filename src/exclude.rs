@@ -1,10 +1,10 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::ceremony;
 use crate::domain::exclusion::find_excludable_duplicates;
-use crate::domain::path::canonicalize_scopes;
+use crate::domain::path::{resolve_path, resolve_paths};
 use crate::domain::root::find_containing_root;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
@@ -44,8 +44,9 @@ pub fn set(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths
-    let scope_prefixes = canonicalize_scopes(scope_paths)?;
+    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
+    let all_roots = repo::root::fetch_all(conn)?;
+    let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
 
     // Get matching sources (only from source roots, exclude already-excluded)
     let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, false)?;
@@ -120,8 +121,9 @@ pub fn clear(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths
-    let scope_prefixes = canonicalize_scopes(scope_paths)?;
+    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
+    let all_roots = repo::root::fetch_all(conn)?;
+    let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
 
     // Get excluded sources matching filters
     let excluded_sources = get_excluded_sources(conn, &scope_prefixes, &filters)?;
@@ -346,17 +348,13 @@ pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
 pub fn set_by_path(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()> {
     let conn = db.conn();
 
-    // Canonicalize the path (command boundary I/O)
-    let canonical = std::fs::canonicalize(file_path)
-        .with_context(|| format!("Failed to resolve path: {}", file_path.display()))?;
-    let path_str = canonical
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
+    // Resolve path (soft resolution: matches known roots, falls back to fs)
+    let roots = repo::root::fetch_all(conn)?;
+    let cwd = std::env::current_dir()?;
+    let path_str = resolve_path(file_path, &roots, &cwd)?;
 
     // Find which root contains this path (domain layer)
-    let roots = repo::root::fetch_all(conn)?;
-
-    let Some((root_id, _root_path, _role, rel_path)) = find_containing_root(path_str, &roots)
+    let Some((root_id, _root_path, _role, rel_path)) = find_containing_root(&path_str, &roots)
     else {
         anyhow::bail!("No source found for path: {}", file_path.display());
     };
@@ -415,17 +413,15 @@ pub fn exclude_duplicates(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve paths (canonicalization happens at command boundary)
+    // Resolve paths (soft resolution: matches known roots, falls back to fs)
+    let all_roots = repo::root::fetch_all(conn)?;
+    let cwd = std::env::current_dir()?;
     let scope_prefixes: Vec<String> = if let Some(p) = scope_path {
-        vec![std::fs::canonicalize(p)
-            .map(|cp| cp.to_string_lossy().to_string())
-            .unwrap_or_else(|_| p.to_string_lossy().to_string())]
+        vec![resolve_path(p, &all_roots, &cwd)?]
     } else {
         vec![]
     };
-    let prefer_prefix = std::fs::canonicalize(prefer_path)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| prefer_path.to_string_lossy().to_string());
+    let prefer_prefix = resolve_path(prefer_path, &all_roots, &cwd)?;
 
     // Get matching source IDs in scope (candidates for exclusion)
     let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, false)?;
@@ -578,17 +574,13 @@ pub fn set_object_by_hash(db: &Db, hash: &str, options: &SetOptions) -> Result<(
 pub fn set_object_by_file(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()> {
     let conn = db.conn();
 
-    // Canonicalize the path (command boundary I/O)
-    let canonical = std::fs::canonicalize(file_path)
-        .with_context(|| format!("Failed to resolve path: {}", file_path.display()))?;
-    let path_str = canonical
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
+    // Resolve path (soft resolution: matches known roots, falls back to fs)
+    let roots = repo::root::fetch_all(conn)?;
+    let cwd = std::env::current_dir()?;
+    let path_str = resolve_path(file_path, &roots, &cwd)?;
 
     // Find which root contains this path (domain layer)
-    let roots = repo::root::fetch_all(conn)?;
-
-    let Some((root_id, _root_path, _role, rel_path)) = find_containing_root(path_str, &roots)
+    let Some((root_id, _root_path, _role, rel_path)) = find_containing_root(&path_str, &roots)
     else {
         anyhow::bail!(
             "No hashed source found for path: {}\n  (File must be scanned and hashed first)",
@@ -648,8 +640,9 @@ pub fn set_objects_by_filter(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths
-    let scope_prefixes = canonicalize_scopes(scope_paths)?;
+    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
+    let all_roots = repo::root::fetch_all(conn)?;
+    let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
 
     // Get matching sources (only from source roots, include already-excluded to find their objects)
     let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, true)?;

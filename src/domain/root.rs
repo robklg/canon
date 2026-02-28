@@ -10,10 +10,9 @@
 //! resolution functions.
 
 use anyhow::{bail, Context, Result};
-use std::fs;
 use std::path::Path;
 
-use super::path::{canonicalize_maybe_missing, path_strip_prefix};
+use super::path::{canonicalize_maybe_missing, clean_path, path_strip_prefix, resolve_path};
 
 // ============================================================================
 // Domain Concepts (pure, no I/O)
@@ -180,17 +179,15 @@ fn parse_root_spec_impl(
                 .ok_or_else(|| anyhow::anyhow!("No root with id {id}"))?;
             (root.id, root.role.clone())
         }
-        RootSpec::ByPath(path) => {
-            // Canonicalize (filesystem I/O - only infrastructure in this function)
-            let realpath = fs::canonicalize(&path)
-                .with_context(|| format!("Failed to resolve path: {path}"))?;
-            let realpath_str = realpath
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
-
+        RootSpec::ByPath(ref path) => {
+            let cwd = std::env::current_dir()
+                .context("Failed to determine current directory")?;
+            // Resolve against ALL roots (including suspended) for path recognition
+            let canonical = resolve_path(Path::new(path), roots, &cwd)?;
+            // Find among filtered candidates (respects suspension filter)
             let root = candidates
                 .iter()
-                .find(|r| r.path == realpath_str)
+                .find(|r| r.path == canonical)
                 .ok_or_else(|| anyhow::anyhow!("No root for path: {path}"))?;
             (root.id, root.role.clone())
         }
@@ -234,14 +231,12 @@ fn resolve_root_path_impl(
     path: &Path,
     include_suspended: bool,
 ) -> Result<Option<(i64, String, String, String)>> {
-    // Canonicalize (filesystem I/O - only infrastructure in this function)
-    let canon_path = fs::canonicalize(path)
-        .with_context(|| format!("Failed to resolve path: {}", path.display()))?;
-    let path_str = canon_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
+    let cwd = std::env::current_dir()
+        .context("Failed to determine current directory")?;
+    // Resolve against ALL roots for path recognition (soft resolution)
+    let path_str = resolve_path(path, roots, &cwd)?;
 
-    // Filter roots by suspension status
+    // Filter roots by suspension status for the containing-root lookup
     let candidates: Vec<Root> = roots
         .iter()
         .filter(|r| include_suspended || r.is_active())
@@ -249,7 +244,7 @@ fn resolve_root_path_impl(
         .collect();
 
     // Find containing root (pure domain logic)
-    Ok(find_containing_root(path_str, &candidates))
+    Ok(find_containing_root(&path_str, &candidates))
 }
 
 /// Resolve a path to its containing archive root and relative subdir.
@@ -261,8 +256,19 @@ fn resolve_root_path_impl(
 ///
 /// Returns (root_id, root_path, relative_subdir) or error if not in an archive.
 pub fn resolve_archive_path(roots: &[Root], path: &Path) -> Result<(i64, String, String)> {
-    // Canonicalize path (allowing non-existent subdirs) - filesystem I/O
-    let path_str = canonicalize_maybe_missing(path)?;
+    // Soft resolution: try matching against known roots first (works offline),
+    // then fall back to canonicalize_maybe_missing (tolerates non-existent subdirs)
+    let cwd = std::env::current_dir()
+        .context("Failed to determine current directory")?;
+    let cleaned = clean_path(path, &cwd);
+    let cleaned_str = cleaned.to_string_lossy();
+
+    let path_str = if find_containing_root(&cleaned_str, roots).is_some() {
+        cleaned_str.into_owned()
+    } else {
+        // Fallback: canonicalize (tolerating non-existent subdirectories)
+        canonicalize_maybe_missing(path)?
+    };
 
     // Filter to active roots only
     let candidates: Vec<&Root> = roots.iter().filter(|r| r.is_active()).collect();
@@ -653,6 +659,57 @@ mod tests {
 
         // parse_root_spec_any should include suspended roots
         let result = parse_root_spec_any(&roots, "id:1");
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    // ========================================================================
+    // parse_root_spec ByPath tests (soft resolution)
+    // ========================================================================
+
+    #[test]
+    fn parse_root_spec_by_path_matches_root() {
+        let roots = vec![make_root_with(1, "/a/b", "source")];
+        let result = parse_root_spec(&roots, "path:/a/b", None);
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_root_spec_by_path_no_match() {
+        let roots = vec![make_root_with(1, "/a/b", "source")];
+        let result = parse_root_spec(&roots, "path:/nonexistent", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_root_spec_by_path_role_filter() {
+        let roots = vec![make_root_with(1, "/a/b", "source")];
+        // Root exists but has wrong role
+        let result = parse_root_spec(&roots, "path:/a/b", Some("archive"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("role 'source', expected 'archive'"));
+    }
+
+    #[test]
+    fn parse_root_spec_by_path_suspended_excluded() {
+        let mut root = make_root_with(1, "/a/b", "source");
+        root.suspended = true;
+        let roots = vec![root];
+        // Path resolves (against all roots) but root is filtered out of candidates
+        let result = parse_root_spec(&roots, "path:/a/b", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No root for path"));
+    }
+
+    #[test]
+    fn parse_root_spec_any_by_path_suspended_included() {
+        let mut root = make_root_with(1, "/a/b", "source");
+        root.suspended = true;
+        let roots = vec![root];
+        // parse_root_spec_any includes suspended roots
+        let result = parse_root_spec_any(&roots, "path:/a/b");
         assert_eq!(result.unwrap(), 1);
     }
 }

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use crate::domain::path::canonicalize_scopes;
+use crate::domain::path::resolve_paths;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::domain::IncludeSet;
@@ -73,11 +73,12 @@ pub fn run(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths to realpaths and classify
-    let scope_prefixes = canonicalize_scopes(scope_paths)?;
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
-
     let conn = db.conn_mut();
+
+    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
+    let all_roots = repo::root::fetch_all(conn)?;
+    let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
+    let scopes = ScopeMatch::classify_all(&scope_prefixes);
 
     // Fetch all matching sources using domain predicates
     let (sources, excluded_count) =
