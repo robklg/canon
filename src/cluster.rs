@@ -138,7 +138,7 @@ fn generate_lock(
 
     // Report archived files
     if !qr.archived.is_empty() {
-        eprintln!("Excluded {} files already in archive(s)", qr.archived.len());
+        eprintln!("Excluded {} sources already in archive(s)", qr.archived.len());
         if options.show_archived {
             eprintln!("Archived files:");
             for (source_path, archive_path) in &qr.archived {

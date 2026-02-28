@@ -200,7 +200,12 @@ pub fn suspend(db: &Db, spec: &str) -> Result<()> {
     }
 
     repo::root::set_suspended(conn, root_id, true)?;
-    println!("Suspended root {}: {}", root_id, root.path);
+    let counts = repo::root::fetch_file_counts(conn, &[root_id])?;
+    let count = counts.get(&root_id).copied().unwrap_or(0) as usize;
+    println!(
+        "Suspended root {}: {} ({} sources)",
+        root_id, root.path, ceremony::format_count(count)
+    );
     Ok(())
 }
 
@@ -222,6 +227,11 @@ pub fn unsuspend(db: &Db, spec: &str) -> Result<()> {
     }
 
     repo::root::set_suspended(conn, root_id, false)?;
-    println!("Unsuspended root {}: {}", root_id, root.path);
+    let counts = repo::root::fetch_file_counts(conn, &[root_id])?;
+    let count = counts.get(&root_id).copied().unwrap_or(0) as usize;
+    println!(
+        "Unsuspended root {}: {} ({} sources)",
+        root_id, root.path, ceremony::format_count(count)
+    );
     Ok(())
 }

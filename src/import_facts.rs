@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::ceremony;
 use crate::domain::fact::{is_content_fact, normalize_fact_key, FactValueType};
 use crate::repo::{self, Connection, Db};
 
@@ -141,14 +142,14 @@ pub fn run(db: &mut Db, allow_archived: bool, verbose: bool) -> Result<()> {
 
     println!(
         "Processed {} lines: {} facts imported, {} skipped (stale), {} skipped (reserved), {} skipped (archived), {} skipped (type mismatch), {} objects created, {} facts promoted",
-        stats.lines_processed,
-        stats.facts_imported,
-        stats.skipped_stale,
-        stats.skipped_reserved,
-        stats.skipped_archived,
-        stats.skipped_type_mismatch,
-        stats.objects_created,
-        stats.facts_promoted
+        ceremony::format_count(stats.lines_processed as usize),
+        ceremony::format_count(stats.facts_imported as usize),
+        ceremony::format_count(stats.skipped_stale as usize),
+        ceremony::format_count(stats.skipped_reserved as usize),
+        ceremony::format_count(stats.skipped_archived as usize),
+        ceremony::format_count(stats.skipped_type_mismatch as usize),
+        ceremony::format_count(stats.objects_created as usize),
+        ceremony::format_count(stats.facts_promoted as usize)
     );
 
     // Update query planner statistics after bulk changes
