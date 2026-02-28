@@ -1,10 +1,10 @@
 use std::fs;
-use std::io::{self, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
+use crate::ceremony;
 use crate::domain::{parse_root_spec, parse_root_spec_any, Root};
 use crate::repo::{self, Db};
 
@@ -149,14 +149,10 @@ pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
         eprintln!("To see which sources will be forgotten:");
         eprintln!("  canon ls {}", root.path);
         eprintln!();
-        eprint!("Proceed? [y/N] ");
-        io::stderr().flush()?;
+    }
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        if !input.trim().eq_ignore_ascii_case("y") {
-            bail!("Aborted");
-        }
+    if !ceremony::confirm(yes)? {
+        return Ok(());
     }
 
     // Delete facts, sources, and root via repo function

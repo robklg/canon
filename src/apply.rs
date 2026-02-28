@@ -7,6 +7,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::ceremony;
 use crate::cluster::{LockEntry, ManifestConfig};
 use crate::domain::apply::{classify_destination, DestinationState};
 use crate::domain::fact::FactEntry;
@@ -22,7 +23,7 @@ use crate::scan::compute_partial_hash;
 pub enum TransferMode {
     Copy,   // Default: copy only, source remains
     Rename, // Unix only, error if cross-device
-    Move,   // Try rename, fallback to copy+delete on EXDEV (requires --yes)
+    Move,   // Try rename, fallback to copy+delete on EXDEV
 }
 
 #[derive(Default)]
@@ -254,10 +255,9 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     let skipped_by_filter = sources.len() - filtered_sources.len();
 
     // Show summary and confirm (unless --yes)
-    print_apply_summary(&config_path, &base_dir, &filtered_sources, options);
+    print_apply_summary(&config_path, &base_dir, &filtered_sources, options, &root_paths);
 
-    if !options.yes && !confirm_proceed(options.dry_run)? {
-        println!("Aborted.");
+    if !ceremony::confirm(options.yes)? {
         return Ok(());
     }
 
@@ -727,6 +727,7 @@ fn print_apply_summary(
     base_dir: &Path,
     sources: &[&LockEntry],
     options: &ApplyOptions,
+    root_paths: &HashMap<i64, String>,
 ) {
     eprintln!();
     eprintln!("=== Apply Summary ===");
@@ -735,11 +736,31 @@ fn print_apply_summary(
 
     let mode_name = match options.transfer_mode {
         TransferMode::Copy => "copy",
-        TransferMode::Rename => "rename",
-        TransferMode::Move => "move",
+        TransferMode::Rename => "rename (sources will be relocated)",
+        TransferMode::Move => "move (sources will be deleted after copy)",
     };
     eprintln!("Mode: {mode_name}");
     eprintln!("Files: {}", sources.len());
+
+    // "Sources from:" section for rename/move (not copy)
+    if options.transfer_mode != TransferMode::Copy {
+        let mut by_root: HashMap<i64, usize> = HashMap::new();
+        for source in sources {
+            *by_root.entry(source.root_id).or_insert(0) += 1;
+        }
+        let mut root_entries: Vec<(&str, usize)> = by_root
+            .iter()
+            .filter_map(|(root_id, count)| {
+                root_paths.get(root_id).map(|p| (p.as_str(), *count))
+            })
+            .collect();
+        root_entries.sort_by_key(|(path, _)| *path);
+
+        eprintln!("Sources from:");
+        for (path, count) in &root_entries {
+            eprintln!("  {path}  ({count} files)");
+        }
+    }
 
     // Show destination preview if exists
     if base_dir.exists() {
@@ -789,22 +810,6 @@ fn show_directory_preview(dir: &Path, max_items: usize) {
             eprintln!("  ... and {remaining} more");
         }
     }
-}
-
-fn confirm_proceed(dry_run: bool) -> Result<bool> {
-    use std::io::{self, Write};
-
-    if dry_run {
-        eprint!("Proceed with dry-run? [y/N] ");
-    } else {
-        eprint!("Proceed? [y/N] ");
-    }
-    io::stderr().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-
-    Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
 // ============================================================================

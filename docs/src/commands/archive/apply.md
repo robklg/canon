@@ -19,7 +19,7 @@ canon apply manifest.toml --resume
 canon apply manifest.toml --rename
 
 # Move files: rename if same device, copy+delete if cross-device
-canon apply manifest.toml --move --yes
+canon apply manifest.toml --move
 
 # Only apply sources from specific roots
 canon apply manifest.toml --root id:1 --root id:2
@@ -38,7 +38,7 @@ canon apply manifest.toml --allow cross-archive-duplicates
 |------|----------|
 | (default) | Copy + preserve mtime/permissions (Unix) |
 | `--rename` | Atomic rename; fails if cross-device (Unix only) |
-| `--move` | Try rename; fallback to copy+delete on cross-device (Unix only, requires `--yes`) |
+| `--move` | Try rename; fallback to copy+delete on cross-device (Unix only) |
 
 All modes use noclobber semantics: if a destination file exists, apply aborts with an error.
 

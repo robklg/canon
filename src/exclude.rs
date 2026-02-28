@@ -2,10 +2,12 @@ use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::ceremony;
 use crate::domain::exclusion::find_excludable_duplicates;
 use crate::domain::path::canonicalize_scopes;
 use crate::domain::root::find_containing_root;
 use crate::domain::scope::ScopeMatch;
+use crate::domain::source::Source;
 use crate::expr::filter::{self, Filter};
 use crate::repo::{self, Connection, Db};
 
@@ -16,10 +18,12 @@ use crate::repo::{self, Connection, Db};
 pub struct SetOptions {
     pub dry_run: bool,
     pub verbose: bool,
+    pub yes: bool,
 }
 
 pub struct ClearOptions {
     pub dry_run: bool,
+    pub yes: bool,
 }
 
 // ============================================================================
@@ -73,6 +77,21 @@ pub fn set(
         return Ok(());
     }
 
+    // Confirmation when affecting > 1 source
+    if to_exclude.len() > 1 {
+        if !options.yes {
+            let confirm_data = compute_set_confirmation(conn, &to_exclude, &sources_map)?;
+
+            eprintln!("Will exclude {} sources", to_exclude.len());
+            eprintln!("  Across {} roots", confirm_data.root_count);
+            eprintln!("  {} have no archived copy", confirm_data.not_archived);
+        }
+
+        if !ceremony::confirm(options.yes)? {
+            return Ok(());
+        }
+    }
+
     // Mark sources as excluded
     for source_id in &to_exclude {
         repo::source::set_excluded(conn, *source_id, true)?;
@@ -116,15 +135,32 @@ pub fn clear(
             "Would clear exclusions for {} sources:",
             excluded_sources.len()
         );
-        for (_, path) in &excluded_sources {
-            println!("  {path}");
+        for s in &excluded_sources {
+            println!("  {}", s.path());
         }
         return Ok(());
     }
 
+    // Confirmation when affecting > 1 source
+    if excluded_sources.len() > 1 {
+        if !options.yes {
+            let root_ids: HashSet<i64> = excluded_sources.iter().map(|s| s.root_id).collect();
+
+            eprintln!(
+                "Will clear exclusions for {} sources",
+                excluded_sources.len()
+            );
+            eprintln!("  Across {} roots", root_ids.len());
+        }
+
+        if !ceremony::confirm(options.yes)? {
+            return Ok(());
+        }
+    }
+
     // Clear exclusions
-    for (source_id, _) in &excluded_sources {
-        repo::source::set_excluded(conn, *source_id, false)?;
+    for s in &excluded_sources {
+        repo::source::set_excluded(conn, s.id, false)?;
     }
 
     println!("Cleared exclusions for {} sources", excluded_sources.len());
@@ -134,6 +170,52 @@ pub fn clear(
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+/// Data for exclude set confirmation prompt
+struct SetConfirmation {
+    root_count: usize,
+    not_archived: usize,
+}
+
+/// Compute confirmation data for exclude set.
+/// Counts distinct roots and sources without archived copies.
+fn compute_set_confirmation(
+    conn: &Connection,
+    to_exclude: &[i64],
+    sources_map: &std::collections::HashMap<i64, Source>,
+) -> Result<SetConfirmation> {
+    // Collect distinct root_ids
+    let root_ids: HashSet<i64> = to_exclude
+        .iter()
+        .filter_map(|id| sources_map.get(id).map(|s| s.root_id))
+        .collect();
+
+    // Collect object_ids for archive coverage check
+    let object_ids: Vec<i64> = to_exclude
+        .iter()
+        .filter_map(|id| sources_map.get(id).and_then(|s| s.object_id))
+        .collect();
+    let archived_set = repo::object::batch_check_archived(conn, &object_ids, None)?;
+
+    // Count sources with no archived copy (object_id is None or not in archived set)
+    let not_archived = to_exclude
+        .iter()
+        .filter(|id| {
+            sources_map
+                .get(id)
+                .map(|s| match s.object_id {
+                    None => true,
+                    Some(oid) => !archived_set.contains(&oid),
+                })
+                .unwrap_or(true)
+        })
+        .count();
+
+    Ok(SetConfirmation {
+        root_count: root_ids.len(),
+        not_archived,
+    })
+}
 
 fn get_matching_sources(
     conn: &mut Connection,
@@ -178,7 +260,7 @@ fn get_excluded_sources(
     conn: &mut Connection,
     scope_prefixes: &[String],
     filters: &[Filter],
-) -> Result<Vec<(i64, String)>> {
+) -> Result<Vec<Source>> {
     // Get all source root IDs (active, source role only)
     let roots = repo::root::fetch_all(conn)?;
     let source_root_ids: Vec<i64> = roots
@@ -199,11 +281,10 @@ fn get_excluded_sources(
 
     // Filter for DIRECTLY excluded sources only (s.excluded = true)
     // NOT s.is_excluded() which would include object-level exclusions
-    let filtered: Vec<(i64, String)> = sources
+    let filtered: Vec<Source> = sources
         .into_iter()
         .filter(|s| scopes.is_empty() || s.matches_scope(&scopes))
         .filter(|s| s.excluded) // Source-level exclusion only
-        .map(|s| (s.id, s.path()))
         .collect();
 
     // Apply --where filters if present
@@ -211,15 +292,15 @@ fn get_excluded_sources(
         return Ok(filtered);
     }
 
-    // Apply filters and preserve paths
-    let ids: Vec<i64> = filtered.iter().map(|(id, _)| *id).collect();
-    let filtered_ids: std::collections::HashSet<i64> = filter::apply_filters(conn, &ids, filters)?
+    // Apply filters and preserve sources
+    let ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
+    let filtered_ids: HashSet<i64> = filter::apply_filters(conn, &ids, filters)?
         .into_iter()
         .collect();
 
     Ok(filtered
         .into_iter()
-        .filter(|(id, _)| filtered_ids.contains(id))
+        .filter(|s| filtered_ids.contains(&s.id))
         .collect())
 }
 
@@ -322,6 +403,7 @@ pub fn exclude_duplicates(
     scope_path: Option<&Path>,
     filter_strs: &[String],
     dry_run: bool,
+    yes: bool,
 ) -> Result<()> {
     let conn = db.conn_mut();
 
@@ -379,42 +461,75 @@ pub fn exclude_duplicates(
         .filter_map(|id| scope_sources_map.get(id).map(|s| (*id, s.path())))
         .collect();
 
-    // Summary header
-    println!(
-        "Sources in scope: {} ({} unhashed skipped)",
-        source_ids.len(),
-        result.skipped_no_hash
-    );
-    println!("  Will exclude: {}", to_exclude_with_paths.len());
-    println!(
-        "  Skipped (no copy in --prefer): {}",
-        result.skipped_not_covered
-    );
-    println!(
-        "  Skipped (multiple copies in --prefer): {}",
-        result.skipped_multiple
-    );
-    if result.skipped_in_prefer > 0 {
-        println!(
-            "  Skipped (already in --prefer): {}",
-            result.skipped_in_prefer
-        );
-    }
-    println!();
-
     if to_exclude_with_paths.is_empty() {
         println!("Nothing to exclude.");
         return Ok(());
     }
 
     if dry_run {
+        // Statistics as pre-listing context
+        eprintln!(
+            "Sources in scope: {} ({} unhashed skipped)",
+            source_ids.len(),
+            result.skipped_no_hash
+        );
+        eprintln!("  Will exclude: {}", to_exclude_with_paths.len());
+        eprintln!(
+            "  Skipped (no copy in --prefer): {}",
+            result.skipped_not_covered
+        );
+        eprintln!(
+            "  Skipped (multiple copies in --prefer): {}",
+            result.skipped_multiple
+        );
+        if result.skipped_in_prefer > 0 {
+            eprintln!(
+                "  Skipped (already in --prefer): {}",
+                result.skipped_in_prefer
+            );
+        }
+        eprintln!();
         println!("Would exclude {} sources:", to_exclude_with_paths.len());
         for (_, path) in &to_exclude_with_paths {
             println!("  {path}");
         }
-        println!();
-        println!("Use `canon ls --duplicates` to see remaining duplicates.");
         return Ok(());
+    }
+
+    // Interactive confirmation for > 1 source
+    if to_exclude_with_paths.len() > 1 {
+        if !yes {
+            // Compute group_count: distinct object_ids among to_exclude sources
+            let group_count: usize = result
+                .to_exclude
+                .iter()
+                .filter_map(|id| scope_sources_map.get(id).and_then(|s| s.object_id))
+                .collect::<HashSet<_>>()
+                .len();
+
+            eprintln!(
+                "Will exclude {} sources ({} duplicate groups)",
+                to_exclude_with_paths.len(),
+                group_count
+            );
+            eprintln!("  Keeping copies in: {prefer_prefix}");
+            if result.skipped_not_covered > 0 {
+                eprintln!(
+                    "  Skipped {} (no copy in --prefer)",
+                    result.skipped_not_covered
+                );
+            }
+            if result.skipped_multiple > 0 {
+                eprintln!(
+                    "  Skipped {} (multiple copies in --prefer)",
+                    result.skipped_multiple
+                );
+            }
+        }
+
+        if !ceremony::confirm(yes)? {
+            return Ok(());
+        }
     }
 
     // Execute exclusions
@@ -1066,7 +1181,7 @@ mod tests {
         let result = get_excluded_sources(&mut conn, &[], &[]).unwrap();
 
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0, excluded_id);
+        assert_eq!(result[0].id, excluded_id);
     }
 
     #[test]
@@ -1108,7 +1223,7 @@ mod tests {
         let result = get_excluded_sources(&mut conn, &scopes, &[]).unwrap();
 
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0, in_scope_id);
+        assert_eq!(result[0].id, in_scope_id);
     }
 
     #[test]
@@ -1121,8 +1236,8 @@ mod tests {
         let result = get_excluded_sources(&mut conn, &[], &[]).unwrap();
 
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0, excluded_id);
-        assert_eq!(result[0].1, "/photos/subdir/excluded.jpg");
+        assert_eq!(result[0].id, excluded_id);
+        assert_eq!(result[0].path(), "/photos/subdir/excluded.jpg");
     }
 
     // =========================================================================
@@ -1171,6 +1286,7 @@ mod tests {
             Some(Path::new("/source")),
             &[],
             false, // not dry run
+            true,  // yes (skip confirmation)
         );
 
         assert!(result.is_ok());
@@ -1201,6 +1317,7 @@ mod tests {
             Some(Path::new("/source")),
             &[],
             false,
+            true, // yes (skip confirmation)
         );
 
         assert!(result.is_ok());
@@ -1237,6 +1354,7 @@ mod tests {
             Some(Path::new("/source")),
             &[],
             false,
+            true, // yes (skip confirmation)
         );
 
         assert!(result.is_ok());
@@ -1270,6 +1388,7 @@ mod tests {
             Some(Path::new("/archive")),
             &[],
             false,
+            true, // yes (skip confirmation)
         );
 
         assert!(result.is_ok());
@@ -1308,6 +1427,7 @@ mod tests {
             Some(Path::new("/source")),
             &[],
             false,
+            true, // yes (skip confirmation)
         );
 
         assert!(result.is_ok());
@@ -1344,6 +1464,7 @@ mod tests {
             Some(Path::new("/source")),
             &[],
             false,
+            true, // yes (skip confirmation)
         );
 
         assert!(result.is_ok());
@@ -1371,6 +1492,7 @@ mod tests {
         let options = SetOptions {
             dry_run: false,
             verbose: false,
+            yes: true,
         };
 
         let result = set_by_id(&db, source_id, &options);
@@ -1389,6 +1511,7 @@ mod tests {
         let options = SetOptions {
             dry_run: false,
             verbose: false,
+            yes: true,
         };
 
         let result = set_by_id(&db, 99999, &options);
@@ -1413,6 +1536,7 @@ mod tests {
         let options = SetOptions {
             dry_run: false,
             verbose: false,
+            yes: true,
         };
 
         // Should succeed (not error) even though already excluded
@@ -1438,6 +1562,7 @@ mod tests {
         let options = SetOptions {
             dry_run: false,
             verbose: false,
+            yes: true,
         };
 
         let result = set_by_id(&db, source_id, &options);
@@ -1461,6 +1586,7 @@ mod tests {
         let options = SetOptions {
             dry_run: false,
             verbose: false,
+            yes: true,
         };
 
         // Path that definitely doesn't exist
@@ -1481,6 +1607,7 @@ mod tests {
         let options = SetOptions {
             dry_run: false,
             verbose: false,
+            yes: true,
         };
 
         // Use a path that exists on disk but isn't in the database
@@ -1606,6 +1733,7 @@ mod tests {
         let options = SetOptions {
             dry_run: false,
             verbose: false,
+            yes: true,
         };
 
         let result = set_objects_by_filter(
@@ -1640,6 +1768,7 @@ mod tests {
         let options = SetOptions {
             dry_run: false,
             verbose: false,
+            yes: true,
         };
 
         let result = set_objects_by_filter(&mut db, &[], &[], &options);
@@ -1664,6 +1793,7 @@ mod tests {
         let options = SetOptions {
             dry_run: false,
             verbose: false,
+            yes: true,
         };
 
         // Should succeed without error (skips already excluded)
@@ -1686,6 +1816,7 @@ mod tests {
         let options = SetOptions {
             dry_run: false,
             verbose: false,
+            yes: true,
         };
 
         // Should succeed (just reports nothing to exclude)
@@ -1706,6 +1837,7 @@ mod tests {
         let options = SetOptions {
             dry_run: true, // DRY RUN
             verbose: false,
+            yes: true,
         };
 
         let result = set_objects_by_filter(&mut db, &[], &[], &options);
@@ -1770,5 +1902,208 @@ mod tests {
         // Should handle no excluded objects gracefully
         let result = list_objects(&db);
         assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // set confirmation data tests (Phase 2)
+    // =========================================================================
+
+    #[test]
+    fn test_set_confirmation_counts_roots() {
+        let conn = setup_test_db();
+
+        // Sources across 2 roots
+        let root1 = insert_root(&conn, "/root1", "source", false);
+        let root2 = insert_root(&conn, "/root2", "source", false);
+        let s1 = insert_source(&conn, root1, "file1.jpg", None, true, false);
+        let s2 = insert_source(&conn, root2, "file2.jpg", None, true, false);
+
+        let sources_map = repo::source::batch_fetch_by_ids(&conn, &[s1, s2]).unwrap();
+        let to_exclude = vec![s1, s2];
+
+        let data = compute_set_confirmation(&conn, &to_exclude, &sources_map).unwrap();
+        assert_eq!(data.root_count, 2, "Should count 2 distinct roots");
+    }
+
+    #[test]
+    fn test_set_confirmation_archive_coverage() {
+        let conn = setup_test_db();
+
+        let source_root = insert_root(&conn, "/source", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        // Object that IS archived
+        let archived_obj = insert_object(&conn, "archived_hash", false);
+        let _archive_copy =
+            insert_source(&conn, archive_root, "copy.jpg", Some(archived_obj), true, false);
+        let s1 = insert_source(&conn, source_root, "file1.jpg", Some(archived_obj), true, false);
+
+        // Object that is NOT archived
+        let unarchived_obj = insert_object(&conn, "unarchived_hash", false);
+        let s2 =
+            insert_source(&conn, source_root, "file2.jpg", Some(unarchived_obj), true, false);
+
+        let sources_map = repo::source::batch_fetch_by_ids(&conn, &[s1, s2]).unwrap();
+        let to_exclude = vec![s1, s2];
+
+        let data = compute_set_confirmation(&conn, &to_exclude, &sources_map).unwrap();
+        assert_eq!(data.not_archived, 1, "Only the unarchived source should count");
+    }
+
+    #[test]
+    fn test_set_confirmation_unhashed_not_archived() {
+        let conn = setup_test_db();
+
+        let root = insert_root(&conn, "/source", "source", false);
+
+        // Source with no object_id (unhashed) counts as "no archived copy"
+        let s1 = insert_source(&conn, root, "unhashed.jpg", None, true, false);
+        // Source with object but no archive copy
+        let obj = insert_object(&conn, "no_archive_hash", false);
+        let s2 = insert_source(&conn, root, "hashed.jpg", Some(obj), true, false);
+
+        let sources_map = repo::source::batch_fetch_by_ids(&conn, &[s1, s2]).unwrap();
+        let to_exclude = vec![s1, s2];
+
+        let data = compute_set_confirmation(&conn, &to_exclude, &sources_map).unwrap();
+        assert_eq!(data.not_archived, 2, "Both unhashed and unarchived should count");
+    }
+
+    #[test]
+    fn test_set_single_source_no_confirmation() {
+        // When count = 1, set() should execute directly without confirmation.
+        // We verify by running set() with yes=false — if it tried to confirm,
+        // it would block on stdin. Since the test doesn't hang, confirmation was skipped.
+        let mut db = make_test_db();
+        let conn = db.conn_mut();
+
+        let root = insert_root(conn, "/source", "source", false);
+        let source_id = insert_source(conn, root, "only_file.jpg", None, true, false);
+
+        let options = SetOptions {
+            dry_run: false,
+            verbose: false,
+            yes: false, // Would block on stdin if confirmation triggered
+        };
+
+        // Use empty scopes so we don't try to canonicalize non-existent paths
+        let result = set(&mut db, &[], &[], &options);
+        assert!(result.is_ok());
+
+        // Verify the source was excluded
+        assert!(is_source_excluded(db.conn(), source_id));
+    }
+
+    #[test]
+    fn test_clear_confirmation_counts_roots() {
+        let conn = setup_test_db();
+
+        // Excluded sources across 2 roots
+        let root1 = insert_root(&conn, "/root1", "source", false);
+        let root2 = insert_root(&conn, "/root2", "source", false);
+        let s1 = insert_source(&conn, root1, "file1.jpg", None, true, true); // excluded
+        let s2 = insert_source(&conn, root2, "file2.jpg", None, true, true); // excluded
+
+        let sources = vec![
+            repo::source::batch_fetch_by_ids(&conn, &[s1]).unwrap().remove(&s1).unwrap(),
+            repo::source::batch_fetch_by_ids(&conn, &[s2]).unwrap().remove(&s2).unwrap(),
+        ];
+
+        // Verify distinct root counting
+        let root_ids: HashSet<i64> = sources.iter().map(|s| s.root_id).collect();
+        assert_eq!(root_ids.len(), 2, "Should count 2 distinct roots");
+    }
+
+    // =========================================================================
+    // exclude_duplicates group count / confirmation tests (Phase 3)
+    // =========================================================================
+
+    #[test]
+    fn test_duplicates_group_count() {
+        // 4 sources excluded across 2 object_ids → "2 duplicate groups"
+        let mut db = make_test_db();
+        let conn = db.conn_mut();
+
+        let source_root = insert_root(conn, "/source", "source", false);
+        let archive_root = insert_root(conn, "/archive", "archive", false);
+
+        // Two distinct objects
+        let obj1 = insert_object(conn, "group_hash_1", false);
+        let obj2 = insert_object(conn, "group_hash_2", false);
+
+        // 2 sources for obj1 in scope
+        let s1 = insert_source(conn, source_root, "a/photo1.jpg", Some(obj1), true, false);
+        let s2 = insert_source(conn, source_root, "b/photo1.jpg", Some(obj1), true, false);
+
+        // 2 sources for obj2 in scope
+        let s3 = insert_source(conn, source_root, "a/photo2.jpg", Some(obj2), true, false);
+        let s4 = insert_source(conn, source_root, "b/photo2.jpg", Some(obj2), true, false);
+
+        // 1 copy of each in archive (prefer path)
+        insert_source(conn, archive_root, "photo1.jpg", Some(obj1), true, false);
+        insert_source(conn, archive_root, "photo2.jpg", Some(obj2), true, false);
+
+        // Run with yes=true to skip interactive prompt
+        let result = exclude_duplicates(
+            &mut db,
+            Path::new("/archive"),
+            Some(Path::new("/source")),
+            &[],
+            false,
+            true, // yes
+        );
+
+        assert!(result.is_ok());
+
+        // All 4 source files should be excluded
+        let conn = db.conn();
+        assert!(is_source_excluded(conn, s1));
+        assert!(is_source_excluded(conn, s2));
+        assert!(is_source_excluded(conn, s3));
+        assert!(is_source_excluded(conn, s4));
+
+        // Verify group count computation matches expectation
+        // (We can't easily capture stderr, so verify the data directly)
+        let scope_ids = vec![s1, s2, s3, s4];
+        let sources_map = repo::source::batch_fetch_by_ids(conn, &scope_ids).unwrap();
+        let group_count: usize = scope_ids
+            .iter()
+            .filter_map(|id| sources_map.get(id).and_then(|s| s.object_id))
+            .collect::<HashSet<_>>()
+            .len();
+        assert_eq!(group_count, 2, "Should have 2 duplicate groups");
+    }
+
+    #[test]
+    fn test_duplicates_single_source_no_confirmation() {
+        // Count = 1: execution directly, no confirmation prompt.
+        // Verify by running with yes=false — if it tried to confirm,
+        // it would block on stdin.
+        let mut db = make_test_db();
+        let conn = db.conn_mut();
+
+        let source_root = insert_root(conn, "/source", "source", false);
+        let archive_root = insert_root(conn, "/archive", "archive", false);
+
+        let obj = insert_object(conn, "single_dup_hash", false);
+        let source_id =
+            insert_source(conn, source_root, "photo.jpg", Some(obj), true, false);
+        insert_source(conn, archive_root, "photo.jpg", Some(obj), true, false);
+
+        // yes=false — would block if confirmation triggered for count=1
+        let result = exclude_duplicates(
+            &mut db,
+            Path::new("/archive"),
+            Some(Path::new("/source")),
+            &[],
+            false,
+            false, // yes=false, but count=1 so no prompt
+        );
+
+        assert!(result.is_ok());
+        assert!(
+            is_source_excluded(db.conn(), source_id),
+            "Single source should be excluded without confirmation"
+        );
     }
 }

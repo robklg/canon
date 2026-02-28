@@ -51,6 +51,7 @@ mod repo;
 
 // Utilities
 mod alias;
+mod ceremony;
 mod progress;
 
 // Command modules
@@ -336,6 +337,9 @@ enum ExcludeAction {
         /// Show what would be excluded without making changes
         #[arg(long)]
         dry_run: bool,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
     },
     /// Remove exclusions from sources
     Clear {
@@ -347,6 +351,9 @@ enum ExcludeAction {
         /// Show what would be cleared without making changes
         #[arg(long)]
         dry_run: bool,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
     },
     /// Exclude duplicate sources, keeping copies in preferred path
     Duplicates {
@@ -361,6 +368,9 @@ enum ExcludeAction {
         /// Show what would be excluded without making changes
         #[arg(long)]
         dry_run: bool,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
     },
     /// Exclude objects by hash, file, or filter (affects all sources with matching content)
     SetObject {
@@ -834,11 +844,13 @@ fn main() -> Result<()> {
                 filters,
                 id,
                 dry_run,
+                yes,
             } => {
                 let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::SetOptions {
                     dry_run,
                     verbose: false,
+                    yes,
                 };
                 if let Some(source_id) = id {
                     exclude::set_by_id(&db, source_id, &options)?;
@@ -853,9 +865,10 @@ fn main() -> Result<()> {
                 paths,
                 filters,
                 dry_run,
+                yes,
             } => {
                 let filters = alias::expand_filter_strings(&filters, &canon_home)?;
-                let options = exclude::ClearOptions { dry_run };
+                let options = exclude::ClearOptions { dry_run, yes };
                 exclude::clear(&mut db, &paths, &filters, &options)?;
             }
             ExcludeAction::Duplicates {
@@ -863,6 +876,7 @@ fn main() -> Result<()> {
                 prefer,
                 filters,
                 dry_run,
+                yes,
             } => {
                 let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 exclude::exclude_duplicates(
@@ -871,6 +885,7 @@ fn main() -> Result<()> {
                     Some(path.as_path()),
                     &filters,
                     dry_run,
+                    yes,
                 )?;
             }
             ExcludeAction::SetObject {
@@ -884,6 +899,7 @@ fn main() -> Result<()> {
                 let options = exclude::SetOptions {
                     dry_run: !yes,
                     verbose,
+                    yes,
                 };
                 if let Some(h) = hash {
                     exclude::set_object_by_hash(&db, &h, &options)?;
@@ -898,7 +914,7 @@ fn main() -> Result<()> {
                 }
             }
             ExcludeAction::ClearObject { hash, dry_run } => {
-                let options = exclude::ClearOptions { dry_run };
+                let options = exclude::ClearOptions { dry_run, yes: true };
                 exclude::clear_object(&db, &hash, &options)?;
             }
             ExcludeAction::ListObjects => {
