@@ -22,6 +22,26 @@ canon cluster generate --where 'geo.country=Netherlands' --dest /archive
 
 Multiple `--where` flags are combined with AND. See [Filters](../reference/filter.md) for the full syntax.
 
+**`--include`** — By default, query commands (`ls`, `facts`, `coverage`, `worklist`, `compare`) show sources from active source roots, hiding excluded and archived sources. Use `--include` to expand what you see:
+
+```bash
+canon ls --include excluded          # Also show excluded sources
+canon ls --include archived          # Also show sources from archive roots
+canon facts --include all            # Show everything
+```
+
+This is always safe — `--include` only changes what's displayed, never modifies anything.
+
+**`--allow`** — Commands that change state (`cluster generate`, `apply`, `import-facts`) skip certain sources by default (e.g., sources already in an archive). Use `--allow` to acknowledge you want to include them:
+
+```bash
+canon cluster generate --allow archived     # Include sources from archive roots
+canon cluster generate --allow duplicates   # Include content already archived elsewhere
+canon import-facts --allow archived         # Import facts for archive sources
+```
+
+The available `--allow` values are specific to each command. See individual command pages for details.
+
 ## Command Reference
 
 - [Managing Roots](roots/index.md): Add and manage storage locations
@@ -41,3 +61,6 @@ Multiple `--where` flags are combined with AND. See [Filters](../reference/filte
   - [coverage](archive/coverage.md): Check archive progress
   - [cluster](archive/cluster.md): Generate a manifest for archiving
   - [apply](archive/apply.md): Execute the manifest to copy/move files
+- [Maintenance](maintain/index.md): Clean up and maintain the database
+  - [facts delete](maintain/facts-delete.md): Remove incorrect or unwanted metadata
+  - [prune](maintain/prune.md): Clean up stale, orphaned, or excluded data

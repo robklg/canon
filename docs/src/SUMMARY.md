@@ -7,11 +7,11 @@
 - [Setup](./setup.md)
 - [Getting Started](./getting-started.md)
 - [Concepts](concepts/index.md)
-  - [Source](concepts/source.md)
-  - [Object](concepts/object.md)
-  - [Source v. Object](./concepts/source-object.md)
-  - [Facts](concepts/facts.md)
   - [Roots](concepts/roots.md)
+  - [Sources](concepts/source.md)
+  - [Objects](concepts/object.md)
+  - [Sources v. Objects](./concepts/source-object.md)
+  - [Facts](concepts/facts.md)
 - [Commands](commands/index.md)
   - [Managing Roots](commands/roots/index.md)
     - [`scan`](commands/roots/scan.md)
@@ -30,6 +30,9 @@
     - [`coverage`](commands/archive/coverage.md)
     - [`cluster`](commands/archive/cluster.md)
     - [`apply`](commands/archive/apply.md)
+  - [Maintenance](./commands/maintain/index.md)
+    - [`facts delete`](commands/maintain/facts-delete.md)
+    - [`prune`](commands/maintain/prune.md)
 
 # Reference
 

@@ -85,40 +85,6 @@ source.rel_path[-1]|stem   → IMG_001
 source.rel_path[0]         → photos
 ```
 
-## Pruning Facts
-
-The `canon prune` command can delete facts to free database space.
-
-### Excluded Entity Facts
-
-Delete facts for sources or objects you've excluded:
-
-```bash
-# Dry-run: show what would be deleted (default)
-canon prune --excluded-facts
-
-# Delete facts for both excluded sources and objects
-canon prune --excluded-facts --yes
-
-# Delete only source facts (excluded sources)
-canon prune --excluded-facts=source --yes
-
-# Delete only object facts (excluded objects)
-canon prune --excluded-facts=object --yes
-```
-
-This is useful when you've excluded sources/objects you're not interested in archiving
-and want to reclaim the database space used by their metadata.
-
-### Other Prune Options
-
-| Flag | Description |
-|------|-------------|
-| `--stale-facts` | Delete source facts where the file changed since recording |
-| `--orphaned-objects` | Delete objects with no present sources (and their facts) |
-
-All prune operations are dry-run by default. Add `--yes` to execute.
-
 ## See Also
 
 - [Built-in Facts](builtins.md) - Complete list of automatic facts
