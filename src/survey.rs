@@ -19,6 +19,10 @@ pub struct SurveyOptions {
     pub original_filters: Vec<String>,
     /// Visibility control (--include excluded).
     pub include: IncludeSet,
+    /// Compare against specific locations instead of discovering them.
+    pub other_paths: Vec<PathBuf>,
+    /// Skip per-location affinity computation.
+    pub brief: bool,
 }
 
 struct SurveyResult {
@@ -30,6 +34,7 @@ struct SurveyResult {
     archive_scopes: Vec<(String, usize)>,
     location_results: Vec<LocationResult>,
     unique_count: usize,
+    is_other_mode: bool,
 }
 
 struct LocationResult {
@@ -69,10 +74,27 @@ pub fn run(
 
     // Fetch all roots and sources upfront
     let all_roots = repo::root::fetch_all(conn)?;
+
+    // Resolve --other paths (same soft resolution as scope paths)
+    let other_resolved = if !options.other_paths.is_empty() {
+        domain::path::resolve_paths(&options.other_paths, &all_roots)?
+    } else {
+        Vec::new()
+    };
+
     let root_ids: Vec<i64> = all_roots.iter().map(|r| r.id).collect();
     let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 
-    match compute_survey(conn, paths, &options.include, &filters, &all_sources, &all_roots)? {
+    match compute_survey(
+        conn,
+        paths,
+        &options.include,
+        &filters,
+        &all_sources,
+        &all_roots,
+        &other_resolved,
+        options.brief,
+    )? {
         SurveyOutcome::Empty { scope_prefixes } => {
             print_selection_header(&scope_prefixes, &options.original_filters, 0, 0, 0);
         }
@@ -106,7 +128,11 @@ pub fn run(
                 &result.archive_scopes,
             );
             println!();
-            print_related_locations(&result.location_results, result.total_hashed);
+            print_related_locations(
+                &result.location_results,
+                result.total_hashed,
+                result.is_other_mode,
+            );
             println!();
             println!("{} unique to this scope", format_count(result.unique_count));
         }
@@ -122,6 +148,8 @@ fn compute_survey(
     filters: &[Filter],
     all_sources: &[Source],
     all_roots: &[domain::Root],
+    other_paths: &[String],
+    brief: bool,
 ) -> Result<SurveyOutcome> {
     // Default to cwd
     let scope_paths = if paths.is_empty() {
@@ -235,31 +263,53 @@ fn compute_survey(
         }
     }
 
-    // Scope discovery on overlap sources → related locations
-    let location_scopes = domain::survey::discover_scopes_by_root(&overlap_sources);
+    // Location discovery
+    let is_other_mode = !other_paths.is_empty();
+    let location_scopes: Vec<(String, usize)> = if is_other_mode {
+        // --other: user paths directly
+        other_paths.iter().map(|p| (p.clone(), 0)).collect()
+    } else {
+        // Default: scope discovery from overlap sources
+        domain::survey::discover_scopes_by_root(&overlap_sources)
+    };
 
-    // Per-location: shared count + affinity (when filters present)
-    let has_filters = !filters.is_empty();
+    // Per-location: shared count + affinity
+    let compute_affinity = !filters.is_empty() && !brief;
     let mut location_results: Vec<LocationResult> = Vec::new();
 
     for (scope_path, _overlap_count) in &location_scopes {
         let loc_scope = vec![ScopeMatch::UnderDirectory(scope_path.clone())];
 
-        // Object IDs present at this location (from overlap sources)
-        let loc_object_ids: HashSet<i64> = overlap_sources
-            .iter()
-            .filter(|s| s.matches_scope(&loc_scope))
-            .filter_map(|s| s.object_id)
-            .collect();
+        // Shared count: how many selection sources have content at this location
+        let shared_count = if is_other_mode {
+            // --other: scan all sources at location (any role) for overlap with selection
+            let loc_oids: HashSet<i64> = all_sources
+                .iter()
+                .filter(|s| s.is_active())
+                .filter(|s| !s.is_excluded())
+                .filter(|s| s.matches_scope(&loc_scope))
+                .filter(|s| !sel_source_ids.contains(&s.id))
+                .filter_map(|s| s.object_id)
+                .collect();
+            hashed
+                .iter()
+                .filter(|s| loc_oids.contains(&s.object_id.unwrap()))
+                .count()
+        } else {
+            // Default: use overlap_sources (source role only, already computed)
+            let loc_object_ids: HashSet<i64> = overlap_sources
+                .iter()
+                .filter(|s| s.matches_scope(&loc_scope))
+                .filter_map(|s| s.object_id)
+                .collect();
+            hashed
+                .iter()
+                .filter(|s| loc_object_ids.contains(&s.object_id.unwrap()))
+                .count()
+        };
 
-        // Count selection sources whose content appears at this location
-        let shared_count = hashed
-            .iter()
-            .filter(|s| loc_object_ids.contains(&s.object_id.unwrap()))
-            .count();
-
-        // Complementary content and classification (only when filters present)
-        let (complementary_count, only_here_count, kind) = if has_filters {
+        // Complementary content and classification (only when filters present and not --brief)
+        let (complementary_count, only_here_count, kind) = if compute_affinity {
             // Step 1: Get ALL sources within this location
             // Active, non-excluded, not in selection
             let loc_sources: Vec<&Source> = all_sources
@@ -326,7 +376,9 @@ fn compute_survey(
     }
 
     // Sort locations
-    if has_filters {
+    if is_other_mode {
+        // --other: preserve user-specified order (no sort)
+    } else if compute_affinity {
         // Classification: supersets first, then leads, then mirrors
         // Within each group: complementary desc, then shared desc
         location_results.sort_by(|a, b| {
@@ -338,7 +390,7 @@ fn compute_survey(
                 .then(b.shared_count.cmp(&a.shared_count))
         });
     } else {
-        // No filters: sort by shared count descending
+        // No affinity data: sort by shared count descending
         location_results.sort_by(|a, b| b.shared_count.cmp(&a.shared_count));
     }
 
@@ -358,6 +410,7 @@ fn compute_survey(
         archive_scopes,
         location_results,
         unique_count,
+        is_other_mode,
     }))
 }
 
@@ -434,13 +487,25 @@ fn print_archive_section(
     }
 }
 
-fn print_related_locations(locations: &[LocationResult], total_hashed: usize) {
+fn print_related_locations(
+    locations: &[LocationResult],
+    total_hashed: usize,
+    is_other_mode: bool,
+) {
     if locations.is_empty() {
-        println!("No related locations found.");
+        if is_other_mode {
+            println!("No shared content at specified locations.");
+        } else {
+            println!("No related locations found.");
+        }
         return;
     }
 
-    println!("Related locations:");
+    if is_other_mode {
+        println!("Comparing with:");
+    } else {
+        println!("Related locations:");
+    }
 
     let max_path_len = locations.iter().map(|l| l.path.len()).max().unwrap_or(0);
     let max_shared_len = locations
@@ -553,13 +618,17 @@ mod tests {
         scope_paths: &[&str],
         include: &IncludeSet,
         filters: &[Filter],
+        other_paths: &[&str],
+        brief: bool,
     ) -> SurveyOutcome {
         let all_roots = repo::root::fetch_all(conn).unwrap();
         let root_ids: Vec<i64> = all_roots.iter().map(|r| r.id).collect();
         let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids).unwrap();
 
         let paths: Vec<PathBuf> = scope_paths.iter().map(|p| PathBuf::from(p)).collect();
-        compute_survey(conn, &paths, include, filters, &all_sources, &all_roots).unwrap()
+        let other: Vec<String> = other_paths.iter().map(|p| p.to_string()).collect();
+        compute_survey(conn, &paths, include, filters, &all_sources, &all_roots, &other, brief)
+            .unwrap()
     }
 
     // =========================================================================
@@ -599,7 +668,7 @@ mod tests {
         insert_source(&conn, archive, "2024/IMG_003.jpg", Some(obj3));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &[]);
+        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &[], &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -632,7 +701,7 @@ mod tests {
         insert_source(&conn, root, "photos/a.jpg", Some(obj));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&mut conn, &["/mnt/drive/other"], &include, &[]);
+        let outcome = run_compute(&mut conn, &["/mnt/drive/other"], &include, &[], &[], false);
 
         match outcome {
             SurveyOutcome::Empty { scope_prefixes } => {
@@ -654,7 +723,7 @@ mod tests {
         insert_source(&conn, root, "b.jpg", None);
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[]);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[], &[], false);
 
         match outcome {
             SurveyOutcome::AllUnhashed {
@@ -688,7 +757,7 @@ mod tests {
         insert_source(&conn, archive, "a.jpg", Some(obj1));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[]);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[], &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -713,7 +782,7 @@ mod tests {
         insert_source(&conn, root, "a.jpg", Some(obj1));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[]);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[], &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -742,7 +811,7 @@ mod tests {
         insert_source(&conn, root_b, "b.jpg", Some(obj2));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&mut conn, &["/mnt/drive-a", "/mnt/drive-b"], &include, &[]);
+        let outcome = run_compute(&mut conn, &["/mnt/drive-a", "/mnt/drive-b"], &include, &[], &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -774,7 +843,7 @@ mod tests {
         insert_source(&conn, suspended, "c.jpg", Some(obj2));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[]);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[], &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -810,7 +879,7 @@ mod tests {
 
         // Default: excluded hidden
         let include = IncludeSet::default();
-        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[]);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[], &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -828,7 +897,7 @@ mod tests {
             excluded: true,
             archived: false,
         };
-        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[]);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[], &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -868,7 +937,7 @@ mod tests {
         insert_source(&conn, archive2, "backup/z.jpg", Some(obj3));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[]);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[], &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -904,7 +973,7 @@ mod tests {
         insert_source(&conn, root, "documents/a_copy.jpg", Some(obj1));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&mut conn, &["/mnt/drive/photos"], &include, &[]);
+        let outcome = run_compute(&mut conn, &["/mnt/drive/photos"], &include, &[], &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -956,7 +1025,7 @@ mod tests {
 
         let include = IncludeSet::default();
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
-        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &filters);
+        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &filters, &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1005,7 +1074,7 @@ mod tests {
 
         let include = IncludeSet::default();
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
-        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &filters);
+        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &filters, &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1052,7 +1121,7 @@ mod tests {
 
         let include = IncludeSet::default();
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
-        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &filters);
+        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &filters, &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1091,7 +1160,7 @@ mod tests {
 
         let include = IncludeSet::default();
         // No filters
-        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &[]);
+        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &[], &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1170,7 +1239,7 @@ mod tests {
 
         let include = IncludeSet::default();
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
-        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &filters);
+        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &filters, &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1227,7 +1296,7 @@ mod tests {
 
         let include = IncludeSet::default();
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
-        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &filters);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &filters, &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1262,7 +1331,7 @@ mod tests {
 
         let include = IncludeSet::default();
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
-        let outcome = run_compute(&mut conn, &["/mnt/drive/photos"], &include, &filters);
+        let outcome = run_compute(&mut conn, &["/mnt/drive/photos"], &include, &filters, &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1301,7 +1370,7 @@ mod tests {
 
         let include = IncludeSet::default();
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
-        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &filters);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &filters, &[], false);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1311,6 +1380,399 @@ mod tests {
                 // Some(0), not None — affinity WAS computed
                 assert_eq!(loc.complementary_count, Some(0));
                 assert_eq!(loc.only_here_count, Some(0));
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // --other and --brief
+    // =========================================================================
+
+    // =========================================================================
+    // --other basic with overlap and complementary
+    // =========================================================================
+
+    #[test]
+    fn test_other_basic() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive-a", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+        let obj3 = insert_object(&conn, "hash_003");
+        let obj4 = insert_object(&conn, "hash_004");
+        let obj5 = insert_object(&conn, "hash_005");
+        let obj6 = insert_object(&conn, "hash_006");
+
+        insert_source(&conn, root_a, "photos/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/IMG_002.jpg", Some(obj2));
+        insert_source(&conn, root_a, "photos/IMG_003.jpg", Some(obj3));
+
+        insert_source(&conn, root_b, "trip/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/IMG_002.jpg", Some(obj2));
+        insert_source(&conn, root_b, "trip/IMG_004.jpg", Some(obj4));
+        insert_source(&conn, root_b, "trip/IMG_005.jpg", Some(obj5));
+        insert_source(&conn, root_b, "trip/notes.txt", Some(obj6));
+
+        let include = IncludeSet::default();
+        let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive-a"],
+            &include,
+            &filters,
+            &["/mnt/backup/trip"],
+            false,
+        );
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert!(result.is_other_mode);
+                assert_eq!(result.location_results.len(), 1);
+                let loc = &result.location_results[0];
+                assert_eq!(loc.path, "/mnt/backup/trip");
+                assert_eq!(loc.shared_count, 2);
+                assert_eq!(loc.complementary_count, Some(2)); // obj4, obj5
+                assert_eq!(loc.only_here_count, Some(2));
+                assert_eq!(loc.kind, Some(domain::survey::LocationKind::Lead));
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // --other with zero overlap
+    // =========================================================================
+
+    #[test]
+    fn test_other_zero_overlap() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive-a", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+        let obj3 = insert_object(&conn, "hash_003");
+        let obj4 = insert_object(&conn, "hash_004");
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/b.jpg", Some(obj2));
+
+        insert_source(&conn, root_b, "docs/c.jpg", Some(obj3));
+        insert_source(&conn, root_b, "docs/d.jpg", Some(obj4));
+
+        let include = IncludeSet::default();
+        let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive-a"],
+            &include,
+            &filters,
+            &["/mnt/backup"],
+            false,
+        );
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert!(result.is_other_mode);
+                assert_eq!(result.location_results.len(), 1);
+                let loc = &result.location_results[0];
+                assert_eq!(loc.shared_count, 0);
+                assert_eq!(loc.complementary_count, Some(2)); // obj3, obj4
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // --other preserves user order
+    // =========================================================================
+
+    #[test]
+    fn test_other_preserves_order() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive-a", "source");
+        let root_b = insert_root(&conn, "/mnt/root-b", "source");
+        let root_c = insert_root(&conn, "/mnt/root-c", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+        let obj3 = insert_object(&conn, "hash_003");
+
+        // Selection: 1 source
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+
+        // Root B (high shared): 3 sources including overlap
+        insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/b.jpg", Some(obj2));
+        insert_source(&conn, root_b, "trip/c.jpg", Some(obj3));
+
+        // Root C (low shared): 1 source with overlap
+        insert_source(&conn, root_c, "backup/a.jpg", Some(obj1));
+
+        let include = IncludeSet::default();
+        // Specify C before B — should preserve this order
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive-a"],
+            &include,
+            &[],
+            &["/mnt/root-c", "/mnt/root-b"],
+            false,
+        );
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert!(result.is_other_mode);
+                assert_eq!(result.location_results.len(), 2);
+                // User order preserved: C first, B second
+                assert!(result.location_results[0].path.contains("root-c"));
+                assert!(result.location_results[1].path.contains("root-b"));
+                // C has less shared, but appears first (user order)
+                assert_eq!(result.location_results[0].shared_count, 1);
+                assert_eq!(result.location_results[1].shared_count, 1);
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // --other on archive root
+    // =========================================================================
+
+    #[test]
+    fn test_other_archive_root() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive-a", "source");
+        let archive = insert_root(&conn, "/archive", "archive");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+        let obj3 = insert_object(&conn, "hash_003");
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/b.jpg", Some(obj2));
+
+        // Archive root: obj1 (overlap) + obj3 (complementary)
+        insert_source(&conn, archive, "2024/a.jpg", Some(obj1));
+        insert_source(&conn, archive, "2024/c.jpg", Some(obj3));
+
+        let include = IncludeSet::default();
+        let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive-a"],
+            &include,
+            &filters,
+            &["/archive"],
+            false,
+        );
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert!(result.is_other_mode);
+                assert_eq!(result.location_results.len(), 1);
+                let loc = &result.location_results[0];
+                // Archive sources counted because --other overrides role restriction
+                assert_eq!(loc.shared_count, 1); // obj1
+                assert_eq!(loc.complementary_count, Some(1)); // obj3
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // --brief suppresses affinity
+    // =========================================================================
+
+    #[test]
+    fn test_brief_suppresses_affinity() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive-a", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+        let obj3 = insert_object(&conn, "hash_003");
+        let obj4 = insert_object(&conn, "hash_004");
+
+        insert_source(&conn, root_a, "photos/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/IMG_002.jpg", Some(obj2));
+        insert_source(&conn, root_a, "photos/IMG_003.jpg", Some(obj3));
+
+        insert_source(&conn, root_b, "trip/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/IMG_002.jpg", Some(obj2));
+        insert_source(&conn, root_b, "trip/IMG_004.jpg", Some(obj4));
+
+        let include = IncludeSet::default();
+        let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+        // With --brief: affinity suppressed even though filters present
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive-a"],
+            &include,
+            &filters,
+            &[],
+            true,
+        );
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert!(!result.is_other_mode);
+                assert_eq!(result.location_results.len(), 1);
+                let loc = &result.location_results[0];
+                assert_eq!(loc.shared_count, 2); // still computed
+                assert_eq!(loc.complementary_count, None);
+                assert_eq!(loc.only_here_count, None);
+                assert_eq!(loc.kind, None);
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // --brief without --where is no-op
+    // =========================================================================
+
+    #[test]
+    fn test_brief_without_filters_noop() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive-a", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+        let obj3 = insert_object(&conn, "hash_003");
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/b.jpg", Some(obj2));
+
+        insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/c.jpg", Some(obj3));
+
+        let include = IncludeSet::default();
+
+        // Without --brief
+        let outcome_normal =
+            run_compute(&mut conn, &["/mnt/drive-a"], &include, &[], &[], false);
+        // With --brief (should be identical — no filters means no affinity either way)
+        let outcome_brief =
+            run_compute(&mut conn, &["/mnt/drive-a"], &include, &[], &[], true);
+
+        match (outcome_normal, outcome_brief) {
+            (SurveyOutcome::Result(normal), SurveyOutcome::Result(brief)) => {
+                assert_eq!(normal.location_results.len(), brief.location_results.len());
+                assert_eq!(
+                    normal.location_results[0].shared_count,
+                    brief.location_results[0].shared_count
+                );
+                assert_eq!(
+                    normal.location_results[0].complementary_count,
+                    brief.location_results[0].complementary_count
+                );
+                assert_eq!(normal.unique_count, brief.unique_count);
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // --other with --brief
+    // =========================================================================
+
+    #[test]
+    fn test_other_with_brief() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive-a", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+        let obj3 = insert_object(&conn, "hash_003");
+        let obj4 = insert_object(&conn, "hash_004");
+
+        insert_source(&conn, root_a, "photos/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/IMG_002.jpg", Some(obj2));
+        insert_source(&conn, root_a, "photos/IMG_003.jpg", Some(obj3));
+
+        insert_source(&conn, root_b, "trip/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/IMG_004.jpg", Some(obj4));
+
+        let include = IncludeSet::default();
+        let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive-a"],
+            &include,
+            &filters,
+            &["/mnt/backup/trip"],
+            true,
+        );
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert!(result.is_other_mode);
+                assert_eq!(result.location_results.len(), 1);
+                let loc = &result.location_results[0];
+                assert_eq!(loc.shared_count, 1); // obj1
+                // Affinity suppressed by --brief
+                assert_eq!(loc.complementary_count, None);
+                assert_eq!(loc.only_here_count, None);
+                assert_eq!(loc.kind, None);
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // --other same root cross-scope
+    // =========================================================================
+
+    #[test]
+    fn test_other_same_root_cross_scope() {
+        let mut conn = open_in_memory_for_test();
+
+        let root = insert_root(&conn, "/mnt/drive", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+        let obj3 = insert_object(&conn, "hash_003");
+
+        // Selection scope
+        insert_source(&conn, root, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root, "photos/b.jpg", Some(obj2));
+        // Other scope: overlap + complementary
+        insert_source(&conn, root, "documents/a.jpg", Some(obj1));
+        insert_source(&conn, root, "documents/c.jpg", Some(obj3));
+
+        let include = IncludeSet::default();
+        let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive/photos"],
+            &include,
+            &filters,
+            &["/mnt/drive/documents"],
+            false,
+        );
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert!(result.is_other_mode);
+                assert_eq!(result.location_results.len(), 1);
+                let loc = &result.location_results[0];
+                assert_eq!(loc.path, "/mnt/drive/documents");
+                assert_eq!(loc.shared_count, 1); // obj1
+                assert_eq!(loc.complementary_count, Some(1)); // obj3
             }
             _ => panic!("Expected SurveyOutcome::Result"),
         }

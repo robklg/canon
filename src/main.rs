@@ -260,6 +260,12 @@ enum Commands {
         /// Include additional sources: excluded
         #[arg(long, value_delimiter = ',')]
         include: Vec<IncludeValue>,
+        /// Compare against specific locations instead of discovering them
+        #[arg(long = "other")]
+        other_paths: Vec<PathBuf>,
+        /// Skip per-location affinity computation
+        #[arg(long)]
+        brief: bool,
     },
     /// Compare two folders by content hash
     Compare {
@@ -779,6 +785,8 @@ fn main() -> Result<()> {
             paths,
             filters,
             include,
+            other_paths,
+            brief,
         } => {
             let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
             let include = include_set_from(&include);
@@ -788,6 +796,8 @@ fn main() -> Result<()> {
             let options = survey::SurveyOptions {
                 original_filters: filters,
                 include,
+                other_paths,
+                brief,
             };
             survey::run(&mut db, &paths, &expanded, &options)?;
         }
