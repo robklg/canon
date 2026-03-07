@@ -65,6 +65,7 @@ mod import_facts;
 mod ls;
 mod roots;
 mod scan;
+mod survey;
 mod worklist;
 
 #[derive(Parser)]
@@ -248,6 +249,14 @@ enum Commands {
         /// Compact output: one line per root
         #[arg(long)]
         compact: bool,
+    },
+    /// Survey a selection: archive status, related locations, unique content
+    Survey {
+        /// Directory paths to scope the query (resolved to realpath)
+        paths: Vec<PathBuf>,
+        /// Include additional sources: excluded
+        #[arg(long, value_delimiter = ',')]
+        include: Vec<IncludeValue>,
     },
     /// Compare two folders by content hash
     Compare {
@@ -762,6 +771,16 @@ fn main() -> Result<()> {
                 &include,
                 compact,
             )?;
+        }
+        Commands::Survey {
+            paths,
+            include,
+        } => {
+            let include = include_set_from(&include);
+            if include.includes_archived() {
+                bail!("--include archived is not valid for survey");
+            }
+            survey::run(&mut db, &paths, &include)?;
         }
         Commands::Compare {
             path_a,
