@@ -254,6 +254,9 @@ enum Commands {
     Survey {
         /// Directory paths to scope the query (resolved to realpath)
         paths: Vec<PathBuf>,
+        /// Filter expressions (e.g., "source.ext=jpg" or "content.hash.sha256?")
+        #[arg(long = "where")]
+        filters: Vec<String>,
         /// Include additional sources: excluded
         #[arg(long, value_delimiter = ',')]
         include: Vec<IncludeValue>,
@@ -774,13 +777,19 @@ fn main() -> Result<()> {
         }
         Commands::Survey {
             paths,
+            filters,
             include,
         } => {
+            let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
             let include = include_set_from(&include);
             if include.includes_archived() {
                 bail!("--include archived is not valid for survey");
             }
-            survey::run(&mut db, &paths, &include)?;
+            let options = survey::SurveyOptions {
+                original_filters: filters,
+                include,
+            };
+            survey::run(&mut db, &paths, &expanded, &options)?;
         }
         Commands::Compare {
             path_a,

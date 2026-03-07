@@ -1,4 +1,5 @@
 use anyhow::Result;
+use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -7,7 +8,18 @@ use crate::domain;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::domain::IncludeSet;
+use crate::expr::filter::{self, Filter};
 use crate::repo;
+
+const SUPERSET_THRESHOLD: f64 = 0.8;
+
+/// Options controlling survey behavior. Grows as later stories add flags.
+pub struct SurveyOptions {
+    /// Original (pre-expansion) filter strings — for display in selection header.
+    pub original_filters: Vec<String>,
+    /// Visibility control (--include excluded).
+    pub include: IncludeSet,
+}
 
 struct SurveyResult {
     scope_prefixes: Vec<String>,
@@ -23,6 +35,9 @@ struct SurveyResult {
 struct LocationResult {
     path: String,
     shared_count: usize,
+    complementary_count: Option<usize>,
+    only_here_count: Option<usize>,
+    kind: Option<domain::survey::LocationKind>,
 }
 
 /// Outcome of compute_survey: either a result to display or an early exit.
@@ -41,24 +56,37 @@ enum SurveyOutcome {
 pub fn run(
     db: &mut repo::Db,
     paths: &[PathBuf],
-    include: &IncludeSet,
+    filter_strs: &[String],
+    options: &SurveyOptions,
 ) -> Result<()> {
-    let conn = db.conn();
+    // Parse expanded filter strings
+    let filters: Vec<Filter> = filter_strs
+        .iter()
+        .map(|f| Filter::parse(f))
+        .collect::<Result<Vec<_>>>()?;
+
+    let conn = db.conn_mut();
 
     // Fetch all roots and sources upfront
     let all_roots = repo::root::fetch_all(conn)?;
     let root_ids: Vec<i64> = all_roots.iter().map(|r| r.id).collect();
     let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 
-    match compute_survey(paths, include, &all_sources, &all_roots)? {
+    match compute_survey(conn, paths, &options.include, &filters, &all_sources, &all_roots)? {
         SurveyOutcome::Empty { scope_prefixes } => {
-            print_selection_header(&scope_prefixes, 0, 0, 0);
+            print_selection_header(&scope_prefixes, &options.original_filters, 0, 0, 0);
         }
         SurveyOutcome::AllUnhashed {
             scope_prefixes,
             total_count,
         } => {
-            print_selection_header(&scope_prefixes, total_count, total_count, 0);
+            print_selection_header(
+                &scope_prefixes,
+                &options.original_filters,
+                total_count,
+                total_count,
+                0,
+            );
             println!();
             println!("No hashed sources in selection. Content comparison requires hashing.");
             println!("Use `canon worklist` to generate a hashing worklist.");
@@ -66,6 +94,7 @@ pub fn run(
         SurveyOutcome::Result(result) => {
             print_selection_header(
                 &result.scope_prefixes,
+                &options.original_filters,
                 result.total_count,
                 result.unhashed_count,
                 result.total_hashed,
@@ -87,8 +116,10 @@ pub fn run(
 }
 
 fn compute_survey(
+    conn: &mut Connection,
     paths: &[PathBuf],
     include: &IncludeSet,
+    filters: &[Filter],
     all_sources: &[Source],
     all_roots: &[domain::Root],
 ) -> Result<SurveyOutcome> {
@@ -103,7 +134,7 @@ fn compute_survey(
     let scope_prefixes = domain::path::resolve_paths(&scope_paths, all_roots)?;
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
 
-    // Build selection: active, source role, in scope, visibility rules
+    // Build selection from domain predicates
     let selection: Vec<&Source> = all_sources
         .iter()
         .filter(|s| s.is_active())
@@ -111,6 +142,20 @@ fn compute_survey(
         .filter(|s| s.matches_scope(&scopes))
         .filter(|s| include.includes_excluded() || !s.is_excluded())
         .collect();
+
+    // Apply --where filters to selection
+    let selection = if filters.is_empty() {
+        selection
+    } else {
+        let ids: Vec<i64> = selection.iter().map(|s| s.id).collect();
+        let passed: HashSet<i64> = filter::apply_filters(conn, &ids, filters)?
+            .into_iter()
+            .collect();
+        selection
+            .into_iter()
+            .filter(|s| passed.contains(&s.id))
+            .collect()
+    };
 
     // Partition: unhashed vs hashed
     let total_count = selection.len();
@@ -149,7 +194,7 @@ fn compute_survey(
         }
     }
 
-    // --- Phase 3: Archive status ---
+    // Archive status: find selection content that exists on archive roots
     let mut archive_sources: Vec<&Source> = Vec::new();
     let mut archived_object_ids: HashSet<i64> = HashSet::new();
 
@@ -178,7 +223,7 @@ fn compute_survey(
     let mut archive_scopes = domain::survey::discover_scopes_by_root(&archive_sources);
     archive_scopes.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // --- Phase 4: Overlap and related locations ---
+    // Overlap: find selection content that exists on other source roots
     let mut overlap_sources: Vec<&Source> = Vec::new();
     for &oid in &sel_object_ids {
         if let Some(siblings) = by_object_id.get(&oid) {
@@ -193,7 +238,8 @@ fn compute_survey(
     // Scope discovery on overlap sources → related locations
     let location_scopes = domain::survey::discover_scopes_by_root(&overlap_sources);
 
-    // Per-location shared count
+    // Per-location: shared count + affinity (when filters present)
+    let has_filters = !filters.is_empty();
     let mut location_results: Vec<LocationResult> = Vec::new();
 
     for (scope_path, _overlap_count) in &location_scopes {
@@ -212,16 +258,91 @@ fn compute_survey(
             .filter(|s| loc_object_ids.contains(&s.object_id.unwrap()))
             .count();
 
+        // Complementary content and classification (only when filters present)
+        let (complementary_count, only_here_count, kind) = if has_filters {
+            // Step 1: Get ALL sources within this location
+            // Active, non-excluded, not in selection
+            let loc_sources: Vec<&Source> = all_sources
+                .iter()
+                .filter(|s| s.is_active())
+                .filter(|s| !s.is_excluded())
+                .filter(|s| s.matches_scope(&loc_scope))
+                .filter(|s| !sel_source_ids.contains(&s.id))
+                .collect();
+
+            // Step 2: Apply --where filters to location sources
+            let loc_ids: Vec<i64> = loc_sources.iter().map(|s| s.id).collect();
+            let passed: HashSet<i64> = filter::apply_filters(conn, &loc_ids, filters)?
+                .into_iter()
+                .collect();
+
+            // Step 3: Partition into overlap vs complementary
+            // CRITICAL: filter to hashed-only BEFORE partitioning.
+            // Unhashed sources can't participate in content comparison.
+            // Without this guard, unhashed sources leak into complementary
+            // count (their object_id is None, which is never in sel_object_ids,
+            // so they'd always be classified as "complementary").
+            let matching_hashed: Vec<&Source> = loc_sources
+                .iter()
+                .filter(|s| passed.contains(&s.id))
+                .filter(|s| s.object_id.is_some())
+                .copied()
+                .collect();
+
+            let complementary: Vec<&Source> = matching_hashed
+                .iter()
+                .filter(|s| !sel_object_ids.contains(&s.object_id.unwrap()))
+                .copied()
+                .collect();
+
+            let comp_count = complementary.len();
+
+            // Step 4: "Only here" — unique object_ids among complementary
+            let comp_oids: HashSet<i64> =
+                complementary.iter().filter_map(|s| s.object_id).collect();
+            let only_here =
+                domain::survey::count_only_here(&comp_oids, scope_path, &by_object_id);
+
+            // Step 5: Classify
+            let kind = domain::survey::classify_location(
+                shared_count,
+                total_hashed,
+                comp_count,
+                SUPERSET_THRESHOLD,
+            );
+
+            (Some(comp_count), Some(only_here), Some(kind))
+        } else {
+            (None, None, None)
+        };
+
         location_results.push(LocationResult {
             path: scope_path.clone(),
             shared_count,
+            complementary_count,
+            only_here_count,
+            kind,
         });
     }
 
-    // Sort by shared count descending (no classification yet — Story 3)
-    location_results.sort_by(|a, b| b.shared_count.cmp(&a.shared_count));
+    // Sort locations
+    if has_filters {
+        // Classification: supersets first, then leads, then mirrors
+        // Within each group: complementary desc, then shared desc
+        location_results.sort_by(|a, b| {
+            let kind_a = a.kind.as_ref().unwrap();
+            let kind_b = b.kind.as_ref().unwrap();
+            kind_a
+                .cmp(kind_b)
+                .then(b.complementary_count.cmp(&a.complementary_count))
+                .then(b.shared_count.cmp(&a.shared_count))
+        });
+    } else {
+        // No filters: sort by shared count descending
+        location_results.sort_by(|a, b| b.shared_count.cmp(&a.shared_count));
+    }
 
-    // --- Phase 5: Unique count ---
+    // Unique count: selection content that exists nowhere else
     let unique_count = domain::survey::count_unique_to_selection(
         &sel_object_ids,
         &sel_source_ids,
@@ -246,6 +367,7 @@ fn compute_survey(
 
 fn print_selection_header(
     scope_prefixes: &[String],
+    original_filters: &[String],
     total: usize,
     unhashed: usize,
     hashed: usize,
@@ -257,6 +379,10 @@ fn print_selection_header(
         for p in scope_prefixes {
             println!("  {p}");
         }
+    }
+
+    if !original_filters.is_empty() {
+        println!("  Filters: {}", original_filters.join(" AND "));
     }
 
     println!(
@@ -325,7 +451,8 @@ fn print_related_locations(locations: &[LocationResult], total_hashed: usize) {
     let m_str = format_count(total_hashed);
 
     for loc in locations {
-        println!(
+        // Base: path + shared count (always present)
+        print!(
             "  {:path_w$}  {:>count_w$} of {} shared",
             loc.path,
             format_count(loc.shared_count),
@@ -333,6 +460,19 @@ fn print_related_locations(locations: &[LocationResult], total_hashed: usize) {
             path_w = max_path_len,
             count_w = max_shared_len,
         );
+
+        // Affinity columns (only when present and complementary > 0)
+        match (loc.complementary_count, loc.only_here_count) {
+            (Some(comp), Some(only)) if comp > 0 => {
+                print!("   +{} more", format_count(comp));
+                if only > 0 {
+                    print!(" ({} only here)", format_count(only));
+                }
+            }
+            _ => {} // Mirror or no filters — no affinity columns
+        }
+
+        println!();
     }
 }
 
@@ -344,7 +484,6 @@ fn print_related_locations(locations: &[LocationResult], total_hashed: usize) {
 mod tests {
     use super::*;
     use crate::repo::open_in_memory_for_test;
-    use rusqlite::Connection;
 
     fn insert_root(conn: &Connection, path: &str, role: &str) -> i64 {
         conn.execute(
@@ -410,25 +549,26 @@ mod tests {
 
     /// Helper to run compute_survey with test data.
     fn run_compute(
-        conn: &Connection,
+        conn: &mut Connection,
         scope_paths: &[&str],
         include: &IncludeSet,
+        filters: &[Filter],
     ) -> SurveyOutcome {
         let all_roots = repo::root::fetch_all(conn).unwrap();
         let root_ids: Vec<i64> = all_roots.iter().map(|r| r.id).collect();
         let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids).unwrap();
 
         let paths: Vec<PathBuf> = scope_paths.iter().map(|p| PathBuf::from(p)).collect();
-        compute_survey(&paths, include, &all_sources, &all_roots).unwrap()
+        compute_survey(conn, &paths, include, filters, &all_sources, &all_roots).unwrap()
     }
 
     // =========================================================================
-    // Test 1: Basic summary end-to-end
+    // Basic summary end-to-end
     // =========================================================================
 
     #[test]
     fn test_basic_summary() {
-        let conn = open_in_memory_for_test();
+        let mut conn = open_in_memory_for_test();
 
         // Source root A (/mnt/drive-a)
         let root_a = insert_root(&conn, "/mnt/drive-a", "source");
@@ -459,7 +599,7 @@ mod tests {
         insert_source(&conn, archive, "2024/IMG_003.jpg", Some(obj3));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&conn, &["/mnt/drive-a"], &include);
+        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &[]);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -480,19 +620,19 @@ mod tests {
     }
 
     // =========================================================================
-    // Test 2: Empty selection
+    // Empty selection
     // =========================================================================
 
     #[test]
     fn test_empty_selection() {
-        let conn = open_in_memory_for_test();
+        let mut conn = open_in_memory_for_test();
         let root = insert_root(&conn, "/mnt/drive", "source");
         // Sources exist, but not under the scoped subdirectory
         let obj = insert_object(&conn, "hash_001");
         insert_source(&conn, root, "photos/a.jpg", Some(obj));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&conn, &["/mnt/drive/other"], &include);
+        let outcome = run_compute(&mut conn, &["/mnt/drive/other"], &include, &[]);
 
         match outcome {
             SurveyOutcome::Empty { scope_prefixes } => {
@@ -503,18 +643,18 @@ mod tests {
     }
 
     // =========================================================================
-    // Test 3: All unhashed
+    // All unhashed
     // =========================================================================
 
     #[test]
     fn test_all_unhashed() {
-        let conn = open_in_memory_for_test();
+        let mut conn = open_in_memory_for_test();
         let root = insert_root(&conn, "/mnt/drive", "source");
         insert_source(&conn, root, "a.jpg", None);
         insert_source(&conn, root, "b.jpg", None);
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&conn, &["/mnt/drive"], &include);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[]);
 
         match outcome {
             SurveyOutcome::AllUnhashed {
@@ -529,12 +669,12 @@ mod tests {
     }
 
     // =========================================================================
-    // Test 4: No related locations
+    // No related locations
     // =========================================================================
 
     #[test]
     fn test_no_related_locations() {
-        let conn = open_in_memory_for_test();
+        let mut conn = open_in_memory_for_test();
         let root = insert_root(&conn, "/mnt/drive", "source");
         let archive = insert_root(&conn, "/archive", "archive");
 
@@ -548,7 +688,7 @@ mod tests {
         insert_source(&conn, archive, "a.jpg", Some(obj1));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&conn, &["/mnt/drive"], &include);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[]);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -561,19 +701,19 @@ mod tests {
     }
 
     // =========================================================================
-    // Test 5: No archived sources
+    // No archived sources
     // =========================================================================
 
     #[test]
     fn test_no_archived() {
-        let conn = open_in_memory_for_test();
+        let mut conn = open_in_memory_for_test();
         let root = insert_root(&conn, "/mnt/drive", "source");
 
         let obj1 = insert_object(&conn, "hash_001");
         insert_source(&conn, root, "a.jpg", Some(obj1));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&conn, &["/mnt/drive"], &include);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[]);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -586,12 +726,12 @@ mod tests {
     }
 
     // =========================================================================
-    // Test 6: Multiple scope paths
+    // Multiple scope paths
     // =========================================================================
 
     #[test]
     fn test_multiple_scope_paths() {
-        let conn = open_in_memory_for_test();
+        let mut conn = open_in_memory_for_test();
         let root_a = insert_root(&conn, "/mnt/drive-a", "source");
         let root_b = insert_root(&conn, "/mnt/drive-b", "source");
 
@@ -602,7 +742,7 @@ mod tests {
         insert_source(&conn, root_b, "b.jpg", Some(obj2));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&conn, &["/mnt/drive-a", "/mnt/drive-b"], &include);
+        let outcome = run_compute(&mut conn, &["/mnt/drive-a", "/mnt/drive-b"], &include, &[]);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -616,12 +756,12 @@ mod tests {
     }
 
     // =========================================================================
-    // Test 7: Suspended root excluded
+    // Suspended root excluded
     // =========================================================================
 
     #[test]
     fn test_suspended_root_excluded() {
-        let conn = open_in_memory_for_test();
+        let mut conn = open_in_memory_for_test();
         let root = insert_root(&conn, "/mnt/drive", "source");
         let suspended = insert_root_suspended(&conn, "/mnt/suspended", "source");
 
@@ -634,7 +774,7 @@ mod tests {
         insert_source(&conn, suspended, "c.jpg", Some(obj2));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&conn, &["/mnt/drive"], &include);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[]);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -650,12 +790,12 @@ mod tests {
     }
 
     // =========================================================================
-    // Test 8: Excluded sources hidden by default
+    // Excluded sources hidden by default
     // =========================================================================
 
     #[test]
     fn test_excluded_sources_hidden() {
-        let conn = open_in_memory_for_test();
+        let mut conn = open_in_memory_for_test();
         let root = insert_root(&conn, "/mnt/drive", "source");
         let other = insert_root(&conn, "/mnt/other", "source");
 
@@ -670,7 +810,7 @@ mod tests {
 
         // Default: excluded hidden
         let include = IncludeSet::default();
-        let outcome = run_compute(&conn, &["/mnt/drive"], &include);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[]);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -688,7 +828,7 @@ mod tests {
             excluded: true,
             archived: false,
         };
-        let outcome = run_compute(&conn, &["/mnt/drive"], &include);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[]);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -704,12 +844,12 @@ mod tests {
     }
 
     // =========================================================================
-    // Test 9: Archive scope grouping
+    // Archive scope grouping
     // =========================================================================
 
     #[test]
     fn test_archive_scope_grouping() {
-        let conn = open_in_memory_for_test();
+        let mut conn = open_in_memory_for_test();
         let root = insert_root(&conn, "/mnt/drive", "source");
         let archive1 = insert_root(&conn, "/archive/a", "archive");
         let archive2 = insert_root(&conn, "/archive/b", "archive");
@@ -728,7 +868,7 @@ mod tests {
         insert_source(&conn, archive2, "backup/z.jpg", Some(obj3));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&conn, &["/mnt/drive"], &include);
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &[]);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -745,12 +885,12 @@ mod tests {
     }
 
     // =========================================================================
-    // Test 10: Same root, different scope — overlap from own root
+    // Same root, different scope — overlap from own root
     // =========================================================================
 
     #[test]
     fn test_same_root_different_scope() {
-        let conn = open_in_memory_for_test();
+        let mut conn = open_in_memory_for_test();
         let root = insert_root(&conn, "/mnt/drive", "source");
 
         let obj1 = insert_object(&conn, "hash_001");
@@ -764,7 +904,7 @@ mod tests {
         insert_source(&conn, root, "documents/a_copy.jpg", Some(obj1));
 
         let include = IncludeSet::default();
-        let outcome = run_compute(&conn, &["/mnt/drive/photos"], &include);
+        let outcome = run_compute(&mut conn, &["/mnt/drive/photos"], &include, &[]);
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -773,6 +913,404 @@ mod tests {
                 assert_eq!(result.location_results[0].path, "/mnt/drive/documents");
                 assert_eq!(result.location_results[0].shared_count, 1); // obj1
                 assert_eq!(result.unique_count, 1); // obj2
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Affinity and classification
+    // =========================================================================
+
+    // =========================================================================
+    // Basic affinity correctness
+    // =========================================================================
+
+    #[test]
+    fn test_affinity_basic() {
+        let mut conn = open_in_memory_for_test();
+
+        // Source root A (selection)
+        let root_a = insert_root(&conn, "/mnt/drive-a", "source");
+        // Source root B (related)
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001"); // overlap
+        let obj2 = insert_object(&conn, "hash_002"); // overlap
+        let obj3 = insert_object(&conn, "hash_003"); // unique to selection
+        let obj4 = insert_object(&conn, "hash_004"); // complementary at B
+        let obj5 = insert_object(&conn, "hash_005"); // complementary at B
+        let obj6 = insert_object(&conn, "hash_006"); // at B but .txt — won't match filter
+
+        // Root A: 3 .jpg sources
+        insert_source(&conn, root_a, "photos/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/IMG_002.jpg", Some(obj2));
+        insert_source(&conn, root_a, "photos/IMG_003.jpg", Some(obj3));
+
+        // Root B: overlap + complementary + non-matching
+        insert_source(&conn, root_b, "trip/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/IMG_002.jpg", Some(obj2));
+        insert_source(&conn, root_b, "trip/IMG_004.jpg", Some(obj4));
+        insert_source(&conn, root_b, "trip/IMG_005.jpg", Some(obj5));
+        insert_source(&conn, root_b, "trip/notes.txt", Some(obj6));
+
+        let include = IncludeSet::default();
+        let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &filters);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert_eq!(result.total_count, 3);
+                assert_eq!(result.total_hashed, 3);
+                assert_eq!(result.location_results.len(), 1);
+                let loc = &result.location_results[0];
+                assert_eq!(loc.shared_count, 2);
+                assert_eq!(loc.complementary_count, Some(2)); // obj4, obj5
+                assert_eq!(loc.only_here_count, Some(2)); // both only at B
+                assert_eq!(loc.kind, Some(domain::survey::LocationKind::Lead));
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // "Only here" with content elsewhere
+    // =========================================================================
+
+    #[test]
+    fn test_affinity_only_here_reduced() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive-a", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+        let root_c = insert_root(&conn, "/mnt/other", "source");
+
+        let obj1 = insert_object(&conn, "hash_001"); // overlap
+        let obj2 = insert_object(&conn, "hash_002"); // overlap
+        let obj3 = insert_object(&conn, "hash_003"); // unique to selection
+        let obj4 = insert_object(&conn, "hash_004"); // complementary, also on C
+        let obj5 = insert_object(&conn, "hash_005"); // complementary, only at B
+
+        insert_source(&conn, root_a, "photos/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/IMG_002.jpg", Some(obj2));
+        insert_source(&conn, root_a, "photos/IMG_003.jpg", Some(obj3));
+
+        insert_source(&conn, root_b, "trip/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/IMG_002.jpg", Some(obj2));
+        insert_source(&conn, root_b, "trip/IMG_004.jpg", Some(obj4));
+        insert_source(&conn, root_b, "trip/IMG_005.jpg", Some(obj5));
+
+        // Root C has a copy of obj4 — makes obj4 NOT "only here" at B
+        insert_source(&conn, root_c, "misc/copy.jpg", Some(obj4));
+
+        let include = IncludeSet::default();
+        let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &filters);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                // Find the B location
+                let loc_b = result
+                    .location_results
+                    .iter()
+                    .find(|l| l.path.contains("backup"))
+                    .expect("Should find backup location");
+                assert_eq!(loc_b.complementary_count, Some(2)); // obj4 + obj5
+                assert_eq!(loc_b.only_here_count, Some(1)); // only obj5 (obj4 is on C too)
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Unhashed sources excluded from complementary count
+    // =========================================================================
+
+    #[test]
+    fn test_affinity_unhashed_excluded() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive-a", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+        let obj3 = insert_object(&conn, "hash_003");
+        let obj4 = insert_object(&conn, "hash_004");
+        let obj5 = insert_object(&conn, "hash_005");
+
+        insert_source(&conn, root_a, "photos/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/IMG_002.jpg", Some(obj2));
+        insert_source(&conn, root_a, "photos/IMG_003.jpg", Some(obj3));
+
+        insert_source(&conn, root_b, "trip/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/IMG_002.jpg", Some(obj2));
+        insert_source(&conn, root_b, "trip/IMG_004.jpg", Some(obj4));
+        insert_source(&conn, root_b, "trip/IMG_005.jpg", Some(obj5));
+        // Unhashed source at B matching the filter extension
+        insert_source(&conn, root_b, "trip/IMG_006.jpg", None);
+
+        let include = IncludeSet::default();
+        let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &filters);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                let loc = &result.location_results[0];
+                // CRITICAL: complementary must be 2 (obj4, obj5), NOT 3
+                // The unhashed source passes the filter but must be excluded
+                assert_eq!(loc.complementary_count, Some(2));
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // No filters means no affinity data
+    // =========================================================================
+
+    #[test]
+    fn test_no_filters_no_affinity() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive-a", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+        let obj3 = insert_object(&conn, "hash_003");
+        let obj4 = insert_object(&conn, "hash_004");
+
+        insert_source(&conn, root_a, "photos/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/IMG_002.jpg", Some(obj2));
+        insert_source(&conn, root_a, "photos/IMG_003.jpg", Some(obj3));
+
+        insert_source(&conn, root_b, "trip/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/IMG_002.jpg", Some(obj2));
+        insert_source(&conn, root_b, "trip/IMG_004.jpg", Some(obj4));
+
+        let include = IncludeSet::default();
+        // No filters
+        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &[]);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert_eq!(result.location_results.len(), 1);
+                let loc = &result.location_results[0];
+                assert_eq!(loc.complementary_count, None);
+                assert_eq!(loc.only_here_count, None);
+                assert_eq!(loc.kind, None);
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Classification sort order
+    // =========================================================================
+
+    #[test]
+    fn test_classification_sort() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive-a", "source");
+        let root_b = insert_root(&conn, "/mnt/backup-main", "source"); // Superset
+        let root_c = insert_root(&conn, "/mnt/partner", "source"); // Lead
+        let root_d = insert_root(&conn, "/mnt/old-copy", "source"); // Mirror
+
+        // Selection: 10 objects
+        let mut sel_objs = Vec::new();
+        for i in 1..=10 {
+            let obj = insert_object(&conn, &format!("hash_{:03}", i));
+            insert_source(
+                &conn,
+                root_a,
+                &format!("photos/IMG_{:03}.jpg", i),
+                Some(obj),
+            );
+            sel_objs.push(obj);
+        }
+
+        // Root B (Superset): 9 overlap + 5 complementary
+        for i in 1..=9 {
+            insert_source(
+                &conn,
+                root_b,
+                &format!("backup/IMG_{:03}.jpg", i),
+                Some(sel_objs[i - 1]),
+            );
+        }
+        for i in 11..=15 {
+            let obj = insert_object(&conn, &format!("hash_{:03}", i));
+            insert_source(
+                &conn,
+                root_b,
+                &format!("backup/EXTRA_{:03}.jpg", i),
+                Some(obj),
+            );
+        }
+
+        // Root C (Lead): 2 overlap + 20 complementary
+        insert_source(&conn, root_c, "photos/IMG_001.jpg", Some(sel_objs[0]));
+        insert_source(&conn, root_c, "photos/IMG_002.jpg", Some(sel_objs[1]));
+        for i in 16..=35 {
+            let obj = insert_object(&conn, &format!("hash_{:03}", i));
+            insert_source(
+                &conn,
+                root_c,
+                &format!("photos/COMP_{:03}.jpg", i),
+                Some(obj),
+            );
+        }
+
+        // Root D (Mirror): 3 overlap, no complementary
+        insert_source(&conn, root_d, "copy/IMG_001.jpg", Some(sel_objs[0]));
+        insert_source(&conn, root_d, "copy/IMG_002.jpg", Some(sel_objs[1]));
+        insert_source(&conn, root_d, "copy/IMG_003.jpg", Some(sel_objs[2]));
+
+        let include = IncludeSet::default();
+        let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &include, &filters);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert_eq!(result.location_results.len(), 3);
+                // Superset first (B: 9/10 = 90% >= 80%)
+                assert!(result.location_results[0].path.contains("backup-main"));
+                assert_eq!(
+                    result.location_results[0].kind,
+                    Some(domain::survey::LocationKind::Superset)
+                );
+                assert_eq!(result.location_results[0].shared_count, 9);
+                assert_eq!(result.location_results[0].complementary_count, Some(5));
+                // Lead second (C)
+                assert!(result.location_results[1].path.contains("partner"));
+                assert_eq!(
+                    result.location_results[1].kind,
+                    Some(domain::survey::LocationKind::Lead)
+                );
+                assert_eq!(result.location_results[1].complementary_count, Some(20));
+                // Mirror last (D)
+                assert!(result.location_results[2].path.contains("old-copy"));
+                assert_eq!(
+                    result.location_results[2].kind,
+                    Some(domain::survey::LocationKind::Mirror)
+                );
+                assert_eq!(result.location_results[2].complementary_count, Some(0));
+                assert_eq!(result.location_results[2].only_here_count, Some(0));
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Selection narrowed by filter
+    // =========================================================================
+
+    #[test]
+    fn test_selection_narrowed_by_filter() {
+        let mut conn = open_in_memory_for_test();
+
+        let root = insert_root(&conn, "/mnt/drive", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+        let obj3 = insert_object(&conn, "hash_003");
+        let obj4 = insert_object(&conn, "hash_004");
+        let obj5 = insert_object(&conn, "hash_005");
+
+        insert_source(&conn, root, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root, "photos/b.jpg", Some(obj2));
+        insert_source(&conn, root, "photos/c.txt", Some(obj3)); // won't match
+        insert_source(&conn, root, "photos/d.txt", Some(obj4)); // won't match
+        insert_source(&conn, root, "photos/e.jpg", Some(obj5));
+
+        let include = IncludeSet::default();
+        let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &filters);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                // Selection narrowed from 5 to 3 by filter
+                assert_eq!(result.total_count, 3);
+                assert_eq!(result.total_hashed, 3);
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Same root, cross-scope complementary content
+    // =========================================================================
+
+    #[test]
+    fn test_same_root_complementary() {
+        let mut conn = open_in_memory_for_test();
+
+        let root = insert_root(&conn, "/mnt/drive", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+        let obj3 = insert_object(&conn, "hash_003"); // complementary
+
+        insert_source(&conn, root, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root, "photos/b.jpg", Some(obj2));
+        // Same content as photos/a.jpg — overlap
+        insert_source(&conn, root, "documents/a.jpg", Some(obj1));
+        // Different content, matches filter — complementary
+        insert_source(&conn, root, "documents/c.jpg", Some(obj3));
+
+        let include = IncludeSet::default();
+        let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+        let outcome = run_compute(&mut conn, &["/mnt/drive/photos"], &include, &filters);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert_eq!(result.total_count, 2);
+                assert_eq!(result.location_results.len(), 1);
+                assert_eq!(result.location_results[0].path, "/mnt/drive/documents");
+                assert_eq!(result.location_results[0].shared_count, 1); // obj1
+                assert_eq!(result.location_results[0].complementary_count, Some(1)); // obj3
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Mirror with filters has kind=Mirror and comp=Some(0)
+    // =========================================================================
+
+    #[test]
+    fn test_mirror_with_filters() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/mirror", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+        let obj3 = insert_object(&conn, "hash_003");
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/b.jpg", Some(obj2));
+        insert_source(&conn, root_a, "photos/c.jpg", Some(obj3));
+
+        // Mirror: same content, nothing complementary
+        insert_source(&conn, root_b, "backup/a.jpg", Some(obj1));
+        insert_source(&conn, root_b, "backup/b.jpg", Some(obj2));
+
+        let include = IncludeSet::default();
+        let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &include, &filters);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert_eq!(result.location_results.len(), 1);
+                let loc = &result.location_results[0];
+                assert_eq!(loc.kind, Some(domain::survey::LocationKind::Mirror));
+                // Some(0), not None — affinity WAS computed
+                assert_eq!(loc.complementary_count, Some(0));
+                assert_eq!(loc.only_here_count, Some(0));
             }
             _ => panic!("Expected SurveyOutcome::Result"),
         }
