@@ -24,6 +24,7 @@
     - [`ls`](commands/query/ls.md)
     - [`facts`](commands/query/facts.md)
     - [`compare`](commands/query/compare.md)
+    - [`survey`](commands/query/survey.md)
   - [Managing Sources](commands/manage/index.md)
     - [`exclude`](commands/manage/exclude.md)
   - [Archiving](./commands/archive/index.md)

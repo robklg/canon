@@ -37,6 +37,7 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 - `scan.rs` - Scan reconciliation logic (`FileObservation`, `Reconciliation`, `reconcile()`, `find_missing()`)
 - `exclusion.rs` - Duplicate exclusion logic (`find_excludable_duplicates()`)
 - `include.rs` - `IncludeSet` struct for controlling source visibility (`includes_excluded()`, `includes_archived()`, `is_expanded()`)
+- `survey.rs` - Scope discovery (`discover_scopes()`, `discover_scopes_by_root()`), uniqueness (`count_only_here()`, `find_unique_object_ids()`), `LocationKind` classification
 
 **Repository Layer** (`src/repo/`) - Database access:
 - `db.rs` - Connection, schema, transactions (`Db`, `open_with_options()`)
@@ -63,6 +64,7 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 - `facts.rs` - Fact inspection and management
 - `roots.rs` - Root management (list, suspend/unsuspend, comment, remove)
 - `compare.rs` - Compare folders by content hash
+- `survey.rs` - Survey scope for archive status, related locations, unique content
 - `scan.rs` - Directory scanning logic
 - `worklist.rs` - JSONL worklist generation for external processing
 - `import_facts.rs` - Fact import with staleness validation
@@ -77,6 +79,7 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 - `facts` - Show fact coverage and value distribution (`--key` supports modifiers/accessors)
 - `coverage` - Show archive coverage statistics
 - `compare` - Compare two folders by content hash
+- `survey` - Survey a selection for archive status, related locations, and unique content
 - `cluster generate` - Generate manifest from matching sources
 - `apply` - Apply manifest to copy/move/rename files
 - `exclude set/clear/duplicates` - Manage source exclusions
@@ -85,7 +88,7 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 
 Two unified flags control visibility and awareness across all commands:
 
-- **`--include`** (query commands: `ls`, `facts`, `coverage`, `worklist`, `compare`): Expands what you see. Values: `excluded`, `archived`, `all`. Comma-separated and repeatable. Always safe — no side effects. Compare only accepts `excluded`.
+- **`--include`** (query commands: `ls`, `facts`, `coverage`, `worklist`, `compare`, `survey`): Expands what you see. Values: `excluded`, `archived`, `all`. Comma-separated and repeatable. Always safe — no side effects. Compare and survey only accept `excluded`.
 - **`--allow`** (effectful commands: `cluster generate`, `apply`, `import-facts`): Acknowledges non-default source selection. Canon's defaults surface information (e.g., duplicates present); `--allow` is the user saying "I'm aware, proceed." Per-command values. Not available on `cluster refresh` (reads from manifest `[options]`).
 
 **Filter modes on `ls`**: `--archived`, `--unarchived`, `--unhashed`, `--duplicates`, `--excluded` are mutually exclusive filter modes. `--excluded` implicitly includes excluded sources and shows both source-level and object-level excluded.
@@ -333,6 +336,22 @@ The `scan` command uses a pipeline architecture with pure domain logic:
 - File replacement (same path, different inode): Old record is updated with new file's attributes
 - Stale record revival (file reappears at old path): Stale record is updated, present=1
 - Device mismatch: Detected as `Disconnected`, file skipped (use `--ignore-device-id` to override)
+
+### Survey Architecture
+
+The `survey` command provides outward-looking comparison from a shaped selection. It answers: what's archived, where are related locations, what's unique to this scope.
+
+**Asymmetric visibility model**: Survey has two sides with different rules:
+- **Selection side** (the user's query): Active source roots only, non-excluded (unless `--include excluded`), filtered by scope + `--where`
+- **Outward side** (the universe): Active roots of any role (source + archive), non-excluded always. Archive roots are visible because "what's resolved?" is a core question
+
+**In-memory object index**: All computations use a `HashMap<i64, Vec<&Source>>` keyed by `object_id`, built from all active non-excluded hashed sources. This single data structure powers overlap, archive status, "only here" checks, and uniqueness.
+
+**"Only here" counts unique objects, not sources**: Exception to the general source-based counting convention. Duplicates within a location don't make content more irreplaceable. A location with 3 copies of the same file has 1 "only here" object.
+
+**Scope discovery** (`domain/survey.rs`): Pure domain function that finds actionable directory paths where overlapping content concentrates, rather than reporting root-level paths. Uses a tree-based collapsing algorithm on relative paths.
+
+**Relationship to other commands**: `survey` subsumes `coverage` for a selection but `coverage` serves project-level progress. `survey` is asymmetric (selection vs universe); `compare` is symmetric (folder A vs folder B). The workflow is: explore with `ls` → assess with `survey` → cluster when ready.
 
 ### Architectural Direction
 

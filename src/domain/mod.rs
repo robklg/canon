@@ -39,6 +39,6 @@ pub use scan::{find_missing, reconcile, FileObservation, Reconciliation};
 pub use scope::ScopeMatch;
 pub use source::{NewSource, Source};
 pub use survey::{
-    classify_location, count_only_here, count_unique_to_selection, discover_scopes,
-    discover_scopes_by_root, DiscoveredScope, LocationKind,
+    classify_location, count_only_here, discover_scopes, discover_scopes_by_root,
+    DiscoveredScope, LocationKind,
 };

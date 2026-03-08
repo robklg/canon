@@ -263,6 +263,9 @@ enum Commands {
         /// Compare against specific locations instead of discovering them
         #[arg(long = "other")]
         other_paths: Vec<PathBuf>,
+        /// Filter archive section to a specific archive (id:N or path:/foo/bar)
+        #[arg(long)]
+        archive: Option<String>,
         /// Skip per-location affinity computation
         #[arg(long, conflicts_with = "detail")]
         brief: bool,
@@ -795,6 +798,7 @@ fn main() -> Result<()> {
             filters,
             include,
             other_paths,
+            archive,
             brief,
             detail,
             null_delim,
@@ -809,6 +813,7 @@ fn main() -> Result<()> {
                 original_filters: filters,
                 include,
                 other_paths,
+                archive,
                 brief,
                 detail,
                 null_delim,

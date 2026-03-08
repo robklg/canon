@@ -170,15 +170,6 @@ pub fn find_unique_object_ids(
         .collect()
 }
 
-/// Count selection object_ids with no source outside the selection.
-pub fn count_unique_to_selection(
-    selection_object_ids: &HashSet<i64>,
-    selection_source_ids: &HashSet<i64>,
-    by_object_id: &HashMap<i64, Vec<&Source>>,
-) -> usize {
-    find_unique_object_ids(selection_object_ids, selection_source_ids, by_object_id).len()
-}
-
 /// Classification of a related location.
 /// Variant order defines sort priority (lowest first): Superset → Lead → Mirror.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -449,7 +440,7 @@ mod tests {
         let selection_object_ids: HashSet<i64> = HashSet::from([42]);
         let selection_source_ids: HashSet<i64> = HashSet::from([1]);
         assert_eq!(
-            count_unique_to_selection(&selection_object_ids, &selection_source_ids, &by_object_id),
+            find_unique_object_ids(&selection_object_ids, &selection_source_ids, &by_object_id).len(),
             1
         );
     }
@@ -463,7 +454,7 @@ mod tests {
         let selection_object_ids: HashSet<i64> = HashSet::from([42]);
         let selection_source_ids: HashSet<i64> = HashSet::from([1]);
         assert_eq!(
-            count_unique_to_selection(&selection_object_ids, &selection_source_ids, &by_object_id),
+            find_unique_object_ids(&selection_object_ids, &selection_source_ids, &by_object_id).len(),
             0
         );
     }
@@ -478,7 +469,7 @@ mod tests {
         let selection_object_ids: HashSet<i64> = HashSet::from([42]);
         let selection_source_ids: HashSet<i64> = HashSet::from([1]);
         assert_eq!(
-            count_unique_to_selection(&selection_object_ids, &selection_source_ids, &by_object_id),
+            find_unique_object_ids(&selection_object_ids, &selection_source_ids, &by_object_id).len(),
             0
         );
     }
@@ -492,7 +483,7 @@ mod tests {
         let selection_object_ids: HashSet<i64> = HashSet::from([42]);
         let selection_source_ids: HashSet<i64> = HashSet::from([1, 2]);
         assert_eq!(
-            count_unique_to_selection(&selection_object_ids, &selection_source_ids, &by_object_id),
+            find_unique_object_ids(&selection_object_ids, &selection_source_ids, &by_object_id).len(),
             1
         );
     }
@@ -569,19 +560,4 @@ mod tests {
         assert_eq!(result, HashSet::from([42]));
     }
 
-    #[test]
-    fn find_unique_delegates_correctly() {
-        // Same inputs → count_unique_to_selection == find_unique_object_ids.len()
-        let s1 = make_source(1, "/sel", "a.jpg", Some(42));
-        let s2 = make_source(2, "/sel", "b.jpg", Some(43));
-        let s3 = make_source(3, "/other", "c.jpg", Some(43));
-        let by_object_id: HashMap<i64, Vec<&Source>> =
-            HashMap::from([(42, vec![&s1]), (43, vec![&s2, &s3])]);
-        let sel_oids: HashSet<i64> = HashSet::from([42, 43]);
-        let sel_sids: HashSet<i64> = HashSet::from([1, 2]);
-
-        let count = count_unique_to_selection(&sel_oids, &sel_sids, &by_object_id);
-        let set = find_unique_object_ids(&sel_oids, &sel_sids, &by_object_id);
-        assert_eq!(count, set.len());
-    }
 }
