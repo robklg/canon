@@ -264,8 +264,17 @@ enum Commands {
         #[arg(long = "other")]
         other_paths: Vec<PathBuf>,
         /// Skip per-location affinity computation
-        #[arg(long)]
+        #[arg(long, conflicts_with = "detail")]
         brief: bool,
+        /// Show detailed output (complement or unique)
+        #[arg(long, value_enum)]
+        detail: Option<survey::DetailMode>,
+        /// Output null-delimited paths (for --detail unique)
+        #[arg(short = '0', long = "null")]
+        null_delim: bool,
+        /// Show all paths per location
+        #[arg(long)]
+        verbose: bool,
     },
     /// Compare two folders by content hash
     Compare {
@@ -787,6 +796,9 @@ fn main() -> Result<()> {
             include,
             other_paths,
             brief,
+            detail,
+            null_delim,
+            verbose,
         } => {
             let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
             let include = include_set_from(&include);
@@ -798,6 +810,9 @@ fn main() -> Result<()> {
                 include,
                 other_paths,
                 brief,
+                detail,
+                null_delim,
+                verbose,
             };
             survey::run(&mut db, &paths, &expanded, &options)?;
         }

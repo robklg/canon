@@ -206,7 +206,7 @@ canon survey [paths]... [OPTIONS]
 | 2 | Summary view (no filters) | Command module, CLI, selection pipeline, archive status, overlap with scope discovery, unique count, formatted output | Story 1 | Done |
 | 3 | Affinity and classification | `--where` enables "+N more" / "(only here)" columns, classification sort, filter echo | Story 2 | Done |
 | 4 | `--other` and `--brief` | Directed comparison mode, brief mode, behavioral differences | Story 3 | Done |
-| 5 | Detail views | `--detail complement` and `--detail unique` output modes | Story 3 | Pending |
+| 5 | Detail views | `--detail complement` and `--detail unique` output modes | Story 3 | Done |
 | 6 | Polish and documentation | `--archive`, location cap, `--verbose`, formatting, CLAUDE.md, docs/ | Story 5 | Pending |
 
 ### Story 1: Domain Foundations
