@@ -518,7 +518,7 @@ All existing tests in `survey.rs` (37 tests) updated for new output format and a
 
 - [x] Phase 1: Orientation default + affinity gate + infrastructure
 - [x] Phase 2: `--detail overlap`
-- [ ] Phase 3: `--detail residual`
+- [x] Phase 3: `--detail residual`
 - [ ] Phase 4: Documentation + `--detail unique` path display
 - [ ] Verify all existing tests pass
 - [ ] Update CLAUDE.md

@@ -25,6 +25,8 @@ pub enum DetailMode {
     Unique,
     /// Show which selection files overlap with each related location
     Overlap,
+    /// Show selection files NOT shared with reference location(s)
+    Residual,
 }
 
 /// Options controlling survey behavior.
@@ -105,6 +107,11 @@ pub fn run(
         bail!("`--detail complement` requires `--where` filters to define matching content.");
     }
 
+    // Validate --detail residual requires --other
+    if options.detail == Some(DetailMode::Residual) && options.other_paths.is_empty() {
+        bail!("`--detail residual` requires `--other` to specify a reference location.");
+    }
+
     // Validate --affinity requires --where
     if options.affinity && filter_strs.is_empty() {
         bail!("`--affinity` requires `--where` filters.");
@@ -156,7 +163,7 @@ pub fn run(
             let suppress = options.null_delim
                 && matches!(
                     options.detail,
-                    Some(DetailMode::Unique) | Some(DetailMode::Overlap)
+                    Some(DetailMode::Unique) | Some(DetailMode::Overlap) | Some(DetailMode::Residual)
                 );
             if !suppress {
                 print_survey_header(&scope_prefixes, &options.original_filters, 0, 0, 0, None);
@@ -169,7 +176,7 @@ pub fn run(
             let suppress = options.null_delim
                 && matches!(
                     options.detail,
-                    Some(DetailMode::Unique) | Some(DetailMode::Overlap)
+                    Some(DetailMode::Unique) | Some(DetailMode::Overlap) | Some(DetailMode::Residual)
                 );
             if !suppress {
                 print_survey_header(
@@ -232,6 +239,29 @@ pub fn run(
                         result.total_hashed,
                         result.is_other_mode,
                         options.verbose,
+                        cwd,
+                        options.null_delim,
+                    );
+                }
+                Some(DetailMode::Residual) => {
+                    if !options.null_delim {
+                        print_survey_header(
+                            &result.scope_prefixes,
+                            &options.original_filters,
+                            result.total_count,
+                            result.unhashed_count,
+                            result.total_hashed,
+                            Some(result.unique_count),
+                        );
+                        println!();
+                    }
+                    let cwd = if options.null_delim {
+                        None
+                    } else {
+                        display_cwd.as_deref()
+                    };
+                    print_residual_detail(
+                        &result.location_results,
                         cwd,
                         options.null_delim,
                     );
@@ -535,6 +565,23 @@ fn compute_survey(
             None
         };
 
+        // Residual paths: selection files NOT shared with this location.
+        // Uses full selection (not just hashed) — unhashed sources are always residual.
+        let residual_paths = if options.detail == Some(DetailMode::Residual) {
+            let mut paths: Vec<String> = selection
+                .iter()
+                .filter(|s| match s.object_id {
+                    Some(oid) => !loc_oids.contains(&oid),
+                    None => true, // unhashed always residual
+                })
+                .map(|s| s.path())
+                .collect();
+            paths.sort_unstable();
+            Some(paths)
+        } else {
+            None
+        };
+
         location_results.push(LocationResult {
             path: scope_path.clone(),
             shared_count,
@@ -544,7 +591,7 @@ fn compute_survey(
             kind,
             complementary_paths,
             overlap_paths,
-            residual_paths: None, // populated in Phase 3
+            residual_paths,
         });
     }
 
@@ -925,6 +972,47 @@ fn print_overlap_detail(
             "  ({} locations not shown, use --verbose to see all)",
             format_count(locations.len() - DEFAULT_LOCATION_CAP),
         );
+    }
+}
+
+fn print_residual_detail(
+    locations: &[LocationResult],
+    cwd: Option<&str>,
+    null_delim: bool,
+) {
+    if null_delim {
+        // -0 mode: flat, deduplicated, absolute paths
+        let all_paths: std::collections::BTreeSet<&str> = locations
+            .iter()
+            .filter_map(|loc| loc.residual_paths.as_ref())
+            .flat_map(|paths| paths.iter().map(|p| p.as_str()))
+            .collect();
+        for path in all_paths {
+            print!("{}\0", path);
+        }
+        return;
+    }
+
+    // Human-readable mode: per-location grouping
+    for loc in locations {
+        let paths = match &loc.residual_paths {
+            Some(p) => p,
+            None => continue,
+        };
+
+        println!(
+            "Not at {} (residual):",
+            domain::path::format_path(&loc.path, cwd),
+        );
+
+        if paths.is_empty() {
+            println!("  (none)");
+        } else {
+            for path in paths {
+                println!("  {}", domain::path::format_path(path, cwd));
+            }
+        }
+        println!();
     }
 }
 
@@ -3244,6 +3332,250 @@ mod tests {
                 // Deduplicates to 1 path
                 assert_eq!(all_paths.len(), 1);
                 assert!(all_paths.contains("/mnt/drive/photos/a.jpg"));
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Phase 3: --detail residual tests
+    // =========================================================================
+
+    // =========================================================================
+    // Residual detail: paths NOT shared with --other location
+    // =========================================================================
+
+    #[test]
+    fn test_residual_detail_basic() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001"); // overlap
+        let obj2 = insert_object(&conn, "hash_002"); // only on A → residual
+        let obj3 = insert_object(&conn, "hash_003"); // only on A → residual
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/b.jpg", Some(obj2));
+        insert_source(&conn, root_a, "photos/c.jpg", Some(obj3));
+
+        insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Residual),
+            other_paths: vec![PathBuf::from("/mnt/backup")],
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert!(result.is_other_mode);
+                assert_eq!(result.location_results.len(), 1);
+                let loc = &result.location_results[0];
+                let paths = loc.residual_paths.as_ref().unwrap();
+                assert_eq!(paths.len(), 2);
+                assert_eq!(paths[0], "/mnt/drive/photos/b.jpg");
+                assert_eq!(paths[1], "/mnt/drive/photos/c.jpg");
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Residual requires --other: validation in run()
+    // =========================================================================
+
+    #[test]
+    fn test_residual_requires_other() {
+        let conn = open_in_memory_for_test();
+
+        let root = insert_root(&conn, "/mnt/drive", "source");
+        let obj1 = insert_object(&conn, "hash_001");
+        insert_source(&conn, root, "a.jpg", Some(obj1));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Residual),
+            ..test_options()
+        };
+        let paths = vec![PathBuf::from("/mnt/drive")];
+        let filter_strs: Vec<String> = vec![];
+
+        let mut db = repo::Db::from_connection(conn);
+        let result = run(&mut db, &paths, &filter_strs, &options);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("--detail residual"));
+        assert!(err.contains("--other"));
+    }
+
+    // =========================================================================
+    // Residual includes unhashed sources (always residual)
+    // =========================================================================
+
+    #[test]
+    fn test_residual_includes_unhashed() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001"); // overlap
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/unhashed.raw", None); // unhashed → residual
+
+        insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Residual),
+            other_paths: vec![PathBuf::from("/mnt/backup")],
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert_eq!(result.location_results.len(), 1);
+                let paths = result.location_results[0].residual_paths.as_ref().unwrap();
+                assert_eq!(paths.len(), 1);
+                assert_eq!(paths[0], "/mnt/drive/photos/unhashed.raw");
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Residual zero: all content overlaps → empty residual
+    // =========================================================================
+
+    #[test]
+    fn test_residual_zero() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+
+        insert_source(&conn, root_a, "a.jpg", Some(obj1));
+        insert_source(&conn, root_a, "b.jpg", Some(obj2));
+
+        // Everything overlaps
+        insert_source(&conn, root_b, "a.jpg", Some(obj1));
+        insert_source(&conn, root_b, "b.jpg", Some(obj2));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Residual),
+            other_paths: vec![PathBuf::from("/mnt/backup")],
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert_eq!(result.location_results.len(), 1);
+                let paths = result.location_results[0].residual_paths.as_ref().unwrap();
+                assert!(paths.is_empty());
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Residual -0: flat, deduplicated, absolute paths
+    // =========================================================================
+
+    #[test]
+    fn test_residual_null() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001"); // overlap
+        let obj2 = insert_object(&conn, "hash_002"); // residual
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/b.jpg", Some(obj2));
+
+        insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Residual),
+            null_delim: true,
+            other_paths: vec![PathBuf::from("/mnt/backup")],
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert_eq!(result.location_results.len(), 1);
+                let paths = result.location_results[0].residual_paths.as_ref().unwrap();
+                assert_eq!(paths.len(), 1);
+                assert_eq!(paths[0], "/mnt/drive/photos/b.jpg");
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Residual with multiple --other: separate listing per location
+    // =========================================================================
+
+    #[test]
+    fn test_residual_multiple_other() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/backup-1", "source");
+        let root_c = insert_root(&conn, "/mnt/backup-2", "source");
+
+        let obj1 = insert_object(&conn, "hash_001"); // on A, B, C
+        let obj2 = insert_object(&conn, "hash_002"); // on A, B only
+        let obj3 = insert_object(&conn, "hash_003"); // on A only
+
+        insert_source(&conn, root_a, "a.jpg", Some(obj1));
+        insert_source(&conn, root_a, "b.jpg", Some(obj2));
+        insert_source(&conn, root_a, "c.jpg", Some(obj3));
+
+        insert_source(&conn, root_b, "a.jpg", Some(obj1));
+        insert_source(&conn, root_b, "b.jpg", Some(obj2));
+
+        insert_source(&conn, root_c, "a.jpg", Some(obj1));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Residual),
+            other_paths: vec![
+                PathBuf::from("/mnt/backup-1"),
+                PathBuf::from("/mnt/backup-2"),
+            ],
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert!(result.is_other_mode);
+                assert_eq!(result.location_results.len(), 2);
+
+                // backup-1 has obj1+obj2 → residual = c.jpg (obj3)
+                let loc_b = &result.location_results[0];
+                assert!(loc_b.path.contains("backup-1"));
+                let paths_b = loc_b.residual_paths.as_ref().unwrap();
+                assert_eq!(paths_b.len(), 1);
+                assert_eq!(paths_b[0], "/mnt/drive/c.jpg");
+
+                // backup-2 has only obj1 → residual = b.jpg, c.jpg
+                let loc_c = &result.location_results[1];
+                assert!(loc_c.path.contains("backup-2"));
+                let paths_c = loc_c.residual_paths.as_ref().unwrap();
+                assert_eq!(paths_c.len(), 2);
+                assert_eq!(paths_c[0], "/mnt/drive/b.jpg");
+                assert_eq!(paths_c[1], "/mnt/drive/c.jpg");
             }
             _ => panic!("Expected SurveyOutcome::Result"),
         }
