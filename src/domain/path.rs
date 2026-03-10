@@ -131,6 +131,22 @@ pub fn canonicalize_maybe_missing(path: &Path) -> Result<String> {
     Ok(result.to_string_lossy().to_string())
 }
 
+/// Format a path for display: relative when under cwd, absolute otherwise.
+/// Returns "." when path equals cwd exactly.
+pub fn format_path(full_path: &str, cwd: Option<&str>) -> String {
+    if let Some(cwd) = cwd {
+        if full_path == cwd {
+            ".".to_string()
+        } else if let Some(rel) = path_strip_prefix(full_path, cwd) {
+            rel.to_string()
+        } else {
+            full_path.to_string()
+        }
+    } else {
+        full_path.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,5 +339,35 @@ mod tests {
         }];
         let result = resolve_path(Path::new("/a/b/c"), &roots, Path::new("/any"));
         assert_eq!(result.unwrap(), "/a/b/c");
+    }
+
+    // ========================================================================
+    // format_path tests
+    // ========================================================================
+
+    #[test]
+    fn test_format_path_strips_cwd() {
+        assert_eq!(
+            format_path("/a/b/c/file.jpg", Some("/a/b")),
+            "c/file.jpg"
+        );
+    }
+
+    #[test]
+    fn test_format_path_absolute_fallback() {
+        assert_eq!(
+            format_path("/x/y/z.jpg", Some("/a/b")),
+            "/x/y/z.jpg"
+        );
+    }
+
+    #[test]
+    fn test_format_path_cwd_itself() {
+        assert_eq!(format_path("/a/b", Some("/a/b")), ".");
+    }
+
+    #[test]
+    fn test_format_path_no_cwd() {
+        assert_eq!(format_path("/a/b/c.jpg", None), "/a/b/c.jpg");
     }
 }

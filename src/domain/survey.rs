@@ -171,30 +171,35 @@ pub fn find_unique_object_ids(
 }
 
 /// Classification of a related location.
-/// Variant order defines sort priority (lowest first): Superset → Lead → Mirror.
+/// Variant order defines sort priority (lowest first): Superset → Lead → Subset → Mirror.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LocationKind {
     Superset, // shared >= threshold AND has complementary
     Lead,     // has complementary content
-    Mirror,   // overlap only, no complementary
+    Subset,   // no complementary AND shared/location_total >= threshold
+    Mirror,   // overlap only, no complementary, below subset threshold
 }
 
 /// Classify a location based on shared/complementary data.
-/// Guards against division by zero when total_hashed == 0.
+/// Guards against division by zero when total_hashed == 0 or location_total == 0.
 pub fn classify_location(
     shared_count: usize,
     total_hashed: usize,
     complementary_count: usize,
-    superset_threshold: f64,
+    threshold: f64,
+    location_total: usize,
 ) -> LocationKind {
     if complementary_count == 0 {
+        if location_total > 0 && shared_count as f64 / location_total as f64 >= threshold {
+            return LocationKind::Subset;
+        }
         return LocationKind::Mirror;
     }
     if total_hashed == 0 {
         return LocationKind::Lead;
     }
     let ratio = shared_count as f64 / total_hashed as f64;
-    if ratio >= superset_threshold {
+    if ratio >= threshold {
         LocationKind::Superset
     } else {
         LocationKind::Lead
@@ -496,7 +501,7 @@ mod tests {
     fn classify_superset() {
         // shared=320, total=400, complementary=95, threshold=0.8 → Superset (0.80 >= 0.80)
         assert_eq!(
-            classify_location(320, 400, 95, 0.8),
+            classify_location(320, 400, 95, 0.8, 500),
             LocationKind::Superset
         );
     }
@@ -504,19 +509,67 @@ mod tests {
     #[test]
     fn classify_lead() {
         // shared=45, total=400, complementary=180, threshold=0.8 → Lead (0.1125 < 0.80)
-        assert_eq!(classify_location(45, 400, 180, 0.8), LocationKind::Lead);
+        assert_eq!(
+            classify_location(45, 400, 180, 0.8, 500),
+            LocationKind::Lead
+        );
     }
 
     #[test]
     fn classify_mirror() {
         // shared=30, total=400, complementary=0, threshold=0.8 → Mirror
-        assert_eq!(classify_location(30, 400, 0, 0.8), LocationKind::Mirror);
+        // location_total=100, shared/location_total = 0.3 < 0.8 → Mirror, not Subset
+        assert_eq!(
+            classify_location(30, 400, 0, 0.8, 100),
+            LocationKind::Mirror
+        );
     }
 
     #[test]
     fn classify_edge_of_threshold() {
         // shared=319, total=400, complementary=10, threshold=0.8 → Lead (0.7975 < 0.80)
-        assert_eq!(classify_location(319, 400, 10, 0.8), LocationKind::Lead);
+        assert_eq!(
+            classify_location(319, 400, 10, 0.8, 500),
+            LocationKind::Lead
+        );
+    }
+
+    // =========================================================================
+    // Subset classification tests
+    // =========================================================================
+
+    #[test]
+    fn test_classify_subset() {
+        // complementary == 0, shared/location_total = 8/10 = 0.8 >= 0.8 → Subset
+        assert_eq!(
+            classify_location(8, 100, 0, 0.8, 10),
+            LocationKind::Subset
+        );
+    }
+
+    #[test]
+    fn test_classify_subset_below_threshold() {
+        // complementary == 0, shared/location_total = 7/10 = 0.7 < 0.8 → Mirror
+        assert_eq!(
+            classify_location(7, 100, 0, 0.8, 10),
+            LocationKind::Mirror
+        );
+    }
+
+    #[test]
+    fn test_classify_subset_with_complementary() {
+        // complementary > 0 → never Subset (even if shared/location_total >= threshold)
+        assert_eq!(
+            classify_location(8, 10, 5, 0.8, 10),
+            LocationKind::Superset
+        );
+    }
+
+    #[test]
+    fn test_classify_sort_order_with_subset() {
+        assert!(LocationKind::Superset < LocationKind::Lead);
+        assert!(LocationKind::Lead < LocationKind::Subset);
+        assert!(LocationKind::Subset < LocationKind::Mirror);
     }
 
     // =========================================================================

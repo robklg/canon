@@ -266,6 +266,9 @@ enum Commands {
         /// Filter archive section to a specific archive (id:N or path:/foo/bar)
         #[arg(long)]
         archive: Option<String>,
+        /// Opt into affinity enrichment (requires --where)
+        #[arg(long)]
+        affinity: bool,
         /// Skip per-location affinity computation
         #[arg(long, conflicts_with = "detail")]
         brief: bool,
@@ -799,6 +802,7 @@ fn main() -> Result<()> {
             include,
             other_paths,
             archive,
+            affinity,
             brief,
             detail,
             null_delim,
@@ -813,6 +817,7 @@ fn main() -> Result<()> {
                 original_filters: filters,
                 include,
                 other_paths,
+                affinity,
                 archive,
                 brief,
                 detail,

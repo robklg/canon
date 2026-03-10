@@ -289,17 +289,7 @@ fn get_matching_sources(
 }
 
 fn format_path(full_path: &str, cwd: Option<&str>) -> String {
-    if let Some(cwd) = cwd {
-        if full_path == cwd {
-            ".".to_string()
-        } else if let Some(rel) = path_strip_prefix(full_path, cwd) {
-            rel.to_string()
-        } else {
-            full_path.to_string()
-        }
-    } else {
-        full_path.to_string()
-    }
+    crate::domain::path::format_path(full_path, cwd)
 }
 
 fn format_size(bytes: i64) -> String {
