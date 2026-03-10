@@ -267,7 +267,12 @@ pub fn run(
                     );
                 }
                 Some(DetailMode::Unique) => {
-                    print_unique_detail(&result.unique_paths, options.null_delim);
+                    let cwd = if options.null_delim {
+                        None
+                    } else {
+                        display_cwd.as_deref()
+                    };
+                    print_unique_detail(&result.unique_paths, options.null_delim, cwd);
                 }
                 None => {
                     print_survey_header(
@@ -1016,10 +1021,15 @@ fn print_residual_detail(
     }
 }
 
-fn print_unique_detail(paths: &[String], null_delim: bool) {
+fn print_unique_detail(paths: &[String], null_delim: bool, cwd: Option<&str>) {
     let sep = if null_delim { "\0" } else { "\n" };
     for path in paths {
-        print!("{}{}", path, sep);
+        let display = if null_delim {
+            path.clone() // -0: always absolute
+        } else {
+            domain::path::format_path(path, cwd)
+        };
+        print!("{}{}", display, sep);
     }
 }
 
@@ -3576,6 +3586,51 @@ mod tests {
                 assert_eq!(paths_c.len(), 2);
                 assert_eq!(paths_c[0], "/mnt/drive/b.jpg");
                 assert_eq!(paths_c[1], "/mnt/drive/c.jpg");
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Phase 4: --detail unique path display with format_path
+    // =========================================================================
+
+    // =========================================================================
+    // Unique paths are absolute in data; format_path makes them relative
+    // =========================================================================
+
+    #[test]
+    fn test_unique_detail_relative_paths() {
+        // Verify unique_paths are absolute (the data contract).
+        // The display function (print_unique_detail) applies format_path,
+        // which is tested in domain/path.rs. This test confirms the data
+        // flows correctly for format_path to work.
+        let mut conn = open_in_memory_for_test();
+
+        let root = insert_root(&conn, "/mnt/drive", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+
+        insert_source(&conn, root, "photos/sub/unique.jpg", Some(obj1));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Unique),
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert_eq!(result.unique_count, 1);
+                // Data contains absolute path — format_path("/mnt/drive/photos/sub/unique.jpg",
+                // Some("/mnt/drive")) would produce "photos/sub/unique.jpg"
+                assert_eq!(result.unique_paths[0], "/mnt/drive/photos/sub/unique.jpg");
+                // Verify format_path would relativize it correctly
+                let relative = domain::path::format_path(
+                    &result.unique_paths[0],
+                    Some("/mnt/drive"),
+                );
+                assert_eq!(relative, "photos/sub/unique.jpg");
             }
             _ => panic!("Expected SurveyOutcome::Result"),
         }

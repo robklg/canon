@@ -33,11 +33,11 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 - `object.rs` - Object struct and `is_excluded()` predicate
 - `fact.rs` - FactEntry struct, re-exports FactValue/FactType
 - `scope.rs` - ScopeMatch enum for file vs directory scope matching
-- `path.rs` - Pure path utilities (`path_is_under()`, `path_strip_prefix()`)
+- `path.rs` - Pure path utilities (`path_is_under()`, `path_strip_prefix()`, `format_path()`)
 - `scan.rs` - Scan reconciliation logic (`FileObservation`, `Reconciliation`, `reconcile()`, `find_missing()`)
 - `exclusion.rs` - Duplicate exclusion logic (`find_excludable_duplicates()`)
 - `include.rs` - `IncludeSet` struct for controlling source visibility (`includes_excluded()`, `includes_archived()`, `is_expanded()`)
-- `survey.rs` - Scope discovery (`discover_scopes()`, `discover_scopes_by_root()`), uniqueness (`count_only_here()`, `find_unique_object_ids()`), `LocationKind` classification
+- `survey.rs` - Scope discovery (`discover_scopes()`, `discover_scopes_by_root()`), uniqueness (`count_only_here()`, `find_unique_object_ids()`), `LocationKind` classification (Superset, Lead, Subset, Mirror)
 
 **Repository Layer** (`src/repo/`) - Database access:
 - `db.rs` - Connection, schema, transactions (`Db`, `open_with_options()`)
@@ -79,7 +79,7 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 - `facts` - Show fact coverage and value distribution (`--key` supports modifiers/accessors)
 - `coverage` - Show archive coverage statistics
 - `compare` - Compare two folders by content hash
-- `survey` - Survey a selection for archive status, related locations, and unique content
+- `survey` - Survey a selection for archive status, related locations, and unique content (orientation/affinity modes, detail views)
 - `cluster generate` - Generate manifest from matching sources
 - `apply` - Apply manifest to copy/move/rename files
 - `exclude set/clear/duplicates` - Manage source exclusions
@@ -341,6 +341,16 @@ The `scan` command uses a pipeline architecture with pure domain logic:
 
 The `survey` command provides outward-looking comparison from a shaped selection. It answers: what's archived, where are related locations, what's unique to this scope.
 
+**Two cognitive modes**:
+- **Orientation** (default): What's here? Archive status, related locations sorted by overlap, unique count. No `--where` or `--affinity` required.
+- **Affinity** (`--affinity`, requires `--where`): Adds classification columns (+N more, unique count, disposition symbol) per location. Sorted by classification. `--brief` suppresses affinity computation.
+
+**Detail views** (`--detail`): Replace the summary with specific listings:
+- `complement` — files at related locations matching filters but with different content (implies affinity)
+- `unique` — bare paths of content existing nowhere else
+- `overlap` — selection-side paths whose content exists at a location
+- `residual` — selection sources NOT shared with a location (requires `--other`); unhashed sources always residual
+
 **Asymmetric visibility model**: Survey has two sides with different rules:
 - **Selection side** (the user's query): Active source roots only, non-excluded (unless `--include excluded`), filtered by scope + `--where`
 - **Outward side** (the universe): Active roots of any role (source + archive), non-excluded always. Archive roots are visible because "what's resolved?" is a core question
@@ -348,6 +358,8 @@ The `survey` command provides outward-looking comparison from a shaped selection
 **In-memory object index**: All computations use a `HashMap<i64, Vec<&Source>>` keyed by `object_id`, built from all active non-excluded hashed sources. This single data structure powers overlap, archive status, "only here" checks, and uniqueness.
 
 **"Only here" counts unique objects, not sources**: Exception to the general source-based counting convention. Duplicates within a location don't make content more irreplaceable. A location with 3 copies of the same file has 1 "only here" object.
+
+**Location classification** (`domain/survey.rs`): Five dispositions — Superset (≥), Lead (>), Subset (⊆), Mirror (=). Subset: high overlap (≥80% of location's content), no complementary. Classification is a pure domain function `classify_location()`.
 
 **Scope discovery** (`domain/survey.rs`): Pure domain function that finds actionable directory paths where overlapping content concentrates, rather than reporting root-level paths. Uses a tree-based collapsing algorithm on relative paths.
 

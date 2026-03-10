@@ -3,7 +3,7 @@ use chrono::{TimeZone, Utc};
 use rusqlite::types::Value;
 use std::collections::{HashMap, HashSet};
 
-use crate::domain::path::{path_strip_prefix, resolve_paths};
+use crate::domain::path::resolve_paths;
 use crate::domain::root::Root;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;

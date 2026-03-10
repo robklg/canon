@@ -1,7 +1,7 @@
 # Story: Survey Modes — Orientation Default, Affinity Opt-In, and New Detail Views
 
 **Design Spec**: ~/store/claude-designs/2026-03-09-survey-modes.md
-**Status**: Pending
+**Status**: Complete
 **Created**: 2026-03-10
 
 ## Objective
@@ -519,10 +519,10 @@ All existing tests in `survey.rs` (37 tests) updated for new output format and a
 - [x] Phase 1: Orientation default + affinity gate + infrastructure
 - [x] Phase 2: `--detail overlap`
 - [x] Phase 3: `--detail residual`
-- [ ] Phase 4: Documentation + `--detail unique` path display
-- [ ] Verify all existing tests pass
-- [ ] Update CLAUDE.md
-- [ ] Update docs/src/commands/query/survey.md
+- [x] Phase 4: Documentation + `--detail unique` path display
+- [x] Verify all existing tests pass
+- [x] Update CLAUDE.md
+- [x] Update docs/src/commands/query/survey.md
 
 ## Documentation Updates
 
