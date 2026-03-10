@@ -23,6 +23,8 @@ pub enum DetailMode {
     Complement,
     /// Output bare paths of unique-to-selection content
     Unique,
+    /// Show which selection files overlap with each related location
+    Overlap,
 }
 
 /// Options controlling survey behavior.
@@ -39,7 +41,7 @@ pub struct SurveyOptions {
     pub brief: bool,
     /// Detail output mode (replaces summary).
     pub detail: Option<DetailMode>,
-    /// Null-delimited output for --detail unique.
+    /// Null-delimited output for --detail unique/overlap.
     pub null_delim: bool,
     /// Filter archive section to a specific archive root.
     pub archive: Option<String>,
@@ -151,7 +153,12 @@ pub fn run(
         archive_root_id,
     )? {
         SurveyOutcome::Empty { scope_prefixes } => {
-            if options.detail != Some(DetailMode::Unique) {
+            let suppress = options.null_delim
+                && matches!(
+                    options.detail,
+                    Some(DetailMode::Unique) | Some(DetailMode::Overlap)
+                );
+            if !suppress {
                 print_survey_header(&scope_prefixes, &options.original_filters, 0, 0, 0, None);
             }
         }
@@ -159,7 +166,12 @@ pub fn run(
             scope_prefixes,
             total_count,
         } => {
-            if options.detail != Some(DetailMode::Unique) {
+            let suppress = options.null_delim
+                && matches!(
+                    options.detail,
+                    Some(DetailMode::Unique) | Some(DetailMode::Overlap)
+                );
+            if !suppress {
                 print_survey_header(
                     &scope_prefixes,
                     &options.original_filters,
@@ -177,6 +189,9 @@ pub fn run(
         }
         SurveyOutcome::Result(mut result) => {
             result.archive_label = archive_label;
+            let display_cwd = std::env::current_dir()
+                .ok()
+                .and_then(|p| p.to_str().map(|s| s.to_string()));
             match options.detail {
                 Some(DetailMode::Complement) => {
                     print_survey_header(
@@ -193,6 +208,32 @@ pub fn run(
                         result.total_hashed,
                         result.is_other_mode,
                         options.verbose,
+                    );
+                }
+                Some(DetailMode::Overlap) => {
+                    if !options.null_delim {
+                        print_survey_header(
+                            &result.scope_prefixes,
+                            &options.original_filters,
+                            result.total_count,
+                            result.unhashed_count,
+                            result.total_hashed,
+                            Some(result.unique_count),
+                        );
+                        println!();
+                    }
+                    let cwd = if options.null_delim {
+                        None
+                    } else {
+                        display_cwd.as_deref()
+                    };
+                    print_overlap_detail(
+                        &result.location_results,
+                        result.total_hashed,
+                        result.is_other_mode,
+                        options.verbose,
+                        cwd,
+                        options.null_delim,
                     );
                 }
                 Some(DetailMode::Unique) => {
@@ -481,6 +522,19 @@ fn compute_survey(
             (None, None, None, None)
         };
 
+        // Overlap paths: which selection files have copies at this location
+        let overlap_paths = if options.detail == Some(DetailMode::Overlap) {
+            let mut paths: Vec<String> = hashed
+                .iter()
+                .filter(|s| loc_oids.contains(&s.object_id.unwrap()))
+                .map(|s| s.path())
+                .collect();
+            paths.sort_unstable();
+            Some(paths)
+        } else {
+            None
+        };
+
         location_results.push(LocationResult {
             path: scope_path.clone(),
             shared_count,
@@ -489,7 +543,7 @@ fn compute_survey(
             only_here_count,
             kind,
             complementary_paths,
-            overlap_paths: None,  // populated in Phase 2
+            overlap_paths,
             residual_paths: None, // populated in Phase 3
         });
     }
@@ -778,6 +832,99 @@ fn print_complement_detail(
         } else {
             println!("  No complementary content found at related locations.");
         }
+    }
+}
+
+fn print_overlap_detail(
+    locations: &[LocationResult],
+    total_hashed: usize,
+    is_other_mode: bool,
+    verbose: bool,
+    cwd: Option<&str>,
+    null_delim: bool,
+) {
+    if null_delim {
+        // -0 mode: flat, deduplicated, absolute paths (no cwd applied)
+        let all_paths: std::collections::BTreeSet<&str> = locations
+            .iter()
+            .filter_map(|loc| loc.overlap_paths.as_ref())
+            .flat_map(|paths| paths.iter().map(|p| p.as_str()))
+            .collect();
+        for path in all_paths {
+            print!("{}\0", path);
+        }
+        return;
+    }
+
+    // Human-readable mode
+    if is_other_mode {
+        println!("Overlapping with specified locations (overlap):");
+    } else {
+        println!("Overlapping with related locations (overlap):");
+    }
+
+    let display_locations = if verbose || locations.len() <= DEFAULT_LOCATION_CAP {
+        locations
+    } else {
+        &locations[..DEFAULT_LOCATION_CAP]
+    };
+
+    let mut any_output = false;
+
+    for loc in display_locations {
+        let paths = match &loc.overlap_paths {
+            Some(p) => p,
+            None => continue,
+        };
+
+        if paths.is_empty() {
+            continue;
+        }
+
+        any_output = true;
+        println!();
+
+        // Header: /path/ (N of M overlap):
+        println!(
+            "  {} ({} of {} overlap):",
+            domain::path::format_path(&loc.path, cwd),
+            format_count(loc.shared_count),
+            format_count(total_hashed),
+        );
+
+        // Paths (capped unless --verbose)
+        let show_count = if verbose {
+            paths.len()
+        } else {
+            COMPLEMENT_SAMPLE_SIZE.min(paths.len())
+        };
+        for path in &paths[..show_count] {
+            println!("    {}", domain::path::format_path(path, cwd));
+        }
+        if !verbose && paths.len() > COMPLEMENT_SAMPLE_SIZE {
+            println!(
+                "    ... and {} more",
+                format_count(paths.len() - COMPLEMENT_SAMPLE_SIZE),
+            );
+        }
+    }
+
+    if !any_output {
+        println!();
+        if is_other_mode {
+            println!("  No overlapping content at specified locations.");
+        } else {
+            println!("  No overlapping content found.");
+        }
+    }
+
+    // Location truncation notice
+    if !verbose && locations.len() > DEFAULT_LOCATION_CAP {
+        println!();
+        println!(
+            "  ({} locations not shown, use --verbose to see all)",
+            format_count(locations.len() - DEFAULT_LOCATION_CAP),
+        );
     }
 }
 
@@ -2855,6 +3002,248 @@ mod tests {
                 // total_count = hashed sources at location (source-role, active, non-excluded)
                 assert_eq!(loc.total_count, 3);
                 assert_eq!(loc.shared_count, 1);
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Phase 2: --detail overlap tests
+    // =========================================================================
+
+    // =========================================================================
+    // Overlap detail: per-location grouping with selection-side paths
+    // =========================================================================
+
+    #[test]
+    fn test_overlap_detail_basic() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+        let root_c = insert_root(&conn, "/mnt/other", "source");
+
+        let obj1 = insert_object(&conn, "hash_001"); // on A, B
+        let obj2 = insert_object(&conn, "hash_002"); // on A, B, C
+        let obj3 = insert_object(&conn, "hash_003"); // on A, C
+        let obj4 = insert_object(&conn, "hash_004"); // unique to A
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/b.jpg", Some(obj2));
+        insert_source(&conn, root_a, "photos/c.jpg", Some(obj3));
+        insert_source(&conn, root_a, "photos/d.jpg", Some(obj4));
+
+        insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/b.jpg", Some(obj2));
+
+        insert_source(&conn, root_c, "misc/b.jpg", Some(obj2));
+        insert_source(&conn, root_c, "misc/c.jpg", Some(obj3));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Overlap),
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                // Two related locations
+                assert_eq!(result.location_results.len(), 2);
+
+                // Sorted by shared desc: backup (2) before other (2 — tie, path order)
+                // Both have shared_count = 2
+                let loc_b = result
+                    .location_results
+                    .iter()
+                    .find(|l| l.path.contains("backup"))
+                    .unwrap();
+                let loc_c = result
+                    .location_results
+                    .iter()
+                    .find(|l| l.path.contains("other"))
+                    .unwrap();
+
+                // Backup overlaps with obj1, obj2 → selection paths a.jpg, b.jpg
+                let paths_b = loc_b.overlap_paths.as_ref().unwrap();
+                assert_eq!(paths_b.len(), 2);
+                assert_eq!(paths_b[0], "/mnt/drive/photos/a.jpg");
+                assert_eq!(paths_b[1], "/mnt/drive/photos/b.jpg");
+
+                // Other overlaps with obj2, obj3 → selection paths b.jpg, c.jpg
+                let paths_c = loc_c.overlap_paths.as_ref().unwrap();
+                assert_eq!(paths_c.len(), 2);
+                assert_eq!(paths_c[0], "/mnt/drive/photos/b.jpg");
+                assert_eq!(paths_c[1], "/mnt/drive/photos/c.jpg");
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Overlap detail with --other: works with directed locations
+    // =========================================================================
+
+    #[test]
+    fn test_overlap_detail_with_other() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001"); // overlap
+        let obj2 = insert_object(&conn, "hash_002"); // overlap
+        let obj3 = insert_object(&conn, "hash_003"); // only on A
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/b.jpg", Some(obj2));
+        insert_source(&conn, root_a, "photos/c.jpg", Some(obj3));
+
+        insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/b.jpg", Some(obj2));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Overlap),
+            other_paths: vec![PathBuf::from("/mnt/backup/trip")],
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert!(result.is_other_mode);
+                assert_eq!(result.location_results.len(), 1);
+                let loc = &result.location_results[0];
+                assert_eq!(loc.path, "/mnt/backup/trip");
+                let paths = loc.overlap_paths.as_ref().unwrap();
+                assert_eq!(paths.len(), 2);
+                assert_eq!(paths[0], "/mnt/drive/photos/a.jpg");
+                assert_eq!(paths[1], "/mnt/drive/photos/b.jpg");
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Overlap detail -0: flat, deduplicated, absolute paths
+    // =========================================================================
+
+    #[test]
+    fn test_overlap_detail_null() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001"); // on A, B
+        let obj2 = insert_object(&conn, "hash_002"); // only on A
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_a, "photos/b.jpg", Some(obj2));
+
+        insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
+
+        // overlap_paths are populated regardless of null_delim
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Overlap),
+            null_delim: true,
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert_eq!(result.location_results.len(), 1);
+                let paths = result.location_results[0].overlap_paths.as_ref().unwrap();
+                // Only obj1 overlaps → one selection path
+                assert_eq!(paths.len(), 1);
+                assert_eq!(paths[0], "/mnt/drive/photos/a.jpg");
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Overlap detail: no overlap → empty paths
+    // =========================================================================
+
+    #[test]
+    fn test_overlap_detail_no_overlap() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+        let obj2 = insert_object(&conn, "hash_002");
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/b.jpg", Some(obj2));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Overlap),
+            other_paths: vec![PathBuf::from("/mnt/backup")],
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert_eq!(result.location_results.len(), 1);
+                let loc = &result.location_results[0];
+                assert_eq!(loc.shared_count, 0);
+                let paths = loc.overlap_paths.as_ref().unwrap();
+                assert!(paths.is_empty());
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Overlap multi-location dedup: source appearing at 2 locations
+    // listed under both in human-readable, once in -0
+    // =========================================================================
+
+    #[test]
+    fn test_overlap_multi_location_dedup() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+        let root_c = insert_root(&conn, "/mnt/other", "source");
+
+        let obj1 = insert_object(&conn, "hash_001"); // on A, B, C
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
+        insert_source(&conn, root_c, "misc/a.jpg", Some(obj1));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Overlap),
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                // Two related locations (backup and other)
+                assert_eq!(result.location_results.len(), 2);
+                // Same selection path appears under both
+                for loc in &result.location_results {
+                    let paths = loc.overlap_paths.as_ref().unwrap();
+                    assert_eq!(paths.len(), 1);
+                    assert_eq!(paths[0], "/mnt/drive/photos/a.jpg");
+                }
+
+                // For -0 dedup: collect all overlap paths into BTreeSet
+                let all_paths: std::collections::BTreeSet<&str> = result
+                    .location_results
+                    .iter()
+                    .filter_map(|l| l.overlap_paths.as_ref())
+                    .flat_map(|p| p.iter().map(|s| s.as_str()))
+                    .collect();
+                // Deduplicates to 1 path
+                assert_eq!(all_paths.len(), 1);
+                assert!(all_paths.contains("/mnt/drive/photos/a.jpg"));
             }
             _ => panic!("Expected SurveyOutcome::Result"),
         }

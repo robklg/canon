@@ -517,7 +517,7 @@ All existing tests in `survey.rs` (37 tests) updated for new output format and a
 ## Implementation Checklist
 
 - [x] Phase 1: Orientation default + affinity gate + infrastructure
-- [ ] Phase 2: `--detail overlap`
+- [x] Phase 2: `--detail overlap`
 - [ ] Phase 3: `--detail residual`
 - [ ] Phase 4: Documentation + `--detail unique` path display
 - [ ] Verify all existing tests pass
