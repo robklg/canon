@@ -13,7 +13,8 @@ use crate::expr::filter::{self, Filter};
 use crate::repo;
 
 const SUPERSET_THRESHOLD: f64 = 0.8;
-const COMPLEMENT_SAMPLE_SIZE: usize = 5;
+const DETAIL_SAMPLE_SIZE: usize = 5;
+const DETAIL_SHOW_ALL_THRESHOLD: usize = 20;
 const DEFAULT_LOCATION_CAP: usize = 10;
 
 /// Detail output mode for `--detail`.
@@ -66,6 +67,14 @@ struct SurveyResult {
     archive_label: Option<String>,
 }
 
+/// A selection-side path paired with its counterpart paths at a location.
+struct OverlapPair {
+    /// Path of the selection-side source (absolute).
+    selection_path: String,
+    /// Paths at the other location with matching content (relative to location).
+    counterpart_paths: Vec<String>,
+}
+
 struct LocationResult {
     path: String,
     shared_count: usize,
@@ -77,8 +86,8 @@ struct LocationResult {
     /// Complementary source paths relative to location, sorted.
     /// None when affinity not computed; Some(vec![]) when computed but empty.
     complementary_paths: Option<Vec<String>>,
-    /// Selection source paths that overlap with this location (Phase 2).
-    overlap_paths: Option<Vec<String>>,
+    /// Selection sources overlapping with this location, with counterpart paths.
+    overlap_pairs: Option<Vec<OverlapPair>>,
     /// Selection source paths NOT shared with this location (Phase 3).
     residual_paths: Option<Vec<String>>,
 }
@@ -141,7 +150,9 @@ pub fn run(
 
     // Resolve --other paths (same soft resolution as scope paths)
     let other_resolved = if !options.other_paths.is_empty() {
-        domain::path::resolve_paths(&options.other_paths, &all_roots)?
+        let resolved = domain::path::resolve_paths(&options.other_paths, &all_roots)?;
+        domain::path::warn_nonexistent_scope_paths(&resolved, &all_roots);
+        resolved
     } else {
         Vec::new()
     };
@@ -263,6 +274,7 @@ pub fn run(
                     print_residual_detail(
                         &result.location_results,
                         cwd,
+                        options.verbose,
                         options.null_delim,
                     );
                 }
@@ -284,13 +296,15 @@ pub fn run(
                         Some(result.unique_count),
                     );
                     println!();
-                    print_archive_section(
-                        result.archived_source_count,
-                        result.total_hashed,
-                        &result.archive_scopes,
-                        result.archive_label.as_deref(),
-                    );
-                    println!();
+                    if !result.is_other_mode {
+                        print_archive_section(
+                            result.archived_source_count,
+                            result.total_hashed,
+                            &result.archive_scopes,
+                            result.archive_label.as_deref(),
+                        );
+                        println!();
+                    }
                     print_related_locations(
                         &result.location_results,
                         result.total_hashed,
@@ -324,6 +338,7 @@ fn compute_survey(
 
     // Resolve scope paths (soft resolution — offline-capable)
     let scope_prefixes = domain::path::resolve_paths(&scope_paths, all_roots)?;
+    domain::path::warn_nonexistent_scope_paths(&scope_prefixes, all_roots);
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
 
     // Build selection from domain predicates
@@ -557,15 +572,38 @@ fn compute_survey(
             (None, None, None, None)
         };
 
-        // Overlap paths: which selection files have copies at this location
-        let overlap_paths = if options.detail == Some(DetailMode::Overlap) {
-            let mut paths: Vec<String> = hashed
+        // Overlap pairs: which selection files have copies at this location,
+        // paired with their counterpart paths at the location.
+        let overlap_pairs = if options.detail == Some(DetailMode::Overlap) {
+            let mut pairs: Vec<OverlapPair> = hashed
                 .iter()
                 .filter(|s| loc_oids.contains(&s.object_id.unwrap()))
-                .map(|s| s.path())
+                .map(|s| {
+                    let oid = s.object_id.unwrap();
+                    let mut counterpart_paths: Vec<String> = by_object_id
+                        .get(&oid)
+                        .map(|sources| {
+                            sources
+                                .iter()
+                                .filter(|cs| cs.matches_scope(&loc_scope))
+                                .filter(|cs| !sel_source_ids.contains(&cs.id))
+                                .map(|cs| {
+                                    domain::path::path_strip_prefix(&cs.path(), scope_path)
+                                        .map(|p| p.to_string())
+                                        .unwrap_or_else(|| cs.path())
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    counterpart_paths.sort_unstable();
+                    OverlapPair {
+                        selection_path: s.path(),
+                        counterpart_paths,
+                    }
+                })
                 .collect();
-            paths.sort_unstable();
-            Some(paths)
+            pairs.sort_by(|a, b| a.selection_path.cmp(&b.selection_path));
+            Some(pairs)
         } else {
             None
         };
@@ -595,7 +633,7 @@ fn compute_survey(
             only_here_count,
             kind,
             complementary_paths,
-            overlap_paths,
+            overlap_pairs,
             residual_paths,
         });
     }
@@ -860,19 +898,19 @@ fn print_complement_detail(
             println!("  {} (+{}):", loc.path, format_count(comp_count));
         }
 
-        // Paths (capped unless --verbose)
-        let show_count = if verbose {
+        // Paths (capped unless --verbose or small enough to show all)
+        let show_count = if verbose || paths.len() <= DETAIL_SHOW_ALL_THRESHOLD {
             paths.len()
         } else {
-            COMPLEMENT_SAMPLE_SIZE.min(paths.len())
+            DETAIL_SAMPLE_SIZE.min(paths.len())
         };
         for path in &paths[..show_count] {
-            println!("    {}", path);
+            println!("    {path}");
         }
-        if !verbose && paths.len() > COMPLEMENT_SAMPLE_SIZE {
+        if !verbose && paths.len() > DETAIL_SHOW_ALL_THRESHOLD {
             println!(
                 "    ... and {} more",
-                format_count(paths.len() - COMPLEMENT_SAMPLE_SIZE),
+                format_count(paths.len() - DETAIL_SAMPLE_SIZE),
             );
         }
     }
@@ -896,14 +934,14 @@ fn print_overlap_detail(
     null_delim: bool,
 ) {
     if null_delim {
-        // -0 mode: flat, deduplicated, absolute paths (no cwd applied)
+        // -0 mode: flat, deduplicated, selection-side paths only (no counterparts)
         let all_paths: std::collections::BTreeSet<&str> = locations
             .iter()
-            .filter_map(|loc| loc.overlap_paths.as_ref())
-            .flat_map(|paths| paths.iter().map(|p| p.as_str()))
+            .filter_map(|loc| loc.overlap_pairs.as_ref())
+            .flat_map(|pairs| pairs.iter().map(|p| p.selection_path.as_str()))
             .collect();
         for path in all_paths {
-            print!("{}\0", path);
+            print!("{path}\0");
         }
         return;
     }
@@ -924,12 +962,12 @@ fn print_overlap_detail(
     let mut any_output = false;
 
     for loc in display_locations {
-        let paths = match &loc.overlap_paths {
+        let pairs = match &loc.overlap_pairs {
             Some(p) => p,
             None => continue,
         };
 
-        if paths.is_empty() {
+        if pairs.is_empty() {
             continue;
         }
 
@@ -944,19 +982,22 @@ fn print_overlap_detail(
             format_count(total_hashed),
         );
 
-        // Paths (capped unless --verbose)
-        let show_count = if verbose {
-            paths.len()
+        // Pairs (capped unless --verbose or small enough to show all)
+        let show_count = if verbose || pairs.len() <= DETAIL_SHOW_ALL_THRESHOLD {
+            pairs.len()
         } else {
-            COMPLEMENT_SAMPLE_SIZE.min(paths.len())
+            DETAIL_SAMPLE_SIZE.min(pairs.len())
         };
-        for path in &paths[..show_count] {
-            println!("    {}", domain::path::format_path(path, cwd));
+        for pair in &pairs[..show_count] {
+            println!("    {}", domain::path::format_path(&pair.selection_path, cwd));
+            for cp in &pair.counterpart_paths {
+                println!("      \u{2192} {cp}");
+            }
         }
-        if !verbose && paths.len() > COMPLEMENT_SAMPLE_SIZE {
+        if !verbose && pairs.len() > DETAIL_SHOW_ALL_THRESHOLD {
             println!(
                 "    ... and {} more",
-                format_count(paths.len() - COMPLEMENT_SAMPLE_SIZE),
+                format_count(pairs.len() - DETAIL_SAMPLE_SIZE),
             );
         }
     }
@@ -983,6 +1024,7 @@ fn print_overlap_detail(
 fn print_residual_detail(
     locations: &[LocationResult],
     cwd: Option<&str>,
+    verbose: bool,
     null_delim: bool,
 ) {
     if null_delim {
@@ -993,7 +1035,7 @@ fn print_residual_detail(
             .flat_map(|paths| paths.iter().map(|p| p.as_str()))
             .collect();
         for path in all_paths {
-            print!("{}\0", path);
+            print!("{path}\0");
         }
         return;
     }
@@ -1013,8 +1055,20 @@ fn print_residual_detail(
         if paths.is_empty() {
             println!("  (none)");
         } else {
-            for path in paths {
+            // Capped unless --verbose or small enough to show all
+            let show_count = if verbose || paths.len() <= DETAIL_SHOW_ALL_THRESHOLD {
+                paths.len()
+            } else {
+                DETAIL_SAMPLE_SIZE.min(paths.len())
+            };
+            for path in &paths[..show_count] {
                 println!("  {}", domain::path::format_path(path, cwd));
+            }
+            if !verbose && paths.len() > DETAIL_SHOW_ALL_THRESHOLD {
+                println!(
+                    "  ... and {} more",
+                    format_count(paths.len() - DETAIL_SAMPLE_SIZE),
+                );
             }
         }
         println!();
@@ -1029,7 +1083,7 @@ fn print_unique_detail(paths: &[String], null_delim: bool, cwd: Option<&str>) {
         } else {
             domain::path::format_path(path, cwd)
         };
-        print!("{}{}", display, sep);
+        print!("{display}{sep}");
     }
 }
 
@@ -1116,7 +1170,7 @@ mod tests {
         let root_ids: Vec<i64> = all_roots.iter().map(|r| r.id).collect();
         let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids).unwrap();
 
-        let paths: Vec<PathBuf> = scope_paths.iter().map(|p| PathBuf::from(p)).collect();
+        let paths: Vec<PathBuf> = scope_paths.iter().map(PathBuf::from).collect();
         let other: Vec<String> = options.other_paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
         compute_survey(conn, &paths, filters, options, &all_sources, &all_roots, &other, archive_root_id)
             .unwrap()
@@ -1696,11 +1750,11 @@ mod tests {
         // Selection: 10 objects
         let mut sel_objs = Vec::new();
         for i in 1..=10 {
-            let obj = insert_object(&conn, &format!("hash_{:03}", i));
+            let obj = insert_object(&conn, &format!("hash_{i:03}"));
             insert_source(
                 &conn,
                 root_a,
-                &format!("photos/IMG_{:03}.jpg", i),
+                &format!("photos/IMG_{i:03}.jpg"),
                 Some(obj),
             );
             sel_objs.push(obj);
@@ -1711,16 +1765,16 @@ mod tests {
             insert_source(
                 &conn,
                 root_b,
-                &format!("backup/IMG_{:03}.jpg", i),
+                &format!("backup/IMG_{i:03}.jpg"),
                 Some(sel_objs[i - 1]),
             );
         }
         for i in 11..=15 {
-            let obj = insert_object(&conn, &format!("hash_{:03}", i));
+            let obj = insert_object(&conn, &format!("hash_{i:03}"));
             insert_source(
                 &conn,
                 root_b,
-                &format!("backup/EXTRA_{:03}.jpg", i),
+                &format!("backup/EXTRA_{i:03}.jpg"),
                 Some(obj),
             );
         }
@@ -1729,11 +1783,11 @@ mod tests {
         insert_source(&conn, root_c, "photos/IMG_001.jpg", Some(sel_objs[0]));
         insert_source(&conn, root_c, "photos/IMG_002.jpg", Some(sel_objs[1]));
         for i in 16..=35 {
-            let obj = insert_object(&conn, &format!("hash_{:03}", i));
+            let obj = insert_object(&conn, &format!("hash_{i:03}"));
             insert_source(
                 &conn,
                 root_c,
-                &format!("photos/COMP_{:03}.jpg", i),
+                &format!("photos/COMP_{i:03}.jpg"),
                 Some(obj),
             );
         }
@@ -2706,11 +2760,11 @@ mod tests {
 
         // Create 15 source roots, each with one overlapping source
         for i in 0..15 {
-            let root = insert_root(&conn, &format!("/mnt/other-{:02}", i), "source");
+            let root = insert_root(&conn, &format!("/mnt/other-{i:02}"), "source");
             insert_source(
                 &conn,
                 root,
-                &format!("dir/copy_{:02}.jpg", i),
+                &format!("dir/copy_{i:02}.jpg"),
                 Some(obj_shared),
             );
         }
@@ -3162,16 +3216,16 @@ mod tests {
                     .unwrap();
 
                 // Backup overlaps with obj1, obj2 → selection paths a.jpg, b.jpg
-                let paths_b = loc_b.overlap_paths.as_ref().unwrap();
-                assert_eq!(paths_b.len(), 2);
-                assert_eq!(paths_b[0], "/mnt/drive/photos/a.jpg");
-                assert_eq!(paths_b[1], "/mnt/drive/photos/b.jpg");
+                let pairs_b = loc_b.overlap_pairs.as_ref().unwrap();
+                assert_eq!(pairs_b.len(), 2);
+                assert_eq!(pairs_b[0].selection_path, "/mnt/drive/photos/a.jpg");
+                assert_eq!(pairs_b[1].selection_path, "/mnt/drive/photos/b.jpg");
 
                 // Other overlaps with obj2, obj3 → selection paths b.jpg, c.jpg
-                let paths_c = loc_c.overlap_paths.as_ref().unwrap();
-                assert_eq!(paths_c.len(), 2);
-                assert_eq!(paths_c[0], "/mnt/drive/photos/b.jpg");
-                assert_eq!(paths_c[1], "/mnt/drive/photos/c.jpg");
+                let pairs_c = loc_c.overlap_pairs.as_ref().unwrap();
+                assert_eq!(pairs_c.len(), 2);
+                assert_eq!(pairs_c[0].selection_path, "/mnt/drive/photos/b.jpg");
+                assert_eq!(pairs_c[1].selection_path, "/mnt/drive/photos/c.jpg");
             }
             _ => panic!("Expected SurveyOutcome::Result"),
         }
@@ -3212,10 +3266,10 @@ mod tests {
                 assert_eq!(result.location_results.len(), 1);
                 let loc = &result.location_results[0];
                 assert_eq!(loc.path, "/mnt/backup/trip");
-                let paths = loc.overlap_paths.as_ref().unwrap();
-                assert_eq!(paths.len(), 2);
-                assert_eq!(paths[0], "/mnt/drive/photos/a.jpg");
-                assert_eq!(paths[1], "/mnt/drive/photos/b.jpg");
+                let pairs = loc.overlap_pairs.as_ref().unwrap();
+                assert_eq!(pairs.len(), 2);
+                assert_eq!(pairs[0].selection_path, "/mnt/drive/photos/a.jpg");
+                assert_eq!(pairs[1].selection_path, "/mnt/drive/photos/b.jpg");
             }
             _ => panic!("Expected SurveyOutcome::Result"),
         }
@@ -3240,7 +3294,7 @@ mod tests {
 
         insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
 
-        // overlap_paths are populated regardless of null_delim
+        // overlap_pairs are populated regardless of null_delim
         let options = SurveyOptions {
             detail: Some(DetailMode::Overlap),
             null_delim: true,
@@ -3251,10 +3305,10 @@ mod tests {
         match outcome {
             SurveyOutcome::Result(result) => {
                 assert_eq!(result.location_results.len(), 1);
-                let paths = result.location_results[0].overlap_paths.as_ref().unwrap();
-                // Only obj1 overlaps → one selection path
-                assert_eq!(paths.len(), 1);
-                assert_eq!(paths[0], "/mnt/drive/photos/a.jpg");
+                let pairs = result.location_results[0].overlap_pairs.as_ref().unwrap();
+                // Only obj1 overlaps → one selection pair
+                assert_eq!(pairs.len(), 1);
+                assert_eq!(pairs[0].selection_path, "/mnt/drive/photos/a.jpg");
             }
             _ => panic!("Expected SurveyOutcome::Result"),
         }
@@ -3289,8 +3343,8 @@ mod tests {
                 assert_eq!(result.location_results.len(), 1);
                 let loc = &result.location_results[0];
                 assert_eq!(loc.shared_count, 0);
-                let paths = loc.overlap_paths.as_ref().unwrap();
-                assert!(paths.is_empty());
+                let pairs = loc.overlap_pairs.as_ref().unwrap();
+                assert!(pairs.is_empty());
             }
             _ => panic!("Expected SurveyOutcome::Result"),
         }
@@ -3327,21 +3381,155 @@ mod tests {
                 assert_eq!(result.location_results.len(), 2);
                 // Same selection path appears under both
                 for loc in &result.location_results {
-                    let paths = loc.overlap_paths.as_ref().unwrap();
-                    assert_eq!(paths.len(), 1);
-                    assert_eq!(paths[0], "/mnt/drive/photos/a.jpg");
+                    let pairs = loc.overlap_pairs.as_ref().unwrap();
+                    assert_eq!(pairs.len(), 1);
+                    assert_eq!(pairs[0].selection_path, "/mnt/drive/photos/a.jpg");
                 }
 
-                // For -0 dedup: collect all overlap paths into BTreeSet
+                // For -0 dedup: collect all selection paths into BTreeSet
                 let all_paths: std::collections::BTreeSet<&str> = result
                     .location_results
                     .iter()
-                    .filter_map(|l| l.overlap_paths.as_ref())
-                    .flat_map(|p| p.iter().map(|s| s.as_str()))
+                    .filter_map(|l| l.overlap_pairs.as_ref())
+                    .flat_map(|p| p.iter().map(|s| s.selection_path.as_str()))
                     .collect();
                 // Deduplicates to 1 path
                 assert_eq!(all_paths.len(), 1);
                 assert!(all_paths.contains("/mnt/drive/photos/a.jpg"));
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // Overlap matched pairs: counterpart paths
+    // =========================================================================
+
+    #[test]
+    fn test_overlap_single_counterpart() {
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/photo.jpg", Some(obj1));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Overlap),
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                assert_eq!(result.location_results.len(), 1);
+                let pairs = result.location_results[0].overlap_pairs.as_ref().unwrap();
+                assert_eq!(pairs.len(), 1);
+                assert_eq!(pairs[0].selection_path, "/mnt/drive/photos/a.jpg");
+                // Counterpart path relative to location
+                assert_eq!(pairs[0].counterpart_paths.len(), 1);
+                // Scope discovery finds /mnt/backup/trip/ — path is relative to that
+                assert_eq!(pairs[0].counterpart_paths[0], "photo.jpg");
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    #[test]
+    fn test_overlap_multiple_counterparts() {
+        // Same content exists twice at the other location (e.g., OS duplicate)
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/a 2.jpg", Some(obj1));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Overlap),
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                let pairs = result.location_results[0].overlap_pairs.as_ref().unwrap();
+                assert_eq!(pairs.len(), 1);
+                assert_eq!(pairs[0].counterpart_paths.len(), 2);
+                // Sorted alphabetically, relative to discovered scope /mnt/backup/trip/
+                assert_eq!(pairs[0].counterpart_paths[0], "a 2.jpg");
+                assert_eq!(pairs[0].counterpart_paths[1], "a.jpg");
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    #[test]
+    fn test_overlap_counterpart_relative_to_location() {
+        // Counterpart paths should be relative to the discovered location scope,
+        // not to the root
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/week1/a.jpg", Some(obj1));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Overlap),
+            other_paths: vec![PathBuf::from("/mnt/backup/trip")],
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                let pairs = result.location_results[0].overlap_pairs.as_ref().unwrap();
+                assert_eq!(pairs.len(), 1);
+                // Path relative to /mnt/backup/trip
+                assert_eq!(pairs[0].counterpart_paths[0], "week1/a.jpg");
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    #[test]
+    fn test_overlap_null_delim_no_counterparts() {
+        // -0 mode should only emit selection-side paths, no counterpart data
+        let mut conn = open_in_memory_for_test();
+
+        let root_a = insert_root(&conn, "/mnt/drive", "source");
+        let root_b = insert_root(&conn, "/mnt/backup", "source");
+
+        let obj1 = insert_object(&conn, "hash_001");
+
+        insert_source(&conn, root_a, "photos/a.jpg", Some(obj1));
+        insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
+
+        let options = SurveyOptions {
+            detail: Some(DetailMode::Overlap),
+            null_delim: true,
+            ..test_options()
+        };
+        let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
+
+        match outcome {
+            SurveyOutcome::Result(result) => {
+                let pairs = result.location_results[0].overlap_pairs.as_ref().unwrap();
+                assert_eq!(pairs.len(), 1);
+                // Counterpart data is present in the struct...
+                assert_eq!(pairs[0].counterpart_paths.len(), 1);
+                // ...but print_overlap_detail in -0 mode only emits selection_path
             }
             _ => panic!("Expected SurveyOutcome::Result"),
         }

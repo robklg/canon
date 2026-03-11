@@ -51,6 +51,9 @@ canon scan --no-hash /path/to/photos
 
 # Verify archive integrity by recomputing all hashes (good for cron jobs)
 canon scan --verify /Volumes/Archive
+
+# Mark sources under a deleted folder as not present
+canon scan --missing /path/to/deleted/folder
 ```
 
 **Hash computation:** By default, Canon computes content hashes for new and changed files during scan. This enables deduplication and archive tracking. Use `--no-hash` to skip hashing if you just want to index files quickly.
@@ -70,6 +73,18 @@ Candidate roots to add:
 ```
 
 Directories under existing roots are skipped. When multiple subdirectories share a common ancestor that could be added as a single root, they're rolled up (unless that ancestor contains an existing root).
+
+**Marking deleted paths as missing:** When you delete a folder that was under a scanned root, Canon still thinks those files are present. Normally you'd re-scan the parent to let Canon discover they're gone, but that can be expensive if the parent contains many other files. Use `--missing` to tell Canon directly that a path no longer exists:
+
+```bash
+# Deleted a backup folder — mark its 140 sources as not present
+canon scan --missing /Volumes/share/Backup/old-phone
+
+# Works with any path under a known root, including the root itself
+canon scan --missing /Volumes/share/Backup
+```
+
+The sources are marked as not present but remain in the database with their hashes and metadata intact. If the path reappears later (e.g., storage remounted), a normal scan will reconcile them back. Cannot be combined with `--all` or `--add`.
 
 Output shows what was found:
 ```

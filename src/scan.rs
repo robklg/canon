@@ -96,6 +96,49 @@ struct FileToHash {
     basis_changed: bool, // True if file was new/updated (mtime/size changed)
 }
 
+/// Mark all present sources under a path as missing (present=0).
+/// Used with `--missing` for deleted folders that no longer exist on disk.
+fn mark_missing_path(
+    conn: &Connection,
+    path: &Path,
+    roots: &[crate::domain::root::Root],
+    now: i64,
+    stats: &mut ScanStats,
+) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let cleaned = crate::domain::path::clean_path(path, &cwd);
+    let cleaned_str = cleaned.to_string_lossy();
+
+    let (root_id, rel_prefix) =
+        match crate::domain::root::find_containing_root(&cleaned_str, roots) {
+            Some((id, _root_path, _role, rel)) => (id, rel),
+            None => {
+                bail!(
+                    "Cannot mark missing: {} is not under any known root",
+                    path.display()
+                );
+            }
+        };
+
+    // Fetch present source IDs under this prefix
+    let prefix_arg = if rel_prefix.is_empty() {
+        None
+    } else {
+        Some(rel_prefix.as_str())
+    };
+    let source_ids = repo::source::fetch_source_ids_for_root(conn, root_id, prefix_arg)?;
+
+    if source_ids.is_empty() {
+        eprintln!("No present sources found under {}", path.display());
+        return Ok(());
+    }
+
+    let marked = repo::source::mark_missing(conn, &source_ids, now)?;
+    stats.missing += marked;
+
+    Ok(())
+}
+
 pub fn run(
     db: &Db,
     paths: &[PathBuf],
@@ -106,6 +149,7 @@ pub fn run(
     no_hash: bool,
     verify: bool,
     ignore_device_id: bool,
+    missing: bool,
 ) -> Result<()> {
     // Validate role if provided
     if let Some(r) = role {
@@ -152,6 +196,11 @@ pub fn run(
         let canonical = match fs::canonicalize(path) {
             Ok(p) => p,
             Err(e) => {
+                if missing {
+                    // User explicitly wants to mark this path's sources as missing
+                    mark_missing_path(conn, path, &roots, now, &mut total_stats)?;
+                    continue;
+                }
                 eprintln!("Warning: skipping {}: {}", path.display(), e);
                 continue;
             }
@@ -338,8 +387,13 @@ pub fn run(
         );
     }
 
-    // Update query planner statistics after bulk changes
-    db.run_analyze()?;
+    // Update query planner statistics after significant bulk changes.
+    // ANALYZE is expensive on large databases — only run when row counts
+    // changed enough to meaningfully affect query planning.
+    let rows_changed = total_stats.new + total_stats.missing;
+    if rows_changed >= 100 {
+        db.run_analyze()?;
+    }
 
     Ok(())
 }
@@ -1370,5 +1424,201 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 3);
+    }
+
+    // =========================================================================
+    // mark_missing_path tests
+    // =========================================================================
+
+    fn make_test_root(id: i64, path: &str) -> crate::domain::root::Root {
+        crate::domain::root::Root {
+            id,
+            path: path.to_string(),
+            role: "source".to_string(),
+            comment: None,
+            last_scanned_at: None,
+            suspended: false,
+        }
+    }
+
+    #[test]
+    fn mark_missing_path_marks_sources() {
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        let roots = vec![make_test_root(root_id, "/photos")];
+
+        // Insert 5 sources under vacation/
+        for i in 0..5 {
+            repo::insert_test_source(
+                &conn,
+                root_id,
+                &format!("vacation/img{i}.jpg"),
+                1, 100 + i, 1000, 1000,
+            );
+        }
+
+        let mut stats = ScanStats::default();
+        mark_missing_path(
+            &conn,
+            Path::new("/photos/vacation"),
+            &roots,
+            9999,
+            &mut stats,
+        )
+        .unwrap();
+
+        assert_eq!(stats.missing, 5);
+
+        // Verify all sources are not present
+        let present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE root_id = ? AND present = 1",
+                [root_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(present, 0);
+    }
+
+    #[test]
+    fn mark_missing_path_not_under_any_root() {
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        let roots = vec![make_test_root(root_id, "/photos")];
+
+        let mut stats = ScanStats::default();
+        let result = mark_missing_path(
+            &conn,
+            Path::new("/nonexistent/path"),
+            &roots,
+            9999,
+            &mut stats,
+        );
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not under any known root"));
+    }
+
+    #[test]
+    fn mark_missing_path_prefix_matches_subset() {
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        let roots = vec![make_test_root(root_id, "/photos")];
+
+        // Insert sources under vacation/ and work/
+        for i in 0..3 {
+            repo::insert_test_source(
+                &conn,
+                root_id,
+                &format!("vacation/img{i}.jpg"),
+                1, 200 + i, 1000, 1000,
+            );
+        }
+        for i in 0..2 {
+            repo::insert_test_source(
+                &conn,
+                root_id,
+                &format!("work/doc{i}.pdf"),
+                1, 300 + i, 1000, 1000,
+            );
+        }
+
+        let mut stats = ScanStats::default();
+        mark_missing_path(
+            &conn,
+            Path::new("/photos/vacation"),
+            &roots,
+            9999,
+            &mut stats,
+        )
+        .unwrap();
+
+        assert_eq!(stats.missing, 3);
+
+        // Work sources should still be present
+        let work_present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path LIKE 'work/%' AND present = 1",
+                [root_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(work_present, 2);
+    }
+
+    #[test]
+    fn mark_missing_path_already_not_present() {
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        let roots = vec![make_test_root(root_id, "/photos")];
+
+        let sid = repo::insert_test_source(&conn, root_id, "vacation/img.jpg", 1, 400, 1000, 1000);
+        // Mark not-present manually
+        conn.execute("UPDATE sources SET present = 0 WHERE id = ?", [sid])
+            .unwrap();
+
+        let mut stats = ScanStats::default();
+        mark_missing_path(
+            &conn,
+            Path::new("/photos/vacation"),
+            &roots,
+            9999,
+            &mut stats,
+        )
+        .unwrap();
+
+        // mark_missing only updates present=1 rows, so count is 0
+        assert_eq!(stats.missing, 0);
+    }
+
+    #[test]
+    fn mark_missing_path_empty_prefix_marks_all() {
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        let roots = vec![make_test_root(root_id, "/photos")];
+
+        for i in 0..4 {
+            repo::insert_test_source(
+                &conn,
+                root_id,
+                &format!("img{i}.jpg"),
+                1, 500 + i, 1000, 1000,
+            );
+        }
+
+        let mut stats = ScanStats::default();
+        mark_missing_path(
+            &conn,
+            Path::new("/photos"),
+            &roots,
+            9999,
+            &mut stats,
+        )
+        .unwrap();
+
+        assert_eq!(stats.missing, 4);
+    }
+
+    #[test]
+    fn mark_missing_path_no_sources_found() {
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        let roots = vec![make_test_root(root_id, "/photos")];
+
+        // No sources inserted — path resolves but nothing to mark
+        let mut stats = ScanStats::default();
+        mark_missing_path(
+            &conn,
+            Path::new("/photos/empty"),
+            &roots,
+            9999,
+            &mut stats,
+        )
+        .unwrap();
+
+        assert_eq!(stats.missing, 0);
     }
 }

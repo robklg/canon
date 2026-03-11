@@ -120,6 +120,10 @@ enum Commands {
         /// Use when device IDs change between scans (e.g., NAS remounts).
         #[arg(long)]
         ignore_device_id: bool,
+        /// Mark all sources under the given path(s) as not present.
+        /// Use for deleted folders that no longer exist on disk.
+        #[arg(long, conflicts_with_all = ["all", "add"])]
+        missing: bool,
     },
     /// List and manage roots
     #[command(args_conflicts_with_subcommands = true)]
@@ -572,6 +576,7 @@ fn main() -> Result<()> {
             verify,
             candidates,
             ignore_device_id,
+            missing,
         } => {
             if candidates {
                 if paths.is_empty() {
@@ -608,6 +613,7 @@ fn main() -> Result<()> {
                 no_hash,
                 verify,
                 ignore_device_id,
+                missing,
             )?;
         }
         Commands::Worklist {

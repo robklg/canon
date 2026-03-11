@@ -158,21 +158,24 @@ Paths are relative when the scope is under the current directory, absolute other
 
 ### Overlap (`--detail overlap`)
 
-Shows which of your files have copies at each related location:
+Shows which of your files have copies at each related location, along with the counterpart paths at that location:
 
 ```
 Overlapping with related locations (overlap):
 
-  /mnt/backup-2022/photos/italy/ (380 of 388 overlap):
-    photos/IMG_0001.jpg
-    photos/IMG_0002.jpg
-    photos/IMG_0003.jpg
-    photos/IMG_0004.jpg
-    photos/IMG_0005.jpg
-    ... and 375 more
+  /mnt/backup/phone-export/ (4 of 135 overlap):
+    recordings/morning-walk.m4a
+      → audio/2020/morning-walk.m4a
+    recordings/evening-notes.m4a
+      → audio/misc/recording-001.mp3
+    photos/IMG_0042.JPG
+      → DCIM/2020-W48/IMG_0042.JPG
+      → DCIM/2020-W48/IMG_0042 2.JPG
 ```
 
-Paths shown are from your selection (your files, not the copies at the other location). Each location shows up to 5 paths; use `--verbose` to see all. With `-0`, output is flat and deduplicated — a file appearing at multiple locations is emitted once.
+Each `→` line shows where the matching content lives at the other location. Multiple counterparts appear when the same content exists more than once (e.g., OS-generated duplicates like `IMG_0042 2.JPG`). Counterpart paths are relative to the location.
+
+When results are small (20 or fewer), all paths are shown. For larger results, paths are capped at 5 per location; use `--verbose` to see all. With `-0`, output is flat and deduplicated selection-side paths only (no counterpart data) — for piping to `xargs -0`.
 
 ### Complement (`--detail complement`)
 
@@ -190,7 +193,7 @@ Complementary content at related locations:
     ... and 90 more
 ```
 
-Paths are relative to the location. Each location shows up to 5 paths; use `--verbose` to see all.
+Paths are relative to the location. When results are small (20 or fewer), all paths are shown; otherwise capped at 5 per location. Use `--verbose` to see all.
 
 ### Residual (`--detail residual`)
 

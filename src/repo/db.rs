@@ -425,32 +425,6 @@ pub fn open_in_memory_for_test() -> Connection {
     conn
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn open_with_options_enables_wal_mode() {
-        let dir = TempDir::new().unwrap();
-        let db_path = dir.path().join("test.db");
-        let db = open_with_options(
-            &db_path,
-            DbOptions {
-                debug_sql: false,
-                profile: false,
-            },
-        )
-        .unwrap();
-
-        let mode: String = db
-            .conn()
-            .pragma_query_value(None, "journal_mode", |row| row.get(0))
-            .unwrap();
-        assert_eq!(mode, "wal");
-    }
-}
-
 /// Get EXPLAIN QUERY PLAN output for a SQL statement
 fn get_query_plan(conn: &Connection, sql: &str) -> Option<String> {
     // Skip non-SELECT statements and statements with temp tables
@@ -475,5 +449,31 @@ fn get_query_plan(conn: &Connection, sql: &str) -> Option<String> {
         None
     } else {
         Some(rows.join("\n"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn open_with_options_enables_wal_mode() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = open_with_options(
+            &db_path,
+            DbOptions {
+                debug_sql: false,
+                profile: false,
+            },
+        )
+        .unwrap();
+
+        let mode: String = db
+            .conn()
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
     }
 }
