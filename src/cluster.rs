@@ -113,6 +113,7 @@ pub struct GenerateOptions {
     pub allow_archived: bool,
     pub allow_duplicates: bool,
     pub show_archived: bool,
+    pub edit: bool,
 }
 
 /// Result from generating a lock file
@@ -121,6 +122,7 @@ struct LockGenerationResult {
     full_coverage_facts: Vec<(String, FactType, String)>,
     root_breakdown: Vec<(String, usize)>,  // (root_path, count), sorted by path
     not_archived_count: usize,             // sources with no archived copy
+    archived_count: usize,                 // skipped already-archived sources
     excluded_count: usize,                 // skipped excluded sources
     unhashed_count: usize,                 // skipped unhashed sources
 }
@@ -147,6 +149,7 @@ fn generate_lock(
         } else {
             eprintln!("Use --show-archived to list them");
         }
+        eprintln!("Use --allow archived to include them");
     }
 
     if qr.sources.is_empty() {
@@ -180,6 +183,7 @@ fn generate_lock(
         full_coverage_facts,
         root_breakdown: qr.root_breakdown,
         not_archived_count: qr.not_archived_count,
+        archived_count: qr.archived.len(),
         excluded_count: qr.excluded_count,
         unhashed_count: qr.unhashed_count,
     }))
@@ -305,6 +309,18 @@ pub fn generate(
         &result,
     );
 
+    if options.edit {
+        let editor = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| "vi".to_string());
+        std::process::Command::new(&editor)
+            .arg(output_path)
+            .status()
+            .with_context(|| format!("Failed to launch editor: {editor}"))?;
+    }
+
+    eprintln!("\nTo apply: canon apply {}", output_path.display());
+
     Ok(())
 }
 
@@ -328,6 +344,7 @@ pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool) -> Result<(
         allow_archived,
         allow_duplicates,
         show_archived,
+        edit: false,
     };
 
     // Report which options are in effect
@@ -625,7 +642,7 @@ fn allow_values_to_strings(options: &GenerateOptions) -> Vec<String> {
     v
 }
 
-fn parse_manifest_allow(allow: &[String]) -> Result<(bool, bool)> {
+pub fn parse_manifest_allow(allow: &[String]) -> Result<(bool, bool)> {
     let mut archived = false;
     let mut duplicates = false;
     for v in allow {
@@ -938,9 +955,15 @@ fn generate_summary_comments(result: &LockGenerationResult) -> String {
     ));
 
     // Skipped line (only if there are skipped sources)
-    if result.excluded_count > 0 || result.unhashed_count > 0 {
+    if result.archived_count > 0 || result.excluded_count > 0 || result.unhashed_count > 0 {
         s.push_str("#\n");
         let mut parts = Vec::new();
+        if result.archived_count > 0 {
+            parts.push(format!(
+                "{} already archived (--allow archived)",
+                result.archived_count
+            ));
+        }
         if result.excluded_count > 0 {
             parts.push(format!("{} excluded", result.excluded_count));
         }
@@ -1278,6 +1301,7 @@ base_dir = "photos"
             full_coverage_facts: vec![],
             root_breakdown: vec![("/photos".to_string(), 42)],
             not_archived_count: 42,
+            archived_count: 0,
             excluded_count: 0,
             unhashed_count: 0,
         };
@@ -1298,6 +1322,7 @@ base_dir = "photos"
                 ("/photos".to_string(), 100),
             ],
             not_archived_count: 120,
+            archived_count: 0,
             excluded_count: 0,
             unhashed_count: 0,
         };
@@ -1316,6 +1341,7 @@ base_dir = "photos"
             full_coverage_facts: vec![],
             root_breakdown: vec![("/photos".to_string(), 10)],
             not_archived_count: 10,
+            archived_count: 0,
             excluded_count: 0,
             unhashed_count: 0,
         };
@@ -1330,11 +1356,27 @@ base_dir = "photos"
             full_coverage_facts: vec![],
             root_breakdown: vec![("/photos".to_string(), 10)],
             not_archived_count: 10,
+            archived_count: 0,
             excluded_count: 3,
             unhashed_count: 5,
         };
         let summary = generate_summary_comments(&result);
         assert!(summary.contains("# Skipped: 3 excluded, 5 unhashed"));
+    }
+
+    #[test]
+    fn test_generate_summary_with_archived_skipped() {
+        let result = LockGenerationResult {
+            source_count: 10,
+            full_coverage_facts: vec![],
+            root_breakdown: vec![("/photos".to_string(), 10)],
+            not_archived_count: 10,
+            archived_count: 4,
+            excluded_count: 2,
+            unhashed_count: 0,
+        };
+        let summary = generate_summary_comments(&result);
+        assert!(summary.contains("# Skipped: 4 already archived (--allow archived), 2 excluded"));
     }
 
     #[test]

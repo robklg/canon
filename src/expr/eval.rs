@@ -299,11 +299,11 @@ impl BuiltinKey {
             | BuiltinKey::SourceSize
             | BuiltinKey::SourceMtime
             | BuiltinKey::SourcePath
+            | BuiltinKey::SourceRelPath
             | BuiltinKey::Filename => BuiltinKeyVisibility::Default,
 
             // Hidden
             BuiltinKey::SourceRoot
-            | BuiltinKey::SourceRelPath
             | BuiltinKey::SourceId
             | BuiltinKey::SourceDevice
             | BuiltinKey::SourceInode => BuiltinKeyVisibility::Hidden,

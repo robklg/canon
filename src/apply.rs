@@ -181,6 +181,16 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     // Validate manifest version
     cluster::validate_manifest_version(config.meta.version)?;
 
+    // Merge manifest [options] with CLI options
+    let (_, manifest_duplicates) = cluster::parse_manifest_allow(&config.options.allow)?;
+    let allow_duplicates = options.allow_duplicates || manifest_duplicates;
+    if manifest_duplicates && !options.allow_duplicates {
+        eprintln!(
+            "Options from manifest: allow {}",
+            config.options.allow.join(", ")
+        );
+    }
+
     // Read JSONL lock file
     let lock_file = File::open(&lock_path)
         .with_context(|| format!("Failed to open lock file: {}", lock_path.display()))?;
@@ -461,7 +471,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     let conflicts =
         check_archive_conflicts_filtered(conn, &filtered_sources, config.output.archive_root_id)?;
 
-    if !conflicts.in_dest_archive.is_empty() && !options.allow_duplicates {
+    if !conflicts.in_dest_archive.is_empty() && !allow_duplicates {
         eprintln!(
             "Error: {} files already exist in destination archive:",
             conflicts.in_dest_archive.len()

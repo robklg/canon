@@ -513,6 +513,9 @@ enum ClusterAction {
         /// Output manifest file
         #[arg(short, long, default_value = "manifest.toml")]
         output: PathBuf,
+        /// Output manifest at dest/<name> (e.g., -O test.toml)
+        #[arg(short = 'O', long = "dest-output", conflicts_with = "output")]
+        dest_output: Option<String>,
         /// Overwrite existing output file
         #[arg(short, long)]
         force: bool,
@@ -522,6 +525,9 @@ enum ClusterAction {
         /// Show which files were excluded because they're already archived
         #[arg(long)]
         show_archived: bool,
+        /// Open manifest in $VISUAL/$EDITOR after generation
+        #[arg(short = 'e', long)]
+        edit: bool,
     },
     /// Regenerate lock file from existing manifest config
     Refresh {
@@ -859,9 +865,11 @@ fn main() -> Result<()> {
                 filters,
                 dest,
                 output,
+                dest_output,
                 force,
                 allow,
                 show_archived,
+                edit,
             } => {
                 let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = cluster::GenerateOptions {
@@ -869,8 +877,22 @@ fn main() -> Result<()> {
                     allow_archived: allow.contains(&ClusterAllow::Archived),
                     allow_duplicates: allow.contains(&ClusterAllow::Duplicates),
                     show_archived,
+                    edit,
                 };
-                cluster::generate(&mut db, &paths, &filters, &expanded, &dest, &output, &options)?;
+                let output_path = if let Some(name) = dest_output {
+                    dest.join(name)
+                } else {
+                    output
+                };
+                cluster::generate(
+                    &mut db,
+                    &paths,
+                    &filters,
+                    &expanded,
+                    &dest,
+                    &output_path,
+                    &options,
+                )?;
             }
             ClusterAction::Refresh {
                 manifest,
