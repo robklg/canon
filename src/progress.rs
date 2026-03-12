@@ -17,14 +17,14 @@ impl Progress {
     pub fn update(&self, i: usize) {
         if i > 0 && i % self.interval == 0 {
             let pct = (i * 100) / self.total;
-            eprint!("\r  {}% ({}/{})", pct, i, self.total);
+            eprint!("\r  {}% ({}/{})\x1b[K", pct, i, self.total);
             let _ = std::io::stderr().flush();
         }
     }
 
     pub fn finish(&self) {
         if self.total > self.interval {
-            eprint!("\r  100% ({}/{})\n", self.total, self.total);
+            eprint!("\r  100% ({}/{})\x1b[K\n", self.total, self.total);
         }
     }
 }
