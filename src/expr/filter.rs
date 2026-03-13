@@ -211,7 +211,9 @@ fn to_fact_value(
         Some(expr::FactValue::Text(t))
     } else if let Some(n) = num {
         Some(expr::FactValue::Num(n))
-    } else { time.map(expr::FactValue::Time) }
+    } else {
+        time.map(expr::FactValue::Time)
+    }
 }
 
 impl Expr {
@@ -653,9 +655,7 @@ fn validate_filter_keys(conn: &Connection, filters: &[Filter]) -> Result<()> {
     for key in all_keys {
         let (base_key, _, _) = parse_key_with_modifiers(&key)?;
         if !is_known_key(conn, &base_key)? {
-            bail!(
-                "Unknown fact key: '{base_key}'. Use 'canon facts' to see available keys."
-            );
+            bail!("Unknown fact key: '{base_key}'. Use 'canon facts' to see available keys.");
         }
     }
     Ok(())
@@ -1146,7 +1146,9 @@ pub fn get_fact_value(
             Some(FactValue::Text(t))
         } else if let Some(n) = num {
             Some(FactValue::Num(n))
-        } else { time.map(FactValue::Time) }
+        } else {
+            time.map(FactValue::Time)
+        }
     }))
 }
 

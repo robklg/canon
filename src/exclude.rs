@@ -98,8 +98,15 @@ pub fn set(
         repo::source::set_excluded(conn, *source_id, true)?;
     }
 
-    let noun = if to_exclude.len() == 1 { "source" } else { "sources" };
-    println!("Excluded {} {noun}", ceremony::format_count(to_exclude.len()));
+    let noun = if to_exclude.len() == 1 {
+        "source"
+    } else {
+        "sources"
+    };
+    println!(
+        "Excluded {} {noun}",
+        ceremony::format_count(to_exclude.len())
+    );
     Ok(())
 }
 
@@ -166,8 +173,15 @@ pub fn clear(
         repo::source::set_excluded(conn, s.id, false)?;
     }
 
-    let noun = if excluded_sources.len() == 1 { "source" } else { "sources" };
-    println!("Cleared exclusions for {} {noun}", ceremony::format_count(excluded_sources.len()));
+    let noun = if excluded_sources.len() == 1 {
+        "source"
+    } else {
+        "sources"
+    };
+    println!(
+        "Cleared exclusions for {} {noun}",
+        ceremony::format_count(excluded_sources.len())
+    );
     Ok(())
 }
 
@@ -545,7 +559,11 @@ pub fn exclude_duplicates(
         excluded_count += 1;
     }
 
-    let noun = if excluded_count == 1 { "source" } else { "sources" };
+    let noun = if excluded_count == 1 {
+        "source"
+    } else {
+        "sources"
+    };
     println!("Excluded {} {noun}", ceremony::format_count(excluded_count));
     println!();
     println!("Use `canon ls --duplicates` to see remaining duplicates.");
@@ -691,9 +709,7 @@ pub fn set_objects_by_filter(
             println!("  {no_hash} sources have no hash yet");
         }
         if empty_skipped > 0 {
-            println!(
-                "  {empty_skipped} empty files skipped (use --hash to exclude explicitly)"
-            );
+            println!("  {empty_skipped} empty files skipped (use --hash to exclude explicitly)");
         }
         return Ok(());
     }
@@ -734,9 +750,7 @@ pub fn set_objects_by_filter(
             println!("  {no_hash} sources have no hash yet");
         }
         if empty_skipped > 0 {
-            println!(
-                "  {empty_skipped} empty files skipped (use --hash to exclude explicitly)"
-            );
+            println!("  {empty_skipped} empty files skipped (use --hash to exclude explicitly)");
         }
         if already_excluded > 0 {
             println!("  {already_excluded} objects already excluded");
@@ -788,9 +802,7 @@ pub fn set_objects_by_filter(
             println!("\n  {no_hash} sources skipped (no hash)");
         }
         if empty_skipped > 0 {
-            println!(
-                "  {empty_skipped} empty files skipped (use --hash to exclude explicitly)"
-            );
+            println!("  {empty_skipped} empty files skipped (use --hash to exclude explicitly)");
         }
         if already_excluded > 0 {
             println!("  {already_excluded} objects already excluded");
@@ -848,9 +860,7 @@ fn print_source_locations(sources: &[SourceInfo], verbose: bool) {
     let archive_count = sources.iter().filter(|s| s.is_archive).count();
     let source_count = sources.len() - archive_count;
 
-    println!(
-        "  Sources: {source_count} in source roots, {archive_count} in archive roots"
-    );
+    println!("  Sources: {source_count} in source roots, {archive_count} in archive roots");
 
     // Show paths (limited unless verbose)
     const DEFAULT_LIMIT: usize = 3;
@@ -1930,20 +1940,42 @@ mod tests {
 
         // Object that IS archived
         let archived_obj = insert_object(&conn, "archived_hash", false);
-        let _archive_copy =
-            insert_source(&conn, archive_root, "copy.jpg", Some(archived_obj), true, false);
-        let s1 = insert_source(&conn, source_root, "file1.jpg", Some(archived_obj), true, false);
+        let _archive_copy = insert_source(
+            &conn,
+            archive_root,
+            "copy.jpg",
+            Some(archived_obj),
+            true,
+            false,
+        );
+        let s1 = insert_source(
+            &conn,
+            source_root,
+            "file1.jpg",
+            Some(archived_obj),
+            true,
+            false,
+        );
 
         // Object that is NOT archived
         let unarchived_obj = insert_object(&conn, "unarchived_hash", false);
-        let s2 =
-            insert_source(&conn, source_root, "file2.jpg", Some(unarchived_obj), true, false);
+        let s2 = insert_source(
+            &conn,
+            source_root,
+            "file2.jpg",
+            Some(unarchived_obj),
+            true,
+            false,
+        );
 
         let sources_map = repo::source::batch_fetch_by_ids(&conn, &[s1, s2]).unwrap();
         let to_exclude = vec![s1, s2];
 
         let data = compute_set_confirmation(&conn, &to_exclude, &sources_map).unwrap();
-        assert_eq!(data.not_archived, 1, "Only the unarchived source should count");
+        assert_eq!(
+            data.not_archived, 1,
+            "Only the unarchived source should count"
+        );
     }
 
     #[test]
@@ -1962,7 +1994,10 @@ mod tests {
         let to_exclude = vec![s1, s2];
 
         let data = compute_set_confirmation(&conn, &to_exclude, &sources_map).unwrap();
-        assert_eq!(data.not_archived, 2, "Both unhashed and unarchived should count");
+        assert_eq!(
+            data.not_archived, 2,
+            "Both unhashed and unarchived should count"
+        );
     }
 
     #[test]
@@ -2001,8 +2036,14 @@ mod tests {
         let s2 = insert_source(&conn, root2, "file2.jpg", None, true, true); // excluded
 
         let sources = vec![
-            repo::source::batch_fetch_by_ids(&conn, &[s1]).unwrap().remove(&s1).unwrap(),
-            repo::source::batch_fetch_by_ids(&conn, &[s2]).unwrap().remove(&s2).unwrap(),
+            repo::source::batch_fetch_by_ids(&conn, &[s1])
+                .unwrap()
+                .remove(&s1)
+                .unwrap(),
+            repo::source::batch_fetch_by_ids(&conn, &[s2])
+                .unwrap()
+                .remove(&s2)
+                .unwrap(),
         ];
 
         // Verify distinct root counting
@@ -2082,8 +2123,7 @@ mod tests {
         let archive_root = insert_root(conn, "/archive", "archive", false);
 
         let obj = insert_object(conn, "single_dup_hash", false);
-        let source_id =
-            insert_source(conn, source_root, "photo.jpg", Some(obj), true, false);
+        let source_id = insert_source(conn, source_root, "photo.jpg", Some(obj), true, false);
         insert_source(conn, archive_root, "photo.jpg", Some(obj), true, false);
 
         // yes=false — would block if confirmation triggered for count=1

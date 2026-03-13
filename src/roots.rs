@@ -202,7 +202,9 @@ pub fn suspend(db: &Db, spec: &str) -> Result<()> {
     let count = counts.get(&root_id).copied().unwrap_or(0) as usize;
     println!(
         "Suspended root {}: {} ({} sources)",
-        root_id, root.path, ceremony::format_count(count)
+        root_id,
+        root.path,
+        ceremony::format_count(count)
     );
     Ok(())
 }
@@ -229,7 +231,9 @@ pub fn unsuspend(db: &Db, spec: &str) -> Result<()> {
     let count = counts.get(&root_id).copied().unwrap_or(0) as usize;
     println!(
         "Unsuspended root {}: {} ({} sources)",
-        root_id, root.path, ceremony::format_count(count)
+        root_id,
+        root.path,
+        ceremony::format_count(count)
     );
     Ok(())
 }

@@ -13,10 +13,10 @@ fn load_aliases(canon_home: &Path) -> Result<Option<HashMap<String, String>>> {
     if !path.exists() {
         return Ok(None);
     }
-    let content =
-        std::fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let table: HashMap<String, String> = toml::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let table: HashMap<String, String> =
+        toml::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))?;
     Ok(Some(table))
 }
 

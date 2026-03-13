@@ -632,19 +632,9 @@ fn main() -> Result<()> {
         } => {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
             let include = include_set_from(&include);
-            worklist::run(
-                &mut db,
-                &paths,
-                &filters,
-                &include,
-                unique_content,
-                &emit,
-            )?;
+            worklist::run(&mut db, &paths, &filters, &include, unique_content, &emit)?;
         }
-        Commands::ImportFacts {
-            allow,
-            verbose,
-        } => {
+        Commands::ImportFacts { allow, verbose } => {
             let allow_archived = allow.contains(&ImportFactsAllow::Archived);
             import_facts::run(&mut db, allow_archived, verbose)?;
         }
@@ -851,10 +841,7 @@ fn main() -> Result<()> {
             if include.includes_archived() {
                 bail!("--include archived is not valid for compare (valid values: excluded)");
             }
-            let options = compare::CompareOptions {
-                include,
-                verbose,
-            };
+            let options = compare::CompareOptions { include, verbose };
             let identical = compare::run(&mut db, &path_a, &path_b, &filters, &options)?;
             if !identical {
                 std::process::exit(1);

@@ -24,8 +24,8 @@ pub mod survey;
 // Re-export primary types for convenient access
 pub use apply::{classify_destination, DestinationState};
 pub use exclusion::{find_excludable_duplicates, ExcludableDuplicatesResult};
-pub use include::IncludeSet;
 pub use fact::{FactEntry, FactType, FactValue};
+pub use include::IncludeSet;
 pub use object::Object;
 pub use path::{
     canonicalize_maybe_missing, clean_path, path_is_under, path_strip_prefix, resolve_path,
@@ -39,6 +39,6 @@ pub use scan::{find_missing, reconcile, FileObservation, Reconciliation};
 pub use scope::ScopeMatch;
 pub use source::{NewSource, Source};
 pub use survey::{
-    classify_location, count_only_here, discover_scopes, discover_scopes_by_root,
-    DiscoveredScope, LocationKind,
+    classify_location, count_only_here, discover_scopes, discover_scopes_by_root, DiscoveredScope,
+    LocationKind,
 };

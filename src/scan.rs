@@ -109,16 +109,16 @@ fn mark_missing_path(
     let cleaned = crate::domain::path::clean_path(path, &cwd);
     let cleaned_str = cleaned.to_string_lossy();
 
-    let (root_id, rel_prefix) =
-        match crate::domain::root::find_containing_root(&cleaned_str, roots) {
-            Some((id, _root_path, _role, rel)) => (id, rel),
-            None => {
-                bail!(
-                    "Cannot mark missing: {} is not under any known root",
-                    path.display()
-                );
-            }
-        };
+    let (root_id, rel_prefix) = match crate::domain::root::find_containing_root(&cleaned_str, roots)
+    {
+        Some((id, _root_path, _role, rel)) => (id, rel),
+        None => {
+            bail!(
+                "Cannot mark missing: {} is not under any known root",
+                path.display()
+            );
+        }
+    };
 
     // Fetch present source IDs under this prefix
     let prefix_arg = if rel_prefix.is_empty() {
@@ -1453,7 +1453,10 @@ mod tests {
                 &conn,
                 root_id,
                 &format!("vacation/img{i}.jpg"),
-                1, 100 + i, 1000, 1000,
+                1,
+                100 + i,
+                1000,
+                1000,
             );
         }
 
@@ -1514,7 +1517,10 @@ mod tests {
                 &conn,
                 root_id,
                 &format!("vacation/img{i}.jpg"),
-                1, 200 + i, 1000, 1000,
+                1,
+                200 + i,
+                1000,
+                1000,
             );
         }
         for i in 0..2 {
@@ -1522,7 +1528,10 @@ mod tests {
                 &conn,
                 root_id,
                 &format!("work/doc{i}.pdf"),
-                1, 300 + i, 1000, 1000,
+                1,
+                300 + i,
+                1000,
+                1000,
             );
         }
 
@@ -1585,19 +1594,15 @@ mod tests {
                 &conn,
                 root_id,
                 &format!("img{i}.jpg"),
-                1, 500 + i, 1000, 1000,
+                1,
+                500 + i,
+                1000,
+                1000,
             );
         }
 
         let mut stats = ScanStats::default();
-        mark_missing_path(
-            &conn,
-            Path::new("/photos"),
-            &roots,
-            9999,
-            &mut stats,
-        )
-        .unwrap();
+        mark_missing_path(&conn, Path::new("/photos"), &roots, 9999, &mut stats).unwrap();
 
         assert_eq!(stats.missing, 4);
     }
@@ -1610,14 +1615,7 @@ mod tests {
 
         // No sources inserted — path resolves but nothing to mark
         let mut stats = ScanStats::default();
-        mark_missing_path(
-            &conn,
-            Path::new("/photos/empty"),
-            &roots,
-            9999,
-            &mut stats,
-        )
-        .unwrap();
+        mark_missing_path(&conn, Path::new("/photos/empty"), &roots, 9999, &mut stats).unwrap();
 
         assert_eq!(stats.missing, 0);
     }

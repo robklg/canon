@@ -131,9 +131,7 @@ pub fn run(db: &mut Db, allow_archived: bool, verbose: bool) -> Result<()> {
         let mut keys: Vec<_> = type_mismatch_keys.iter().collect();
         keys.sort_by_key(|(k, _)| *k);
         for (key, (existing, attempted)) in keys {
-            eprintln!(
-                "  {key}: existing type is {existing}, attempted to import {attempted}"
-            );
+            eprintln!("  {key}: existing type is {existing}, attempted to import {attempted}");
         }
         eprintln!("\nTo change the type, first delete existing facts:");
         eprintln!("  canon facts delete --key <key>");

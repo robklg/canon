@@ -332,9 +332,7 @@ pub fn print_profile_summary(conn: &Connection) {
     eprintln!("Unique query patterns: {}", sorted.len());
 
     // Show top slow queries
-    eprintln!(
-        "\nTop {TOP_SLOW_QUERIES} slowest query patterns (by total time):"
-    );
+    eprintln!("\nTop {TOP_SLOW_QUERIES} slowest query patterns (by total time):");
     eprintln!("{}", "-".repeat(70));
 
     for (i, (normalized, (count, total_ms, max_ms, example_sql))) in

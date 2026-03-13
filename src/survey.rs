@@ -174,7 +174,9 @@ pub fn run(
             let suppress = options.null_delim
                 && matches!(
                     options.detail,
-                    Some(DetailMode::Unique) | Some(DetailMode::Overlap) | Some(DetailMode::Residual)
+                    Some(DetailMode::Unique)
+                        | Some(DetailMode::Overlap)
+                        | Some(DetailMode::Residual)
                 );
             if !suppress {
                 print_survey_header(&scope_prefixes, &options.original_filters, 0, 0, 0, None);
@@ -187,7 +189,9 @@ pub fn run(
             let suppress = options.null_delim
                 && matches!(
                     options.detail,
-                    Some(DetailMode::Unique) | Some(DetailMode::Overlap) | Some(DetailMode::Residual)
+                    Some(DetailMode::Unique)
+                        | Some(DetailMode::Overlap)
+                        | Some(DetailMode::Residual)
                 );
             if !suppress {
                 print_survey_header(
@@ -199,9 +203,7 @@ pub fn run(
                     None,
                 );
                 println!();
-                println!(
-                    "No hashed sources in selection. Content comparison requires hashing."
-                );
+                println!("No hashed sources in selection. Content comparison requires hashing.");
                 println!("Run `canon scan` to hash these sources.");
             }
         }
@@ -504,7 +506,8 @@ fn compute_survey(
             .count();
 
         // Complementary content and classification (only with --affinity or --detail complement)
-        let (complementary_count, only_here_count, kind, complementary_paths) = if compute_affinity {
+        let (complementary_count, only_here_count, kind, complementary_paths) = if compute_affinity
+        {
             // Step 1: Get ALL sources within this location
             // Active, non-excluded, not in selection
             let loc_sources: Vec<&Source> = all_sources
@@ -546,8 +549,7 @@ fn compute_survey(
             let mut comp_paths: Vec<String> = complementary
                 .iter()
                 .filter_map(|s| {
-                    domain::path::path_strip_prefix(&s.path(), scope_path)
-                        .map(|p| p.to_string())
+                    domain::path::path_strip_prefix(&s.path(), scope_path).map(|p| p.to_string())
                 })
                 .collect();
             comp_paths.sort_unstable();
@@ -555,8 +557,7 @@ fn compute_survey(
             // Step 5: "Only here" — unique object_ids among complementary
             let comp_oids: HashSet<i64> =
                 complementary.iter().filter_map(|s| s.object_id).collect();
-            let only_here =
-                domain::survey::count_only_here(&comp_oids, scope_path, &by_object_id);
+            let only_here = domain::survey::count_only_here(&comp_oids, scope_path, &by_object_id);
 
             // Step 6: Classify
             let kind = domain::survey::classify_location(
@@ -567,7 +568,12 @@ fn compute_survey(
                 total_count,
             );
 
-            (Some(comp_count), Some(only_here), Some(kind), Some(comp_paths))
+            (
+                Some(comp_count),
+                Some(only_here),
+                Some(kind),
+                Some(comp_paths),
+            )
         } else {
             (None, None, None, None)
         };
@@ -658,11 +664,8 @@ fn compute_survey(
     }
 
     // Unique: selection content that exists nowhere else
-    let unique_oids = domain::survey::find_unique_object_ids(
-        &sel_object_ids,
-        &sel_source_ids,
-        &by_object_id,
-    );
+    let unique_oids =
+        domain::survey::find_unique_object_ids(&sel_object_ids, &sel_source_ids, &by_object_id);
     let unique_count = unique_oids.len();
     let mut unique_paths: Vec<String> = hashed
         .iter()
@@ -989,7 +992,10 @@ fn print_overlap_detail(
             DETAIL_SAMPLE_SIZE.min(pairs.len())
         };
         for pair in &pairs[..show_count] {
-            println!("    {}", domain::path::format_path(&pair.selection_path, cwd));
+            println!(
+                "    {}",
+                domain::path::format_path(&pair.selection_path, cwd)
+            );
             for cp in &pair.counterpart_paths {
                 println!("      \u{2192} {cp}");
             }
@@ -1171,9 +1177,22 @@ mod tests {
         let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids).unwrap();
 
         let paths: Vec<PathBuf> = scope_paths.iter().map(PathBuf::from).collect();
-        let other: Vec<String> = options.other_paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
-        compute_survey(conn, &paths, filters, options, &all_sources, &all_roots, &other, archive_root_id)
-            .unwrap()
+        let other: Vec<String> = options
+            .other_paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        compute_survey(
+            conn,
+            &paths,
+            filters,
+            options,
+            &all_sources,
+            &all_roots,
+            &other,
+            archive_root_id,
+        )
+        .unwrap()
     }
 
     /// Build a SurveyOptions for tests with common defaults.
@@ -1371,7 +1390,13 @@ mod tests {
         insert_source(&conn, root_b, "b.jpg", Some(obj2));
 
         let options = test_options();
-        let outcome = run_compute(&mut conn, &["/mnt/drive-a", "/mnt/drive-b"], &options, &[], None);
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive-a", "/mnt/drive-b"],
+            &options,
+            &[],
+            None,
+        );
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1454,7 +1479,10 @@ mod tests {
 
         // With --include excluded: excluded appears in selection
         let options = SurveyOptions {
-            include: IncludeSet { excluded: true, archived: false },
+            include: IncludeSet {
+                excluded: true,
+                archived: false,
+            },
             ..test_options()
         };
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
@@ -1583,7 +1611,10 @@ mod tests {
         insert_source(&conn, root_b, "trip/IMG_005.jpg", Some(obj5));
         insert_source(&conn, root_b, "trip/notes.txt", Some(obj6));
 
-        let options = SurveyOptions { affinity: true, ..test_options() };
+        let options = SurveyOptions {
+            affinity: true,
+            ..test_options()
+        };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &options, &filters, None);
 
@@ -1632,7 +1663,10 @@ mod tests {
         // Root C has a copy of obj4 — makes obj4 NOT "only here" at B
         insert_source(&conn, root_c, "misc/copy.jpg", Some(obj4));
 
-        let options = SurveyOptions { affinity: true, ..test_options() };
+        let options = SurveyOptions {
+            affinity: true,
+            ..test_options()
+        };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &options, &filters, None);
 
@@ -1679,7 +1713,10 @@ mod tests {
         // Unhashed source at B matching the filter extension
         insert_source(&conn, root_b, "trip/IMG_006.jpg", None);
 
-        let options = SurveyOptions { affinity: true, ..test_options() };
+        let options = SurveyOptions {
+            affinity: true,
+            ..test_options()
+        };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &options, &filters, None);
 
@@ -1751,12 +1788,7 @@ mod tests {
         let mut sel_objs = Vec::new();
         for i in 1..=10 {
             let obj = insert_object(&conn, &format!("hash_{i:03}"));
-            insert_source(
-                &conn,
-                root_a,
-                &format!("photos/IMG_{i:03}.jpg"),
-                Some(obj),
-            );
+            insert_source(&conn, root_a, &format!("photos/IMG_{i:03}.jpg"), Some(obj));
             sel_objs.push(obj);
         }
 
@@ -1784,12 +1816,7 @@ mod tests {
         insert_source(&conn, root_c, "photos/IMG_002.jpg", Some(sel_objs[1]));
         for i in 16..=35 {
             let obj = insert_object(&conn, &format!("hash_{i:03}"));
-            insert_source(
-                &conn,
-                root_c,
-                &format!("photos/COMP_{i:03}.jpg"),
-                Some(obj),
-            );
+            insert_source(&conn, root_c, &format!("photos/COMP_{i:03}.jpg"), Some(obj));
         }
 
         // Root D (Mirror): 3 overlap, no complementary
@@ -1797,7 +1824,10 @@ mod tests {
         insert_source(&conn, root_d, "copy/IMG_002.jpg", Some(sel_objs[1]));
         insert_source(&conn, root_d, "copy/IMG_003.jpg", Some(sel_objs[2]));
 
-        let options = SurveyOptions { affinity: true, ..test_options() };
+        let options = SurveyOptions {
+            affinity: true,
+            ..test_options()
+        };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &options, &filters, None);
 
@@ -1889,7 +1919,10 @@ mod tests {
         // Different content, matches filter — complementary
         insert_source(&conn, root, "documents/c.jpg", Some(obj3));
 
-        let options = SurveyOptions { affinity: true, ..test_options() };
+        let options = SurveyOptions {
+            affinity: true,
+            ..test_options()
+        };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let outcome = run_compute(&mut conn, &["/mnt/drive/photos"], &options, &filters, None);
 
@@ -1899,7 +1932,8 @@ mod tests {
                 assert_eq!(result.location_results.len(), 1);
                 assert_eq!(result.location_results[0].path, "/mnt/drive/documents");
                 assert_eq!(result.location_results[0].shared_count, 1); // obj1
-                assert_eq!(result.location_results[0].complementary_count, Some(1)); // obj3
+                assert_eq!(result.location_results[0].complementary_count, Some(1));
+                // obj3
             }
             _ => panic!("Expected SurveyOutcome::Result"),
         }
@@ -1928,7 +1962,10 @@ mod tests {
         insert_source(&conn, root_b, "backup/a.jpg", Some(obj1));
         insert_source(&conn, root_b, "backup/b.jpg", Some(obj2));
 
-        let options = SurveyOptions { affinity: true, ..test_options() };
+        let options = SurveyOptions {
+            affinity: true,
+            ..test_options()
+        };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &filters, None);
 
@@ -2159,7 +2196,11 @@ mod tests {
         insert_source(&conn, root_b, "trip/IMG_002.jpg", Some(obj2));
         insert_source(&conn, root_b, "trip/IMG_004.jpg", Some(obj4));
 
-        let options = SurveyOptions { affinity: true, brief: true, ..test_options() };
+        let options = SurveyOptions {
+            affinity: true,
+            brief: true,
+            ..test_options()
+        };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         // With --brief: affinity suppressed even though --affinity present
         let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &options, &filters, None);
@@ -2201,12 +2242,13 @@ mod tests {
 
         // Without --brief
         let options_normal = test_options();
-        let outcome_normal =
-            run_compute(&mut conn, &["/mnt/drive-a"], &options_normal, &[], None);
+        let outcome_normal = run_compute(&mut conn, &["/mnt/drive-a"], &options_normal, &[], None);
         // With --brief (should be identical — no affinity means brief is a no-op)
-        let options_brief = SurveyOptions { brief: true, ..test_options() };
-        let outcome_brief =
-            run_compute(&mut conn, &["/mnt/drive-a"], &options_brief, &[], None);
+        let options_brief = SurveyOptions {
+            brief: true,
+            ..test_options()
+        };
+        let outcome_brief = run_compute(&mut conn, &["/mnt/drive-a"], &options_brief, &[], None);
 
         match (outcome_normal, outcome_brief) {
             (SurveyOutcome::Result(normal), SurveyOutcome::Result(brief)) => {
@@ -2263,7 +2305,7 @@ mod tests {
                 assert_eq!(result.location_results.len(), 1);
                 let loc = &result.location_results[0];
                 assert_eq!(loc.shared_count, 1); // obj1
-                // Affinity suppressed by --brief
+                                                 // Affinity suppressed by --brief
                 assert_eq!(loc.complementary_count, None);
                 assert_eq!(loc.only_here_count, None);
                 assert_eq!(loc.kind, None);
@@ -2344,7 +2386,10 @@ mod tests {
         insert_source(&conn, root_b, "trip/IMG_004.jpg", Some(obj4));
         insert_source(&conn, root_b, "trip/IMG_005.jpg", Some(obj5));
 
-        let options = SurveyOptions { affinity: true, ..test_options() };
+        let options = SurveyOptions {
+            affinity: true,
+            ..test_options()
+        };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &options, &filters, None);
 
@@ -2383,7 +2428,10 @@ mod tests {
         // Mirror: overlap only, no complementary
         insert_source(&conn, root_b, "backup/a.jpg", Some(obj1));
 
-        let options = SurveyOptions { affinity: true, ..test_options() };
+        let options = SurveyOptions {
+            affinity: true,
+            ..test_options()
+        };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &filters, None);
 
@@ -2548,7 +2596,10 @@ mod tests {
         insert_source(&conn, root_b, "trip/week1/a.jpg", Some(obj1));
         insert_source(&conn, root_b, "trip/week1/sub/deep.jpg", Some(obj2));
 
-        let options = SurveyOptions { affinity: true, ..test_options() };
+        let options = SurveyOptions {
+            affinity: true,
+            ..test_options()
+        };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &options, &filters, None);
 
@@ -2725,7 +2776,8 @@ mod tests {
         let options = test_options();
         let outcome_all = run_compute(&mut conn, &["/mnt/drive"], &options, &[], None);
         // With --archive filtering to archive_a
-        let outcome_filtered = run_compute(&mut conn, &["/mnt/drive"], &options, &[], Some(archive_a));
+        let outcome_filtered =
+            run_compute(&mut conn, &["/mnt/drive"], &options, &[], Some(archive_a));
 
         match (outcome_all, outcome_filtered) {
             (SurveyOutcome::Result(all), SurveyOutcome::Result(filtered)) => {
@@ -2933,7 +2985,10 @@ mod tests {
         let obj1 = insert_object(&conn, "hash_001");
         insert_source(&conn, root, "a.jpg", Some(obj1));
 
-        let options = SurveyOptions { affinity: true, ..test_options() };
+        let options = SurveyOptions {
+            affinity: true,
+            ..test_options()
+        };
         let paths = vec![PathBuf::from("/mnt/drive")];
         let filter_strs: Vec<String> = vec![];
 
@@ -2967,7 +3022,11 @@ mod tests {
         insert_source(&conn, root_b, "trip/c.jpg", Some(obj3));
 
         // --affinity + --brief: affinity suppressed
-        let options = SurveyOptions { affinity: true, brief: true, ..test_options() };
+        let options = SurveyOptions {
+            affinity: true,
+            brief: true,
+            ..test_options()
+        };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &filters, None);
 
@@ -3008,7 +3067,10 @@ mod tests {
         let options_plain = test_options();
         let outcome_plain = run_compute(&mut conn, &["/mnt/drive"], &options_plain, &[], None);
 
-        let options_brief = SurveyOptions { brief: true, ..test_options() };
+        let options_brief = SurveyOptions {
+            brief: true,
+            ..test_options()
+        };
         let outcome_brief = run_compute(&mut conn, &["/mnt/drive"], &options_brief, &[], None);
 
         match (outcome_plain, outcome_brief) {
@@ -3052,7 +3114,10 @@ mod tests {
         insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
         insert_source(&conn, root_b, "trip/b.jpg", Some(obj2));
 
-        let options = SurveyOptions { affinity: true, ..test_options() };
+        let options = SurveyOptions {
+            affinity: true,
+            ..test_options()
+        };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &filters, None);
 
@@ -3100,7 +3165,10 @@ mod tests {
         insert_source(&conn, root_b, "trip/x3.txt", Some(obj_other3));
         insert_source(&conn, root_b, "trip/x4.txt", Some(obj_other4));
 
-        let options = SurveyOptions { affinity: true, ..test_options() };
+        let options = SurveyOptions {
+            affinity: true,
+            ..test_options()
+        };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &options, &filters, None);
 
@@ -3814,10 +3882,8 @@ mod tests {
                 // Some("/mnt/drive")) would produce "photos/sub/unique.jpg"
                 assert_eq!(result.unique_paths[0], "/mnt/drive/photos/sub/unique.jpg");
                 // Verify format_path would relativize it correctly
-                let relative = domain::path::format_path(
-                    &result.unique_paths[0],
-                    Some("/mnt/drive"),
-                );
+                let relative =
+                    domain::path::format_path(&result.unique_paths[0], Some("/mnt/drive"));
                 assert_eq!(relative, "photos/sub/unique.jpg");
             }
             _ => panic!("Expected SurveyOutcome::Result"),

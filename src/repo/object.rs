@@ -97,9 +97,7 @@ pub fn batch_fetch_by_ids(conn: &Connection, object_ids: &[i64]) -> Result<HashM
 ///
 /// This is a single-row lookup, not a batch operation.
 pub fn fetch_by_hash(conn: &Connection, hash: &str) -> Result<Option<Object>> {
-    let sql = format!(
-        "SELECT {OBJECT_COLUMNS} FROM objects WHERE hash_value = ?"
-    );
+    let sql = format!("SELECT {OBJECT_COLUMNS} FROM objects WHERE hash_value = ?");
 
     let result = conn.query_row(&sql, [hash], object_from_row).optional()?;
 
@@ -327,9 +325,7 @@ pub fn set_excluded(conn: &Connection, object_id: i64, excluded: bool) -> Result
 /// Returns a Vec of Object structs where excluded = 1, ordered by id.
 /// Used by `exclude list --objects` to show all excluded objects.
 pub fn fetch_excluded(conn: &Connection) -> Result<Vec<Object>> {
-    let sql = format!(
-        "SELECT {OBJECT_COLUMNS} FROM objects WHERE excluded = 1 ORDER BY id"
-    );
+    let sql = format!("SELECT {OBJECT_COLUMNS} FROM objects WHERE excluded = 1 ORDER BY id");
 
     let mut stmt = conn.prepare(&sql)?;
     let objects = stmt
@@ -549,9 +545,8 @@ pub fn get_or_create(conn: &Connection, hash_type: &str, hash_value: &str) -> Re
     )?;
 
     // Now fetch the object (whether we just created it or it already existed)
-    let sql = format!(
-        "SELECT {OBJECT_COLUMNS} FROM objects WHERE hash_type = ? AND hash_value = ?"
-    );
+    let sql =
+        format!("SELECT {OBJECT_COLUMNS} FROM objects WHERE hash_type = ? AND hash_value = ?");
     let obj = conn.query_row(
         &sql,
         rusqlite::params![hash_type, hash_value],

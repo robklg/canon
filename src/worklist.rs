@@ -124,9 +124,7 @@ pub fn run(
         eprintln!("Skipped {excluded_count} excluded sources");
     }
     if unique_content && (skipped_unhashed > 0 || skipped_duplicate > 0) {
-        eprintln!(
-            "Skipped {skipped_unhashed} unhashed, {skipped_duplicate} duplicate sources"
-        );
+        eprintln!("Skipped {skipped_unhashed} unhashed, {skipped_duplicate} duplicate sources");
     }
 
     Ok(())

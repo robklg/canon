@@ -180,8 +180,7 @@ fn parse_root_spec_impl(
             (root.id, root.role.clone())
         }
         RootSpec::ByPath(ref path) => {
-            let cwd = std::env::current_dir()
-                .context("Failed to determine current directory")?;
+            let cwd = std::env::current_dir().context("Failed to determine current directory")?;
             // Resolve against ALL roots (including suspended) for path recognition
             let canonical = resolve_path(Path::new(path), roots, &cwd)?;
             // Find among filtered candidates (respects suspension filter)
@@ -231,8 +230,7 @@ fn resolve_root_path_impl(
     path: &Path,
     include_suspended: bool,
 ) -> Result<Option<(i64, String, String, String)>> {
-    let cwd = std::env::current_dir()
-        .context("Failed to determine current directory")?;
+    let cwd = std::env::current_dir().context("Failed to determine current directory")?;
     // Resolve against ALL roots for path recognition (soft resolution)
     let path_str = resolve_path(path, roots, &cwd)?;
 
@@ -258,8 +256,7 @@ fn resolve_root_path_impl(
 pub fn resolve_archive_path(roots: &[Root], path: &Path) -> Result<(i64, String, String)> {
     // Soft resolution: try matching against known roots first (works offline),
     // then fall back to canonicalize_maybe_missing (tolerates non-existent subdirs)
-    let cwd = std::env::current_dir()
-        .context("Failed to determine current directory")?;
+    let cwd = std::env::current_dir().context("Failed to determine current directory")?;
     let cleaned = clean_path(path, &cwd);
     let cleaned_str = cleaned.to_string_lossy();
 

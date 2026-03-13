@@ -367,18 +367,12 @@ mod tests {
 
     #[test]
     fn test_format_path_strips_cwd() {
-        assert_eq!(
-            format_path("/a/b/c/file.jpg", Some("/a/b")),
-            "c/file.jpg"
-        );
+        assert_eq!(format_path("/a/b/c/file.jpg", Some("/a/b")), "c/file.jpg");
     }
 
     #[test]
     fn test_format_path_absolute_fallback() {
-        assert_eq!(
-            format_path("/x/y/z.jpg", Some("/a/b")),
-            "/x/y/z.jpg"
-        );
+        assert_eq!(format_path("/x/y/z.jpg", Some("/a/b")), "/x/y/z.jpg");
     }
 
     #[test]

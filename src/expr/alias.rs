@@ -150,16 +150,14 @@ mod tests {
     #[test]
     fn test_expand_mixed_with_regular() {
         let aliases = test_aliases();
-        let result =
-            expand_aliases("@image AND source.size>1000", &aliases, &test_path()).unwrap();
+        let result = expand_aliases("@image AND source.size>1000", &aliases, &test_path()).unwrap();
         assert_eq!(result, "source.ext=jpg AND source.size>1000");
     }
 
     #[test]
     fn test_expand_no_aliases_passthrough() {
         let aliases = test_aliases();
-        let result =
-            expand_aliases("source.ext=jpg", &aliases, &test_path()).unwrap();
+        let result = expand_aliases("source.ext=jpg", &aliases, &test_path()).unwrap();
         assert_eq!(result, "source.ext=jpg");
     }
 
@@ -177,28 +175,22 @@ mod tests {
     #[test]
     fn test_at_in_single_quotes_literal() {
         let aliases = test_aliases();
-        let result =
-            expand_aliases("source.path ~ '*@2x*'", &aliases, &test_path()).unwrap();
+        let result = expand_aliases("source.path ~ '*@2x*'", &aliases, &test_path()).unwrap();
         assert_eq!(result, "source.path ~ '*@2x*'");
     }
 
     #[test]
     fn test_at_in_double_quotes_literal() {
         let aliases = test_aliases();
-        let result =
-            expand_aliases("source.path = \"user@host\"", &aliases, &test_path()).unwrap();
+        let result = expand_aliases("source.path = \"user@host\"", &aliases, &test_path()).unwrap();
         assert_eq!(result, "source.path = \"user@host\"");
     }
 
     #[test]
     fn test_mixed_quoted_and_unquoted_at() {
         let aliases = test_aliases();
-        let result = expand_aliases(
-            "@image AND source.path ~ '*@2x*'",
-            &aliases,
-            &test_path(),
-        )
-        .unwrap();
+        let result =
+            expand_aliases("@image AND source.path ~ '*@2x*'", &aliases, &test_path()).unwrap();
         assert_eq!(result, "source.ext=jpg AND source.path ~ '*@2x*'");
     }
 
@@ -229,7 +221,10 @@ mod tests {
         let aliases = test_aliases();
         let err = expand_aliases("@123abc", &aliases, &test_path()).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Alias names must start with a letter"), "{msg}");
+        assert!(
+            msg.contains("Alias names must start with a letter"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -237,7 +232,10 @@ mod tests {
         let aliases = test_aliases();
         let err = expand_aliases("something @", &aliases, &test_path()).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Alias names must start with a letter"), "{msg}");
+        assert!(
+            msg.contains("Alias names must start with a letter"),
+            "{msg}"
+        );
     }
 
     // ======================================================================

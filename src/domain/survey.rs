@@ -165,7 +165,9 @@ pub fn find_unique_object_ids(
                 None => return true, // no sources at all — vacuously unique
             };
             // Unique if every source for this object is in the selection
-            !sources.iter().any(|s| !selection_source_ids.contains(&s.id))
+            !sources
+                .iter()
+                .any(|s| !selection_source_ids.contains(&s.id))
         })
         .collect()
 }
@@ -400,8 +402,7 @@ mod tests {
         let s1 = make_source(1, "/loc", "a.jpg", Some(42));
         let s2 = make_source(2, "/loc", "b.jpg", Some(42));
         let s3 = make_source(3, "/loc", "c.jpg", Some(42));
-        let by_object_id: HashMap<i64, Vec<&Source>> =
-            HashMap::from([(42, vec![&s1, &s2, &s3])]);
+        let by_object_id: HashMap<i64, Vec<&Source>> = HashMap::from([(42, vec![&s1, &s2, &s3])]);
         let object_ids: HashSet<i64> = HashSet::from([42]);
         assert_eq!(count_only_here(&object_ids, "/loc", &by_object_id), 1);
     }
@@ -413,11 +414,8 @@ mod tests {
         let s2 = make_source(2, "/loc", "b.jpg", Some(43));
         let s3 = make_source(3, "/loc", "c.jpg", Some(44));
         let s4 = make_source(4, "/other", "d.jpg", Some(44));
-        let by_object_id: HashMap<i64, Vec<&Source>> = HashMap::from([
-            (42, vec![&s1]),
-            (43, vec![&s2]),
-            (44, vec![&s3, &s4]),
-        ]);
+        let by_object_id: HashMap<i64, Vec<&Source>> =
+            HashMap::from([(42, vec![&s1]), (43, vec![&s2]), (44, vec![&s3, &s4])]);
         let object_ids: HashSet<i64> = HashSet::from([42, 43, 44]);
         assert_eq!(count_only_here(&object_ids, "/loc", &by_object_id), 2);
     }
@@ -445,7 +443,8 @@ mod tests {
         let selection_object_ids: HashSet<i64> = HashSet::from([42]);
         let selection_source_ids: HashSet<i64> = HashSet::from([1]);
         assert_eq!(
-            find_unique_object_ids(&selection_object_ids, &selection_source_ids, &by_object_id).len(),
+            find_unique_object_ids(&selection_object_ids, &selection_source_ids, &by_object_id)
+                .len(),
             1
         );
     }
@@ -459,7 +458,8 @@ mod tests {
         let selection_object_ids: HashSet<i64> = HashSet::from([42]);
         let selection_source_ids: HashSet<i64> = HashSet::from([1]);
         assert_eq!(
-            find_unique_object_ids(&selection_object_ids, &selection_source_ids, &by_object_id).len(),
+            find_unique_object_ids(&selection_object_ids, &selection_source_ids, &by_object_id)
+                .len(),
             0
         );
     }
@@ -474,7 +474,8 @@ mod tests {
         let selection_object_ids: HashSet<i64> = HashSet::from([42]);
         let selection_source_ids: HashSet<i64> = HashSet::from([1]);
         assert_eq!(
-            find_unique_object_ids(&selection_object_ids, &selection_source_ids, &by_object_id).len(),
+            find_unique_object_ids(&selection_object_ids, &selection_source_ids, &by_object_id)
+                .len(),
             0
         );
     }
@@ -488,7 +489,8 @@ mod tests {
         let selection_object_ids: HashSet<i64> = HashSet::from([42]);
         let selection_source_ids: HashSet<i64> = HashSet::from([1, 2]);
         assert_eq!(
-            find_unique_object_ids(&selection_object_ids, &selection_source_ids, &by_object_id).len(),
+            find_unique_object_ids(&selection_object_ids, &selection_source_ids, &by_object_id)
+                .len(),
             1
         );
     }
@@ -541,28 +543,19 @@ mod tests {
     #[test]
     fn test_classify_subset() {
         // complementary == 0, shared/location_total = 8/10 = 0.8 >= 0.8 → Subset
-        assert_eq!(
-            classify_location(8, 100, 0, 0.8, 10),
-            LocationKind::Subset
-        );
+        assert_eq!(classify_location(8, 100, 0, 0.8, 10), LocationKind::Subset);
     }
 
     #[test]
     fn test_classify_subset_below_threshold() {
         // complementary == 0, shared/location_total = 7/10 = 0.7 < 0.8 → Mirror
-        assert_eq!(
-            classify_location(7, 100, 0, 0.8, 10),
-            LocationKind::Mirror
-        );
+        assert_eq!(classify_location(7, 100, 0, 0.8, 10), LocationKind::Mirror);
     }
 
     #[test]
     fn test_classify_subset_with_complementary() {
         // complementary > 0 → never Subset (even if shared/location_total >= threshold)
-        assert_eq!(
-            classify_location(8, 10, 5, 0.8, 10),
-            LocationKind::Superset
-        );
+        assert_eq!(classify_location(8, 10, 5, 0.8, 10), LocationKind::Superset);
     }
 
     #[test]
@@ -612,5 +605,4 @@ mod tests {
         let result = find_unique_object_ids(&sel_oids, &sel_sids, &by_object_id);
         assert_eq!(result, HashSet::from([42]));
     }
-
 }

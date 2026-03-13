@@ -120,11 +120,11 @@ pub struct GenerateOptions {
 struct LockGenerationResult {
     source_count: usize,
     full_coverage_facts: Vec<(String, FactType, String)>,
-    root_breakdown: Vec<(String, usize)>,  // (root_path, count), sorted by path
-    not_archived_count: usize,             // sources with no archived copy
-    archived_count: usize,                 // skipped already-archived sources
-    excluded_count: usize,                 // skipped excluded sources
-    unhashed_count: usize,                 // skipped unhashed sources
+    root_breakdown: Vec<(String, usize)>, // (root_path, count), sorted by path
+    not_archived_count: usize,            // sources with no archived copy
+    archived_count: usize,                // skipped already-archived sources
+    excluded_count: usize,                // skipped excluded sources
+    unhashed_count: usize,                // skipped unhashed sources
 }
 
 /// Core logic shared between generate() and refresh()
@@ -140,7 +140,10 @@ fn generate_lock(
 
     // Report archived files
     if !qr.archived.is_empty() {
-        eprintln!("Excluded {} sources already in archive(s)", qr.archived.len());
+        eprintln!(
+            "Excluded {} sources already in archive(s)",
+            qr.archived.len()
+        );
         if options.show_archived {
             eprintln!("Archived files:");
             for (source_path, archive_path) in &qr.archived {
@@ -604,7 +607,9 @@ fn query_sources(
     let mut root_breakdown: Vec<(String, usize)> = root_counts
         .into_iter()
         .filter_map(|(root_id, count)| {
-            root_path_map.get(&root_id).map(|path| (path.clone(), count))
+            root_path_map
+                .get(&root_id)
+                .map(|path| (path.clone(), count))
         })
         .collect();
     root_breakdown.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1234,7 +1239,10 @@ archive_root_id = 1
 base_dir = "photos"
 "#;
         let config: ManifestConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.options.allow.is_empty(), "Options should default to empty");
+        assert!(
+            config.options.allow.is_empty(),
+            "Options should default to empty"
+        );
     }
 
     #[test]
@@ -1242,7 +1250,10 @@ base_dir = "photos"
         let result = parse_manifest_allow(&["bogus".to_string()]);
         assert!(result.is_err(), "Should error on invalid allow value");
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("bogus"), "Error should mention the invalid value");
+        assert!(
+            err.contains("bogus"),
+            "Error should mention the invalid value"
+        );
         assert!(err.contains("archived"), "Error should list valid values");
     }
 
@@ -1269,9 +1280,13 @@ base_dir = "photos"
 
     #[test]
     fn test_extract_notes_with_content() {
-        let content = "# === Notes ===\n# This cluster has family photos\n# from 2020-2023\n\n[meta]\n";
+        let content =
+            "# === Notes ===\n# This cluster has family photos\n# from 2020-2023\n\n[meta]\n";
         let notes = extract_notes(content).unwrap();
-        assert_eq!(notes, "\n# This cluster has family photos\n# from 2020-2023\n\n");
+        assert_eq!(
+            notes,
+            "\n# This cluster has family photos\n# from 2020-2023\n\n"
+        );
     }
 
     #[test]
@@ -1317,10 +1332,7 @@ base_dir = "photos"
         let result = LockGenerationResult {
             source_count: 150,
             full_coverage_facts: vec![],
-            root_breakdown: vec![
-                ("/backup".to_string(), 50),
-                ("/photos".to_string(), 100),
-            ],
+            root_breakdown: vec![("/backup".to_string(), 50), ("/photos".to_string(), 100)],
             not_archived_count: 120,
             archived_count: 0,
             excluded_count: 0,
@@ -1422,9 +1434,7 @@ base_dir = "photos"
                 generated_at: "2026-02-15T12:00:00Z".to_string(),
                 lock_hash: "abc123".to_string(),
             },
-            options: ManifestOptions {
-                allow: vec![],
-            },
+            options: ManifestOptions { allow: vec![] },
             output: ManifestOutput {
                 pattern: "{filename}".to_string(),
                 archive_root_id: 1,

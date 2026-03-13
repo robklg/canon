@@ -232,9 +232,7 @@ pub fn fetch_by_path(conn: &Connection, root_id: i64, rel_path: &str) -> Result<
 /// This is useful for operations that have a source_id and need the full
 /// Source data (e.g., import processing where source_id comes from worklist).
 pub fn fetch_by_id(conn: &Connection, source_id: i64) -> Result<Option<Source>> {
-    let sql = format!(
-        "SELECT {SOURCE_COLUMNS} {SOURCE_FROM} WHERE s.present = 1 AND s.id = ?",
-    );
+    let sql = format!("SELECT {SOURCE_COLUMNS} {SOURCE_FROM} WHERE s.present = 1 AND s.id = ?",);
 
     let result = conn
         .query_row(&sql, rusqlite::params![source_id], source_from_row)
@@ -2099,14 +2097,7 @@ mod tests {
         // Create more than BATCH_SIZE sources (1000+)
         let mut source_ids = Vec::new();
         for i in 0..1050 {
-            let id = insert_source(
-                &conn,
-                root_id,
-                &format!("file_{i}.jpg"),
-                None,
-                true,
-                false,
-            );
+            let id = insert_source(&conn, root_id, &format!("file_{i}.jpg"), None, true, false);
             source_ids.push(id);
         }
 

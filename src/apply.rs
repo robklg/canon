@@ -268,7 +268,13 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     let skipped_by_filter = sources.len() - filtered_sources.len();
 
     // Show summary and confirm (unless --yes)
-    print_apply_summary(&config_path, &base_dir, &filtered_sources, options, &root_paths);
+    print_apply_summary(
+        &config_path,
+        &base_dir,
+        &filtered_sources,
+        options,
+        &root_paths,
+    );
 
     if !ceremony::confirm(options.yes)? {
         return Ok(());
@@ -424,9 +430,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         let total_conflicts = dest_conflicts.in_db.len() + dest_conflicts.on_disk_only.len();
         if total_conflicts > 0 {
             eprintln!();
-            eprintln!(
-                "Preflight failed: {total_conflicts} destination paths already exist."
-            );
+            eprintln!("Preflight failed: {total_conflicts} destination paths already exist.");
             eprintln!();
             if !dest_conflicts.in_db.is_empty() {
                 eprintln!(
@@ -763,9 +767,7 @@ fn print_apply_summary(
         }
         let mut root_entries: Vec<(&str, usize)> = by_root
             .iter()
-            .filter_map(|(root_id, count)| {
-                root_paths.get(root_id).map(|p| (p.as_str(), *count))
-            })
+            .filter_map(|(root_id, count)| root_paths.get(root_id).map(|p| (p.as_str(), *count)))
             .collect();
         root_entries.sort_by_key(|(path, _)| *path);
 

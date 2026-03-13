@@ -108,8 +108,7 @@ pub fn run(
     // Compute and display stats
     if !scope_prefixes.is_empty() {
         // Scoped mode
-        let stats =
-            compute_scoped_stats(conn, &scopes, &filters, archive_root_id, include)?;
+        let stats = compute_scoped_stats(conn, &scopes, &filters, archive_root_id, include)?;
         let scope_display = if scope_prefixes.len() == 1 {
             Some(scope_prefixes[0].as_str())
         } else {
@@ -669,7 +668,10 @@ mod tests {
 
         let params = SelectionParams {
             scopes: vec![],
-            include: IncludeSet { excluded: true, archived: false },
+            include: IncludeSet {
+                excluded: true,
+                archived: false,
+            },
             filters: vec![],
             role_policy: RolePolicy::SourceUnlessIncluded,
         };

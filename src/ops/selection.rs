@@ -223,7 +223,8 @@ mod tests {
         let id1 = insert_source(&conn, active_root, "a.jpg", None);
         let _id2 = insert_source(&conn, suspended_root, "b.jpg", None);
 
-        let sel = select_sources(&mut conn, &make_params(RolePolicy::SourceUnlessIncluded)).unwrap();
+        let sel =
+            select_sources(&mut conn, &make_params(RolePolicy::SourceUnlessIncluded)).unwrap();
         assert_eq!(sel.sources.len(), 1);
         assert_eq!(sel.sources[0].id, id1);
     }
@@ -240,7 +241,8 @@ mod tests {
         insert_source(&conn, src_root, "a.jpg", None);
         insert_source(&conn, arc_root, "b.jpg", None);
 
-        let sel = select_sources(&mut conn, &make_params(RolePolicy::SourceUnlessIncluded)).unwrap();
+        let sel =
+            select_sources(&mut conn, &make_params(RolePolicy::SourceUnlessIncluded)).unwrap();
         assert_eq!(sel.sources.len(), 1);
         assert_eq!(sel.sources[0].root_id, src_root);
         assert_eq!(sel.included_archived_count, 0);
@@ -322,7 +324,8 @@ mod tests {
         insert_source(&conn, r1, "x.jpg", None);
         insert_source(&conn, r2, "y.jpg", None);
 
-        let sel = select_sources(&mut conn, &make_params(RolePolicy::SourceUnlessIncluded)).unwrap();
+        let sel =
+            select_sources(&mut conn, &make_params(RolePolicy::SourceUnlessIncluded)).unwrap();
         assert_eq!(sel.sources.len(), 2);
     }
 
@@ -343,7 +346,8 @@ mod tests {
         // Normal
         let normal_id = insert_source(&conn, root, "normal.jpg", None);
 
-        let sel = select_sources(&mut conn, &make_params(RolePolicy::SourceUnlessIncluded)).unwrap();
+        let sel =
+            select_sources(&mut conn, &make_params(RolePolicy::SourceUnlessIncluded)).unwrap();
         assert_eq!(sel.sources.len(), 1);
         assert_eq!(sel.sources[0].id, normal_id);
         assert_eq!(sel.excluded_count, 2);
@@ -421,7 +425,8 @@ mod tests {
     #[test]
     fn select_sources_empty_database() {
         let mut conn = setup_test_db();
-        let sel = select_sources(&mut conn, &make_params(RolePolicy::SourceUnlessIncluded)).unwrap();
+        let sel =
+            select_sources(&mut conn, &make_params(RolePolicy::SourceUnlessIncluded)).unwrap();
         assert!(sel.sources.is_empty());
         assert_eq!(sel.excluded_count, 0);
         assert_eq!(sel.included_excluded_count, 0);
@@ -447,7 +452,8 @@ mod tests {
         let id1 = insert_source(&conn, root, "a.jpg", None);
         let id2 = insert_source(&conn, root, "b.jpg", None);
 
-        let sel = select_sources(&mut conn, &make_params(RolePolicy::SourceUnlessIncluded)).unwrap();
+        let sel =
+            select_sources(&mut conn, &make_params(RolePolicy::SourceUnlessIncluded)).unwrap();
         let ids = sel.source_ids();
         assert_eq!(ids.len(), 2);
         // IDs match sources in the same order
