@@ -8,7 +8,8 @@ use crate::domain::path::resolve_paths;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::domain::IncludeSet;
-use crate::expr::filter::{self, get_fact_value, Filter};
+use crate::expr::filter::{get_fact_value, Filter};
+use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Connection, Db};
 
 #[derive(Serialize)]
@@ -75,14 +76,18 @@ pub fn run(
 
     let conn = db.conn_mut();
 
-    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
+    // Resolve scope paths
     let all_roots = repo::root::fetch_all(conn)?;
     let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
 
-    // Fetch all matching sources using domain predicates
-    let (sources, excluded_count) =
-        get_matching_sources(conn, &scopes, &filters, include)?;
+    let params = SelectionParams {
+        scopes,
+        include: include.clone(),
+        filters,
+        role_policy: RolePolicy::SourceUnlessIncluded,
+    };
+    let sel = selection::select_sources(conn, &params)?;
 
     let stdout = io::stdout();
     let mut handle = stdout.lock();
@@ -90,7 +95,7 @@ pub fn run(
     let mut skipped_unhashed: u64 = 0;
     let mut skipped_duplicate: u64 = 0;
 
-    for source in &sources {
+    for source in &sel.sources {
         if unique_content {
             // Skip sources without an object_id
             if source.object_id.is_none() {
@@ -112,9 +117,10 @@ pub fn run(
     }
 
     // Report stats to stderr
-    if include.includes_excluded() && excluded_count > 0 {
-        eprintln!("Included {excluded_count} excluded sources");
-    } else if !include.includes_excluded() && excluded_count > 0 {
+    let excluded_count = sel.excluded_count;
+    if include.includes_excluded() && sel.included_excluded_count > 0 {
+        eprintln!("Included {} excluded sources", sel.included_excluded_count);
+    } else if excluded_count > 0 {
         eprintln!("Skipped {excluded_count} excluded sources");
     }
     if unique_content && (skipped_unhashed > 0 || skipped_duplicate > 0) {
@@ -124,60 +130,4 @@ pub fn run(
     }
 
     Ok(())
-}
-
-/// Fetch sources matching scope/role/exclusion criteria, then apply --where filters.
-///
-/// Returns (matching_sources, excluded_count) where excluded_count is the number
-/// of sources that matched scope/role but were excluded.
-fn get_matching_sources(
-    conn: &mut Connection,
-    scopes: &[ScopeMatch],
-    filters: &[Filter],
-    include: &IncludeSet,
-) -> Result<(Vec<Source>, usize)> {
-    // 1. Get all root IDs
-    let root_ids: Vec<i64> = conn
-        .prepare("SELECT id FROM roots")?
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // 2. Fetch all present sources for those roots
-    let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
-
-    // 3. Filter using domain predicates, tracking excluded count
-    let mut excluded_count = 0usize;
-    let filtered: Vec<Source> = all_sources
-        .into_iter()
-        .filter(|s| s.is_active())
-        .filter(|s| include.includes_archived() || s.is_from_role("source"))
-        .filter(|s| s.matches_scope(scopes))
-        .filter(|s| {
-            if s.is_excluded() && !include.includes_excluded() {
-                excluded_count += 1;
-                return false;
-            }
-            true
-        })
-        .collect();
-
-    // 4. Apply --where filters if present
-    if filters.is_empty() {
-        return Ok((filtered, excluded_count));
-    }
-
-    // Extract IDs, apply filters, then map back to Source objects
-    let source_ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-    let filtered_ids = filter::apply_filters(conn, &source_ids, filters)?;
-
-    // Build a set for O(1) lookup
-    let filtered_id_set: std::collections::HashSet<i64> = filtered_ids.into_iter().collect();
-
-    // Keep only sources whose ID passed the filter
-    let result: Vec<Source> = filtered
-        .into_iter()
-        .filter(|s| filtered_id_set.contains(&s.id))
-        .collect();
-
-    Ok((result, excluded_count))
 }

@@ -25,7 +25,7 @@ Canon is a CLI tool for organizing large media libraries into a "canonical archi
 
 ### Architecture
 
-The codebase is organized into three namespaces (domain/, repo/, expr/) plus command modules:
+The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plus command modules:
 
 **Domain Layer** (`src/domain/`) - Pure concepts, no I/O:
 - `source.rs` - Source struct and predicates (`is_excluded()`, `matches_scope()`, etc.)
@@ -51,6 +51,9 @@ The codebase is organized into three namespaces (domain/, repo/, expr/) plus com
 - `eval.rs` - Pattern evaluation, modifiers, accessors, FactValue types
 - `filter.rs` - Filter expression parsing for `--where` clauses
 - `value.rs` - Fact value resolution for sources
+
+**Operations Layer** (`src/ops/`) - Composed behaviors, interface-independent:
+- `selection.rs` - Source selection: `select_sources()`, `RolePolicy`, `SelectionParams`, `Selection`
 
 **Command Modules** (flat in `src/`):
 - `main.rs` - CLI entry point using clap (canon home resolution, alias expansion dispatch)
@@ -371,12 +374,21 @@ The codebase follows a **strict layered architecture** prioritizing reliability,
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Command Layer (ls.rs, exclude.rs, scan.rs, etc.)            │
-│ - CLI argument parsing and validation                       │
-│ - Transaction boundaries (commands own transactions)        │
-│ - Orchestration: repo fetch → domain logic → repo write     │
-│ - User-facing output formatting                             │
-│ - Path canonicalization (ONLY filesystem I/O for paths)     │
+│ Interface Layer (src/*.rs — CLI commands)                    │
+│ - CLI argument parsing (clap structs)                       │
+│ - Output formatting (terminal, JSONL, null-delimited)       │
+│ - Ceremony presentation (display plan, prompt, report)      │
+│ - The ONLY layer that knows about stdout/stderr/stdin       │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Operations Layer (src/ops/)                                  │
+│ - Typed operation functions with typed results               │
+│ - Shared sub-operations (select_sources, etc.)              │
+│ - Ceremony policy: what to show, when to confirm            │
+│ - Transaction boundaries for write operations               │
+│ - Interface-independent — no stdout, stderr, stdin          │
 └─────────────────────────────────────────────────────────────┘
                           │
           ┌───────────────┴───────────────┐
@@ -395,9 +407,12 @@ The codebase follows a **strict layered architecture** prioritizing reliability,
 
 | Layer | Allowed | NOT Allowed |
 |-------|---------|-------------|
+| **Interface** | CLI parsing, output formatting, ceremony presentation, terminal I/O | Business logic, source selection logic, ceremony policy, direct repo calls (use ops/) |
+| **Operations** | Composing domain + repo into typed behaviors, ceremony policy, transactions (writes) | stdout/stderr/stdin, CLI argument types, display formatting |
+| **Repo** | Database queries, returning domain types, batch operations | Business logic, transaction management, path construction |
 | **Domain** | Pure functions, structs, predicates, business logic | Any I/O (database, filesystem, network) |
-| **Repo** | Database queries, returning domain types | Business logic, path construction, transaction management |
-| **Command** | Orchestration, transactions, CLI parsing, formatting | Inline SQL, business logic that belongs in domain |
+
+**Note**: The operations layer is being introduced incrementally. During migration, some commands still contain inline behavioral logic that will be extracted to `ops/`. New commands should use `ops/` from the start.
 
 **Repo Function Return Type Conventions:**
 
@@ -410,21 +425,39 @@ The codebase follows a **strict layered architecture** prioritizing reliability,
 
 *Rationale*: Creation functions return domain objects so the command layer immediately has usable data with all computed/joined fields populated. This follows the `insert_destination()` pattern — no follow-up fetch required.
 
+**Operations Layer Conventions** (`src/ops/`):
+
+Operations are typed, interface-independent functions that compose domain predicates and repo functions into Canon's behavioral contracts.
+
+- **Read operations** take `&mut Connection` (needed for filter temp tables). No transaction management.
+- **Write operations** take `&mut Db` and own their transactions.
+- **Result types** are concrete structs per operation — no generic containers or trait hierarchies.
+- **No stdout/stderr/stdin** — operations return data, the interface formats it.
+
+The reference implementation is `ops::selection::select_sources()`:
+```rust
+let selection = ops::selection::select_sources(conn, &params)?;
+// selection.sources — the filtered sources
+// selection.source_ids() — convenience for ID-based consumers
+// selection.excluded_count — for "N excluded hidden" hints
+```
+
 **Concurrency Considerations**:
-Users may run multiple canon processes simultaneously (scanning, enriching, applying, excluding). When designing commands, consider:
+Users may run multiple canon processes simultaneously (scanning, enriching, applying, excluding). When designing operations, consider:
 - **Transaction scope**: What operations need to be atomic? Per-item, per-batch, or per-command?
 - **Idempotency**: Can users re-run after partial failure? This often reduces the need for transactions.
 - **Contention**: Larger transaction scopes block concurrent processes longer.
 
-Repo functions do NOT manage transactions — commands establish scope when needed.
+Repo functions do NOT manage transactions — operations or commands establish scope when needed.
 
-**The Standard Pattern** (see `domain/source.rs`, `repo/source.rs`, `ls.rs`):
+**The Standard Pattern** (see `domain/source.rs`, `repo/source.rs`, `ops/selection.rs`):
 1. **Domain module**: Struct + pure predicate functions (no I/O, unit-testable)
 2. **Repository module**: Batch fetch/write, returns domain types, SQL lives here
-3. **Command module**: Orchestrates repo → domain → repo, manages transactions, formats output
+3. **Operations module**: Composes repo fetch → domain predicates → typed result
+4. **Interface module**: Parses CLI arguments, calls operations, formats output
 
 ```rust
-// Command pattern: fetch → filter with domain predicates → transform → output
+// Legacy command pattern (being migrated to ops layer):
 let sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 let filtered: Vec<Source> = sources.into_iter()
     .filter(|s| s.is_active())           // domain predicate
@@ -432,6 +465,9 @@ let filtered: Vec<Source> = sources.into_iter()
     .filter(|s| s.matches_scope(&scopes)) // domain predicate
     .filter(|s| !s.is_excluded())         // domain predicate
     .collect();
+
+// New pattern via operations layer:
+let selection = ops::selection::select_sources(conn, &params)?;
 ```
 
 **Why Strict Separation Matters:**
@@ -450,7 +486,7 @@ let filtered: Vec<Source> = sources.into_iter()
 **Path Handling Principle: SQL NEVER constructs or compares paths.**
 - **Repo layer** returns `Source` objects with `root_path` populated (via JOIN)
 - **Domain layer** computes paths using `Source::path()` and compares using `path_is_under()`
-- **Command layer** resolves CLI path arguments — two strategies:
+- **Interface layer** resolves CLI path arguments — two strategies:
   - **Source-querying commands** (ls, facts, coverage, worklist, compare, exclude, roots, cluster generate): Use `resolve_paths()` — soft resolution that matches against known roots in the DB (works offline), falling back to `fs::canonicalize` only when no root matches.
   - **File-accessing commands** (scan): Use `fs::canonicalize` directly — hard resolution that requires the path to exist on disk.
 - See `domain/exclusion.rs` for the reference implementation
@@ -458,10 +494,9 @@ let filtered: Vec<Source> = sources.into_iter()
 **When Adding New Features:**
 1. If you need a predicate or business logic → add to domain layer (pure function)
 2. If you need database access → add to repo layer (returns domain types)
-3. Command modules should ONLY orchestrate, never contain inline SQL or business logic
-4. When refactoring existing code, migrate inline SQL to repo layer, logic to domain layer
-
-This separation enables future flexibility (e.g., different storage backends, cloud filesystem support) without requiring rewrites.
+3. If you need composed behavior (selection, computation, ceremony policy) → add to ops layer
+4. Interface modules should ONLY parse arguments, call operations, and format output
+5. When refactoring existing commands, extract behavioral logic to ops layer
 
 ### CLI Conventions
 

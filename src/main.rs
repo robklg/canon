@@ -47,6 +47,7 @@ fn include_set_from(values: &[IncludeValue]) -> IncludeSet {
 // Infrastructure layers
 mod domain;
 mod expr;
+mod ops;
 mod repo;
 
 // Utilities

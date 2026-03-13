@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::domain::path::resolve_paths;
@@ -7,7 +6,8 @@ use crate::domain::root::{parse_root_spec, Root};
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::domain::IncludeSet;
-use crate::expr::filter::{self, Filter};
+use crate::expr::filter::Filter;
+use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Db};
 
 /// Statistics for a single root or overall
@@ -134,45 +134,6 @@ pub fn run(
     Ok(())
 }
 
-/// Get all sources matching scope/role/exclusion criteria, then apply filters.
-fn get_matching_sources(
-    conn: &mut rusqlite::Connection,
-    scopes: &[ScopeMatch],
-    filters: &[Filter],
-    include: &IncludeSet,
-) -> Result<Vec<Source>> {
-    // Get all roots and extract IDs
-    let roots = repo::root::fetch_all(conn)?;
-    let root_ids: Vec<i64> = roots.iter().map(|r| r.id).collect();
-
-    // Fetch all present sources
-    let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
-
-    // Filter using domain predicates
-    let filtered: Vec<Source> = all_sources
-        .into_iter()
-        .filter(|s| s.is_active())
-        .filter(|s| include.includes_archived() || s.is_from_role("source"))
-        .filter(|s| s.matches_scope(scopes))
-        .filter(|s| include.includes_excluded() || !s.is_excluded())
-        .collect();
-
-    // Apply --where filters if present
-    if filters.is_empty() {
-        return Ok(filtered);
-    }
-
-    let source_ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-    let filtered_ids: HashSet<i64> = filter::apply_filters(conn, &source_ids, filters)?
-        .into_iter()
-        .collect();
-
-    Ok(filtered
-        .into_iter()
-        .filter(|s| filtered_ids.contains(&s.id))
-        .collect())
-}
-
 /// Compute coverage stats for sources under a specific path scope
 fn compute_scoped_stats(
     conn: &mut rusqlite::Connection,
@@ -181,8 +142,14 @@ fn compute_scoped_stats(
     archive_root_id: Option<i64>,
     include: &IncludeSet,
 ) -> Result<CoverageStats> {
-    let sources = get_matching_sources(conn, scopes, filters, include)?;
-    compute_stats_from_sources(conn, &sources, archive_root_id)
+    let params = SelectionParams {
+        scopes: scopes.to_vec(),
+        include: include.clone(),
+        filters: filters.to_vec(),
+        role_policy: RolePolicy::SourceUnlessIncluded,
+    };
+    let sel = selection::select_sources(conn, &params)?;
+    compute_stats_from_sources(conn, &sel.sources, archive_root_id)
 }
 
 /// Compute coverage stats per root, plus overall totals
@@ -200,8 +167,14 @@ fn compute_per_root_stats(
         .filter(|r| include.includes_archived() || r.is_source())
         .collect();
 
-    // Get all matching sources (unscoped)
-    let all_sources = get_matching_sources(conn, &[], filters, include)?;
+    let params = SelectionParams {
+        scopes: vec![],
+        include: include.clone(),
+        filters: filters.to_vec(),
+        role_policy: RolePolicy::SourceUnlessIncluded,
+    };
+    let all_sel = selection::select_sources(conn, &params)?;
+    let all_sources = all_sel.sources;
 
     // Group by root_id
     let mut per_root_stats = Vec::new();
@@ -554,48 +527,49 @@ mod tests {
         conn.last_insert_rowid()
     }
 
-    /// Test that get_matching_sources respects scope filtering.
-    ///
-    /// This validates the full scope-filtering pipeline:
-    /// - Sources are filtered by path using Source::matches_scope()
-    /// - Empty scopes returns all sources
     #[test]
-    fn test_get_matching_sources_respects_scope() {
+    fn test_coverage_selection_respects_scope() {
         use crate::domain::scope::ScopeMatch;
+        use crate::ops::selection::{self, RolePolicy, SelectionParams};
 
         let mut conn = setup_test_db();
 
-        // Create two roots at different paths
         let photos_root = insert_root(&conn, "/photos", "source", false);
         let videos_root = insert_root(&conn, "/videos", "source", false);
 
-        // Add sources to each root
         let photo1_id = insert_source(&conn, photos_root, "photo1.jpg", None);
         let photo2_id = insert_source(&conn, photos_root, "photo2.jpg", None);
         let video1_id = insert_source(&conn, videos_root, "video1.mp4", None);
 
-        // Test 1: Scoped to /photos - should return only photo sources
-        let scopes = vec![ScopeMatch::UnderDirectory("/photos".to_string())];
-        let include = IncludeSet::default();
-        let sources = get_matching_sources(&mut conn, &scopes, &[], &include).unwrap();
-        let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
+        // Scoped to /photos — only photo sources
+        let params = SelectionParams {
+            scopes: vec![ScopeMatch::UnderDirectory("/photos".to_string())],
+            include: IncludeSet::default(),
+            filters: vec![],
+            role_policy: RolePolicy::SourceUnlessIncluded,
+        };
+        let sel = selection::select_sources(&mut conn, &params).unwrap();
+        let ids = sel.source_ids();
 
-        assert_eq!(source_ids.len(), 2, "Should return 2 photo sources");
-        assert!(source_ids.contains(&photo1_id), "Should contain photo1");
-        assert!(source_ids.contains(&photo2_id), "Should contain photo2");
-        assert!(
-            !source_ids.contains(&video1_id),
-            "Should NOT contain video1"
-        );
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&photo1_id));
+        assert!(ids.contains(&photo2_id));
+        assert!(!ids.contains(&video1_id));
 
-        // Test 2: Unscoped (empty scopes = all) - should return all sources
-        let sources = get_matching_sources(&mut conn, &[], &[], &include).unwrap();
-        let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
+        // Unscoped — all sources
+        let params = SelectionParams {
+            scopes: vec![],
+            include: IncludeSet::default(),
+            filters: vec![],
+            role_policy: RolePolicy::SourceUnlessIncluded,
+        };
+        let sel = selection::select_sources(&mut conn, &params).unwrap();
+        let ids = sel.source_ids();
 
-        assert_eq!(source_ids.len(), 3, "Should return all 3 sources");
-        assert!(source_ids.contains(&photo1_id), "Should contain photo1");
-        assert!(source_ids.contains(&photo2_id), "Should contain photo2");
-        assert!(source_ids.contains(&video1_id), "Should contain video1");
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&photo1_id));
+        assert!(ids.contains(&photo2_id));
+        assert!(ids.contains(&video1_id));
     }
 
     /// Test that archived_sources counts sources, not unique objects.
@@ -643,23 +617,21 @@ mod tests {
         assert_eq!(stats.hashed_sources, 4);
     }
 
-    /// Test that excluded sources are filtered out when include.excluded is false.
-    /// This verifies the bug fix where _include_excluded was previously unused.
     #[test]
     fn test_coverage_excludes_excluded_sources() {
+        use crate::ops::selection::{self, RolePolicy, SelectionParams};
+
         let mut conn = setup_test_db();
 
         let root = insert_root(&conn, "/photos", "source", false);
 
-        // Create an excluded object and a normal object
         let excluded_obj = insert_object(&conn, "excluded_hash", true);
         let normal_obj = insert_object(&conn, "normal_hash", false);
 
-        // Insert sources
         insert_source(&conn, root, "excluded.jpg", Some(excluded_obj));
         insert_source(&conn, root, "normal.jpg", Some(normal_obj));
 
-        // Also add a source-level excluded source (excluded on source, not object)
+        // Source-level exclusion
         let normal_obj2 = insert_object(&conn, "normal_hash2", false);
         let src_id = insert_source(&conn, root, "src_excluded.jpg", Some(normal_obj2));
         conn.execute(
@@ -668,35 +640,41 @@ mod tests {
         )
         .unwrap();
 
-        // Default include (excluded=false) should filter out excluded sources
-        let include = IncludeSet::default();
-        let sources = get_matching_sources(&mut conn, &[], &[], &include).unwrap();
+        let params = SelectionParams {
+            scopes: vec![],
+            include: IncludeSet::default(),
+            filters: vec![],
+            role_policy: RolePolicy::SourceUnlessIncluded,
+        };
+        let sel = selection::select_sources(&mut conn, &params).unwrap();
 
-        // Only the non-excluded source should remain
-        assert_eq!(sources.len(), 1, "Should only return non-excluded source");
-        assert_eq!(sources[0].rel_path, "normal.jpg");
+        assert_eq!(sel.sources.len(), 1);
+        assert_eq!(sel.sources[0].rel_path, "normal.jpg");
+        assert_eq!(sel.excluded_count, 2);
     }
 
-    /// Test that excluded sources are included when include.excluded is true.
     #[test]
     fn test_coverage_includes_excluded_when_requested() {
+        use crate::ops::selection::{self, RolePolicy, SelectionParams};
+
         let mut conn = setup_test_db();
 
         let root = insert_root(&conn, "/photos", "source", false);
 
-        // Create an excluded object and a normal object
         let excluded_obj = insert_object(&conn, "excluded_hash", true);
         let normal_obj = insert_object(&conn, "normal_hash", false);
 
-        // Insert sources
         insert_source(&conn, root, "excluded.jpg", Some(excluded_obj));
         insert_source(&conn, root, "normal.jpg", Some(normal_obj));
 
-        // Include excluded sources
-        let include = IncludeSet { excluded: true, archived: false };
-        let sources = get_matching_sources(&mut conn, &[], &[], &include).unwrap();
+        let params = SelectionParams {
+            scopes: vec![],
+            include: IncludeSet { excluded: true, archived: false },
+            filters: vec![],
+            role_policy: RolePolicy::SourceUnlessIncluded,
+        };
+        let sel = selection::select_sources(&mut conn, &params).unwrap();
 
-        // Both sources should be returned
-        assert_eq!(sources.len(), 2, "Should return all sources including excluded");
+        assert_eq!(sel.sources.len(), 2);
     }
 }
