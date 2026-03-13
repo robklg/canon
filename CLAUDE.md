@@ -412,7 +412,7 @@ The codebase follows a **strict layered architecture** prioritizing reliability,
 | **Repo** | Database queries, returning domain types, batch operations | Business logic, transaction management, path construction |
 | **Domain** | Pure functions, structs, predicates, business logic | Any I/O (database, filesystem, network) |
 
-**Note**: The operations layer is being introduced incrementally. During migration, some commands still contain inline behavioral logic that will be extracted to `ops/`. New commands should use `ops/` from the start.
+**Note**: The operations layer is being introduced incrementally. Most query commands use `ops::selection::select_sources()` for source selection. Two commands intentionally use custom selection logic: `survey` (asymmetric visibility model — selection side vs outward side have different role/exclusion rules) and `cluster generate` (additional post-filtering for archive status and detailed breakdowns). Effectful command extraction (plan/execute pattern) is planned but not yet started. New commands should use `ops/` from the start.
 
 **Repo Function Return Type Conventions:**
 

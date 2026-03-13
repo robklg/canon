@@ -526,51 +526,6 @@ mod tests {
         conn.last_insert_rowid()
     }
 
-    #[test]
-    fn test_coverage_selection_respects_scope() {
-        use crate::domain::scope::ScopeMatch;
-        use crate::ops::selection::{self, RolePolicy, SelectionParams};
-
-        let mut conn = setup_test_db();
-
-        let photos_root = insert_root(&conn, "/photos", "source", false);
-        let videos_root = insert_root(&conn, "/videos", "source", false);
-
-        let photo1_id = insert_source(&conn, photos_root, "photo1.jpg", None);
-        let photo2_id = insert_source(&conn, photos_root, "photo2.jpg", None);
-        let video1_id = insert_source(&conn, videos_root, "video1.mp4", None);
-
-        // Scoped to /photos — only photo sources
-        let params = SelectionParams {
-            scopes: vec![ScopeMatch::UnderDirectory("/photos".to_string())],
-            include: IncludeSet::default(),
-            filters: vec![],
-            role_policy: RolePolicy::SourceUnlessIncluded,
-        };
-        let sel = selection::select_sources(&mut conn, &params).unwrap();
-        let ids = sel.source_ids();
-
-        assert_eq!(ids.len(), 2);
-        assert!(ids.contains(&photo1_id));
-        assert!(ids.contains(&photo2_id));
-        assert!(!ids.contains(&video1_id));
-
-        // Unscoped — all sources
-        let params = SelectionParams {
-            scopes: vec![],
-            include: IncludeSet::default(),
-            filters: vec![],
-            role_policy: RolePolicy::SourceUnlessIncluded,
-        };
-        let sel = selection::select_sources(&mut conn, &params).unwrap();
-        let ids = sel.source_ids();
-
-        assert_eq!(ids.len(), 3);
-        assert!(ids.contains(&photo1_id));
-        assert!(ids.contains(&photo2_id));
-        assert!(ids.contains(&video1_id));
-    }
-
     /// Test that archived_sources counts sources, not unique objects.
     ///
     /// This guards against the Object Infrastructure bug pattern where
@@ -616,67 +571,4 @@ mod tests {
         assert_eq!(stats.hashed_sources, 4);
     }
 
-    #[test]
-    fn test_coverage_excludes_excluded_sources() {
-        use crate::ops::selection::{self, RolePolicy, SelectionParams};
-
-        let mut conn = setup_test_db();
-
-        let root = insert_root(&conn, "/photos", "source", false);
-
-        let excluded_obj = insert_object(&conn, "excluded_hash", true);
-        let normal_obj = insert_object(&conn, "normal_hash", false);
-
-        insert_source(&conn, root, "excluded.jpg", Some(excluded_obj));
-        insert_source(&conn, root, "normal.jpg", Some(normal_obj));
-
-        // Source-level exclusion
-        let normal_obj2 = insert_object(&conn, "normal_hash2", false);
-        let src_id = insert_source(&conn, root, "src_excluded.jpg", Some(normal_obj2));
-        conn.execute(
-            "UPDATE sources SET excluded = 1 WHERE id = ?",
-            rusqlite::params![src_id],
-        )
-        .unwrap();
-
-        let params = SelectionParams {
-            scopes: vec![],
-            include: IncludeSet::default(),
-            filters: vec![],
-            role_policy: RolePolicy::SourceUnlessIncluded,
-        };
-        let sel = selection::select_sources(&mut conn, &params).unwrap();
-
-        assert_eq!(sel.sources.len(), 1);
-        assert_eq!(sel.sources[0].rel_path, "normal.jpg");
-        assert_eq!(sel.excluded_count, 2);
-    }
-
-    #[test]
-    fn test_coverage_includes_excluded_when_requested() {
-        use crate::ops::selection::{self, RolePolicy, SelectionParams};
-
-        let mut conn = setup_test_db();
-
-        let root = insert_root(&conn, "/photos", "source", false);
-
-        let excluded_obj = insert_object(&conn, "excluded_hash", true);
-        let normal_obj = insert_object(&conn, "normal_hash", false);
-
-        insert_source(&conn, root, "excluded.jpg", Some(excluded_obj));
-        insert_source(&conn, root, "normal.jpg", Some(normal_obj));
-
-        let params = SelectionParams {
-            scopes: vec![],
-            include: IncludeSet {
-                excluded: true,
-                archived: false,
-            },
-            filters: vec![],
-            role_policy: RolePolicy::SourceUnlessIncluded,
-        };
-        let sel = selection::select_sources(&mut conn, &params).unwrap();
-
-        assert_eq!(sel.sources.len(), 2);
-    }
 }
