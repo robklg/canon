@@ -1,17 +1,18 @@
 use anyhow::{bail, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::domain::fact::FactEntry;
 use crate::domain::path::resolve_paths;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
-use crate::expr::filter::{self, Filter};
+use crate::expr::filter::Filter;
 use crate::expr::value as fact_value;
 use crate::expr::{
     self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, ModifierCall,
     ParsedFactKey, PathAccessor,
 };
+use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Connection, Db};
 
 /// Check if a parsed key represents source.root (for special display formatting)
@@ -110,32 +111,41 @@ pub fn run(
     let all_roots = repo::root::fetch_all(conn)?;
     let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
 
-    // Get all matching source IDs using domain predicates
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
-    let (source_ids, excluded_count, included_excluded, included_archived) =
-        get_matching_sources(conn, &scopes, &filters, include)?;
+    let params = SelectionParams {
+        scopes,
+        include: include.clone(),
+        filters,
+        role_policy: RolePolicy::SourceUnlessIncluded,
+    };
+    let sel = selection::select_sources(conn, &params)?;
+    let source_ids = sel.source_ids();
     let total_sources = source_ids.len();
 
     if total_sources == 0 {
         println!("No sources match the given filters.");
-        // Show excluded hint if excluded sources were filtered out
-        if !include.includes_excluded() && excluded_count > 0 {
+        if sel.excluded_count > 0 {
             println!(
-                "\n({excluded_count} excluded sources hidden, use --include excluded to show)"
+                "\n({} excluded sources hidden, use --include excluded to show)",
+                sel.excluded_count
             );
         }
         return Ok(());
     }
 
-    if include.is_expanded() && (included_excluded > 0 || included_archived > 0) {
+    if include.is_expanded() && (sel.included_excluded_count > 0 || sel.included_archived_count > 0)
+    {
         let mut parts = Vec::new();
-        if included_excluded > 0 {
-            parts.push(format!("{included_excluded} excluded"));
+        if sel.included_excluded_count > 0 {
+            parts.push(format!("{} excluded", sel.included_excluded_count));
         }
-        if included_archived > 0 {
-            parts.push(format!("{included_archived} from archive"));
+        if sel.included_archived_count > 0 {
+            parts.push(format!("{} from archive", sel.included_archived_count));
         }
-        println!("Sources matching filters: {total_sources} (incl. {})\n", parts.join(", "));
+        println!(
+            "Sources matching filters: {total_sources} (incl. {})\n",
+            parts.join(", ")
+        );
     } else {
         println!("Sources matching filters: {total_sources}\n");
     }
@@ -185,10 +195,10 @@ pub fn run(
         show_all_keys(conn, &source_ids, total_sources, show_all)?;
     }
 
-    // Report excluded count
-    if !include.includes_excluded() && excluded_count > 0 {
+    if sel.excluded_count > 0 {
         println!(
-            "\n({excluded_count} excluded sources hidden, use --include excluded to show)"
+            "\n({} excluded sources hidden, use --include excluded to show)",
+            sel.excluded_count
         );
     }
 
@@ -200,61 +210,6 @@ pub fn run(
 /// Returns (source_ids, excluded_count, included_excluded_count, included_archived_count)
 /// where excluded_count is the number of sources that matched scope/role but were excluded,
 /// and the included counts track how many excluded/archived sources were kept (for annotations).
-fn get_matching_sources(
-    conn: &mut Connection,
-    scopes: &[ScopeMatch],
-    filters: &[Filter],
-    include: &IncludeSet,
-) -> Result<(Vec<i64>, usize, usize, usize)> {
-    // 1. Get all root IDs
-    let roots = repo::root::fetch_all(conn)?;
-    let root_ids: Vec<i64> = roots.iter().map(|r| r.id).collect();
-
-    // 2. Fetch all present sources for those roots
-    let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
-
-    // 3. Filter using domain predicates, tracking excluded and archived counts
-    let mut excluded_count = 0usize;
-    let mut included_excluded_count = 0usize;
-    let mut included_archived_count = 0usize;
-    let filtered: Vec<i64> = all_sources
-        .into_iter()
-        .filter(|s| s.is_active())
-        .filter(|s| include.includes_archived() || s.is_from_role("source"))
-        .filter(|s| s.matches_scope(scopes))
-        .filter(|s| {
-            if s.is_excluded() && !include.includes_excluded() {
-                excluded_count += 1;
-                return false;
-            }
-            if s.is_excluded() {
-                included_excluded_count += 1;
-            }
-            if s.is_from_role("archive") {
-                included_archived_count += 1;
-            }
-            true
-        })
-        .map(|s| s.id)
-        .collect();
-
-    // 4. Apply --where filters if present
-    if filters.is_empty() {
-        return Ok((filtered, excluded_count, included_excluded_count, included_archived_count));
-    }
-
-    let filtered_ids = filter::apply_filters(conn, &filtered, filters)?;
-    let filtered_id_set: HashSet<i64> = filtered_ids.into_iter().collect();
-
-    // Keep only IDs that passed the filter (preserving order)
-    let result: Vec<i64> = filtered
-        .into_iter()
-        .filter(|id| filtered_id_set.contains(id))
-        .collect();
-
-    Ok((result, excluded_count, included_excluded_count, included_archived_count))
-}
-
 fn show_all_keys(
     conn: &mut Connection,
     source_ids: &[i64],
@@ -325,9 +280,7 @@ fn show_all_keys(
         let hidden_count = BuiltinKey::iter()
             .filter(|k| k.visibility() == BuiltinKeyVisibility::Hidden)
             .count();
-        println!(
-            "\n({hidden_count} built-in/derived facts hidden, use --all to show)"
-        );
+        println!("\n({hidden_count} built-in/derived facts hidden, use --all to show)");
     }
 
     Ok(())
@@ -960,9 +913,18 @@ pub fn delete_facts(
     let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
 
-    // Get matching source IDs (include all for delete operations)
-    let include_all = IncludeSet { excluded: true, archived: true };
-    let (source_ids, ..) = get_matching_sources(conn, &scopes, &filters, &include_all)?;
+    // Select all sources (include all for delete operations)
+    let include_all = IncludeSet {
+        excluded: true,
+        archived: true,
+    };
+    let params = SelectionParams {
+        scopes,
+        include: include_all,
+        filters,
+        role_policy: RolePolicy::SourceUnlessIncluded,
+    };
+    let source_ids = selection::select_sources(conn, &params)?.source_ids();
 
     if source_ids.is_empty() {
         println!("No sources match the given filters.");
@@ -1141,9 +1103,7 @@ pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
     let prune_objects = scope == "all" || scope == "object";
 
     if !prune_sources && !prune_objects {
-        anyhow::bail!(
-            "Invalid scope '{scope}'. Use 'source', 'object', or omit for both."
-        );
+        anyhow::bail!("Invalid scope '{scope}'. Use 'source', 'object', or omit for both.");
     }
 
     // Count facts for excluded entities using repo layer

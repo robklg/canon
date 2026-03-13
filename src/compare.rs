@@ -4,9 +4,9 @@ use std::path::Path;
 
 use crate::domain::path::resolve_path;
 use crate::domain::scope::ScopeMatch;
-use crate::domain::source::Source;
 use crate::domain::IncludeSet;
-use crate::expr::filter::{self, Filter};
+use crate::expr::filter::Filter;
+use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Db};
 
 pub struct CompareOptions {
@@ -37,9 +37,9 @@ pub fn run(
 
     // Query sources in each scope
     let (sources_a, unhashed_a) =
-        get_sources_in_scope(conn, &prefix_a, &filters, &options.include)?;
+        select_and_build_map(conn, &prefix_a, &filters, &options.include)?;
     let (sources_b, unhashed_b) =
-        get_sources_in_scope(conn, &prefix_b, &filters, &options.include)?;
+        select_and_build_map(conn, &prefix_b, &filters, &options.include)?;
 
     // Build object_id sets
     let objects_a: HashSet<i64> = sources_a.keys().copied().collect();
@@ -62,9 +62,7 @@ pub fn run(
     // Report unhashed files
     let total_unhashed = unhashed_a + unhashed_b;
     if total_unhashed > 0 {
-        eprintln!(
-            "Skipped {total_unhashed} unhashed files (use `canon worklist` to hash them)"
-        );
+        eprintln!("Skipped {total_unhashed} unhashed files (use `canon worklist` to hash them)");
         eprintln!();
     }
 
@@ -105,59 +103,32 @@ pub fn run(
     Ok(is_identical)
 }
 
-/// Get sources in scope, returns (object_id -> path map, unhashed count)
+/// Select sources in scope and build an object_id → path map for content comparison.
 ///
-/// Note: compare does NOT filter by role. When comparing folders, all sources
-/// are included regardless of whether root is "source" or "archive".
-fn get_sources_in_scope(
+/// Returns (object_id -> path map, unhashed count). Compare uses AnyRole — all
+/// sources are included regardless of whether root is "source" or "archive".
+fn select_and_build_map(
     conn: &mut crate::repo::Connection,
     scope_prefix: &str,
     filters: &[Filter],
     include: &IncludeSet,
 ) -> Result<(HashMap<i64, String>, usize)> {
-    // Classify the scope
     let scopes = ScopeMatch::classify_all(&[scope_prefix.to_string()]);
-
-    // Get all root IDs
-    let root_ids: Vec<i64> = conn
-        .prepare("SELECT id FROM roots")?
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Fetch all present sources
-    let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
-
-    // Filter using domain predicates
-    // Note: No role filtering - compare works across all root types
-    let filtered: Vec<Source> = all_sources
-        .into_iter()
-        .filter(|s| s.is_active())
-        .filter(|s| s.matches_scope(&scopes))
-        .filter(|s| include.includes_excluded() || !s.is_excluded())
-        .collect();
-
-    // Apply --where filters if present
-    let final_sources = if filters.is_empty() {
-        filtered
-    } else {
-        let source_ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-        let filtered_ids: HashSet<i64> = filter::apply_filters(conn, &source_ids, filters)?
-            .into_iter()
-            .collect();
-        filtered
-            .into_iter()
-            .filter(|s| filtered_ids.contains(&s.id))
-            .collect()
+    let params = SelectionParams {
+        scopes,
+        include: include.clone(),
+        filters: filters.to_vec(),
+        role_policy: RolePolicy::AnyRole,
     };
+    let sel = selection::select_sources(conn, &params)?;
 
-    // Build result map and count unhashed
+    // Build object_id → path map, counting unhashed sources
     let mut result: HashMap<i64, String> = HashMap::new();
     let mut unhashed = 0;
 
-    for source in final_sources {
+    for source in &sel.sources {
         match source.object_id {
             Some(oid) => {
-                // If multiple sources have same object_id, keep first path
                 result.entry(oid).or_insert_with(|| source.path());
             }
             None => {

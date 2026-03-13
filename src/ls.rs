@@ -8,7 +8,8 @@ use crate::domain::root::Root;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::domain::IncludeSet;
-use crate::expr::filter::{self, Filter};
+use crate::expr::filter::Filter;
+use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::source::BATCH_SIZE;
 use crate::repo::{self, Connection, Db};
 
@@ -34,9 +35,7 @@ pub fn run(
 
     // Validate sort option
     if !matches!(sort_by, "path" | "size" | "mtime" | "name") {
-        anyhow::bail!(
-            "Invalid sort option '{sort_by}'. Valid options: path, size, mtime, name"
-        );
+        anyhow::bail!("Invalid sort option '{sort_by}'. Valid options: path, size, mtime, name");
     }
 
     // Parse filters
@@ -59,22 +58,27 @@ pub fn run(
         None
     };
 
-    // Fetch all sources and filter using domain predicates
-    let (sources, excluded_count) =
-        get_matching_sources(conn, &scopes, &filters, include)?;
+    let params = SelectionParams {
+        scopes,
+        include: include.clone(),
+        filters,
+        role_policy: RolePolicy::SourceUnlessIncluded,
+    };
+    let sel = selection::select_sources(conn, &params)?;
 
-    if sources.is_empty() {
+    if sel.sources.is_empty() {
         eprintln!("No sources match the given filters.");
-        if !include.includes_excluded() && excluded_count > 0 {
+        if sel.excluded_count > 0 {
             eprintln!(
-                "({excluded_count} excluded sources hidden, use --include excluded to show)"
+                "({} excluded sources hidden, use --include excluded to show)",
+                sel.excluded_count
             );
         }
         return Ok(());
     }
 
     // Batch fetch archive status for all sources with object_ids (eliminates N+1)
-    let object_ids: Vec<i64> = sources.iter().filter_map(|s| s.object_id).collect();
+    let object_ids: Vec<i64> = sel.sources.iter().filter_map(|s| s.object_id).collect();
     let archived_set: HashSet<i64> = if archived_only || unarchived_only {
         repo::object::batch_check_archived(conn, &object_ids, None)?
     } else {
@@ -94,7 +98,7 @@ pub fn run(
     let mut output_lines: Vec<(String, Option<String>, i64, i64, String)> = Vec::new();
     let mut unhashed_count = 0usize;
 
-    for source in &sources {
+    for source in &sel.sources {
         let formatted_source = format_path(&source.path(), cwd.as_deref());
         let object_id = source.object_id;
         let size = source.size;
@@ -123,7 +127,13 @@ pub fn run(
                             }
                         }
                     } else if archived_set.contains(&obj_id) {
-                        output_lines.push((formatted_source, None, size, mtime, status.to_string()));
+                        output_lines.push((
+                            formatted_source,
+                            None,
+                            size,
+                            mtime,
+                            status.to_string(),
+                        ));
                     }
                 }
             }
@@ -135,7 +145,13 @@ pub fn run(
                 }
                 Some(obj_id) => {
                     if !archived_set.contains(&obj_id) {
-                        output_lines.push((formatted_source, None, size, mtime, status.to_string()));
+                        output_lines.push((
+                            formatted_source,
+                            None,
+                            size,
+                            mtime,
+                            status.to_string(),
+                        ));
                     }
                 }
             }
@@ -177,16 +193,12 @@ pub fn run(
             let date_str = format_date(*mtime);
             if show_status {
                 if let Some(ap) = archive_path {
-                    print!(
-                        "{status}{size_str:>8}  {date_str}  {source_path}\t{ap}{line_end}"
-                    );
+                    print!("{status}{size_str:>8}  {date_str}  {source_path}\t{ap}{line_end}");
                 } else {
                     print!("{status}{size_str:>8}  {date_str}  {source_path}{line_end}");
                 }
             } else if let Some(ap) = archive_path {
-                print!(
-                    "{size_str:>8}  {date_str}  {source_path}\t{ap}{line_end}"
-                );
+                print!("{size_str:>8}  {date_str}  {source_path}\t{ap}{line_end}");
             } else {
                 print!("{size_str:>8}  {date_str}  {source_path}{line_end}");
             }
@@ -209,8 +221,8 @@ pub fn run(
         output_lines.len()
     };
     let mut footer_parts = vec![format!("{} sources", source_count)];
-    if !include.includes_excluded() && excluded_count > 0 {
-        footer_parts.push(format!("{excluded_count} excluded hidden"));
+    if sel.excluded_count > 0 {
+        footer_parts.push(format!("{} excluded hidden", sel.excluded_count));
     }
     if (archived_only || unarchived_only) && unhashed_count > 0 {
         footer_parts.push(format!(
@@ -225,67 +237,6 @@ pub fn run(
     }
 
     Ok(())
-}
-
-/// Fetch sources matching scope/role/exclusion criteria, then apply --where filters.
-///
-/// Returns (matching_sources, excluded_count) where excluded_count is the number
-/// of sources that matched scope/role but were excluded.
-///
-/// This function implements the domain-predicate filtering pattern:
-/// 1. Fetch all sources from all roots
-/// 2. Filter using pure domain predicates (is_active, is_from_role, matches_scope, is_excluded)
-/// 3. Apply --where filters (requires DB access for fact queries)
-fn get_matching_sources(
-    conn: &mut Connection,
-    scopes: &[ScopeMatch],
-    filters: &[Filter],
-    include: &IncludeSet,
-) -> Result<(Vec<Source>, usize)> {
-    // 1. Get all root IDs
-    let root_ids: Vec<i64> = conn
-        .prepare("SELECT id FROM roots")?
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // 2. Fetch all present sources for those roots
-    let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
-
-    // 3. Filter using domain predicates, tracking excluded count
-    let mut excluded_count = 0usize;
-    let filtered: Vec<Source> = all_sources
-        .into_iter()
-        .filter(|s| s.is_active())
-        .filter(|s| include.includes_archived() || s.is_from_role("source"))
-        .filter(|s| s.matches_scope(scopes))
-        .filter(|s| {
-            if s.is_excluded() && !include.includes_excluded() {
-                excluded_count += 1;
-                return false;
-            }
-            true
-        })
-        .collect();
-
-    // 4. Apply --where filters if present
-    if filters.is_empty() {
-        return Ok((filtered, excluded_count));
-    }
-
-    // Extract IDs, apply filters, then map back to Source objects
-    let source_ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-    let filtered_ids = filter::apply_filters(conn, &source_ids, filters)?;
-
-    // Build a set for O(1) lookup
-    let filtered_id_set: std::collections::HashSet<i64> = filtered_ids.into_iter().collect();
-
-    // Keep only sources whose ID passed the filter
-    let result: Vec<Source> = filtered
-        .into_iter()
-        .filter(|s| filtered_id_set.contains(&s.id))
-        .collect();
-
-    Ok((result, excluded_count))
 }
 
 fn format_path(full_path: &str, cwd: Option<&str>) -> String {
@@ -360,31 +311,37 @@ pub fn show_duplicates(
         None
     };
 
-    // Get all matching sources using domain predicates
-    let (sources, excluded_count) =
-        get_matching_sources(conn, &scopes, &filters, include)?;
+    let params = SelectionParams {
+        scopes,
+        include: include.clone(),
+        filters,
+        role_policy: RolePolicy::SourceUnlessIncluded,
+    };
+    let sel = selection::select_sources(conn, &params)?;
 
-    if sources.is_empty() {
+    if sel.sources.is_empty() {
         eprintln!("No sources match the given filters.");
-        if !include.includes_excluded() && excluded_count > 0 {
+        if sel.excluded_count > 0 {
             eprintln!(
-                "({excluded_count} excluded sources hidden, use --include excluded to show)"
+                "({} excluded sources hidden, use --include excluded to show)",
+                sel.excluded_count
             );
         }
         return Ok(());
     }
 
     // Extract source IDs for duplicate finding
-    let source_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
+    let source_ids = sel.source_ids();
 
     // Find duplicate groups: object_ids that appear more than once
     let duplicate_groups = find_duplicate_groups(conn, &source_ids)?;
 
     if duplicate_groups.is_empty() {
         println!("No duplicates found.");
-        if !include.includes_excluded() && excluded_count > 0 {
+        if sel.excluded_count > 0 {
             eprintln!(
-                "({excluded_count} excluded sources hidden, use --include excluded to show)"
+                "({} excluded sources hidden, use --include excluded to show)",
+                sel.excluded_count
             );
         }
         return Ok(());
@@ -415,9 +372,10 @@ pub fn show_duplicates(
         duplicate_groups.len(),
         total_sources
     );
-    if !include.includes_excluded() && excluded_count > 0 {
+    if sel.excluded_count > 0 {
         eprintln!(
-            "({excluded_count} excluded sources hidden, use --include excluded to show)"
+            "({} excluded sources hidden, use --include excluded to show)",
+            sel.excluded_count
         );
     }
 
