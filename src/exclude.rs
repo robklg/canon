@@ -4,11 +4,13 @@ use std::path::{Path, PathBuf};
 
 use crate::ceremony;
 use crate::domain::exclusion::find_excludable_duplicates;
+use crate::domain::include::IncludeSet;
 use crate::domain::path::{resolve_path, resolve_paths};
 use crate::domain::root::find_containing_root;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::expr::filter::{self, Filter};
+use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Connection, Db};
 
 // ============================================================================
@@ -49,7 +51,14 @@ pub fn set(
     let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
 
     // Get matching sources (only from source roots, exclude already-excluded)
-    let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, false)?;
+    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let params = SelectionParams {
+        scopes,
+        include: IncludeSet::default(),
+        filters,
+        role_policy: RolePolicy::SourceOnly,
+    };
+    let source_ids = selection::select_sources(conn, &params)?.source_ids();
 
     // Batch fetch sources and filter out already excluded using domain predicate
     let sources_map = repo::source::batch_fetch_by_ids(conn, &source_ids)?;
@@ -235,45 +244,6 @@ fn compute_set_confirmation(
     })
 }
 
-fn get_matching_sources(
-    conn: &mut Connection,
-    scope_prefixes: &[String],
-    filters: &[Filter],
-    include_excluded: bool,
-) -> Result<Vec<i64>> {
-    // Get all source root IDs (active, source role only)
-    let roots = repo::root::fetch_all(conn)?;
-    let source_root_ids: Vec<i64> = roots
-        .iter()
-        .filter(|r| r.is_active() && r.is_source())
-        .map(|r| r.id)
-        .collect();
-
-    if source_root_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Batch fetch all present sources from source roots
-    let sources = repo::source::batch_fetch_by_roots(conn, &source_root_ids)?;
-
-    // Classify scopes for matching
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
-
-    // Apply domain predicates
-    let filtered: Vec<i64> = sources
-        .into_iter()
-        .filter(|s| scopes.is_empty() || s.matches_scope(&scopes))
-        .filter(|s| include_excluded || !s.is_excluded())
-        .map(|s| s.id)
-        .collect();
-
-    // Apply --where filters if present
-    if filters.is_empty() {
-        return Ok(filtered);
-    }
-    filter::apply_filters(conn, &filtered, filters)
-}
-
 fn get_excluded_sources(
     conn: &mut Connection,
     scope_prefixes: &[String],
@@ -438,7 +408,14 @@ pub fn exclude_duplicates(
     let prefer_prefix = resolve_path(prefer_path, &all_roots, &cwd)?;
 
     // Get matching source IDs in scope (candidates for exclusion)
-    let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, false)?;
+    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let params = SelectionParams {
+        scopes,
+        include: IncludeSet::default(),
+        filters,
+        role_policy: RolePolicy::SourceOnly,
+    };
+    let source_ids = selection::select_sources(conn, &params)?.source_ids();
 
     if source_ids.is_empty() {
         println!("No sources match the given filters.");
@@ -662,8 +639,18 @@ pub fn set_objects_by_filter(
     let all_roots = repo::root::fetch_all(conn)?;
     let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
 
-    // Get matching sources (only from source roots, include already-excluded to find their objects)
-    let source_ids = get_matching_sources(conn, &scope_prefixes, &filters, true)?;
+    // Get matching sources (include already-excluded to find their objects)
+    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let params = SelectionParams {
+        scopes,
+        include: IncludeSet {
+            excluded: true,
+            archived: false,
+        },
+        filters,
+        role_policy: RolePolicy::SourceOnly,
+    };
+    let source_ids = selection::select_sources(conn, &params)?.source_ids();
 
     if source_ids.is_empty() {
         println!("No sources match the given filters.");
@@ -1052,83 +1039,81 @@ mod tests {
     }
 
     // =========================================================================
-    // get_matching_sources tests
+    // exclude selection tests (via ops::selection::select_sources)
     // =========================================================================
 
+    fn make_exclude_params(scopes: Vec<ScopeMatch>, include_excluded: bool) -> SelectionParams {
+        SelectionParams {
+            scopes,
+            include: IncludeSet {
+                excluded: include_excluded,
+                archived: false,
+            },
+            filters: vec![],
+            role_policy: RolePolicy::SourceOnly,
+        }
+    }
+
     #[test]
-    fn test_get_matching_sources_excludes_suspended_roots() {
+    fn test_exclude_selection_excludes_suspended_roots() {
         let mut conn = setup_test_db();
 
-        // Active source root
         let active_root = insert_root(&conn, "/active", "source", false);
         let active_id = insert_source(&conn, active_root, "file.txt", None, true, false);
 
-        // Suspended source root
         let suspended_root = insert_root(&conn, "/suspended", "source", true);
         let _suspended_id = insert_source(&conn, suspended_root, "file.txt", None, true, false);
 
-        let result = get_matching_sources(&mut conn, &[], &[], false).unwrap();
-
-        assert_eq!(result.len(), 1);
-        assert!(result.contains(&active_id));
+        let sel = selection::select_sources(&mut conn, &make_exclude_params(vec![], false)).unwrap();
+        assert_eq!(sel.source_ids(), vec![active_id]);
     }
 
     #[test]
-    fn test_get_matching_sources_excludes_archive_roots() {
+    fn test_exclude_selection_excludes_archive_roots() {
         let mut conn = setup_test_db();
 
-        // Source root
         let source_root = insert_root(&conn, "/source", "source", false);
         let source_id = insert_source(&conn, source_root, "file.txt", None, true, false);
 
-        // Archive root
         let archive_root = insert_root(&conn, "/archive", "archive", false);
         let _archive_id = insert_source(&conn, archive_root, "file.txt", None, true, false);
 
-        let result = get_matching_sources(&mut conn, &[], &[], false).unwrap();
-
-        assert_eq!(result.len(), 1);
-        assert!(result.contains(&source_id));
+        let sel = selection::select_sources(&mut conn, &make_exclude_params(vec![], false)).unwrap();
+        assert_eq!(sel.source_ids(), vec![source_id]);
     }
 
     #[test]
-    fn test_get_matching_sources_respects_scope() {
+    fn test_exclude_selection_respects_scope() {
         let mut conn = setup_test_db();
 
         let root = insert_root(&conn, "/photos", "source", false);
         let in_scope_id = insert_source(&conn, root, "2024/photo.jpg", None, true, false);
         let _out_of_scope_id = insert_source(&conn, root, "2023/photo.jpg", None, true, false);
 
-        // Scope to /photos/2024
-        let scopes = vec!["/photos/2024".to_string()];
-        let result = get_matching_sources(&mut conn, &scopes, &[], false).unwrap();
-
-        assert_eq!(result.len(), 1);
-        assert!(result.contains(&in_scope_id));
+        let scopes = ScopeMatch::classify_all(&["/photos/2024".to_string()]);
+        let sel = selection::select_sources(&mut conn, &make_exclude_params(scopes, false)).unwrap();
+        assert_eq!(sel.source_ids(), vec![in_scope_id]);
     }
 
     #[test]
-    fn test_get_matching_sources_excludes_source_level_excluded() {
+    fn test_exclude_selection_excludes_source_level_excluded() {
         let mut conn = setup_test_db();
 
         let root = insert_root(&conn, "/photos", "source", false);
         let normal_id = insert_source(&conn, root, "normal.jpg", None, true, false);
-        let _excluded_id = insert_source(&conn, root, "excluded.jpg", None, true, true); // source-level excluded
+        let _excluded_id = insert_source(&conn, root, "excluded.jpg", None, true, true);
 
-        let result = get_matching_sources(&mut conn, &[], &[], false).unwrap();
-
-        assert_eq!(result.len(), 1);
-        assert!(result.contains(&normal_id));
+        let sel = selection::select_sources(&mut conn, &make_exclude_params(vec![], false)).unwrap();
+        assert_eq!(sel.source_ids(), vec![normal_id]);
     }
 
     #[test]
-    fn test_get_matching_sources_excludes_object_level_excluded() {
+    fn test_exclude_selection_excludes_object_level_excluded() {
         let mut conn = setup_test_db();
 
         let root = insert_root(&conn, "/photos", "source", false);
         let normal_id = insert_source(&conn, root, "normal.jpg", None, true, false);
 
-        // Source not excluded, but linked to excluded object
         let excluded_obj = insert_object(&conn, "abc123excluded", true);
         let _obj_excluded_id = insert_source(
             &conn,
@@ -1139,14 +1124,12 @@ mod tests {
             false,
         );
 
-        let result = get_matching_sources(&mut conn, &[], &[], false).unwrap();
-
-        assert_eq!(result.len(), 1);
-        assert!(result.contains(&normal_id));
+        let sel = selection::select_sources(&mut conn, &make_exclude_params(vec![], false)).unwrap();
+        assert_eq!(sel.source_ids(), vec![normal_id]);
     }
 
     #[test]
-    fn test_get_matching_sources_includes_excluded_when_flag_set() {
+    fn test_exclude_selection_includes_excluded_when_flag_set() {
         let mut conn = setup_test_db();
 
         let root = insert_root(&conn, "/photos", "source", false);
@@ -1164,13 +1147,12 @@ mod tests {
             false,
         );
 
-        // With include_excluded = true
-        let result = get_matching_sources(&mut conn, &[], &[], true).unwrap();
-
-        assert_eq!(result.len(), 3);
-        assert!(result.contains(&normal_id));
-        assert!(result.contains(&source_excluded_id));
-        assert!(result.contains(&obj_excluded_id));
+        let sel = selection::select_sources(&mut conn, &make_exclude_params(vec![], true)).unwrap();
+        let ids = sel.source_ids();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&normal_id));
+        assert!(ids.contains(&source_excluded_id));
+        assert!(ids.contains(&obj_excluded_id));
     }
 
     // =========================================================================
