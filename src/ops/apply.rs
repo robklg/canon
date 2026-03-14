@@ -1,15 +1,22 @@
-//! Apply plan computation.
+//! Apply operations — plan and execute for file transfers.
 //!
-//! Validates constraints and computes destination paths for an apply operation.
-//! No filesystem I/O, no file transfers — the interface handles those.
+//! `plan_apply()` validates constraints and computes destination paths.
+//! `execute_apply()` performs file transfers, staleness validation, and DB registration.
 
 use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use super::cluster::LockEntry;
+use super::fs::{compute_partial_hash, preserve_metadata};
+use crate::domain::apply::{classify_destination, DestinationState};
 use crate::domain::fact::FactEntry;
 use crate::domain::path::path_strip_prefix;
+use crate::domain::source::NewSource;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
 use crate::repo::{self, Connection};
 
@@ -428,6 +435,549 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
         already_archived_count,
     })
 }
+
+// ===========================================================================
+// Execute types
+// ===========================================================================
+
+/// Outcome of a single transfer operation.
+#[derive(Debug)]
+pub enum TransferOutcome {
+    Copied,
+    Renamed,
+    Moved,
+    SkippedMissing,
+    SkippedStale(String),
+    Error(String),
+}
+
+/// Progress notification for file transfer operations.
+/// The interface implements this to display progress, verbose logging, etc.
+/// Fire-and-forget — does not affect the operation's behavior.
+pub trait TransferProgress {
+    /// Called once before the transfer loop begins.
+    fn on_start(&self, total: usize);
+    /// Called after each transfer completes.
+    fn on_transfer(&self, index: usize, total: usize, source_path: &str, outcome: &TransferOutcome);
+    /// Called once after the transfer loop ends.
+    fn on_finish(&self);
+}
+
+/// No-op implementation for tests.
+pub struct NoopProgress;
+impl TransferProgress for NoopProgress {
+    fn on_start(&self, _total: usize) {}
+    fn on_transfer(&self, _index: usize, _total: usize, _source_path: &str, _outcome: &TransferOutcome) {}
+    fn on_finish(&self) {}
+}
+
+/// Parameters for executing an apply operation.
+pub struct ApplyExecuteParams {
+    /// Base directory for destination paths (archive root + base_dir from manifest).
+    pub base_dir: PathBuf,
+    /// Archive root ID for DB registration.
+    pub archive_root_id: i64,
+    /// How to transfer files.
+    pub transfer_mode: TransferMode,
+    /// Whether this is a resume operation.
+    pub resume: bool,
+}
+
+/// Result of executing an apply operation.
+pub struct ApplyResult {
+    pub copied: u64,
+    pub renamed: u64,
+    pub moved: u64,
+    pub skipped_missing: u64,
+    pub skipped_stale: Vec<StaleSource>,
+    pub errors: Vec<TransferError>,
+    /// Resume mode: count of sources already registered in archive DB.
+    pub already_archived: u64,
+    /// Resume mode: count of files on disk with correct size (need scan, not transfer).
+    pub resumed: u64,
+}
+
+/// An error encountered during a file transfer.
+pub struct TransferError {
+    pub path: String,
+    pub error: String,
+}
+
+/// Result of disk classification in resume mode.
+#[derive(Debug)]
+struct ResumeClassification<'a> {
+    /// Transfers that need to be executed (not on disk).
+    to_transfer: Vec<&'a ApplyTransfer>,
+    /// Count of files on disk with correct size (skipped, need scan).
+    resumed: usize,
+}
+
+struct SizeMismatchError {
+    dest_path: String,
+    expected: u64,
+    actual: u64,
+}
+
+// ===========================================================================
+// Execute function
+// ===========================================================================
+
+/// Execute file transfers from a computed apply plan.
+///
+/// Performs: source readability checks, resume disk classification (if resume mode),
+/// batch staleness validation, and the transfer loop. Each transfer is independent
+/// (no transaction wrapping) — the operation is idempotent and resume-safe.
+///
+/// Does NOT handle: manifest parsing, confirmation prompts, dry-run display,
+/// output formatting. These are interface concerns.
+pub fn execute_apply(
+    conn: &Connection,
+    plan: &ApplyPlan,
+    params: &ApplyExecuteParams,
+    progress: &dyn TransferProgress,
+) -> Result<ApplyResult> {
+    let mut result = ApplyResult {
+        copied: 0,
+        renamed: 0,
+        moved: 0,
+        skipped_missing: 0,
+        skipped_stale: Vec::new(),
+        errors: Vec::new(),
+        already_archived: plan.already_archived_count as u64,
+        resumed: 0,
+    };
+
+    // --- Source readability pre-check ---
+    let mut unreadable: Vec<(String, String)> = Vec::new();
+    for transfer in &plan.transfers {
+        match File::open(&transfer.source_path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                unreadable.push((transfer.source_path.clone(), "permission denied".to_string()));
+            }
+            Err(e) => {
+                unreadable.push((transfer.source_path.clone(), e.to_string()));
+            }
+        }
+    }
+    if !unreadable.is_empty() {
+        bail!(
+            "{} sources are not readable: {}",
+            unreadable.len(),
+            unreadable
+                .iter()
+                .take(10)
+                .map(|(p, r)| format!("{p} ({r})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    // --- Resume mode: disk classification ---
+    let transfers_to_execute: Vec<&ApplyTransfer> = if params.resume {
+        let classification = classify_transfers_disk(&plan.transfers, &params.base_dir)?;
+        result.resumed = classification.resumed as u64;
+        classification.to_transfer
+    } else {
+        plan.transfers.iter().collect()
+    };
+
+    // --- Batch staleness validation ---
+    if !transfers_to_execute.is_empty() {
+        let stale = validate_transfers_disk(&transfers_to_execute);
+        if !stale.is_empty() {
+            bail!(
+                "{} sources have changed since manifest was generated. \
+                 Run `canon scan` then `cluster refresh` to regenerate the lock file. \
+                 First: {} ({})",
+                stale.len(),
+                stale[0].path,
+                stale[0].reason
+            );
+        }
+    }
+
+    // --- Transfer loop ---
+    let total = transfers_to_execute.len();
+    progress.on_start(total);
+
+    for (i, transfer) in transfers_to_execute.iter().enumerate() {
+        let outcome = match execute_single_transfer(
+            transfer,
+            &params.base_dir,
+            params.transfer_mode,
+            conn,
+            params.archive_root_id,
+        ) {
+            Ok(outcome) => outcome,
+            Err(e) => TransferOutcome::Error(e.to_string()),
+        };
+
+        match &outcome {
+            TransferOutcome::Copied => result.copied += 1,
+            TransferOutcome::Renamed => result.renamed += 1,
+            TransferOutcome::Moved => result.moved += 1,
+            TransferOutcome::SkippedMissing => result.skipped_missing += 1,
+            TransferOutcome::SkippedStale(reason) => {
+                result.skipped_stale.push(StaleSource {
+                    path: transfer.source_path.clone(),
+                    reason: reason.clone(),
+                });
+            }
+            TransferOutcome::Error(msg) => {
+                result.errors.push(TransferError {
+                    path: transfer.source_path.clone(),
+                    error: msg.clone(),
+                });
+            }
+        }
+
+        progress.on_transfer(i, total, &transfer.source_path, &outcome);
+    }
+
+    progress.on_finish();
+
+    Ok(result)
+}
+
+// ===========================================================================
+// Execute helpers (private)
+// ===========================================================================
+
+/// Execute a single file transfer. Returns the outcome.
+fn execute_single_transfer(
+    transfer: &ApplyTransfer,
+    base_dir: &Path,
+    transfer_mode: TransferMode,
+    conn: &Connection,
+    archive_root_id: i64,
+) -> Result<TransferOutcome> {
+    let src_path = Path::new(&transfer.source_path);
+    let dest_path = base_dir.join(&transfer.dest_rel_path);
+
+    // Check if source exists
+    if !src_path.exists() {
+        return Ok(TransferOutcome::SkippedMissing);
+    }
+
+    // Per-transfer staleness validation (catches race conditions)
+    if let Err(reason) = validate_source_state(transfer) {
+        return Ok(TransferOutcome::SkippedStale(reason));
+    }
+
+    // Create parent directories
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+
+    match transfer_mode {
+        TransferMode::Copy => {
+            if dest_path.exists() {
+                bail!("Destination already exists: {}", dest_path.display());
+            }
+            let src_meta = fs::metadata(src_path)
+                .with_context(|| format!("Failed to read metadata: {}", transfer.source_path))?;
+            fs::copy(src_path, &dest_path).with_context(|| {
+                format!("Failed to copy {} to {}", transfer.source_path, dest_path.display())
+            })?;
+            preserve_metadata(&dest_path, &src_meta)?;
+            let new_source = build_new_source(
+                &dest_path,
+                archive_root_id,
+                &transfer.archive_rel_path,
+                transfer.object_id,
+                &transfer.partial_hash,
+            )?;
+            repo::source::insert_destination(conn, &new_source)?;
+            Ok(TransferOutcome::Copied)
+        }
+        TransferMode::Rename => {
+            if dest_path.exists() {
+                bail!("Destination already exists: {}", dest_path.display());
+            }
+            fs::rename(src_path, &dest_path).with_context(|| {
+                format!("Failed to rename {} to {}", transfer.source_path, dest_path.display())
+            })?;
+            relocate_source(conn, transfer.source_id, archive_root_id, &transfer.archive_rel_path)?;
+            Ok(TransferOutcome::Renamed)
+        }
+        TransferMode::Move => {
+            if dest_path.exists() {
+                bail!("Destination already exists: {}", dest_path.display());
+            }
+            match fs::rename(src_path, &dest_path) {
+                Ok(()) => {
+                    relocate_source(conn, transfer.source_id, archive_root_id, &transfer.archive_rel_path)?;
+                    Ok(TransferOutcome::Renamed)
+                }
+                #[cfg(unix)]
+                Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+                    // Cross-device: fallback to copy + delete
+                    if dest_path.exists() {
+                        bail!("Destination already exists: {}", dest_path.display());
+                    }
+                    let src_meta = fs::metadata(src_path)
+                        .with_context(|| format!("Failed to read metadata: {}", transfer.source_path))?;
+                    fs::copy(src_path, &dest_path).with_context(|| {
+                        format!("Failed to copy {} to {}", transfer.source_path, dest_path.display())
+                    })?;
+                    preserve_metadata(&dest_path, &src_meta)?;
+                    fs::remove_file(src_path)
+                        .with_context(|| format!("Failed to delete source: {}", transfer.source_path))?;
+                    mark_source_not_present(conn, transfer.source_id)?;
+                    let new_source = build_new_source(
+                        &dest_path,
+                        archive_root_id,
+                        &transfer.archive_rel_path,
+                        transfer.object_id,
+                        &transfer.partial_hash,
+                    )?;
+                    repo::source::insert_destination(conn, &new_source)?;
+                    Ok(TransferOutcome::Moved)
+                }
+                Err(e) => Err(e).with_context(|| {
+                    format!("Failed to rename {} to {}", transfer.source_path, dest_path.display())
+                }),
+            }
+        }
+    }
+}
+
+/// Validate that a source file on disk matches the state recorded in the transfer.
+fn validate_source_state(transfer: &ApplyTransfer) -> std::result::Result<(), String> {
+    let meta = match fs::metadata(&transfer.source_path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            return Err("file not found".to_string());
+        }
+        Err(e) => {
+            return Err(format!("cannot stat: {e}"));
+        }
+    };
+
+    let mut mismatches = Vec::new();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let current_size = meta.size() as i64;
+        let current_mtime = meta.mtime();
+
+        if current_size != transfer.size {
+            mismatches.push(format!("size: {} → {}", transfer.size, current_size));
+        }
+        if current_mtime != transfer.mtime {
+            mismatches.push(format!("mtime: {} → {}", transfer.mtime, current_mtime));
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let current_size = meta.len() as i64;
+        let current_mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        if current_size != transfer.size {
+            mismatches.push(format!("size: {} → {}", transfer.size, current_size));
+        }
+        if current_mtime != transfer.mtime {
+            mismatches.push(format!("mtime: {} → {}", transfer.mtime, current_mtime));
+        }
+    }
+
+    // Partial hash check — recompute from disk and compare to lock
+    let current_hash =
+        compute_partial_hash(Path::new(&transfer.source_path), transfer.size as u64)
+            .map_err(|e| format!("failed to compute partial hash: {e}"))?;
+    if current_hash != transfer.partial_hash {
+        mismatches.push(format!(
+            "partial hash mismatch: {}... → {}...",
+            &transfer.partial_hash[..16.min(transfer.partial_hash.len())],
+            &current_hash[..16]
+        ));
+    }
+
+    if !mismatches.is_empty() {
+        Err(mismatches.join(", "))
+    } else {
+        Ok(())
+    }
+}
+
+/// Batch validate source file states against disk.
+fn validate_transfers_disk(transfers: &[&ApplyTransfer]) -> Vec<StaleSource> {
+    let mut stale = Vec::new();
+    for transfer in transfers {
+        if let Err(reason) = validate_source_state(transfer) {
+            stale.push(StaleSource {
+                path: transfer.source_path.clone(),
+                reason,
+            });
+        }
+    }
+    stale
+}
+
+/// Classify transfers on disk for resume mode. Separates transfers still
+/// needed from files already on disk with correct size.
+fn classify_transfers_disk<'a>(
+    transfers: &'a [ApplyTransfer],
+    base_dir: &Path,
+) -> Result<ResumeClassification<'a>> {
+    let mut to_transfer = Vec::new();
+    let mut resumed = 0usize;
+    let mut size_mismatches = Vec::new();
+
+    for transfer in transfers {
+        let full_path = base_dir.join(&transfer.dest_rel_path);
+        let expected_size = transfer.size as u64;
+
+        let on_disk = if full_path.exists() {
+            match fs::metadata(&full_path) {
+                Ok(meta) => Some(meta.len()),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        let state = classify_destination(false, on_disk, expected_size);
+
+        match state {
+            DestinationState::Available => {
+                to_transfer.push(transfer);
+            }
+            DestinationState::Archived => {
+                // Should not happen (in_db=false always), but handle gracefully
+                to_transfer.push(transfer);
+            }
+            DestinationState::Resumed => {
+                resumed += 1;
+            }
+            DestinationState::SizeMismatch { expected, actual } => {
+                size_mismatches.push(SizeMismatchError {
+                    dest_path: full_path.display().to_string(),
+                    expected,
+                    actual,
+                });
+            }
+        }
+    }
+
+    if !size_mismatches.is_empty() {
+        let details: Vec<String> = size_mismatches
+            .iter()
+            .take(10)
+            .map(|e| format!("{} (expected {} bytes, found {})", e.dest_path, e.expected, e.actual))
+            .collect();
+        let suffix = if size_mismatches.len() > 10 {
+            format!(" ... and {} more", size_mismatches.len() - 10)
+        } else {
+            String::new()
+        };
+        bail!(
+            "Found {} partial/mismatched files in destination. \
+             Delete the partial files, then re-run with --resume. {}{}",
+            size_mismatches.len(),
+            details.join("; "),
+            suffix
+        );
+    }
+
+    Ok(ResumeClassification {
+        to_transfer,
+        resumed,
+    })
+}
+
+/// Relocate an existing source to a new location (for rename/move on same device).
+/// Updates the source row in-place since the inode remains the same.
+fn relocate_source(
+    conn: &Connection,
+    source_id: i64,
+    archive_root_id: i64,
+    rel_path: &str,
+) -> Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs() as i64;
+    repo::source::update_location(conn, source_id, archive_root_id, rel_path, now)
+}
+
+/// Mark a source as no longer present (for cross-device move after deletion).
+fn mark_source_not_present(conn: &Connection, source_id: i64) -> Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs() as i64;
+    repo::source::mark_missing(conn, &[source_id], now)?;
+    Ok(())
+}
+
+/// Build a NewSource from destination file metadata for DB registration.
+#[cfg(unix)]
+fn build_new_source(
+    dest_path: &Path,
+    archive_root_id: i64,
+    rel_path: &str,
+    object_id: Option<i64>,
+    partial_hash: &str,
+) -> Result<NewSource> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(dest_path).with_context(|| {
+        format!("Failed to read metadata for registration: {}", dest_path.display())
+    })?;
+    Ok(NewSource {
+        root_id: archive_root_id,
+        rel_path: rel_path.to_string(),
+        size: meta.size() as i64,
+        mtime: meta.mtime(),
+        partial_hash: partial_hash.to_string(),
+        object_id,
+        device: Some(meta.dev() as i64),
+        inode: Some(meta.ino() as i64),
+    })
+}
+
+#[cfg(not(unix))]
+fn build_new_source(
+    dest_path: &Path,
+    archive_root_id: i64,
+    rel_path: &str,
+    object_id: Option<i64>,
+    partial_hash: &str,
+) -> Result<NewSource> {
+    let meta = fs::metadata(dest_path).with_context(|| {
+        format!("Failed to read metadata for registration: {}", dest_path.display())
+    })?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Ok(NewSource {
+        root_id: archive_root_id,
+        rel_path: rel_path.to_string(),
+        size: meta.len() as i64,
+        mtime,
+        partial_hash: partial_hash.to_string(),
+        object_id,
+        device: None,
+        inode: None,
+    })
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
 
 #[cfg(test)]
 mod tests {
@@ -990,5 +1540,308 @@ mod tests {
         assert!(plan.violations.expansion_failures.is_empty());
         assert!(plan.violations.collisions.is_empty());
         assert_eq!(plan.already_archived_count, 0);
+    }
+
+    // =========================================================================
+    // validate_source_state tests
+    // =========================================================================
+
+    fn make_transfer_for_file(path: &Path, size: i64, mtime: i64, partial_hash: &str) -> ApplyTransfer {
+        ApplyTransfer {
+            source_id: 1,
+            source_path: path.display().to_string(),
+            dest_rel_path: "dest.jpg".to_string(),
+            archive_rel_path: "dest.jpg".to_string(),
+            object_id: Some(1),
+            partial_hash: partial_hash.to_string(),
+            size,
+            mtime,
+        }
+    }
+
+    #[test]
+    fn validate_unchanged_file() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"test content").unwrap();
+        f.flush().unwrap();
+
+        let meta = std::fs::metadata(f.path()).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
+        #[cfg(not(unix))]
+        let (size, mtime) = {
+            (meta.len() as i64, 0i64)
+        };
+
+        let hash = compute_partial_hash(f.path(), size as u64).unwrap();
+        let transfer = make_transfer_for_file(f.path(), size, mtime, &hash);
+        assert!(validate_source_state(&transfer).is_ok());
+    }
+
+    #[test]
+    fn validate_missing_file() {
+        let transfer = make_transfer_for_file(
+            Path::new("/nonexistent/file.jpg"),
+            1000,
+            1704067200,
+            "testhash",
+        );
+        let err = validate_source_state(&transfer).unwrap_err();
+        assert!(err.contains("not found"), "expected 'not found', got: {err}");
+    }
+
+    #[test]
+    fn validate_size_changed() {
+        use std::io::Write;
+
+        // Create file, record metadata, then change it
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_path_buf();
+        std::fs::write(&path, b"short").unwrap();
+
+        let meta = std::fs::metadata(&path).unwrap();
+        #[cfg(unix)]
+        let (orig_size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
+        #[cfg(not(unix))]
+        let (orig_size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&path, orig_size as u64).unwrap();
+
+        // Now write more data so size changes
+        std::fs::write(&path, b"much longer content here").unwrap();
+
+        let transfer = make_transfer_for_file(&path, orig_size, mtime, &hash);
+        let err = validate_source_state(&transfer).unwrap_err();
+        assert!(err.contains("size"), "expected 'size' in error, got: {err}");
+    }
+
+    #[test]
+    fn validate_hash_changed() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"test content").unwrap();
+        f.flush().unwrap();
+
+        let meta = std::fs::metadata(f.path()).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
+        #[cfg(not(unix))]
+        let (size, mtime) = {
+            (meta.len() as i64, 0i64)
+        };
+
+        // Correct size/mtime but wrong hash
+        let transfer = make_transfer_for_file(f.path(), size, mtime, "wrong_hash_value_here");
+        let err = validate_source_state(&transfer).unwrap_err();
+        assert!(err.contains("partial hash"), "expected 'partial hash' in error, got: {err}");
+    }
+
+    // =========================================================================
+    // classify_transfers_disk tests
+    // =========================================================================
+
+    #[test]
+    fn classify_available_when_dest_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let transfers = vec![ApplyTransfer {
+            source_id: 1,
+            source_path: "/src/photo.jpg".to_string(),
+            dest_rel_path: "photo.jpg".to_string(),
+            archive_rel_path: "photo.jpg".to_string(),
+            object_id: Some(1),
+            partial_hash: "hash".to_string(),
+            size: 1000,
+            mtime: 0,
+        }];
+
+        let result = classify_transfers_disk(&transfers, dir.path()).unwrap();
+        assert_eq!(result.to_transfer.len(), 1);
+        assert_eq!(result.resumed, 0);
+    }
+
+    #[test]
+    fn classify_resumed_when_size_matches() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("photo.jpg");
+        let mut f = std::fs::File::create(&dest).unwrap();
+        f.write_all(&vec![0u8; 1000]).unwrap();
+
+        let transfers = vec![ApplyTransfer {
+            source_id: 1,
+            source_path: "/src/photo.jpg".to_string(),
+            dest_rel_path: "photo.jpg".to_string(),
+            archive_rel_path: "photo.jpg".to_string(),
+            object_id: Some(1),
+            partial_hash: "hash".to_string(),
+            size: 1000,
+            mtime: 0,
+        }];
+
+        let result = classify_transfers_disk(&transfers, dir.path()).unwrap();
+        assert_eq!(result.to_transfer.len(), 0);
+        assert_eq!(result.resumed, 1);
+    }
+
+    #[test]
+    fn classify_size_mismatch_errors() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("photo.jpg");
+        let mut f = std::fs::File::create(&dest).unwrap();
+        f.write_all(&vec![0u8; 500]).unwrap(); // Wrong size
+
+        let transfers = vec![ApplyTransfer {
+            source_id: 1,
+            source_path: "/src/photo.jpg".to_string(),
+            dest_rel_path: "photo.jpg".to_string(),
+            archive_rel_path: "photo.jpg".to_string(),
+            object_id: Some(1),
+            partial_hash: "hash".to_string(),
+            size: 1000,
+            mtime: 0,
+        }];
+
+        let err = classify_transfers_disk(&transfers, dir.path());
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("partial/mismatched"), "expected size mismatch error, got: {msg}");
+    }
+
+    // =========================================================================
+    // execute_single_transfer tests (integration, uses tempfiles)
+    // =========================================================================
+
+    #[test]
+    fn execute_copy_creates_file() {
+        use std::io::Write;
+        let conn = setup_test_db();
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_file = src_dir.path().join("photo.jpg");
+        let mut f = std::fs::File::create(&src_file).unwrap();
+        f.write_all(b"photo data").unwrap();
+        drop(f);
+
+        let meta = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
+        #[cfg(not(unix))]
+        let (size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&src_file, size as u64).unwrap();
+
+        let obj_id = insert_object(&conn, "abc123", false);
+
+        let dest_dir = tempfile::tempdir().unwrap();
+        let transfer = ApplyTransfer {
+            source_id: 1,
+            source_path: src_file.display().to_string(),
+            dest_rel_path: "photo.jpg".to_string(),
+            archive_rel_path: "photo.jpg".to_string(),
+            object_id: Some(obj_id),
+            partial_hash: hash,
+            size,
+            mtime,
+        };
+
+        let outcome = execute_single_transfer(
+            &transfer,
+            dest_dir.path(),
+            TransferMode::Copy,
+            &conn,
+            archive_root,
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, TransferOutcome::Copied));
+        assert!(dest_dir.path().join("photo.jpg").exists());
+    }
+
+    #[test]
+    fn execute_copy_noclobber() {
+        use std::io::Write;
+        let conn = setup_test_db();
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::File::create(&src_file).unwrap().write_all(b"data").unwrap();
+
+        let meta = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
+        #[cfg(not(unix))]
+        let (size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&src_file, size as u64).unwrap();
+
+        let dest_dir = tempfile::tempdir().unwrap();
+        // Pre-create destination
+        std::fs::File::create(dest_dir.path().join("photo.jpg")).unwrap();
+
+        let transfer = ApplyTransfer {
+            source_id: 1,
+            source_path: src_file.display().to_string(),
+            dest_rel_path: "photo.jpg".to_string(),
+            archive_rel_path: "photo.jpg".to_string(),
+            object_id: Some(1),
+            partial_hash: hash,
+            size,
+            mtime,
+        };
+
+        let result = execute_single_transfer(
+            &transfer,
+            dest_dir.path(),
+            TransferMode::Copy,
+            &conn,
+            archive_root,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn execute_source_missing() {
+        let conn = setup_test_db();
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+        let dest_dir = tempfile::tempdir().unwrap();
+
+        let transfer = ApplyTransfer {
+            source_id: 1,
+            source_path: "/nonexistent/photo.jpg".to_string(),
+            dest_rel_path: "photo.jpg".to_string(),
+            archive_rel_path: "photo.jpg".to_string(),
+            object_id: Some(1),
+            partial_hash: "hash".to_string(),
+            size: 1000,
+            mtime: 0,
+        };
+
+        let outcome = execute_single_transfer(
+            &transfer,
+            dest_dir.path(),
+            TransferMode::Copy,
+            &conn,
+            archive_root,
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, TransferOutcome::SkippedMissing));
     }
 }

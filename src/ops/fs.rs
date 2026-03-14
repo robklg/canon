@@ -81,6 +81,45 @@ pub fn preserve_metadata(_dest: &Path, _src_meta: &Metadata) -> Result<()> {
     Ok(())
 }
 
+/// Check if a directory (or its nearest existing ancestor) is writable.
+/// Creates and removes a test file to verify write permissions.
+pub fn check_destination_writable(base_dir: &Path) -> Result<()> {
+    // Walk up to find the nearest existing directory
+    let mut check_dir = base_dir.to_path_buf();
+    while !check_dir.exists() {
+        if let Some(parent) = check_dir.parent() {
+            check_dir = parent.to_path_buf();
+        } else {
+            anyhow::bail!(
+                "Cannot find existing parent directory for {}",
+                base_dir.display()
+            );
+        }
+    }
+
+    // Try to create a temp file to verify write permissions
+    let test_file = check_dir.join(".canon_write_test");
+    match File::create(&test_file) {
+        Ok(_) => {
+            let _ = fs::remove_file(&test_file);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            anyhow::bail!(
+                "No write permission for destination directory: {}",
+                check_dir.display()
+            );
+        }
+        Err(e) => {
+            anyhow::bail!(
+                "Cannot write to destination directory {}: {}",
+                check_dir.display(),
+                e
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +205,19 @@ mod tests {
         let dest_meta = fs::metadata(dest.path()).unwrap();
         let dest_mtime = FileTime::from_last_modification_time(&dest_meta);
         assert_eq!(dest_mtime, known_mtime);
+    }
+
+    #[test]
+    fn check_writable_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(check_destination_writable(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn check_writable_nested_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b").join("c");
+        // Parent exists and is writable, nested dirs don't exist yet
+        assert!(check_destination_writable(&nested).is_ok());
     }
 }

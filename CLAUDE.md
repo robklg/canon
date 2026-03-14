@@ -56,8 +56,8 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 - `selection.rs` - Source selection: `select_sources()`, `RolePolicy`, `SelectionParams`, `Selection`
 - `exclude.rs` - Exclude plan/execute: `plan_set()`, `execute_set()`, `plan_clear()`, `execute_clear()`
 - `cluster.rs` - Cluster plan: `plan_generate()`, `LockEntry`
-- `apply.rs` - Apply plan: `plan_apply()`, `TransferMode`
-- `fs.rs` - Filesystem primitives: `compute_partial_hash()`, `compute_full_hash()`, `preserve_metadata()`
+- `apply.rs` - Apply plan/execute: `plan_apply()`, `execute_apply()`, `TransferMode`, `TransferProgress` trait
+- `fs.rs` - Filesystem primitives: `compute_partial_hash()`, `compute_full_hash()`, `preserve_metadata()`, `check_destination_writable()`
 
 **Command Modules** (flat in `src/`):
 - `main.rs` - CLI entry point using clap (canon home resolution, alias expansion dispatch)
@@ -419,7 +419,7 @@ The codebase follows a **strict layered architecture** prioritizing reliability,
 | **Repo** | Database queries, returning domain types, batch operations | Business logic, transaction management, filesystem access |
 | **Domain** | Pure functions, structs, predicates, business logic | Any I/O (database, filesystem, network) |
 
-**Note**: The operations layer is being introduced incrementally. Most query commands use `ops::selection::select_sources()` for source selection. Two commands intentionally use custom selection logic: `survey` (asymmetric visibility model — selection side vs outward side have different role/exclusion rules) and `cluster generate` (additional post-filtering for archive status and detailed breakdowns). Effectful command extraction uses the plan/execute pattern — `ops::exclude` (`plan_set`/`execute_set`, `plan_clear`/`execute_clear`) is the reference implementation. `ops::cluster` and `ops::apply` have plan functions; execute functions are planned for a future phase. The `ops/fs` module provides filesystem primitives (hashing, metadata). New commands should use `ops/` from the start.
+**Note**: The operations layer is being introduced incrementally. Most query commands use `ops::selection::select_sources()` for source selection. Two commands intentionally use custom selection logic: `survey` (asymmetric visibility model — selection side vs outward side have different role/exclusion rules) and `cluster generate` (additional post-filtering for archive status and detailed breakdowns). Effectful command extraction uses the plan/execute pattern — `ops::exclude` (`plan_set`/`execute_set`, `plan_clear`/`execute_clear`) is the reference implementation. `ops::cluster` has plan functions; execute is planned for a future phase. `ops::apply` has both `plan_apply()` and `execute_apply()` with a `TransferProgress` trait for observability. The `ops/fs` module provides filesystem primitives (hashing, metadata). New commands should use `ops/` from the start.
 
 **Repo Function Return Type Conventions:**
 

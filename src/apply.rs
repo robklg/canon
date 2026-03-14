@@ -1,44 +1,17 @@
 use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, ErrorKind};
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ceremony;
 use crate::cluster::{self, ManifestConfig};
-use crate::domain::apply::{classify_destination, DestinationState};
 use crate::domain::root::parse_root_spec;
-use crate::domain::source::NewSource;
 use crate::expr;
 use crate::ops;
 use crate::ops::apply::TransferMode;
 use crate::ops::cluster::LockEntry;
-use crate::ops::fs::{compute_partial_hash, preserve_metadata};
-use crate::progress::Progress;
-use crate::repo::{self, Connection, Db};
-
-#[derive(Default)]
-struct ApplyStats {
-    copied: u64,
-    renamed: u64,
-    moved: u64,
-    skipped_missing: u64,
-    skipped_stale: u64,
-    skipped_filtered: u64,
-    errors: u64,
-    // Resume mode counts (from work planning phase)
-    already_archived: u64,
-    resumed: u64,
-}
-
-/// Tracks sources that were skipped due to state changes
-struct SkippedStaleSource {
-    path: String,
-    reason: String,
-}
+use crate::repo::{self, Db};
 
 pub struct ApplyOptions {
     pub dry_run: bool,
@@ -49,22 +22,6 @@ pub struct ApplyOptions {
     pub transfer_mode: TransferMode,
     pub yes: bool,
     pub resume: bool,
-}
-
-/// Result of disk classification in resume mode.
-/// DB classification is done by plan_apply(); this handles the disk part.
-struct DiskWorkPlan<'a> {
-    /// Transfers that need to be executed (not on disk)
-    to_transfer: Vec<&'a ops::apply::ApplyTransfer>,
-    /// Count of files on disk but not in DB (skipped, need scan)
-    resumed: usize,
-}
-
-/// A size mismatch found during work planning.
-struct SizeMismatchError {
-    dest_path: String,
-    expected: u64,
-    actual: u64,
 }
 
 pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> {
@@ -369,194 +326,97 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         bail!("Aborting due to sources from suspended roots");
     }
 
-    // --- Filesystem checks (stay in interface) ---
+    // --- Dry-run: display plan and return ---
+
+    if options.dry_run {
+        // DB-based staleness check for dry-run
+        if !plan.stale_sources.is_empty() {
+            eprintln!(
+                "Error: {} sources have changed since manifest was generated:",
+                plan.stale_sources.len()
+            );
+            for s in plan.stale_sources.iter().take(10) {
+                eprintln!("  {}: {}", s.path, s.reason);
+            }
+            if plan.stale_sources.len() > 10 {
+                eprintln!("  ... and {} more", plan.stale_sources.len() - 10);
+            }
+            eprintln!("\nRun `canon scan` then `cluster refresh` to regenerate the lock file.");
+            bail!("Aborting due to stale sources in manifest");
+        }
+
+        display_dry_run_plan(&plan, &base_dir, options.transfer_mode);
+
+        let mode = " (dry-run)";
+        if options.resume {
+            println!(
+                "Applied{} (--resume): 0 copied, 0 renamed, 0 moved, {} already archived, 0 resumed, 0 errors",
+                mode, plan.already_archived_count
+            );
+        } else {
+            println!(
+                "Applied{}: 0 copied, 0 renamed, 0 moved, 0 skipped (missing), 0 skipped (stale), {} skipped (filtered), 0 errors",
+                mode, skipped_by_filter
+            );
+        }
+        return Ok(());
+    }
+
+    // --- Execute transfers ---
 
     eprintln!("Checking destination write permissions...");
-    check_destination_writable(&base_dir)?;
+    ops::fs::check_destination_writable(&base_dir)?;
 
-    // Check source readability (filesystem — skip in dry-run)
-    if !options.dry_run {
-        let mut unreadable: Vec<(String, String)> = Vec::new();
-        for transfer in &plan.transfers {
-            match File::open(&transfer.source_path) {
-                Ok(_) => {}
-                Err(e) if e.kind() == ErrorKind::NotFound => continue,
-                Err(e) if e.kind() == ErrorKind::PermissionDenied => {
-                    unreadable.push((transfer.source_path.clone(), "permission denied".to_string()));
-                }
-                Err(e) => {
-                    unreadable.push((transfer.source_path.clone(), e.to_string()));
-                }
-            }
-        }
-        if !unreadable.is_empty() {
-            eprintln!(
-                "Error: {} sources are not readable:",
-                unreadable.len()
-            );
-            for (path, reason) in &unreadable {
-                eprintln!("  {path} ({reason})");
-            }
-            bail!("Aborting due to unreadable sources");
-        }
-    }
+    let progress_impl = CliTransferProgress::new(options.verbose);
+    let result = ops::apply::execute_apply(
+        conn,
+        &plan,
+        &ops::apply::ApplyExecuteParams {
+            base_dir: base_dir.clone(),
+            archive_root_id: config.output.archive_root_id,
+            transfer_mode: options.transfer_mode,
+            resume: options.resume,
+        },
+        &progress_impl,
+    )?;
 
-    let mut stats = ApplyStats {
-        skipped_filtered: skipped_by_filter as u64,
-        ..Default::default()
-    };
-
-    // --- Resume mode: disk classification ---
-    // plan.transfers already excludes sources in DB. Now classify on disk.
-    // In non-resume mode, all plan.transfers go to execution.
-    let transfers_to_execute: Vec<&ops::apply::ApplyTransfer> = if options.resume {
-        eprint!("Planning transfers (--resume mode)...");
-        let work_plan = plan_transfers_disk(
-            &plan.transfers,
-            &base_dir,
-        )?;
-        eprintln!(" ok");
-
-        eprintln!();
-        eprintln!("Resume plan:");
-        eprintln!("  Already archived: {}", plan.already_archived_count);
-        eprintln!("  Resumed (need scan): {}", work_plan.resumed);
-        eprintln!("  To transfer: {}", work_plan.to_transfer.len());
-
-        stats.already_archived = plan.already_archived_count as u64;
-        stats.resumed = work_plan.resumed as u64;
-
-        work_plan.to_transfer
-    } else {
-        plan.transfers.iter().collect()
-    };
-
-    // Validate source file states (only for sources that need transfer)
-    // dry-run: use plan.stale_sources (DB check already done in plan)
-    // real apply: thorough disk check
-    if !transfers_to_execute.is_empty() {
-        eprintln!("Validating source file states...");
-        if options.dry_run {
-            // Use pre-computed DB-based staleness from plan
-            if !plan.stale_sources.is_empty() {
-                eprintln!(
-                    "Error: {} sources have changed since manifest was generated:",
-                    plan.stale_sources.len()
-                );
-                for s in plan.stale_sources.iter().take(10) {
-                    eprintln!("  {}: {}", s.path, s.reason);
-                }
-                if plan.stale_sources.len() > 10 {
-                    eprintln!("  ... and {} more", plan.stale_sources.len() - 10);
-                }
-                eprintln!("\nRun `canon scan` then `cluster refresh` to regenerate the lock file.");
-                bail!("Aborting due to stale sources in manifest");
-            }
-        } else {
-            let stale = check_source_states_disk_from_transfers(&transfers_to_execute);
-            if !stale.is_empty() {
-                eprintln!(
-                    "Error: {} sources have changed since manifest was generated:",
-                    stale.len()
-                );
-                for s in stale.iter().take(10) {
-                    eprintln!("  {}: {}", s.path, s.reason);
-                }
-                if stale.len() > 10 {
-                    eprintln!("  ... and {} more", stale.len() - 10);
-                }
-                eprintln!("\nRun `canon scan` then `cluster refresh` to regenerate the lock file.");
-                bail!("Aborting due to stale sources in manifest");
-            }
-        }
-    }
-
-    // Track stale sources found during transfers (race condition detection)
-    let mut stale_during_transfer: Vec<SkippedStaleSource> = Vec::new();
-
-    // Phase 3: Transfer
-    let total = transfers_to_execute.len();
-    if total > 0 {
-        let progress = Progress::new(total);
-        eprintln!();
-        eprintln!("Processing {total} sources...");
-
-        for (i, transfer) in transfers_to_execute.iter().enumerate() {
-            progress.update(i);
-
-            match process_source(
-                transfer,
-                &base_dir,
-                options,
-                conn,
-                config.output.archive_root_id,
-            ) {
-                Ok(action) => match action {
-                    ApplyAction::Copied => stats.copied += 1,
-                    ApplyAction::Renamed => stats.renamed += 1,
-                    ApplyAction::Moved => stats.moved += 1,
-                    ApplyAction::SkippedMissing => stats.skipped_missing += 1,
-                    ApplyAction::SkippedStale(reason) => {
-                        stats.skipped_stale += 1;
-                        stale_during_transfer.push(SkippedStaleSource {
-                            path: transfer.source_path.clone(),
-                            reason,
-                        });
-                    }
-                },
-                Err(e) => {
-                    eprintln!("Error processing {}: {}", transfer.source_path, e);
-                    stats.errors += 1;
-                }
-            }
-        }
-
-        progress.finish();
-    } else if options.resume {
-        eprintln!();
-        eprintln!("No sources need transfer.");
-    }
-
-    // Summary of files that became stale during transfer (race conditions)
-    if !stale_during_transfer.is_empty() {
+    // Display stale sources found during transfer (race conditions)
+    if !result.skipped_stale.is_empty() {
         eprintln!(
             "\nSkipped {} files that changed during apply:",
-            stale_during_transfer.len()
+            result.skipped_stale.len()
         );
-        for s in stale_during_transfer.iter().take(10) {
+        for s in result.skipped_stale.iter().take(10) {
             eprintln!("  {}: {}", s.path, s.reason);
         }
-        if stale_during_transfer.len() > 10 {
-            eprintln!("  ... and {} more", stale_during_transfer.len() - 10);
+        if result.skipped_stale.len() > 10 {
+            eprintln!("  ... and {} more", result.skipped_stale.len() - 10);
         }
         eprintln!("Run `canon scan` then `cluster refresh` to regenerate the lock file.");
     }
 
     // Summary output
-    let mode = if options.dry_run { " (dry-run)" } else { "" };
     if options.resume {
         println!(
-            "Applied{} (--resume): {} copied, {} renamed, {} moved, {} already archived, {} resumed, {} errors",
-            mode, stats.copied, stats.renamed, stats.moved, stats.already_archived, stats.resumed, stats.errors
+            "Applied (--resume): {} copied, {} renamed, {} moved, {} already archived, {} resumed, {} errors",
+            result.copied, result.renamed, result.moved, result.already_archived, result.resumed, result.errors.len()
         );
-
-        // Advisory when resumed files need scan
-        if stats.resumed > 0 {
+        if result.resumed > 0 {
             eprintln!();
             eprintln!(
                 "Note: {} resumed files are not yet registered. Run `canon scan <archive>` to complete.",
-                stats.resumed
+                result.resumed
             );
         }
     } else {
         println!(
-            "Applied{}: {} copied, {} renamed, {} moved, {} skipped (missing), {} skipped (stale), {} skipped (filtered), {} errors",
-            mode, stats.copied, stats.renamed, stats.moved, stats.skipped_missing, stats.skipped_stale, stats.skipped_filtered, stats.errors
+            "Applied: {} copied, {} renamed, {} moved, {} skipped (missing), {} skipped (stale), {} skipped (filtered), {} errors",
+            result.copied, result.renamed, result.moved, result.skipped_missing, result.skipped_stale.len(), skipped_by_filter, result.errors.len()
         );
     }
 
     // Recovery guidance when errors occurred
-    if stats.errors > 0 && !options.dry_run {
+    if !result.errors.is_empty() {
         eprintln!();
         eprintln!("Some files failed to transfer. To recover:");
         eprintln!("  1. Fix any reported errors (permissions, disk space, etc.)");
@@ -570,10 +430,8 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         eprintln!("  3. Re-apply: canon apply <manifest.lock>");
     }
 
-    // Update query planner statistics after bulk changes (skip for dry-run)
-    if !options.dry_run {
-        db.run_analyze()?;
-    }
+    // Update query planner statistics after bulk changes
+    db.run_analyze()?;
 
     Ok(())
 }
@@ -670,49 +528,6 @@ fn show_directory_preview(dir: &Path, max_items: usize) {
     }
 }
 
-// ============================================================================
-// Helper functions for pre-flight checks (work with filtered source list)
-// ============================================================================
-
-/// Check if destination directory is writable by creating and removing a test file.
-fn check_destination_writable(base_dir: &Path) -> Result<()> {
-    // Find the nearest existing directory
-    let mut check_dir = base_dir.to_path_buf();
-    while !check_dir.exists() {
-        if let Some(parent) = check_dir.parent() {
-            check_dir = parent.to_path_buf();
-        } else {
-            bail!(
-                "Cannot find existing parent directory for {}",
-                base_dir.display()
-            );
-        }
-    }
-
-    // Try to create a temp file to verify write permissions
-    let test_file = check_dir.join(".canon_write_test");
-    match File::create(&test_file) {
-        Ok(_) => {
-            // Successfully created, now remove it
-            let _ = fs::remove_file(&test_file);
-            Ok(())
-        }
-        Err(e) if e.kind() == ErrorKind::PermissionDenied => {
-            bail!(
-                "No write permission for destination directory: {}",
-                check_dir.display()
-            );
-        }
-        Err(e) => {
-            bail!(
-                "Cannot write to destination directory {}: {}",
-                check_dir.display(),
-                e
-            );
-        }
-    }
-}
-
 fn filter_by_roots<'a>(
     sources: &'a [LockEntry],
     root_specs: &[String],
@@ -734,434 +549,75 @@ fn filter_by_roots<'a>(
         .collect())
 }
 
-/// Classify plan transfers on disk for resume mode.
-///
-/// plan.transfers already excludes sources in DB (done by plan_apply).
-/// This function checks each remaining transfer on disk:
-/// - `to_transfer`: Not on disk — needs copying
-/// - `resumed`: On disk, size matches — skip (needs scan to register)
-/// - Size mismatch → error
-fn plan_transfers_disk<'a>(
-    transfers: &'a [ops::apply::ApplyTransfer],
-    base_dir: &Path,
-) -> Result<DiskWorkPlan<'a>> {
-    let mut to_transfer = Vec::new();
-    let mut resumed = 0usize;
-    let mut size_mismatches = Vec::new();
-
-    for transfer in transfers {
-        let full_path = base_dir.join(&transfer.dest_rel_path);
-        let expected_size = transfer.size as u64;
-
-        // Check disk state (DB filtering already done by plan)
-        let on_disk = if full_path.exists() {
-            match fs::metadata(&full_path) {
-                Ok(meta) => Some(meta.len()),
-                Err(_) => None,
-            }
-        } else {
-            None
-        };
-
-        let state = classify_destination(false, on_disk, expected_size);
-
-        match state {
-            DestinationState::Available => {
-                to_transfer.push(transfer);
-            }
-            DestinationState::Archived => {
-                // Should not happen (in_db=false always), but handle gracefully
-                to_transfer.push(transfer);
-            }
-            DestinationState::Resumed => {
-                resumed += 1;
-            }
-            DestinationState::SizeMismatch { expected, actual } => {
-                size_mismatches.push(SizeMismatchError {
-                    dest_path: full_path.display().to_string(),
-                    expected,
-                    actual,
-                });
-            }
-        }
-    }
-
-    if !size_mismatches.is_empty() {
-        eprintln!();
-        eprintln!(
-            "Work planning found {} partial/mismatched files:",
-            size_mismatches.len()
-        );
-        for err in size_mismatches.iter().take(10) {
-            eprintln!(
-                "  {} (expected {} bytes, found {})",
-                err.dest_path, err.expected, err.actual
-            );
-        }
-        if size_mismatches.len() > 10 {
-            eprintln!("  ... and {} more", size_mismatches.len() - 10);
-        }
-        eprintln!();
-        eprintln!("These may be from an interrupted transfer. To resolve:");
-        eprintln!("  1. Delete the partial files");
-        eprintln!("  2. Re-run: canon apply --resume <manifest>");
-        bail!("Aborting due to size mismatches in destination files");
-    }
-
-    Ok(DiskWorkPlan {
-        to_transfer,
-        resumed,
-    })
-}
-
-/// Validate that a source file on disk matches the state recorded in the transfer.
-/// Returns Ok(()) if valid, Err with reason if changed.
-fn validate_source_state_from_transfer(
-    transfer: &ops::apply::ApplyTransfer,
-) -> std::result::Result<(), String> {
-    let meta = match fs::metadata(&transfer.source_path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            return Err("file not found".to_string());
-        }
-        Err(e) => {
-            return Err(format!("cannot stat: {e}"));
-        }
+/// Display dry-run transfer plan.
+fn display_dry_run_plan(plan: &ops::apply::ApplyPlan, base_dir: &Path, mode: TransferMode) {
+    let label = match mode {
+        TransferMode::Copy => "COPY",
+        TransferMode::Rename => "RENAME",
+        TransferMode::Move => "MOVE",
     };
-
-    let mut mismatches = Vec::new();
-
-    #[cfg(unix)]
-    {
-        let current_size = meta.size() as i64;
-        let current_mtime = meta.mtime();
-
-        if current_size != transfer.size {
-            mismatches.push(format!("size: {} → {}", transfer.size, current_size));
-        }
-        if current_mtime != transfer.mtime {
-            mismatches.push(format!("mtime: {} → {}", transfer.mtime, current_mtime));
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        let current_size = meta.len() as i64;
-        let current_mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-
-        if current_size != transfer.size {
-            mismatches.push(format!("size: {} → {}", transfer.size, current_size));
-        }
-        if current_mtime != transfer.mtime {
-            mismatches.push(format!("mtime: {} → {}", transfer.mtime, current_mtime));
-        }
-    }
-
-    // Partial hash check - recompute from disk and compare to lock
-    let current_hash =
-        compute_partial_hash(Path::new(&transfer.source_path), transfer.size as u64)
-            .map_err(|e| format!("failed to compute partial hash: {e}"))?;
-    if current_hash != transfer.partial_hash {
-        mismatches.push(format!(
-            "partial hash mismatch: {}... → {}...",
-            &transfer.partial_hash[..16.min(transfer.partial_hash.len())],
-            &current_hash[..16]
-        ));
-    }
-
-    if !mismatches.is_empty() {
-        Err(mismatches.join(", "))
-    } else {
-        Ok(())
-    }
-}
-
-/// Batch validate source file states against disk using transfers.
-fn check_source_states_disk_from_transfers(
-    transfers: &[&ops::apply::ApplyTransfer],
-) -> Vec<SkippedStaleSource> {
-    let mut stale = Vec::new();
-    let total = transfers.len();
-    let progress = Progress::new(total);
-
-    for (i, transfer) in transfers.iter().enumerate() {
-        progress.update(i);
-
-        if let Err(reason) = validate_source_state_from_transfer(transfer) {
-            stale.push(SkippedStaleSource {
-                path: transfer.source_path.clone(),
-                reason,
-            });
-        }
-    }
-
-    progress.finish();
-
-    stale
-}
-
-enum ApplyAction {
-    Copied,
-    Renamed,
-    Moved,
-    SkippedMissing,
-    SkippedStale(String), // reason
-}
-
-fn process_source(
-    transfer: &ops::apply::ApplyTransfer,
-    base_dir: &Path,
-    options: &ApplyOptions,
-    conn: &Connection,
-    archive_root_id: i64,
-) -> Result<ApplyAction> {
-    let src_path = Path::new(&transfer.source_path);
-    let dest_path = base_dir.join(&transfer.dest_rel_path);
-
-    // Check if source exists
-    if !src_path.exists() {
-        if options.dry_run {
+    for transfer in &plan.transfers {
+        let dest_path = base_dir.join(&transfer.dest_rel_path);
+        if !Path::new(&transfer.source_path).exists() {
             println!("[dry-run] SKIP (missing): {}", transfer.source_path);
-        }
-        return Ok(ApplyAction::SkippedMissing);
-    }
-
-    if options.dry_run {
-        match options.transfer_mode {
-            TransferMode::Copy => {
-                println!("[dry-run] COPY: {} -> {}", transfer.source_path, dest_path.display());
-                return Ok(ApplyAction::Copied);
-            }
-            TransferMode::Rename => {
-                println!(
-                    "[dry-run] RENAME: {} -> {}",
-                    transfer.source_path,
-                    dest_path.display()
-                );
-                return Ok(ApplyAction::Renamed);
-            }
-            TransferMode::Move => {
-                println!(
-                    "[dry-run] MOVE: {} -> {} (would delete source; may copy if cross-device)",
-                    transfer.source_path,
-                    dest_path.display()
-                );
-                return Ok(ApplyAction::Moved);
-            }
+        } else {
+            println!("[dry-run] {}: {} -> {}", label, transfer.source_path, dest_path.display());
         }
     }
+}
 
-    // Per-transfer validation: check source hasn't changed since preflight
-    // (catches race conditions where file changes between preflight and transfer)
-    if let Err(reason) = validate_source_state_from_transfer(transfer) {
-        return Ok(ApplyAction::SkippedStale(reason));
+/// CLI implementation of TransferProgress using the Progress spinner.
+struct CliTransferProgress {
+    verbose: bool,
+    progress: std::cell::RefCell<Option<crate::progress::Progress>>,
+}
+
+impl CliTransferProgress {
+    fn new(verbose: bool) -> Self {
+        Self {
+            verbose,
+            progress: std::cell::RefCell::new(None),
+        }
+    }
+}
+
+impl ops::apply::TransferProgress for CliTransferProgress {
+    fn on_start(&self, total: usize) {
+        if total > 0 {
+            eprintln!();
+            eprintln!("Processing {total} sources...");
+            *self.progress.borrow_mut() = Some(crate::progress::Progress::new(total));
+        }
     }
 
-    // Create parent directories
-    if let Some(parent) = dest_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-    }
-
-    match options.transfer_mode {
-        TransferMode::Copy => {
-            // Check exists right before copy (noclobber)
-            if dest_path.exists() {
-                bail!("Destination already exists: {}", dest_path.display());
-            }
-            let src_meta = fs::metadata(src_path)
-                .with_context(|| format!("Failed to read metadata: {}", transfer.source_path))?;
-            fs::copy(src_path, &dest_path).with_context(|| {
-                format!("Failed to copy {} to {}", transfer.source_path, dest_path.display())
-            })?;
-            preserve_metadata(&dest_path, &src_meta)?;
-            let new_source = build_new_source(
-                &dest_path,
-                archive_root_id,
-                &transfer.archive_rel_path,
-                transfer.object_id,
-                &transfer.partial_hash,
-            )?;
-            repo::source::insert_destination(conn, &new_source)?;
-            if options.verbose {
-                println!("Copied: {} -> {}", transfer.source_path, dest_path.display());
-            }
-            Ok(ApplyAction::Copied)
+    fn on_transfer(&self, index: usize, _total: usize, source_path: &str, outcome: &ops::apply::TransferOutcome) {
+        if let Some(ref p) = *self.progress.borrow() {
+            p.update(index);
         }
-        TransferMode::Rename => {
-            // Check exists right before rename (noclobber)
-            if dest_path.exists() {
-                bail!("Destination already exists: {}", dest_path.display());
-            }
-            // No metadata read needed - rename preserves all attributes
-            fs::rename(src_path, &dest_path).with_context(|| {
-                format!(
-                    "Failed to rename {} to {}",
-                    transfer.source_path,
-                    dest_path.display()
-                )
-            })?;
-            // Update existing source row (inode unchanged on same device)
-            relocate_source(conn, transfer.source_id, archive_root_id, &transfer.archive_rel_path)?;
-            if options.verbose {
-                println!("Renamed: {} -> {}", transfer.source_path, dest_path.display());
-            }
-            Ok(ApplyAction::Renamed)
-        }
-        TransferMode::Move => {
-            // Check exists right before rename attempt (noclobber)
-            if dest_path.exists() {
-                bail!("Destination already exists: {}", dest_path.display());
-            }
-            // Try rename first (mv semantics)
-            match fs::rename(src_path, &dest_path) {
-                Ok(()) => {
-                    // Update existing source row (inode unchanged on same device)
-                    relocate_source(conn, transfer.source_id, archive_root_id, &transfer.archive_rel_path)?;
-                    if options.verbose {
-                        println!("Renamed: {} -> {}", transfer.source_path, dest_path.display());
-                    }
-                    Ok(ApplyAction::Renamed)
+        if self.verbose {
+            match outcome {
+                ops::apply::TransferOutcome::Copied => {
+                    println!("Copied: {source_path}");
                 }
-                #[cfg(unix)]
-                Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-                    // Cross-device only: fallback to copy + delete
-                    // Re-check dest doesn't exist (race condition guard)
-                    if dest_path.exists() {
-                        bail!("Destination already exists: {}", dest_path.display());
-                    }
-                    let src_meta = fs::metadata(src_path)
-                        .with_context(|| format!("Failed to read metadata: {}", transfer.source_path))?;
-                    fs::copy(src_path, &dest_path).with_context(|| {
-                        format!("Failed to copy {} to {}", transfer.source_path, dest_path.display())
-                    })?;
-                    preserve_metadata(&dest_path, &src_meta)?;
-                    fs::remove_file(src_path)
-                        .with_context(|| format!("Failed to delete source: {}", transfer.source_path))?;
-                    // Mark old source as not present (file was deleted)
-                    mark_source_not_present(conn, transfer.source_id)?;
-                    // Register new destination (new inode on different device)
-                    let new_source = build_new_source(
-                        &dest_path,
-                        archive_root_id,
-                        &transfer.archive_rel_path,
-                        transfer.object_id,
-                        &transfer.partial_hash,
-                    )?;
-                    repo::source::insert_destination(conn, &new_source)?;
-                    if options.verbose {
-                        println!("Moved: {} -> {}", transfer.source_path, dest_path.display());
-                    }
-                    Ok(ApplyAction::Moved)
+                ops::apply::TransferOutcome::Renamed => {
+                    println!("Renamed: {source_path}");
                 }
-                Err(e) => Err(e).with_context(|| {
-                    format!(
-                        "Failed to rename {} to {}",
-                        transfer.source_path,
-                        dest_path.display()
-                    )
-                }),
+                ops::apply::TransferOutcome::Moved => {
+                    println!("Moved: {source_path}");
+                }
+                ops::apply::TransferOutcome::Error(msg) => {
+                    eprintln!("Error processing {source_path}: {msg}");
+                }
+                _ => {}
             }
+        } else if let ops::apply::TransferOutcome::Error(msg) = outcome {
+            eprintln!("Error processing {source_path}: {msg}");
         }
     }
-}
 
-/// Relocate an existing source to a new location (for rename/move on same device).
-/// Updates the source row in-place since the inode remains the same.
-fn relocate_source(
-    conn: &Connection,
-    source_id: i64,
-    archive_root_id: i64,
-    rel_path: &str,
-) -> Result<()> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64;
-
-    repo::source::update_location(conn, source_id, archive_root_id, rel_path, now)
-}
-
-/// Mark a source as no longer present (for cross-device move after deletion).
-fn mark_source_not_present(conn: &Connection, source_id: i64) -> Result<()> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64;
-
-    repo::source::mark_missing(conn, &[source_id], now)?;
-    Ok(())
-}
-
-/// Build a NewSource from destination file metadata for registration.
-///
-/// Reads metadata from the destination file and constructs a NewSource
-/// struct suitable for passing to repo::source::insert_destination().
-#[cfg(unix)]
-fn build_new_source(
-    dest_path: &Path,
-    archive_root_id: i64,
-    rel_path: &str,
-    object_id: Option<i64>,
-    partial_hash: &str,
-) -> Result<NewSource> {
-    let meta = fs::metadata(dest_path).with_context(|| {
-        format!(
-            "Failed to read metadata for registration: {}",
-            dest_path.display()
-        )
-    })?;
-
-    Ok(NewSource {
-        root_id: archive_root_id,
-        rel_path: rel_path.to_string(),
-        size: meta.size() as i64,
-        mtime: meta.mtime(),
-        partial_hash: partial_hash.to_string(),
-        object_id,
-        device: Some(meta.dev() as i64),
-        inode: Some(meta.ino() as i64),
-    })
-}
-
-/// Build a NewSource from destination file metadata for registration.
-///
-/// Non-Unix version: device and inode are not available.
-#[cfg(not(unix))]
-fn build_new_source(
-    dest_path: &Path,
-    archive_root_id: i64,
-    rel_path: &str,
-    object_id: Option<i64>,
-    partial_hash: &str,
-) -> Result<NewSource> {
-    let meta = fs::metadata(dest_path).with_context(|| {
-        format!(
-            "Failed to read metadata for registration: {}",
-            dest_path.display()
-        )
-    })?;
-
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    Ok(NewSource {
-        root_id: archive_root_id,
-        rel_path: rel_path.to_string(),
-        size: meta.len() as i64,
-        mtime,
-        partial_hash: partial_hash.to_string(),
-        object_id,
-        device: None,
-        inode: None,
-    })
+    fn on_finish(&self) {
+        if let Some(ref p) = *self.progress.borrow() {
+            p.finish();
+        }
+    }
 }
