@@ -259,7 +259,7 @@ This spec covers one story of the plan/execute extraction (ADR Step 6). The full
 | **A: set + clear** | Source-level multi-target plan/execute | **This spec** | This file |
 | **B: duplicates** | `exclude_duplicates()` plan/execute. Richer plan struct (group count, skip categories: no-copy, multiple, in-prefer, unhashed). Already uses `domain::exclusion::find_excludable_duplicates()`. | **Completed** | `.claude/specs/2026-03-14-exclude-plan-execute-duplicates.md` |
 | **C: object-level + single-target** | `set_objects_by_filter()` plan/execute (different ceremony: dry-run-default, `--yes` to execute). Plus five thin single-target operations (`set_by_id`, `set_by_path`, `set_object_by_hash`, `set_object_by_file`, `clear_object`) and read-only `list_objects()`. | **Completed** (Phase 1: plan/execute for `set_objects_by_filter`. Phase 2: single-target + `list_objects`). | `.claude/specs/2026-03-14-exclude-plan-execute-objects.md`, `.claude/specs/2026-03-14-exclude-single-target-list.md` |
-| **D: cluster/apply** | Manifest workflow plan/execute. Separate from exclude. | **Cluster completed** (plan_generate extracted). Apply pending. | `.claude/specs/2026-03-14-cluster-plan-generate.md` |
+| **D: cluster/apply** | Manifest workflow plan/execute. Separate from exclude. | **Completed** (cluster: plan_generate. apply: plan_apply). | `.claude/specs/2026-03-14-cluster-plan-generate.md`, `.claude/specs/2026-03-14-apply-plan.md` |
 | **E: scan** | Scan pipeline plan/execute. Separate from exclude. | Pending | — |
 
 **ADR Step 7 (Final audit)** follows after all effectful commands are extracted.
