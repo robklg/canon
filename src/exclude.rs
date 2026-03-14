@@ -8,8 +8,10 @@ use crate::domain::include::IncludeSet;
 use crate::domain::path::{resolve_path, resolve_paths};
 use crate::domain::root::find_containing_root;
 use crate::domain::scope::ScopeMatch;
-use crate::domain::source::Source;
-use crate::expr::filter::{self, Filter};
+use crate::expr::filter::Filter;
+use crate::ops::exclude::{
+    execute_clear, execute_set, plan_clear, plan_set, ExcludeClearParams, ExcludeSetParams,
+};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Connection, Db};
 
@@ -50,51 +52,28 @@ pub fn set(
     let all_roots = repo::root::fetch_all(conn)?;
     let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
 
-    // Get matching sources (only from source roots, exclude already-excluded)
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
-    let params = SelectionParams {
-        scopes,
-        include: IncludeSet::default(),
-        filters,
-        role_policy: RolePolicy::SourceOnly,
-    };
-    let source_ids = selection::select_sources(conn, &params)?.source_ids();
+    let plan = plan_set(conn, &ExcludeSetParams { scopes, filters })?;
 
-    // Batch fetch sources and filter out already excluded using domain predicate
-    let sources_map = repo::source::batch_fetch_by_ids(conn, &source_ids)?;
-    let to_exclude: Vec<i64> = source_ids
-        .into_iter()
-        .filter(|id| {
-            sources_map
-                .get(id)
-                .map(|s| !s.is_excluded())
-                .unwrap_or(false)
-        })
-        .collect();
-
-    if to_exclude.is_empty() {
+    if plan.source_ids.is_empty() {
         println!("No sources to exclude (0 matching non-excluded sources)");
         return Ok(());
     }
 
     if options.dry_run {
-        println!("Would exclude {} sources:", to_exclude.len());
-        for &id in &to_exclude {
-            if let Some(path) = get_source_path(conn, id)? {
-                println!("  {path}");
-            }
+        println!("Would exclude {} sources:", plan.source_ids.len());
+        for path in &plan.paths {
+            println!("  {path}");
         }
         return Ok(());
     }
 
     // Confirmation when affecting > 1 source
-    if to_exclude.len() > 1 {
+    if plan.source_ids.len() > 1 {
         if !options.yes {
-            let confirm_data = compute_set_confirmation(conn, &to_exclude, &sources_map)?;
-
-            eprintln!("Will exclude {} sources", to_exclude.len());
-            eprintln!("  Across {} roots", confirm_data.root_count);
-            eprintln!("  {} have no archived copy", confirm_data.not_archived);
+            eprintln!("Will exclude {} sources", plan.source_ids.len());
+            eprintln!("  Across {} roots", plan.root_count);
+            eprintln!("  {} have no archived copy", plan.not_archived_count);
         }
 
         if !ceremony::confirm(options.yes)? {
@@ -102,19 +81,16 @@ pub fn set(
         }
     }
 
-    // Mark sources as excluded
-    for source_id in &to_exclude {
-        repo::source::set_excluded(conn, *source_id, true)?;
-    }
+    execute_set(conn, &plan)?;
 
-    let noun = if to_exclude.len() == 1 {
+    let noun = if plan.source_ids.len() == 1 {
         "source"
     } else {
         "sources"
     };
     println!(
         "Excluded {} {noun}",
-        ceremony::format_count(to_exclude.len())
+        ceremony::format_count(plan.source_ids.len())
     );
     Ok(())
 }
@@ -141,10 +117,10 @@ pub fn clear(
     let all_roots = repo::root::fetch_all(conn)?;
     let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
 
-    // Get excluded sources matching filters
-    let excluded_sources = get_excluded_sources(conn, &scope_prefixes, &filters)?;
+    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let plan = plan_clear(conn, &ExcludeClearParams { scopes, filters })?;
 
-    if excluded_sources.is_empty() {
+    if plan.source_ids.is_empty() {
         println!("No excluded sources match the given filters");
         return Ok(());
     }
@@ -152,24 +128,22 @@ pub fn clear(
     if options.dry_run {
         println!(
             "Would clear exclusions for {} sources:",
-            excluded_sources.len()
+            plan.source_ids.len()
         );
-        for s in &excluded_sources {
-            println!("  {}", s.path());
+        for path in &plan.paths {
+            println!("  {path}");
         }
         return Ok(());
     }
 
     // Confirmation when affecting > 1 source
-    if excluded_sources.len() > 1 {
+    if plan.source_ids.len() > 1 {
         if !options.yes {
-            let root_ids: HashSet<i64> = excluded_sources.iter().map(|s| s.root_id).collect();
-
             eprintln!(
                 "Will clear exclusions for {} sources",
-                excluded_sources.len()
+                plan.source_ids.len()
             );
-            eprintln!("  Across {} roots", root_ids.len());
+            eprintln!("  Across {} roots", plan.root_count);
         }
 
         if !ceremony::confirm(options.yes)? {
@@ -177,124 +151,18 @@ pub fn clear(
         }
     }
 
-    // Clear exclusions
-    for s in &excluded_sources {
-        repo::source::set_excluded(conn, s.id, false)?;
-    }
+    execute_clear(conn, &plan)?;
 
-    let noun = if excluded_sources.len() == 1 {
+    let noun = if plan.source_ids.len() == 1 {
         "source"
     } else {
         "sources"
     };
     println!(
         "Cleared exclusions for {} {noun}",
-        ceremony::format_count(excluded_sources.len())
+        ceremony::format_count(plan.source_ids.len())
     );
     Ok(())
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Data for exclude set confirmation prompt
-struct SetConfirmation {
-    root_count: usize,
-    not_archived: usize,
-}
-
-/// Compute confirmation data for exclude set.
-/// Counts distinct roots and sources without archived copies.
-fn compute_set_confirmation(
-    conn: &Connection,
-    to_exclude: &[i64],
-    sources_map: &std::collections::HashMap<i64, Source>,
-) -> Result<SetConfirmation> {
-    // Collect distinct root_ids
-    let root_ids: HashSet<i64> = to_exclude
-        .iter()
-        .filter_map(|id| sources_map.get(id).map(|s| s.root_id))
-        .collect();
-
-    // Collect object_ids for archive coverage check
-    let object_ids: Vec<i64> = to_exclude
-        .iter()
-        .filter_map(|id| sources_map.get(id).and_then(|s| s.object_id))
-        .collect();
-    let archived_set = repo::object::batch_check_archived(conn, &object_ids, None)?;
-
-    // Count sources with no archived copy (object_id is None or not in archived set)
-    let not_archived = to_exclude
-        .iter()
-        .filter(|id| {
-            sources_map
-                .get(id)
-                .map(|s| match s.object_id {
-                    None => true,
-                    Some(oid) => !archived_set.contains(&oid),
-                })
-                .unwrap_or(true)
-        })
-        .count();
-
-    Ok(SetConfirmation {
-        root_count: root_ids.len(),
-        not_archived,
-    })
-}
-
-fn get_excluded_sources(
-    conn: &mut Connection,
-    scope_prefixes: &[String],
-    filters: &[Filter],
-) -> Result<Vec<Source>> {
-    // Get all source root IDs (active, source role only)
-    let roots = repo::root::fetch_all(conn)?;
-    let source_root_ids: Vec<i64> = roots
-        .iter()
-        .filter(|r| r.is_active() && r.is_source())
-        .map(|r| r.id)
-        .collect();
-
-    if source_root_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Batch fetch all present sources from source roots
-    let sources = repo::source::batch_fetch_by_roots(conn, &source_root_ids)?;
-
-    // Classify scopes for matching
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
-
-    // Filter for DIRECTLY excluded sources only (s.excluded = true)
-    // NOT s.is_excluded() which would include object-level exclusions
-    let filtered: Vec<Source> = sources
-        .into_iter()
-        .filter(|s| scopes.is_empty() || s.matches_scope(&scopes))
-        .filter(|s| s.excluded) // Source-level exclusion only
-        .collect();
-
-    // Apply --where filters if present
-    if filters.is_empty() {
-        return Ok(filtered);
-    }
-
-    // Apply filters and preserve sources
-    let ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-    let filtered_ids: HashSet<i64> = filter::apply_filters(conn, &ids, filters)?
-        .into_iter()
-        .collect();
-
-    Ok(filtered
-        .into_iter()
-        .filter(|s| filtered_ids.contains(&s.id))
-        .collect())
-}
-
-fn get_source_path(conn: &Connection, source_id: i64) -> Result<Option<String>> {
-    let sources = repo::source::batch_fetch_by_ids(conn, &[source_id])?;
-    Ok(sources.get(&source_id).map(|s| s.path()))
 }
 
 /// Exclude a specific source by ID
@@ -1039,79 +907,6 @@ mod tests {
     }
 
     // =========================================================================
-    // get_excluded_sources tests
-    // =========================================================================
-
-    #[test]
-    fn test_get_excluded_sources_returns_source_level_only() {
-        let mut conn = setup_test_db();
-
-        let root = insert_root(&conn, "/photos", "source", false);
-        let excluded_id = insert_source(&conn, root, "excluded.jpg", None, true, true); // source-level excluded
-
-        let result = get_excluded_sources(&mut conn, &[], &[]).unwrap();
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].id, excluded_id);
-    }
-
-    #[test]
-    fn test_get_excluded_sources_ignores_object_level_excluded() {
-        let mut conn = setup_test_db();
-
-        let root = insert_root(&conn, "/photos", "source", false);
-
-        // Source NOT excluded, but object IS excluded
-        let excluded_obj = insert_object(&conn, "abc123excluded", true);
-        let _obj_excluded_id = insert_source(
-            &conn,
-            root,
-            "obj_excluded.jpg",
-            Some(excluded_obj),
-            true,
-            false,
-        );
-
-        // This is the critical distinction: get_excluded_sources should NOT return this
-        let result = get_excluded_sources(&mut conn, &[], &[]).unwrap();
-
-        assert!(
-            result.is_empty(),
-            "Object-level excluded sources should NOT appear in get_excluded_sources"
-        );
-    }
-
-    #[test]
-    fn test_get_excluded_sources_respects_scope() {
-        let mut conn = setup_test_db();
-
-        let root = insert_root(&conn, "/photos", "source", false);
-        let in_scope_id = insert_source(&conn, root, "2024/excluded.jpg", None, true, true);
-        let _out_of_scope_id = insert_source(&conn, root, "2023/excluded.jpg", None, true, true);
-
-        // Scope to /photos/2024
-        let scopes = vec!["/photos/2024".to_string()];
-        let result = get_excluded_sources(&mut conn, &scopes, &[]).unwrap();
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].id, in_scope_id);
-    }
-
-    #[test]
-    fn test_get_excluded_sources_returns_correct_path() {
-        let mut conn = setup_test_db();
-
-        let root = insert_root(&conn, "/photos", "source", false);
-        let excluded_id = insert_source(&conn, root, "subdir/excluded.jpg", None, true, true);
-
-        let result = get_excluded_sources(&mut conn, &[], &[]).unwrap();
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].id, excluded_id);
-        assert_eq!(result[0].path(), "/photos/subdir/excluded.jpg");
-    }
-
-    // =========================================================================
     // exclude_duplicates integration tests
     // =========================================================================
 
@@ -1775,96 +1570,6 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // =========================================================================
-    // set confirmation data tests (Phase 2)
-    // =========================================================================
-
-    #[test]
-    fn test_set_confirmation_counts_roots() {
-        let conn = setup_test_db();
-
-        // Sources across 2 roots
-        let root1 = insert_root(&conn, "/root1", "source", false);
-        let root2 = insert_root(&conn, "/root2", "source", false);
-        let s1 = insert_source(&conn, root1, "file1.jpg", None, true, false);
-        let s2 = insert_source(&conn, root2, "file2.jpg", None, true, false);
-
-        let sources_map = repo::source::batch_fetch_by_ids(&conn, &[s1, s2]).unwrap();
-        let to_exclude = vec![s1, s2];
-
-        let data = compute_set_confirmation(&conn, &to_exclude, &sources_map).unwrap();
-        assert_eq!(data.root_count, 2, "Should count 2 distinct roots");
-    }
-
-    #[test]
-    fn test_set_confirmation_archive_coverage() {
-        let conn = setup_test_db();
-
-        let source_root = insert_root(&conn, "/source", "source", false);
-        let archive_root = insert_root(&conn, "/archive", "archive", false);
-
-        // Object that IS archived
-        let archived_obj = insert_object(&conn, "archived_hash", false);
-        let _archive_copy = insert_source(
-            &conn,
-            archive_root,
-            "copy.jpg",
-            Some(archived_obj),
-            true,
-            false,
-        );
-        let s1 = insert_source(
-            &conn,
-            source_root,
-            "file1.jpg",
-            Some(archived_obj),
-            true,
-            false,
-        );
-
-        // Object that is NOT archived
-        let unarchived_obj = insert_object(&conn, "unarchived_hash", false);
-        let s2 = insert_source(
-            &conn,
-            source_root,
-            "file2.jpg",
-            Some(unarchived_obj),
-            true,
-            false,
-        );
-
-        let sources_map = repo::source::batch_fetch_by_ids(&conn, &[s1, s2]).unwrap();
-        let to_exclude = vec![s1, s2];
-
-        let data = compute_set_confirmation(&conn, &to_exclude, &sources_map).unwrap();
-        assert_eq!(
-            data.not_archived, 1,
-            "Only the unarchived source should count"
-        );
-    }
-
-    #[test]
-    fn test_set_confirmation_unhashed_not_archived() {
-        let conn = setup_test_db();
-
-        let root = insert_root(&conn, "/source", "source", false);
-
-        // Source with no object_id (unhashed) counts as "no archived copy"
-        let s1 = insert_source(&conn, root, "unhashed.jpg", None, true, false);
-        // Source with object but no archive copy
-        let obj = insert_object(&conn, "no_archive_hash", false);
-        let s2 = insert_source(&conn, root, "hashed.jpg", Some(obj), true, false);
-
-        let sources_map = repo::source::batch_fetch_by_ids(&conn, &[s1, s2]).unwrap();
-        let to_exclude = vec![s1, s2];
-
-        let data = compute_set_confirmation(&conn, &to_exclude, &sources_map).unwrap();
-        assert_eq!(
-            data.not_archived, 2,
-            "Both unhashed and unarchived should count"
-        );
-    }
-
     #[test]
     fn test_set_single_source_no_confirmation() {
         // When count = 1, set() should execute directly without confirmation.
@@ -1888,32 +1593,6 @@ mod tests {
 
         // Verify the source was excluded
         assert!(is_source_excluded(db.conn(), source_id));
-    }
-
-    #[test]
-    fn test_clear_confirmation_counts_roots() {
-        let conn = setup_test_db();
-
-        // Excluded sources across 2 roots
-        let root1 = insert_root(&conn, "/root1", "source", false);
-        let root2 = insert_root(&conn, "/root2", "source", false);
-        let s1 = insert_source(&conn, root1, "file1.jpg", None, true, true); // excluded
-        let s2 = insert_source(&conn, root2, "file2.jpg", None, true, true); // excluded
-
-        let sources = vec![
-            repo::source::batch_fetch_by_ids(&conn, &[s1])
-                .unwrap()
-                .remove(&s1)
-                .unwrap(),
-            repo::source::batch_fetch_by_ids(&conn, &[s2])
-                .unwrap()
-                .remove(&s2)
-                .unwrap(),
-        ];
-
-        // Verify distinct root counting
-        let root_ids: HashSet<i64> = sources.iter().map(|s| s.root_id).collect();
-        assert_eq!(root_ids.len(), 2, "Should count 2 distinct roots");
     }
 
     // =========================================================================

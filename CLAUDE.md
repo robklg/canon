@@ -54,6 +54,7 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 
 **Operations Layer** (`src/ops/`) - Composed behaviors, interface-independent:
 - `selection.rs` - Source selection: `select_sources()`, `RolePolicy`, `SelectionParams`, `Selection`
+- `exclude.rs` - Exclude plan/execute: `plan_set()`, `execute_set()`, `plan_clear()`, `execute_clear()`
 
 **Command Modules** (flat in `src/`):
 - `main.rs` - CLI entry point using clap (canon home resolution, alias expansion dispatch)
@@ -412,7 +413,7 @@ The codebase follows a **strict layered architecture** prioritizing reliability,
 | **Repo** | Database queries, returning domain types, batch operations | Business logic, transaction management, path construction |
 | **Domain** | Pure functions, structs, predicates, business logic | Any I/O (database, filesystem, network) |
 
-**Note**: The operations layer is being introduced incrementally. Most query commands use `ops::selection::select_sources()` for source selection. Two commands intentionally use custom selection logic: `survey` (asymmetric visibility model — selection side vs outward side have different role/exclusion rules) and `cluster generate` (additional post-filtering for archive status and detailed breakdowns). Effectful command extraction (plan/execute pattern) is planned but not yet started. New commands should use `ops/` from the start.
+**Note**: The operations layer is being introduced incrementally. Most query commands use `ops::selection::select_sources()` for source selection. Two commands intentionally use custom selection logic: `survey` (asymmetric visibility model — selection side vs outward side have different role/exclusion rules) and `cluster generate` (additional post-filtering for archive status and detailed breakdowns). Effectful command extraction uses the plan/execute pattern — `ops::exclude` (`plan_set`/`execute_set`, `plan_clear`/`execute_clear`) is the first implementation. New commands should use `ops/` from the start.
 
 **Repo Function Return Type Conventions:**
 
@@ -434,13 +435,29 @@ Operations are typed, interface-independent functions that compose domain predic
 - **Result types** are concrete structs per operation — no generic containers or trait hierarchies.
 - **No stdout/stderr/stdin** — operations return data, the interface formats it.
 
-The reference implementation is `ops::selection::select_sources()`:
+The reference implementation for **read operations** is `ops::selection::select_sources()`:
 ```rust
 let selection = ops::selection::select_sources(conn, &params)?;
 // selection.sources — the filtered sources
 // selection.source_ids() — convenience for ID-based consumers
 // selection.excluded_count — for "N excluded hidden" hints
 ```
+
+The reference implementation for **effectful operations** is `ops::exclude` (plan/execute pattern):
+```rust
+// Plan: compute what would happen — no side effects
+let plan = ops::exclude::plan_set(conn, &params)?;
+// plan.source_ids, plan.paths — what to exclude
+// plan.root_count, plan.not_archived_count — confirmation data
+
+// Interface decides: dry-run display, confirmation prompt, or proceed
+// ...
+
+// Execute: perform the writes
+let count = ops::exclude::execute_set(conn, &plan)?;
+```
+
+Plan/execute separates computation from side effects. The plan function returns a typed struct with all data needed for display and confirmation. The execute function performs writes and returns a count. The interface layer decides what happens between plan and execute (dry-run, confirmation, or immediate execution). This makes operations testable without CLI and supports multiple interface types.
 
 **Concurrency Considerations**:
 Users may run multiple canon processes simultaneously (scanning, enriching, applying, excluding). When designing operations, consider:
