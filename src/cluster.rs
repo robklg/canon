@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -10,9 +9,10 @@ use crate::domain::path::resolve_paths;
 use crate::domain::root::resolve_archive_path;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
-use crate::domain::{FactEntry, FactValue};
-use crate::expr::filter::{self, Filter};
+use crate::expr::filter::Filter;
 use crate::expr::{BuiltinKey, BuiltinKeyVisibility, FactType, Modifier, ModifierCategory};
+use crate::ops;
+use crate::ops::cluster::ClusterGenerateParams;
 use crate::repo::{self, Connection, Db};
 
 /// TOML config file (without sources)
@@ -64,7 +64,7 @@ pub struct ManifestOutput {
 }
 
 /// JSONL lock entry (one per line in .lock file)
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LockEntry {
     pub id: i64,
     pub root_id: i64,
@@ -127,8 +127,8 @@ struct LockGenerationResult {
     unhashed_count: usize,                // skipped unhashed sources
 }
 
-/// Core logic shared between generate() and refresh()
-/// Queries sources, validates, and writes the lock file
+/// Core logic shared between generate() and refresh().
+/// Plans the cluster via ops layer, displays warnings, and writes the lock file.
 fn generate_lock(
     conn: &mut Connection,
     scope_prefixes: &[String],
@@ -136,17 +136,24 @@ fn generate_lock(
     lock_path: &Path,
     options: &GenerateOptions,
 ) -> Result<Option<LockGenerationResult>> {
-    let qr = query_sources(conn, scope_prefixes, filters, options.allow_archived)?;
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let params = ClusterGenerateParams {
+        scopes,
+        filters: filters.to_vec(),
+        allow_archived: options.allow_archived,
+        allow_duplicates: options.allow_duplicates,
+    };
+    let plan = ops::cluster::plan_generate(conn, &params)?;
 
     // Report archived files
-    if !qr.archived.is_empty() {
+    if !plan.archived.is_empty() {
         eprintln!(
             "Excluded {} sources already in archive(s)",
-            qr.archived.len()
+            plan.archived.len()
         );
         if options.show_archived {
             eprintln!("Archived files:");
-            for (source_path, archive_path) in &qr.archived {
+            for (source_path, archive_path) in &plan.archived {
                 eprintln!("  {source_path} -> {archive_path}");
             }
         } else {
@@ -155,40 +162,31 @@ fn generate_lock(
         eprintln!("Use --allow archived to include them");
     }
 
-    if qr.sources.is_empty() {
+    if plan.lock_entries.is_empty() {
         return Ok(None);
     }
 
-    // Check for source duplicates (same content hash)
-    if !options.allow_duplicates {
-        let duplicate_groups = find_source_duplicates(&qr.sources);
-        if !duplicate_groups.is_empty() {
-            let total_dup_sources: usize = duplicate_groups.iter().map(|(_, v)| v.len()).sum();
-            bail!(
-                "Found {} duplicate groups ({} sources with identical content)\n\
-                 Use `canon ls --duplicates` to see details (supports [path] and --where filters).\n\
-                 Use `canon exclude duplicates --prefer <path>` to resolve.\n\
-                 Use --allow duplicates to include them.",
-                duplicate_groups.len(),
-                total_dup_sources
-            );
+    // Display mixed-type warnings
+    if !plan.mixed_type_warnings.is_empty() {
+        eprintln!("Warning: some facts have inconsistent types across sources:");
+        for (key, breakdown) in &plan.mixed_type_warnings {
+            eprintln!("  {key}: {breakdown}");
         }
+        eprintln!("  Type-specific modifiers (|year, |month, etc.) may fail on mismatched values.");
+        eprintln!("  To fix: delete outliers with 'canon facts delete <key> --on object --value-type <minority-type>'");
     }
 
-    // Collect facts with 100% coverage (using typed facts from batch fetch)
-    let full_coverage_facts = collect_full_coverage_facts(&qr.sources, &qr.all_facts);
-
-    // Write JSONL lock file (no facts — apply looks them up at runtime)
-    write_lock_file(lock_path, &qr.sources)?;
+    // Write JSONL lock file
+    write_lock_file(lock_path, &plan.lock_entries)?;
 
     Ok(Some(LockGenerationResult {
-        source_count: qr.sources.len(),
-        full_coverage_facts,
-        root_breakdown: qr.root_breakdown,
-        not_archived_count: qr.not_archived_count,
-        archived_count: qr.archived.len(),
-        excluded_count: qr.excluded_count,
-        unhashed_count: qr.unhashed_count,
+        source_count: plan.lock_entries.len(),
+        full_coverage_facts: plan.full_coverage_facts,
+        root_breakdown: plan.root_breakdown,
+        not_archived_count: plan.not_archived_count,
+        archived_count: plan.archived.len(),
+        excluded_count: plan.excluded_count,
+        unhashed_count: plan.unhashed_count,
     }))
 }
 
@@ -467,174 +465,6 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Result from querying and filtering sources for a cluster.
-struct QuerySourcesResult {
-    /// Sources included in the cluster (as lock entries)
-    sources: Vec<LockEntry>,
-    /// Sources excluded because they're already archived: (source_path, archive_path)
-    archived: Vec<(String, String)>,
-    /// Number of sources skipped due to exclusion (hard gate)
-    excluded_count: usize,
-    /// Number of sources skipped due to missing content hash
-    unhashed_count: usize,
-    /// Typed FactEntry values keyed by source_id (for 100% coverage computation)
-    all_facts: HashMap<i64, Vec<FactEntry>>,
-    /// Root breakdown: (root_path, count) sorted by path
-    root_breakdown: Vec<(String, usize)>,
-    /// Number of sources in the cluster with no archived copy
-    not_archived_count: usize,
-}
-
-fn query_sources(
-    conn: &mut Connection,
-    scope_prefixes: &[String],
-    filters: &[Filter],
-    allow_archived: bool,
-) -> Result<QuerySourcesResult> {
-    // 1. Get all root IDs
-    let root_ids: Vec<i64> = conn
-        .prepare("SELECT id FROM roots")?
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // 2. Batch fetch all present sources for those roots
-    let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
-
-    // 3. Classify scopes for matching
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
-
-    // 4. Filter using domain predicates, tracking excluded count
-    let mut excluded_count = 0usize;
-    let filtered: Vec<_> = all_sources
-        .into_iter()
-        .filter(|s| s.is_active())
-        .filter(|s| allow_archived || s.is_from_role("source"))
-        .filter(|s| s.matches_scope(&scopes))
-        .filter(|s| {
-            if s.is_excluded() {
-                excluded_count += 1;
-                false
-            } else {
-                true
-            }
-        })
-        .collect();
-
-    // 5. Apply --where filters if present
-    let filtered_sources = if filters.is_empty() {
-        filtered
-    } else {
-        let source_ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-        let filtered_ids = filter::apply_filters(conn, &source_ids, filters)?;
-        let filtered_id_set: HashSet<i64> = filtered_ids.into_iter().collect();
-        filtered
-            .into_iter()
-            .filter(|s| filtered_id_set.contains(&s.id))
-            .collect()
-    };
-
-    // 6. Separate hashed from unhashed sources
-    let mut unhashed_count = 0;
-    let hashed_sources: Vec<Source> = filtered_sources
-        .into_iter()
-        .filter(|s| {
-            if s.object_id.is_none() {
-                unhashed_count += 1;
-                false
-            } else {
-                true
-            }
-        })
-        .collect();
-
-    // 7. Batch fetch objects for all sources with object_id
-    let object_ids: Vec<i64> = hashed_sources.iter().filter_map(|s| s.object_id).collect();
-    let objects = repo::object::batch_fetch_by_ids(conn, &object_ids)?;
-
-    // 8. Batch fetch archive paths for all objects (eliminates N+1 query)
-    let archive_paths = repo::object::batch_find_archive_paths(conn, &object_ids)?;
-
-    // 9. Batch fetch all facts for all sources
-    let source_ids: Vec<i64> = hashed_sources.iter().map(|s| s.id).collect();
-    let all_facts = repo::fact::batch_fetch_for_sources(conn, &source_ids)?;
-
-    // 10. Collect root paths from sources (before consuming them)
-    let mut root_path_map: HashMap<i64, String> = HashMap::new();
-    for source in &hashed_sources {
-        root_path_map
-            .entry(source.root_id)
-            .or_insert_with(|| source.root_path.clone());
-    }
-
-    // 11. Build LockEntry for each source, check archive status
-    let mut sources = Vec::new();
-    let mut archived = Vec::new();
-
-    for source in hashed_sources {
-        // Get hash info from batch result
-        let (hash_type, hash_value) = source
-            .object_id
-            .and_then(|oid| objects.get(&oid))
-            .map(|obj| (Some(obj.hash_type.clone()), Some(obj.hash_value.clone())))
-            .unwrap_or((None, None));
-
-        // Check if this content is already in an archive (from batch result)
-        let archive_path = source
-            .object_id
-            .and_then(|oid| archive_paths.get(&oid))
-            .and_then(|paths| paths.first())
-            .cloned();
-
-        // Build LockEntry from Source + hash info (no facts — apply looks them up at runtime)
-        let lock_entry = LockEntry::from_source(&source, hash_type, hash_value);
-
-        if let Some(arch_path) = archive_path {
-            if allow_archived {
-                sources.push(lock_entry);
-            } else {
-                archived.push((lock_entry.path.clone(), arch_path));
-            }
-        } else {
-            sources.push(lock_entry);
-        }
-    }
-
-    // 12. Compute root breakdown from final sources
-    let mut root_counts: HashMap<i64, usize> = HashMap::new();
-    for source in &sources {
-        *root_counts.entry(source.root_id).or_insert(0) += 1;
-    }
-    let mut root_breakdown: Vec<(String, usize)> = root_counts
-        .into_iter()
-        .filter_map(|(root_id, count)| {
-            root_path_map
-                .get(&root_id)
-                .map(|path| (path.clone(), count))
-        })
-        .collect();
-    root_breakdown.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // 13. Count sources with no archived copy (from final sources list)
-    let not_archived_count = sources
-        .iter()
-        .filter(|s| {
-            s.object_id
-                .and_then(|oid| archive_paths.get(&oid))
-                .map(|paths| paths.is_empty())
-                .unwrap_or(true) // no object_id = not archived
-        })
-        .count();
-
-    Ok(QuerySourcesResult {
-        sources,
-        archived,
-        excluded_count,
-        unhashed_count,
-        all_facts,
-        root_breakdown,
-        not_archived_count,
-    })
-}
 
 fn allow_values_to_strings(options: &GenerateOptions) -> Vec<String> {
     let mut v = Vec::new();
@@ -666,141 +496,6 @@ fn current_timestamp() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-/// Track types seen for a fact key
-#[derive(Default)]
-struct FactTypeTracker {
-    count: usize,
-    text_count: usize,
-    num_count: usize,
-    time_count: usize,
-}
-
-impl FactTypeTracker {
-    fn add(&mut self, fact_type: FactType) {
-        self.count += 1;
-        match fact_type {
-            FactType::Text | FactType::Path => self.text_count += 1,
-            FactType::Num => self.num_count += 1,
-            FactType::Time => self.time_count += 1,
-        }
-    }
-
-    fn has_mixed_types(&self) -> bool {
-        let type_count = (self.text_count > 0) as usize
-            + (self.num_count > 0) as usize
-            + (self.time_count > 0) as usize;
-        type_count > 1
-    }
-
-    fn dominant_type(&self) -> FactType {
-        if self.time_count >= self.text_count && self.time_count >= self.num_count {
-            FactType::Time
-        } else if self.num_count >= self.text_count {
-            FactType::Num
-        } else {
-            FactType::Text
-        }
-    }
-
-    fn type_breakdown(&self) -> String {
-        let mut parts = Vec::new();
-        if self.time_count > 0 {
-            parts.push(format!("{} time", self.time_count));
-        }
-        if self.text_count > 0 {
-            parts.push(format!("{} text", self.text_count));
-        }
-        if self.num_count > 0 {
-            parts.push(format!("{} num", self.num_count));
-        }
-        parts.join(", ")
-    }
-}
-
-/// Collect facts with 100% coverage across all sources in the manifest.
-/// Uses pre-fetched typed facts from `all_facts` (keyed by source_id).
-fn collect_full_coverage_facts(
-    sources: &[LockEntry],
-    all_facts: &HashMap<i64, Vec<FactEntry>>,
-) -> Vec<(String, FactType, String)> {
-    use std::collections::HashSet;
-
-    if sources.is_empty() {
-        return Vec::new();
-    }
-
-    let source_count = sources.len();
-
-    // Count facts by key across all sources, tracking type consistency
-    let mut fact_counts: HashMap<String, FactTypeTracker> = HashMap::new();
-    let mut seen_keys: HashSet<String> = HashSet::new();
-
-    // Iterate over pre-fetched facts (already merged source + object facts by source_id)
-    for source in sources {
-        if let Some(facts) = all_facts.get(&source.id) {
-            for fact in facts {
-                // Derive FactType from the typed FactValue (preserves Time vs Num distinction)
-                let fact_type = match &fact.value {
-                    FactValue::Text(_) => FactType::Text,
-                    FactValue::Num(_) => FactType::Num,
-                    FactValue::Time(_) => FactType::Time,
-                    FactValue::Path(_) => FactType::Path,
-                };
-
-                // Track uniqueness per source (a source might have same key from both source and object)
-                let seen_key = format!("{}:{}", source.id, fact.key);
-                if !seen_keys.contains(&seen_key) {
-                    fact_counts
-                        .entry(fact.key.clone())
-                        .or_default()
-                        .add(fact_type);
-                    seen_keys.insert(seen_key);
-                }
-            }
-        }
-    }
-
-    // Warn about facts with mixed types (only for 100% coverage facts)
-    let mut mixed_type_warnings: Vec<(String, String)> = Vec::new();
-    for (key, tracker) in &fact_counts {
-        if tracker.count == source_count && tracker.has_mixed_types() {
-            mixed_type_warnings.push((key.clone(), tracker.type_breakdown()));
-        }
-    }
-
-    if !mixed_type_warnings.is_empty() {
-        mixed_type_warnings.sort_by(|a, b| a.0.cmp(&b.0));
-        eprintln!("Warning: some facts have inconsistent types across sources:");
-        for (key, breakdown) in &mixed_type_warnings {
-            eprintln!("  {key}: {breakdown}");
-        }
-        eprintln!("  Type-specific modifiers (|year, |month, etc.) may fail on mismatched values.");
-        eprintln!("  To fix: delete outliers with 'canon facts delete <key> --on object --value-type <minority-type>'");
-    }
-
-    // Filter to only 100% coverage facts
-    let mut full_coverage: Vec<(String, FactType, String)> = fact_counts
-        .into_iter()
-        .filter(|(_, tracker)| tracker.count == source_count)
-        .map(|(key, tracker)| {
-            let description = get_fact_description(&key);
-            (key, tracker.dominant_type(), description)
-        })
-        .collect();
-
-    // Sort by key for consistent output
-    full_coverage.sort_by(|a, b| a.0.cmp(&b.0));
-
-    full_coverage
-}
-
-/// Get a human-readable description for a fact key
-fn get_fact_description(key: &str) -> String {
-    BuiltinKey::from_str(key)
-        .and_then(|k| k.description())
-        .map(|s| s.to_string())
-        .unwrap_or_default()
-}
 
 /// Generate fact help comments for the manifest
 fn generate_fact_help(
@@ -892,24 +587,6 @@ fn generate_fact_help(
     help.push('\n');
 
     help
-}
-
-/// Find duplicate sources (same object_id) within the manifest sources
-/// Returns Vec of (object_id, Vec<source_id>)
-fn find_source_duplicates(sources: &[LockEntry]) -> Vec<(i64, Vec<i64>)> {
-    let mut object_map: HashMap<i64, Vec<i64>> = HashMap::new();
-
-    for source in sources {
-        if let Some(object_id) = source.object_id {
-            object_map.entry(object_id).or_default().push(source.id);
-        }
-    }
-
-    // Return only groups with 2+ sources
-    object_map
-        .into_iter()
-        .filter(|(_, ids)| ids.len() > 1)
-        .collect()
 }
 
 /// Insert comment lines before a key in a TOML string.
@@ -1028,172 +705,6 @@ fn print_cluster_stdout(header: &str, result: &LockGenerationResult) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::open_in_memory_for_test;
-    use rusqlite::Connection as RusqliteConnection;
-
-    fn setup_test_db() -> RusqliteConnection {
-        open_in_memory_for_test()
-    }
-
-    fn insert_root(conn: &RusqliteConnection, path: &str, role: &str, suspended: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",
-            rusqlite::params![path, role, suspended as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_object(conn: &RusqliteConnection, hash: &str, excluded: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO objects (hash_type, hash_value, excluded) VALUES ('sha256', ?, ?)",
-            rusqlite::params![hash, excluded as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_source(
-        conn: &RusqliteConnection,
-        root_id: i64,
-        rel_path: &str,
-        object_id: Option<i64>,
-        excluded: bool,
-    ) -> i64 {
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, excluded)
-             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0, ?)",
-            rusqlite::params![root_id, rel_path, object_id, excluded as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    /// Test that sources from suspended roots are excluded from manifest generation.
-    #[test]
-    fn test_cluster_excludes_suspended_roots() {
-        let mut conn = setup_test_db();
-
-        // Create active and suspended source roots
-        let active_root = insert_root(&conn, "/active", "source", false);
-        let suspended_root = insert_root(&conn, "/suspended", "source", true);
-
-        // Create objects for hashing
-        let obj1 = insert_object(&conn, "hash1", false);
-        let obj2 = insert_object(&conn, "hash2", false);
-
-        // Insert sources in both roots
-        insert_source(&conn, active_root, "file1.jpg", Some(obj1), false);
-        insert_source(&conn, suspended_root, "file2.jpg", Some(obj2), false);
-
-        // Query sources (this is what cluster generate does)
-        let qr = query_sources(&mut conn, &[], &[], false).unwrap();
-
-        // Should only include source from active root
-        assert_eq!(
-            qr.sources.len(),
-            1,
-            "Should exclude sources from suspended roots"
-        );
-        assert_eq!(qr.sources[0].path, "/active/file1.jpg");
-    }
-
-    /// Test that excluded sources are filtered out at both source and object level.
-    #[test]
-    fn test_cluster_excludes_excluded_sources() {
-        let mut conn = setup_test_db();
-
-        let root = insert_root(&conn, "/photos", "source", false);
-
-        // Normal source
-        let normal_obj = insert_object(&conn, "normal_hash", false);
-        insert_source(&conn, root, "normal.jpg", Some(normal_obj), false);
-
-        // Source-level excluded
-        let source_excl_obj = insert_object(&conn, "source_excl_hash", false);
-        insert_source(
-            &conn,
-            root,
-            "source_excluded.jpg",
-            Some(source_excl_obj),
-            true,
-        );
-
-        // Object-level excluded (source not excluded, but object is)
-        let object_excl_obj = insert_object(&conn, "object_excl_hash", true);
-        insert_source(
-            &conn,
-            root,
-            "object_excluded.jpg",
-            Some(object_excl_obj),
-            false,
-        );
-
-        // Query sources
-        let qr = query_sources(&mut conn, &[], &[], false).unwrap();
-
-        // Should only include the normal source
-        assert_eq!(
-            qr.sources.len(),
-            1,
-            "Should exclude both source-level and object-level excluded"
-        );
-        assert_eq!(qr.sources[0].path, "/photos/normal.jpg");
-        assert_eq!(qr.excluded_count, 2, "Should count both excluded sources");
-    }
-
-    /// Test that archive detection handles multiple sources pointing to same object.
-    ///
-    /// When 3 sources point to 1 archived object, all 3 should be marked as
-    /// "already archived" (not just 1).
-    #[test]
-    fn test_cluster_archive_detection_counts_sources_not_objects() {
-        let mut conn = setup_test_db();
-
-        // Create source root and archive root
-        let source_root = insert_root(&conn, "/photos", "source", false);
-        let archive_root = insert_root(&conn, "/archive", "archive", false);
-
-        // Create ONE object that will be archived
-        let archived_obj = insert_object(&conn, "archived_hash", false);
-
-        // Create 3 source files pointing to the SAME object
-        insert_source(&conn, source_root, "photo1.jpg", Some(archived_obj), false);
-        insert_source(&conn, source_root, "photo2.jpg", Some(archived_obj), false);
-        insert_source(&conn, source_root, "photo3.jpg", Some(archived_obj), false);
-
-        // Create another object that is NOT archived
-        let unarchived_obj = insert_object(&conn, "unarchived_hash", false);
-        insert_source(
-            &conn,
-            source_root,
-            "photo4.jpg",
-            Some(unarchived_obj),
-            false,
-        );
-
-        // Put the first object in archive
-        insert_source(&conn, archive_root, "backup.jpg", Some(archived_obj), false);
-
-        // Query sources WITHOUT include_archived flag (default behavior)
-        let qr = query_sources(&mut conn, &[], &[], false).unwrap();
-
-        // The critical assertion: all 3 sources pointing to archived object should be
-        // in the "archived" list, not just 1
-        assert_eq!(
-            qr.archived.len(),
-            3,
-            "Should detect 3 SOURCES as already archived, not 1 unique object"
-        );
-
-        // Only the unarchived source should be in the main sources list
-        assert_eq!(
-            qr.sources.len(),
-            1,
-            "Only unarchived source should be in sources"
-        );
-        assert_eq!(qr.sources[0].path, "/photos/photo4.jpg");
-    }
 
     #[test]
     fn test_manifest_options_round_trip() {
