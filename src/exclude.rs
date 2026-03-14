@@ -7,11 +7,13 @@ use crate::domain::root::find_containing_root;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::Filter;
 use crate::ops::exclude::{
-    execute_clear, execute_duplicates, execute_set, execute_set_objects, plan_clear,
-    plan_duplicates, plan_set, plan_set_objects, ExcludeClearParams, ExcludeDuplicatesParams,
-    ExcludeSetObjectsParams, ExcludeSetParams,
+    self, check_clear_object, check_set_object_by_file, check_set_object_by_hash,
+    check_set_source_by_id, check_set_source_by_path, execute_clear, execute_duplicates,
+    execute_set, execute_set_objects, plan_clear, plan_duplicates, plan_set, plan_set_objects,
+    ExcludeClearParams, ExcludeDuplicatesParams, ExcludeSetObjectsParams, ExcludeSetParams,
+    ObjectClearCheck, ObjectExclusionCheck, ObjectSourceInfo, SourceExclusionCheck,
 };
-use crate::repo::{self, Connection, Db};
+use crate::repo::{self, Db};
 
 // ============================================================================
 // Options
@@ -167,30 +169,20 @@ pub fn clear(
 pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
     let conn = db.conn();
 
-    // Fetch source using repo layer
-    let sources = repo::source::batch_fetch_by_ids(conn, &[source_id])?;
-    let Some(source) = sources.get(&source_id) else {
-        anyhow::bail!("Source with id {source_id} not found or not present");
-    };
-
-    // Use Source::path() for display
-    let path = source.path();
-
-    // Check if already excluded using domain predicate
-    if source.is_excluded() {
-        println!("Source already excluded: {path}");
-        return Ok(());
+    match check_set_source_by_id(conn, source_id)? {
+        SourceExclusionCheck::AlreadyExcluded { path } => {
+            println!("Source already excluded: {path}");
+        }
+        SourceExclusionCheck::Ready { source_id, path } => {
+            if options.dry_run {
+                println!("Would exclude source (id: {source_id}):");
+                println!("  {path}");
+            } else {
+                exclude::exclude_source(conn, source_id)?;
+                println!("Excluded source (id: {source_id}): {path}");
+            }
+        }
     }
-
-    if options.dry_run {
-        println!("Would exclude source (id: {source_id}):");
-        println!("  {path}");
-        return Ok(());
-    }
-
-    repo::source::set_excluded(conn, source_id, true)?;
-
-    println!("Excluded source (id: {source_id}): {path}");
     Ok(())
 }
 
@@ -209,29 +201,21 @@ pub fn set_by_path(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()
         anyhow::bail!("No source found for path: {}", file_path.display());
     };
 
-    // Fetch the source using repo layer
-    let Some(source) = repo::source::fetch_by_path(conn, root_id, &rel_path)? else {
-        anyhow::bail!("No source found for path: {}", file_path.display());
-    };
-
-    // Use Source::path() for display (consistent path formatting)
-    let display_path = source.path();
-
-    // Check if already excluded using domain predicate
-    if source.is_excluded() {
-        println!("Source already excluded: {display_path}");
-        return Ok(());
+    let display_path = format!("{}", file_path.display());
+    match check_set_source_by_path(conn, root_id, &rel_path, &display_path)? {
+        SourceExclusionCheck::AlreadyExcluded { path } => {
+            println!("Source already excluded: {path}");
+        }
+        SourceExclusionCheck::Ready { source_id, path } => {
+            if options.dry_run {
+                println!("Would exclude:");
+                println!("  {path}");
+            } else {
+                exclude::exclude_source(conn, source_id)?;
+                println!("Excluded: {path}");
+            }
+        }
     }
-
-    if options.dry_run {
-        println!("Would exclude:");
-        println!("  {display_path}");
-        return Ok(());
-    }
-
-    repo::source::set_excluded(conn, source.id, true)?;
-
-    println!("Excluded: {display_path}");
     Ok(())
 }
 
@@ -371,12 +355,27 @@ pub fn exclude_duplicates(
 pub fn set_object_by_hash(db: &Db, hash: &str, options: &SetOptions) -> Result<()> {
     let conn = db.conn();
 
-    // Find the object by hash
-    let Some(object) = repo::object::fetch_by_hash(conn, hash)? else {
-        anyhow::bail!("No object found with hash: {hash}");
-    };
-
-    exclude_object_by_id(conn, object.id, &object.hash_value, options)
+    match check_set_object_by_hash(conn, hash)? {
+        ObjectExclusionCheck::AlreadyExcluded { hash_prefix } => {
+            println!("Object already excluded: {hash_prefix}...");
+        }
+        ObjectExclusionCheck::Ready {
+            object_id,
+            hash_prefix,
+            sources,
+        } => {
+            if options.dry_run {
+                println!("Would exclude object: {hash_prefix}...");
+                print_source_locations(&sources, options.verbose);
+                println!("\nUse --yes to execute.");
+            } else {
+                exclude::exclude_object(conn, object_id)?;
+                println!("Excluded object: {hash_prefix}...");
+                print_source_locations(&sources, options.verbose);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Exclude an object by file path. Looks up the source, gets its object, and excludes it.
@@ -397,41 +396,28 @@ pub fn set_object_by_file(db: &Db, file_path: &Path, options: &SetOptions) -> Re
         );
     };
 
-    // Fetch the source using repo layer
-    let Some(source) = repo::source::fetch_by_path(conn, root_id, &rel_path)? else {
-        anyhow::bail!(
-            "No hashed source found for path: {}\n  (File must be scanned and hashed first)",
-            file_path.display()
-        );
-    };
-
-    // Verify source has an object (is hashed)
-    let Some(object_id) = source.object_id else {
-        anyhow::bail!(
-            "No hashed source found for path: {}\n  (File must be scanned and hashed first)",
-            file_path.display()
-        );
-    };
-
-    // Get the object to access hash_value
-    let objects = repo::object::batch_fetch_by_ids(conn, &[object_id])?;
-    let Some(object) = objects.get(&object_id) else {
-        anyhow::bail!(
-            "No hashed source found for path: {}\n  (File must be scanned and hashed first)",
-            file_path.display()
-        );
-    };
-
-    // Safety check: refuse to exclude empty files via path lookup
-    if source.size == 0 {
-        anyhow::bail!(
-            "Cannot exclude empty file via path (all empty files share the same hash).\n  \
-             Use --hash {} to explicitly exclude all empty files.",
-            object.hash_value
-        );
+    let display_path = format!("{}", file_path.display());
+    match check_set_object_by_file(conn, root_id, &rel_path, &display_path)? {
+        ObjectExclusionCheck::AlreadyExcluded { hash_prefix } => {
+            println!("Object already excluded: {hash_prefix}...");
+        }
+        ObjectExclusionCheck::Ready {
+            object_id,
+            hash_prefix,
+            sources,
+        } => {
+            if options.dry_run {
+                println!("Would exclude object: {hash_prefix}...");
+                print_source_locations(&sources, options.verbose);
+                println!("\nUse --yes to execute.");
+            } else {
+                exclude::exclude_object(conn, object_id)?;
+                println!("Excluded object: {hash_prefix}...");
+                print_source_locations(&sources, options.verbose);
+            }
+        }
     }
-
-    exclude_object_by_id(conn, object_id, &object.hash_value, options)
+    Ok(())
 }
 
 /// Exclude objects matching the given scope and filters.
@@ -529,37 +515,8 @@ pub fn set_objects_by_filter(
     Ok(())
 }
 
-/// Source info for display
-struct SourceInfo {
-    path: String,
-    is_archive: bool,
-}
-
-/// Fetch source details for an object
-fn get_object_sources(conn: &Connection, object_id: i64) -> Result<Vec<SourceInfo>> {
-    let sources_map = repo::source::fetch_sources_by_object_ids(conn, &[object_id])?;
-    let mut sources: Vec<_> = sources_map.get(&object_id).cloned().unwrap_or_default();
-
-    // Sort: same as previous SQL ORDER BY r.role DESC, r.path, s.rel_path
-    // Note: role DESC puts 'source' before 'archive' (s > a alphabetically)
-    sources.sort_by(|a, b| {
-        b.root_role
-            .cmp(&a.root_role) // DESC
-            .then_with(|| a.root_path.cmp(&b.root_path))
-            .then_with(|| a.rel_path.cmp(&b.rel_path))
-    });
-
-    Ok(sources
-        .into_iter()
-        .map(|s| SourceInfo {
-            path: s.path(),
-            is_archive: s.is_from_role("archive"),
-        })
-        .collect())
-}
-
 /// Display source locations for an object
-fn print_source_locations(sources: &[SourceInfo], verbose: bool) {
+fn print_source_locations(sources: &[ObjectSourceInfo], verbose: bool) {
     let archive_count = sources.iter().filter(|s| s.is_archive).count();
     let source_count = sources.len() - archive_count;
 
@@ -587,80 +544,26 @@ fn print_source_locations(sources: &[SourceInfo], verbose: bool) {
     }
 }
 
-/// Internal helper to exclude an object by its ID
-fn exclude_object_by_id(
-    conn: &Connection,
-    object_id: i64,
-    hash_value: &str,
-    options: &SetOptions,
-) -> Result<()> {
-    // Check if already excluded using domain predicate
-    let objects = repo::object::batch_fetch_by_ids(conn, &[object_id])?;
-    if let Some(object) = objects.get(&object_id) {
-        if object.is_excluded() {
-            println!(
-                "Object already excluded: {}...",
-                &hash_value[..16.min(hash_value.len())]
-            );
-            return Ok(());
-        }
-    }
-
-    // Get source details
-    let sources = get_object_sources(conn, object_id)?;
-
-    if options.dry_run {
-        println!(
-            "Would exclude object: {}...",
-            &hash_value[..16.min(hash_value.len())]
-        );
-        print_source_locations(&sources, options.verbose);
-        println!("\nUse --yes to execute.");
-        return Ok(());
-    }
-
-    repo::object::set_excluded(conn, object_id, true)?;
-
-    println!(
-        "Excluded object: {}...",
-        &hash_value[..16.min(hash_value.len())]
-    );
-    print_source_locations(&sources, options.verbose);
-    Ok(())
-}
-
 /// Clear exclusion from an object by its hash
 pub fn clear_object(db: &Db, hash: &str, options: &ClearOptions) -> Result<()> {
     let conn = db.conn();
 
-    // Find the object by hash
-    let Some(object) = repo::object::fetch_by_hash(conn, hash)? else {
-        anyhow::bail!("No object found with hash: {hash}");
-    };
-
-    // Check if excluded (use domain predicate)
-    if !object.is_excluded() {
-        println!(
-            "Object is not excluded: {}...",
-            &object.hash_value[..16.min(object.hash_value.len())]
-        );
-        return Ok(());
+    match check_clear_object(conn, hash)? {
+        ObjectClearCheck::NotExcluded { hash_prefix } => {
+            println!("Object is not excluded: {hash_prefix}...");
+        }
+        ObjectClearCheck::Ready {
+            object_id,
+            hash_prefix,
+        } => {
+            if options.dry_run {
+                println!("Would clear exclusion from object: {hash_prefix}...");
+            } else {
+                exclude::clear_object_exclusion(conn, object_id)?;
+                println!("Cleared exclusion from object: {hash_prefix}...");
+            }
+        }
     }
-
-    if options.dry_run {
-        println!(
-            "Would clear exclusion from object: {}...",
-            &object.hash_value[..16.min(object.hash_value.len())]
-        );
-        return Ok(());
-    }
-
-    repo::object::set_excluded(conn, object.id, false)?;
-
-    println!(
-        "Cleared exclusion from object: {}...",
-        &object.hash_value[..16.min(object.hash_value.len())]
-    );
     Ok(())
 }
 
@@ -668,28 +571,18 @@ pub fn clear_object(db: &Db, hash: &str, options: &ClearOptions) -> Result<()> {
 pub fn list_objects(db: &Db) -> Result<()> {
     let conn = db.conn();
 
-    // Fetch excluded objects via repo layer
-    let excluded = repo::object::fetch_excluded(conn)?;
+    let entries = exclude::list_excluded_objects(conn)?;
 
-    if excluded.is_empty() {
+    if entries.is_empty() {
         println!("No excluded objects");
         return Ok(());
     }
 
-    // Get source counts for display
-    let object_ids: Vec<i64> = excluded.iter().map(|o| o.id).collect();
-    let sources_by_object = repo::source::fetch_sources_by_object_ids(conn, &object_ids)?;
-
-    println!("Excluded objects ({}):", excluded.len());
-    for object in &excluded {
-        let hash_short = &object.hash_value[..16.min(object.hash_value.len())];
-        let source_count = sources_by_object
-            .get(&object.id)
-            .map(|sources| sources.len())
-            .unwrap_or(0);
+    println!("Excluded objects ({}):", entries.len());
+    for entry in &entries {
         println!(
             "  {}... (id: {}, {} sources)",
-            hash_short, object.id, source_count
+            entry.hash_prefix, entry.object_id, entry.source_count
         );
     }
 
@@ -802,79 +695,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_set_by_id_nonexistent_fails() {
-        let db = make_test_db();
-
-        let options = SetOptions {
-            dry_run: false,
-            verbose: false,
-            yes: true,
-        };
-
-        let result = set_by_id(&db, 99999, &options);
-        assert!(result.is_err());
-
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("not found"),
-            "Error should mention 'not found', got: {err_msg}"
-        );
-    }
-
-    #[test]
-    fn test_set_by_id_already_excluded_skips() {
-        let db = make_test_db();
-        let conn = db.conn();
-
-        let root = insert_root(conn, "/photos", "source", false);
-        // Create source that's already excluded
-        let source_id = insert_source(conn, root, "photo.jpg", None, true, true);
-
-        let options = SetOptions {
-            dry_run: false,
-            verbose: false,
-            yes: true,
-        };
-
-        // Should succeed (not error) even though already excluded
-        let result = set_by_id(&db, source_id, &options);
-        assert!(result.is_ok());
-
-        // Should still be excluded
-        assert!(
-            is_source_excluded(conn, source_id),
-            "Source should remain excluded"
-        );
-    }
-
-    #[test]
-    fn test_set_by_id_not_present_fails() {
-        let db = make_test_db();
-        let conn = db.conn();
-
-        let root = insert_root(conn, "/photos", "source", false);
-        // Create source that's not present (present=false)
-        let source_id = insert_source(conn, root, "deleted.jpg", None, false, false);
-
-        let options = SetOptions {
-            dry_run: false,
-            verbose: false,
-            yes: true,
-        };
-
-        let result = set_by_id(&db, source_id, &options);
-        assert!(result.is_err());
-
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("not found") || err_msg.contains("not present"),
-            "Error should mention source not found/present, got: {err_msg}"
-        );
-    }
-
     // =========================================================================
-    // set_by_path tests (Phase 1: path pattern completion)
+    // set_by_path tests
     // =========================================================================
 
     #[test]
@@ -921,91 +743,7 @@ mod tests {
     }
 
     // =========================================================================
-    // get_object_sources tests (Phase 1: path pattern completion)
-    // =========================================================================
-
-    #[test]
-    fn test_get_object_sources_returns_paths() {
-        let conn = setup_test_db();
-
-        let root = insert_root(&conn, "/photos", "source", false);
-        let obj = insert_object(&conn, "abc123hash", false);
-        insert_source(&conn, root, "2024/photo.jpg", Some(obj), true, false);
-
-        let sources = get_object_sources(&conn, obj).unwrap();
-
-        assert_eq!(sources.len(), 1);
-        assert_eq!(
-            sources[0].path, "/photos/2024/photo.jpg",
-            "Path should be correctly constructed from root + rel_path"
-        );
-    }
-
-    #[test]
-    fn test_get_object_sources_includes_role() {
-        let conn = setup_test_db();
-
-        let source_root = insert_root(&conn, "/source", "source", false);
-        let archive_root = insert_root(&conn, "/archive", "archive", false);
-        let obj = insert_object(&conn, "abc123hash", false);
-
-        insert_source(&conn, source_root, "photo.jpg", Some(obj), true, false);
-        insert_source(&conn, archive_root, "photo.jpg", Some(obj), true, false);
-
-        let sources = get_object_sources(&conn, obj).unwrap();
-
-        assert_eq!(sources.len(), 2);
-
-        // Archives come first (ORDER BY r.role DESC)
-        let archive_sources: Vec<_> = sources.iter().filter(|s| s.is_archive).collect();
-        let source_sources: Vec<_> = sources.iter().filter(|s| !s.is_archive).collect();
-
-        assert_eq!(archive_sources.len(), 1, "Should have one archive source");
-        assert_eq!(source_sources.len(), 1, "Should have one source source");
-
-        assert_eq!(archive_sources[0].path, "/archive/photo.jpg");
-        assert_eq!(source_sources[0].path, "/source/photo.jpg");
-    }
-
-    #[test]
-    fn test_get_object_sources_empty_rel_path() {
-        let conn = setup_test_db();
-
-        // Root IS the file (empty rel_path)
-        let root = insert_root(&conn, "/archive/photo.jpg", "archive", false);
-        let obj = insert_object(&conn, "abc123hash", false);
-        insert_source(&conn, root, "", Some(obj), true, false);
-
-        let sources = get_object_sources(&conn, obj).unwrap();
-
-        assert_eq!(sources.len(), 1);
-        // Source::path() correctly handles empty rel_path (no trailing slash)
-        // This fixes the R1 inconsistency that existed with inline SQL
-        assert_eq!(
-            sources[0].path, "/archive/photo.jpg",
-            "Empty rel_path should NOT produce trailing slash"
-        );
-    }
-
-    #[test]
-    fn test_get_object_sources_excludes_not_present() {
-        let conn = setup_test_db();
-
-        let root = insert_root(&conn, "/photos", "source", false);
-        let obj = insert_object(&conn, "abc123hash", false);
-
-        // One present, one not present
-        insert_source(&conn, root, "present.jpg", Some(obj), true, false);
-        insert_source(&conn, root, "deleted.jpg", Some(obj), false, false);
-
-        let sources = get_object_sources(&conn, obj).unwrap();
-
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].path, "/photos/present.jpg");
-    }
-
-    // =========================================================================
-    // set_objects_by_filter tests (Phase 2: final extraction)
+    // set_objects_by_filter tests
     // =========================================================================
 
     /// Check if an object is excluded in the database
@@ -1071,60 +809,6 @@ mod tests {
             !is_object_excluded_in_db(db.conn(), obj),
             "Dry run should NOT actually exclude objects"
         );
-    }
-
-    // =========================================================================
-    // list_objects tests (Phase 3: final extraction)
-    // =========================================================================
-
-    #[test]
-    fn test_list_objects_shows_excluded() {
-        let db = make_test_db();
-        let conn = db.conn();
-
-        let root = insert_root(conn, "/photos", "source", false);
-
-        // Create excluded object with a source
-        let obj = insert_object(conn, "excluded_object_hash", true);
-        insert_source(conn, root, "photo.jpg", Some(obj), true, false);
-
-        // list_objects prints to stdout, just verify it doesn't error
-        let result = list_objects(&db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_list_objects_shows_source_count() {
-        let db = make_test_db();
-        let conn = db.conn();
-
-        let root = insert_root(conn, "/photos", "source", false);
-
-        // Create excluded object with multiple sources
-        let obj = insert_object(conn, "multi_source_hash", true);
-        insert_source(conn, root, "photo1.jpg", Some(obj), true, false);
-        insert_source(conn, root, "photo2.jpg", Some(obj), true, false);
-        insert_source(conn, root, "deleted.jpg", Some(obj), false, false); // not present, shouldn't count
-
-        // Verify the function runs without error
-        // (the actual source count of 2 is displayed to stdout)
-        let result = list_objects(&db);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_list_objects_empty() {
-        let db = make_test_db();
-        let conn = db.conn();
-
-        // Create non-excluded object
-        let root = insert_root(conn, "/photos", "source", false);
-        let obj = insert_object(conn, "not_excluded_hash", false);
-        insert_source(conn, root, "photo.jpg", Some(obj), true, false);
-
-        // Should handle no excluded objects gracefully
-        let result = list_objects(&db);
-        assert!(result.is_ok());
     }
 
     #[test]

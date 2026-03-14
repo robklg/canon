@@ -119,6 +119,7 @@ pub struct ObjectPlanEntry {
 }
 
 /// Source info for object exclusion display.
+#[derive(Debug)]
 pub struct ObjectSourceInfo {
     pub path: String,
     pub is_archive: bool,
@@ -483,6 +484,265 @@ pub fn execute_set_objects(conn: &Connection, plan: &ExcludeSetObjectsPlan) -> R
         repo::object::set_excluded(conn, entry.object_id, true)?;
     }
     Ok(plan.objects.len())
+}
+
+// ============================================================================
+// Single-target check/execute functions
+// ============================================================================
+
+/// Outcome of validating a single source for exclusion.
+#[derive(Debug)]
+pub enum SourceExclusionCheck {
+    /// Source found and eligible for exclusion.
+    Ready { source_id: i64, path: String },
+    /// Source is already excluded (at source or object level).
+    AlreadyExcluded { path: String },
+}
+
+/// Outcome of validating a single object for exclusion.
+#[derive(Debug)]
+pub enum ObjectExclusionCheck {
+    /// Object found and eligible for exclusion.
+    Ready {
+        object_id: i64,
+        hash_prefix: String,
+        sources: Vec<ObjectSourceInfo>,
+    },
+    /// Object is already excluded.
+    AlreadyExcluded { hash_prefix: String },
+}
+
+/// Outcome of validating a single object for clearing exclusion.
+#[derive(Debug)]
+pub enum ObjectClearCheck {
+    /// Object found and currently excluded — eligible for clearing.
+    Ready { object_id: i64, hash_prefix: String },
+    /// Object is not excluded.
+    NotExcluded { hash_prefix: String },
+}
+
+/// Entry in the excluded objects list.
+pub struct ExcludedObjectEntry {
+    pub object_id: i64,
+    pub hash_prefix: String,
+    pub source_count: usize,
+}
+
+/// Validate that a source can be excluded by its database ID.
+///
+/// Errors if the source is not found or not present.
+pub fn check_set_source_by_id(
+    conn: &Connection,
+    source_id: i64,
+) -> Result<SourceExclusionCheck> {
+    let sources = repo::source::batch_fetch_by_ids(conn, &[source_id])?;
+    let Some(source) = sources.get(&source_id) else {
+        anyhow::bail!("Source with id {source_id} not found or not present");
+    };
+
+    let path = source.path();
+    if source.is_excluded() {
+        return Ok(SourceExclusionCheck::AlreadyExcluded { path });
+    }
+
+    Ok(SourceExclusionCheck::Ready { source_id, path })
+}
+
+/// Validate that a source can be excluded by its root and relative path.
+///
+/// Errors if no source exists at the given path.
+/// `display_path` is used in error messages (the user-visible path).
+pub fn check_set_source_by_path(
+    conn: &Connection,
+    root_id: i64,
+    rel_path: &str,
+    display_path: &str,
+) -> Result<SourceExclusionCheck> {
+    let Some(source) = repo::source::fetch_by_path(conn, root_id, rel_path)? else {
+        anyhow::bail!("No source found for path: {display_path}");
+    };
+
+    let path = source.path();
+    if source.is_excluded() {
+        return Ok(SourceExclusionCheck::AlreadyExcluded { path });
+    }
+
+    Ok(SourceExclusionCheck::Ready {
+        source_id: source.id,
+        path,
+    })
+}
+
+/// Exclude a single source by ID.
+pub fn exclude_source(conn: &Connection, source_id: i64) -> Result<()> {
+    repo::source::set_excluded(conn, source_id, true)?;
+    Ok(())
+}
+
+/// Validate that an object can be excluded by its hash.
+///
+/// Errors if no object exists with the given hash.
+pub fn check_set_object_by_hash(
+    conn: &Connection,
+    hash: &str,
+) -> Result<ObjectExclusionCheck> {
+    let Some(object) = repo::object::fetch_by_hash(conn, hash)? else {
+        anyhow::bail!("No object found with hash: {hash}");
+    };
+
+    let hash_prefix = object.hash_value[..16.min(object.hash_value.len())].to_string();
+
+    if object.is_excluded() {
+        return Ok(ObjectExclusionCheck::AlreadyExcluded { hash_prefix });
+    }
+
+    let sources = fetch_object_sources(conn, object.id)?;
+    Ok(ObjectExclusionCheck::Ready {
+        object_id: object.id,
+        hash_prefix,
+        sources,
+    })
+}
+
+/// Validate that an object can be excluded by looking up a source file path.
+///
+/// Errors if no source at path, source is unhashed, or file is empty (size=0).
+/// `display_path` is used in error messages.
+pub fn check_set_object_by_file(
+    conn: &Connection,
+    root_id: i64,
+    rel_path: &str,
+    display_path: &str,
+) -> Result<ObjectExclusionCheck> {
+    let Some(source) = repo::source::fetch_by_path(conn, root_id, rel_path)? else {
+        anyhow::bail!(
+            "No hashed source found for path: {display_path}\n  (File must be scanned and hashed first)"
+        );
+    };
+
+    let Some(object_id) = source.object_id else {
+        anyhow::bail!(
+            "No hashed source found for path: {display_path}\n  (File must be scanned and hashed first)"
+        );
+    };
+
+    let objects = repo::object::batch_fetch_by_ids(conn, &[object_id])?;
+    let Some(object) = objects.get(&object_id) else {
+        anyhow::bail!(
+            "No hashed source found for path: {display_path}\n  (File must be scanned and hashed first)"
+        );
+    };
+
+    // Safety: refuse to exclude empty files via path lookup
+    if source.size == 0 {
+        anyhow::bail!(
+            "Cannot exclude empty file via path (all empty files share the same hash).\n  \
+             Use --hash {} to explicitly exclude all empty files.",
+            object.hash_value
+        );
+    }
+
+    let hash_prefix = object.hash_value[..16.min(object.hash_value.len())].to_string();
+
+    if object.is_excluded() {
+        return Ok(ObjectExclusionCheck::AlreadyExcluded { hash_prefix });
+    }
+
+    let sources = fetch_object_sources(conn, object_id)?;
+    Ok(ObjectExclusionCheck::Ready {
+        object_id,
+        hash_prefix,
+        sources,
+    })
+}
+
+/// Exclude a single object by ID.
+pub fn exclude_object(conn: &Connection, object_id: i64) -> Result<()> {
+    repo::object::set_excluded(conn, object_id, true)?;
+    Ok(())
+}
+
+/// Validate that an object exclusion can be cleared by its hash.
+///
+/// Errors if no object exists with the given hash.
+pub fn check_clear_object(conn: &Connection, hash: &str) -> Result<ObjectClearCheck> {
+    let Some(object) = repo::object::fetch_by_hash(conn, hash)? else {
+        anyhow::bail!("No object found with hash: {hash}");
+    };
+
+    let hash_prefix = object.hash_value[..16.min(object.hash_value.len())].to_string();
+
+    if !object.is_excluded() {
+        return Ok(ObjectClearCheck::NotExcluded { hash_prefix });
+    }
+
+    Ok(ObjectClearCheck::Ready {
+        object_id: object.id,
+        hash_prefix,
+    })
+}
+
+/// Clear exclusion from a single object by ID.
+pub fn clear_object_exclusion(conn: &Connection, object_id: i64) -> Result<()> {
+    repo::object::set_excluded(conn, object_id, false)?;
+    Ok(())
+}
+
+/// Fetch source display info for an object.
+///
+/// Returns present sources sorted by role DESC, root_path, rel_path.
+/// Maps to `ObjectSourceInfo` for display.
+pub fn fetch_object_sources(
+    conn: &Connection,
+    object_id: i64,
+) -> Result<Vec<ObjectSourceInfo>> {
+    let sources_map = repo::source::fetch_sources_by_object_ids(conn, &[object_id])?;
+    let mut sources: Vec<_> = sources_map.get(&object_id).cloned().unwrap_or_default();
+
+    // Sort: role DESC (source before archive), root_path, rel_path
+    sources.sort_by(|a, b| {
+        b.root_role
+            .cmp(&a.root_role)
+            .then_with(|| a.root_path.cmp(&b.root_path))
+            .then_with(|| a.rel_path.cmp(&b.rel_path))
+    });
+
+    Ok(sources
+        .into_iter()
+        .map(|s| ObjectSourceInfo {
+            path: s.path(),
+            is_archive: s.is_from_role("archive"),
+        })
+        .collect())
+}
+
+/// List all excluded objects with source counts.
+pub fn list_excluded_objects(conn: &Connection) -> Result<Vec<ExcludedObjectEntry>> {
+    let excluded = repo::object::fetch_excluded(conn)?;
+
+    if excluded.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let object_ids: Vec<i64> = excluded.iter().map(|o| o.id).collect();
+    let sources_by_object = repo::source::fetch_sources_by_object_ids(conn, &object_ids)?;
+
+    Ok(excluded
+        .iter()
+        .map(|object| {
+            let hash_prefix =
+                object.hash_value[..16.min(object.hash_value.len())].to_string();
+            let source_count = sources_by_object
+                .get(&object.id)
+                .map(|sources| sources.len())
+                .unwrap_or(0);
+            ExcludedObjectEntry {
+                object_id: object.id,
+                hash_prefix,
+                source_count,
+            }
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -1341,5 +1601,444 @@ mod tests {
 
         let count = execute_set_objects(&conn, &plan).unwrap();
         assert_eq!(count, 1);
+    }
+
+    // =========================================================================
+    // check_set_source_by_id() tests
+    // =========================================================================
+
+    #[test]
+    fn test_check_source_by_id_ready() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let id = insert_source(&conn, root, "photo.jpg", None);
+
+        let result = check_set_source_by_id(&conn, id).unwrap();
+        match result {
+            SourceExclusionCheck::Ready { source_id, path } => {
+                assert_eq!(source_id, id);
+                assert_eq!(path, "/photos/photo.jpg");
+            }
+            SourceExclusionCheck::AlreadyExcluded { .. } => {
+                panic!("Expected Ready, got AlreadyExcluded");
+            }
+        }
+    }
+
+    #[test]
+    fn test_check_source_by_id_already_excluded() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let id = insert_source_excluded(&conn, root, "photo.jpg", None);
+
+        let result = check_set_source_by_id(&conn, id).unwrap();
+        match result {
+            SourceExclusionCheck::AlreadyExcluded { path } => {
+                assert_eq!(path, "/photos/photo.jpg");
+            }
+            SourceExclusionCheck::Ready { .. } => {
+                panic!("Expected AlreadyExcluded, got Ready");
+            }
+        }
+    }
+
+    #[test]
+    fn test_check_source_by_id_not_found() {
+        let conn = setup_test_db();
+
+        let result = check_set_source_by_id(&conn, 99999);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not found"),
+            "Error should mention 'not found', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_check_source_by_id_not_present() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        // Not present (batch_fetch_by_ids filters these out)
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, present)
+             VALUES (?, 'deleted.jpg', 1000, 1704067200, '', 0, 0, 0, 0, 0)",
+            rusqlite::params![root],
+        )
+        .unwrap();
+        let source_id = conn.last_insert_rowid();
+
+        let result = check_set_source_by_id(&conn, source_id);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not found") || err.contains("not present"),
+            "Error should mention not found/present, got: {err}"
+        );
+    }
+
+    // =========================================================================
+    // check_set_source_by_path() tests
+    // =========================================================================
+
+    #[test]
+    fn test_check_source_by_path_ready() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let id = insert_source(&conn, root, "photo.jpg", None);
+
+        let result =
+            check_set_source_by_path(&conn, root, "photo.jpg", "/photos/photo.jpg").unwrap();
+        match result {
+            SourceExclusionCheck::Ready { source_id, path } => {
+                assert_eq!(source_id, id);
+                assert_eq!(path, "/photos/photo.jpg");
+            }
+            SourceExclusionCheck::AlreadyExcluded { .. } => {
+                panic!("Expected Ready, got AlreadyExcluded");
+            }
+        }
+    }
+
+    #[test]
+    fn test_check_source_by_path_not_found() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+
+        let result =
+            check_set_source_by_path(&conn, root, "nonexistent.jpg", "/photos/nonexistent.jpg");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("No source found"),
+            "Error should mention no source found, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_check_source_by_path_already_excluded() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        insert_source_excluded(&conn, root, "photo.jpg", None);
+
+        let result =
+            check_set_source_by_path(&conn, root, "photo.jpg", "/photos/photo.jpg").unwrap();
+        match result {
+            SourceExclusionCheck::AlreadyExcluded { path } => {
+                assert_eq!(path, "/photos/photo.jpg");
+            }
+            SourceExclusionCheck::Ready { .. } => {
+                panic!("Expected AlreadyExcluded, got Ready");
+            }
+        }
+    }
+
+    // =========================================================================
+    // check_set_object_by_hash() tests
+    // =========================================================================
+
+    #[test]
+    fn test_check_object_by_hash_ready() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "abc123hash_value_x", false);
+        insert_source(&conn, root, "photo.jpg", Some(obj));
+
+        let result = check_set_object_by_hash(&conn, "abc123hash_value_x").unwrap();
+        match result {
+            ObjectExclusionCheck::Ready {
+                object_id,
+                hash_prefix,
+                sources,
+            } => {
+                assert_eq!(object_id, obj);
+                assert_eq!(hash_prefix, "abc123hash_value");
+                assert_eq!(sources.len(), 1);
+                assert_eq!(sources[0].path, "/photos/photo.jpg");
+            }
+            ObjectExclusionCheck::AlreadyExcluded { .. } => {
+                panic!("Expected Ready, got AlreadyExcluded");
+            }
+        }
+    }
+
+    #[test]
+    fn test_check_object_by_hash_not_found() {
+        let conn = setup_test_db();
+
+        let result = check_set_object_by_hash(&conn, "nonexistent_hash");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("No object found"),
+            "Error should mention no object found, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_check_object_by_hash_already_excluded() {
+        let conn = setup_test_db();
+        let _root = insert_root(&conn, "/photos", "source", false);
+        let _obj = insert_object(&conn, "excluded_hash_val_", true);
+
+        let result = check_set_object_by_hash(&conn, "excluded_hash_val_").unwrap();
+        match result {
+            ObjectExclusionCheck::AlreadyExcluded { hash_prefix } => {
+                assert_eq!(hash_prefix, "excluded_hash_va");
+            }
+            ObjectExclusionCheck::Ready { .. } => {
+                panic!("Expected AlreadyExcluded, got Ready");
+            }
+        }
+    }
+
+    // =========================================================================
+    // check_set_object_by_file() tests
+    // =========================================================================
+
+    #[test]
+    fn test_check_object_by_file_ready() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "file_obj_hash_val_", false);
+        insert_source(&conn, root, "photo.jpg", Some(obj));
+
+        let result =
+            check_set_object_by_file(&conn, root, "photo.jpg", "/photos/photo.jpg").unwrap();
+        match result {
+            ObjectExclusionCheck::Ready {
+                object_id,
+                hash_prefix,
+                sources,
+            } => {
+                assert_eq!(object_id, obj);
+                assert_eq!(hash_prefix, "file_obj_hash_va");
+                assert_eq!(sources.len(), 1);
+            }
+            ObjectExclusionCheck::AlreadyExcluded { .. } => {
+                panic!("Expected Ready, got AlreadyExcluded");
+            }
+        }
+    }
+
+    #[test]
+    fn test_check_object_by_file_not_found() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+
+        let result =
+            check_set_object_by_file(&conn, root, "missing.jpg", "/photos/missing.jpg");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("No hashed source found"),
+            "Error should mention no hashed source, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_check_object_by_file_unhashed() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root, "unhashed.jpg", None);
+
+        let result =
+            check_set_object_by_file(&conn, root, "unhashed.jpg", "/photos/unhashed.jpg");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("No hashed source found"),
+            "Error should mention no hashed source, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_check_object_by_file_empty() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "empty_file_hash_v_", false);
+        insert_source_with_size(&conn, root, "empty.txt", Some(obj), 0);
+
+        let result =
+            check_set_object_by_file(&conn, root, "empty.txt", "/photos/empty.txt");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Cannot exclude empty file"),
+            "Error should mention empty file, got: {err}"
+        );
+    }
+
+    // =========================================================================
+    // check_clear_object() tests
+    // =========================================================================
+
+    #[test]
+    fn test_check_clear_object_ready() {
+        let conn = setup_test_db();
+        let obj = insert_object(&conn, "clear_ready_hash_v", true);
+
+        let result = check_clear_object(&conn, "clear_ready_hash_v").unwrap();
+        match result {
+            ObjectClearCheck::Ready {
+                object_id,
+                hash_prefix,
+            } => {
+                assert_eq!(object_id, obj);
+                assert_eq!(hash_prefix, "clear_ready_hash");
+            }
+            ObjectClearCheck::NotExcluded { .. } => {
+                panic!("Expected Ready, got NotExcluded");
+            }
+        }
+    }
+
+    #[test]
+    fn test_check_clear_object_not_found() {
+        let conn = setup_test_db();
+
+        let result = check_clear_object(&conn, "nonexistent_hash");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("No object found"),
+            "Error should mention no object found, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_check_clear_object_not_excluded() {
+        let conn = setup_test_db();
+        let _obj = insert_object(&conn, "not_excluded_hash_", false);
+
+        let result = check_clear_object(&conn, "not_excluded_hash_").unwrap();
+        match result {
+            ObjectClearCheck::NotExcluded { hash_prefix } => {
+                assert_eq!(hash_prefix, "not_excluded_has");
+            }
+            ObjectClearCheck::Ready { .. } => {
+                panic!("Expected NotExcluded, got Ready");
+            }
+        }
+    }
+
+    // =========================================================================
+    // fetch_object_sources() tests
+    // =========================================================================
+
+    #[test]
+    fn test_fetch_object_sources_returns_paths() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "fetch_src_hash_val", false);
+        insert_source(&conn, root, "2024/photo.jpg", Some(obj));
+
+        let sources = fetch_object_sources(&conn, obj).unwrap();
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].path, "/photos/2024/photo.jpg");
+    }
+
+    #[test]
+    fn test_fetch_object_sources_includes_role() {
+        let conn = setup_test_db();
+        let source_root = insert_root(&conn, "/source", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+        let obj = insert_object(&conn, "role_src_hash_val_", false);
+        insert_source(&conn, source_root, "photo.jpg", Some(obj));
+        insert_source(&conn, archive_root, "photo.jpg", Some(obj));
+
+        let sources = fetch_object_sources(&conn, obj).unwrap();
+
+        assert_eq!(sources.len(), 2);
+        // Source roots come first (role DESC: 'source' > 'archive')
+        assert!(!sources[0].is_archive, "Source root should come first");
+        assert!(sources[1].is_archive, "Archive root should come second");
+    }
+
+    #[test]
+    fn test_fetch_object_sources_empty_rel_path() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/archive/photo.jpg", "archive", false);
+        let obj = insert_object(&conn, "empty_rel_hash_val", false);
+        insert_source(&conn, root, "", Some(obj));
+
+        let sources = fetch_object_sources(&conn, obj).unwrap();
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].path, "/archive/photo.jpg");
+    }
+
+    #[test]
+    fn test_fetch_object_sources_excludes_not_present() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "present_hash_val_x", false);
+        insert_source(&conn, root, "present.jpg", Some(obj));
+        // Not present source
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, present)
+             VALUES (?, 'deleted.jpg', ?, 1000, 1704067200, '', 0, 0, 0, 0, 0)",
+            rusqlite::params![root, obj],
+        )
+        .unwrap();
+
+        let sources = fetch_object_sources(&conn, obj).unwrap();
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].path, "/photos/present.jpg");
+    }
+
+    // =========================================================================
+    // list_excluded_objects() tests
+    // =========================================================================
+
+    #[test]
+    fn test_list_excluded_objects_returns_entries() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "list_excl_hash_val", true);
+        insert_source(&conn, root, "photo.jpg", Some(obj));
+
+        let entries = list_excluded_objects(&conn).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].object_id, obj);
+        assert_eq!(entries[0].hash_prefix, "list_excl_hash_v");
+        assert_eq!(entries[0].source_count, 1);
+    }
+
+    #[test]
+    fn test_list_excluded_objects_source_counts() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "multi_src_hash_val", true);
+        insert_source(&conn, root, "photo1.jpg", Some(obj));
+        insert_source(&conn, root, "photo2.jpg", Some(obj));
+        // Not present — still counted by fetch_sources_by_object_ids
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, present)
+             VALUES (?, 'deleted.jpg', ?, 1000, 1704067200, '', 0, 0, 0, 0, 0)",
+            rusqlite::params![root, obj],
+        )
+        .unwrap();
+
+        let entries = list_excluded_objects(&conn).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        // fetch_sources_by_object_ids returns present sources only
+        // (the repo function filters for present=1)
+        assert!(entries[0].source_count >= 2);
+    }
+
+    #[test]
+    fn test_list_excluded_objects_empty() {
+        let conn = setup_test_db();
+        let _root = insert_root(&conn, "/photos", "source", false);
+        let _obj = insert_object(&conn, "not_excl_hash_val_", false);
+
+        let entries = list_excluded_objects(&conn).unwrap();
+
+        assert!(entries.is_empty());
     }
 }
