@@ -1,8 +1,6 @@
 use anyhow::{bail, Context, Result};
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,6 +10,7 @@ use rusqlite::{Transaction, TransactionBehavior};
 
 use crate::domain::resolve_root_path_any;
 use crate::domain::scan::{find_missing, reconcile, FileObservation, Reconciliation};
+use crate::ops::fs::{compute_full_hash, compute_partial_hash};
 use crate::progress::Progress;
 use crate::repo::{self, Connection, Db};
 
@@ -722,55 +721,6 @@ fn current_timestamp() -> i64 {
         .as_secs() as i64
 }
 
-const PARTIAL_HASH_CHUNK_SIZE: usize = 8192; // 8KB
-
-/// Compute SHA256 hash of first 8KB + last 8KB of a file.
-/// For files <= 16KB, hash the entire file.
-pub fn compute_partial_hash(path: &Path, size: u64) -> Result<String> {
-    let mut file = File::open(path)
-        .with_context(|| format!("Failed to open file for partial hash: {}", path.display()))?;
-    let mut hasher = Sha256::new();
-
-    if size <= (PARTIAL_HASH_CHUNK_SIZE * 2) as u64 {
-        // Small file - hash entire content
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf)?;
-        hasher.update(&buf);
-    } else {
-        // Large file - hash first 8KB + last 8KB
-        let mut buf = [0u8; PARTIAL_HASH_CHUNK_SIZE];
-
-        // Read first 8KB
-        file.read_exact(&mut buf)?;
-        hasher.update(buf);
-
-        // Seek to last 8KB and read
-        file.seek(SeekFrom::End(-(PARTIAL_HASH_CHUNK_SIZE as i64)))?;
-        file.read_exact(&mut buf)?;
-        hasher.update(buf);
-    }
-
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-/// Compute full SHA256 hash of a file
-fn compute_full_hash(path: &Path) -> Result<String> {
-    let mut file = File::open(path)
-        .with_context(|| format!("Failed to open file for hashing: {}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 65536]; // 64KB buffer
-
-    loop {
-        let bytes_read = file.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes_read]);
-    }
-
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
 /// Get or create an object by hash, returning the Object
 fn get_or_create_object(
     conn: &Connection,
@@ -942,6 +892,7 @@ fn find_common_ancestors(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
 

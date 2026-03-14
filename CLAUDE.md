@@ -55,6 +55,9 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 **Operations Layer** (`src/ops/`) - Composed behaviors, interface-independent:
 - `selection.rs` - Source selection: `select_sources()`, `RolePolicy`, `SelectionParams`, `Selection`
 - `exclude.rs` - Exclude plan/execute: `plan_set()`, `execute_set()`, `plan_clear()`, `execute_clear()`
+- `cluster.rs` - Cluster plan: `plan_generate()`, `LockEntry`
+- `apply.rs` - Apply plan: `plan_apply()`, `TransferMode`
+- `fs.rs` - Filesystem primitives: `compute_partial_hash()`, `compute_full_hash()`, `preserve_metadata()`
 
 **Command Modules** (flat in `src/`):
 - `main.rs` - CLI entry point using clap (canon home resolution, alias expansion dispatch)
@@ -375,10 +378,11 @@ The codebase follows a **strict layered architecture** prioritizing reliability,
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Interface Layer (src/*.rs — CLI commands)                    │
+│ Interface Layer (src/*.rs — CLI today, TUI tomorrow)        │
 │ - CLI argument parsing (clap structs)                       │
 │ - Output formatting (terminal, JSONL, null-delimited)       │
 │ - Ceremony presentation (display plan, prompt, report)      │
+│ - Directory walk creation (WalkDir configuration)           │
 │ - The ONLY layer that knows about stdout/stderr/stdin       │
 └─────────────────────────────────────────────────────────────┘
                           │
@@ -389,31 +393,33 @@ The codebase follows a **strict layered architecture** prioritizing reliability,
 │ - Shared sub-operations (select_sources, etc.)              │
 │ - Ceremony policy: what to show, when to confirm            │
 │ - Transaction boundaries for write operations               │
+│ - Orchestrates repo + domain + fs                           │
 │ - Interface-independent — no stdout, stderr, stdin          │
 └─────────────────────────────────────────────────────────────┘
                           │
-          ┌───────────────┴───────────────┐
-          ▼                               ▼
-┌──────────────────────────────┐   ┌──────────────────────────────┐
-│ Repository Layer (repo/)     │   │ Domain Layer (domain/)       │
-│ - ALL database access        │   │ - Pure structs and predicates│
-│ - Returns domain types       │   │ - Business logic functions   │
-│ - Batch operations           │   │ - NO I/O, fully unit-testable│
-│ - SQL lives HERE ONLY        │   │ - Path computation/comparison│
-│ - NO transaction management  │   │                              │
-└──────────────────────────────┘   └──────────────────────────────┘
+          ┌───────────────┼───────────────┐
+          ▼               ▼               ▼
+┌──────────────────┐ ┌──────────────┐ ┌──────────────────────┐
+│ Repository (repo/)│ │ Domain       │ │ Filesystem (ops/fs)  │
+│ - ALL db access   │ │ (domain/)    │ │ - File copy/rename   │
+│ - Returns domain  │ │ - Pure logic │ │ - Hash computation   │
+│   types           │ │ - No I/O     │ │ - Metadata ops       │
+│ - Batch ops       │ │ - Predicates │ │ - No DB, no terminal │
+│ - SQL lives HERE  │ │              │ │                      │
+└──────────────────┘ └──────────────┘ └──────────────────────┘
 ```
 
 **Layer Responsibilities (STRICT)**:
 
 | Layer | Allowed | NOT Allowed |
 |-------|---------|-------------|
-| **Interface** | CLI parsing, output formatting, ceremony presentation, terminal I/O | Business logic, source selection logic, ceremony policy, direct repo calls (use ops/) |
-| **Operations** | Composing domain + repo into typed behaviors, ceremony policy, transactions (writes) | stdout/stderr/stdin, CLI argument types, display formatting |
-| **Repo** | Database queries, returning domain types, batch operations | Business logic, transaction management, path construction |
+| **Interface** | CLI parsing, output formatting, ceremony presentation, terminal I/O, directory walk creation | Business logic, source selection, ceremony policy, computation, filesystem data operations, direct repo calls |
+| **Operations** | Composing domain + repo + fs into behaviors, typed results, ceremony policy, transactions (writes) | stdout/stderr/stdin, CLI argument types, display formatting, direct SQL, direct filesystem data operations (use ops/fs) |
+| **ops/fs** | Filesystem data operations: copy, rename, validate, hash, metadata | Database access, terminal I/O, business logic decisions |
+| **Repo** | Database queries, returning domain types, batch operations | Business logic, transaction management, filesystem access |
 | **Domain** | Pure functions, structs, predicates, business logic | Any I/O (database, filesystem, network) |
 
-**Note**: The operations layer is being introduced incrementally. Most query commands use `ops::selection::select_sources()` for source selection. Two commands intentionally use custom selection logic: `survey` (asymmetric visibility model — selection side vs outward side have different role/exclusion rules) and `cluster generate` (additional post-filtering for archive status and detailed breakdowns). Effectful command extraction uses the plan/execute pattern — `ops::exclude` (`plan_set`/`execute_set`, `plan_clear`/`execute_clear`) is the first implementation. New commands should use `ops/` from the start.
+**Note**: The operations layer is being introduced incrementally. Most query commands use `ops::selection::select_sources()` for source selection. Two commands intentionally use custom selection logic: `survey` (asymmetric visibility model — selection side vs outward side have different role/exclusion rules) and `cluster generate` (additional post-filtering for archive status and detailed breakdowns). Effectful command extraction uses the plan/execute pattern — `ops::exclude` (`plan_set`/`execute_set`, `plan_clear`/`execute_clear`) is the reference implementation. `ops::cluster` and `ops::apply` have plan functions; execute functions are planned for a future phase. The `ops/fs` module provides filesystem primitives (hashing, metadata). New commands should use `ops/` from the start.
 
 **Repo Function Return Type Conventions:**
 
@@ -458,6 +464,19 @@ let count = ops::exclude::execute_set(conn, &plan)?;
 ```
 
 Plan/execute separates computation from side effects. The plan function returns a typed struct with all data needed for display and confirmation. The execute function performs writes and returns a count. The interface layer decides what happens between plan and execute (dry-run, confirmation, or immediate execution). This makes operations testable without CLI and supports multiple interface types.
+
+**Filesystem Layer** (`src/ops/fs.rs`):
+
+The filesystem layer provides structured access to files on disk, parallel to how the repo layer provides structured access to the database. Canon has two fundamental data planes: Sources (DB-indexed, via repo) and Files (on disk, via ops/fs). The operations layer orchestrates both.
+
+ops/fs functions:
+- Take paths and parameters, return typed results
+- Do NOT make business decisions (the ops layer decides what to do, ops/fs does it)
+- Do NOT access the database or terminal
+- Are testable in isolation using temp files
+
+Currently provides: `compute_partial_hash()`, `compute_full_hash()`, `preserve_metadata()`.
+Future additions (with apply/scan execute extraction): `copy_file()`, `rename_file()`, `move_file()`, `validate_file_state()`.
 
 **Concurrency Considerations**:
 Users may run multiple canon processes simultaneously (scanning, enriching, applying, excluding). When designing operations, consider:
@@ -512,8 +531,9 @@ let selection = ops::selection::select_sources(conn, &params)?;
 1. If you need a predicate or business logic → add to domain layer (pure function)
 2. If you need database access → add to repo layer (returns domain types)
 3. If you need composed behavior (selection, computation, ceremony policy) → add to ops layer
-4. Interface modules should ONLY parse arguments, call operations, and format output
-5. When refactoring existing commands, extract behavioral logic to ops layer
+4. If you need filesystem operations (copy, hash, validate, metadata) → add to ops/fs layer
+5. Interface modules should ONLY parse arguments, call operations, and format output
+6. When refactoring existing commands, extract behavioral logic to ops layer
 
 ### CLI Conventions
 

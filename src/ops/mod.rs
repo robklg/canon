@@ -8,4 +8,8 @@
 pub mod apply;
 pub mod cluster;
 pub mod exclude;
+pub mod fs;
 pub mod selection;
+
+#[cfg(test)]
+pub(crate) mod test_helpers;

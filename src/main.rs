@@ -901,11 +901,11 @@ fn main() -> Result<()> {
             resume,
         } => {
             let transfer_mode = if rename {
-                apply::TransferMode::Rename
+                ops::apply::TransferMode::Rename
             } else if move_files {
-                apply::TransferMode::Move
+                ops::apply::TransferMode::Move
             } else {
-                apply::TransferMode::Copy
+                ops::apply::TransferMode::Copy
             };
             let options = apply::ApplyOptions {
                 dry_run,

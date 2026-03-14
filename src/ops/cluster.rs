@@ -8,15 +8,65 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
 
-use crate::cluster::LockEntry;
 use crate::domain::include::IncludeSet;
 use crate::domain::scope::ScopeMatch;
+use crate::domain::source::Source;
 use crate::domain::{FactEntry, FactValue};
 use crate::expr::filter::Filter;
 use crate::expr::{BuiltinKey, FactType};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Connection};
+
+// ============================================================================
+// Types
+// ============================================================================
+
+/// JSONL lock entry (one per line in .lock file)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LockEntry {
+    pub id: i64,
+    pub root_id: i64,
+    pub path: String,
+    // Device and inode are recorded for move detection, not for staleness validation.
+    // Staleness is determined by size+mtime+partial_hash only.
+    pub device: i64,
+    pub inode: i64,
+    // File state for pre-transfer staleness validation
+    pub size: i64,
+    pub mtime: i64,
+    pub partial_hash: String, // SHA256 of first 8KB + last 8KB (for integrity validation)
+    // Content info
+    pub object_id: Option<i64>,
+    pub hash_type: Option<String>,
+    pub hash_value: Option<String>,
+    // Note: `facts` field was removed. Apply looks up facts at runtime from DB.
+    // Old lock files with `facts` field are still readable (serde ignores unknown fields).
+}
+
+impl LockEntry {
+    /// Build a LockEntry from a Source and object hash info.
+    pub fn from_source(
+        source: &Source,
+        hash_type: Option<String>,
+        hash_value: Option<String>,
+    ) -> Self {
+        Self {
+            id: source.id,
+            root_id: source.root_id,
+            path: source.path(),
+            device: source.device,
+            inode: source.inode,
+            size: source.size,
+            mtime: source.mtime,
+            partial_hash: source.partial_hash.clone(),
+            object_id: source.object_id,
+            hash_type,
+            hash_value,
+        }
+    }
+}
 
 // ============================================================================
 // Types
@@ -352,53 +402,10 @@ fn get_fact_description(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::db::open_in_memory_for_test;
-
-    fn setup_test_db() -> Connection {
-        open_in_memory_for_test()
-    }
-
-    fn insert_root(conn: &Connection, path: &str, role: &str, suspended: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",
-            rusqlite::params![path, role, suspended as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_object(conn: &Connection, hash: &str, excluded: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO objects (hash_type, hash_value, excluded) VALUES ('sha256', ?, ?)",
-            rusqlite::params![hash, excluded as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_source(
-        conn: &Connection,
-        root_id: i64,
-        rel_path: &str,
-        object_id: Option<i64>,
-        excluded: bool,
-    ) -> i64 {
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, excluded)
-             VALUES (?, ?, ?, 1000, 1704067200, 'ph', 0, 0, 0, 0, ?)",
-            rusqlite::params![root_id, rel_path, object_id, excluded as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_fact(conn: &Connection, source_id: i64, key: &str, value: &str) {
-        conn.execute(
-            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev) VALUES ('source', ?, ?, ?, 0, 0)",
-            rusqlite::params![source_id, key, value],
-        )
-        .unwrap();
-    }
+    use crate::ops::test_helpers::{
+        insert_fact, insert_object, insert_root, insert_source, insert_source_excluded,
+        setup_test_db,
+    };
 
     fn default_params() -> ClusterGenerateParams {
         ClusterGenerateParams {
@@ -430,8 +437,8 @@ mod tests {
         let suspended_root = insert_root(&conn, "/suspended", "source", true);
         let obj1 = insert_object(&conn, "hash1", false);
         let obj2 = insert_object(&conn, "hash2", false);
-        insert_source(&conn, active_root, "file1.jpg", Some(obj1), false);
-        insert_source(&conn, suspended_root, "file2.jpg", Some(obj2), false);
+        insert_source(&conn, active_root, "file1.jpg", Some(obj1));
+        insert_source(&conn, suspended_root, "file2.jpg", Some(obj2));
 
         let plan = plan_generate(&mut conn, &default_params()).unwrap();
         assert_eq!(plan.lock_entries.len(), 1);
@@ -446,9 +453,9 @@ mod tests {
         let obj_src_excl = insert_object(&conn, "src_excl_hash", false);
         let obj_obj_excl = insert_object(&conn, "obj_excl_hash", true);
 
-        insert_source(&conn, root, "normal.jpg", Some(obj_normal), false);
-        insert_source(&conn, root, "source_excluded.jpg", Some(obj_src_excl), true);
-        insert_source(&conn, root, "object_excluded.jpg", Some(obj_obj_excl), false);
+        insert_source(&conn, root, "normal.jpg", Some(obj_normal));
+        insert_source_excluded(&conn, root, "source_excluded.jpg", Some(obj_src_excl));
+        insert_source(&conn, root, "object_excluded.jpg", Some(obj_obj_excl));
 
         let plan = plan_generate(&mut conn, &default_params()).unwrap();
         assert_eq!(plan.lock_entries.len(), 1);
@@ -463,8 +470,8 @@ mod tests {
         let videos = insert_root(&conn, "/videos", "source", false);
         let obj1 = insert_object(&conn, "hash1", false);
         let obj2 = insert_object(&conn, "hash2", false);
-        insert_source(&conn, photos, "a.jpg", Some(obj1), false);
-        insert_source(&conn, videos, "b.mp4", Some(obj2), false);
+        insert_source(&conn, photos, "a.jpg", Some(obj1));
+        insert_source(&conn, videos, "b.mp4", Some(obj2));
 
         let mut params = default_params();
         params.scopes = vec![ScopeMatch::UnderDirectory("/photos".to_string())];
@@ -485,28 +492,16 @@ mod tests {
 
         // One object archived, shared by 3 sources
         let archived_obj = insert_object(&conn, "archived_hash", false);
-        insert_source(&conn, source_root, "photo1.jpg", Some(archived_obj), false);
-        insert_source(&conn, source_root, "photo2.jpg", Some(archived_obj), false);
-        insert_source(&conn, source_root, "photo3.jpg", Some(archived_obj), false);
+        insert_source(&conn, source_root, "photo1.jpg", Some(archived_obj));
+        insert_source(&conn, source_root, "photo2.jpg", Some(archived_obj));
+        insert_source(&conn, source_root, "photo3.jpg", Some(archived_obj));
 
         // One unarchived object
         let unarchived_obj = insert_object(&conn, "unarchived_hash", false);
-        insert_source(
-            &conn,
-            source_root,
-            "photo4.jpg",
-            Some(unarchived_obj),
-            false,
-        );
+        insert_source(&conn, source_root, "photo4.jpg", Some(unarchived_obj));
 
         // Put the first object in the archive
-        insert_source(
-            &conn,
-            archive_root,
-            "backup.jpg",
-            Some(archived_obj),
-            false,
-        );
+        insert_source(&conn, archive_root, "backup.jpg", Some(archived_obj));
 
         let plan = plan_generate(&mut conn, &default_params()).unwrap();
         // All 3 sources of the archived object should be in `archived`
@@ -524,10 +519,10 @@ mod tests {
         let obj1 = insert_object(&conn, "hash1", false);
         let obj2 = insert_object(&conn, "hash2", false);
         // Two sources with different content, both archived
-        insert_source(&conn, source_root, "photo1.jpg", Some(obj1), false);
-        insert_source(&conn, source_root, "photo2.jpg", Some(obj2), false);
-        insert_source(&conn, archive_root, "backup1.jpg", Some(obj1), false);
-        insert_source(&conn, archive_root, "backup2.jpg", Some(obj2), false);
+        insert_source(&conn, source_root, "photo1.jpg", Some(obj1));
+        insert_source(&conn, source_root, "photo2.jpg", Some(obj2));
+        insert_source(&conn, archive_root, "backup1.jpg", Some(obj1));
+        insert_source(&conn, archive_root, "backup2.jpg", Some(obj2));
 
         // Scope to source root to avoid archive-role sources in selection
         let scope = vec![ScopeMatch::UnderDirectory("/photos".to_string())];
@@ -558,29 +553,11 @@ mod tests {
         let obj_unarchived = insert_object(&conn, "unarchived_hash", false);
 
         // Source whose content IS in archive
-        insert_source(
-            &conn,
-            source_root,
-            "has_backup.jpg",
-            Some(obj_archived),
-            false,
-        );
-        insert_source(
-            &conn,
-            archive_root,
-            "backup.jpg",
-            Some(obj_archived),
-            false,
-        );
+        insert_source(&conn, source_root, "has_backup.jpg", Some(obj_archived));
+        insert_source(&conn, archive_root, "backup.jpg", Some(obj_archived));
 
         // Source whose content is NOT in archive
-        insert_source(
-            &conn,
-            source_root,
-            "no_backup.jpg",
-            Some(obj_unarchived),
-            false,
-        );
+        insert_source(&conn, source_root, "no_backup.jpg", Some(obj_unarchived));
 
         // Scope to source root + allow_archived so the archived source stays in lock_entries
         let mut params = default_params();
@@ -601,8 +578,8 @@ mod tests {
         let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "hash1", false);
-        insert_source(&conn, root, "hashed.jpg", Some(obj), false);
-        insert_source(&conn, root, "unhashed.jpg", None, false);
+        insert_source(&conn, root, "hashed.jpg", Some(obj));
+        insert_source(&conn, root, "unhashed.jpg", None);
 
         let plan = plan_generate(&mut conn, &default_params()).unwrap();
         assert_eq!(plan.lock_entries.len(), 1);
@@ -615,7 +592,7 @@ mod tests {
         let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "abcdef1234567890", false);
-        insert_source(&conn, root, "photo.jpg", Some(obj), false);
+        insert_source(&conn, root, "photo.jpg", Some(obj));
 
         let plan = plan_generate(&mut conn, &default_params()).unwrap();
         assert_eq!(plan.lock_entries.len(), 1);
@@ -638,8 +615,8 @@ mod tests {
         let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "same_hash", false);
-        insert_source(&conn, root, "copy1.jpg", Some(obj), false);
-        insert_source(&conn, root, "copy2.jpg", Some(obj), false);
+        insert_source(&conn, root, "copy1.jpg", Some(obj));
+        insert_source(&conn, root, "copy2.jpg", Some(obj));
 
         let result = plan_generate(&mut conn, &default_params());
         assert!(result.is_err());
@@ -652,8 +629,8 @@ mod tests {
         let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "same_hash", false);
-        insert_source(&conn, root, "copy1.jpg", Some(obj), false);
-        insert_source(&conn, root, "copy2.jpg", Some(obj), false);
+        insert_source(&conn, root, "copy1.jpg", Some(obj));
+        insert_source(&conn, root, "copy2.jpg", Some(obj));
 
         let mut params = default_params();
         params.allow_duplicates = true;
@@ -673,9 +650,9 @@ mod tests {
         let obj1 = insert_object(&conn, "hash1", false);
         let obj2 = insert_object(&conn, "hash2", false);
         let obj3 = insert_object(&conn, "hash3", false);
-        insert_source(&conn, root_a, "a1.jpg", Some(obj1), false);
-        insert_source(&conn, root_b, "b1.jpg", Some(obj2), false);
-        insert_source(&conn, root_b, "b2.jpg", Some(obj3), false);
+        insert_source(&conn, root_a, "a1.jpg", Some(obj1));
+        insert_source(&conn, root_b, "b1.jpg", Some(obj2));
+        insert_source(&conn, root_b, "b2.jpg", Some(obj3));
 
         let plan = plan_generate(&mut conn, &default_params()).unwrap();
         assert_eq!(plan.root_breakdown.len(), 2);
@@ -696,8 +673,8 @@ mod tests {
         let root = insert_root(&conn, "/photos", "source", false);
         let obj1 = insert_object(&conn, "hash1", false);
         let obj2 = insert_object(&conn, "hash2", false);
-        let id1 = insert_source(&conn, root, "a.jpg", Some(obj1), false);
-        let id2 = insert_source(&conn, root, "b.jpg", Some(obj2), false);
+        let id1 = insert_source(&conn, root, "a.jpg", Some(obj1));
+        let id2 = insert_source(&conn, root, "b.jpg", Some(obj2));
 
         // Both sources have "content.Make"
         insert_fact(&conn, id1, "content.Make", "Canon");
@@ -715,9 +692,9 @@ mod tests {
         let obj1 = insert_object(&conn, "hash1", false);
         let obj2 = insert_object(&conn, "hash2", false);
         let obj3 = insert_object(&conn, "hash3", false);
-        let id1 = insert_source(&conn, root, "a.jpg", Some(obj1), false);
-        let id2 = insert_source(&conn, root, "b.jpg", Some(obj2), false);
-        let _id3 = insert_source(&conn, root, "c.jpg", Some(obj3), false);
+        let id1 = insert_source(&conn, root, "a.jpg", Some(obj1));
+        let id2 = insert_source(&conn, root, "b.jpg", Some(obj2));
+        let _id3 = insert_source(&conn, root, "c.jpg", Some(obj3));
 
         // Only 2 of 3 sources have the fact
         insert_fact(&conn, id1, "content.Make", "Canon");

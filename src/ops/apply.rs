@@ -7,11 +7,18 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 
-use crate::cluster::LockEntry;
+use super::cluster::LockEntry;
 use crate::domain::fact::FactEntry;
 use crate::domain::path::path_strip_prefix;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
 use crate::repo::{self, Connection};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferMode {
+    Copy,   // Default: copy only, source remains
+    Rename, // Unix only, error if cross-device
+    Move,   // Try rename, fallback to copy+delete on EXDEV
+}
 
 /// Parameters for planning an apply operation.
 pub struct ApplyPlanParams<'a> {
@@ -425,71 +432,10 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::open_in_memory_for_test;
-
-    fn setup_test_db() -> Connection {
-        open_in_memory_for_test()
-    }
-
-    fn insert_root(conn: &Connection, path: &str, role: &str, suspended: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",
-            rusqlite::params![path, role, suspended as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_object(conn: &Connection, hash: &str, excluded: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO objects (hash_type, hash_value, excluded) VALUES ('sha256', ?, ?)",
-            rusqlite::params![hash, excluded as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_source(
-        conn: &Connection,
-        root_id: i64,
-        rel_path: &str,
-        object_id: Option<i64>,
-        size: i64,
-        mtime: i64,
-    ) -> i64 {
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
-             VALUES (?, ?, ?, ?, ?, 'testhash', 0, 0, 0, 0)",
-            rusqlite::params![root_id, rel_path, object_id, size, mtime],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_source_excluded(
-        conn: &Connection,
-        root_id: i64,
-        rel_path: &str,
-        object_id: Option<i64>,
-        excluded: bool,
-    ) -> i64 {
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, excluded)
-             VALUES (?, ?, ?, 1000, 1704067200, 'testhash', 0, 0, 0, 0, ?)",
-            rusqlite::params![root_id, rel_path, object_id, excluded as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_fact(conn: &Connection, source_id: i64, key: &str, value: &str) {
-        conn.execute(
-            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev) VALUES ('source', ?, ?, ?, 0, 0)",
-            rusqlite::params![source_id, key, value],
-        )
-        .unwrap();
-        conn.last_insert_rowid();
-    }
+    use crate::ops::test_helpers::{
+        insert_fact, insert_object, insert_root, insert_source_excluded, insert_source_with_metadata,
+        setup_test_db,
+    };
 
     fn make_lock_entry(id: i64, root_id: i64, path: &str, object_id: Option<i64>, hash: Option<&str>) -> LockEntry {
         LockEntry {
@@ -536,7 +482,7 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source(&conn, root_id, "vacation/photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "vacation/photo.jpg", Some(obj_id), 1000, 1704067200);
         insert_fact(&conn, src_id, "content.Make", "Canon");
 
         let entry = make_lock_entry(src_id, root_id, "/photos/vacation/photo.jpg", Some(obj_id), Some("hash1"));
@@ -561,7 +507,7 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
@@ -585,7 +531,7 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
         // No fact inserted — pattern requires content.Make
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
@@ -615,8 +561,8 @@ mod tests {
         let obj1 = insert_object(&conn, "hash1", false);
         let obj2 = insert_object(&conn, "hash2", false);
         // Two sources with different names but same content.Make → same dest
-        let src1 = insert_source(&conn, root_id, "a/photo.jpg", Some(obj1), 1000, 1704067200);
-        let src2 = insert_source(&conn, root_id, "b/photo.jpg", Some(obj2), 1000, 1704067200);
+        let src1 = insert_source_with_metadata(&conn, root_id, "a/photo.jpg", Some(obj1), 1000, 1704067200);
+        let src2 = insert_source_with_metadata(&conn, root_id, "b/photo.jpg", Some(obj2), 1000, 1704067200);
         insert_fact(&conn, src1, "content.Make", "Canon");
         insert_fact(&conn, src2, "content.Make", "Canon");
 
@@ -644,8 +590,8 @@ mod tests {
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj1 = insert_object(&conn, "hash1", false);
         let obj2 = insert_object(&conn, "hash2", false);
-        let src1 = insert_source(&conn, root_id, "a.jpg", Some(obj1), 1000, 1704067200);
-        let src2 = insert_source(&conn, root_id, "b.jpg", Some(obj2), 1000, 1704067200);
+        let src1 = insert_source_with_metadata(&conn, root_id, "a.jpg", Some(obj1), 1000, 1704067200);
+        let src2 = insert_source_with_metadata(&conn, root_id, "b.jpg", Some(obj2), 1000, 1704067200);
 
         let e1 = make_lock_entry(src1, root_id, "/photos/a.jpg", Some(obj1), Some("hash1"));
         let e2 = make_lock_entry(src2, root_id, "/photos/b.jpg", Some(obj2), Some("hash2"));
@@ -673,9 +619,9 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
         // Same hash already in destination archive
-        insert_source(&conn, archive_id, "existing/photo.jpg", Some(obj_id), 1000, 1704067200);
+        insert_source_with_metadata(&conn, archive_id, "existing/photo.jpg", Some(obj_id), 1000, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
@@ -698,9 +644,9 @@ mod tests {
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let other_archive = insert_root(&conn, "/other-archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
         // Same hash in OTHER archive
-        insert_source(&conn, other_archive, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        insert_source_with_metadata(&conn, other_archive, "photo.jpg", Some(obj_id), 1000, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
@@ -722,7 +668,7 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
@@ -748,7 +694,7 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_excluded(&conn, root_id, "photo.jpg", Some(obj_id), true);
+        let src_id = insert_source_excluded(&conn, root_id, "photo.jpg", Some(obj_id));
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
@@ -770,7 +716,7 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", true); // suspended
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
@@ -796,9 +742,9 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
         // Destination path already has a record in archive
-        insert_source(&conn, archive_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        insert_source_with_metadata(&conn, archive_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
@@ -820,10 +766,10 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
         // Destination path occupied
         let obj2 = insert_object(&conn, "different_hash", false);
-        insert_source(&conn, archive_id, "photo.jpg", Some(obj2), 1000, 1704067200);
+        insert_source_with_metadata(&conn, archive_id, "photo.jpg", Some(obj2), 1000, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
@@ -846,9 +792,9 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
         // Same path exists in archive
-        insert_source(&conn, archive_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        insert_source_with_metadata(&conn, archive_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
@@ -880,7 +826,7 @@ mod tests {
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
         // DB has size=2000 but lock entry has size=1000
-        let src_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), 2000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 2000, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
@@ -903,7 +849,7 @@ mod tests {
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
         // DB matches lock entry exactly
-        let src_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
@@ -928,9 +874,9 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
         // Already in archive at same dest path
-        insert_source(&conn, archive_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        insert_source_with_metadata(&conn, archive_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
@@ -954,7 +900,7 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
         // No existing entry in archive
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
@@ -983,7 +929,7 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         // Source without object_id
-        let src_id = insert_source(&conn, root_id, "photo.jpg", None, 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", None, 1000, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", None, None);
         let sources: Vec<&LockEntry> = vec![&entry];
@@ -1005,9 +951,9 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
         // Archive has an unhashed file
-        insert_source(&conn, archive_id, "unhashed.jpg", None, 500, 1704067200);
+        insert_source_with_metadata(&conn, archive_id, "unhashed.jpg", None, 500, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];

@@ -131,76 +131,10 @@ pub fn select_sources(conn: &mut Connection, params: &SelectionParams) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::db::open_in_memory_for_test;
-
-    fn setup_test_db() -> Connection {
-        open_in_memory_for_test()
-    }
-
-    fn insert_root(conn: &Connection, path: &str, role: &str, suspended: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",
-            rusqlite::params![path, role, suspended as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_object(conn: &Connection, hash: &str, excluded: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO objects (hash_type, hash_value, excluded) VALUES ('sha256', ?, ?)",
-            rusqlite::params![hash, excluded as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_source(
-        conn: &Connection,
-        root_id: i64,
-        rel_path: &str,
-        object_id: Option<i64>,
-    ) -> i64 {
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
-             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0)",
-            rusqlite::params![root_id, rel_path, object_id],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_source_excluded(
-        conn: &Connection,
-        root_id: i64,
-        rel_path: &str,
-        object_id: Option<i64>,
-    ) -> i64 {
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, excluded)
-             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0, 1)",
-            rusqlite::params![root_id, rel_path, object_id],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    /// Insert a source with a specific size (for --where filter tests).
-    fn insert_source_with_size(
-        conn: &Connection,
-        root_id: i64,
-        rel_path: &str,
-        object_id: Option<i64>,
-        size: i64,
-    ) -> i64 {
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
-             VALUES (?, ?, ?, ?, 1704067200, '', 0, 0, 0, 0)",
-            rusqlite::params![root_id, rel_path, object_id, size],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
+    use crate::ops::test_helpers::{
+        insert_object, insert_root, insert_source, insert_source_excluded,
+        insert_source_with_size, setup_test_db,
+    };
 
     fn make_params(role_policy: RolePolicy) -> SelectionParams {
         SelectionParams {

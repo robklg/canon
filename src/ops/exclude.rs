@@ -748,69 +748,10 @@ pub fn list_excluded_objects(conn: &Connection) -> Result<Vec<ExcludedObjectEntr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::db::open_in_memory_for_test;
-
-    fn setup_test_db() -> Connection {
-        open_in_memory_for_test()
-    }
-
-    fn insert_root(conn: &Connection, path: &str, role: &str, suspended: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",
-            rusqlite::params![path, role, suspended as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_object(conn: &Connection, hash: &str, excluded: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO objects (hash_type, hash_value, excluded) VALUES ('sha256', ?, ?)",
-            rusqlite::params![hash, excluded as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_source(
-        conn: &Connection,
-        root_id: i64,
-        rel_path: &str,
-        object_id: Option<i64>,
-    ) -> i64 {
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
-             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0)",
-            rusqlite::params![root_id, rel_path, object_id],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_source_excluded(
-        conn: &Connection,
-        root_id: i64,
-        rel_path: &str,
-        object_id: Option<i64>,
-    ) -> i64 {
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, excluded)
-             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0, 1)",
-            rusqlite::params![root_id, rel_path, object_id],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn is_source_excluded(conn: &Connection, source_id: i64) -> bool {
-        conn.query_row(
-            "SELECT excluded FROM sources WHERE id = ?",
-            [source_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|v| v == 1)
-        .unwrap_or(false)
-    }
+    use crate::ops::test_helpers::{
+        insert_object, insert_root, insert_source, insert_source_excluded, is_source_excluded,
+        setup_test_db,
+    };
 
     fn make_set_params(scopes: Vec<ScopeMatch>) -> ExcludeSetParams {
         ExcludeSetParams {
@@ -1369,37 +1310,13 @@ mod tests {
     // plan_set_objects() tests
     // =========================================================================
 
-    fn insert_source_with_size(
-        conn: &Connection,
-        root_id: i64,
-        rel_path: &str,
-        object_id: Option<i64>,
-        size: i64,
-    ) -> i64 {
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
-             VALUES (?, ?, ?, ?, 1704067200, '', 0, 0, 0, 0)",
-            rusqlite::params![root_id, rel_path, object_id, size],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
+    use crate::ops::test_helpers::{insert_source_with_size, is_object_excluded};
 
     fn make_set_objects_params(scopes: Vec<ScopeMatch>) -> ExcludeSetObjectsParams {
         ExcludeSetObjectsParams {
             scopes,
             filters: vec![],
         }
-    }
-
-    fn is_object_excluded(conn: &Connection, object_id: i64) -> bool {
-        conn.query_row(
-            "SELECT excluded FROM objects WHERE id = ?",
-            [object_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|v| v == 1)
-        .unwrap_or(false)
     }
 
     #[test]

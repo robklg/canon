@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, Metadata};
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, ErrorKind};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -8,22 +8,17 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ceremony;
-use crate::cluster::{self, LockEntry, ManifestConfig};
+use crate::cluster::{self, ManifestConfig};
 use crate::domain::apply::{classify_destination, DestinationState};
 use crate::domain::root::parse_root_spec;
 use crate::domain::source::NewSource;
 use crate::expr;
 use crate::ops;
+use crate::ops::apply::TransferMode;
+use crate::ops::cluster::LockEntry;
+use crate::ops::fs::{compute_partial_hash, preserve_metadata};
 use crate::progress::Progress;
 use crate::repo::{self, Connection, Db};
-use crate::scan::compute_partial_hash;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransferMode {
-    Copy,   // Default: copy only, source remains
-    Rename, // Unix only, error if cross-device
-    Move,   // Try rename, fallback to copy+delete on EXDEV
-}
 
 #[derive(Default)]
 struct ApplyStats {
@@ -1074,24 +1069,6 @@ fn process_source(
             }
         }
     }
-}
-
-#[cfg(unix)]
-fn preserve_metadata(dest: &Path, src_meta: &Metadata) -> Result<()> {
-    use filetime::FileTime;
-
-    let mtime = FileTime::from_last_modification_time(src_meta);
-    filetime::set_file_mtime(dest, mtime)
-        .with_context(|| format!("Failed to set mtime on {}", dest.display()))?;
-    fs::set_permissions(dest, src_meta.permissions())
-        .with_context(|| format!("Failed to set permissions on {}", dest.display()))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn preserve_metadata(_dest: &Path, _src_meta: &Metadata) -> Result<()> {
-    // No-op on non-Unix
-    Ok(())
 }
 
 /// Relocate an existing source to a new location (for rename/move on same device).

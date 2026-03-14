@@ -8,11 +8,10 @@ use std::path::{Path, PathBuf};
 use crate::domain::path::resolve_paths;
 use crate::domain::root::resolve_archive_path;
 use crate::domain::scope::ScopeMatch;
-use crate::domain::source::Source;
 use crate::expr::filter::Filter;
 use crate::expr::{BuiltinKey, BuiltinKeyVisibility, FactType, Modifier, ModifierCategory};
 use crate::ops;
-use crate::ops::cluster::ClusterGenerateParams;
+use crate::ops::cluster::{ClusterGenerateParams, LockEntry};
 use crate::repo::{self, Connection, Db};
 
 /// TOML config file (without sources)
@@ -61,51 +60,6 @@ pub struct ManifestOutput {
     pub pattern: String,
     pub archive_root_id: i64,
     pub base_dir: String,
-}
-
-/// JSONL lock entry (one per line in .lock file)
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LockEntry {
-    pub id: i64,
-    pub root_id: i64,
-    pub path: String,
-    // Device and inode are recorded for move detection, not for staleness validation.
-    // Staleness is determined by size+mtime+partial_hash only.
-    pub device: i64,
-    pub inode: i64,
-    // File state for pre-transfer staleness validation
-    pub size: i64,
-    pub mtime: i64,
-    pub partial_hash: String, // SHA256 of first 8KB + last 8KB (for integrity validation)
-    // Content info
-    pub object_id: Option<i64>,
-    pub hash_type: Option<String>,
-    pub hash_value: Option<String>,
-    // Note: `facts` field was removed. Apply looks up facts at runtime from DB.
-    // Old lock files with `facts` field are still readable (serde ignores unknown fields).
-}
-
-impl LockEntry {
-    /// Build a LockEntry from a Source and object hash info.
-    pub fn from_source(
-        source: &Source,
-        hash_type: Option<String>,
-        hash_value: Option<String>,
-    ) -> Self {
-        Self {
-            id: source.id,
-            root_id: source.root_id,
-            path: source.path(),
-            device: source.device,
-            inode: source.inode,
-            size: source.size,
-            mtime: source.mtime,
-            partial_hash: source.partial_hash.clone(),
-            object_id: source.object_id,
-            hash_type,
-            hash_value,
-        }
-    }
 }
 
 pub struct GenerateOptions {
