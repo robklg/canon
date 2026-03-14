@@ -3,14 +3,14 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::ceremony;
-use crate::domain::exclusion::find_excludable_duplicates;
 use crate::domain::include::IncludeSet;
 use crate::domain::path::{resolve_path, resolve_paths};
 use crate::domain::root::find_containing_root;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::Filter;
 use crate::ops::exclude::{
-    execute_clear, execute_set, plan_clear, plan_set, ExcludeClearParams, ExcludeSetParams,
+    execute_clear, execute_duplicates, execute_set, plan_clear, plan_duplicates, plan_set,
+    ExcludeClearParams, ExcludeDuplicatesParams, ExcludeSetParams,
 };
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Connection, Db};
@@ -275,111 +275,71 @@ pub fn exclude_duplicates(
     };
     let prefer_prefix = resolve_path(prefer_path, &all_roots, &cwd)?;
 
-    // Get matching source IDs in scope (candidates for exclusion)
+    // Plan
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
-    let params = SelectionParams {
+    let params = ExcludeDuplicatesParams {
         scopes,
-        include: IncludeSet::default(),
         filters,
-        role_policy: RolePolicy::SourceOnly,
+        prefer_prefix,
     };
-    let source_ids = selection::select_sources(conn, &params)?.source_ids();
+    let plan = plan_duplicates(conn, &params)?;
 
-    if source_ids.is_empty() {
-        println!("No sources match the given filters.");
-        return Ok(());
-    }
-
-    // Fetch full Source objects for the scope
-    let scope_sources_map = repo::source::batch_fetch_by_ids(conn, &source_ids)?;
-    let scope_sources: Vec<_> = source_ids
-        .iter()
-        .filter_map(|id| scope_sources_map.get(id).cloned())
-        .collect();
-
-    // Collect object_ids from scope sources (for duplicate lookup)
-    let object_ids: Vec<i64> = scope_sources
-        .iter()
-        .filter_map(|s| s.object_id)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-
-    // Fetch all sources that share these objects (potential duplicates)
-    let sources_by_object = repo::source::fetch_sources_by_object_ids(conn, &object_ids)?;
-
-    // Use pure domain function to determine what to exclude
-    let result = find_excludable_duplicates(&scope_sources, &sources_by_object, &prefer_prefix);
-
-    // Build path lookup for display
-    let to_exclude_with_paths: Vec<(i64, String)> = result
-        .to_exclude
-        .iter()
-        .filter_map(|id| scope_sources_map.get(id).map(|s| (*id, s.path())))
-        .collect();
-
-    if to_exclude_with_paths.is_empty() {
-        println!("Nothing to exclude.");
+    if plan.source_ids.is_empty() {
+        if plan.scope_count == 0 {
+            println!("No sources match the given filters.");
+        } else {
+            println!("Nothing to exclude.");
+        }
         return Ok(());
     }
 
     if dry_run {
-        // Statistics as pre-listing context
         eprintln!(
             "Sources in scope: {} ({} unhashed skipped)",
-            source_ids.len(),
-            result.skipped_no_hash
+            plan.scope_count, plan.skipped_no_hash
         );
-        eprintln!("  Will exclude: {}", to_exclude_with_paths.len());
+        eprintln!("  Will exclude: {}", plan.source_ids.len());
         eprintln!(
             "  Skipped (no copy in --prefer): {}",
-            result.skipped_not_covered
+            plan.skipped_not_covered
         );
         eprintln!(
             "  Skipped (multiple copies in --prefer): {}",
-            result.skipped_multiple
+            plan.skipped_multiple
         );
-        if result.skipped_in_prefer > 0 {
+        if plan.skipped_in_prefer > 0 {
             eprintln!(
                 "  Skipped (already in --prefer): {}",
-                result.skipped_in_prefer
+                plan.skipped_in_prefer
             );
         }
         eprintln!();
-        println!("Would exclude {} sources:", to_exclude_with_paths.len());
-        for (_, path) in &to_exclude_with_paths {
+        println!("Would exclude {} sources:", plan.source_ids.len());
+        for path in &plan.paths {
             println!("  {path}");
         }
         return Ok(());
     }
 
     // Interactive confirmation for > 1 source
-    if to_exclude_with_paths.len() > 1 {
+    if plan.source_ids.len() > 1 {
         if !yes {
-            // Compute group_count: distinct object_ids among to_exclude sources
-            let group_count: usize = result
-                .to_exclude
-                .iter()
-                .filter_map(|id| scope_sources_map.get(id).and_then(|s| s.object_id))
-                .collect::<HashSet<_>>()
-                .len();
-
             eprintln!(
                 "Will exclude {} sources ({} duplicate groups)",
-                to_exclude_with_paths.len(),
-                group_count
+                plan.source_ids.len(),
+                plan.group_count
             );
-            eprintln!("  Keeping copies in: {prefer_prefix}");
-            if result.skipped_not_covered > 0 {
+            eprintln!("  Keeping copies in: {}", plan.prefer_prefix);
+            if plan.skipped_not_covered > 0 {
                 eprintln!(
                     "  Skipped {} (no copy in --prefer)",
-                    result.skipped_not_covered
+                    plan.skipped_not_covered
                 );
             }
-            if result.skipped_multiple > 0 {
+            if plan.skipped_multiple > 0 {
                 eprintln!(
                     "  Skipped {} (multiple copies in --prefer)",
-                    result.skipped_multiple
+                    plan.skipped_multiple
                 );
             }
         }
@@ -389,20 +349,8 @@ pub fn exclude_duplicates(
         }
     }
 
-    // Execute exclusions
-    let mut excluded_count = 0;
-
-    for (source_id, _) in &to_exclude_with_paths {
-        // Skip if already excluded (use domain predicate from fetched sources)
-        if let Some(source) = scope_sources_map.get(source_id) {
-            if source.is_excluded() {
-                continue;
-            }
-        }
-
-        repo::source::set_excluded(conn, *source_id, true)?;
-        excluded_count += 1;
-    }
+    // Execute
+    let excluded_count = execute_duplicates(conn, &plan)?;
 
     let noun = if excluded_count == 1 {
         "source"
@@ -927,222 +875,6 @@ mod tests {
         .unwrap_or(false)
     }
 
-    #[test]
-    fn test_exclude_duplicates_excludes_when_one_copy_in_prefer() {
-        let mut db = make_test_db();
-        let conn = db.conn_mut();
-
-        // Setup: source root with a file, archive root with the same file (duplicate)
-        let source_root = insert_root(conn, "/source", "source", false);
-        let archive_root = insert_root(conn, "/archive", "archive", false);
-
-        // Same object (same content)
-        let obj = insert_object(conn, "same_content_hash", false);
-
-        // Source file (candidate for exclusion)
-        let source_id = insert_source(conn, source_root, "photo.jpg", Some(obj), true, false);
-
-        // Archive copy (the preferred copy)
-        let _archive_id = insert_source(conn, archive_root, "photo.jpg", Some(obj), true, false);
-
-        // Run exclude_duplicates with prefer=/archive, scope=/source
-        let result = exclude_duplicates(
-            &mut db,
-            Path::new("/archive"),
-            Some(Path::new("/source")),
-            &[],
-            false, // not dry run
-            true,  // yes (skip confirmation)
-        );
-
-        assert!(result.is_ok());
-
-        // The source file should now be excluded
-        assert!(
-            is_source_excluded(db.conn(), source_id),
-            "Source should be excluded when exactly one copy exists in prefer path"
-        );
-    }
-
-    #[test]
-    fn test_exclude_duplicates_skips_when_no_copy_in_prefer() {
-        let mut db = make_test_db();
-        let conn = db.conn_mut();
-
-        // Setup: source root with a file, archive is empty (no duplicate there)
-        let source_root = insert_root(conn, "/source", "source", false);
-        let _archive_root = insert_root(conn, "/archive", "archive", false);
-
-        let obj = insert_object(conn, "unique_content_hash", false);
-        let source_id = insert_source(conn, source_root, "unique.jpg", Some(obj), true, false);
-
-        // Run exclude_duplicates - no copy in /archive
-        let result = exclude_duplicates(
-            &mut db,
-            Path::new("/archive"),
-            Some(Path::new("/source")),
-            &[],
-            false,
-            true, // yes (skip confirmation)
-        );
-
-        assert!(result.is_ok());
-
-        // Source should NOT be excluded (no backup exists)
-        assert!(
-            !is_source_excluded(db.conn(), source_id),
-            "Source should NOT be excluded when no copy exists in prefer path"
-        );
-    }
-
-    #[test]
-    fn test_exclude_duplicates_skips_when_multiple_copies_in_prefer() {
-        let mut db = make_test_db();
-        let conn = db.conn_mut();
-
-        // Setup: source with file, archive has TWO copies (ambiguous)
-        let source_root = insert_root(conn, "/source", "source", false);
-        let archive_root = insert_root(conn, "/archive", "archive", false);
-
-        let obj = insert_object(conn, "duplicated_content", false);
-
-        // Source file
-        let source_id = insert_source(conn, source_root, "photo.jpg", Some(obj), true, false);
-
-        // Two copies in archive (ambiguous - which is the canonical one?)
-        let _archive_copy1 = insert_source(conn, archive_root, "copy1.jpg", Some(obj), true, false);
-        let _archive_copy2 = insert_source(conn, archive_root, "copy2.jpg", Some(obj), true, false);
-
-        // Run exclude_duplicates
-        let result = exclude_duplicates(
-            &mut db,
-            Path::new("/archive"),
-            Some(Path::new("/source")),
-            &[],
-            false,
-            true, // yes (skip confirmation)
-        );
-
-        assert!(result.is_ok());
-
-        // Source should NOT be excluded (ambiguous - multiple copies)
-        assert!(
-            !is_source_excluded(db.conn(), source_id),
-            "Source should NOT be excluded when multiple copies exist in prefer path"
-        );
-    }
-
-    #[test]
-    fn test_exclude_duplicates_skips_source_already_in_prefer() {
-        let mut db = make_test_db();
-        let conn = db.conn_mut();
-
-        // Setup: file is in the archive (prefer path) itself
-        let archive_root = insert_root(conn, "/archive", "archive", false);
-
-        let obj = insert_object(conn, "archive_file_hash", false);
-
-        // This file IS in the prefer path - should never be excluded
-        let archive_file_id =
-            insert_source(conn, archive_root, "keeper.jpg", Some(obj), true, false);
-
-        // Run exclude_duplicates with scope=/archive (the file is in the prefer path)
-        // Note: This tests the case where scope overlaps with prefer
-        let result = exclude_duplicates(
-            &mut db,
-            Path::new("/archive"),
-            Some(Path::new("/archive")),
-            &[],
-            false,
-            true, // yes (skip confirmation)
-        );
-
-        assert!(result.is_ok());
-
-        // File in prefer path should NOT be excluded
-        assert!(
-            !is_source_excluded(db.conn(), archive_file_id),
-            "Source in prefer path should never be excluded"
-        );
-    }
-
-    #[test]
-    fn test_exclude_duplicates_path_prefix_no_false_positive() {
-        let mut db = make_test_db();
-        let conn = db.conn_mut();
-
-        // Setup: Test that /a/bc is NOT under /a/b (different directory names)
-        // This tests the path-prefix matching logic for false positives
-        let source_root = insert_root(conn, "/source", "source", false);
-        let _archive_root = insert_root(conn, "/archive/photos", "archive", false);
-        let other_root = insert_root(conn, "/archive/photos-old", "archive", false);
-
-        let obj = insert_object(conn, "test_content", false);
-
-        // Source file to potentially exclude
-        let source_id = insert_source(conn, source_root, "file.jpg", Some(obj), true, false);
-
-        // Copy in /archive/photos-old (NOT under /archive/photos)
-        let _other_copy = insert_source(conn, other_root, "file.jpg", Some(obj), true, false);
-
-        // Run exclude_duplicates with prefer=/archive/photos
-        // The copy is in /archive/photos-old which should NOT match
-        let result = exclude_duplicates(
-            &mut db,
-            Path::new("/archive/photos"),
-            Some(Path::new("/source")),
-            &[],
-            false,
-            true, // yes (skip confirmation)
-        );
-
-        assert!(result.is_ok());
-
-        // Source should NOT be excluded (/archive/photos-old is not under /archive/photos)
-        assert!(
-            !is_source_excluded(db.conn(), source_id),
-            "Path prefix matching should not have false positives: /archive/photos-old is NOT under /archive/photos"
-        );
-    }
-
-    #[test]
-    fn test_exclude_duplicates_empty_rel_path() {
-        // Test that duplicates are found correctly when a source has empty rel_path.
-        // Empty rel_path means the root path IS the file (e.g., someone registered
-        // "/archive/photo.jpg" as a root rather than "/archive" with rel_path "photo.jpg").
-        let mut db = make_test_db();
-        let conn = db.conn_mut();
-
-        // Source file to potentially exclude (normal path)
-        let source_root = insert_root(conn, "/source", "source", false);
-        let obj = insert_object(conn, "duplicate_content", false);
-        let source_id = insert_source(conn, source_root, "photo.jpg", Some(obj), true, false);
-
-        // Archive "file" where the root IS the file (empty rel_path)
-        // This simulates registering a single file as a root
-        let archive_file_root = insert_root(conn, "/archive/photo.jpg", "archive", false);
-        let _archive_id = insert_source(conn, archive_file_root, "", Some(obj), true, false);
-
-        // Run exclude_duplicates with prefer=/archive/photo.jpg (the exact file path)
-        let result = exclude_duplicates(
-            &mut db,
-            Path::new("/archive/photo.jpg"),
-            Some(Path::new("/source")),
-            &[],
-            false,
-            true, // yes (skip confirmation)
-        );
-
-        assert!(result.is_ok());
-
-        // The source file should be excluded - there's a copy at the prefer path
-        // (even though the archive source has empty rel_path)
-        assert!(
-            is_source_excluded(db.conn(), source_id),
-            "Source should be excluded when duplicate exists at prefer path with empty rel_path"
-        );
-    }
-
     // =========================================================================
     // set_by_id tests (Phase 1: path pattern completion)
     // =========================================================================
@@ -1596,64 +1328,8 @@ mod tests {
     }
 
     // =========================================================================
-    // exclude_duplicates group count / confirmation tests (Phase 3)
+    // exclude_duplicates integration tests (Phase 3)
     // =========================================================================
-
-    #[test]
-    fn test_duplicates_group_count() {
-        // 4 sources excluded across 2 object_ids → "2 duplicate groups"
-        let mut db = make_test_db();
-        let conn = db.conn_mut();
-
-        let source_root = insert_root(conn, "/source", "source", false);
-        let archive_root = insert_root(conn, "/archive", "archive", false);
-
-        // Two distinct objects
-        let obj1 = insert_object(conn, "group_hash_1", false);
-        let obj2 = insert_object(conn, "group_hash_2", false);
-
-        // 2 sources for obj1 in scope
-        let s1 = insert_source(conn, source_root, "a/photo1.jpg", Some(obj1), true, false);
-        let s2 = insert_source(conn, source_root, "b/photo1.jpg", Some(obj1), true, false);
-
-        // 2 sources for obj2 in scope
-        let s3 = insert_source(conn, source_root, "a/photo2.jpg", Some(obj2), true, false);
-        let s4 = insert_source(conn, source_root, "b/photo2.jpg", Some(obj2), true, false);
-
-        // 1 copy of each in archive (prefer path)
-        insert_source(conn, archive_root, "photo1.jpg", Some(obj1), true, false);
-        insert_source(conn, archive_root, "photo2.jpg", Some(obj2), true, false);
-
-        // Run with yes=true to skip interactive prompt
-        let result = exclude_duplicates(
-            &mut db,
-            Path::new("/archive"),
-            Some(Path::new("/source")),
-            &[],
-            false,
-            true, // yes
-        );
-
-        assert!(result.is_ok());
-
-        // All 4 source files should be excluded
-        let conn = db.conn();
-        assert!(is_source_excluded(conn, s1));
-        assert!(is_source_excluded(conn, s2));
-        assert!(is_source_excluded(conn, s3));
-        assert!(is_source_excluded(conn, s4));
-
-        // Verify group count computation matches expectation
-        // (We can't easily capture stderr, so verify the data directly)
-        let scope_ids = vec![s1, s2, s3, s4];
-        let sources_map = repo::source::batch_fetch_by_ids(conn, &scope_ids).unwrap();
-        let group_count: usize = scope_ids
-            .iter()
-            .filter_map(|id| sources_map.get(id).and_then(|s| s.object_id))
-            .collect::<HashSet<_>>()
-            .len();
-        assert_eq!(group_count, 2, "Should have 2 duplicate groups");
-    }
 
     #[test]
     fn test_duplicates_single_source_no_confirmation() {

@@ -1,14 +1,15 @@
 //! Exclude operations — plan/execute for source exclusion management.
 //!
-//! Provides plan/execute functions for `exclude set` and `exclude clear`.
-//! Plan functions compute what would happen (no side effects), returning
-//! typed plan structs with all data needed for display and confirmation.
-//! Execute functions perform the writes.
+//! Provides plan/execute functions for `exclude set`, `exclude clear`,
+//! and `exclude duplicates`. Plan functions compute what would happen
+//! (no side effects), returning typed plan structs with all data needed
+//! for display and confirmation. Execute functions perform the writes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
+use crate::domain::exclusion::find_excludable_duplicates;
 use crate::domain::include::IncludeSet;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::{self, Filter};
@@ -52,6 +53,37 @@ pub struct ExcludeClearPlan {
     pub paths: Vec<String>,
     /// Distinct root count across sources to clear.
     pub root_count: usize,
+}
+
+/// Parameters for planning a duplicate exclusion operation.
+pub struct ExcludeDuplicatesParams {
+    pub scopes: Vec<ScopeMatch>,
+    pub filters: Vec<Filter>,
+    pub prefer_prefix: String,
+}
+
+/// Computed plan for excluding duplicate sources. Contains all data the
+/// interface needs for dry-run display and confirmation — no further
+/// queries needed.
+pub struct ExcludeDuplicatesPlan {
+    /// Source IDs to exclude.
+    pub source_ids: Vec<i64>,
+    /// Paths corresponding to source_ids (parallel vector, for display).
+    pub paths: Vec<String>,
+    /// Distinct object groups being excluded (count of unique object_ids).
+    pub group_count: usize,
+    /// The prefer path used for duplicate resolution.
+    pub prefer_prefix: String,
+    /// Total sources in scope (before duplicate analysis).
+    pub scope_count: usize,
+    /// Sources skipped because they have no object_id (unhashed).
+    pub skipped_no_hash: usize,
+    /// Sources skipped because they're already in the prefer path.
+    pub skipped_in_prefer: usize,
+    /// Sources skipped because no copy exists in prefer path.
+    pub skipped_not_covered: usize,
+    /// Sources skipped because multiple copies exist in prefer path.
+    pub skipped_multiple: usize,
 }
 
 // ============================================================================
@@ -165,6 +197,87 @@ pub fn plan_clear(conn: &mut Connection, params: &ExcludeClearParams) -> Result<
     })
 }
 
+/// Compute what `exclude duplicates` would do — no side effects.
+///
+/// Selects non-excluded sources matching scope and filters, runs duplicate
+/// analysis via `find_excludable_duplicates()`, and computes confirmation
+/// data (group count, skip statistics).
+pub fn plan_duplicates(
+    conn: &mut Connection,
+    params: &ExcludeDuplicatesParams,
+) -> Result<ExcludeDuplicatesPlan> {
+    let sel_params = SelectionParams {
+        scopes: params.scopes.clone(),
+        include: IncludeSet::default(),
+        filters: params.filters.clone(),
+        role_policy: RolePolicy::SourceOnly,
+    };
+    let selection = selection::select_sources(conn, &sel_params)?;
+    let scope_count = selection.sources.len();
+
+    if selection.sources.is_empty() {
+        return Ok(ExcludeDuplicatesPlan {
+            source_ids: Vec::new(),
+            paths: Vec::new(),
+            group_count: 0,
+            prefer_prefix: params.prefer_prefix.clone(),
+            scope_count: 0,
+            skipped_no_hash: 0,
+            skipped_in_prefer: 0,
+            skipped_not_covered: 0,
+            skipped_multiple: 0,
+        });
+    }
+
+    // Build lookup map for source objects
+    let source_map: HashMap<i64, &_> = selection.sources.iter().map(|s| (s.id, s)).collect();
+
+    // Collect unique object_ids for duplicate lookup
+    let object_ids: Vec<i64> = selection
+        .sources
+        .iter()
+        .filter_map(|s| s.object_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    // Fetch all sources that share these objects (potential duplicates)
+    let sources_by_object = repo::source::fetch_sources_by_object_ids(conn, &object_ids)?;
+
+    // Use pure domain function to determine what to exclude
+    let result =
+        find_excludable_duplicates(&selection.sources, &sources_by_object, &params.prefer_prefix);
+
+    // Build plan from domain result
+    let mut source_ids = Vec::new();
+    let mut paths = Vec::new();
+    for &id in &result.to_exclude {
+        if let Some(source) = source_map.get(&id) {
+            source_ids.push(id);
+            paths.push(source.path());
+        }
+    }
+
+    // Compute group_count: distinct object_ids among sources to exclude
+    let group_count = source_ids
+        .iter()
+        .filter_map(|id| source_map.get(id).and_then(|s| s.object_id))
+        .collect::<HashSet<_>>()
+        .len();
+
+    Ok(ExcludeDuplicatesPlan {
+        source_ids,
+        paths,
+        group_count,
+        prefer_prefix: params.prefer_prefix.clone(),
+        scope_count,
+        skipped_no_hash: result.skipped_no_hash,
+        skipped_in_prefer: result.skipped_in_prefer,
+        skipped_not_covered: result.skipped_not_covered,
+        skipped_multiple: result.skipped_multiple,
+    })
+}
+
 // ============================================================================
 // Execute functions
 // ============================================================================
@@ -181,6 +294,14 @@ pub fn execute_set(conn: &Connection, plan: &ExcludeSetPlan) -> Result<usize> {
 pub fn execute_clear(conn: &Connection, plan: &ExcludeClearPlan) -> Result<usize> {
     for &source_id in &plan.source_ids {
         repo::source::set_excluded(conn, source_id, false)?;
+    }
+    Ok(plan.source_ids.len())
+}
+
+/// Execute a duplicate exclusion plan — marks sources as excluded.
+pub fn execute_duplicates(conn: &Connection, plan: &ExcludeDuplicatesPlan) -> Result<usize> {
+    for &source_id in &plan.source_ids {
+        repo::source::set_excluded(conn, source_id, true)?;
     }
     Ok(plan.source_ids.len())
 }
@@ -560,5 +681,248 @@ mod tests {
 
         let count = execute_clear(&conn, &plan).unwrap();
         assert_eq!(count, 2);
+    }
+
+    // =========================================================================
+    // plan_duplicates() tests
+    // =========================================================================
+
+    fn make_duplicates_params(
+        scopes: Vec<ScopeMatch>,
+        prefer_prefix: &str,
+    ) -> ExcludeDuplicatesParams {
+        ExcludeDuplicatesParams {
+            scopes,
+            filters: vec![],
+            prefer_prefix: prefer_prefix.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_plan_duplicates_empty_when_no_sources() {
+        let mut conn = setup_test_db();
+        let _root = insert_root(&conn, "/source", "source", false);
+
+        let plan =
+            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+
+        assert!(plan.source_ids.is_empty());
+        assert_eq!(plan.scope_count, 0);
+        assert_eq!(plan.group_count, 0);
+    }
+
+    #[test]
+    fn test_plan_duplicates_excludes_with_prefer_copy() {
+        let mut conn = setup_test_db();
+        let source_root = insert_root(&conn, "/source", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        let obj = insert_object(&conn, "same_hash", false);
+        let source_id = insert_source(&conn, source_root, "photo.jpg", Some(obj));
+        insert_source(&conn, archive_root, "photo.jpg", Some(obj));
+
+        let plan =
+            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+
+        assert_eq!(plan.source_ids, vec![source_id]);
+        assert_eq!(plan.scope_count, 1);
+    }
+
+    #[test]
+    fn test_plan_duplicates_skips_no_copy() {
+        let mut conn = setup_test_db();
+        let source_root = insert_root(&conn, "/source", "source", false);
+        let _archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        let obj = insert_object(&conn, "unique_hash", false);
+        insert_source(&conn, source_root, "unique.jpg", Some(obj));
+
+        let plan =
+            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+
+        assert!(plan.source_ids.is_empty());
+        assert_eq!(plan.skipped_not_covered, 1);
+    }
+
+    #[test]
+    fn test_plan_duplicates_skips_multiple_copies() {
+        let mut conn = setup_test_db();
+        let source_root = insert_root(&conn, "/source", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        let obj = insert_object(&conn, "multi_hash", false);
+        insert_source(&conn, source_root, "photo.jpg", Some(obj));
+        insert_source(&conn, archive_root, "copy1.jpg", Some(obj));
+        insert_source(&conn, archive_root, "copy2.jpg", Some(obj));
+
+        let plan =
+            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+
+        assert!(plan.source_ids.is_empty());
+        assert_eq!(plan.skipped_multiple, 1);
+    }
+
+    #[test]
+    fn test_plan_duplicates_skips_unhashed() {
+        let mut conn = setup_test_db();
+        let source_root = insert_root(&conn, "/source", "source", false);
+
+        insert_source(&conn, source_root, "unhashed.jpg", None);
+
+        let plan =
+            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+
+        assert!(plan.source_ids.is_empty());
+        assert_eq!(plan.skipped_no_hash, 1);
+        assert_eq!(plan.scope_count, 1);
+    }
+
+    #[test]
+    fn test_plan_duplicates_skips_in_prefer() {
+        let mut conn = setup_test_db();
+        let archive_root = insert_root(&conn, "/archive", "source", false);
+
+        let obj = insert_object(&conn, "prefer_hash", false);
+        insert_source(&conn, archive_root, "photo.jpg", Some(obj));
+
+        // Source is in the prefer path itself — should be skipped
+        let plan =
+            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+
+        assert!(plan.source_ids.is_empty());
+        assert_eq!(plan.skipped_in_prefer, 1);
+    }
+
+    #[test]
+    fn test_plan_duplicates_computes_group_count() {
+        let mut conn = setup_test_db();
+        let source_root = insert_root(&conn, "/source", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        let obj1 = insert_object(&conn, "group1_hash", false);
+        let obj2 = insert_object(&conn, "group2_hash", false);
+
+        // 2 sources for obj1, 2 sources for obj2
+        insert_source(&conn, source_root, "a/photo1.jpg", Some(obj1));
+        insert_source(&conn, source_root, "b/photo1.jpg", Some(obj1));
+        insert_source(&conn, source_root, "a/photo2.jpg", Some(obj2));
+        insert_source(&conn, source_root, "b/photo2.jpg", Some(obj2));
+
+        // 1 copy each in archive
+        insert_source(&conn, archive_root, "photo1.jpg", Some(obj1));
+        insert_source(&conn, archive_root, "photo2.jpg", Some(obj2));
+
+        let plan =
+            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+
+        assert_eq!(plan.source_ids.len(), 4);
+        assert_eq!(plan.group_count, 2, "2 distinct object groups");
+    }
+
+    #[test]
+    fn test_plan_duplicates_includes_paths() {
+        let mut conn = setup_test_db();
+        let source_root = insert_root(&conn, "/source", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        let obj = insert_object(&conn, "path_hash", false);
+        insert_source(&conn, source_root, "subdir/photo.jpg", Some(obj));
+        insert_source(&conn, archive_root, "photo.jpg", Some(obj));
+
+        let plan =
+            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+
+        assert_eq!(plan.paths, vec!["/source/subdir/photo.jpg"]);
+    }
+
+    #[test]
+    fn test_plan_duplicates_scope_count() {
+        let mut conn = setup_test_db();
+        let source_root = insert_root(&conn, "/source", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        let obj = insert_object(&conn, "scope_hash", false);
+        insert_source(&conn, source_root, "a.jpg", Some(obj));
+        insert_source(&conn, source_root, "b.jpg", None); // unhashed
+        insert_source(&conn, archive_root, "a.jpg", Some(obj));
+
+        let plan =
+            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+
+        assert_eq!(plan.scope_count, 2, "Both sources in scope (before analysis)");
+        assert_eq!(plan.source_ids.len(), 1, "Only hashed with prefer copy excluded");
+    }
+
+    #[test]
+    fn test_plan_duplicates_respects_scope() {
+        let mut conn = setup_test_db();
+        let source_root = insert_root(&conn, "/source", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        let obj1 = insert_object(&conn, "in_scope_hash", false);
+        let obj2 = insert_object(&conn, "out_scope_hash", false);
+
+        let in_scope = insert_source(&conn, source_root, "2024/photo.jpg", Some(obj1));
+        insert_source(&conn, source_root, "2023/photo.jpg", Some(obj2));
+        insert_source(&conn, archive_root, "photo1.jpg", Some(obj1));
+        insert_source(&conn, archive_root, "photo2.jpg", Some(obj2));
+
+        let scopes = ScopeMatch::classify_all(&["/source/2024".to_string()]);
+        let plan =
+            plan_duplicates(&mut conn, &make_duplicates_params(scopes, "/archive")).unwrap();
+
+        assert_eq!(plan.source_ids, vec![in_scope]);
+        assert_eq!(plan.scope_count, 1);
+    }
+
+    // =========================================================================
+    // execute_duplicates() tests
+    // =========================================================================
+
+    #[test]
+    fn test_execute_duplicates_marks_excluded() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/source", "source", false);
+        let id1 = insert_source(&conn, root, "a.jpg", None);
+        let id2 = insert_source(&conn, root, "b.jpg", None);
+
+        let plan = ExcludeDuplicatesPlan {
+            source_ids: vec![id1, id2],
+            paths: vec!["/source/a.jpg".to_string(), "/source/b.jpg".to_string()],
+            group_count: 1,
+            prefer_prefix: "/archive".to_string(),
+            scope_count: 2,
+            skipped_no_hash: 0,
+            skipped_in_prefer: 0,
+            skipped_not_covered: 0,
+            skipped_multiple: 0,
+        };
+
+        execute_duplicates(&conn, &plan).unwrap();
+
+        assert!(is_source_excluded(&conn, id1));
+        assert!(is_source_excluded(&conn, id2));
+    }
+
+    #[test]
+    fn test_execute_duplicates_returns_count() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/source", "source", false);
+        let id1 = insert_source(&conn, root, "a.jpg", None);
+
+        let plan = ExcludeDuplicatesPlan {
+            source_ids: vec![id1],
+            paths: vec!["/source/a.jpg".to_string()],
+            group_count: 1,
+            prefer_prefix: "/archive".to_string(),
+            scope_count: 1,
+            skipped_no_hash: 0,
+            skipped_in_prefer: 0,
+            skipped_not_covered: 0,
+            skipped_multiple: 0,
+        };
+
+        let count = execute_duplicates(&conn, &plan).unwrap();
+        assert_eq!(count, 1);
     }
 }
