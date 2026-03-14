@@ -1,9 +1,9 @@
-//! Exclude operations — plan/execute for source exclusion management.
+//! Exclude operations — plan/execute for exclusion management.
 //!
 //! Provides plan/execute functions for `exclude set`, `exclude clear`,
-//! and `exclude duplicates`. Plan functions compute what would happen
-//! (no side effects), returning typed plan structs with all data needed
-//! for display and confirmation. Execute functions perform the writes.
+//! `exclude duplicates`, and `exclude set --objects`. Plan functions compute
+//! what would happen (no side effects), returning typed plan structs with all
+//! data needed for display and confirmation. Execute functions perform the writes.
 
 use std::collections::{HashMap, HashSet};
 
@@ -84,6 +84,44 @@ pub struct ExcludeDuplicatesPlan {
     pub skipped_not_covered: usize,
     /// Sources skipped because multiple copies exist in prefer path.
     pub skipped_multiple: usize,
+}
+
+/// Parameters for planning an object exclusion operation.
+pub struct ExcludeSetObjectsParams {
+    pub scopes: Vec<ScopeMatch>,
+    pub filters: Vec<Filter>,
+}
+
+/// Computed plan for excluding objects. Contains all data the interface
+/// needs for dry-run display and confirmation — no further queries needed.
+pub struct ExcludeSetObjectsPlan {
+    /// Objects to exclude, with display data.
+    pub objects: Vec<ObjectPlanEntry>,
+    /// Total source count across all objects.
+    pub total_source_count: usize,
+    /// Total archive source count across all objects.
+    pub total_archive_count: usize,
+    /// Sources skipped because they have no hash.
+    pub skipped_no_hash: usize,
+    /// Empty files skipped (size = 0).
+    pub skipped_empty: usize,
+    /// Objects already excluded.
+    pub skipped_already_excluded: usize,
+}
+
+/// A single object entry in the exclusion plan.
+pub struct ObjectPlanEntry {
+    pub object_id: i64,
+    /// Hash prefix for display (first 16 chars).
+    pub hash_prefix: String,
+    /// Sources linked to this object (sorted: role DESC, root_path, rel_path).
+    pub sources: Vec<ObjectSourceInfo>,
+}
+
+/// Source info for object exclusion display.
+pub struct ObjectSourceInfo {
+    pub path: String,
+    pub is_archive: bool,
 }
 
 // ============================================================================
@@ -278,6 +316,139 @@ pub fn plan_duplicates(
     })
 }
 
+/// Compute what `exclude set --objects` would do — no side effects.
+///
+/// Selects sources matching scope and filters (including already-excluded
+/// sources), collects their objects, filters out unhashed/empty/already-excluded,
+/// and computes display data per object.
+pub fn plan_set_objects(
+    conn: &mut Connection,
+    params: &ExcludeSetObjectsParams,
+) -> Result<ExcludeSetObjectsPlan> {
+    let sel_params = SelectionParams {
+        scopes: params.scopes.clone(),
+        include: IncludeSet {
+            excluded: true,
+            archived: false,
+        },
+        filters: params.filters.clone(),
+        role_policy: RolePolicy::SourceOnly,
+    };
+    let selection = selection::select_sources(conn, &sel_params)?;
+
+    if selection.sources.is_empty() {
+        return Ok(ExcludeSetObjectsPlan {
+            objects: vec![],
+            total_source_count: 0,
+            total_archive_count: 0,
+            skipped_no_hash: 0,
+            skipped_empty: 0,
+            skipped_already_excluded: 0,
+        });
+    }
+
+    // Collect unique object_ids from selected sources, counting skips
+    let mut seen_objects: HashSet<i64> = HashSet::new();
+    let mut object_ids_to_check: Vec<i64> = Vec::new();
+    let mut skipped_no_hash = 0;
+    let mut skipped_empty = 0;
+
+    for source in &selection.sources {
+        let Some(object_id) = source.object_id else {
+            skipped_no_hash += 1;
+            continue;
+        };
+        if !seen_objects.insert(object_id) {
+            continue;
+        }
+        // Empty files all share the same hash — skip to prevent excluding all empty files
+        if source.size == 0 {
+            skipped_empty += 1;
+            continue;
+        }
+        object_ids_to_check.push(object_id);
+    }
+
+    if object_ids_to_check.is_empty() {
+        return Ok(ExcludeSetObjectsPlan {
+            objects: vec![],
+            total_source_count: 0,
+            total_archive_count: 0,
+            skipped_no_hash,
+            skipped_empty,
+            skipped_already_excluded: 0,
+        });
+    }
+
+    // Batch fetch objects to check exclusion status
+    let objects_map = repo::object::batch_fetch_by_ids(conn, &object_ids_to_check)?;
+
+    // Batch fetch all sources per object for display
+    let sources_by_object =
+        repo::source::fetch_sources_by_object_ids(conn, &object_ids_to_check)?;
+
+    // Build plan entries, filtering out already-excluded objects
+    let mut objects: Vec<ObjectPlanEntry> = Vec::new();
+    let mut total_source_count = 0;
+    let mut total_archive_count = 0;
+    let mut skipped_already_excluded = 0;
+
+    for &object_id in &object_ids_to_check {
+        let Some(object) = objects_map.get(&object_id) else {
+            continue;
+        };
+
+        if object.is_excluded() {
+            skipped_already_excluded += 1;
+            continue;
+        }
+
+        let hash_prefix =
+            object.hash_value[..16.min(object.hash_value.len())].to_string();
+
+        // Get and sort sources for this object
+        let mut obj_sources: Vec<_> = sources_by_object
+            .get(&object_id)
+            .cloned()
+            .unwrap_or_default();
+
+        // Sort: role DESC (source before archive), root_path, rel_path
+        obj_sources.sort_by(|a, b| {
+            b.root_role
+                .cmp(&a.root_role)
+                .then_with(|| a.root_path.cmp(&b.root_path))
+                .then_with(|| a.rel_path.cmp(&b.rel_path))
+        });
+
+        let sources: Vec<ObjectSourceInfo> = obj_sources
+            .iter()
+            .map(|s| ObjectSourceInfo {
+                path: s.path(),
+                is_archive: s.is_from_role("archive"),
+            })
+            .collect();
+
+        let archive_count = sources.iter().filter(|s| s.is_archive).count();
+        total_archive_count += archive_count;
+        total_source_count += sources.len();
+
+        objects.push(ObjectPlanEntry {
+            object_id,
+            hash_prefix,
+            sources,
+        });
+    }
+
+    Ok(ExcludeSetObjectsPlan {
+        objects,
+        total_source_count,
+        total_archive_count,
+        skipped_no_hash,
+        skipped_empty,
+        skipped_already_excluded,
+    })
+}
+
 // ============================================================================
 // Execute functions
 // ============================================================================
@@ -304,6 +475,14 @@ pub fn execute_duplicates(conn: &Connection, plan: &ExcludeDuplicatesPlan) -> Re
         repo::source::set_excluded(conn, source_id, true)?;
     }
     Ok(plan.source_ids.len())
+}
+
+/// Execute an object exclusion plan — marks objects as excluded.
+pub fn execute_set_objects(conn: &Connection, plan: &ExcludeSetObjectsPlan) -> Result<usize> {
+    for entry in &plan.objects {
+        repo::object::set_excluded(conn, entry.object_id, true)?;
+    }
+    Ok(plan.objects.len())
 }
 
 #[cfg(test)]
@@ -923,6 +1102,244 @@ mod tests {
         };
 
         let count = execute_duplicates(&conn, &plan).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    // =========================================================================
+    // plan_set_objects() tests
+    // =========================================================================
+
+    fn insert_source_with_size(
+        conn: &Connection,
+        root_id: i64,
+        rel_path: &str,
+        object_id: Option<i64>,
+        size: i64,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
+             VALUES (?, ?, ?, ?, 1704067200, '', 0, 0, 0, 0)",
+            rusqlite::params![root_id, rel_path, object_id, size],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn make_set_objects_params(scopes: Vec<ScopeMatch>) -> ExcludeSetObjectsParams {
+        ExcludeSetObjectsParams {
+            scopes,
+            filters: vec![],
+        }
+    }
+
+    fn is_object_excluded(conn: &Connection, object_id: i64) -> bool {
+        conn.query_row(
+            "SELECT excluded FROM objects WHERE id = ?",
+            [object_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v == 1)
+        .unwrap_or(false)
+    }
+
+    #[test]
+    fn test_plan_set_objects_empty_when_no_sources() {
+        let mut conn = setup_test_db();
+        let _root = insert_root(&conn, "/photos", "source", false);
+
+        let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+
+        assert!(plan.objects.is_empty());
+        assert_eq!(plan.total_source_count, 0);
+        assert_eq!(plan.total_archive_count, 0);
+    }
+
+    #[test]
+    fn test_plan_set_objects_includes_non_excluded() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "abc123hash_value_x", false);
+        insert_source(&conn, root, "photo.jpg", Some(obj));
+
+        let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+
+        assert_eq!(plan.objects.len(), 1);
+        assert_eq!(plan.objects[0].object_id, obj);
+    }
+
+    #[test]
+    fn test_plan_set_objects_skips_already_excluded() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "already_excl_hash", true);
+        insert_source(&conn, root, "photo.jpg", Some(obj));
+
+        let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+
+        assert!(plan.objects.is_empty());
+        assert_eq!(plan.skipped_already_excluded, 1);
+    }
+
+    #[test]
+    fn test_plan_set_objects_skips_unhashed() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root, "unhashed.jpg", None);
+
+        let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+
+        assert!(plan.objects.is_empty());
+        assert_eq!(plan.skipped_no_hash, 1);
+    }
+
+    #[test]
+    fn test_plan_set_objects_skips_empty() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "empty_hash_value_x", false);
+        insert_source_with_size(&conn, root, "empty.txt", Some(obj), 0);
+
+        let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+
+        assert!(plan.objects.is_empty());
+        assert_eq!(plan.skipped_empty, 1);
+    }
+
+    #[test]
+    fn test_plan_set_objects_computes_source_counts() {
+        let mut conn = setup_test_db();
+        let source_root = insert_root(&conn, "/source", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+        let obj = insert_object(&conn, "counts_hash_value", false);
+        insert_source(&conn, source_root, "photo.jpg", Some(obj));
+        insert_source(&conn, archive_root, "photo.jpg", Some(obj));
+
+        let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+
+        assert_eq!(plan.objects.len(), 1);
+        assert_eq!(plan.total_source_count, 2);
+        assert_eq!(plan.total_archive_count, 1);
+    }
+
+    #[test]
+    fn test_plan_set_objects_hash_prefix() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "abcdef1234567890extra", false);
+        insert_source(&conn, root, "photo.jpg", Some(obj));
+
+        let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+
+        assert_eq!(plan.objects[0].hash_prefix, "abcdef1234567890");
+    }
+
+    #[test]
+    fn test_plan_set_objects_respects_scope() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj1 = insert_object(&conn, "in_scope_obj_hash", false);
+        let obj2 = insert_object(&conn, "out_scope_obj_hsh", false);
+        insert_source(&conn, root, "2024/photo.jpg", Some(obj1));
+        insert_source(&conn, root, "2023/photo.jpg", Some(obj2));
+
+        let scopes = ScopeMatch::classify_all(&["/photos/2024".to_string()]);
+        let plan = plan_set_objects(&mut conn, &make_set_objects_params(scopes)).unwrap();
+
+        assert_eq!(plan.objects.len(), 1);
+        assert_eq!(plan.objects[0].object_id, obj1);
+    }
+
+    #[test]
+    fn test_plan_set_objects_deduplicates_objects() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "shared_obj_hash_xx", false);
+        // Two sources sharing the same object
+        insert_source(&conn, root, "copy1.jpg", Some(obj));
+        insert_source(&conn, root, "copy2.jpg", Some(obj));
+
+        let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+
+        assert_eq!(plan.objects.len(), 1, "Same object should appear once");
+    }
+
+    #[test]
+    fn test_plan_set_objects_source_sort_order() {
+        let mut conn = setup_test_db();
+        let source_root = insert_root(&conn, "/source", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+        let obj = insert_object(&conn, "sort_order_hash_xx", false);
+        insert_source(&conn, source_root, "photo.jpg", Some(obj));
+        insert_source(&conn, archive_root, "photo.jpg", Some(obj));
+
+        let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+
+        let sources = &plan.objects[0].sources;
+        assert_eq!(sources.len(), 2);
+        // Source roots come first (role DESC: 'source' > 'archive')
+        assert!(!sources[0].is_archive, "Source root should come first");
+        assert!(sources[1].is_archive, "Archive root should come second");
+    }
+
+    // =========================================================================
+    // execute_set_objects() tests
+    // =========================================================================
+
+    #[test]
+    fn test_execute_set_objects_marks_excluded() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj1 = insert_object(&conn, "exec_obj_hash1_xx", false);
+        let obj2 = insert_object(&conn, "exec_obj_hash2_xx", false);
+        insert_source(&conn, root, "a.jpg", Some(obj1));
+        insert_source(&conn, root, "b.jpg", Some(obj2));
+
+        let plan = ExcludeSetObjectsPlan {
+            objects: vec![
+                ObjectPlanEntry {
+                    object_id: obj1,
+                    hash_prefix: "exec_obj_hash1_x".to_string(),
+                    sources: vec![],
+                },
+                ObjectPlanEntry {
+                    object_id: obj2,
+                    hash_prefix: "exec_obj_hash2_x".to_string(),
+                    sources: vec![],
+                },
+            ],
+            total_source_count: 2,
+            total_archive_count: 0,
+            skipped_no_hash: 0,
+            skipped_empty: 0,
+            skipped_already_excluded: 0,
+        };
+
+        execute_set_objects(&conn, &plan).unwrap();
+
+        assert!(is_object_excluded(&conn, obj1));
+        assert!(is_object_excluded(&conn, obj2));
+    }
+
+    #[test]
+    fn test_execute_set_objects_returns_count() {
+        let conn = setup_test_db();
+        let _root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "count_obj_hash_xxx", false);
+
+        let plan = ExcludeSetObjectsPlan {
+            objects: vec![ObjectPlanEntry {
+                object_id: obj,
+                hash_prefix: "count_obj_hash_x".to_string(),
+                sources: vec![],
+            }],
+            total_source_count: 1,
+            total_archive_count: 0,
+            skipped_no_hash: 0,
+            skipped_empty: 0,
+            skipped_already_excluded: 0,
+        };
+
+        let count = execute_set_objects(&conn, &plan).unwrap();
         assert_eq!(count, 1);
     }
 }

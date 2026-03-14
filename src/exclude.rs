@@ -1,18 +1,16 @@
 use anyhow::Result;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::ceremony;
-use crate::domain::include::IncludeSet;
 use crate::domain::path::{resolve_path, resolve_paths};
 use crate::domain::root::find_containing_root;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::Filter;
 use crate::ops::exclude::{
-    execute_clear, execute_duplicates, execute_set, plan_clear, plan_duplicates, plan_set,
-    ExcludeClearParams, ExcludeDuplicatesParams, ExcludeSetParams,
+    execute_clear, execute_duplicates, execute_set, execute_set_objects, plan_clear,
+    plan_duplicates, plan_set, plan_set_objects, ExcludeClearParams, ExcludeDuplicatesParams,
+    ExcludeSetObjectsParams, ExcludeSetParams,
 };
-use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Connection, Db};
 
 // ============================================================================
@@ -455,176 +453,78 @@ pub fn set_objects_by_filter(
     let all_roots = repo::root::fetch_all(conn)?;
     let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
 
-    // Get matching sources (include already-excluded to find their objects)
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
-    let params = SelectionParams {
-        scopes,
-        include: IncludeSet {
-            excluded: true,
-            archived: false,
-        },
-        filters,
-        role_policy: RolePolicy::SourceOnly,
-    };
-    let source_ids = selection::select_sources(conn, &params)?.source_ids();
+    let plan = plan_set_objects(conn, &ExcludeSetObjectsParams { scopes, filters })?;
 
-    if source_ids.is_empty() {
-        println!("No sources match the given filters.");
-        return Ok(());
-    }
-
-    // Batch fetch all sources
-    let sources_map = repo::source::batch_fetch_by_ids(conn, &source_ids)?;
-
-    // Collect unique object_ids and track stats
-    let mut object_ids_to_check: Vec<i64> = Vec::new();
-    let mut seen_objects: HashSet<i64> = HashSet::new();
-    let mut no_hash = 0;
-    let mut empty_skipped = 0;
-
-    for source_id in &source_ids {
-        let Some(source) = sources_map.get(source_id) else {
-            continue;
-        };
-
-        let Some(object_id) = source.object_id else {
-            no_hash += 1;
-            continue;
-        };
-
-        if seen_objects.contains(&object_id) {
-            continue;
-        }
-        seen_objects.insert(object_id);
-
-        // Skip empty files
-        if source.size == 0 {
-            empty_skipped += 1;
-            continue;
-        }
-
-        object_ids_to_check.push(object_id);
-    }
-
-    if object_ids_to_check.is_empty() {
+    if plan.objects.is_empty() {
         println!("No objects to exclude.");
-        if no_hash > 0 {
-            println!("  {no_hash} sources have no hash yet");
+        if plan.skipped_no_hash > 0 {
+            println!("  {} sources have no hash yet", plan.skipped_no_hash);
         }
-        if empty_skipped > 0 {
-            println!("  {empty_skipped} empty files skipped (use --hash to exclude explicitly)");
+        if plan.skipped_empty > 0 {
+            println!(
+                "  {} empty files skipped (use --hash to exclude explicitly)",
+                plan.skipped_empty
+            );
         }
-        return Ok(());
-    }
-
-    // Batch fetch objects to check exclusion status and get hash values
-    let objects_map = repo::object::batch_fetch_by_ids(conn, &object_ids_to_check)?;
-
-    // Batch fetch sources per object for counting
-    let sources_by_object = repo::source::fetch_sources_by_object_ids(conn, &object_ids_to_check)?;
-
-    // Filter to non-excluded objects and build final list
-    let mut objects_to_exclude: Vec<(i64, String, i64)> = Vec::new(); // (object_id, hash, source_count)
-    let mut already_excluded = 0;
-
-    for object_id in &object_ids_to_check {
-        let Some(object) = objects_map.get(object_id) else {
-            continue;
-        };
-
-        // Skip already excluded (using domain predicate)
-        if object.is_excluded() {
-            already_excluded += 1;
-            continue;
-        }
-
-        // Count present sources for this object (from batch-fetched data)
-        let source_count = sources_by_object
-            .get(object_id)
-            .map(|sources| sources.len() as i64)
-            .unwrap_or(0);
-
-        objects_to_exclude.push((*object_id, object.hash_value.clone(), source_count));
-    }
-
-    if objects_to_exclude.is_empty() {
-        println!("No objects to exclude.");
-        if no_hash > 0 {
-            println!("  {no_hash} sources have no hash yet");
-        }
-        if empty_skipped > 0 {
-            println!("  {empty_skipped} empty files skipped (use --hash to exclude explicitly)");
-        }
-        if already_excluded > 0 {
-            println!("  {already_excluded} objects already excluded");
+        if plan.skipped_already_excluded > 0 {
+            println!(
+                "  {} objects already excluded",
+                plan.skipped_already_excluded
+            );
         }
         return Ok(());
     }
 
-    // Gather source details for each object
-    let mut all_sources: Vec<(i64, String, Vec<SourceInfo>)> = Vec::new(); // (object_id, hash, sources)
-    let mut total_source_count = 0;
-    let mut total_archive_count = 0;
+    let total_in_source_roots = plan.total_source_count - plan.total_archive_count;
 
-    for (object_id, hash, _) in &objects_to_exclude {
-        let sources = get_object_sources(conn, *object_id)?;
-        let archive_count = sources.iter().filter(|s| s.is_archive).count();
-        total_archive_count += archive_count;
-        total_source_count += sources.len();
-        all_sources.push((*object_id, hash.clone(), sources));
-    }
-
-    let total_in_source_roots = total_source_count - total_archive_count;
-
-    // Summary
     if options.dry_run {
         println!(
             "Would exclude {} objects affecting {} sources ({} in source roots, {} in archives):",
-            objects_to_exclude.len(),
-            total_source_count,
+            plan.objects.len(),
+            plan.total_source_count,
             total_in_source_roots,
-            total_archive_count
+            plan.total_archive_count
         );
-        for (_, hash, sources) in &all_sources {
-            let archive_count = sources.iter().filter(|s| s.is_archive).count();
-            let src_count = sources.len() - archive_count;
+        for entry in &plan.objects {
+            let archive_count = entry.sources.iter().filter(|s| s.is_archive).count();
+            let src_count = entry.sources.len() - archive_count;
             println!(
                 "  {}... ({} source, {} archive)",
-                &hash[..16.min(hash.len())],
-                src_count,
-                archive_count
+                entry.hash_prefix, src_count, archive_count
             );
             if options.verbose {
-                for source in sources {
+                for source in &entry.sources {
                     let marker = if source.is_archive { " (archive)" } else { "" };
                     println!("      {}{}", source.path, marker);
                 }
             }
         }
-        if no_hash > 0 {
-            println!("\n  {no_hash} sources skipped (no hash)");
+        if plan.skipped_no_hash > 0 {
+            println!("\n  {} sources skipped (no hash)", plan.skipped_no_hash);
         }
-        if empty_skipped > 0 {
-            println!("  {empty_skipped} empty files skipped (use --hash to exclude explicitly)");
+        if plan.skipped_empty > 0 {
+            println!(
+                "  {} empty files skipped (use --hash to exclude explicitly)",
+                plan.skipped_empty
+            );
         }
-        if already_excluded > 0 {
-            println!("  {already_excluded} objects already excluded");
+        if plan.skipped_already_excluded > 0 {
+            println!(
+                "  {} objects already excluded",
+                plan.skipped_already_excluded
+            );
         }
         println!("\nUse --yes to execute.");
         return Ok(());
     }
 
-    // Execute exclusions
-    for (object_id, _, _) in &all_sources {
-        repo::object::set_excluded(conn, *object_id, true)?;
-    }
+    // Execute
+    let count = execute_set_objects(conn, &plan)?;
 
     println!(
         "Excluded {} objects affecting {} sources ({} in source roots, {} in archives)",
-        all_sources.len(),
-        total_source_count,
-        total_in_source_roots,
-        total_archive_count
+        count, plan.total_source_count, total_in_source_roots, plan.total_archive_count
     );
     Ok(())
 }
@@ -1146,81 +1046,6 @@ mod tests {
             is_object_excluded_in_db(db.conn(), obj),
             "Object should be excluded after set_objects_by_filter"
         );
-    }
-
-    #[test]
-    fn test_set_objects_by_filter_skips_empty_files() {
-        let mut db = make_test_db();
-        let conn = db.conn_mut();
-
-        let root = insert_root(conn, "/photos", "source", false);
-        let obj = insert_object(conn, "empty_file_hash", false);
-        // Size = 0 (empty file)
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, present, excluded)
-             VALUES (?, ?, ?, 0, 1704067200, '', 0, 0, 0, 0, 1, 0)",
-            rusqlite::params![root, "empty.txt", obj],
-        )
-        .unwrap();
-
-        let options = SetOptions {
-            dry_run: false,
-            verbose: false,
-            yes: true,
-        };
-
-        let result = set_objects_by_filter(&mut db, &[], &[], &options);
-
-        assert!(result.is_ok());
-        assert!(
-            !is_object_excluded_in_db(db.conn(), obj),
-            "Empty file objects should NOT be excluded"
-        );
-    }
-
-    #[test]
-    fn test_set_objects_by_filter_skips_already_excluded() {
-        let mut db = make_test_db();
-        let conn = db.conn_mut();
-
-        let root = insert_root(conn, "/photos", "source", false);
-        // Object is already excluded
-        let obj = insert_object(conn, "already_excluded_hash", true);
-        insert_source(conn, root, "photo.jpg", Some(obj), true, false);
-
-        let options = SetOptions {
-            dry_run: false,
-            verbose: false,
-            yes: true,
-        };
-
-        // Should succeed without error (skips already excluded)
-        let result = set_objects_by_filter(&mut db, &[], &[], &options);
-
-        assert!(result.is_ok());
-        // Should still be excluded (unchanged)
-        assert!(is_object_excluded_in_db(db.conn(), obj));
-    }
-
-    #[test]
-    fn test_set_objects_by_filter_skips_unhashed() {
-        let mut db = make_test_db();
-        let conn = db.conn_mut();
-
-        let root = insert_root(conn, "/photos", "source", false);
-        // Source without object_id (unhashed)
-        insert_source(conn, root, "unhashed.jpg", None, true, false);
-
-        let options = SetOptions {
-            dry_run: false,
-            verbose: false,
-            yes: true,
-        };
-
-        // Should succeed (just reports nothing to exclude)
-        let result = set_objects_by_filter(&mut db, &[], &[], &options);
-
-        assert!(result.is_ok());
     }
 
     #[test]
