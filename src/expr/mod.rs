@@ -26,4 +26,4 @@ pub use eval::{
 pub use filter::{apply_filters, CompareOp, Filter};
 
 // Re-export from value.rs
-pub use value::{fact_value_to_display, resolve_fact_value};
+pub use value::{fact_value_to_display, get_builtin_value, resolve_fact_value};

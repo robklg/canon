@@ -70,7 +70,7 @@ pub fn resolve_fact_value(
 ///
 /// Built-in facts are derived from Source columns without database lookup.
 /// Returns None for hash-based facts which require object lookup.
-fn get_builtin_value(source: &Source, builtin: BuiltinKey) -> Option<FactValue> {
+pub fn get_builtin_value(source: &Source, builtin: BuiltinKey) -> Option<FactValue> {
     match builtin {
         BuiltinKey::SourceExt | BuiltinKey::Ext => {
             let ext = std::path::Path::new(&source.rel_path)

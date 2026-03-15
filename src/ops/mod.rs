@@ -9,6 +9,7 @@ pub mod apply;
 pub mod cluster;
 pub mod coverage;
 pub mod exclude;
+pub mod facts;
 pub mod fs;
 pub mod ls;
 pub mod selection;

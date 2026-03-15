@@ -1,19 +1,15 @@
 use anyhow::{bail, Result};
-use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::domain::fact::FactEntry;
 use crate::domain::path::resolve_paths;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
-use crate::expr::value as fact_value;
-use crate::expr::{
-    self, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, ModifierCall,
-    ParsedFactKey, PathAccessor,
-};
+use crate::expr::{BuiltinKey, BuiltinKeyCategory, ParsedFactKey};
+use crate::ops;
+use crate::ops::facts::{AllKeysResult, DistributionResult, GroupedDistributionResult};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
-use crate::repo::{self, Connection, Db};
+use crate::repo::{self, Db};
 
 /// Check if a parsed key represents source.root (for special display formatting)
 fn is_root_key(key: &ParsedFactKey) -> bool {
@@ -24,53 +20,6 @@ fn get_fact_category(key: &str) -> BuiltinKeyCategory {
     BuiltinKey::from_str(key)
         .map(|k| k.category())
         .unwrap_or(BuiltinKeyCategory::Stored)
-}
-
-fn is_builtin_or_derived(key: &str) -> bool {
-    BuiltinKey::from_str(key)
-        .map(|k| k.visibility() != BuiltinKeyVisibility::NotListed)
-        .unwrap_or(false)
-}
-
-/// Convert a FactValue to a display string.
-fn fact_value_to_display(value: &FactValue) -> String {
-    match value {
-        FactValue::Text(t) => t.clone(),
-        FactValue::Path(p) => p.clone(),
-        FactValue::Num(n) => {
-            if n.fract() == 0.0 {
-                format!("{}", *n as i64)
-            } else {
-                format!("{n}")
-            }
-        }
-        FactValue::Time(ts) => chrono::DateTime::from_timestamp(*ts, 0)
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-            .unwrap_or_else(|| ts.to_string()),
-    }
-}
-
-/// Apply accessor and modifiers to a FactValue, returning a string for grouping
-fn apply_transforms(
-    value: FactValue,
-    accessor: &Option<PathAccessor>,
-    modifiers: &[ModifierCall],
-    key: &str,
-) -> Result<String> {
-    let mut result = value;
-
-    // Apply accessor if present
-    if let Some(acc) = accessor {
-        result = expr::apply_accessor(&result, acc, key)?;
-    }
-
-    // Apply modifiers (for_display: true since this is for facts output)
-    for modifier_call in modifiers {
-        result = expr::apply_modifier(&result, modifier_call, key, true)?;
-    }
-
-    // Convert to string for display
-    Ok(fact_value_to_display(&result))
 }
 
 pub fn run(
@@ -151,48 +100,25 @@ pub fn run(
     }
 
     if let Some(fact_key) = key_arg {
-        // Parse key for accessor and modifiers
         let main_key = ParsedFactKey::parse(fact_key)?;
 
         if !grouping_keys.is_empty() {
-            // Grouped distribution
-            show_grouped_distribution(
+            let result = ops::facts::compute_grouped_distribution(
                 conn,
                 &source_ids,
                 &main_key,
                 &grouping_keys,
-                total_sources,
                 limit,
             )?;
-        } else if is_builtin_or_derived(&main_key.base_key) {
-            show_builtin_distribution(
-                conn,
-                &source_ids,
-                &main_key.base_key,
-                fact_key,
-                &main_key.accessor,
-                &main_key.modifiers,
-                total_sources,
-                limit,
-            )?;
-        } else if main_key.has_transforms() {
-            // Stored fact with transforms - need to fetch raw values and apply transforms
-            show_transformed_distribution(
-                conn,
-                &source_ids,
-                &main_key.base_key,
-                fact_key,
-                &main_key.accessor,
-                &main_key.modifiers,
-                total_sources,
-                limit,
-            )?;
+            display_grouped_distribution(&result, &main_key, &grouping_keys, total_sources);
         } else {
-            // Stored fact without transforms - use SQL grouping
-            show_value_distribution(conn, &source_ids, &main_key.base_key, total_sources, limit)?;
+            let result =
+                ops::facts::compute_distribution(conn, &source_ids, &main_key, limit)?;
+            display_distribution(&result, fact_key, &main_key);
         }
     } else {
-        show_all_keys(conn, &source_ids, total_sources, show_all)?;
+        let result = ops::facts::compute_all_keys(conn, &source_ids, show_all)?;
+        display_all_keys(&result, show_all);
     }
 
     if sel.excluded_count > 0 {
@@ -205,417 +131,89 @@ pub fn run(
     Ok(())
 }
 
-/// Fetch sources matching scope/role/exclusion criteria, then apply --where filters.
-///
-/// Returns (source_ids, excluded_count, included_excluded_count, included_archived_count)
-/// where excluded_count is the number of sources that matched scope/role but were excluded,
-/// and the included counts track how many excluded/archived sources were kept (for annotations).
-fn show_all_keys(
-    conn: &mut Connection,
-    source_ids: &[i64],
-    total_sources: usize,
-    show_all: bool,
-) -> Result<()> {
-    if source_ids.is_empty() {
-        return Ok(());
-    }
+// ============================================================================
+// Display functions (format typed results from ops layer)
+// ============================================================================
 
-    // Use fact_repo to count fact keys
-    let results = repo::fact::count_fact_keys(conn, source_ids)?;
-
-    // Add built-in and derived facts at the top (they always have 100% coverage)
-    use strum::IntoEnumIterator;
-    let mut all_results: Vec<(String, i64, BuiltinKeyCategory, FactType)> = Vec::new();
-
-    for key in BuiltinKey::iter() {
-        let vis = key.visibility();
-        // Skip NotListed keys and Hidden keys (unless --all)
-        if vis == BuiltinKeyVisibility::NotListed {
-            continue;
-        }
-        if vis == BuiltinKeyVisibility::Hidden && !show_all {
-            continue;
-        }
-        let name: &'static str = key.into();
-        all_results.push((
-            name.to_string(),
-            total_sources as i64,
-            key.category(),
-            key.fact_type(),
-        ));
-    }
-
-    // Add stored facts (with Stored category)
-    let stored_results: Vec<(String, i64, BuiltinKeyCategory, FactType)> = results
-        .into_iter()
-        .map(|(key, count, fact_type)| (key, count as i64, BuiltinKeyCategory::Stored, fact_type))
-        .collect();
-    all_results.extend(stored_results);
-
-    // Print header
+fn display_all_keys(result: &AllKeysResult, show_all: bool) {
     println!(
         "{:<30} {:>6} {:>10} {:>10}",
         "Fact", "Type", "Count", "Coverage"
     );
     println!("{}", "─".repeat(60));
 
-    for (key, count, category, fact_type) in &all_results {
-        let coverage = (*count as f64 / total_sources as f64) * 100.0;
-        let suffix = match category {
+    for key_info in &result.keys {
+        let coverage = (key_info.count as f64 / result.total_sources as f64) * 100.0;
+        let suffix = match key_info.category {
             BuiltinKeyCategory::BuiltIn => "  (built-in)",
             BuiltinKeyCategory::Derived => "  (derived)",
             BuiltinKeyCategory::Stored => "",
         };
         println!(
             "{:<30} {:>6} {:>10} {:>9.1}%{}",
-            key,
-            fact_type.as_str(),
-            count,
+            key_info.key,
+            key_info.fact_type.as_str(),
+            key_info.count,
             coverage,
             suffix
         );
     }
 
     if !show_all {
+        use strum::IntoEnumIterator;
         let hidden_count = BuiltinKey::iter()
-            .filter(|k| k.visibility() == BuiltinKeyVisibility::Hidden)
+            .filter(|k| k.visibility() == crate::expr::BuiltinKeyVisibility::Hidden)
             .count();
         println!("\n({hidden_count} built-in/derived facts hidden, use --all to show)");
     }
-
-    Ok(())
 }
 
-fn show_value_distribution(
-    conn: &mut Connection,
-    source_ids: &[i64],
-    key: &str,
-    total_sources: usize,
-    limit: usize,
-) -> Result<()> {
-    if source_ids.is_empty() {
-        return Ok(());
-    }
+fn display_distribution(result: &DistributionResult, display_key: &str, key: &ParsedFactKey) {
+    // Build label with category for builtin keys
+    let category = get_fact_category(&key.base_key);
+    let label = match category {
+        BuiltinKeyCategory::BuiltIn => format!("{display_key} (built-in)"),
+        BuiltinKeyCategory::Derived => format!("{display_key} (derived)"),
+        BuiltinKeyCategory::Stored => display_key.to_string(),
+    };
 
-    // Fetch values using fact_repo
-    let fact_map = repo::fact::batch_fetch_key_for_sources(conn, source_ids, key)?;
-
-    // Group values and count
-    let mut counts: HashMap<String, i64> = HashMap::new();
-    let mut sources_with_fact: i64 = 0;
-
-    for entry in fact_map.values().flatten() {
-        sources_with_fact += 1;
-        let display_val = fact_value_to_display(&entry.value);
-        *counts.entry(display_val).or_insert(0) += 1;
-    }
-
-    // Sort by count descending
-    let mut results: Vec<(String, i64)> = counts.into_iter().collect();
-    results.sort_by(|a, b| b.1.cmp(&a.1));
-
-    // Apply limit
-    if limit > 0 && results.len() > limit {
-        results.truncate(limit);
-    }
-
-    // Print header
-    println!("{:<40} {:>10} {:>10}", key, "Count", "Coverage");
+    println!("{:<40} {:>10} {:>10}", label, "Count", "Coverage");
     println!("{}", "─".repeat(62));
 
-    for (value, count) in &results {
-        let display_val = if value.len() > 38 {
-            format!("{}...", &value[..35])
+    for entry in &result.entries {
+        let display_val = if entry.value.is_empty() {
+            if key.base_key == "source.ext" {
+                "(no extension)".to_string()
+            } else {
+                "(empty)".to_string()
+            }
+        } else if entry.value.len() > 38 {
+            format!("{}...", &entry.value[..35])
         } else {
-            value.clone()
+            entry.value.clone()
         };
-        let coverage = (*count as f64 / total_sources as f64) * 100.0;
-        println!("{display_val:<40} {count:>10} {coverage:>9.1}%");
+        let coverage = (entry.count as f64 / result.total_sources as f64) * 100.0;
+        println!("{display_val:<40} {:>10} {:>9.1}%", entry.count, coverage);
     }
 
     // Show "(no value)" count
-    let without_fact = total_sources as i64 - sources_with_fact;
-    if without_fact > 0 {
-        let coverage = (without_fact as f64 / total_sources as f64) * 100.0;
+    let without_value = result.total_sources as i64 - result.sources_with_value;
+    if without_value > 0 {
+        let coverage = (without_value as f64 / result.total_sources as f64) * 100.0;
         println!(
             "{:<40} {:>10} {:>9.1}%",
-            "(no value)", without_fact, coverage
-        );
-    }
-
-    Ok(())
-}
-
-/// Show distribution for stored facts with transforms (accessor/modifiers)
-fn show_transformed_distribution(
-    conn: &mut Connection,
-    source_ids: &[i64],
-    base_key: &str,
-    display_key: &str,
-    accessor: &Option<PathAccessor>,
-    modifiers: &[ModifierCall],
-    total_sources: usize,
-    limit: usize,
-) -> Result<()> {
-    if source_ids.is_empty() {
-        return Ok(());
-    }
-
-    // Fetch values using fact_repo
-    let fact_map = repo::fact::batch_fetch_key_for_sources(conn, source_ids, base_key)?;
-
-    let mut counts: HashMap<String, i64> = HashMap::new();
-    let mut sources_with_fact: i64 = 0;
-    let mut skipped_type_mismatch: i64 = 0;
-
-    for entry in fact_map.values().flatten() {
-        sources_with_fact += 1;
-        match apply_transforms(entry.value.clone(), accessor, modifiers, display_key) {
-            Ok(transformed) => {
-                *counts.entry(transformed).or_insert(0) += 1;
-            }
-            Err(_) => {
-                // Type mismatch (e.g., text value when time modifier expected)
-                skipped_type_mismatch += 1;
-            }
-        }
-    }
-
-    // Sort by count descending
-    let mut results: Vec<(String, i64)> = counts.into_iter().collect();
-    results.sort_by(|a, b| b.1.cmp(&a.1));
-
-    // Apply limit
-    if limit > 0 && results.len() > limit {
-        results.truncate(limit);
-    }
-
-    // Print header
-    println!("{:<40} {:>10} {:>10}", display_key, "Count", "Coverage");
-    println!("{}", "─".repeat(62));
-
-    for (value, count) in &results {
-        let display_val = if value.is_empty() {
-            "(empty)".to_string()
-        } else if value.len() > 38 {
-            format!("{}...", &value[..35])
-        } else {
-            value.clone()
-        };
-        let coverage = (*count as f64 / total_sources as f64) * 100.0;
-        println!("{display_val:<40} {count:>10} {coverage:>9.1}%");
-    }
-
-    // Show "(no value)" count
-    let without_fact = total_sources as i64 - sources_with_fact;
-    if without_fact > 0 {
-        let coverage = (without_fact as f64 / total_sources as f64) * 100.0;
-        println!(
-            "{:<40} {:>10} {:>9.1}%",
-            "(no value)", without_fact, coverage
+            "(no value)", without_value, coverage
         );
     }
 
     // Warn about skipped values due to type mismatch
-    if skipped_type_mismatch > 0 {
+    if result.skipped_type_mismatch > 0 {
         eprintln!(
-            "Warning: skipped {skipped_type_mismatch} values with incompatible type for transform"
+            "Warning: skipped {} values with incompatible type for transform",
+            result.skipped_type_mismatch
         );
     }
-
-    Ok(())
 }
-
-fn show_builtin_distribution(
-    conn: &mut Connection,
-    source_ids: &[i64],
-    base_key: &str,
-    display_key: &str,
-    accessor: &Option<PathAccessor>,
-    modifiers: &[ModifierCall],
-    total_sources: usize,
-    limit: usize,
-) -> Result<()> {
-    use std::collections::HashMap;
-
-    if source_ids.is_empty() {
-        return Ok(());
-    }
-
-    // Fetch all sources using repo layer
-    let sources = repo::source::batch_fetch_by_ids(conn, source_ids)?;
-
-    let category = get_fact_category(base_key);
-    let category_str = match category {
-        BuiltinKeyCategory::BuiltIn => "built-in",
-        BuiltinKeyCategory::Derived => "derived",
-        BuiltinKeyCategory::Stored => "stored",
-    };
-    let label = format!("{display_key} ({category_str})");
-
-    let has_transforms = accessor.is_some() || !modifiers.is_empty();
-    let mut counts: HashMap<String, i64> = HashMap::new();
-
-    // Extract values from sources based on key, then aggregate
-    for source in sources.values() {
-        let val = match base_key {
-            "source.ext" => {
-                let ext = std::path::Path::new(&source.rel_path)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.to_lowercase())
-                    .unwrap_or_default();
-                if has_transforms {
-                    apply_transforms(FactValue::Text(ext), accessor, modifiers, display_key)?
-                } else {
-                    ext
-                }
-            }
-            "source.size" => {
-                if has_transforms {
-                    apply_transforms(
-                        FactValue::Num(source.size as f64),
-                        accessor,
-                        modifiers,
-                        display_key,
-                    )?
-                } else {
-                    // Default: size buckets
-                    let bucket = if source.size < 1024 {
-                        "< 1 KB"
-                    } else if source.size < 1024 * 1024 {
-                        "1 KB - 1 MB"
-                    } else if source.size < 10 * 1024 * 1024 {
-                        "1 MB - 10 MB"
-                    } else if source.size < 100 * 1024 * 1024 {
-                        "10 MB - 100 MB"
-                    } else if source.size < 1024 * 1024 * 1024 {
-                        "100 MB - 1 GB"
-                    } else {
-                        "> 1 GB"
-                    };
-                    bucket.to_string()
-                }
-            }
-            "source.mtime" => {
-                if has_transforms {
-                    apply_transforms(
-                        FactValue::Time(source.mtime),
-                        accessor,
-                        modifiers,
-                        display_key,
-                    )?
-                } else {
-                    // Default: group by year
-                    chrono::DateTime::from_timestamp(source.mtime, 0)
-                        .map(|dt| dt.format("%Y").to_string())
-                        .unwrap_or_else(|| "(unknown)".to_string())
-                }
-            }
-            "source.path" => {
-                let full_path = source.path();
-                if has_transforms {
-                    apply_transforms(FactValue::Path(full_path), accessor, modifiers, display_key)?
-                } else {
-                    full_path
-                }
-            }
-            "source.root" => {
-                if has_transforms {
-                    apply_transforms(
-                        FactValue::Path(source.root_path.clone()),
-                        accessor,
-                        modifiers,
-                        display_key,
-                    )?
-                } else {
-                    source.root_path.clone()
-                }
-            }
-            "source.rel_path" => {
-                if has_transforms {
-                    apply_transforms(
-                        FactValue::Path(source.rel_path.clone()),
-                        accessor,
-                        modifiers,
-                        display_key,
-                    )?
-                } else {
-                    source.rel_path.clone()
-                }
-            }
-            "source.device" => {
-                if has_transforms {
-                    apply_transforms(
-                        FactValue::Num(source.device as f64),
-                        accessor,
-                        modifiers,
-                        display_key,
-                    )?
-                } else {
-                    source.device.to_string()
-                }
-            }
-            "source.inode" => {
-                if has_transforms {
-                    apply_transforms(
-                        FactValue::Num(source.inode as f64),
-                        accessor,
-                        modifiers,
-                        display_key,
-                    )?
-                } else {
-                    source.inode.to_string()
-                }
-            }
-            "filename" => {
-                let filename = std::path::Path::new(&source.rel_path)
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or(&source.rel_path)
-                    .to_string();
-                if has_transforms {
-                    apply_transforms(FactValue::Text(filename), accessor, modifiers, display_key)?
-                } else {
-                    filename
-                }
-            }
-            _ => return Ok(()),
-        };
-        *counts.entry(val).or_insert(0) += 1;
-    }
-
-    // Sort by count descending
-    let mut results: Vec<(String, i64)> = counts.into_iter().collect();
-    results.sort_by(|a, b| b.1.cmp(&a.1));
-
-    // Apply limit
-    if limit > 0 && results.len() > limit {
-        results.truncate(limit);
-    }
-
-    // Print header
-    println!("{:<40} {:>10} {:>10}", label, "Count", "Coverage");
-    println!("{}", "─".repeat(62));
-
-    for (value, count) in &results {
-        let display_val = if value.is_empty() {
-            "(no extension)".to_string()
-        } else if value.len() > 38 {
-            format!("{}...", &value[..35])
-        } else {
-            value.clone()
-        };
-        let coverage = (*count as f64 / total_sources as f64) * 100.0;
-        println!("{display_val:<40} {count:>10} {coverage:>9.1}%");
-    }
-
-    Ok(())
-}
-
-// ============================================================================
-// Grouped Distribution
-// ============================================================================
 
 /// Format root for display: id:N ...truncated_path
 fn format_root_display(root_id: i64, root_path: &str) -> String {
@@ -629,160 +227,12 @@ fn format_root_display(root_id: i64, root_path: &str) -> String {
     }
 }
 
-/// Show distribution with grouping by root and/or other fact keys
-fn show_grouped_distribution(
-    conn: &mut Connection,
-    source_ids: &[i64],
+fn display_grouped_distribution(
+    result: &GroupedDistributionResult,
     main_key: &ParsedFactKey,
     grouping_keys: &[ParsedFactKey],
     total_sources: usize,
-    limit: usize,
-) -> Result<()> {
-    if source_ids.is_empty() {
-        return Ok(());
-    }
-
-    // 1. FETCH - Use infrastructure layer
-    // Fetch all sources by ID
-    let sources = repo::source::batch_fetch_by_ids(conn, source_ids)?;
-
-    // Collect all stored fact keys we need to fetch
-    let mut stored_keys: Vec<&str> = Vec::new();
-    if !main_key.is_builtin() {
-        stored_keys.push(&main_key.base_key);
-    }
-    for gk in grouping_keys {
-        if !gk.is_builtin() && !stored_keys.contains(&gk.base_key.as_str()) {
-            stored_keys.push(&gk.base_key);
-        }
-    }
-
-    // Fetch stored facts for all needed keys
-    let all_facts: HashMap<i64, HashMap<String, FactEntry>> = if stored_keys.is_empty() {
-        HashMap::new()
-    } else {
-        // Fetch each key and merge results per source
-        let mut merged: HashMap<i64, HashMap<String, FactEntry>> = HashMap::new();
-        for key in &stored_keys {
-            let key_facts = repo::fact::batch_fetch_key_for_sources(conn, source_ids, key)?;
-            for (source_id, entry_opt) in key_facts {
-                if let Some(entry) = entry_opt {
-                    merged
-                        .entry(source_id)
-                        .or_default()
-                        .insert(entry.key.clone(), entry);
-                }
-            }
-        }
-        merged
-    };
-
-    // 2. RESOLVE + AGGREGATE
-    #[derive(Hash, Eq, PartialEq, Clone)]
-    struct GroupKey {
-        main_value: String,
-        group_values: Vec<String>,
-    }
-
-    struct GroupInfo {
-        count: i64,
-        root_id: Option<i64>,
-        root_path: Option<String>,
-    }
-
-    let mut aggregated: HashMap<GroupKey, GroupInfo> = HashMap::new();
-    let mut sources_with_main_value: i64 = 0;
-
-    for source_id in source_ids {
-        let source = match sources.get(source_id) {
-            Some(s) => s,
-            None => continue,
-        };
-
-        // Get stored facts for this source (empty map if none)
-        let empty_facts: HashMap<String, FactEntry> = HashMap::new();
-        let stored_facts = all_facts.get(source_id).unwrap_or(&empty_facts);
-
-        // Resolve main value using domain layer
-        let main_value = match fact_value::resolve_fact_value(source, main_key, stored_facts)? {
-            Some(v) => {
-                sources_with_main_value += 1;
-                v
-            }
-            None => continue,
-        };
-
-        // Resolve grouping values
-        let mut group_values: Vec<String> = Vec::new();
-        let mut root_id_for_display: Option<i64> = None;
-        let mut root_path_for_display: Option<String> = None;
-
-        for gk in grouping_keys {
-            let gk_value = match fact_value::resolve_fact_value(source, gk, stored_facts) {
-                Ok(Some(v)) => v,
-                Ok(None) => "(no value)".to_string(),
-                Err(_) => "(transform error)".to_string(),
-            };
-
-            // Track root info for special display
-            if is_root_key(gk) {
-                root_id_for_display = Some(source.root_id);
-                root_path_for_display = Some(source.root_path.clone());
-            }
-
-            group_values.push(gk_value);
-        }
-
-        let key = GroupKey {
-            main_value,
-            group_values,
-        };
-        let entry = aggregated.entry(key).or_insert(GroupInfo {
-            count: 0,
-            root_id: root_id_for_display,
-            root_path: root_path_for_display,
-        });
-        entry.count += 1;
-    }
-
-    // 3. BUILD RESULTS - Group by main_value, then sort sub-groups
-    struct MainValueGroup {
-        main_value: String,
-        total_count: i64,
-        sub_groups: Vec<(Vec<String>, i64, Option<i64>, Option<String>)>,
-    }
-
-    let mut by_main_value: HashMap<String, MainValueGroup> = HashMap::new();
-
-    for (key, info) in aggregated {
-        let entry = by_main_value
-            .entry(key.main_value.clone())
-            .or_insert(MainValueGroup {
-                main_value: key.main_value,
-                total_count: 0,
-                sub_groups: Vec::new(),
-            });
-        entry.total_count += info.count;
-        entry
-            .sub_groups
-            .push((key.group_values, info.count, info.root_id, info.root_path));
-    }
-
-    // Sort main values by total count descending
-    let mut main_values: Vec<MainValueGroup> = by_main_value.into_values().collect();
-    main_values.sort_by(|a, b| b.total_count.cmp(&a.total_count));
-
-    // Apply limit to top N main values
-    if limit > 0 && main_values.len() > limit {
-        main_values.truncate(limit);
-    }
-
-    // Sort sub-groups within each main value by count descending
-    for mv in &mut main_values {
-        mv.sub_groups.sort_by(|a, b| b.1.cmp(&a.1));
-    }
-
-    // 4. DISPLAY
+) {
     // Build grouping label
     let grouping_label = if grouping_keys.len() == 1 && is_root_key(&grouping_keys[0]) {
         "by root".to_string()
@@ -791,48 +241,46 @@ fn show_grouped_distribution(
         format!("grouped by {}", labels.join(", "))
     };
 
-    // Print header
     println!("{} ({})\n", main_key.raw, grouping_label);
 
-    for mv in &main_values {
-        let coverage = (mv.total_count as f64 / total_sources as f64) * 100.0;
-        let main_display = if mv.main_value.is_empty() {
+    for group in &result.groups {
+        let coverage = (group.total_count as f64 / total_sources as f64) * 100.0;
+        let main_display = if group.main_value.is_empty() {
             "(empty)"
         } else {
-            &mv.main_value
+            &group.main_value
         };
         println!(
             "{} (total: {:>6}, {:>5.1}%)",
             main_display,
-            format_number(mv.total_count),
+            format_number(group.total_count),
             coverage
         );
 
-        for (group_values, count, root_id, root_path) in &mv.sub_groups {
-            let sub_coverage = (*count as f64 / mv.total_count as f64) * 100.0;
+        for sub in &group.sub_groups {
+            let sub_coverage = (sub.count as f64 / group.total_count as f64) * 100.0;
 
             // Format group display
             let group_display = if grouping_keys.len() == 1 && is_root_key(&grouping_keys[0]) {
-                // Special root display
-                if let (Some(rid), Some(rpath)) = (root_id, root_path) {
-                    format_root_display(*rid, rpath)
+                if let (Some(rid), Some(rpath)) = (sub.root_id, sub.root_path.as_ref()) {
+                    format_root_display(rid, rpath)
                 } else {
-                    group_values[0].clone()
+                    sub.group_values[0].clone()
                 }
             } else {
-                // Multiple grouping keys or non-root
                 let parts: Vec<String> = grouping_keys
                     .iter()
                     .enumerate()
                     .map(|(i, gk)| {
                         if is_root_key(gk) {
-                            if let (Some(rid), Some(rpath)) = (root_id, root_path) {
-                                format_root_display(*rid, rpath)
+                            if let (Some(rid), Some(rpath)) = (sub.root_id, sub.root_path.as_ref())
+                            {
+                                format_root_display(rid, rpath)
                             } else {
-                                group_values[i].clone()
+                                sub.group_values[i].clone()
                             }
                         } else {
-                            group_values[i].clone()
+                            sub.group_values[i].clone()
                         }
                     })
                     .collect();
@@ -842,7 +290,7 @@ fn show_grouped_distribution(
             println!(
                 "  {:<40} {:>8} {:>6.1}%",
                 group_display,
-                format_number(*count),
+                format_number(sub.count),
                 sub_coverage
             );
         }
@@ -850,7 +298,7 @@ fn show_grouped_distribution(
     }
 
     // Show "(no value)" count for main key
-    let without_main_value = total_sources as i64 - sources_with_main_value;
+    let without_main_value = total_sources as i64 - result.sources_with_value;
     if without_main_value > 0 {
         let coverage = (without_main_value as f64 / total_sources as f64) * 100.0;
         println!(
@@ -859,8 +307,6 @@ fn show_grouped_distribution(
             coverage
         );
     }
-
-    Ok(())
 }
 
 // ============================================================================

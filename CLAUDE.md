@@ -60,6 +60,7 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 - `coverage.rs` - Coverage statistics: `compute_stats()`, `compute_scoped()`, `compute_per_root()`, `CoverageStats`
 - `ls.rs` - Duplicate detection: `find_duplicate_groups()`, `DuplicateGroup`
 - `survey.rs` - Survey computation: `compute_survey()`, `SurveyParams`, `SurveyOutcome`, `SurveyResult`, `LocationResult`
+- `facts.rs` - Facts distribution: `compute_all_keys()`, `compute_distribution()`, `compute_grouped_distribution()`, `DistributionResult`, `AllKeysResult`
 - `fs.rs` - Filesystem primitives: `compute_partial_hash()`, `compute_full_hash()`, `preserve_metadata()`, `check_destination_writable()`
 
 **Command Modules** (flat in `src/`):
