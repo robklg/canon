@@ -57,6 +57,8 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 - `exclude.rs` - Exclude plan/execute: `plan_set()`, `execute_set()`, `plan_clear()`, `execute_clear()`
 - `cluster.rs` - Cluster plan: `plan_generate()`, `LockEntry`
 - `apply.rs` - Apply plan/execute: `plan_apply()`, `execute_apply()`, `TransferMode`, `TransferProgress` trait
+- `coverage.rs` - Coverage statistics: `compute_stats()`, `compute_scoped()`, `compute_per_root()`, `CoverageStats`
+- `ls.rs` - Duplicate detection: `find_duplicate_groups()`, `DuplicateGroup`
 - `fs.rs` - Filesystem primitives: `compute_partial_hash()`, `compute_full_hash()`, `preserve_metadata()`, `check_destination_writable()`
 
 **Command Modules** (flat in `src/`):

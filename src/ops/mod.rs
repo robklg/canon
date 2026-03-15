@@ -7,8 +7,10 @@
 
 pub mod apply;
 pub mod cluster;
+pub mod coverage;
 pub mod exclude;
 pub mod fs;
+pub mod ls;
 pub mod selection;
 
 #[cfg(test)]

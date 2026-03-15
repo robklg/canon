@@ -1,6 +1,5 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
-use rusqlite::types::Value;
 use std::collections::{HashMap, HashSet};
 
 use crate::domain::path::resolve_paths;
@@ -10,8 +9,7 @@ use crate::domain::source::Source;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
-use crate::repo::source::BATCH_SIZE;
-use crate::repo::{self, Connection, Db};
+use crate::repo::{self, Db};
 
 pub fn run(
     db: &mut Db,
@@ -334,7 +332,7 @@ pub fn show_duplicates(
     let source_ids = sel.source_ids();
 
     // Find duplicate groups: object_ids that appear more than once
-    let duplicate_groups = find_duplicate_groups(conn, &source_ids)?;
+    let duplicate_groups = crate::ops::ls::find_duplicate_groups(conn, &source_ids)?;
 
     if duplicate_groups.is_empty() {
         println!("No duplicates found.");
@@ -349,21 +347,21 @@ pub fn show_duplicates(
 
     // Print each duplicate group
     let mut total_sources = 0usize;
-    for (hash, size, dup_sources) in &duplicate_groups {
-        let short_hash = if hash.len() > 12 { &hash[..12] } else { hash };
-        let size_str = format_size(*size);
+    for group in &duplicate_groups {
+        let short_hash = if group.hash_value.len() > 12 { &group.hash_value[..12] } else { &group.hash_value };
+        let size_str = format_size(group.total_size);
         println!(
             "[{}...] {} sources, {}:",
             short_hash,
-            dup_sources.len(),
+            group.sources.len(),
             size_str
         );
-        for (path, source_id) in dup_sources {
-            let display_path = format_path(path, cwd.as_deref());
-            println!("  {display_path} (id: {source_id})");
+        for src in &group.sources {
+            let display_path = format_path(&src.path, cwd.as_deref());
+            println!("  {display_path} (id: {})", src.source_id);
         }
         println!();
-        total_sources += dup_sources.len();
+        total_sources += group.sources.len();
     }
 
     // Summary
@@ -380,81 +378,6 @@ pub fn show_duplicates(
     }
 
     Ok(())
-}
-
-/// Find groups of sources that share the same object_id (content hash)
-/// Returns Vec of (hash_value, size, Vec<(path, source_id)>)
-fn find_duplicate_groups(
-    conn: &Connection,
-    source_ids: &[i64],
-) -> Result<Vec<(String, i64, Vec<(String, i64)>)>> {
-    if source_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Build a map of object_id -> (hash, size, sources)
-    let mut object_map: HashMap<i64, (String, i64, Vec<(String, i64)>)> = HashMap::new();
-
-    // Batch fetch source info including object_id, hash, and size
-    // Note: This query needs hash_value from objects table, which isn't in Source struct
-    for chunk in source_ids.chunks(BATCH_SIZE) {
-        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        let sql = format!(
-            "SELECT s.id, s.object_id, o.hash_value, s.size, r.path, s.rel_path
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             JOIN objects o ON s.object_id = o.id
-             WHERE s.id IN ({}) AND s.object_id IS NOT NULL",
-            placeholders.join(",")
-        );
-
-        let params: Vec<Value> = chunk.iter().map(|&id| Value::from(id)).collect();
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
-            Ok((
-                row.get::<_, i64>(0)?,    // source_id
-                row.get::<_, i64>(1)?,    // object_id
-                row.get::<_, String>(2)?, // hash_value
-                row.get::<_, i64>(3)?,    // size
-                row.get::<_, String>(4)?, // root_path
-                row.get::<_, String>(5)?, // rel_path
-            ))
-        })?;
-
-        for row in rows {
-            let (source_id, object_id, hash, size, root_path, rel_path) = row?;
-            let full_path = if rel_path.is_empty() {
-                root_path
-            } else {
-                format!("{root_path}/{rel_path}")
-            };
-
-            object_map
-                .entry(object_id)
-                .or_insert_with(|| (hash, size, Vec::new()))
-                .2
-                .push((full_path, source_id));
-        }
-    }
-
-    // Filter to only groups with 2+ sources
-    let mut groups: Vec<(String, i64, Vec<(String, i64)>)> = object_map
-        .into_values()
-        .filter(|(_, _, sources)| sources.len() > 1)
-        .collect();
-
-    // Sort sources within each group by path
-    for (_, _, sources) in &mut groups {
-        sources.sort_by(|a, b| a.0.cmp(&b.0));
-    }
-    // Sort groups by first path (so related duplicates appear near each other)
-    groups.sort_by(|a, b| {
-        a.2.first()
-            .map(|(p, _)| p.as_str())
-            .cmp(&b.2.first().map(|(p, _)| p.as_str()))
-    });
-
-    Ok(groups)
 }
 
 // ============================================================================

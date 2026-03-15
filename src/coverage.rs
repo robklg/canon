@@ -2,63 +2,13 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 use crate::domain::path::resolve_paths;
-use crate::domain::root::{parse_root_spec, Root};
+use crate::domain::root::parse_root_spec;
 use crate::domain::scope::ScopeMatch;
-use crate::domain::source::Source;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
-use crate::ops::selection::{self, RolePolicy, SelectionParams};
+use crate::ops;
+use crate::ops::coverage::CoverageStats;
 use crate::repo::{self, Db};
-
-/// Statistics for a single root or overall
-struct CoverageStats {
-    root_id: Option<i64>,
-    root_path: Option<String>,
-    root_role: Option<String>,
-    total_sources: i64,
-    excluded_sources: i64,
-    hashed_sources: i64,
-    archived_sources: i64,
-}
-
-impl CoverageStats {
-    fn new() -> Self {
-        CoverageStats {
-            root_id: None,
-            root_path: None,
-            root_role: None,
-            total_sources: 0,
-            excluded_sources: 0,
-            hashed_sources: 0,
-            archived_sources: 0,
-        }
-    }
-
-    fn included_sources(&self) -> i64 {
-        self.total_sources - self.excluded_sources
-    }
-
-    fn hashed_pct(&self) -> f64 {
-        let included = self.included_sources();
-        if included == 0 {
-            0.0
-        } else {
-            (self.hashed_sources as f64 / included as f64) * 100.0
-        }
-    }
-
-    fn archived_pct(&self) -> f64 {
-        if self.hashed_sources == 0 {
-            0.0
-        } else {
-            (self.archived_sources as f64 / self.hashed_sources as f64) * 100.0
-        }
-    }
-
-    fn unarchived(&self) -> i64 {
-        self.hashed_sources - self.archived_sources
-    }
-}
 
 pub fn run(
     db: &mut Db,
@@ -108,7 +58,7 @@ pub fn run(
     // Compute and display stats
     if !scope_prefixes.is_empty() {
         // Scoped mode
-        let stats = compute_scoped_stats(conn, &scopes, &filters, archive_root_id, include)?;
+        let stats = ops::coverage::compute_scoped(conn, &scopes, &filters, archive_root_id, include)?;
         let scope_display = if scope_prefixes.len() == 1 {
             Some(scope_prefixes[0].as_str())
         } else {
@@ -122,7 +72,7 @@ pub fn run(
     } else {
         // Per-root breakdown mode
         let (per_root_stats, overall) =
-            compute_per_root_stats(conn, &filters, archive_root_id, include)?;
+            ops::coverage::compute_per_root(conn, &filters, archive_root_id, include)?;
         if compact {
             display_compact_per_root(&per_root_stats, &overall);
         } else {
@@ -131,127 +81,6 @@ pub fn run(
     }
 
     Ok(())
-}
-
-/// Compute coverage stats for sources under a specific path scope
-fn compute_scoped_stats(
-    conn: &mut rusqlite::Connection,
-    scopes: &[ScopeMatch],
-    filters: &[Filter],
-    archive_root_id: Option<i64>,
-    include: &IncludeSet,
-) -> Result<CoverageStats> {
-    let params = SelectionParams {
-        scopes: scopes.to_vec(),
-        include: include.clone(),
-        filters: filters.to_vec(),
-        role_policy: RolePolicy::SourceUnlessIncluded,
-    };
-    let sel = selection::select_sources(conn, &params)?;
-    compute_stats_from_sources(conn, &sel.sources, archive_root_id)
-}
-
-/// Compute coverage stats per root, plus overall totals
-fn compute_per_root_stats(
-    conn: &mut rusqlite::Connection,
-    filters: &[Filter],
-    archive_root_id: Option<i64>,
-    include: &IncludeSet,
-) -> Result<(Vec<CoverageStats>, CoverageStats)> {
-    // Get list of roots, filtered by role and suspension status
-    let all_roots = repo::root::fetch_all(conn)?;
-    let roots: Vec<&Root> = all_roots
-        .iter()
-        .filter(|r| r.is_active())
-        .filter(|r| include.includes_archived() || r.is_source())
-        .collect();
-
-    let params = SelectionParams {
-        scopes: vec![],
-        include: include.clone(),
-        filters: filters.to_vec(),
-        role_policy: RolePolicy::SourceUnlessIncluded,
-    };
-    let all_sel = selection::select_sources(conn, &params)?;
-    let all_sources = all_sel.sources;
-
-    // Group by root_id
-    let mut per_root_stats = Vec::new();
-    let mut overall = CoverageStats::new();
-
-    for root in &roots {
-        // Filter sources for this root
-        let root_sources: Vec<&Source> = all_sources
-            .iter()
-            .filter(|s| s.root_id == root.id)
-            .collect();
-
-        let mut stats = compute_stats_from_source_refs(conn, &root_sources, archive_root_id)?;
-        stats.root_id = Some(root.id);
-        stats.root_path = Some(root.path.clone());
-        stats.root_role = Some(root.role.clone());
-
-        // Add to overall totals
-        overall.total_sources += stats.total_sources;
-        overall.excluded_sources += stats.excluded_sources;
-        overall.hashed_sources += stats.hashed_sources;
-        overall.archived_sources += stats.archived_sources;
-
-        per_root_stats.push(stats);
-    }
-
-    Ok((per_root_stats, overall))
-}
-
-/// Compute stats from a list of sources using domain predicates.
-/// Uses is_excluded() which checks BOTH source-level and object-level exclusion.
-fn compute_stats_from_sources(
-    conn: &mut rusqlite::Connection,
-    sources: &[Source],
-    archive_root_id: Option<i64>,
-) -> Result<CoverageStats> {
-    let refs: Vec<&Source> = sources.iter().collect();
-    compute_stats_from_source_refs(conn, &refs, archive_root_id)
-}
-
-/// Compute stats from source references.
-fn compute_stats_from_source_refs(
-    conn: &mut rusqlite::Connection,
-    sources: &[&Source],
-    archive_root_id: Option<i64>,
-) -> Result<CoverageStats> {
-    let mut stats = CoverageStats::new();
-
-    // Total sources
-    stats.total_sources = sources.len() as i64;
-
-    // Excluded sources - uses is_excluded() which checks BOTH source and object level
-    stats.excluded_sources = sources.iter().filter(|s| s.is_excluded()).count() as i64;
-
-    // Hashed sources (have object_id AND not excluded)
-    let hashed_sources: Vec<&&Source> = sources
-        .iter()
-        .filter(|s| s.object_id.is_some() && !s.is_excluded())
-        .collect();
-    stats.hashed_sources = hashed_sources.len() as i64;
-
-    // Archived sources - use batch archive detection
-    if stats.hashed_sources > 0 {
-        // Collect object IDs from hashed sources
-        let object_ids: Vec<i64> = hashed_sources.iter().filter_map(|s| s.object_id).collect();
-
-        // Batch check which objects are archived
-        let archived_set = repo::object::batch_check_archived(conn, &object_ids, archive_root_id)?;
-
-        // Count sources whose object_id is in the archived set
-        // (not unique objects — multiple sources can have the same object)
-        stats.archived_sources = hashed_sources
-            .iter()
-            .filter(|s| s.object_id.is_some_and(|oid| archived_set.contains(&oid)))
-            .count() as i64;
-    }
-
-    Ok(stats)
 }
 
 fn display_compact_scoped(stats: &CoverageStats, scope: Option<&str>) {
@@ -479,96 +308,3 @@ fn format_number(n: i64) -> String {
     result.chars().rev().collect()
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::repo::open_in_memory_for_test;
-    use rusqlite::Connection as RusqliteConnection;
-
-    fn setup_test_db() -> RusqliteConnection {
-        open_in_memory_for_test()
-    }
-
-    fn insert_root(conn: &RusqliteConnection, path: &str, role: &str, suspended: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",
-            rusqlite::params![path, role, suspended as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_object(conn: &RusqliteConnection, hash: &str, excluded: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO objects (hash_type, hash_value, excluded) VALUES ('sha256', ?, ?)",
-            rusqlite::params![hash, excluded as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_source(
-        conn: &RusqliteConnection,
-        root_id: i64,
-        rel_path: &str,
-        object_id: Option<i64>,
-    ) -> i64 {
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
-             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0)",
-            rusqlite::params![root_id, rel_path, object_id],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    /// Test that archived_sources counts sources, not unique objects.
-    ///
-    /// This guards against the Object Infrastructure bug pattern where
-    /// archived_set.len() was used instead of counting sources.
-    #[test]
-    fn test_coverage_archived_counts_sources_not_objects() {
-        let mut conn = setup_test_db();
-
-        // Create source root and archive root
-        let source_root = insert_root(&conn, "/photos", "source", false);
-        let archive_root = insert_root(&conn, "/archive", "archive", false);
-
-        // Create ONE object that will be archived
-        let archived_obj = insert_object(&conn, "abc123archived", false);
-
-        // Create 3 source files pointing to the SAME object
-        insert_source(&conn, source_root, "photo1.jpg", Some(archived_obj));
-        insert_source(&conn, source_root, "photo2.jpg", Some(archived_obj));
-        insert_source(&conn, source_root, "photo3.jpg", Some(archived_obj));
-
-        // Create another object that is NOT archived
-        let unarchived_obj = insert_object(&conn, "def456unarchived", false);
-        insert_source(&conn, source_root, "photo4.jpg", Some(unarchived_obj));
-
-        // Put the archived object in the archive root
-        insert_source(&conn, archive_root, "backup.jpg", Some(archived_obj));
-
-        // Fetch sources from source root only (simulating what coverage does)
-        let sources = repo::source::batch_fetch_by_roots(&conn, &[source_root]).unwrap();
-        assert_eq!(sources.len(), 4, "Should have 4 sources in source root");
-
-        // Compute stats using the actual function
-        let stats = compute_stats_from_sources(&mut conn, &sources, None).unwrap();
-
-        // The critical assertion: archived_sources should be 3 (sources), not 1 (object)
-        assert_eq!(
-            stats.archived_sources, 3,
-            "Should count 3 SOURCES with archived objects, not 1 unique object"
-        );
-
-        // Verify other stats are correct
-        assert_eq!(stats.total_sources, 4);
-        assert_eq!(stats.hashed_sources, 4);
-    }
-
-}
