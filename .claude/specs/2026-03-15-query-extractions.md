@@ -251,7 +251,7 @@ if let Some(fact_key) = key_arg {
 ```
 
 ### Phase 2b: Facts write operations extraction
-- **Status**: pending
+- **Status**: completed
 - **Goal**: Extract delete/prune operations to ops layer using plan/execute pattern.
 - **Non-goals**: Changing prune behavior. Adding transaction management where none exists.
 - **Dependencies**: Phase 2a complete
@@ -407,9 +407,9 @@ All 748 existing tests must pass.
 - [x] Phase 2a: Remove duplicate fact_value_to_display/apply_transforms from facts.rs
 - [x] Phase 2a: Add 8 distribution tests
 - [x] Phase 2a: Verify all tests pass (756 pass)
-- [ ] Phase 2b: Add plan/execute for delete_facts
-- [ ] Phase 2b: Add plan/execute for prune_stale, prune_orphaned, prune_excluded
-- [ ] Phase 2b: Move is_protected_fact to ops as validate_delete_key
-- [ ] Phase 2b: Rewire facts.rs write operations
-- [ ] Phase 2b: Add 3 write operation tests
-- [ ] Phase 2b: Verify all tests pass
+- [x] Phase 2b: Add plan/execute for delete_facts
+- [x] Phase 2b: Add plan/execute for prune_stale, prune_orphaned, prune_excluded
+- [x] Phase 2b: Move is_protected_fact to ops as validate_delete_key
+- [x] Phase 2b: Rewire facts.rs write operations
+- [x] Phase 2b: Add 4 write operation tests (validate_delete_key, plan_delete, plan_prune_stale, validate_excluded_scope)
+- [x] Phase 2b: Verify all tests pass (756 pass)

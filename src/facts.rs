@@ -319,11 +319,6 @@ pub struct DeleteOptions {
     pub dry_run: bool,
 }
 
-/// Check if a fact key is protected from deletion
-fn is_protected_fact(key: &str) -> bool {
-    key.starts_with("source.") || key.starts_with("policy.")
-}
-
 pub fn delete_facts(
     db: &mut Db,
     key: &str,
@@ -331,14 +326,8 @@ pub fn delete_facts(
     filter_strs: &[String],
     options: &DeleteOptions,
 ) -> Result<()> {
-    // Validate key is not protected
-    if is_protected_fact(key) {
-        bail!(
-            "Cannot delete protected fact '{key}'. Facts in source.* and policy.* namespaces cannot be deleted."
-        );
-    }
-
-    // Validate entity type
+    // Validate key and entity type
+    ops::facts::validate_delete_key(key)?;
     if options.entity_type != "source" && options.entity_type != "object" {
         bail!(
             "Invalid entity type '{}'. Must be 'source' or 'object'.",
@@ -354,7 +343,7 @@ pub fn delete_facts(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
+    // Resolve scope paths
     let all_roots = repo::root::fetch_all(conn)?;
     let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
@@ -377,8 +366,8 @@ pub fn delete_facts(
         return Ok(());
     }
 
-    // Count facts matching criteria
-    let (fact_count, entity_count) = repo::fact::count_by_criteria(
+    // Plan
+    let plan = ops::facts::plan_delete(
         conn,
         &source_ids,
         key,
@@ -386,38 +375,34 @@ pub fn delete_facts(
         options.value_type.as_deref(),
     )?;
 
-    // Delete if not dry run
-    if !options.dry_run && fact_count > 0 {
-        repo::fact::delete_by_criteria(
-            conn,
-            &source_ids,
-            key,
-            &options.entity_type,
-            options.value_type.as_deref(),
-        )?;
-    }
-
-    // Report results
     let entity_label = if options.entity_type == "source" {
         "sources"
     } else {
         "objects"
     };
 
-    if fact_count == 0 {
+    if plan.fact_count == 0 {
         println!("No '{key}' facts found on matching {entity_label}.");
     } else if options.dry_run {
         println!(
             "Would delete {} fact rows across {} {}",
-            format_number(fact_count),
-            format_number(entity_count),
+            format_number(plan.fact_count),
+            format_number(plan.entity_count),
             entity_label
         );
     } else {
+        // Execute
+        ops::facts::execute_delete(
+            conn,
+            &source_ids,
+            key,
+            &options.entity_type,
+            options.value_type.as_deref(),
+        )?;
         println!(
             "Deleted {} fact rows across {} {}",
-            format_number(fact_count),
-            format_number(entity_count),
+            format_number(plan.fact_count),
+            format_number(plan.entity_count),
             entity_label
         );
     }
@@ -432,10 +417,9 @@ pub fn delete_facts(
 pub fn prune_stale(db: &Db, dry_run: bool) -> Result<()> {
     let conn = db.conn();
 
-    // Count stale source facts using repo layer
-    let stale_count = repo::fact::count_stale(conn)?;
+    let plan = ops::facts::plan_prune_stale(conn)?;
 
-    if stale_count == 0 {
+    if plan.stale_count == 0 {
         println!("No stale facts found.");
         return Ok(());
     }
@@ -443,10 +427,10 @@ pub fn prune_stale(db: &Db, dry_run: bool) -> Result<()> {
     if dry_run {
         println!(
             "Would delete {} stale fact rows (observed_basis_rev mismatch)",
-            format_number(stale_count)
+            format_number(plan.stale_count)
         );
     } else {
-        let deleted = repo::fact::delete_stale(conn)?;
+        let deleted = ops::facts::execute_prune_stale(conn)?;
         println!(
             "Deleted {} stale fact rows (observed_basis_rev mismatch)",
             format_number(deleted as i64)
@@ -472,25 +456,10 @@ fn format_number(n: i64) -> String {
 // Prune Orphaned Objects
 // ============================================================================
 
-/// Delete objects (and their facts) that have no remaining present sources.
-/// Also deletes non-present sources that reference these objects.
-///
-/// An object is considered orphaned when no source with `present = 1` references it.
-/// This can happen when:
-/// - All sources for a piece of content were deleted from disk
-/// - Sources were moved cross-device (old source marked not present, new source created)
-/// - Manual cleanup removed sources but not objects
-///
-/// Note: You may want to keep orphaned objects because:
-/// - They serve as a historical record of content you've processed
-/// - If the content reappears (restore from backup, found on another drive),
-///   all the facts (EXIF, hashes, etc.) are already available
-/// - Storage cost is minimal (just metadata rows)
 pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool) -> Result<()> {
     let conn = db.conn_mut();
 
-    // Find statistics about orphaned objects
-    let stats = repo::object::find_orphaned_stats(conn)?;
+    let stats = ops::facts::plan_prune_orphaned(conn)?;
 
     if stats.object_count == 0 {
         println!("No orphaned objects found.");
@@ -512,11 +481,7 @@ pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool) -> Result<()> {
         );
         println!("Use --yes to proceed with deletion.");
     } else {
-        // Use transaction for atomicity of cascade delete
-        let tx = conn.transaction()?;
-        let deleted = repo::object::delete_orphaned(&tx)?;
-        tx.commit()?;
-
+        let deleted = ops::facts::execute_prune_orphaned(db)?;
         println!(
             "Deleted {} orphaned objects, {} non-present sources, and {} facts",
             format_number(deleted.object_count),
@@ -532,52 +497,37 @@ pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool) -> Result<()> {
 // Prune Excluded Facts
 // ============================================================================
 
-/// Delete facts for excluded sources and/or objects.
-///
-/// Scope options:
-/// - "all": Delete facts for both excluded sources AND excluded objects (default)
-/// - "source": Delete only source facts where sources.excluded = 1
-/// - "object": Delete only object facts where objects.excluded = 1
-///
-/// This is useful when you've excluded sources/objects you're not interested in archiving,
-/// and want to free up database space by removing their associated metadata.
 pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
+    ops::facts::validate_prune_excluded_scope(scope)?;
     let conn = db.conn();
 
-    // Validate scope
-    let prune_sources = scope == "all" || scope == "source";
-    let prune_objects = scope == "all" || scope == "object";
+    let plan = ops::facts::plan_prune_excluded(conn, scope)?;
 
-    if !prune_sources && !prune_objects {
-        anyhow::bail!("Invalid scope '{scope}'. Use 'source', 'object', or omit for both.");
-    }
-
-    // Count facts for excluded entities using repo layer
-    let (source_fact_count, object_fact_count) = repo::fact::count_excluded(conn, scope)?;
-    let total_count = source_fact_count + object_fact_count;
-
-    if total_count == 0 {
+    if plan.total_count() == 0 {
         println!("No facts found for excluded entities.");
         return Ok(());
     }
+
+    let prune_sources = scope == "all" || scope == "source";
+    let prune_objects = scope == "all" || scope == "object";
 
     if dry_run {
         println!("Facts for excluded entities:");
         if prune_sources {
             println!(
                 "  Source facts (excluded sources): {}",
-                format_number(source_fact_count)
+                format_number(plan.source_fact_count)
             );
         }
         if prune_objects {
             println!(
                 "  Object facts (excluded objects): {}",
-                format_number(object_fact_count)
+                format_number(plan.object_fact_count)
             );
         }
         println!(
             "  Total: {} facts would be deleted",
-            format_number(total_count)
+            format_number(plan.total_count())
         );
         println!();
         if scope == "all" {
@@ -587,7 +537,7 @@ pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
         }
         println!("Use --yes to proceed with deletion.");
     } else {
-        let (source_deleted, object_deleted) = repo::fact::delete_excluded(conn, scope)?;
+        let (source_deleted, object_deleted) = ops::facts::execute_prune_excluded(conn, scope)?;
 
         if source_deleted > 0 {
             println!(
@@ -708,35 +658,5 @@ mod tests {
         assert!(format_root_display(99, "/tmp").starts_with("id:99"));
     }
 
-    // =========================================================================
-    // is_protected_fact tests
-    // =========================================================================
-
-    #[test]
-    fn is_protected_fact_source_namespace() {
-        assert!(is_protected_fact("source.policy"));
-        assert!(is_protected_fact("source.reviewed"));
-        assert!(is_protected_fact("source.anything"));
-    }
-
-    #[test]
-    fn is_protected_fact_policy_namespace() {
-        assert!(is_protected_fact("policy.reviewed"));
-        assert!(is_protected_fact("policy.archive"));
-        assert!(is_protected_fact("policy.anything"));
-    }
-
-    #[test]
-    fn is_protected_fact_content_not_protected() {
-        assert!(!is_protected_fact("content.Make"));
-        assert!(!is_protected_fact("content.Model"));
-        assert!(!is_protected_fact("content.DateTimeOriginal"));
-    }
-
-    #[test]
-    fn is_protected_fact_other_not_protected() {
-        assert!(!is_protected_fact("custom.field"));
-        assert!(!is_protected_fact("Make")); // bare key
-        assert!(!is_protected_fact("object.something"));
-    }
+    // is_protected_fact tests moved to ops::facts::tests::test_validate_delete_key_protected
 }

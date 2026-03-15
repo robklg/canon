@@ -518,6 +518,135 @@ fn is_root_grouping_key(key: &ParsedFactKey) -> bool {
 }
 
 // ============================================================================
+// Write operations (plan/execute)
+// ============================================================================
+
+use crate::repo::object::OrphanedStats;
+use crate::repo::Db;
+
+/// Plan result for fact deletion.
+pub struct DeletePlan {
+    /// Kept for plan self-containedness — the interface currently uses its own
+    /// copies of key/entity_type for display and execute.
+    #[allow(dead_code)]
+    pub key: String,
+    #[allow(dead_code)]
+    pub entity_type: String,
+    pub fact_count: i64,
+    pub entity_count: i64,
+}
+
+/// Plan result for stale fact pruning.
+pub struct PruneStalePlan {
+    pub stale_count: i64,
+}
+
+/// Plan result for excluded fact pruning.
+pub struct PruneExcludedPlan {
+    #[allow(dead_code)]
+    pub scope: String,
+    pub source_fact_count: i64,
+    pub object_fact_count: i64,
+}
+
+impl PruneExcludedPlan {
+    pub fn total_count(&self) -> i64 {
+        self.source_fact_count + self.object_fact_count
+    }
+}
+
+/// Validate that a fact key is not protected from deletion.
+/// Protected namespaces: `source.*`, `policy.*`.
+pub fn validate_delete_key(key: &str) -> Result<()> {
+    if key.starts_with("source.") || key.starts_with("policy.") {
+        anyhow::bail!(
+            "Cannot delete protected fact '{key}'. Facts in source.* and policy.* namespaces cannot be deleted."
+        );
+    }
+    Ok(())
+}
+
+/// Plan fact deletion: count matching facts without performing the delete.
+pub fn plan_delete(
+    conn: &mut Connection,
+    source_ids: &[i64],
+    key: &str,
+    entity_type: &str,
+    value_type: Option<&str>,
+) -> Result<DeletePlan> {
+    let (fact_count, entity_count) =
+        repo::fact::count_by_criteria(conn, source_ids, key, entity_type, value_type)?;
+
+    Ok(DeletePlan {
+        key: key.to_string(),
+        entity_type: entity_type.to_string(),
+        fact_count,
+        entity_count,
+    })
+}
+
+/// Execute fact deletion.
+pub fn execute_delete(
+    conn: &mut Connection,
+    source_ids: &[i64],
+    key: &str,
+    entity_type: &str,
+    value_type: Option<&str>,
+) -> Result<()> {
+    repo::fact::delete_by_criteria(conn, source_ids, key, entity_type, value_type)?;
+    Ok(())
+}
+
+/// Plan stale fact pruning: count facts with mismatched basis_rev.
+pub fn plan_prune_stale(conn: &Connection) -> Result<PruneStalePlan> {
+    let stale_count = repo::fact::count_stale(conn)?;
+    Ok(PruneStalePlan { stale_count })
+}
+
+/// Execute stale fact pruning. Returns the number of rows deleted.
+pub fn execute_prune_stale(conn: &Connection) -> Result<usize> {
+    repo::fact::delete_stale(conn)
+}
+
+/// Plan orphaned object pruning: count orphaned objects, sources, and facts.
+pub fn plan_prune_orphaned(conn: &mut Connection) -> Result<OrphanedStats> {
+    repo::object::find_orphaned_stats(conn)
+}
+
+/// Execute orphaned object pruning. Owns the transaction for atomicity.
+/// Returns stats of what was deleted.
+pub fn execute_prune_orphaned(db: &mut Db) -> Result<OrphanedStats> {
+    let conn = db.conn_mut();
+    let tx = conn.transaction()?;
+    let deleted = repo::object::delete_orphaned(&tx)?;
+    tx.commit()?;
+    Ok(deleted)
+}
+
+/// Validate the scope parameter for excluded fact pruning.
+pub fn validate_prune_excluded_scope(scope: &str) -> Result<()> {
+    if scope != "all" && scope != "source" && scope != "object" {
+        anyhow::bail!("Invalid scope '{scope}'. Use 'source', 'object', or omit for both.");
+    }
+    Ok(())
+}
+
+/// Plan excluded fact pruning: count facts for excluded entities.
+pub fn plan_prune_excluded(conn: &Connection, scope: &str) -> Result<PruneExcludedPlan> {
+    let (source_fact_count, object_fact_count) = repo::fact::count_excluded(conn, scope)?;
+    Ok(PruneExcludedPlan {
+        scope: scope.to_string(),
+        source_fact_count,
+        object_fact_count,
+    })
+}
+
+/// Execute excluded fact pruning. Returns (source_deleted, object_deleted).
+pub fn execute_prune_excluded(conn: &Connection, scope: &str) -> Result<(usize, usize)> {
+    repo::fact::delete_excluded(conn, scope)
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -769,5 +898,58 @@ mod tests {
         assert_eq!(result.groups.len(), 1);
         assert_eq!(result.groups[0].main_value, "Canon");
         assert_eq!(result.groups[0].total_count, 1);
+    }
+
+    // =========================================================================
+    // Write operation tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_delete_key_protected() {
+        assert!(validate_delete_key("source.policy").is_err());
+        assert!(validate_delete_key("source.anything").is_err());
+        assert!(validate_delete_key("policy.reviewed").is_err());
+        assert!(validate_delete_key("policy.archive").is_err());
+
+        assert!(validate_delete_key("content.Make").is_ok());
+        assert!(validate_delete_key("custom.field").is_ok());
+        assert!(validate_delete_key("Make").is_ok());
+    }
+
+    #[test]
+    fn test_plan_delete_counts() {
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let obj1 = insert_object(&conn, "h1", false);
+        let obj2 = insert_object(&conn, "h2", false);
+        let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj1));
+        let s2 = insert_source(&conn, root_id, "b.jpg", Some(obj2));
+
+        crate::ops::test_helpers::insert_fact(&conn, s1, "content.Make", "Canon");
+        crate::ops::test_helpers::insert_fact(&conn, s2, "content.Make", "Nikon");
+
+        let plan = plan_delete(&mut conn, &[s1, s2], "content.Make", "source", None).unwrap();
+
+        assert_eq!(plan.fact_count, 2);
+        assert_eq!(plan.entity_count, 2);
+        assert_eq!(plan.key, "content.Make");
+        assert_eq!(plan.entity_type, "source");
+    }
+
+    #[test]
+    fn test_plan_prune_stale_counts() {
+        let conn = setup_test_db();
+        // With no stale facts, count should be 0
+        let plan = plan_prune_stale(&conn).unwrap();
+        assert_eq!(plan.stale_count, 0);
+    }
+
+    #[test]
+    fn test_validate_prune_excluded_scope() {
+        assert!(validate_prune_excluded_scope("all").is_ok());
+        assert!(validate_prune_excluded_scope("source").is_ok());
+        assert!(validate_prune_excluded_scope("object").is_ok());
+        assert!(validate_prune_excluded_scope("invalid").is_err());
+        assert!(validate_prune_excluded_scope("").is_err());
     }
 }
