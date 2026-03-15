@@ -11,6 +11,7 @@ pub mod coverage;
 pub mod exclude;
 pub mod facts;
 pub mod fs;
+pub mod import_facts;
 pub mod ls;
 pub mod scan;
 pub mod selection;

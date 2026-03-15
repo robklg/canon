@@ -61,8 +61,9 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 - `ls.rs` - Duplicate detection: `find_duplicate_groups()`, `DuplicateGroup`
 - `survey.rs` - Survey computation: `compute_survey()`, `SurveyParams`, `SurveyOutcome`, `SurveyResult`, `LocationResult`
 - `facts.rs` - Facts distribution: `compute_all_keys()`, `compute_distribution()`, `compute_grouped_distribution()`, `DistributionResult`, `AllKeysResult`
+- `import_facts.rs` - Import facts processing: `init_state()`, `process_record()`, `ImportRecord`, `ImportState`, `ImportStats`, `RecordOutcome`
 - `scan.rs` - Scan pipeline: `scan_root()`, `ScanOptions`, `ScanProgress` trait, `ScanStats`, `FileToHash`, `ScanRootResult`
-- `fs.rs` - Filesystem primitives: `compute_partial_hash()`, `compute_full_hash()`, `preserve_metadata()`, `check_destination_writable()`
+- `fs.rs` - Filesystem primitives: `compute_partial_hash()`, `compute_full_hash()`, `preserve_metadata()`, `check_destination_writable()`, `ensure_parent_dir()`, `copy_file()`, `rename_file()`, `move_file()`, `MoveOutcome`
 
 **Command Modules** (flat in `src/`):
 - `main.rs` - CLI entry point using clap (canon home resolution, alias expansion dispatch)
