@@ -222,17 +222,10 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         bail!("Aborting due to stale destination records");
     }
 
-    // Destination path conflicts (non-resume only): DB part from plan + on-disk check
     // Destination path conflicts (non-resume only):
-    // DB conflicts come from plan, disk-only conflicts checked here
+    // DB conflicts come from plan, disk-only conflicts checked via ops layer
     if !options.resume {
-        let mut on_disk_only = Vec::new();
-        for transfer in &plan.transfers {
-            let dest_path = base_dir.join(&transfer.dest_rel_path);
-            if !v.dest_conflicts_in_db.contains(&transfer.archive_rel_path) && dest_path.exists() {
-                on_disk_only.push(transfer.archive_rel_path.clone());
-            }
-        }
+        let on_disk_only = ops::apply::check_disk_conflicts(&plan, &base_dir);
 
         let total_conflicts = v.dest_conflicts_in_db.len() + on_disk_only.len();
         if total_conflicts > 0 {

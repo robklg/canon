@@ -1,6 +1,5 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
-use std::collections::{HashMap, HashSet};
 
 use crate::domain::path::resolve_paths;
 use crate::domain::root::Root;
@@ -8,8 +7,10 @@ use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
+use crate::ops;
+use crate::ops::ls::LsMode;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
-use crate::repo::{self, Db};
+use crate::repo::Db;
 
 pub fn run(
     db: &mut Db,
@@ -75,97 +76,38 @@ pub fn run(
         return Ok(());
     }
 
-    // Batch fetch archive status for all sources with object_ids (eliminates N+1)
-    let object_ids: Vec<i64> = sel.sources.iter().filter_map(|s| s.object_id).collect();
-    let archived_set: HashSet<i64> = if archived_only || unarchived_only {
-        repo::object::batch_check_archived(conn, &object_ids, None)?
-    } else {
-        HashSet::new()
+    // Determine mode for post-selection filtering
+    let mode = match (archived_mode, unarchived_only, unhashed_only, excluded_only) {
+        (Some("show"), _, _, _) => LsMode::ArchivedShow,
+        (Some(_), _, _, _) => LsMode::Archived,
+        (_, true, _, _) => LsMode::Unarchived,
+        (_, _, true, _) => LsMode::Unhashed,
+        (_, _, _, true) => LsMode::Excluded,
+        _ => LsMode::All,
     };
-    let archive_paths_map: HashMap<i64, Vec<String>> = if show_archive_paths {
-        repo::object::batch_find_archive_paths(conn, &object_ids)?
-    } else {
-        HashMap::new()
-    };
+
+    let mode_result = ops::ls::filter_by_mode(conn, &sel.sources, &mode)?;
+    let unhashed_count = mode_result.unhashed_skipped;
 
     // Determine whether to show status column
     let show_status = include.is_expanded() || excluded_only;
 
-    // Apply archived/unarchived/unhashed/excluded filter and collect output lines
-    // Each entry is (source_path, optional_archive_path, size, mtime, status)
-    let mut output_lines: Vec<(String, Option<String>, i64, i64, String)> = Vec::new();
-    let mut unhashed_count = 0usize;
-
-    for source in &sel.sources {
-        let formatted_source = format_path(&source.path(), cwd.as_deref());
-        let object_id = source.object_id;
-        let size = source.size;
-        let mtime = source.mtime;
-        let status = status_indicator(source);
-
-        // Check archive status if filtering
-        if archived_only {
-            match object_id {
-                None => {
-                    // Unhashed - skip but track count (can't determine archive status)
-                    unhashed_count += 1;
-                }
-                Some(obj_id) => {
-                    if show_archive_paths {
-                        // Get all archive locations for this object (from batch result)
-                        if let Some(paths) = archive_paths_map.get(&obj_id) {
-                            for archive_path in paths {
-                                output_lines.push((
-                                    formatted_source.clone(),
-                                    Some(archive_path.clone()),
-                                    size,
-                                    mtime,
-                                    status.to_string(),
-                                ));
-                            }
-                        }
-                    } else if archived_set.contains(&obj_id) {
-                        output_lines.push((
-                            formatted_source,
-                            None,
-                            size,
-                            mtime,
-                            status.to_string(),
-                        ));
-                    }
-                }
-            }
-        } else if unarchived_only {
-            match object_id {
-                None => {
-                    // Unhashed - skip but track count (can't determine archive status)
-                    unhashed_count += 1;
-                }
-                Some(obj_id) => {
-                    if !archived_set.contains(&obj_id) {
-                        output_lines.push((
-                            formatted_source,
-                            None,
-                            size,
-                            mtime,
-                            status.to_string(),
-                        ));
-                    }
-                }
-            }
-        } else if unhashed_only {
-            if object_id.is_none() {
-                output_lines.push((formatted_source, None, size, mtime, status.to_string()));
-            }
-        } else if excluded_only {
-            if source.is_excluded() {
-                output_lines.push((formatted_source, None, size, mtime, status.to_string()));
-            }
-        } else {
-            // Default: show all
-            output_lines.push((formatted_source, None, size, mtime, status.to_string()));
-        }
-    }
+    // Build output lines from filtered entries (formatting stays here)
+    let mut output_lines: Vec<(String, Option<String>, i64, i64, String)> = mode_result
+        .entries
+        .iter()
+        .map(|e| {
+            let formatted = format_path(&e.source.path(), cwd.as_deref());
+            let status = status_indicator(e.source);
+            (
+                formatted,
+                e.archive_path.clone(),
+                e.source.size,
+                e.source.mtime,
+                status.to_string(),
+            )
+        })
+        .collect();
 
     // Sort output (all ascending by default, -r reverses)
     match sort_by {
@@ -386,8 +328,7 @@ pub fn show_duplicates(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::repo::open_in_memory_for_test;
+    use crate::repo::{self, open_in_memory_for_test};
     use rusqlite::Connection as RusqliteConnection;
 
     fn setup_test_db() -> RusqliteConnection {

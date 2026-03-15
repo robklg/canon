@@ -4,11 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use rusqlite::{Transaction, TransactionBehavior};
-
 use crate::domain::resolve_root_path_any;
 use crate::ops;
-use crate::ops::fs::compute_full_hash;
 use crate::ops::scan::{FileToHash, ScanOptions, ScanStats};
 use crate::progress::Progress;
 use crate::repo::{self, Connection, Db};
@@ -65,6 +62,37 @@ impl ops::scan::ScanProgress for StderrProgress {
     }
     fn on_process_error(&self, path: &str, error: &str) {
         eprintln!("Warning: Failed to process {path}: {error}");
+    }
+}
+
+/// HashProgress implementation that displays a progress bar on stderr.
+#[derive(Default)]
+struct StderrHashProgress {
+    progress: std::cell::RefCell<Option<Progress>>,
+}
+impl ops::scan::HashProgress for StderrHashProgress {
+    fn on_start(&self, total: usize) {
+        eprintln!("Computing hashes for {total} files...");
+        *self.progress.borrow_mut() = Some(Progress::new(total));
+    }
+    fn on_hash(&self, index: usize, _path: &Path) {
+        if let Some(ref p) = *self.progress.borrow() {
+            p.update(index);
+        }
+    }
+    fn on_hash_error(&self, path: &Path, error: &str) {
+        eprintln!("\nWarning: Failed to hash {}: {error}", path.display());
+    }
+    fn on_unexpected_change(&self, path: &Path) {
+        eprintln!(
+            "\nWarning: hash changed for {} (file may be corrupted or was modified without mtime change)",
+            path.display()
+        );
+    }
+    fn on_finish(&self) {
+        if let Some(ref p) = *self.progress.borrow() {
+            p.finish();
+        }
     }
 }
 
@@ -260,67 +288,13 @@ pub fn run(
     }
     println!("{summary}");
 
-    // Hash collected files with progress indicator
+    // Hash collected files via ops layer
     if !all_files_to_hash.is_empty() {
-        let total = all_files_to_hash.len();
-        let progress = Progress::new(total);
-        eprintln!("Computing hashes for {total} files...");
-
-        for (i, file) in all_files_to_hash.iter().enumerate() {
-            progress.update(i);
-
-            // Compute full SHA256 hash
-            let hash_value = match compute_full_hash(&file.full_path) {
-                Ok(h) => h,
-                Err(e) => {
-                    eprintln!(
-                        "\nWarning: Failed to hash {}: {}",
-                        file.full_path.display(),
-                        e
-                    );
-                    continue;
-                }
-            };
-
-            // Wrap object creation + source linking + fact storage in a single
-            // transaction for atomicity. Without this, a crash could leave an
-            // object created but not linked, or linked but without the hash fact.
-            // Uses Immediate for reliable busy-handler support under concurrency.
-            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-
-            let new_object = ops::scan::get_or_create_object(&tx, "sha256", &hash_value)?;
-
-            // Check for unexpected hash change (only if basis didn't change and file had existing hash)
-            if !file.basis_changed {
-                if let Some(old_oid) = file.old_object_id {
-                    if old_oid != new_object.id {
-                        eprintln!(
-                            "\nWarning: hash changed for {} (file may be corrupted or was modified without mtime change)",
-                            file.full_path.display()
-                        );
-                        total_stats.unexpected_hash_changes += 1;
-                    }
-                }
-            }
-
-            repo::source::set_object_id(&tx, file.source_id, new_object.id)?;
-
-            repo::fact::store_object_fact(
-                &tx,
-                new_object.id,
-                "content.hash.sha256",
-                &hash_value,
-                ops::scan::current_timestamp(),
-            )?;
-
-            tx.commit()?;
-
-            total_stats.hashed += 1;
-        }
-
-        progress.finish();
-
-        println!("Hashed {} files", total_stats.hashed);
+        let hash_progress = StderrHashProgress::default();
+        let hash_stats = ops::scan::hash_files(conn, &all_files_to_hash, &hash_progress)?;
+        total_stats.hashed = hash_stats.hashed;
+        total_stats.unexpected_hash_changes = hash_stats.unexpected_hash_changes;
+        println!("Hashed {} files", hash_stats.hashed);
     }
 
     // Exit with error if there were unexpected hash changes (possible corruption)

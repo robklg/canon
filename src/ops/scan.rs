@@ -440,6 +440,100 @@ pub fn current_timestamp() -> i64 {
         .as_secs() as i64
 }
 
+// ============================================================================
+// Hash pipeline
+// ============================================================================
+
+/// Observability for the hash pipeline. The interface implements this
+/// to display progress bars, emit warnings, etc.
+pub trait HashProgress {
+    fn on_start(&self, total: usize);
+    fn on_hash(&self, index: usize, path: &Path);
+    fn on_hash_error(&self, path: &Path, error: &str);
+    fn on_unexpected_change(&self, path: &Path);
+    fn on_finish(&self);
+}
+
+/// Result of the hash pipeline.
+#[derive(Default)]
+pub struct HashStats {
+    pub hashed: u64,
+    pub unexpected_hash_changes: u64,
+    pub errors: u64,
+}
+
+/// Hash files collected during scan, linking each to its content object.
+///
+/// For each file: computes full SHA256, creates/looks up the object,
+/// links the source, stores the hash fact. Each file is wrapped in its
+/// own Immediate transaction for atomicity without blocking concurrent
+/// processes for long periods.
+///
+/// Individual hash I/O errors are reported via `progress` and skipped
+/// (not fatal). DB/transaction errors propagate as `Err`.
+pub fn hash_files(
+    conn: &Connection,
+    files: &[FileToHash],
+    progress: &dyn HashProgress,
+) -> Result<HashStats> {
+    if files.is_empty() {
+        return Ok(HashStats::default());
+    }
+
+    progress.on_start(files.len());
+
+    let mut stats = HashStats::default();
+
+    for (i, file) in files.iter().enumerate() {
+        progress.on_hash(i, &file.full_path);
+
+        // Compute full SHA256 hash
+        let hash_value = match crate::ops::fs::compute_full_hash(&file.full_path) {
+            Ok(h) => h,
+            Err(e) => {
+                progress.on_hash_error(&file.full_path, &e.to_string());
+                stats.errors += 1;
+                continue;
+            }
+        };
+
+        // Wrap object creation + source linking + fact storage in a single
+        // transaction for atomicity. Uses Immediate for reliable busy-handler
+        // support under concurrency.
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+
+        let new_object = get_or_create_object(&tx, "sha256", &hash_value)?;
+
+        // Check for unexpected hash change (only if basis didn't change and file had existing hash)
+        if !file.basis_changed {
+            if let Some(old_oid) = file.old_object_id {
+                if old_oid != new_object.id {
+                    progress.on_unexpected_change(&file.full_path);
+                    stats.unexpected_hash_changes += 1;
+                }
+            }
+        }
+
+        repo::source::set_object_id(&tx, file.source_id, new_object.id)?;
+
+        repo::fact::store_object_fact(
+            &tx,
+            new_object.id,
+            "content.hash.sha256",
+            &hash_value,
+            current_timestamp(),
+        )?;
+
+        tx.commit()?;
+
+        stats.hashed += 1;
+    }
+
+    progress.on_finish();
+
+    Ok(stats)
+}
+
 /// Get or create an object by hash, returning the Object.
 pub fn get_or_create_object(
     conn: &Connection,

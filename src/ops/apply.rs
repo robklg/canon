@@ -522,6 +522,27 @@ struct SizeMismatchError {
 // Execute function
 // ===========================================================================
 
+/// Check for on-disk destination conflicts not already captured by DB checks.
+///
+/// Returns archive-relative paths that exist on disk but are NOT in
+/// `plan.violations.dest_conflicts_in_db`. Used by the interface layer
+/// to combine DB and disk conflicts into a single preflight report.
+pub fn check_disk_conflicts(plan: &ApplyPlan, base_dir: &Path) -> Vec<String> {
+    let db_conflicts: std::collections::HashSet<&str> = plan
+        .violations
+        .dest_conflicts_in_db
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+
+    plan.transfers
+        .iter()
+        .filter(|t| !db_conflicts.contains(t.archive_rel_path.as_str()))
+        .filter(|t| base_dir.join(&t.dest_rel_path).exists())
+        .map(|t| t.archive_rel_path.clone())
+        .collect()
+}
+
 /// Execute file transfers from a computed apply plan.
 ///
 /// Performs: source readability checks, resume disk classification (if resume mode),
