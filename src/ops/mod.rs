@@ -12,6 +12,7 @@ pub mod exclude;
 pub mod facts;
 pub mod fs;
 pub mod ls;
+pub mod scan;
 pub mod selection;
 pub mod survey;
 
