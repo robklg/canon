@@ -1,5 +1,4 @@
 use anyhow::{bail, Context, Result};
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -212,7 +211,7 @@ pub fn run(
                 }
                 // role is guaranteed to be Some when add_root is true (validated in main.rs)
                 let new_role = role.expect("--role is required with --add");
-                check_overlapping_roots(&roots, &canonical)?;
+                crate::domain::root::check_no_overlap(&roots, &canonical)?;
                 let new_root = create_root(conn, &canonical, new_role, comment)?;
                 (new_root.id, canonical.clone(), None, new_role.to_string())
             }
@@ -326,39 +325,6 @@ fn create_root(
     repo::root::create(conn, path_str, role, comment)
 }
 
-fn check_overlapping_roots(all_roots: &[crate::domain::root::Root], new_path: &Path) -> Result<()> {
-    let new_path_str = new_path.to_str().context("Path is not valid UTF-8")?;
-
-    for root in all_roots {
-        let existing = &root.path;
-        if existing == new_path_str {
-            continue; // Same path, not overlapping
-        }
-
-        let existing_path = Path::new(&existing);
-
-        // Check if new path is inside existing root
-        if new_path.starts_with(existing_path) {
-            bail!(
-                "Path {} overlaps with existing root {}",
-                new_path.display(),
-                existing
-            );
-        }
-
-        // Check if existing root is inside new path
-        if existing_path.starts_with(new_path) {
-            bail!(
-                "Path {} overlaps with existing root {}",
-                new_path.display(),
-                existing
-            );
-        }
-    }
-
-    Ok(())
-}
-
 /// Find directories with files that aren't under any root
 pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
     let conn = db.conn();
@@ -394,18 +360,20 @@ pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    // Get all existing roots (excluding suspended for candidate discovery)
-    let roots: Vec<PathBuf> = all_roots
+    // Get active root paths for candidate discovery
+    let root_paths: Vec<PathBuf> = all_roots
         .iter()
         .filter(|r| r.is_active())
         .map(|r| PathBuf::from(&r.path))
         .collect();
 
-    // Find directories with files, skipping tracked subtrees
-    let mut dirs_with_files: HashSet<PathBuf> = HashSet::new();
-    scan_for_untracked(&scope, &roots, &mut dirs_with_files)?;
+    let result = ops::scan::find_root_candidates(&scope, &root_paths)?;
 
-    if dirs_with_files.is_empty() {
+    for warning in &result.warnings {
+        eprintln!("Warning: {warning}");
+    }
+
+    if result.candidates.is_empty() {
         println!(
             "No untracked directories with files found under {}",
             scope.display()
@@ -413,109 +381,20 @@ pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    // Find shortest common ancestors (bounded by scope)
-    let candidates = find_common_ancestors(&dirs_with_files, &roots, &scope);
-
     println!("Candidate roots to add:");
-    for (path, count) in candidates {
-        if count == 1 {
-            println!("  {}  (1 directory with files)", path.display());
+    for candidate in &result.candidates {
+        if candidate.dir_count == 1 {
+            println!("  {}  (1 directory with files)", candidate.path.display());
         } else {
-            println!("  {}  ({} directories with files)", path.display(), count);
+            println!(
+                "  {}  ({} directories with files)",
+                candidate.path.display(),
+                candidate.dir_count
+            );
         }
     }
 
     Ok(())
-}
-
-/// Recursively scan for untracked directories with files
-fn scan_for_untracked(dir: &Path, roots: &[PathBuf], result: &mut HashSet<PathBuf>) -> Result<()> {
-    // Skip if this directory is under an existing root
-    if roots
-        .iter()
-        .any(|root| dir == root || dir.starts_with(root))
-    {
-        return Ok(());
-    }
-
-    let entries: Vec<_> = match fs::read_dir(dir) {
-        Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
-        Err(e) => {
-            eprintln!("Warning: cannot read {}: {}", dir.display(), e);
-            return Ok(());
-        }
-    };
-
-    // Check if this directory has any files (stop at first one found)
-    let has_file = entries
-        .iter()
-        .any(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false));
-
-    // Check if this directory contains any root (can't be added as a root - invariant)
-    let contains_root = roots
-        .iter()
-        .any(|root| root.starts_with(dir) && root != dir);
-
-    if has_file && !contains_root {
-        // Found a file and directory doesn't contain any roots: record it
-        result.insert(dir.to_path_buf());
-    } else {
-        // Either no files here, or directory contains roots: recurse into subdirs
-        for entry in entries {
-            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                scan_for_untracked(&entry.path(), roots, result)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Find the shortest common ancestors for a set of directories
-fn find_common_ancestors(
-    dirs_with_files: &HashSet<PathBuf>,
-    roots: &[PathBuf],
-    scope: &Path,
-) -> Vec<(PathBuf, usize)> {
-    use std::collections::HashMap;
-
-    let mut ancestors: HashMap<PathBuf, usize> = HashMap::new();
-
-    for dir in dirs_with_files {
-        // Walk up the path, find the highest ancestor not under a root
-        let mut current = dir.clone();
-        let mut highest_untracked = dir.clone();
-
-        while let Some(parent) = current.parent() {
-            // Stop if we've reached the scope boundary (don't walk up to scope itself)
-            if parent == scope || !parent.starts_with(scope) {
-                break;
-            }
-
-            // Stop if we hit a root
-            if roots
-                .iter()
-                .any(|root| parent == root || parent.starts_with(root))
-            {
-                break;
-            }
-
-            // Stop if parent contains a root (don't suggest parent of existing root)
-            if roots.iter().any(|root| root.starts_with(parent)) {
-                break;
-            }
-
-            highest_untracked = parent.to_path_buf();
-            current = parent.to_path_buf();
-        }
-
-        *ancestors.entry(highest_untracked).or_insert(0) += 1;
-    }
-
-    // Sort by path for consistent output
-    let mut result: Vec<_> = ancestors.into_iter().collect();
-    result.sort_by(|a, b| a.0.cmp(&b.0));
-    result
 }
 
 #[cfg(test)]

@@ -78,6 +78,41 @@ pub fn find_containing_root(
     None
 }
 
+/// Check that a new root path does not overlap with any existing root.
+///
+/// Two roots overlap if one is a parent of the other. The same path is
+/// allowed (handled elsewhere as a no-op or error). This is a pure
+/// predicate — no I/O.
+pub fn check_no_overlap(roots: &[Root], new_path: &Path) -> Result<()> {
+    let new_path_str = new_path.to_str().context("Path is not valid UTF-8")?;
+
+    for root in roots {
+        if root.path == new_path_str {
+            continue; // Same path, not overlapping
+        }
+
+        let existing_path = Path::new(&root.path);
+
+        if new_path.starts_with(existing_path) {
+            bail!(
+                "Path {} overlaps with existing root {}",
+                new_path.display(),
+                root.path
+            );
+        }
+
+        if existing_path.starts_with(new_path) {
+            bail!(
+                "Path {} overlaps with existing root {}",
+                new_path.display(),
+                root.path
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// A root directory registered in canon.
 ///
 /// Roots are the top-level directories that canon manages. Each root has a role
