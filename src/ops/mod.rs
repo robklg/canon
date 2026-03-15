@@ -12,6 +12,7 @@ pub mod exclude;
 pub mod fs;
 pub mod ls;
 pub mod selection;
+pub mod survey;
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
