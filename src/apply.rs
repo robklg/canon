@@ -5,8 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::ceremony;
-use crate::cluster;
-use crate::ops::cluster::{ManifestConfig, validate_manifest_version};
+use crate::ops::cluster::{ManifestConfig, parse_manifest_allow, validate_manifest_version};
 use crate::domain::root::parse_root_spec;
 use crate::expr;
 use crate::ops;
@@ -63,7 +62,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     validate_manifest_version(config.meta.version)?;
 
     // Merge manifest [options] with CLI options
-    let (_, manifest_duplicates) = cluster::parse_manifest_allow(&config.options.allow)?;
+    let (_, manifest_duplicates) = parse_manifest_allow(&config.options.allow)?;
     let allow_duplicates = options.allow_duplicates || manifest_duplicates;
     if manifest_duplicates && !options.allow_duplicates {
         eprintln!(
@@ -87,7 +86,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         .collect::<Result<Vec<_>>>()?;
 
     // Validate lock file hash matches config
-    let actual_hash = crate::cluster::hash_file(&lock_path)?;
+    let actual_hash = ops::fs::compute_full_hash(&lock_path)?;
     if actual_hash != config.meta.lock_hash {
         bail!(
             "Lock file hash mismatch: expected {}, got {}\n\

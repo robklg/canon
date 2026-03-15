@@ -1,13 +1,19 @@
-//! Cluster operations — plan for cluster generation.
+//! Cluster operations — plan and execute for cluster generation.
 //!
-//! Provides `plan_generate()`, which computes what `cluster generate` would
-//! produce — source selection, archive detection, duplicate checking, and
-//! fact coverage computation — without any side effects. The interface layer
-//! uses the plan to write the lock file and manifest.
+//! `plan_generate()` computes what `cluster generate` would produce — source
+//! selection, archive detection, duplicate checking, and fact coverage
+//! computation — without any side effects.
+//!
+//! `execute_generate()` and `execute_refresh()` write the lock file and manifest
+//! to disk. Manifests are stored artifacts (not presentation) so this logic
+//! belongs in the ops layer, not the interface.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -304,6 +310,240 @@ pub fn plan_generate(
 }
 
 // ============================================================================
+// Execute types
+// ============================================================================
+
+/// Parameters for executing a cluster generation (writing lock file + manifest).
+pub struct ExecuteGenerateParams {
+    pub lock_path: PathBuf,
+    pub manifest_path: PathBuf,
+    pub expanded_filters: Vec<String>,
+    pub original_filters: Vec<String>,
+    pub scope_prefixes: Vec<String>,
+    pub archive_root_id: i64,
+    pub base_dir: String,
+    pub allow: Vec<String>,
+}
+
+/// Result from executing a cluster generation — display data for the interface.
+pub struct ExecuteGenerateResult {
+    pub source_count: usize,
+    pub root_breakdown: Vec<(String, usize)>,
+    pub not_archived_count: usize,
+}
+
+/// Parameters for executing a cluster refresh.
+pub struct ExecuteRefreshParams {
+    pub lock_path: PathBuf,
+    pub manifest_path: PathBuf,
+    pub old_manifest_content: String,
+    pub config: ManifestConfig,
+}
+
+/// Result from executing a cluster refresh.
+pub struct ExecuteRefreshResult {
+    /// None if no sources matched (lock file removed, minimal manifest written).
+    pub outcome: Option<ExecuteGenerateResult>,
+}
+
+// ============================================================================
+// Execute functions
+// ============================================================================
+
+/// Write lock file + manifest for a fresh cluster generation.
+pub fn execute_generate(
+    plan: &ClusterGeneratePlan,
+    params: &ExecuteGenerateParams,
+) -> Result<ExecuteGenerateResult> {
+    // Write JSONL lock file
+    write_lock_file(&params.lock_path, &plan.lock_entries)?;
+
+    // Compute lock file hash
+    let lock_hash = super::fs::compute_full_hash(&params.lock_path)?;
+
+    // Build ManifestConfig
+    let scope = if params.scope_prefixes.len() == 1 {
+        Some(params.scope_prefixes[0].clone())
+    } else if params.scope_prefixes.is_empty() {
+        None
+    } else {
+        Some(params.scope_prefixes.join(", "))
+    };
+
+    let config = ManifestConfig {
+        meta: ManifestMeta {
+            version: 1,
+            query: params.expanded_filters.clone(),
+            scope,
+            generated_at: current_timestamp(),
+            lock_hash,
+        },
+        options: ManifestOptions {
+            allow: params.allow.clone(),
+        },
+        output: ManifestOutput {
+            pattern: "{filename}".to_string(),
+            archive_root_id: params.archive_root_id,
+            base_dir: params.base_dir.clone(),
+        },
+    };
+
+    // Assemble manifest
+    let summary = generate_summary_comments(plan);
+    let notes_block = "# === Notes ===\n#\n";
+    let fact_help = generate_fact_help(plan.lock_entries.len(), &plan.full_coverage_facts);
+
+    let toml_str =
+        toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
+
+    // Inject "# Original:" comments when alias expansion changed the filter
+    let comment_lines: Vec<String> = params
+        .original_filters
+        .iter()
+        .zip(params.expanded_filters.iter())
+        .filter(|(orig, exp)| orig != exp)
+        .map(|(orig, _)| format!("# Original: {orig}"))
+        .collect();
+    let toml_str = if comment_lines.is_empty() {
+        toml_str
+    } else {
+        inject_comments_before_key(&toml_str, "query", &comment_lines)
+    };
+
+    let manifest = format!(
+        "{}\n{}\n{}\n\n{}",
+        summary.trim_end(),
+        notes_block.trim_end(),
+        toml_str.trim_end(),
+        fact_help
+    );
+    fs::write(&params.manifest_path, &manifest).with_context(|| {
+        format!(
+            "Failed to write manifest to {}",
+            params.manifest_path.display()
+        )
+    })?;
+
+    Ok(ExecuteGenerateResult {
+        source_count: plan.lock_entries.len(),
+        root_breakdown: plan.root_breakdown.clone(),
+        not_archived_count: plan.not_archived_count,
+    })
+}
+
+/// Rewrite lock file + update existing manifest for a cluster refresh.
+pub fn execute_refresh(
+    plan: &ClusterGeneratePlan,
+    params: &ExecuteRefreshParams,
+) -> Result<ExecuteRefreshResult> {
+    if plan.lock_entries.is_empty() {
+        // No sources — remove lock file if it exists
+        if params.lock_path.exists() {
+            fs::remove_file(&params.lock_path)?;
+        }
+        // Update config with empty lock hash
+        let mut config = ManifestConfig {
+            meta: ManifestMeta {
+                version: params.config.meta.version,
+                query: params.config.meta.query.clone(),
+                scope: params.config.meta.scope.clone(),
+                generated_at: current_timestamp(),
+                lock_hash: String::new(),
+            },
+            options: ManifestOptions {
+                allow: params.config.options.allow.clone(),
+            },
+            output: ManifestOutput {
+                pattern: params.config.output.pattern.clone(),
+                archive_root_id: params.config.output.archive_root_id,
+                base_dir: params.config.output.base_dir.clone(),
+            },
+        };
+        // Preserve version default behavior
+        config.meta.version = params.config.meta.version;
+        let toml_str =
+            toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
+        fs::write(&params.manifest_path, &toml_str).with_context(|| {
+            format!(
+                "Failed to write config: {}",
+                params.manifest_path.display()
+            )
+        })?;
+        return Ok(ExecuteRefreshResult { outcome: None });
+    }
+
+    // Write JSONL lock file
+    write_lock_file(&params.lock_path, &plan.lock_entries)?;
+
+    // Compute lock file hash and update config
+    let lock_hash = super::fs::compute_full_hash(&params.lock_path)?;
+    let mut config = ManifestConfig {
+        meta: ManifestMeta {
+            version: params.config.meta.version,
+            query: params.config.meta.query.clone(),
+            scope: params.config.meta.scope.clone(),
+            generated_at: current_timestamp(),
+            lock_hash,
+        },
+        options: ManifestOptions {
+            allow: params.config.options.allow.clone(),
+        },
+        output: ManifestOutput {
+            pattern: params.config.output.pattern.clone(),
+            archive_root_id: params.config.output.archive_root_id,
+            base_dir: params.config.output.base_dir.clone(),
+        },
+    };
+    config.meta.version = params.config.meta.version;
+
+    // Assemble manifest with preserved notes
+    let summary = generate_summary_comments(plan);
+    let notes = extract_notes(&params.old_manifest_content).unwrap_or_else(|| "\n#\n".to_string());
+    let notes_block = format!("# === Notes ==={notes}");
+    let fact_help = generate_fact_help(plan.lock_entries.len(), &plan.full_coverage_facts);
+
+    let toml_str =
+        toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
+    let manifest = format!(
+        "{}\n{}\n{}\n\n{}",
+        summary.trim_end(),
+        notes_block.trim_end(),
+        toml_str.trim_end(),
+        fact_help
+    );
+    fs::write(&params.manifest_path, &manifest).with_context(|| {
+        format!(
+            "Failed to write config: {}",
+            params.manifest_path.display()
+        )
+    })?;
+
+    Ok(ExecuteRefreshResult {
+        outcome: Some(ExecuteGenerateResult {
+            source_count: plan.lock_entries.len(),
+            root_breakdown: plan.root_breakdown.clone(),
+            not_archived_count: plan.not_archived_count,
+        }),
+    })
+}
+
+/// Parse `allow` values from a manifest's `[options]` section.
+pub fn parse_manifest_allow(allow: &[String]) -> Result<(bool, bool)> {
+    let mut archived = false;
+    let mut duplicates = false;
+    for v in allow {
+        match v.as_str() {
+            "archived" => archived = true,
+            "duplicates" => duplicates = true,
+            other => bail!(
+                "Invalid allow value '{other}' in manifest [options]. Valid: archived, duplicates"
+            ),
+        }
+    }
+    Ok((archived, duplicates))
+}
+
+// ============================================================================
 // Private helpers
 // ============================================================================
 
@@ -445,6 +685,208 @@ fn get_fact_description(key: &str) -> String {
         .and_then(|k| k.description())
         .map(|s| s.to_string())
         .unwrap_or_default()
+}
+
+// ============================================================================
+// Manifest content helpers (moved from interface layer)
+// ============================================================================
+
+/// Write a JSONL lock file from lock entries.
+fn write_lock_file(lock_path: &Path, entries: &[LockEntry]) -> Result<()> {
+    let lock_file = std::fs::File::create(lock_path)
+        .with_context(|| format!("Failed to create lock file: {}", lock_path.display()))?;
+    let mut writer = BufWriter::new(lock_file);
+
+    for entry in entries {
+        serde_json::to_writer(&mut writer, entry)
+            .with_context(|| format!("Failed to write lock entry for {}", entry.path))?;
+        writeln!(writer)?;
+    }
+
+    writer.flush()?;
+    Ok(())
+}
+
+fn current_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+/// Generate cluster summary comment block for the manifest.
+fn generate_summary_comments(plan: &ClusterGeneratePlan) -> String {
+    use crate::ceremony::format_count;
+
+    let source_count = plan.lock_entries.len();
+    let mut s = String::new();
+    s.push_str("# === Cluster Summary ===\n");
+
+    let root_word = if plan.root_breakdown.len() == 1 {
+        "root"
+    } else {
+        "roots"
+    };
+    s.push_str(&format!(
+        "# {} sources from {} {}:\n",
+        format_count(source_count),
+        plan.root_breakdown.len(),
+        root_word
+    ));
+    for (path, count) in &plan.root_breakdown {
+        s.push_str(&format!("#   {}  ({})\n", path, format_count(*count)));
+    }
+    s.push_str(&format!(
+        "# {} have no archived copy\n",
+        format_count(plan.not_archived_count)
+    ));
+
+    let archived_count = plan.archived.len();
+    if archived_count > 0 || plan.excluded_count > 0 || plan.unhashed_count > 0 {
+        s.push_str("#\n");
+        let mut parts = Vec::new();
+        if archived_count > 0 {
+            parts.push(format!(
+                "{} already archived (--allow archived)",
+                archived_count
+            ));
+        }
+        if plan.excluded_count > 0 {
+            parts.push(format!("{} excluded", plan.excluded_count));
+        }
+        if plan.unhashed_count > 0 {
+            parts.push(format!("{} unhashed", plan.unhashed_count));
+        }
+        s.push_str(&format!("# Skipped: {}\n", parts.join(", ")));
+    }
+
+    s
+}
+
+/// Generate fact help comments for the manifest.
+fn generate_fact_help(
+    source_count: usize,
+    full_coverage_facts: &[(String, FactType, String)],
+) -> String {
+    use crate::expr::{BuiltinKeyVisibility, Modifier, ModifierCategory};
+    use strum::IntoEnumIterator;
+
+    if source_count == 0 {
+        return String::new();
+    }
+
+    let mut help = String::new();
+    help.push_str(&format!(
+        "# Available facts for pattern (100% coverage on {source_count} sources in this cluster):\n"
+    ));
+    help.push_str("#\n");
+
+    // Built-in facts
+    help.push_str("# Built-in:\n");
+    for key in BuiltinKey::iter() {
+        if key.visibility() != BuiltinKeyVisibility::Default {
+            continue;
+        }
+        let name: &'static str = key.into();
+        let desc = key.description().unwrap_or("");
+        help.push_str(&format!(
+            "#   {:18} {:6} - {}\n",
+            name,
+            key.fact_type().as_str(),
+            desc
+        ));
+    }
+    help.push_str(&format!(
+        "#   {:18} {:6} - {}\n",
+        "object.hash", "text", "Content hash (if hashed)"
+    ));
+    help.push_str("#\n");
+
+    // User facts with 100% coverage
+    if !full_coverage_facts.is_empty() {
+        help.push_str("# Content facts:\n");
+        for (key, fact_type, description) in full_coverage_facts {
+            let desc_part = if description.is_empty() {
+                String::new()
+            } else {
+                format!(" - {description}")
+            };
+            help.push_str(&format!(
+                "#   {:18} {:6}{}\n",
+                key,
+                fact_type.as_str(),
+                desc_part
+            ));
+        }
+        help.push_str("#\n");
+    }
+
+    // Modifiers reference
+    let time_mods: Vec<_> = Modifier::iter()
+        .filter(|m| m.category() == ModifierCategory::Time)
+        .map(|m| {
+            let name: &'static str = m.into();
+            format!("|{name}")
+        })
+        .collect();
+    let string_mods: Vec<_> = Modifier::iter()
+        .filter(|m| m.category() == ModifierCategory::String)
+        .map(|m| {
+            let name: &'static str = m.into();
+            format!("|{name}")
+        })
+        .collect();
+    help.push_str("# Modifiers:\n");
+    help.push_str(&format!("#   Time: {}\n", time_mods.join(" ")));
+    help.push_str(&format!("#   String: {}\n", string_mods.join(" ")));
+    help.push_str("#   Path: [0] [-1] [1:3] etc.\n");
+    help.push_str("#\n");
+
+    // Aliases
+    help.push_str("# Aliases:\n");
+    for key in BuiltinKey::iter() {
+        if let Some(expansion) = key.expansion() {
+            let name: &'static str = key.into();
+            help.push_str(&format!("#   {{{name}}}  →  {{{expansion}}}\n"));
+        }
+    }
+    help.push('\n');
+
+    help
+}
+
+/// Extract notes section from an existing manifest.
+fn extract_notes(content: &str) -> Option<String> {
+    let marker = "# === Notes ===";
+    let start_idx = content.find(marker)?;
+    let after_marker = start_idx + marker.len();
+    let rest = &content[after_marker..];
+
+    let end = rest
+        .lines()
+        .enumerate()
+        .skip(1)
+        .find(|(_, line)| line.starts_with("# === ") || line.starts_with('['))
+        .map(|(i, _)| {
+            rest.lines().take(i).map(|l| l.len() + 1).sum::<usize>()
+        })
+        .unwrap_or(rest.len());
+
+    Some(rest[..end].to_string())
+}
+
+/// Insert comment lines before a key in a TOML string.
+fn inject_comments_before_key(toml_str: &str, key: &str, comments: &[String]) -> String {
+    let prefix = format!("{key} = ");
+    let mut result = String::with_capacity(toml_str.len() + comments.len() * 40);
+    for line in toml_str.lines() {
+        if line.starts_with(&prefix) {
+            for comment in comments {
+                result.push_str(comment);
+                result.push('\n');
+            }
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+    result
 }
 
 // ============================================================================
@@ -760,5 +1202,498 @@ mod tests {
             plan.full_coverage_facts.is_empty(),
             "Partial coverage facts should not appear"
         );
+    }
+
+    // =========================================================================
+    // parse_manifest_allow
+    // =========================================================================
+
+    #[test]
+    fn test_manifest_options_invalid_allow() {
+        let result = parse_manifest_allow(&["bogus".to_string()]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("bogus"));
+        assert!(err.contains("archived"));
+    }
+
+    #[test]
+    fn test_parse_manifest_allow_valid() {
+        let (archived, duplicates) =
+            parse_manifest_allow(&["archived".to_string(), "duplicates".to_string()]).unwrap();
+        assert!(archived);
+        assert!(duplicates);
+    }
+
+    #[test]
+    fn test_parse_manifest_allow_empty() {
+        let (archived, duplicates) = parse_manifest_allow(&[]).unwrap();
+        assert!(!archived);
+        assert!(!duplicates);
+    }
+
+    // =========================================================================
+    // Version validation
+    // =========================================================================
+
+    #[test]
+    fn test_version_1_accepted() {
+        assert!(validate_manifest_version(1).is_ok());
+    }
+
+    #[test]
+    fn test_version_future_rejected() {
+        let result = validate_manifest_version(99);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("99"));
+        assert!(err.contains("not supported"));
+    }
+
+    // =========================================================================
+    // Manifest serde
+    // =========================================================================
+
+    #[test]
+    fn test_manifest_options_round_trip() {
+        let config = ManifestConfig {
+            meta: ManifestMeta {
+                version: 1,
+                query: vec!["source.ext=jpg".to_string()],
+                scope: Some("/photos".to_string()),
+                generated_at: "2026-02-15T12:00:00Z".to_string(),
+                lock_hash: "abc123".to_string(),
+            },
+            options: ManifestOptions {
+                allow: vec!["archived".to_string(), "duplicates".to_string()],
+            },
+            output: ManifestOutput {
+                pattern: "{filename}".to_string(),
+                archive_root_id: 1,
+                base_dir: "photos".to_string(),
+            },
+        };
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: ManifestConfig = toml::from_str(&toml_str).unwrap();
+
+        assert_eq!(parsed.options.allow, vec!["archived", "duplicates"]);
+        assert_eq!(parsed.meta.query, vec!["source.ext=jpg"]);
+        assert_eq!(parsed.output.pattern, "{filename}");
+    }
+
+    #[test]
+    fn test_manifest_options_backward_compat() {
+        let toml_str = r#"
+[meta]
+query = ["source.ext=jpg"]
+scope = "/photos"
+generated_at = "2026-02-15T12:00:00Z"
+lock_hash = "abc123"
+
+[output]
+pattern = "{filename}"
+archive_root_id = 1
+base_dir = "photos"
+"#;
+        let config: ManifestConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.options.allow.is_empty());
+    }
+
+    #[test]
+    fn test_manifest_without_version_defaults_to_1() {
+        let toml_str = r#"
+[meta]
+query = ["source.ext=jpg"]
+scope = "/photos"
+generated_at = "2026-02-15T12:00:00Z"
+lock_hash = "abc123"
+
+[output]
+pattern = "{filename}"
+archive_root_id = 1
+base_dir = "photos"
+"#;
+        let config: ManifestConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.meta.version, 1);
+    }
+
+    #[test]
+    fn test_manifest_with_version_round_trip() {
+        let config = ManifestConfig {
+            meta: ManifestMeta {
+                version: 1,
+                query: vec!["source.ext=jpg".to_string()],
+                scope: Some("/photos".to_string()),
+                generated_at: "2026-02-15T12:00:00Z".to_string(),
+                lock_hash: "abc123".to_string(),
+            },
+            options: ManifestOptions { allow: vec![] },
+            output: ManifestOutput {
+                pattern: "{filename}".to_string(),
+                archive_root_id: 1,
+                base_dir: "photos".to_string(),
+            },
+        };
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: ManifestConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.meta.version, 1);
+    }
+
+    // =========================================================================
+    // extract_notes
+    // =========================================================================
+
+    #[test]
+    fn test_extract_notes_empty_placeholder() {
+        let content = "# === Notes ===\n#\n\n[meta]\nversion = 1\n";
+        let notes = extract_notes(content).unwrap();
+        assert_eq!(notes, "\n#\n\n");
+    }
+
+    #[test]
+    fn test_extract_notes_with_content() {
+        let content =
+            "# === Notes ===\n# This cluster has family photos\n# from 2020-2023\n\n[meta]\n";
+        let notes = extract_notes(content).unwrap();
+        assert_eq!(
+            notes,
+            "\n# This cluster has family photos\n# from 2020-2023\n\n"
+        );
+    }
+
+    #[test]
+    fn test_extract_notes_missing() {
+        let content = "[meta]\nversion = 1\nquery = []\n";
+        assert!(extract_notes(content).is_none());
+    }
+
+    #[test]
+    fn test_extract_notes_before_meta() {
+        let content = "# === Notes ===\n# Some note\n[meta]\nversion = 1\n";
+        let notes = extract_notes(content).unwrap();
+        assert_eq!(notes, "\n# Some note\n");
+    }
+
+    #[test]
+    fn test_extract_notes_before_next_section() {
+        let content = "# === Notes ===\n# My notes\n# === Cluster Summary ===\n# stuff\n";
+        let notes = extract_notes(content).unwrap();
+        assert_eq!(notes, "\n# My notes\n");
+    }
+
+    // =========================================================================
+    // generate_summary_comments
+    // =========================================================================
+
+    fn make_plan_for_summary(
+        source_count: usize,
+        root_breakdown: Vec<(String, usize)>,
+        not_archived_count: usize,
+        archived_count: usize,
+        excluded_count: usize,
+        unhashed_count: usize,
+    ) -> ClusterGeneratePlan {
+        // Build minimal lock entries to match source_count
+        let lock_entries: Vec<LockEntry> = (0..source_count)
+            .map(|i| LockEntry {
+                id: i as i64,
+                root_id: 1,
+                path: format!("file{i}.jpg"),
+                device: 0,
+                inode: i as i64,
+                size: 100,
+                mtime: 0,
+                partial_hash: "hash".to_string(),
+                object_id: Some(i as i64),
+                hash_type: None,
+                hash_value: None,
+            })
+            .collect();
+
+        let archived: Vec<(String, String)> = (0..archived_count)
+            .map(|i| (format!("archived{i}.jpg"), format!("archive{i}.jpg")))
+            .collect();
+
+        ClusterGeneratePlan {
+            lock_entries,
+            archived,
+            full_coverage_facts: vec![],
+            mixed_type_warnings: vec![],
+            root_breakdown,
+            not_archived_count,
+            excluded_count,
+            unhashed_count,
+        }
+    }
+
+    #[test]
+    fn test_generate_summary_single_root() {
+        let plan = make_plan_for_summary(42, vec![("/photos".to_string(), 42)], 42, 0, 0, 0);
+        let summary = generate_summary_comments(&plan);
+        assert!(summary.contains("42 sources from 1 root:"));
+        assert!(summary.contains("#   /photos  (42)"));
+        assert!(summary.contains("# 42 have no archived copy"));
+        assert!(!summary.contains("Skipped"));
+    }
+
+    #[test]
+    fn test_generate_summary_multiple_roots() {
+        let plan = make_plan_for_summary(
+            150,
+            vec![("/backup".to_string(), 50), ("/photos".to_string(), 100)],
+            120,
+            0,
+            0,
+            0,
+        );
+        let summary = generate_summary_comments(&plan);
+        assert!(summary.contains("150 sources from 2 roots:"));
+        let backup_pos = summary.find("/backup").unwrap();
+        let photos_pos = summary.find("/photos").unwrap();
+        assert!(backup_pos < photos_pos);
+    }
+
+    #[test]
+    fn test_generate_summary_no_skipped() {
+        let plan = make_plan_for_summary(10, vec![("/photos".to_string(), 10)], 10, 0, 0, 0);
+        let summary = generate_summary_comments(&plan);
+        assert!(!summary.contains("Skipped"));
+    }
+
+    #[test]
+    fn test_generate_summary_with_skipped() {
+        let plan = make_plan_for_summary(10, vec![("/photos".to_string(), 10)], 10, 0, 3, 5);
+        let summary = generate_summary_comments(&plan);
+        assert!(summary.contains("# Skipped: 3 excluded, 5 unhashed"));
+    }
+
+    #[test]
+    fn test_generate_summary_with_archived_skipped() {
+        let plan = make_plan_for_summary(10, vec![("/photos".to_string(), 10)], 10, 4, 2, 0);
+        let summary = generate_summary_comments(&plan);
+        assert!(summary.contains("# Skipped: 4 already archived (--allow archived), 2 excluded"));
+    }
+
+    // =========================================================================
+    // write_lock_file
+    // =========================================================================
+
+    #[test]
+    fn test_write_lock_file_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("test.lock");
+        let entries = vec![
+            LockEntry {
+                id: 1,
+                root_id: 10,
+                path: "/photos/a.jpg".to_string(),
+                device: 100,
+                inode: 200,
+                size: 5000,
+                mtime: 1700000000,
+                partial_hash: "abc123".to_string(),
+                object_id: Some(42),
+                hash_type: Some("sha256".to_string()),
+                hash_value: Some("deadbeef".to_string()),
+            },
+            LockEntry {
+                id: 2,
+                root_id: 10,
+                path: "/photos/b.jpg".to_string(),
+                device: 100,
+                inode: 201,
+                size: 3000,
+                mtime: 1700000001,
+                partial_hash: "def456".to_string(),
+                object_id: None,
+                hash_type: None,
+                hash_value: None,
+            },
+        ];
+
+        write_lock_file(&lock_path, &entries).unwrap();
+
+        // Read back and verify
+        let content = std::fs::read_to_string(&lock_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let entry1: LockEntry = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(entry1.id, 1);
+        assert_eq!(entry1.path, "/photos/a.jpg");
+        assert_eq!(entry1.hash_value.as_deref(), Some("deadbeef"));
+        let entry2: LockEntry = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(entry2.id, 2);
+        assert!(entry2.object_id.is_none());
+    }
+
+    // =========================================================================
+    // execute_generate
+    // =========================================================================
+
+    #[test]
+    fn test_execute_generate_writes_files() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "hash1", false);
+        insert_source(&conn, root, "photo.jpg", Some(obj));
+
+        let plan = plan_generate(&mut conn, &default_params()).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("cluster.toml");
+        let lock_path = dir.path().join("cluster.lock");
+
+        let params = ExecuteGenerateParams {
+            lock_path: lock_path.clone(),
+            manifest_path: manifest_path.clone(),
+            expanded_filters: vec![],
+            original_filters: vec![],
+            scope_prefixes: vec!["/photos".to_string()],
+            archive_root_id: 1,
+            base_dir: "output".to_string(),
+            allow: vec![],
+        };
+
+        let result = execute_generate(&plan, &params).unwrap();
+        assert_eq!(result.source_count, 1);
+
+        // Verify files exist
+        assert!(lock_path.exists());
+        assert!(manifest_path.exists());
+
+        // Verify manifest content sections
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.contains("# === Cluster Summary ==="));
+        assert!(manifest.contains("# === Notes ==="));
+        assert!(manifest.contains("[meta]"));
+        assert!(manifest.contains("[output]"));
+        assert!(manifest.contains("pattern = \"{filename}\""));
+    }
+
+    #[test]
+    fn test_execute_generate_injects_original_filter_comments() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "hash1", false);
+        insert_source(&conn, root, "photo.jpg", Some(obj));
+
+        let plan = plan_generate(&mut conn, &default_params()).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let params = ExecuteGenerateParams {
+            lock_path: dir.path().join("cluster.lock"),
+            manifest_path: dir.path().join("cluster.toml"),
+            expanded_filters: vec!["source.ext=jpg".to_string()],
+            original_filters: vec!["@image".to_string()],
+            scope_prefixes: vec!["/photos".to_string()],
+            archive_root_id: 1,
+            base_dir: "output".to_string(),
+            allow: vec![],
+        };
+
+        execute_generate(&plan, &params).unwrap();
+
+        let manifest = std::fs::read_to_string(dir.path().join("cluster.toml")).unwrap();
+        assert!(manifest.contains("# Original: @image"));
+    }
+
+    // =========================================================================
+    // execute_refresh
+    // =========================================================================
+
+    #[test]
+    fn test_execute_refresh_preserves_notes() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "hash1", false);
+        insert_source(&conn, root, "photo.jpg", Some(obj));
+
+        let plan = plan_generate(&mut conn, &default_params()).unwrap();
+
+        // Simulate an existing manifest with user-edited notes
+        let old_content = "\
+# === Cluster Summary ===\n\
+# 1 sources from 1 root:\n\
+# === Notes ===\n\
+# These are my important notes\n\
+# about this cluster\n\
+[meta]\n\
+version = 1\n\
+query = []\n\
+generated_at = \"2026-01-01T00:00:00Z\"\n\
+lock_hash = \"old\"\n\
+\n\
+[output]\n\
+pattern = \"{filename}\"\n\
+archive_root_id = 1\n\
+base_dir = \"output\"\n";
+
+        let config: ManifestConfig = toml::from_str(old_content).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let params = ExecuteRefreshParams {
+            lock_path: dir.path().join("cluster.lock"),
+            manifest_path: dir.path().join("cluster.toml"),
+            old_manifest_content: old_content.to_string(),
+            config,
+        };
+
+        let result = execute_refresh(&plan, &params).unwrap();
+        assert!(result.outcome.is_some());
+
+        let manifest = std::fs::read_to_string(dir.path().join("cluster.toml")).unwrap();
+        assert!(manifest.contains("# These are my important notes"));
+        assert!(manifest.contains("# about this cluster"));
+    }
+
+    #[test]
+    fn test_execute_refresh_empty_removes_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("cluster.lock");
+        let manifest_path = dir.path().join("cluster.toml");
+
+        // Create a lock file that should be removed
+        std::fs::write(&lock_path, "old content").unwrap();
+
+        let empty_plan = ClusterGeneratePlan {
+            lock_entries: vec![],
+            archived: vec![],
+            full_coverage_facts: vec![],
+            mixed_type_warnings: vec![],
+            root_breakdown: vec![],
+            not_archived_count: 0,
+            excluded_count: 0,
+            unhashed_count: 0,
+        };
+
+        let config = ManifestConfig {
+            meta: ManifestMeta {
+                version: 1,
+                query: vec![],
+                scope: None,
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+                lock_hash: "old".to_string(),
+            },
+            options: ManifestOptions { allow: vec![] },
+            output: ManifestOutput {
+                pattern: "{filename}".to_string(),
+                archive_root_id: 1,
+                base_dir: "output".to_string(),
+            },
+        };
+
+        let params = ExecuteRefreshParams {
+            lock_path: lock_path.clone(),
+            manifest_path: manifest_path.clone(),
+            old_manifest_content: String::new(),
+            config,
+        };
+
+        let result = execute_refresh(&empty_plan, &params).unwrap();
+        assert!(result.outcome.is_none());
+        assert!(!lock_path.exists());
+        assert!(manifest_path.exists());
     }
 }

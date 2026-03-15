@@ -55,7 +55,7 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 **Operations Layer** (`src/ops/`) - Composed behaviors, interface-independent:
 - `selection.rs` - Source selection: `select_sources()`, `RolePolicy`, `SelectionParams`, `Selection`
 - `exclude.rs` - Exclude plan/execute: `plan_set()`, `execute_set()`, `plan_clear()`, `execute_clear()`
-- `cluster.rs` - Cluster plan + manifest contract: `plan_generate()`, `LockEntry`, `ManifestConfig`, `ManifestMeta`, `ManifestOptions`, `ManifestOutput`, `validate_manifest_version()`
+- `cluster.rs` - Cluster plan/execute + manifest contract: `plan_generate()`, `execute_generate()`, `execute_refresh()`, `parse_manifest_allow()`, `LockEntry`, `ManifestConfig`, `ManifestMeta`, `ManifestOptions`, `ManifestOutput`, `validate_manifest_version()`, `ExecuteGenerateParams`, `ExecuteGenerateResult`, `ExecuteRefreshParams`, `ExecuteRefreshResult`
 - `apply.rs` - Apply plan/execute: `plan_apply()`, `execute_apply()`, `TransferMode`, `TransferProgress` trait
 - `coverage.rs` - Coverage statistics: `compute_stats()`, `compute_scoped()`, `compute_per_root()`, `CoverageStats`
 - `ls.rs` - Duplicate detection: `find_duplicate_groups()`, `DuplicateGroup`
