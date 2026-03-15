@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 
 use super::cluster::LockEntry;
-use super::fs::{compute_partial_hash, preserve_metadata};
+use super::fs::{compute_partial_hash, copy_file, ensure_parent_dir, move_file, rename_file, MoveOutcome};
 use crate::domain::apply::{classify_destination, DestinationState};
 use crate::domain::fact::FactEntry;
 use crate::domain::path::path_strip_prefix;
@@ -667,22 +667,11 @@ fn execute_single_transfer(
     }
 
     // Create parent directories
-    if let Some(parent) = dest_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-    }
+    ensure_parent_dir(&dest_path)?;
 
     match transfer_mode {
         TransferMode::Copy => {
-            if dest_path.exists() {
-                bail!("Destination already exists: {}", dest_path.display());
-            }
-            let src_meta = fs::metadata(src_path)
-                .with_context(|| format!("Failed to read metadata: {}", transfer.source_path))?;
-            fs::copy(src_path, &dest_path).with_context(|| {
-                format!("Failed to copy {} to {}", transfer.source_path, dest_path.display())
-            })?;
-            preserve_metadata(&dest_path, &src_meta)?;
+            copy_file(src_path, &dest_path, true)?;
             let new_source = build_new_source(
                 &dest_path,
                 archive_root_id,
@@ -694,38 +683,17 @@ fn execute_single_transfer(
             Ok(TransferOutcome::Copied)
         }
         TransferMode::Rename => {
-            if dest_path.exists() {
-                bail!("Destination already exists: {}", dest_path.display());
-            }
-            fs::rename(src_path, &dest_path).with_context(|| {
-                format!("Failed to rename {} to {}", transfer.source_path, dest_path.display())
-            })?;
+            rename_file(src_path, &dest_path, true)?;
             relocate_source(conn, transfer.source_id, archive_root_id, &transfer.archive_rel_path)?;
             Ok(TransferOutcome::Renamed)
         }
         TransferMode::Move => {
-            if dest_path.exists() {
-                bail!("Destination already exists: {}", dest_path.display());
-            }
-            match fs::rename(src_path, &dest_path) {
-                Ok(()) => {
+            match move_file(src_path, &dest_path, true)? {
+                MoveOutcome::Renamed => {
                     relocate_source(conn, transfer.source_id, archive_root_id, &transfer.archive_rel_path)?;
                     Ok(TransferOutcome::Renamed)
                 }
-                #[cfg(unix)]
-                Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-                    // Cross-device: fallback to copy + delete
-                    if dest_path.exists() {
-                        bail!("Destination already exists: {}", dest_path.display());
-                    }
-                    let src_meta = fs::metadata(src_path)
-                        .with_context(|| format!("Failed to read metadata: {}", transfer.source_path))?;
-                    fs::copy(src_path, &dest_path).with_context(|| {
-                        format!("Failed to copy {} to {}", transfer.source_path, dest_path.display())
-                    })?;
-                    preserve_metadata(&dest_path, &src_meta)?;
-                    fs::remove_file(src_path)
-                        .with_context(|| format!("Failed to delete source: {}", transfer.source_path))?;
+                MoveOutcome::CopiedAndDeleted => {
                     mark_source_not_present(conn, transfer.source_id)?;
                     let new_source = build_new_source(
                         &dest_path,
@@ -737,9 +705,6 @@ fn execute_single_transfer(
                     repo::source::insert_destination(conn, &new_source)?;
                     Ok(TransferOutcome::Moved)
                 }
-                Err(e) => Err(e).with_context(|| {
-                    format!("Failed to rename {} to {}", transfer.source_path, dest_path.display())
-                }),
             }
         }
     }

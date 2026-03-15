@@ -480,8 +480,7 @@ ops/fs functions:
 - Do NOT access the database or terminal
 - Are testable in isolation using temp files
 
-Currently provides: `compute_partial_hash()`, `compute_full_hash()`, `preserve_metadata()`.
-Future additions (with apply/scan execute extraction): `copy_file()`, `rename_file()`, `move_file()`, `validate_file_state()`.
+Currently provides: `compute_partial_hash()`, `compute_full_hash()`, `preserve_metadata()`, `check_destination_writable()`, `ensure_parent_dir()`, `copy_file()`, `rename_file()`, `move_file()`, `MoveOutcome`.
 
 **Concurrency Considerations**:
 Users may run multiple canon processes simultaneously (scanning, enriching, applying, excluding). When designing operations, consider:

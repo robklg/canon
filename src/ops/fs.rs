@@ -8,13 +8,22 @@
 //!
 //! No database access, no terminal I/O.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 const PARTIAL_HASH_CHUNK_SIZE: usize = 8192; // 8KB
+
+/// Outcome of a move operation — caller needs to know which DB path to take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveOutcome {
+    /// Same-device rename succeeded (source relocated)
+    Renamed,
+    /// Cross-device: copied to dest, deleted source
+    CopiedAndDeleted,
+}
 
 /// Compute SHA256 hash of first 8KB + last 8KB of a file.
 /// For files <= 16KB, hash the entire file.
@@ -120,6 +129,77 @@ pub fn check_destination_writable(base_dir: &Path) -> Result<()> {
     }
 }
 
+/// Create parent directories for a path.
+pub fn ensure_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+    Ok(())
+}
+
+/// Copy a file and preserve its metadata (mtime, permissions).
+/// If noclobber is true, errors when dest already exists.
+pub fn copy_file(src: &Path, dest: &Path, noclobber: bool) -> Result<()> {
+    if noclobber && dest.exists() {
+        bail!("Destination already exists: {}", dest.display());
+    }
+    let src_meta = fs::metadata(src)
+        .with_context(|| format!("Failed to read metadata: {}", src.display()))?;
+    fs::copy(src, dest).with_context(|| {
+        format!(
+            "Failed to copy {} to {}",
+            src.display(),
+            dest.display()
+        )
+    })?;
+    preserve_metadata(dest, &src_meta)?;
+    Ok(())
+}
+
+/// Rename a file (same filesystem only).
+/// If noclobber is true, errors when dest already exists.
+pub fn rename_file(src: &Path, dest: &Path, noclobber: bool) -> Result<()> {
+    if noclobber && dest.exists() {
+        bail!("Destination already exists: {}", dest.display());
+    }
+    fs::rename(src, dest).with_context(|| {
+        format!(
+            "Failed to rename {} to {}",
+            src.display(),
+            dest.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Move a file: try rename, fall back to copy+delete on cross-device (EXDEV).
+/// If noclobber is true, errors when dest already exists.
+/// Returns which strategy was used so the caller can take the appropriate DB path.
+pub fn move_file(src: &Path, dest: &Path, noclobber: bool) -> Result<MoveOutcome> {
+    if noclobber && dest.exists() {
+        bail!("Destination already exists: {}", dest.display());
+    }
+    match fs::rename(src, dest) {
+        Ok(()) => Ok(MoveOutcome::Renamed),
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            // Cross-device: fallback to copy + delete
+            copy_file(src, dest, false)?;
+            fs::remove_file(src)
+                .with_context(|| format!("Failed to delete source: {}", src.display()))?;
+            Ok(MoveOutcome::CopiedAndDeleted)
+        }
+        Err(e) => Err(e).with_context(|| {
+            format!(
+                "Failed to rename {} to {}",
+                src.display(),
+                dest.display()
+            )
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +299,155 @@ mod tests {
         let nested = dir.path().join("a").join("b").join("c");
         // Parent exists and is writable, nested dirs don't exist yet
         assert!(check_destination_writable(&nested).is_ok());
+    }
+
+    // =========================================================================
+    // ensure_parent_dir
+    // =========================================================================
+
+    #[test]
+    fn ensure_parent_dir_creates_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a").join("b").join("c").join("file.txt");
+        ensure_parent_dir(&path).unwrap();
+        assert!(dir.path().join("a").join("b").join("c").exists());
+    }
+
+    #[test]
+    fn ensure_parent_dir_existing_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        ensure_parent_dir(&path).unwrap();
+        assert!(dir.path().exists());
+    }
+
+    // =========================================================================
+    // copy_file
+    // =========================================================================
+
+    #[test]
+    fn copy_file_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        std::fs::write(&src, b"hello").unwrap();
+
+        let dest = dir.path().join("dest.txt");
+        copy_file(&src, &dest, true).unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+        // Source still exists (it's a copy)
+        assert!(src.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_file_preserves_mtime() {
+        use filetime::FileTime;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        std::fs::write(&src, b"hello").unwrap();
+        let known_mtime = FileTime::from_unix_time(1704067200, 0);
+        filetime::set_file_mtime(&src, known_mtime).unwrap();
+
+        let dest = dir.path().join("dest.txt");
+        copy_file(&src, &dest, true).unwrap();
+
+        let dest_meta = fs::metadata(&dest).unwrap();
+        let dest_mtime = FileTime::from_last_modification_time(&dest_meta);
+        assert_eq!(dest_mtime, known_mtime);
+    }
+
+    #[test]
+    fn copy_file_noclobber_rejects_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        std::fs::write(&src, b"hello").unwrap();
+        let dest = dir.path().join("dest.txt");
+        std::fs::write(&dest, b"existing").unwrap();
+
+        let err = copy_file(&src, &dest, true).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn copy_file_overwrites_without_noclobber() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        std::fs::write(&src, b"new content").unwrap();
+        let dest = dir.path().join("dest.txt");
+        std::fs::write(&dest, b"old content").unwrap();
+
+        copy_file(&src, &dest, false).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new content");
+    }
+
+    #[test]
+    fn copy_file_missing_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("nonexistent.txt");
+        let dest = dir.path().join("dest.txt");
+
+        let err = copy_file(&src, &dest, true).unwrap_err();
+        assert!(err.to_string().contains("metadata"));
+    }
+
+    // =========================================================================
+    // rename_file
+    // =========================================================================
+
+    #[test]
+    fn rename_file_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        std::fs::write(&src, b"hello").unwrap();
+
+        let dest = dir.path().join("dest.txt");
+        rename_file(&src, &dest, true).unwrap();
+
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn rename_file_noclobber_rejects_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        std::fs::write(&src, b"hello").unwrap();
+        let dest = dir.path().join("dest.txt");
+        std::fs::write(&dest, b"existing").unwrap();
+
+        let err = rename_file(&src, &dest, true).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    // =========================================================================
+    // move_file
+    // =========================================================================
+
+    #[test]
+    fn move_file_same_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        std::fs::write(&src, b"hello").unwrap();
+
+        let dest = dir.path().join("dest.txt");
+        let outcome = move_file(&src, &dest, true).unwrap();
+
+        assert_eq!(outcome, MoveOutcome::Renamed);
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn move_file_noclobber_rejects_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        std::fs::write(&src, b"hello").unwrap();
+        let dest = dir.path().join("dest.txt");
+        std::fs::write(&dest, b"existing").unwrap();
+
+        let err = move_file(&src, &dest, true).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
     }
 }
