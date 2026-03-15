@@ -10,6 +10,58 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
+// ============================================================================
+// Manifest data contract (shared between cluster generate and apply)
+// ============================================================================
+
+/// TOML manifest config file structure.
+#[derive(Serialize, Deserialize)]
+pub struct ManifestConfig {
+    pub meta: ManifestMeta,
+    #[serde(default)]
+    pub options: ManifestOptions,
+    pub output: ManifestOutput,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub struct ManifestOptions {
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ManifestMeta {
+    #[serde(default = "default_version")]
+    pub version: u32,
+    pub query: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// RFC3339 timestamp when manifest was generated/refreshed
+    pub generated_at: String,
+    /// SHA256 hash of the lock file (for integrity validation)
+    pub lock_hash: String,
+}
+
+fn default_version() -> u32 {
+    1
+}
+
+const SUPPORTED_MANIFEST_VERSION: u32 = 1;
+
+pub fn validate_manifest_version(version: u32) -> Result<()> {
+    if version > SUPPORTED_MANIFEST_VERSION {
+        bail!("Manifest version {version} is not supported by this version of Canon. Please update Canon.");
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ManifestOutput {
+    pub pattern: String,
+    pub archive_root_id: i64,
+    pub base_dir: String,
+}
+
 use crate::domain::include::IncludeSet;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;

@@ -5,7 +5,8 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::ceremony;
-use crate::cluster::{self, ManifestConfig};
+use crate::cluster;
+use crate::ops::cluster::{ManifestConfig, validate_manifest_version};
 use crate::domain::root::parse_root_spec;
 use crate::expr;
 use crate::ops;
@@ -59,7 +60,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         .with_context(|| format!("Failed to parse manifest config: {}", config_path.display()))?;
 
     // Validate manifest version
-    cluster::validate_manifest_version(config.meta.version)?;
+    validate_manifest_version(config.meta.version)?;
 
     // Merge manifest [options] with CLI options
     let (_, manifest_duplicates) = cluster::parse_manifest_allow(&config.options.allow)?;
