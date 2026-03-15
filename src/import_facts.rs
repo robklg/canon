@@ -66,14 +66,14 @@ pub fn run(db: &mut Db, allow_archived: bool, verbose: bool) -> Result<()> {
     let stats = &state.stats;
     println!(
         "Processed {} lines: {} facts imported, {} skipped (stale), {} skipped (reserved), {} skipped (archived), {} skipped (type mismatch), {} objects created, {} facts promoted",
-        ceremony::format_count(stats.lines_processed as usize),
-        ceremony::format_count(stats.facts_imported as usize),
-        ceremony::format_count(stats.skipped_stale as usize),
-        ceremony::format_count(stats.skipped_reserved as usize),
-        ceremony::format_count(stats.skipped_archived as usize),
-        ceremony::format_count(stats.skipped_type_mismatch as usize),
-        ceremony::format_count(stats.objects_created as usize),
-        ceremony::format_count(stats.facts_promoted as usize)
+        ceremony::format_count(stats.lines_processed),
+        ceremony::format_count(stats.facts_imported),
+        ceremony::format_count(stats.skipped_stale),
+        ceremony::format_count(stats.skipped_reserved),
+        ceremony::format_count(stats.skipped_archived),
+        ceremony::format_count(stats.skipped_type_mismatch),
+        ceremony::format_count(stats.objects_created),
+        ceremony::format_count(stats.facts_promoted)
     );
 
     // Update query planner statistics after bulk changes

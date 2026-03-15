@@ -1,12 +1,11 @@
 use anyhow::{bail, Context, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::ceremony;
 use crate::ops::cluster::{ManifestConfig, parse_manifest_allow, validate_manifest_version};
-use crate::domain::root::parse_root_spec;
 use crate::expr;
 use crate::ops;
 use crate::ops::apply::TransferMode;
@@ -138,7 +137,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     };
 
     // Filter sources by root if specified
-    let filtered_sources = filter_by_roots(&sources, &options.roots, &roots)?;
+    let filtered_sources = ops::apply::filter_by_roots(&sources, &options.roots, &roots)?;
     let skipped_by_filter = sources.len() - filtered_sources.len();
 
     // Show summary and confirm (unless --yes)
@@ -519,27 +518,6 @@ fn show_directory_preview(dir: &Path, max_items: usize) {
             eprintln!("  ... and {remaining} more");
         }
     }
-}
-
-fn filter_by_roots<'a>(
-    sources: &'a [LockEntry],
-    root_specs: &[String],
-    all_roots: &[crate::domain::root::Root],
-) -> Result<Vec<&'a LockEntry>> {
-    if root_specs.is_empty() {
-        return Ok(sources.iter().collect());
-    }
-
-    let mut root_ids = HashSet::new();
-    for spec in root_specs {
-        let id = parse_root_spec(all_roots, spec, None)?;
-        root_ids.insert(id);
-    }
-
-    Ok(sources
-        .iter()
-        .filter(|s| root_ids.contains(&s.root_id))
-        .collect())
 }
 
 /// Display dry-run transfer plan.

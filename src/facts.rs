@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use std::path::PathBuf;
 
+use crate::ceremony;
 use crate::domain::path::resolve_paths;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
@@ -253,7 +254,7 @@ fn display_grouped_distribution(
         println!(
             "{} (total: {:>6}, {:>5.1}%)",
             main_display,
-            format_number(group.total_count),
+            ceremony::format_count(group.total_count),
             coverage
         );
 
@@ -290,7 +291,7 @@ fn display_grouped_distribution(
             println!(
                 "  {:<40} {:>8} {:>6.1}%",
                 group_display,
-                format_number(sub.count),
+                ceremony::format_count(sub.count),
                 sub_coverage
             );
         }
@@ -303,7 +304,7 @@ fn display_grouped_distribution(
         let coverage = (without_main_value as f64 / total_sources as f64) * 100.0;
         println!(
             "(no value) (total: {:>6}, {:>5.1}%)",
-            format_number(without_main_value),
+            ceremony::format_count(without_main_value),
             coverage
         );
     }
@@ -386,8 +387,8 @@ pub fn delete_facts(
     } else if options.dry_run {
         println!(
             "Would delete {} fact rows across {} {}",
-            format_number(plan.fact_count),
-            format_number(plan.entity_count),
+            ceremony::format_count(plan.fact_count),
+            ceremony::format_count(plan.entity_count),
             entity_label
         );
     } else {
@@ -401,8 +402,8 @@ pub fn delete_facts(
         )?;
         println!(
             "Deleted {} fact rows across {} {}",
-            format_number(plan.fact_count),
-            format_number(plan.entity_count),
+            ceremony::format_count(plan.fact_count),
+            ceremony::format_count(plan.entity_count),
             entity_label
         );
     }
@@ -427,30 +428,19 @@ pub fn prune_stale(db: &Db, dry_run: bool) -> Result<()> {
     if dry_run {
         println!(
             "Would delete {} stale fact rows (observed_basis_rev mismatch)",
-            format_number(plan.stale_count)
+            ceremony::format_count(plan.stale_count)
         );
     } else {
         let deleted = ops::facts::execute_prune_stale(conn)?;
         println!(
             "Deleted {} stale fact rows (observed_basis_rev mismatch)",
-            format_number(deleted as i64)
+            ceremony::format_count(deleted as i64)
         );
     }
 
     Ok(())
 }
 
-fn format_number(n: i64) -> String {
-    let s = n.to_string();
-    let mut result = String::new();
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result.chars().rev().collect()
-}
 
 // ============================================================================
 // Prune Orphaned Objects
@@ -469,9 +459,9 @@ pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool) -> Result<()> {
     if dry_run {
         println!(
             "Would delete {} orphaned objects, {} non-present sources, and {} facts",
-            format_number(stats.object_count),
-            format_number(stats.source_count),
-            format_number(stats.total_fact_count())
+            ceremony::format_count(stats.object_count),
+            ceremony::format_count(stats.source_count),
+            ceremony::format_count(stats.total_fact_count())
         );
         println!();
         println!("Note: Orphaned objects represent content you've seen but no longer have.");
@@ -484,9 +474,9 @@ pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool) -> Result<()> {
         let deleted = ops::facts::execute_prune_orphaned(db)?;
         println!(
             "Deleted {} orphaned objects, {} non-present sources, and {} facts",
-            format_number(deleted.object_count),
-            format_number(deleted.source_count),
-            format_number(deleted.total_fact_count())
+            ceremony::format_count(deleted.object_count),
+            ceremony::format_count(deleted.source_count),
+            ceremony::format_count(deleted.total_fact_count())
         );
     }
 
@@ -516,18 +506,18 @@ pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
         if prune_sources {
             println!(
                 "  Source facts (excluded sources): {}",
-                format_number(plan.source_fact_count)
+                ceremony::format_count(plan.source_fact_count)
             );
         }
         if prune_objects {
             println!(
                 "  Object facts (excluded objects): {}",
-                format_number(plan.object_fact_count)
+                ceremony::format_count(plan.object_fact_count)
             );
         }
         println!(
             "  Total: {} facts would be deleted",
-            format_number(plan.total_count())
+            ceremony::format_count(plan.total_count())
         );
         println!();
         if scope == "all" {
@@ -542,14 +532,14 @@ pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
         if source_deleted > 0 {
             println!(
                 "Deleted {} source facts (from excluded sources)",
-                format_number(source_deleted as i64)
+                ceremony::format_count(source_deleted as i64)
             );
         }
 
         if object_deleted > 0 {
             println!(
                 "Deleted {} object facts (from excluded objects)",
-                format_number(object_deleted as i64)
+                ceremony::format_count(object_deleted as i64)
             );
         }
 
@@ -557,7 +547,7 @@ pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
         if total_deleted > 0 {
             println!(
                 "Total: {} facts deleted",
-                format_number(total_deleted as i64)
+                ceremony::format_count(total_deleted as i64)
             );
         }
     }
@@ -591,34 +581,6 @@ pub fn show_aliases() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // =========================================================================
-    // format_number tests
-    // =========================================================================
-
-    #[test]
-    fn format_number_small() {
-        assert_eq!(format_number(0), "0");
-        assert_eq!(format_number(1), "1");
-        assert_eq!(format_number(99), "99");
-        assert_eq!(format_number(999), "999");
-    }
-
-    #[test]
-    fn format_number_with_commas() {
-        assert_eq!(format_number(1_000), "1,000");
-        assert_eq!(format_number(10_000), "10,000");
-        assert_eq!(format_number(100_000), "100,000");
-        assert_eq!(format_number(1_000_000), "1,000,000");
-        assert_eq!(format_number(1_234_567), "1,234,567");
-    }
-
-    #[test]
-    fn format_number_negative() {
-        // Negative numbers should also format correctly
-        assert_eq!(format_number(-1), "-1");
-        assert_eq!(format_number(-1_000), "-1,000");
-    }
 
     // =========================================================================
     // format_root_display tests

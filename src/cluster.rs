@@ -267,19 +267,3 @@ fn print_cluster_stdout(header: &str, result: &ExecuteGenerateResult) {
     );
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use crate::ceremony::format_count;
-
-    #[test]
-    fn test_format_count() {
-        assert_eq!(format_count(0), "0");
-        assert_eq!(format_count(999), "999");
-        assert_eq!(format_count(1000), "1,000");
-        assert_eq!(format_count(1234567), "1,234,567");
-    }
-}

@@ -522,6 +522,31 @@ struct SizeMismatchError {
 // Execute function
 // ===========================================================================
 
+/// Filter lock entries to only those from the specified roots.
+///
+/// Parses root specs (e.g., "id:1", "path:/photos") and keeps only entries
+/// whose `root_id` matches. Returns all entries when `root_specs` is empty.
+pub fn filter_by_roots<'a>(
+    sources: &'a [LockEntry],
+    root_specs: &[String],
+    all_roots: &[crate::domain::root::Root],
+) -> Result<Vec<&'a LockEntry>> {
+    if root_specs.is_empty() {
+        return Ok(sources.iter().collect());
+    }
+
+    let mut root_ids = std::collections::HashSet::new();
+    for spec in root_specs {
+        let id = crate::domain::root::parse_root_spec(all_roots, spec, None)?;
+        root_ids.insert(id);
+    }
+
+    Ok(sources
+        .iter()
+        .filter(|s| root_ids.contains(&s.root_id))
+        .collect())
+}
+
 /// Check for on-disk destination conflicts not already captured by DB checks.
 ///
 /// Returns archive-relative paths that exist on disk but are NOT in

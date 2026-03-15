@@ -16,6 +16,7 @@ pub mod ls;
 pub mod scan;
 pub mod selection;
 pub mod survey;
+pub mod worklist;
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
