@@ -192,20 +192,21 @@ pub fn count_fact_keys(
 
     // Count distinct source IDs per key, determine dominant type
     // We count sources (not entities) because multiple sources can share an object
-    // The outer SELECT DISTINCT ensures each source is counted once per key
+    // COUNT(DISTINCT id) ensures each source is counted once per key, even when
+    // multiple sources share an object (which would inflate object-level fact counts)
     let query = r#"
         SELECT key,
-               COUNT(*) as cnt,
+               COUNT(DISTINCT id) as cnt,
                MAX(CASE WHEN value_time IS NOT NULL THEN 1 ELSE 0 END) as is_time,
                MAX(CASE WHEN value_num IS NOT NULL THEN 1 ELSE 0 END) as is_num
         FROM (
-            SELECT DISTINCT ts.id, f.key, f.value_text, f.value_num, f.value_time
+            SELECT ts.id, f.key, f.value_text, f.value_num, f.value_time
             FROM temp_sources ts
             JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id
 
             UNION ALL
 
-            SELECT DISTINCT ts.id, f.key, f.value_text, f.value_num, f.value_time
+            SELECT ts.id, f.key, f.value_text, f.value_num, f.value_time
             FROM temp_sources ts
             JOIN sources s ON s.id = ts.id
             JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id
@@ -1085,6 +1086,22 @@ mod tests {
         let make = result.iter().find(|(k, _, _)| k == "content.Make").unwrap();
         // Should count 2 (both sources) even though fact is on one object
         assert_eq!(make.1, 2);
+    }
+
+    #[test]
+    fn count_fact_keys_shared_object_no_inflation() {
+        let mut conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_object(&conn, 100, "abc123");
+        // Two sources sharing the same object, but only one is selected
+        insert_source(&conn, 1, 1, "file1.txt", Some(100));
+        insert_source(&conn, 2, 1, "file2.txt", Some(100));
+        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
+
+        // Only select source 1 — count must not exceed 1
+        let result = count_fact_keys(&mut conn, &[1]).unwrap();
+        let make = result.iter().find(|(k, _, _)| k == "content.Make").unwrap();
+        assert_eq!(make.1, 1);
     }
 
     // =========================================================================

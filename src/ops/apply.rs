@@ -463,14 +463,6 @@ pub trait TransferProgress {
     fn on_finish(&self);
 }
 
-/// No-op implementation for tests.
-pub struct NoopProgress;
-impl TransferProgress for NoopProgress {
-    fn on_start(&self, _total: usize) {}
-    fn on_transfer(&self, _index: usize, _total: usize, _source_path: &str, _outcome: &TransferOutcome) {}
-    fn on_finish(&self) {}
-}
-
 /// Parameters for executing an apply operation.
 pub struct ApplyExecuteParams {
     /// Base directory for destination paths (archive root + base_dir from manifest).
@@ -498,6 +490,10 @@ pub struct ApplyResult {
 }
 
 /// An error encountered during a file transfer.
+/// Fields are populated by execute_apply; the CLI currently prints errors
+/// eagerly via TransferProgress but the result record is available for
+/// any consumer that processes errors after completion.
+#[allow(dead_code)]
 pub struct TransferError {
     pub path: String,
     pub error: String,
@@ -1607,8 +1603,6 @@ mod tests {
 
     #[test]
     fn validate_size_changed() {
-        use std::io::Write;
-
         // Create file, record metadata, then change it
         let f = tempfile::NamedTempFile::new().unwrap();
         let path = f.path().to_path_buf();

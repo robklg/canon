@@ -680,14 +680,6 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
-    /// No-op progress implementation for tests.
-    struct NoopProgress;
-    impl ScanProgress for NoopProgress {
-        fn on_file(&self, _path: &str, _action: &FileAction) {}
-        fn on_walk_error(&self, _error: &str) {}
-        fn on_process_error(&self, _path: &str, _error: &str) {}
-    }
-
     /// Create a temp file with content and return (path, device, inode, size, mtime).
     fn create_temp_file(dir: &TempDir, name: &str, content: &str) -> (PathBuf, u64, u64, i64, i64) {
         let path = dir.path().join(name);
