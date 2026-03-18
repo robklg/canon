@@ -83,21 +83,27 @@ pub fn run(
         return Ok(());
     }
 
-    if include.is_expanded() && (sel.included_excluded_count > 0 || sel.included_archived_count > 0)
     {
-        let mut parts = Vec::new();
-        if sel.included_excluded_count > 0 {
-            parts.push(format!("{} excluded", sel.included_excluded_count));
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        if include.is_expanded() && (sel.included_excluded_count > 0 || sel.included_archived_count > 0)
+        {
+            let mut parts = Vec::new();
+            if sel.included_excluded_count > 0 {
+                parts.push(format!("{} excluded", sel.included_excluded_count));
+            }
+            if sel.included_archived_count > 0 {
+                parts.push(format!("{} from archive", sel.included_archived_count));
+            }
+            let _ = writeln!(
+                handle,
+                "Sources matching filters: {total_sources} (incl. {})\n",
+                parts.join(", ")
+            );
+        } else {
+            let _ = writeln!(handle, "Sources matching filters: {total_sources}\n");
         }
-        if sel.included_archived_count > 0 {
-            parts.push(format!("{} from archive", sel.included_archived_count));
-        }
-        println!(
-            "Sources matching filters: {total_sources} (incl. {})\n",
-            parts.join(", ")
-        );
-    } else {
-        println!("Sources matching filters: {total_sources}\n");
     }
 
     if let Some(fact_key) = key_arg {
@@ -123,7 +129,7 @@ pub fn run(
     }
 
     if sel.excluded_count > 0 {
-        println!(
+        eprintln!(
             "\n({} excluded sources hidden, use --include excluded to show)",
             sel.excluded_count
         );
@@ -137,11 +143,15 @@ pub fn run(
 // ============================================================================
 
 fn display_all_keys(result: &AllKeysResult, show_all: bool) {
-    println!(
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    let _ = writeln!(
+        handle,
         "{:<30} {:>6} {:>10} {:>10}",
         "Fact", "Type", "Count", "Coverage"
     );
-    println!("{}", "─".repeat(60));
+    let _ = writeln!(handle, "{}", "─".repeat(60));
 
     for key_info in &result.keys {
         let coverage = (key_info.count as f64 / result.total_sources as f64) * 100.0;
@@ -150,14 +160,19 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool) {
             BuiltinKeyCategory::Derived => "  (derived)",
             BuiltinKeyCategory::Stored => "",
         };
-        println!(
+        if writeln!(
+            handle,
             "{:<30} {:>6} {:>10} {:>9.1}%{}",
             key_info.key,
             key_info.fact_type.as_str(),
             key_info.count,
             coverage,
             suffix
-        );
+        )
+        .is_err()
+        {
+            break;
+        }
     }
 
     if !show_all {
@@ -165,11 +180,12 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool) {
         let hidden_count = BuiltinKey::iter()
             .filter(|k| k.visibility() == crate::expr::BuiltinKeyVisibility::Hidden)
             .count();
-        println!("\n({hidden_count} built-in/derived facts hidden, use --all to show)");
+        let _ = writeln!(handle, "\n({hidden_count} built-in/derived facts hidden, use --all to show)");
     }
 }
 
 fn display_distribution(result: &DistributionResult, display_key: &str, key: &ParsedFactKey) {
+    use std::io::Write;
     // Build label with category for builtin keys
     let category = get_fact_category(&key.base_key);
     let label = match category {
@@ -178,8 +194,10 @@ fn display_distribution(result: &DistributionResult, display_key: &str, key: &Pa
         BuiltinKeyCategory::Stored => display_key.to_string(),
     };
 
-    println!("{:<40} {:>10} {:>10}", label, "Count", "Coverage");
-    println!("{}", "─".repeat(62));
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    let _ = writeln!(handle, "{:<40} {:>10} {:>10}", label, "Count", "Coverage");
+    let _ = writeln!(handle, "{}", "─".repeat(62));
 
     for entry in &result.entries {
         let display_val = if entry.value.is_empty() {
@@ -194,14 +212,18 @@ fn display_distribution(result: &DistributionResult, display_key: &str, key: &Pa
             entry.value.clone()
         };
         let coverage = (entry.count as f64 / result.total_sources as f64) * 100.0;
-        println!("{display_val:<40} {:>10} {:>9.1}%", entry.count, coverage);
+        if writeln!(handle, "{display_val:<40} {:>10} {:>9.1}%", entry.count, coverage).is_err()
+        {
+            break;
+        }
     }
 
     // Show "(no value)" count
     let without_value = result.total_sources as i64 - result.sources_with_value;
     if without_value > 0 {
         let coverage = (without_value as f64 / result.total_sources as f64) * 100.0;
-        println!(
+        let _ = writeln!(
+            handle,
             "{:<40} {:>10} {:>9.1}%",
             "(no value)", without_value, coverage
         );
@@ -243,6 +265,7 @@ fn display_grouped_distribution(
     grouping_keys: &[ParsedFactKey],
     total_sources: usize,
 ) {
+    use std::io::Write;
     // Build grouping label
     let grouping_label = if grouping_keys.len() == 1 && is_root_key(&grouping_keys[0]) {
         "by root".to_string()
@@ -251,7 +274,9 @@ fn display_grouped_distribution(
         format!("grouped by {}", labels.join(", "))
     };
 
-    println!("{} ({})\n", main_key.raw, grouping_label);
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    let _ = writeln!(handle, "{} ({})\n", main_key.raw, grouping_label);
 
     for group in &result.groups {
         let coverage = (group.total_count as f64 / total_sources as f64) * 100.0;
@@ -260,12 +285,17 @@ fn display_grouped_distribution(
         } else {
             &group.main_value
         };
-        println!(
+        if writeln!(
+            handle,
             "{} (total: {:>6}, {:>5.1}%)",
             main_display,
             ceremony::format_count(group.total_count),
             coverage
-        );
+        )
+        .is_err()
+        {
+            return;
+        }
 
         for sub in &group.sub_groups {
             let sub_coverage = (sub.count as f64 / group.total_count as f64) * 100.0;
@@ -297,21 +327,29 @@ fn display_grouped_distribution(
                 parts.join(" / ")
             };
 
-            println!(
+            if writeln!(
+                handle,
                 "  {:<40} {:>8} {:>6.1}%",
                 group_display,
                 ceremony::format_count(sub.count),
                 sub_coverage
-            );
+            )
+            .is_err()
+            {
+                return;
+            }
         }
-        println!();
+        if writeln!(handle).is_err() {
+            return;
+        }
     }
 
     // Show "(no value)" count for main key
     let without_main_value = total_sources as i64 - result.sources_with_value;
     if without_main_value > 0 {
         let coverage = (without_main_value as f64 / total_sources as f64) * 100.0;
-        println!(
+        let _ = writeln!(
+            handle,
             "(no value) (total: {:>6}, {:>5.1}%)",
             ceremony::format_count(without_main_value),
             coverage

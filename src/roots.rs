@@ -57,32 +57,43 @@ pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
     let file_counts = repo::root::fetch_file_counts(conn, &root_ids)?;
 
     // Print header
-    println!(
-        "{:<4} {:<8} {:>8}  {:<16}  PATH",
-        "ID", "ROLE", "FILES", "LAST SCAN"
-    );
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    for root in filtered_roots {
-        let file_count = file_counts.get(&root.id).copied().unwrap_or(0);
-        let scan_ago = format_time_ago(root.last_scanned_at, now);
-        let suspended_marker = if root.is_suspended() {
-            " [suspended]"
-        } else {
-            ""
-        };
-        let path_with_info = match &root.comment {
-            Some(c) => format!("{}{} ({})", root.path, suspended_marker, c),
-            None => format!("{}{}", root.path, suspended_marker),
-        };
-        println!(
-            "{:<4} {:<8} {:>8}  {:<16}  {}",
-            root.id, root.role, file_count, scan_ago, path_with_info
+    {
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        let _ = writeln!(
+            handle,
+            "{:<4} {:<8} {:>8}  {:<16}  PATH",
+            "ID", "ROLE", "FILES", "LAST SCAN"
         );
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        for root in filtered_roots {
+            let file_count = file_counts.get(&root.id).copied().unwrap_or(0);
+            let scan_ago = format_time_ago(root.last_scanned_at, now);
+            let suspended_marker = if root.is_suspended() {
+                " [suspended]"
+            } else {
+                ""
+            };
+            let path_with_info = match &root.comment {
+                Some(c) => format!("{}{} ({})", root.path, suspended_marker, c),
+                None => format!("{}{}", root.path, suspended_marker),
+            };
+            if writeln!(
+                handle,
+                "{:<4} {:<8} {:>8}  {:<16}  {}",
+                root.id, root.role, file_count, scan_ago, path_with_info
+            )
+            .is_err()
+            {
+                break;
+            }
+        }
     }
 
     Ok(())

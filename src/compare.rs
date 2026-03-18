@@ -51,13 +51,18 @@ pub fn run(
     let only_in_b: HashSet<i64> = objects_b.difference(&objects_a).copied().collect();
 
     // Print header
-    println!("Comparing:");
-    println!("  A: {prefix_a}");
-    println!("  B: {prefix_b}");
-    if options.include.includes_excluded() {
-        println!("  [including excluded]");
+    {
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        let _ = writeln!(handle, "Comparing:");
+        let _ = writeln!(handle, "  A: {prefix_a}");
+        let _ = writeln!(handle, "  B: {prefix_b}");
+        if options.include.includes_excluded() {
+            let _ = writeln!(handle, "  [including excluded]");
+        }
+        let _ = writeln!(handle);
     }
-    println!();
 
     // Report unhashed files
     let total_unhashed = unhashed_a + unhashed_b;
@@ -70,33 +75,43 @@ pub fn run(
     let is_identical = only_in_a.is_empty() && only_in_b.is_empty();
 
     // Print summary (always show all lines, even if count is 0)
-    println!("Files in both (by content): {}", in_both.len());
+    {
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
 
-    // Print only in A
-    println!("Only in A: {}", only_in_a.len());
-    if options.verbose && !only_in_a.is_empty() {
-        let mut paths: Vec<&str> = only_in_a
-            .iter()
-            .filter_map(|oid| sources_a.get(oid))
-            .map(|s| s.as_str())
-            .collect();
-        paths.sort();
-        for path in paths {
-            println!("  {path}");
+        let _ = writeln!(handle, "Files in both (by content): {}", in_both.len());
+
+        // Print only in A
+        let _ = writeln!(handle, "Only in A: {}", only_in_a.len());
+        if options.verbose && !only_in_a.is_empty() {
+            let mut paths: Vec<&str> = only_in_a
+                .iter()
+                .filter_map(|oid| sources_a.get(oid))
+                .map(|s| s.as_str())
+                .collect();
+            paths.sort();
+            for path in paths {
+                if writeln!(handle, "  {path}").is_err() {
+                    break;
+                }
+            }
         }
-    }
 
-    // Print only in B
-    println!("Only in B: {}", only_in_b.len());
-    if options.verbose && !only_in_b.is_empty() {
-        let mut paths: Vec<&str> = only_in_b
-            .iter()
-            .filter_map(|oid| sources_b.get(oid))
-            .map(|s| s.as_str())
-            .collect();
-        paths.sort();
-        for path in paths {
-            println!("  {path}");
+        // Print only in B
+        let _ = writeln!(handle, "Only in B: {}", only_in_b.len());
+        if options.verbose && !only_in_b.is_empty() {
+            let mut paths: Vec<&str> = only_in_b
+                .iter()
+                .filter_map(|oid| sources_b.get(oid))
+                .map(|s| s.as_str())
+                .collect();
+            paths.sort();
+            for path in paths {
+                if writeln!(handle, "  {path}").is_err() {
+                    break;
+                }
+            }
         }
     }
 
