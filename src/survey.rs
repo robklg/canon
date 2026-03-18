@@ -111,6 +111,13 @@ pub fn run(
     let scope_prefixes_for_warn = domain::path::resolve_paths(&scope_paths, &all_roots)?;
     domain::path::warn_nonexistent_scope_paths(&scope_prefixes_for_warn, &all_roots);
 
+    // Validate that --other doesn't match the surveyed scope
+    for other_path in &other_resolved {
+        if scope_prefixes_for_warn.contains(other_path) {
+            bail!("Error: --other location is identical to the surveyed scope. Comparing a location to itself is not meaningful.");
+        }
+    }
+
     let root_ids: Vec<i64> = all_roots.iter().map(|r| r.id).collect();
     let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 
@@ -533,14 +540,20 @@ fn print_overlap_detail(
     null_delim: bool,
 ) {
     if null_delim {
+        use std::io::Write;
         // -0 mode: flat, deduplicated, selection-side paths only (no counterparts)
         let all_paths: std::collections::BTreeSet<&str> = locations
             .iter()
             .filter_map(|loc| loc.overlap_pairs.as_ref())
             .flat_map(|pairs| pairs.iter().map(|p| p.selection_path.as_str()))
             .collect();
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
         for path in all_paths {
-            print!("{path}\0");
+            // Ignore broken pipe errors when stdout is closed
+            if write!(handle, "{path}\0").is_err() {
+                break;
+            }
         }
         return;
     }
@@ -630,14 +643,20 @@ fn print_residual_detail(
     null_delim: bool,
 ) {
     if null_delim {
+        use std::io::Write;
         // -0 mode: flat, deduplicated, absolute paths
         let all_paths: std::collections::BTreeSet<&str> = locations
             .iter()
             .filter_map(|loc| loc.residual_paths.as_ref())
             .flat_map(|paths| paths.iter().map(|p| p.as_str()))
             .collect();
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
         for path in all_paths {
-            print!("{path}\0");
+            // Ignore broken pipe errors when stdout is closed
+            if write!(handle, "{path}\0").is_err() {
+                break;
+            }
         }
         return;
     }
@@ -678,14 +697,22 @@ fn print_residual_detail(
 }
 
 fn print_unique_detail(paths: &[String], null_delim: bool, cwd: Option<&str>) {
-    let sep = if null_delim { "\0" } else { "\n" };
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+
     for path in paths {
         let display = if null_delim {
             path.clone() // -0: always absolute
         } else {
             domain::path::format_path(path, cwd)
         };
-        print!("{display}{sep}");
+        // Ignore broken pipe errors (EPIPE) when stdout is closed by consumer (e.g., piped to `head`)
+        let sep = if null_delim { "\0" } else { "\n" };
+        if write!(handle, "{display}{sep}").is_err() {
+            // Pipe closed; exit gracefully
+            break;
+        }
     }
 }
 

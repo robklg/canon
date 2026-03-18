@@ -33,6 +33,8 @@ pub struct DistributionResult {
     pub total_sources: usize,
     /// Number of values skipped due to type mismatch during transform.
     pub skipped_type_mismatch: i64,
+    /// Total distinct values found (before truncation to limit).
+    pub total_distinct_values: usize,
 }
 
 /// Information about a single fact key (for all-keys enumeration).
@@ -124,16 +126,18 @@ fn default_grouping(base_key: &str, value: FactValue) -> String {
 }
 
 /// Aggregate values into sorted (value, count) entries, truncated to limit.
-fn aggregate_and_sort(counts: HashMap<String, i64>, limit: usize) -> Vec<DistributionEntry> {
+/// Returns (entries, total_distinct_values_before_truncation).
+fn aggregate_and_sort(counts: HashMap<String, i64>, limit: usize) -> (Vec<DistributionEntry>, usize) {
     let mut entries: Vec<DistributionEntry> = counts
         .into_iter()
         .map(|(value, count)| DistributionEntry { value, count })
         .collect();
     entries.sort_by(|a, b| b.count.cmp(&a.count));
+    let total_distinct = entries.len();
     if limit > 0 && entries.len() > limit {
         entries.truncate(limit);
     }
-    entries
+    (entries, total_distinct)
 }
 
 // ============================================================================
@@ -217,6 +221,7 @@ pub fn compute_distribution(
             sources_with_value: 0,
             total_sources,
             skipped_type_mismatch: 0,
+            total_distinct_values: 0,
         });
     }
 
@@ -263,11 +268,13 @@ fn compute_builtin_distribution(
         *counts.entry(val).or_insert(0) += 1;
     }
 
+    let (entries, total_distinct_values) = aggregate_and_sort(counts, limit);
     Ok(DistributionResult {
-        entries: aggregate_and_sort(counts, limit),
+        entries,
         sources_with_value,
         total_sources,
         skipped_type_mismatch: 0,
+        total_distinct_values,
     })
 }
 
@@ -290,11 +297,13 @@ fn compute_stored_distribution(
         *counts.entry(display_val).or_insert(0) += 1;
     }
 
+    let (entries, total_distinct_values) = aggregate_and_sort(counts, limit);
     Ok(DistributionResult {
-        entries: aggregate_and_sort(counts, limit),
+        entries,
         sources_with_value,
         total_sources,
         skipped_type_mismatch: 0,
+        total_distinct_values,
     })
 }
 
@@ -343,11 +352,13 @@ fn compute_transformed_distribution(
         *counts.entry(display_val).or_insert(0) += 1;
     }
 
+    let (entries, total_distinct_values) = aggregate_and_sort(counts, limit);
     Ok(DistributionResult {
-        entries: aggregate_and_sort(counts, limit),
+        entries,
         sources_with_value,
         total_sources,
         skipped_type_mismatch,
+        total_distinct_values,
     })
 }
 

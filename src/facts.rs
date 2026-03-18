@@ -207,6 +207,15 @@ fn display_distribution(result: &DistributionResult, display_key: &str, key: &Pa
         );
     }
 
+    // Warn about truncation if limit was applied
+    if result.entries.len() < result.total_distinct_values {
+        eprintln!(
+            "Showing {} of {} values (use --limit 0 for all)",
+            result.entries.len(),
+            result.total_distinct_values
+        );
+    }
+
     // Warn about skipped values due to type mismatch
     if result.skipped_type_mismatch > 0 {
         eprintln!(
