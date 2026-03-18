@@ -400,6 +400,7 @@ pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     // Pipeline tests (process_file, mark_missing_sources) moved to ops::scan::tests
     // =========================================================================
