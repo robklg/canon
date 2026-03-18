@@ -126,26 +126,33 @@ pub fn run(
     }
 
     // Print output (to stdout for pipe-friendliness)
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
     let line_end = if null_delim { "\0" } else { "\n" };
     for (source_path, archive_path, size, mtime, status) in &output_lines {
-        if long_format {
+        let line = if long_format {
             let size_str = format_size(*size);
             let date_str = format_date(*mtime);
             if show_status {
                 if let Some(ap) = archive_path {
-                    print!("{status}{size_str:>8}  {date_str}  {source_path}\t{ap}{line_end}");
+                    format!("{status}{size_str:>8}  {date_str}  {source_path}\t{ap}{line_end}")
                 } else {
-                    print!("{status}{size_str:>8}  {date_str}  {source_path}{line_end}");
+                    format!("{status}{size_str:>8}  {date_str}  {source_path}{line_end}")
                 }
             } else if let Some(ap) = archive_path {
-                print!("{size_str:>8}  {date_str}  {source_path}\t{ap}{line_end}");
+                format!("{size_str:>8}  {date_str}  {source_path}\t{ap}{line_end}")
             } else {
-                print!("{size_str:>8}  {date_str}  {source_path}{line_end}");
+                format!("{size_str:>8}  {date_str}  {source_path}{line_end}")
             }
         } else if let Some(ap) = archive_path {
-            print!("{source_path}\t{ap}{line_end}");
+            format!("{source_path}\t{ap}{line_end}")
         } else {
-            print!("{source_path}{line_end}");
+            format!("{source_path}{line_end}")
+        };
+        // Ignore broken pipe errors when stdout is closed
+        if write!(handle, "{}", line).is_err() {
+            break;
         }
     }
 
@@ -288,26 +295,39 @@ pub fn show_duplicates(
     }
 
     // Print each duplicate group
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
     let mut total_sources = 0usize;
     for group in &duplicate_groups {
         let short_hash = if group.hash_value.len() > 12 { &group.hash_value[..12] } else { &group.hash_value };
         let size_str = format_size(group.total_size);
-        println!(
+        if writeln!(
+            handle,
             "[{}...] {} sources, {}:",
             short_hash,
             group.sources.len(),
             size_str
-        );
+        )
+        .is_err()
+        {
+            break;
+        }
         for src in &group.sources {
             let display_path = format_path(&src.path, cwd.as_deref());
-            println!("  {display_path} (id: {})", src.source_id);
+            if writeln!(handle, "  {display_path} (id: {})", src.source_id).is_err() {
+                break;
+            }
         }
-        println!();
+        if writeln!(handle).is_err() {
+            break;
+        }
         total_sources += group.sources.len();
     }
 
     // Summary
-    println!(
+    let _ = writeln!(
+        handle,
         "Found {} duplicate groups ({} sources)",
         duplicate_groups.len(),
         total_sources
