@@ -42,7 +42,11 @@ canon facts --include excluded
 # Include both
 canon facts --include all
 
-# Group by root (see which roots contribute to each value)
+# Show source count per root (which roots have matching content?)
+canon facts --by-root
+canon facts --where '@image' --by-root
+
+# Group fact values by root (which roots contribute to each value?)
 canon facts --key source.ext --by-root
 
 # Group by any fact key (with modifiers)

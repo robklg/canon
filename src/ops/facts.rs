@@ -77,6 +77,49 @@ pub struct GroupedDistributionResult {
     pub total_sources: usize,
 }
 
+/// A single root's contribution to the selection.
+pub struct RootDistributionEntry {
+    pub root_id: i64,
+    pub root_path: String,
+    pub count: usize,
+}
+
+/// Result of computing root distribution for a selection.
+pub struct RootDistributionResult {
+    pub entries: Vec<RootDistributionEntry>,
+    pub total_sources: usize,
+}
+
+/// Compute source count per root for the given sources.
+/// Sources must have root_id populated (from batch_fetch_by_roots).
+pub fn compute_root_distribution(
+    sources: &[crate::domain::source::Source],
+) -> RootDistributionResult {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<i64, (String, usize)> = BTreeMap::new();
+    for s in sources {
+        let entry = counts
+            .entry(s.root_id)
+            .or_insert_with(|| (s.root_path.clone(), 0));
+        entry.1 += 1;
+    }
+    let mut entries: Vec<RootDistributionEntry> = counts
+        .into_iter()
+        .map(|(root_id, (root_path, count))| RootDistributionEntry {
+            root_id,
+            root_path,
+            count,
+        })
+        .collect();
+    // Sort by count descending
+    entries.sort_by(|a, b| b.count.cmp(&a.count));
+    let total_sources = sources.len();
+    RootDistributionResult {
+        entries,
+        total_sources,
+    }
+}
+
 // ============================================================================
 // Helper functions
 // ============================================================================

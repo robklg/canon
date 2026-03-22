@@ -36,10 +36,9 @@ pub fn run(
     group_by: &[String],
     scope: &ResolvedScope,
 ) -> Result<()> {
-    // Validate grouping requires --key
-    let has_grouping = by_root || !group_by.is_empty();
-    if has_grouping && key_arg.is_none() {
-        bail!("--by-root and --group-by require --key to be specified");
+    // Validate --group-by requires --key (--by-root works standalone)
+    if !group_by.is_empty() && key_arg.is_none() {
+        bail!("--group-by requires --key to be specified");
     }
 
     // Build grouping keys list
@@ -126,6 +125,9 @@ pub fn run(
                 ops::facts::compute_distribution(conn, &source_ids, &main_key, limit)?;
             display_distribution(&result, fact_key, &main_key);
         }
+    } else if by_root {
+        let result = ops::facts::compute_root_distribution(&sel.sources);
+        display_root_distribution(&result);
     } else {
         let result = ops::facts::compute_all_keys(conn, &source_ids, show_all)?;
         display_all_keys(&result, show_all);
@@ -144,6 +146,51 @@ pub fn run(
 // ============================================================================
 // Display functions (format typed results from ops layer)
 // ============================================================================
+
+fn display_root_distribution(result: &ops::facts::RootDistributionResult) {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+
+    // Adaptive path width: compute max needed, cap at 60
+    let max_path = result
+        .entries
+        .iter()
+        .map(|e| format!("id:{:<2} {}", e.root_id, e.root_path).len())
+        .max()
+        .unwrap_or(30);
+    let col_width = max_path.min(60);
+
+    let _ = writeln!(
+        handle,
+        "{:<width$} {:>10}",
+        "Root",
+        "Sources",
+        width = col_width,
+    );
+    let _ = writeln!(handle, "{}", "─".repeat(col_width + 18));
+
+    for entry in &result.entries {
+        let pct = if result.total_sources > 0 {
+            (entry.count as f64 / result.total_sources as f64) * 100.0
+        } else {
+            0.0
+        };
+        let label = format_root_display_adaptive(entry.root_id, &entry.root_path, col_width);
+        if writeln!(
+            handle,
+            "{:<width$} {:>10} ({:>5.1}%)",
+            label,
+            ceremony::format_count(entry.count),
+            pct,
+            width = col_width,
+        )
+        .is_err()
+        {
+            return;
+        }
+    }
+}
 
 fn display_all_keys(result: &AllKeysResult, show_all: bool) {
     use std::io::Write;
@@ -250,14 +297,24 @@ fn display_distribution(result: &DistributionResult, display_key: &str, key: &Pa
     }
 }
 
-/// Format root for display: id:N ...truncated_path
+/// Format root for display: id:N path (with fixed max path length for grouped output)
 fn format_root_display(root_id: i64, root_path: &str) -> String {
-    const MAX_PATH_LEN: usize = 30;
+    format_root_display_adaptive(root_id, root_path, 40)
+}
+
+/// Format root for display with adaptive width: id:N path, truncating path if needed.
+fn format_root_display_adaptive(root_id: i64, root_path: &str, max_total: usize) -> String {
     let id_prefix = format!("id:{root_id:<2}");
-    if root_path.len() <= MAX_PATH_LEN {
+    let prefix_len = id_prefix.len() + 1; // +1 for space
+    let max_path = if max_total > prefix_len + 3 {
+        max_total - prefix_len
+    } else {
+        10 // minimum
+    };
+    if root_path.len() <= max_path {
         format!("{id_prefix} {root_path}")
     } else {
-        let truncated = &root_path[root_path.len() - MAX_PATH_LEN + 3..];
+        let truncated = &root_path[root_path.len() - max_path + 3..];
         format!("{id_prefix} ...{truncated}")
     }
 }

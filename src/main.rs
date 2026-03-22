@@ -241,7 +241,7 @@ enum Commands {
         /// Include additional sources: excluded, archived, all
         #[arg(long, value_delimiter = ',')]
         include: Vec<IncludeValue>,
-        /// Group results by root (requires --key)
+        /// Show source count per root, or group fact values by root (with --key)
         #[arg(long)]
         by_root: bool,
         /// Group results by fact key(s), comma-separated (requires --key). Supports modifiers.
