@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::ceremony::format_count;
-use crate::domain::path::resolve_paths;
+use crate::domain::path::{resolve_paths, validate_paths_in_roots};
 use crate::domain::root::resolve_archive_path;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::Filter;
@@ -56,6 +56,7 @@ pub fn generate(
 
     // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
     let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
+    validate_paths_in_roots(&scope_prefixes, &all_roots)?;
 
     let parsed_filters: Vec<Filter> = expanded_filters
         .iter()

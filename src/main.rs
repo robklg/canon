@@ -305,10 +305,9 @@ enum Commands {
     },
     /// Compare two folders by content hash
     Compare {
-        /// First path to compare
-        path_a: PathBuf,
-        /// Second path to compare
-        path_b: PathBuf,
+        /// Paths to compare (1 path: CWD vs path, 2 paths: A vs B)
+        #[arg(required = true, num_args = 1..=2)]
+        paths: Vec<PathBuf>,
         /// Filter expressions (e.g., "source.ext=jpg")
         #[arg(long = "where")]
         filters: Vec<String>,
@@ -870,8 +869,7 @@ fn main() -> Result<()> {
             survey::run(&mut db, &scope_paths, &expanded, &options)?;
         }
         Commands::Compare {
-            path_a,
-            path_b,
+            paths,
             filters,
             include,
             verbose,
@@ -881,6 +879,18 @@ fn main() -> Result<()> {
             if include.includes_archived() {
                 bail!("--include archived is not valid for compare (valid values: excluded)");
             }
+            let all_roots = repo::root::fetch_all(db.conn())?;
+            let (path_a, path_b) = if paths.len() == 2 {
+                (paths[0].clone(), paths[1].clone())
+            } else {
+                // One path: CWD as side A
+                let cwd = std::env::current_dir()?;
+                let cwd_resolved = domain::path::resolve_path(&cwd, &all_roots, &cwd)?;
+                if domain::root::find_containing_root(&cwd_resolved, &all_roots).is_none() {
+                    bail!("Current directory is not under any known root");
+                }
+                (cwd, paths[0].clone())
+            };
             let options = compare::CompareOptions { include, verbose };
             let identical = compare::run(&mut db, &path_a, &path_b, &filters, &options)?;
             if !identical {

@@ -138,7 +138,7 @@ pub fn run(
         &other_resolved,
         archive_root_id,
     )? {
-        SurveyOutcome::Empty { scope_prefixes: _ } => {
+        SurveyOutcome::Empty => {
             let suppress = options.null_delim
                 && matches!(
                     options.detail,
@@ -151,7 +151,6 @@ pub fn run(
             }
         }
         SurveyOutcome::AllUnhashed {
-            scope_prefixes: _,
             total_count,
         } => {
             let suppress = options.null_delim

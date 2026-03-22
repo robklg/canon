@@ -35,16 +35,14 @@ pub enum SurveyOutcome {
     /// Normal result with all computed data.
     Result(SurveyResult),
     /// Empty selection — display header and stop.
-    Empty { scope_prefixes: Vec<String> },
+    Empty,
     /// All unhashed — display header and hashing guidance.
     AllUnhashed {
-        scope_prefixes: Vec<String>,
         total_count: usize,
     },
 }
 
 pub struct SurveyResult {
-    pub scope_prefixes: Vec<String>,
     pub total_count: usize,
     pub unhashed_count: usize,
     pub total_hashed: usize,
@@ -137,13 +135,12 @@ pub fn compute_survey(
 
     // Early exit: empty selection
     if total_count == 0 {
-        return Ok(SurveyOutcome::Empty { scope_prefixes });
+        return Ok(SurveyOutcome::Empty);
     }
 
     // Early exit: all unhashed
     if total_hashed == 0 {
         return Ok(SurveyOutcome::AllUnhashed {
-            scope_prefixes,
             total_count,
         });
     }
@@ -434,7 +431,6 @@ pub fn compute_survey(
     unique_paths.sort_unstable();
 
     Ok(SurveyOutcome::Result(SurveyResult {
-        scope_prefixes,
         total_count,
         unhashed_count,
         total_hashed,
@@ -556,9 +552,7 @@ mod tests {
         let outcome = run_compute(&mut conn, &["/mnt/drive/other"], &params, &[], &[], None);
 
         match outcome {
-            SurveyOutcome::Empty { scope_prefixes } => {
-                assert_eq!(scope_prefixes, vec!["/mnt/drive/other"]);
-            }
+            SurveyOutcome::Empty => {}
             _ => panic!("Expected SurveyOutcome::Empty"),
         }
     }
@@ -575,10 +569,8 @@ mod tests {
 
         match outcome {
             SurveyOutcome::AllUnhashed {
-                scope_prefixes,
                 total_count,
             } => {
-                assert_eq!(scope_prefixes, vec!["/mnt/drive"]);
                 assert_eq!(total_count, 2);
             }
             _ => panic!("Expected SurveyOutcome::AllUnhashed"),
@@ -656,7 +648,6 @@ mod tests {
 
         match outcome {
             SurveyOutcome::Result(result) => {
-                assert_eq!(result.scope_prefixes.len(), 2);
                 assert_eq!(result.total_count, 2);
                 assert_eq!(result.total_hashed, 2);
                 assert_eq!(result.unique_count, 2);

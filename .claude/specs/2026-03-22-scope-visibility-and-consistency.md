@@ -315,12 +315,13 @@ This is a small addition to each effectful command's path handling — not via `
 
 ## Implementation Checklist
 
-- [ ] Phase 1: Shared infrastructure (`scope.rs`, `validate_paths_in_roots`), `--global` flag, ls + survey wired through
-- [ ] Phase 2: facts, coverage, worklist wired through, scope display on all
-- [ ] Phase 3: Compare one-path mode, non-root error on all commands
-- [ ] Phase 4: CLAUDE.md, user docs, dead code cleanup
-- [ ] Verify all existing tests pass
-- [ ] Update CLAUDE.md with new scope infrastructure patterns
+- [x] Phase 1: Shared infrastructure (`ops/scope.rs`, `validate_paths_in_roots`), `--global` flag, ls + survey wired through
+- [x] Phase 2: facts, coverage, worklist wired through, scope display on all
+- [x] Phase 3: Compare one-path mode, non-root error on all commands (exclude + cluster)
+- [x] Phase 4: CLAUDE.md updated, dead code cleanup (survey scope_prefixes removed)
+- [x] Verify all existing tests pass (813)
+- [x] Update CLAUDE.md with new scope infrastructure patterns
+- [ ] User documentation updates in `docs/src/`
 
 ## Documentation Updates
 

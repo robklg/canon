@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 use crate::ceremony;
-use crate::domain::path::{resolve_path, resolve_paths};
+use crate::domain::path::{resolve_path, resolve_paths, validate_paths_in_roots};
 use crate::domain::root::find_containing_root;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::Filter;
@@ -51,6 +51,7 @@ pub fn set(
     // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
     let all_roots = repo::root::fetch_all(conn)?;
     let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
+    validate_paths_in_roots(&scope_prefixes, &all_roots)?;
 
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
     let plan = plan_set(conn, &ExcludeSetParams { scopes, filters })?;
@@ -116,6 +117,7 @@ pub fn clear(
     // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
     let all_roots = repo::root::fetch_all(conn)?;
     let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
+    validate_paths_in_roots(&scope_prefixes, &all_roots)?;
 
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
     let plan = plan_clear(conn, &ExcludeClearParams { scopes, filters })?;
@@ -255,7 +257,9 @@ pub fn exclude_duplicates(
     } else {
         vec![]
     };
+    validate_paths_in_roots(&scope_prefixes, &all_roots)?;
     let prefer_prefix = resolve_path(prefer_path, &all_roots, &cwd)?;
+    validate_paths_in_roots(&[prefer_prefix.clone()], &all_roots)?;
 
     // Plan
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
@@ -438,6 +442,7 @@ pub fn set_objects_by_filter(
     // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
     let all_roots = repo::root::fetch_all(conn)?;
     let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
+    validate_paths_in_roots(&scope_prefixes, &all_roots)?;
 
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
     let plan = plan_set_objects(conn, &ExcludeSetObjectsParams { scopes, filters })?;
