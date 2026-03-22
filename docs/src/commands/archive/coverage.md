@@ -3,11 +3,14 @@
 Show archive coverage statistics - how many sources are hashed and how many are archived.
 
 ```bash
-# Overview of all source roots
+# Coverage for current directory (when inside a root)
 canon coverage
 
 # Scoped to a specific directory
 canon coverage /path/to/photos
+
+# Global overview of all source roots
+canon coverage --global
 
 # With filters
 canon coverage --where 'source.ext=jpg'
@@ -26,9 +29,11 @@ canon coverage --include excluded
 canon coverage --include all
 ```
 
-Example output:
+The output begins with a scope header (`Coverage: /path` or `Coverage: all roots`).
+
+Example output (global):
 ```
-Archive Coverage Report
+Coverage: all roots
 
 Root: /path/to/backup1 (source)
   Total sources:     1,234

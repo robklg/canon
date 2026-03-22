@@ -3,8 +3,11 @@
 Output sources as JSONL for processing by external tools.
 
 ```bash
-# All sources (from source roots only)
+# Sources in current directory (when inside a root)
 canon worklist
+
+# All sources across all roots
+canon worklist --global
 
 # Only sources missing a content hash
 canon worklist --where 'NOT content.hash.sha256?'

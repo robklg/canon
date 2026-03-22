@@ -3,8 +3,8 @@
 List sources matching filters. Useful for quick inspection and piping to other tools.
 
 ```bash
-# List all sources in current directory
-canon ls .
+# List sources in current directory (default when inside a root)
+canon ls
 
 # List sources matching a filter
 canon ls --where 'source.ext=jpg'
@@ -40,6 +40,9 @@ canon ls --include excluded
 # Include both archived and excluded sources
 canon ls --include all
 
+# Query all roots, ignoring current directory scope
+canon ls --global --where 'source.ext=jpg'
+
 # Long format with size and date
 canon ls -l
 
@@ -51,12 +54,15 @@ canon ls -0 --where 'source.ext=jpg' | xargs -0 open -a Preview
 
 **Status column in long format:** When `--include` is used or `--excluded` mode is active, `ls -l` shows a status column indicating source state: `E` (source-level exclusion), `X` (object-level exclusion), `A` (archived), or blank.
 
+**Scope display:** When scoped (via CWD or explicit path), `ls` prints `scope: /path` to stderr so you always know what you're looking at. When global, no scope line is printed.
+
 **Path display:**
-- Relative path input (`.`, `subdir`) → relative output paths
-- Absolute path input (`/path/to/dir`) → absolute output paths
+- CWD-scoped (no explicit path, inside a root) → relative output paths
+- Explicit absolute path or `--global` → absolute output paths
 
 Output is one path per line (stdout), with a count printed to stderr:
 ```
+scope: /Volumes/old-drive/photos
 vacation/img001.jpg
 vacation/img002.jpg
 work/doc.pdf

@@ -3,7 +3,10 @@
 Compare two folders by content hash. Useful for verifying backups or finding differences between directories.
 
 ```bash
-# Compare two directories
+# Compare current directory against another location
+canon compare /path/to/folder_b
+
+# Compare two explicit directories
 canon compare /path/to/folder_a /path/to/folder_b
 
 # With filters
@@ -15,6 +18,8 @@ canon compare /path/to/folder_a /path/to/folder_b --include excluded
 # Show file paths for differences
 canon compare /path/to/folder_a /path/to/folder_b --verbose
 ```
+
+With one path argument, the current directory is used as side A and the argument as side B. With two paths, they are used as A and B explicitly. The current directory must be inside a known root when used as side A.
 
 Output shows:
 - Files only in A (by content)

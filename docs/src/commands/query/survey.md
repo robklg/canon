@@ -38,6 +38,9 @@ canon survey /mnt/old-drive/photos --archive path:/archive/photos
 
 # Include excluded sources in the selection
 canon survey /mnt/old-drive/photos --include excluded
+
+# Survey all roots globally (when inside a root but want the full picture)
+canon survey --global
 ```
 
 ## Options
@@ -49,6 +52,7 @@ canon survey /mnt/old-drive/photos --include excluded
 | `--detail <MODE>` | `complement`, `unique`, `overlap`, or `residual`. Replaces the summary view. |
 | `--archive <SPEC>` | Filter archive section to a specific archive root (`id:N` or `path:/...`). |
 | `--include <VALUE>` | Include additional sources: `excluded`. |
+| `--global` | Survey all roots, ignoring current directory scope. |
 | `--other <PATH>` | Compare against specific locations (repeatable). Bypasses scope discovery. |
 | `--brief` | Skip per-location affinity computation when `--affinity` is active. |
 | `--verbose` | Show all locations (summary) or all paths per location (detail views). |

@@ -321,7 +321,7 @@ This is a small addition to each effectful command's path handling — not via `
 - [x] Phase 4: CLAUDE.md updated, dead code cleanup (survey scope_prefixes removed)
 - [x] Verify all existing tests pass (813)
 - [x] Update CLAUDE.md with new scope infrastructure patterns
-- [ ] User documentation updates in `docs/src/`
+- [x] User documentation updates in `docs/src/`
 
 ## Documentation Updates
 

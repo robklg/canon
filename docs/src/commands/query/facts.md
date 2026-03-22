@@ -3,11 +3,14 @@
 Discover what metadata you have and check coverage.
 
 ```bash
-# Overview of all facts (source roots only by default)
+# Overview of all facts (scoped to current directory when inside a root)
 canon facts
 
-# Scoped to a directory
+# Scoped to a specific directory
 canon facts /path/to/photos
+
+# Global overview across all roots
+canon facts --global
 
 # With filters
 canon facts --where 'source.ext=jpg'
@@ -49,8 +52,11 @@ canon facts --key source.ext --group-by 'source.mtime|year'
 canon facts --key source.ext --by-root --group-by 'content.Make'
 ```
 
+The output begins with a scope header showing what's being queried (`Facts: /path` or `Facts: all roots`).
+
 Example output:
 ```
+Facts: all roots
 Sources matching filters: 34692
 
 Fact                               Count   Coverage
