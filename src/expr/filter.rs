@@ -254,6 +254,29 @@ enum Token {
     Value(String),
 }
 
+/// Check if a character is valid in a bare value (after a comparison operator).
+/// Values accept a liberal character set: alphanumeric plus common value characters
+/// like `-`, `/`, `?`, `*`, `.`, `_`, `:`, `|`, `[`, `]`, `+`, `@`, `#`, `%`.
+fn is_value_char(c: char) -> bool {
+    c.is_alphanumeric()
+        || matches!(
+            c,
+            '_' | '.' | '-' | '/' | ':' | '*' | '?' | '[' | ']' | '|' | '+' | '@' | '#' | '%'
+        )
+}
+
+/// Check if the token context signals that the next token should be parsed as a value.
+/// This is true after comparison operators, after commas (for IN lists),
+/// and after LParen that follows IN (first value in an IN list).
+fn expects_value(tokens: &[Token]) -> bool {
+    match tokens.last() {
+        Some(Token::Op(_)) | Some(Token::Comma) => true,
+        // First value in IN list: IN (value, ...)
+        Some(Token::LParen) => tokens.len() >= 2 && matches!(tokens[tokens.len() - 2], Token::In),
+        _ => false,
+    }
+}
+
 fn tokenize(s: &str) -> Result<Vec<Token>> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = s.chars().collect();
@@ -264,6 +287,45 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
         if chars[i].is_whitespace() {
             i += 1;
             continue;
+        }
+
+        // Context-aware value parsing: after a comparison operator, comma,
+        // or opening paren of an IN list, parse as a value with liberal characters.
+        if expects_value(&tokens) {
+            // Quoted strings in value position
+            if chars[i] == '"' || chars[i] == '\'' {
+                let quote = chars[i];
+                i += 1;
+                let start = i;
+                while i < chars.len() && chars[i] != quote {
+                    i += 1;
+                }
+                if i >= chars.len() {
+                    bail!("Unterminated string");
+                }
+                let val: String = chars[start..i].iter().collect();
+                tokens.push(Token::Value(val));
+                i += 1; // skip closing quote
+                continue;
+            }
+
+            // LParen in value position starts an IN list — not a value
+            if chars[i] == '(' {
+                tokens.push(Token::LParen);
+                i += 1;
+                continue;
+            }
+
+            // Bare value: read until whitespace or structural character
+            if is_value_char(chars[i]) {
+                let start = i;
+                while i < chars.len() && is_value_char(chars[i]) {
+                    i += 1;
+                }
+                let val: String = chars[start..i].iter().collect();
+                tokens.push(Token::Value(val));
+                continue;
+            }
         }
 
         // Single-char tokens
@@ -350,7 +412,8 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
         }
 
         // Keywords and identifiers
-        // Allow alphanumeric, underscore, dot, pipe, brackets, slash (for accessors like key[-1], modifiers like key|year, and MIME types like image/jpeg)
+        // Allow alphanumeric, underscore, dot, pipe, brackets, slash, colon
+        // (for accessors like key[-1], modifiers like key|year)
         if chars[i].is_alphabetic() || chars[i] == '_' {
             let start = i;
             while i < chars.len()
@@ -415,7 +478,7 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
             continue;
         }
 
-        // Quoted strings
+        // Quoted strings (outside value position — e.g., in IN lists with explicit quoting)
         if chars[i] == '"' || chars[i] == '\'' {
             let quote = chars[i];
             i += 1;
@@ -1454,5 +1517,217 @@ mod tests {
 
         // Modifier failure treated as non-match, not error
         assert!(result.is_empty());
+    }
+
+    // ========================================================================
+    // Tokenizer: context-aware value parsing
+    // ========================================================================
+
+    #[test]
+    fn tokenize_mime_type_with_slash_and_hyphen() {
+        let expr = Expr::parse("mime=application/octet-stream").unwrap();
+        match expr {
+            Expr::Compare { key, op, value } => {
+                assert_eq!(key, "content.mime"); // normalized by parser
+                assert_eq!(op, CompareOp::Eq);
+                assert_eq!(value, "application/octet-stream");
+            }
+            _ => panic!("Expected Compare"),
+        }
+    }
+
+    #[test]
+    fn tokenize_glob_with_question_mark() {
+        let expr = Expr::parse("ext~jp?g").unwrap();
+        match expr {
+            Expr::Compare { key, op, value } => {
+                assert_eq!(key, "ext");
+                assert_eq!(op, CompareOp::Glob);
+                assert_eq!(value, "jp?g");
+            }
+            _ => panic!("Expected Compare"),
+        }
+    }
+
+    #[test]
+    fn tokenize_glob_with_star() {
+        let expr = Expr::parse("ext~*.tmp").unwrap();
+        match expr {
+            Expr::Compare { key, op, value } => {
+                assert_eq!(op, CompareOp::Glob);
+                assert_eq!(value, "*.tmp");
+            }
+            _ => panic!("Expected Compare"),
+        }
+    }
+
+    #[test]
+    fn tokenize_not_glob_with_metacharacters() {
+        let expr = Expr::parse("ext!~*.bak").unwrap();
+        match expr {
+            Expr::Compare { key: _, op, value } => {
+                assert_eq!(op, CompareOp::NotGlob);
+                assert_eq!(value, "*.bak");
+            }
+            _ => panic!("Expected Compare"),
+        }
+    }
+
+    #[test]
+    fn tokenize_hyphenated_value() {
+        let expr = Expr::parse("tag=my-custom-tag").unwrap();
+        match expr {
+            Expr::Compare { key: _, op, value } => {
+                assert_eq!(op, CompareOp::Eq);
+                assert_eq!(value, "my-custom-tag");
+            }
+            _ => panic!("Expected Compare"),
+        }
+    }
+
+    #[test]
+    fn tokenize_value_with_boolean_after() {
+        let expr = Expr::parse("mime=image/jpeg AND source.size>1000").unwrap();
+        match expr {
+            Expr::And(parts) => {
+                assert_eq!(parts.len(), 2);
+                match &parts[0] {
+                    Expr::Compare { value, .. } => assert_eq!(value, "image/jpeg"),
+                    _ => panic!("Expected Compare"),
+                }
+            }
+            _ => panic!("Expected And"),
+        }
+    }
+
+    #[test]
+    fn tokenize_in_list_with_unquoted_values() {
+        let expr =
+            Expr::parse("mime IN (application/octet-stream, image/jpeg)").unwrap();
+        match expr {
+            Expr::In { key: _, values } => {
+                assert_eq!(values, vec!["application/octet-stream", "image/jpeg"]);
+            }
+            _ => panic!("Expected In"),
+        }
+    }
+
+    #[test]
+    fn tokenize_exists_still_works() {
+        let expr = Expr::parse("content.hash.sha256?").unwrap();
+        match expr {
+            Expr::Exists { key } => {
+                assert_eq!(key, "content.hash.sha256");
+            }
+            _ => panic!("Expected Exists"),
+        }
+    }
+
+    #[test]
+    fn tokenize_quoted_value_still_works() {
+        let expr = Expr::parse("mime=\"application/octet-stream\"").unwrap();
+        match expr {
+            Expr::Compare { key: _, op, value } => {
+                assert_eq!(op, CompareOp::Eq);
+                assert_eq!(value, "application/octet-stream");
+            }
+            _ => panic!("Expected Compare"),
+        }
+    }
+
+    #[test]
+    fn tokenize_parenthesized_expression_with_values() {
+        let expr =
+            Expr::parse("(mime=image/jpeg OR mime=image/png) AND source.size>0").unwrap();
+        match expr {
+            Expr::And(parts) => {
+                assert_eq!(parts.len(), 2);
+                match &parts[0] {
+                    Expr::Or(or_parts) => assert_eq!(or_parts.len(), 2),
+                    _ => panic!("Expected Or"),
+                }
+            }
+            _ => panic!("Expected And"),
+        }
+    }
+
+    #[test]
+    fn tokenize_glob_with_bracket_range() {
+        let expr = Expr::parse("ext~[jJ][pP][gG]").unwrap();
+        match expr {
+            Expr::Compare { key: _, op, value } => {
+                assert_eq!(op, CompareOp::Glob);
+                assert_eq!(value, "[jJ][pP][gG]");
+            }
+            _ => panic!("Expected Compare"),
+        }
+    }
+
+    #[test]
+    fn tokenize_negative_number_value() {
+        let expr = Expr::parse("source.size>-1").unwrap();
+        match expr {
+            Expr::Compare { key: _, op, value } => {
+                assert_eq!(op, CompareOp::Gt);
+                assert_eq!(value, "-1");
+            }
+            _ => panic!("Expected Compare"),
+        }
+    }
+
+    #[test]
+    fn tokenize_date_value_with_hyphens() {
+        let expr = Expr::parse("source.mtime>2024-01-15").unwrap();
+        match expr {
+            Expr::Compare { key: _, op, value } => {
+                assert_eq!(op, CompareOp::Gt);
+                assert_eq!(value, "2024-01-15");
+            }
+            _ => panic!("Expected Compare"),
+        }
+    }
+
+    #[test]
+    fn tokenize_not_before_exists_no_value_mode() {
+        let expr = Expr::parse("NOT content.hash.sha256?").unwrap();
+        match expr {
+            Expr::Not(inner) => match *inner {
+                Expr::Exists { key } => assert_eq!(key, "content.hash.sha256"),
+                _ => panic!("Expected Exists inside Not"),
+            },
+            _ => panic!("Expected Not"),
+        }
+    }
+
+    #[test]
+    fn tokenize_simple_value() {
+        let expr = Expr::parse("source.ext=jpg").unwrap();
+        match expr {
+            Expr::Compare { key: _, op, value } => {
+                assert_eq!(op, CompareOp::Eq);
+                assert_eq!(value, "jpg");
+            }
+            _ => panic!("Expected Compare"),
+        }
+    }
+
+    #[test]
+    fn tokenize_value_inside_parens() {
+        let expr =
+            Expr::parse("(source.ext=jpg) AND mime=image/jpeg").unwrap();
+        match expr {
+            Expr::And(parts) => {
+                assert_eq!(parts.len(), 2);
+                match &parts[0] {
+                    Expr::Compare { value, .. } => assert_eq!(value, "jpg"),
+                    _ => panic!("Expected Compare"),
+                }
+                match &parts[1] {
+                    Expr::Compare { value, .. } => assert_eq!(value, "image/jpeg"),
+                    _ => panic!("Expected Compare"),
+                }
+            }
+            _ => panic!("Expected And"),
+        }
     }
 }
