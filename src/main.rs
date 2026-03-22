@@ -587,6 +587,15 @@ fn main() -> Result<()> {
         },
     )?;
 
+    // Run periodic ANALYZE before command dispatch so read-only commands
+    // benefit from fresh query planner statistics without a post-command delay.
+    // Write commands (scan, apply, import-facts) run their own ANALYZE after
+    // bulk changes — the periodic check here catches the gap when only reads
+    // have happened since the last analyze.
+    if db.maybe_analyze()? {
+        eprintln!("Updating query statistics...");
+    }
+
     match cli.command {
         Commands::Scan {
             paths,
@@ -1078,8 +1087,6 @@ fn main() -> Result<()> {
         },
     }
 
-    // Check if ANALYZE should run (based on modifications or time since last analyze)
-    let _ = db.maybe_analyze();
 
     // Print profile summary if profiling was enabled
     repo::print_profile_summary(db.conn());

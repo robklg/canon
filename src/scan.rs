@@ -309,6 +309,7 @@ pub fn run(
     // changed enough to meaningfully affect query planning.
     let rows_changed = total_stats.new + total_stats.missing;
     if rows_changed >= 100 {
+        eprintln!("Updating query statistics...");
         db.run_analyze()?;
     }
 

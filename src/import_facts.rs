@@ -77,6 +77,7 @@ pub fn run(db: &mut Db, allow_archived: bool, verbose: bool) -> Result<()> {
     );
 
     // Update query planner statistics after bulk changes
+    eprintln!("Updating query statistics...");
     db.run_analyze()?;
 
     Ok(())

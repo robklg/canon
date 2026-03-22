@@ -423,6 +423,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     }
 
     // Update query planner statistics after bulk changes
+    eprintln!("Updating query statistics...");
     db.run_analyze()?;
 
     Ok(())
