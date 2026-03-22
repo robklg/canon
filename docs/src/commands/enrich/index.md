@@ -54,7 +54,7 @@ Content hashing normally happens during `scan`. If you prefer to hash only speci
 
 ```bash
 canon scan --no-hash --add --role source /path/to/mixed-files
-canon worklist --where 'mime~"image/*" OR mime~"video/*"' \
+canon worklist --where 'mime~image/* OR mime~video/*' \
   | ./scripts/hash-worklist.sh \
   | canon import-facts
 ```

@@ -35,17 +35,19 @@ The `~` operator supports shell-style glob patterns:
 
 ```bash
 # Files starting with IMG_
---where 'filename~"IMG_*"'
+--where 'filename~IMG_*'
 
 # Files with 3-letter extension
---where 'source.ext~"???"'
+--where 'source.ext~???'
 
 # Files in a year subdirectory
---where 'source.rel_path~"*/2024/*"'
+--where 'source.rel_path~*/2024/*'
 
 # Exclude temp files
---where 'filename!~"*.tmp"'
+--where 'filename!~*.tmp'
 ```
+
+Values after operators like `~`, `=`, `!=` accept most characters without quoting — including `/`, `-`, `?`, `*`, `[`, `]`. Quoting (single or double) is still supported for values containing spaces or parentheses.
 
 ## Boolean Operators
 
@@ -153,7 +155,7 @@ Modifiers can be applied to fact keys using the `|` syntax. See [Facts](facts.md
 --where 'source.ext|lowercase=jpg'
 
 # Case-insensitive glob
---where 'filename|lowercase~"img_*"'
+--where 'filename|lowercase~img_*'
 ```
 
 ### Examples
