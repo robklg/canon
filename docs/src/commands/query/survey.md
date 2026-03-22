@@ -143,10 +143,35 @@ Detail views replace the summary with specific file listings. They answer the "s
 
 | Summary signal | Question | Detail view |
 |---------------|----------|-------------|
+| "201 of 517 archived (38.9%)" | Which files are archived, and where? | `--detail archived` |
 | "264 unique here" | What content exists only here? | `--detail unique` |
 | "161 of 517 overlap" | Which of my files are at that location? | `--detail overlap` |
 | "+95 more" (affinity) | What matching content is over there? | `--detail complement` |
 | — | What's here that's NOT at a specific location? | `--detail residual` |
+
+### Archived (`--detail archived`)
+
+Shows which of your files are archived, grouped by archive location, with counterpart paths showing where each file lives in the archive:
+
+```
+Archived files (201 sources across 6 locations):
+
+  Archived at /archive/media/2019/home (43 files):
+    exports/photos/IMG_0001.jpg
+      → media/2019/home/IMG_0001.jpg
+    exports/photos/IMG_0002.jpg
+      → media/2019/home/IMG_0002.jpg
+    ... and 38 more
+
+  Archived at /archive/media/2019/holiday (41 files):
+    exports/vacation/DSC_0100.jpg
+      → media/2019/holiday/DSC_0100.jpg
+    ...
+```
+
+Locations are sorted by file count (most files first). When results are small (20 or fewer per location), all paths are shown; otherwise capped at 5. Use `--verbose` to see all. With `-0`, output is flat, deduplicated selection-side paths only (for piping to `xargs -0`).
+
+Use `--archive` to filter to a specific archive root.
 
 ### Unique (`--detail unique`)
 

@@ -28,6 +28,8 @@ pub struct SurveyParams {
     pub compute_overlap_pairs: bool,
     /// Whether to compute residual paths per location.
     pub compute_residual: bool,
+    /// Whether to compute archived file pairs (selection path → archive counterpart).
+    pub compute_archived_pairs: bool,
 }
 
 /// Outcome of compute_survey: either a result to display or an early exit.
@@ -55,6 +57,9 @@ pub struct SurveyResult {
     /// Display label when --archive is specified (e.g., "in /archive/photos").
     /// Set by the interface after return — ops always returns None.
     pub archive_label: Option<String>,
+    /// File-level archive detail: selection sources grouped by archive location
+    /// with counterpart paths. Only populated when compute_archived_pairs is true.
+    pub archived_details: Vec<ArchivedLocationDetail>,
 }
 
 /// A selection-side path paired with its counterpart paths at a location.
@@ -63,6 +68,14 @@ pub struct OverlapPair {
     pub selection_path: String,
     /// Paths at the other location with matching content (relative to location).
     pub counterpart_paths: Vec<String>,
+}
+
+/// An archive location with its paired selection/archive files.
+pub struct ArchivedLocationDetail {
+    /// Archive scope path (absolute).
+    pub path: String,
+    /// Selection-side paths paired with archive-side counterparts.
+    pub pairs: Vec<OverlapPair>,
 }
 
 pub struct LocationResult {
@@ -430,6 +443,76 @@ pub fn compute_survey(
         .collect();
     unique_paths.sort_unstable();
 
+    // Archived detail: pair selection sources with archive counterparts by object_id
+    let archived_details = if params.compute_archived_pairs && !archive_sources.is_empty() {
+        // Build archive source index: object_id -> Vec<archive source path>
+        let mut archive_by_oid: HashMap<i64, Vec<String>> = HashMap::new();
+        for s in &archive_sources {
+            if let Some(oid) = s.object_id {
+                archive_by_oid.entry(oid).or_default().push(s.path());
+            }
+        }
+
+        // Group archive sources by their scope path for display grouping
+        // Reuse the already-computed archive_scopes for the location paths
+        let mut details: Vec<ArchivedLocationDetail> = Vec::new();
+
+        // For each archive scope, find the selection sources whose content is archived there
+        for (scope_path, _count) in &archive_scopes {
+            let mut pairs: Vec<OverlapPair> = Vec::new();
+
+            // Find archive sources under this scope
+            let scope_archive_oids: HashSet<i64> = archive_sources
+                .iter()
+                .filter(|s| domain::path::path_is_under(&s.path(), scope_path))
+                .filter_map(|s| s.object_id)
+                .collect();
+
+            // Find selection sources matching these object_ids
+            for sel_source in &hashed {
+                if let Some(oid) = sel_source.object_id {
+                    if scope_archive_oids.contains(&oid) {
+                        // Find counterpart paths at this archive scope
+                        let counterparts: Vec<String> = archive_sources
+                            .iter()
+                            .filter(|s| {
+                                s.object_id == Some(oid)
+                                    && domain::path::path_is_under(&s.path(), scope_path)
+                            })
+                            .map(|s| {
+                                domain::path::path_strip_prefix(&s.path(), scope_path)
+                                    .unwrap_or("")
+                                    .to_string()
+                            })
+                            .collect();
+
+                        if !counterparts.is_empty() {
+                            pairs.push(OverlapPair {
+                                selection_path: sel_source.path(),
+                                counterpart_paths: counterparts,
+                            });
+                        }
+                    }
+                }
+            }
+
+            pairs.sort_by(|a, b| a.selection_path.cmp(&b.selection_path));
+
+            if !pairs.is_empty() {
+                details.push(ArchivedLocationDetail {
+                    path: scope_path.clone(),
+                    pairs,
+                });
+            }
+        }
+
+        // Sort by file count descending
+        details.sort_by(|a, b| b.pairs.len().cmp(&a.pairs.len()));
+        details
+    } else {
+        Vec::new()
+    };
+
     Ok(SurveyOutcome::Result(SurveyResult {
         total_count,
         unhashed_count,
@@ -441,6 +524,7 @@ pub fn compute_survey(
         unique_paths,
         is_other_mode,
         archive_label: None, // set by run() after return
+        archived_details,
     }))
 }
 
@@ -457,6 +541,7 @@ mod tests {
             compute_affinity: false,
             compute_overlap_pairs: false,
             compute_residual: false,
+            compute_archived_pairs: false,
         }
     }
 

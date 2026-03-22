@@ -17,6 +17,8 @@ const DEFAULT_LOCATION_CAP: usize = 10;
 /// Detail output mode for `--detail`.
 #[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
 pub enum DetailMode {
+    /// Show which selection files are archived and where
+    Archived,
     /// Show complementary content at related locations
     Complement,
     /// Output bare paths of unique-to-selection content
@@ -126,6 +128,7 @@ pub fn run(
         compute_affinity,
         compute_overlap_pairs: options.detail == Some(DetailMode::Overlap),
         compute_residual: options.detail == Some(DetailMode::Residual),
+        compute_archived_pairs: options.detail == Some(DetailMode::Archived),
     };
 
     match crate::ops::survey::compute_survey(
@@ -180,6 +183,31 @@ pub fn run(
                 .ok()
                 .and_then(|p| p.to_str().map(|s| s.to_string()));
             match options.detail {
+                Some(DetailMode::Archived) => {
+                    if !options.null_delim {
+                        print_survey_header(
+                            &options.scope,
+                            &options.original_filters,
+                            result.total_count,
+                            result.unhashed_count,
+                            result.total_hashed,
+                            Some(result.unique_count),
+                        );
+                        println!();
+                    }
+                    let cwd = if options.null_delim {
+                        None
+                    } else {
+                        display_cwd.as_deref()
+                    };
+                    print_archived_detail(
+                        &result.archived_details,
+                        result.archived_source_count,
+                        cwd,
+                        options.verbose,
+                        options.null_delim,
+                    );
+                }
                 Some(DetailMode::Complement) => {
                     print_survey_header(
                         &options.scope,
@@ -271,6 +299,7 @@ pub fn run(
                             result.total_hashed,
                             &result.archive_scopes,
                             result.archive_label.as_deref(),
+                            options.verbose,
                         );
                         println!();
                     }
@@ -325,6 +354,7 @@ fn print_archive_section(
     total_hashed: usize,
     archive_scopes: &[(String, usize)],
     archive_label: Option<&str>,
+    verbose: bool,
 ) {
     let header = match archive_label {
         Some(label) => format!("Archived ({label})"),
@@ -345,19 +375,27 @@ fn print_archive_section(
         pct,
     );
 
+    // Sort by count descending for display
+    let mut sorted: Vec<&(String, usize)> = archive_scopes.iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Adaptive cap: show all when ≤20, top 10 when >20 (unless --verbose)
+    let (display, hidden) = if verbose || sorted.len() <= DETAIL_SHOW_ALL_THRESHOLD {
+        (sorted.as_slice(), 0)
+    } else {
+        let cap = DEFAULT_LOCATION_CAP;
+        (&sorted[..cap], sorted.len() - cap)
+    };
+
     // Scope-grouped archive paths with right-aligned counts
-    let max_path_len = archive_scopes
-        .iter()
-        .map(|(p, _)| p.len())
-        .max()
-        .unwrap_or(0);
-    let max_count_len = archive_scopes
+    let max_path_len = display.iter().map(|(p, _)| p.len()).max().unwrap_or(0);
+    let max_count_len = display
         .iter()
         .map(|(_, c)| format_count(*c).len())
         .max()
         .unwrap_or(0);
 
-    for (path, count) in archive_scopes {
+    for (path, count) in display {
         println!(
             "  {:path_w$}  {:>count_w$}",
             path,
@@ -365,6 +403,79 @@ fn print_archive_section(
             path_w = max_path_len,
             count_w = max_count_len,
         );
+    }
+
+    if hidden > 0 {
+        println!("  ... and {hidden} more locations (use --verbose to show all)");
+    }
+}
+
+fn print_archived_detail(
+    details: &[crate::ops::survey::ArchivedLocationDetail],
+    archived_count: usize,
+    cwd: Option<&str>,
+    verbose: bool,
+    null_delim: bool,
+) {
+    use std::io::Write;
+
+    if null_delim {
+        // Flat output: null-delimited selection-side paths of archived files
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        let mut seen = std::collections::HashSet::new();
+        for detail in details {
+            for pair in &detail.pairs {
+                if seen.insert(&pair.selection_path) {
+                    let display = domain::path::format_path(&pair.selection_path, cwd);
+                    let _ = write!(handle, "{}\0", display);
+                }
+            }
+        }
+        return;
+    }
+
+    if details.is_empty() {
+        println!("No archived files in selection.");
+        return;
+    }
+
+    println!(
+        "Archived files ({} sources across {} locations):\n",
+        format_count(archived_count),
+        details.len(),
+    );
+
+    for detail in details {
+        let count = detail.pairs.len();
+        println!(
+            "  Archived at {} ({} files):",
+            detail.path,
+            format_count(count),
+        );
+
+        let show_all = verbose || count <= DETAIL_SHOW_ALL_THRESHOLD;
+        let display_pairs = if show_all {
+            &detail.pairs[..]
+        } else {
+            &detail.pairs[..DETAIL_SAMPLE_SIZE]
+        };
+
+        for pair in display_pairs {
+            let display = domain::path::format_path(&pair.selection_path, cwd);
+            println!("    {display}");
+            for cp in &pair.counterpart_paths {
+                println!("      → {cp}");
+            }
+        }
+
+        if !show_all {
+            println!(
+                "    ... and {} more (use --verbose to show all)",
+                count - DETAIL_SAMPLE_SIZE
+            );
+        }
+        println!();
     }
 }
 
@@ -506,7 +617,7 @@ fn print_complement_detail(
         }
         if !verbose && paths.len() > DETAIL_SHOW_ALL_THRESHOLD {
             println!(
-                "    ... and {} more",
+                "    ... and {} more (use --verbose to show all)",
                 format_count(paths.len() - DETAIL_SAMPLE_SIZE),
             );
         }
@@ -602,7 +713,7 @@ fn print_overlap_detail(
         }
         if !verbose && pairs.len() > DETAIL_SHOW_ALL_THRESHOLD {
             println!(
-                "    ... and {} more",
+                "    ... and {} more (use --verbose to show all)",
                 format_count(pairs.len() - DETAIL_SAMPLE_SIZE),
             );
         }
@@ -678,7 +789,7 @@ fn print_residual_detail(
             }
             if !verbose && paths.len() > DETAIL_SHOW_ALL_THRESHOLD {
                 println!(
-                    "  ... and {} more",
+                    "  ... and {} more (use --verbose to show all)",
                     format_count(paths.len() - DETAIL_SAMPLE_SIZE),
                 );
             }
