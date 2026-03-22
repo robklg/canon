@@ -99,10 +99,17 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 
 ### CLI Flag Vocabulary
 
-Two unified flags control visibility and awareness across all commands:
+Three unified flags control visibility, awareness, and scope across all commands:
 
 - **`--include`** (query commands: `ls`, `facts`, `coverage`, `worklist`, `compare`, `survey`): Expands what you see. Values: `excluded`, `archived`, `all`. Comma-separated and repeatable. Always safe — no side effects. Compare and survey only accept `excluded`.
 - **`--allow`** (effectful commands: `cluster generate`, `apply`, `import-facts`): Acknowledges non-default source selection. Canon's defaults surface information (e.g., duplicates present); `--allow` is the user saying "I'm aware, proceed." Per-command values. Not available on `cluster refresh` (reads from manifest `[options]`).
+- **`--global`** (discovery commands: `ls`, `facts`, `coverage`, `worklist`, `survey`): Operates on all roots, bypassing CWD-based scope defaulting. Only meaningful when no explicit paths are given. Not on `compare` (requires a path), not on effectful commands.
+
+**CWD scope defaulting**: Discovery commands (`ls`, `survey`, `facts`, `coverage`, `worklist`) default to CWD when no paths are given and CWD is inside a known root. When CWD is inside an archive root, `--include archived` is auto-enabled. When CWD is not under any root, commands operate globally. Effectful commands (`exclude`, `cluster generate`) do NOT default to CWD — they require explicit paths. Use `--global` to force global scope while inside a root.
+
+**Scope display**: Discovery commands show their active scope. Report commands (`survey`, `facts`, `coverage`, `compare`) display scope on stdout as part of the report (e.g., `Facts: /path` or `Facts: all roots`). List commands (`ls`, `worklist`) display scope on stderr when scoped (e.g., `scope: /path`); silent when global.
+
+**Non-root error**: When an explicit path is not under any known root, commands error immediately. CWD-not-in-root falls back to global silently.
 
 **Filter modes on `ls`**: `--archived`, `--unarchived`, `--unhashed`, `--duplicates`, `--excluded` are mutually exclusive filter modes. `--excluded` implicitly includes excluded sources and shows both source-level and object-level excluded.
 
@@ -198,10 +205,20 @@ Used with `--root`, `--archive` flags:
 
 ### Shared Utilities
 
+In `ops/scope.rs` (operations layer):
+- `ResolvedScope` struct - Result of scope resolution: prefixes, from_cwd flag, auto_include_archived
+- `resolve_scope()` - Unified scope resolution for discovery commands: CWD defaulting, `--global` handling, non-root validation. Composed behavior returning a typed result — same pattern as `select_sources()`.
+
+In `scope.rs` (interface layer):
+- `print_report_scope()` - Scope header for report commands (stdout, natural: "Facts: /path" or "Facts: all roots")
+- `print_list_scope()` - Scope header for list commands (stderr, terse: "scope: /path", silent when global)
+- Re-exports `ResolvedScope` from `ops::scope` for convenience
+
 In `domain/path.rs`:
 - `path_is_under()`, `path_strip_prefix()` - Pure path manipulation (no I/O)
 - `clean_path()` - Pure lexical path cleaning: make absolute, resolve `.`/`..` without filesystem access
 - `resolve_path()`, `resolve_paths()` - Soft path resolution: match against known roots (works offline), fall back to `fs::canonicalize`. Use for source-querying commands.
+- `validate_paths_in_roots()` - Verify resolved paths are under known roots (pure, checks all roots including suspended)
 - `canonicalize_maybe_missing()` - Canonicalize a path where the leaf may not exist yet (walks up to find existing ancestor). Used by `resolve_archive_path`.
 
 In `domain/scope.rs`:
@@ -526,19 +543,19 @@ let selection = ops::selection::select_sources(conn, &params)?;
 
 **Path Handling Principle: SQL NEVER constructs or compares paths.**
 - **Repo layer** returns `Source` objects with `root_path` populated (via JOIN)
-- **Domain layer** computes paths using `Source::path()` and compares using `path_is_under()`
-- **Interface layer** resolves CLI path arguments — two strategies:
-  - **Source-querying commands** (ls, facts, coverage, worklist, compare, exclude, roots, cluster generate): Use `resolve_paths()` — soft resolution that matches against known roots in the DB (works offline), falling back to `fs::canonicalize` only when no root matches.
-  - **File-accessing commands** (scan): Use `fs::canonicalize` directly — hard resolution that requires the path to exist on disk.
+- **Domain layer** computes paths using `Source::path()` and compares using `path_is_under()`. Path resolution utilities (`resolve_paths()`, `resolve_path()`) live in `domain/path.rs` — soft resolution that matches against known roots in the DB (works offline), falling back to `fs::canonicalize` only when no root matches.
+- **Operations layer** resolves scope for discovery commands via `ops::scope::resolve_scope()` — CWD defaulting, `--global` handling, non-root validation, auto-include-archived detection. This is composed behavioral policy (deciding *what* scope to use), not CLI parsing.
+- **Interface layer** parses CLI path arguments, calls `ops::scope::resolve_scope()`, and formats scope display. File-accessing commands (scan) use `fs::canonicalize` directly — hard resolution that requires the path to exist on disk.
 - See `domain/exclusion.rs` for the reference implementation
 
 **When Adding New Features:**
 1. If you need a predicate or business logic → add to domain layer (pure function)
 2. If you need database access → add to repo layer (returns domain types)
-3. If you need composed behavior (selection, computation, ceremony policy) → add to ops layer
+3. If you need composed behavior (selection, scope resolution, computation, ceremony policy) → add to ops layer
 4. If you need filesystem operations (copy, hash, validate, metadata) → add to ops/fs layer
 5. Interface modules should ONLY parse arguments, call operations, and format output
 6. When refactoring existing commands, extract behavioral logic to ops layer
+7. Scope resolution is an ops-layer concern (`ops::scope`), not interface. Display formatting is interface (`scope.rs`). The distinction: deciding *what scope to use* is behavioral policy; *showing* the scope to the user is presentation.
 
 ### CLI Conventions
 

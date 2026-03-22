@@ -8,6 +8,7 @@ use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::ops::survey::{LocationResult, SurveyOutcome, SurveyParams};
 use crate::repo;
+use crate::ops::scope::ResolvedScope;
 
 const DETAIL_SAMPLE_SIZE: usize = 5;
 const DETAIL_SHOW_ALL_THRESHOLD: usize = 20;
@@ -46,6 +47,8 @@ pub struct SurveyOptions {
     pub archive: Option<String>,
     /// Show all paths per location (complement view) / all locations (summary).
     pub verbose: bool,
+    /// Resolved scope information for display.
+    pub scope: ResolvedScope,
 }
 
 pub fn run(
@@ -80,16 +83,10 @@ pub fn run(
     // Fetch all roots and sources upfront
     let all_roots = repo::root::fetch_all(conn)?;
 
-    // Resolve --archive spec (must be archive role)
-    let archive_root_id = if let Some(ref spec) = options.archive {
-        Some(parse_root_spec(&all_roots, spec, Some("archive"))?)
-    } else {
-        None
-    };
-    let archive_label = archive_root_id.map(|id| {
-        let root = all_roots.iter().find(|r| r.id == id).unwrap();
-        format!("in {}", root.path)
-    });
+    // Scope is now resolved by the caller via scope::resolve_scope() and passed as paths.
+    // Resolve scope prefixes for display and validation.
+    let scope_prefixes = domain::path::resolve_paths(paths, &all_roots)?;
+    domain::path::warn_nonexistent_scope_paths(&scope_prefixes, &all_roots);
 
     // Resolve --other paths (same soft resolution as scope paths)
     let other_resolved = if !options.other_paths.is_empty() {
@@ -100,23 +97,23 @@ pub fn run(
         Vec::new()
     };
 
-    // Default to cwd when no paths specified
-    let scope_paths = if paths.is_empty() {
-        vec![std::env::current_dir()?]
-    } else {
-        paths.to_vec()
-    };
-
-    // Warn about scope paths that don't match any root
-    let scope_prefixes_for_warn = domain::path::resolve_paths(&scope_paths, &all_roots)?;
-    domain::path::warn_nonexistent_scope_paths(&scope_prefixes_for_warn, &all_roots);
-
     // Validate that --other doesn't match the surveyed scope
     for other_path in &other_resolved {
-        if scope_prefixes_for_warn.contains(other_path) {
+        if scope_prefixes.contains(other_path) {
             bail!("Error: --other location is identical to the surveyed scope. Comparing a location to itself is not meaningful.");
         }
     }
+
+    // Resolve --archive spec (must be archive role)
+    let archive_root_id = if let Some(ref spec) = options.archive {
+        Some(parse_root_spec(&all_roots, spec, Some("archive"))?)
+    } else {
+        None
+    };
+    let archive_label = archive_root_id.map(|id| {
+        let root = all_roots.iter().find(|r| r.id == id).unwrap();
+        format!("in {}", root.path)
+    });
 
     let root_ids: Vec<i64> = all_roots.iter().map(|r| r.id).collect();
     let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
@@ -133,7 +130,7 @@ pub fn run(
 
     match crate::ops::survey::compute_survey(
         conn,
-        &scope_paths,
+        paths,
         &filters,
         &params,
         &all_sources,
@@ -141,7 +138,7 @@ pub fn run(
         &other_resolved,
         archive_root_id,
     )? {
-        SurveyOutcome::Empty { scope_prefixes } => {
+        SurveyOutcome::Empty { scope_prefixes: _ } => {
             let suppress = options.null_delim
                 && matches!(
                     options.detail,
@@ -150,11 +147,11 @@ pub fn run(
                         | Some(DetailMode::Residual)
                 );
             if !suppress {
-                print_survey_header(&scope_prefixes, &options.original_filters, 0, 0, 0, None);
+                print_survey_header(&options.scope, &options.original_filters, 0, 0, 0, None);
             }
         }
         SurveyOutcome::AllUnhashed {
-            scope_prefixes,
+            scope_prefixes: _,
             total_count,
         } => {
             let suppress = options.null_delim
@@ -166,7 +163,7 @@ pub fn run(
                 );
             if !suppress {
                 print_survey_header(
-                    &scope_prefixes,
+                    &options.scope,
                     &options.original_filters,
                     total_count,
                     total_count,
@@ -186,7 +183,7 @@ pub fn run(
             match options.detail {
                 Some(DetailMode::Complement) => {
                     print_survey_header(
-                        &result.scope_prefixes,
+                        &options.scope,
                         &options.original_filters,
                         result.total_count,
                         result.unhashed_count,
@@ -204,7 +201,7 @@ pub fn run(
                 Some(DetailMode::Overlap) => {
                     if !options.null_delim {
                         print_survey_header(
-                            &result.scope_prefixes,
+                            &options.scope,
                             &options.original_filters,
                             result.total_count,
                             result.unhashed_count,
@@ -230,7 +227,7 @@ pub fn run(
                 Some(DetailMode::Residual) => {
                     if !options.null_delim {
                         print_survey_header(
-                            &result.scope_prefixes,
+                            &options.scope,
                             &options.original_filters,
                             result.total_count,
                             result.unhashed_count,
@@ -261,7 +258,7 @@ pub fn run(
                 }
                 None => {
                     print_survey_header(
-                        &result.scope_prefixes,
+                        &options.scope,
                         &options.original_filters,
                         result.total_count,
                         result.unhashed_count,
@@ -297,21 +294,16 @@ pub fn run(
 // =============================================================================
 
 fn print_survey_header(
-    scope_prefixes: &[String],
+    scope: &ResolvedScope,
     original_filters: &[String],
     total: usize,
     unhashed: usize,
     hashed: usize,
     unique_count: Option<usize>,
 ) {
-    if scope_prefixes.len() == 1 {
-        println!("Survey: {}", scope_prefixes[0]);
-    } else {
-        println!("Survey:");
-        for p in scope_prefixes {
-            println!("  {p}");
-        }
-    }
+    let mut handle = std::io::stdout().lock();
+    crate::scope::print_report_scope(&mut handle, "Survey", scope);
+    drop(handle);
 
     if !original_filters.is_empty() {
         println!("  Filters: {}", original_filters.join(" AND "));
@@ -737,6 +729,11 @@ mod tests {
             null_delim: false,
             archive: None,
             verbose: false,
+            scope: ResolvedScope {
+                prefixes: vec!["/mnt/drive".to_string()],
+                from_cwd: false,
+                auto_include_archived: false,
+            },
         }
     }
 

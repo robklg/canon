@@ -54,6 +54,7 @@ mod repo;
 mod alias;
 mod ceremony;
 mod progress;
+mod scope;
 
 // Command modules
 mod apply;
@@ -150,6 +151,9 @@ enum Commands {
         /// Include additional sources: excluded, archived, all
         #[arg(long, value_delimiter = ',')]
         include: Vec<IncludeValue>,
+        /// Show results across all roots, ignoring current directory scope
+        #[arg(long)]
+        global: bool,
         /// Emit only one source per unique content hash (sources without a hash are skipped)
         #[arg(long)]
         unique_content: bool,
@@ -174,6 +178,9 @@ enum Commands {
         /// Filter expressions (e.g., "source.ext=jpg" or "content.hash.sha256?")
         #[arg(long = "where")]
         filters: Vec<String>,
+        /// Show results across all roots, ignoring current directory scope
+        #[arg(long)]
+        global: bool,
         /// Only show archived sources (use --archived=show to include archive paths)
         #[arg(long, value_name = "MODE", num_args = 0..=1, default_missing_value = "list", conflicts_with_all = ["unarchived", "unhashed", "duplicates"])]
         archived: Option<String>,
@@ -219,6 +226,9 @@ enum Commands {
         /// Filter expressions (e.g., "source.ext=jpg" or "content.hash.sha256?")
         #[arg(long = "where")]
         filters: Vec<String>,
+        /// Show results across all roots, ignoring current directory scope
+        #[arg(long)]
+        global: bool,
         /// Maximum number of values to show (0 for unlimited, default 50)
         #[arg(long, default_value = "50")]
         limit: usize,
@@ -245,6 +255,9 @@ enum Commands {
         /// Filter expressions (e.g., "source.ext=jpg" or "content.hash.sha256?")
         #[arg(long = "where")]
         filters: Vec<String>,
+        /// Show results across all roots, ignoring current directory scope
+        #[arg(long)]
+        global: bool,
         /// Filter coverage relative to a specific archive (id:N or path:/foo/bar)
         #[arg(long)]
         archive: Option<String>,
@@ -262,6 +275,9 @@ enum Commands {
         /// Filter expressions (e.g., "source.ext=jpg" or "content.hash.sha256?")
         #[arg(long = "where")]
         filters: Vec<String>,
+        /// Show results across all roots, ignoring current directory scope
+        #[arg(long)]
+        global: bool,
         /// Include additional sources: excluded
         #[arg(long, value_delimiter = ',')]
         include: Vec<IncludeValue>,
@@ -627,12 +643,21 @@ fn main() -> Result<()> {
             paths,
             filters,
             include,
+            global,
             unique_content,
             emit,
         } => {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
-            let include = include_set_from(&include);
-            worklist::run(&mut db, &paths, &filters, &include, unique_content, &emit)?;
+            let mut include = include_set_from(&include);
+            let all_roots = repo::root::fetch_all(db.conn())?;
+            let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
+            if resolved.auto_include_archived {
+                include.archived = true;
+            }
+            let scope_paths: Vec<PathBuf> =
+                resolved.prefixes.iter().map(PathBuf::from).collect();
+            scope::print_list_scope(&resolved);
+            worklist::run(&mut db, &scope_paths, &filters, &include, unique_content, &emit)?;
         }
         Commands::ImportFacts { allow, verbose } => {
             let allow_archived = allow.contains(&ImportFactsAllow::Archived);
@@ -641,6 +666,7 @@ fn main() -> Result<()> {
         Commands::Ls {
             paths,
             filters,
+            global,
             archived,
             unarchived,
             unhashed,
@@ -655,35 +681,22 @@ fn main() -> Result<()> {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
             let mut include = include_set_from(&include);
 
-            // Fetch all roots for path resolution
             let all_roots = repo::root::fetch_all(db.conn())?;
-
-            // If no paths given, check if cwd is inside a root
-            // Also detect if scope is inside an archive root to auto-include archived sources
-            let (scope_paths, use_relative, auto_include_archived) = if paths.is_empty() {
-                let cwd = std::env::current_dir()?;
-                match domain::resolve_root_path(&all_roots, &cwd)? {
-                    Some((_, _, role, _)) => (vec![cwd], true, role == "archive"),
-                    None => (vec![], false, false),
-                }
-            } else {
-                let use_rel = !paths.first().map(|p| p.starts_with("/")).unwrap_or(false);
-                // Check if any explicit path is inside an archive root
-                let any_archive = paths.iter().any(|p| {
-                    domain::resolve_root_path(&all_roots, p)
-                        .ok()
-                        .flatten()
-                        .map(|(_, _, role, _)| role == "archive")
-                        .unwrap_or(false)
-                });
-                (paths, use_rel, any_archive)
-            };
-            if auto_include_archived {
+            let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
+            if resolved.auto_include_archived {
                 include.archived = true;
             }
             if excluded {
                 include.excluded = true;
             }
+
+            // Convert resolved scope to PathBuf for command modules
+            let scope_paths: Vec<PathBuf> =
+                resolved.prefixes.iter().map(PathBuf::from).collect();
+            let use_relative = resolved.from_cwd;
+
+            scope::print_list_scope(&resolved);
+
             if duplicates {
                 ls::show_duplicates(
                     &mut db,
@@ -717,6 +730,7 @@ fn main() -> Result<()> {
             key,
             paths,
             filters,
+            global,
             limit,
             all,
             show_aliases,
@@ -747,17 +761,25 @@ fn main() -> Result<()> {
                 }
                 None => {
                     let filters = alias::expand_filter_strings(&filters, &canon_home)?;
-                    let include = include_set_from(&include);
+                    let mut include = include_set_from(&include);
+                    let all_roots = repo::root::fetch_all(db.conn())?;
+                    let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
+                    if resolved.auto_include_archived {
+                        include.archived = true;
+                    }
+                    let scope_paths: Vec<PathBuf> =
+                        resolved.prefixes.iter().map(PathBuf::from).collect();
                     facts::run(
                         &mut db,
                         key.as_deref(),
-                        &paths,
+                        &scope_paths,
                         &filters,
                         limit,
                         all,
                         &include,
                         by_root,
                         &group_by,
+                        &resolved,
                     )?;
                 }
             }
@@ -784,24 +806,34 @@ fn main() -> Result<()> {
         Commands::Coverage {
             paths,
             filters,
+            global,
             archive,
             include,
             compact,
         } => {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
-            let include = include_set_from(&include);
+            let mut include = include_set_from(&include);
+            let all_roots = repo::root::fetch_all(db.conn())?;
+            let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
+            if resolved.auto_include_archived {
+                include.archived = true;
+            }
+            let scope_paths: Vec<PathBuf> =
+                resolved.prefixes.iter().map(PathBuf::from).collect();
             coverage::run(
                 &mut db,
-                &paths,
+                &scope_paths,
                 &filters,
                 archive.as_deref(),
                 &include,
                 compact,
+                &resolved,
             )?;
         }
         Commands::Survey {
             paths,
             filters,
+            global,
             include,
             other_paths,
             archive,
@@ -812,10 +844,17 @@ fn main() -> Result<()> {
             verbose,
         } => {
             let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
-            let include = include_set_from(&include);
+            let mut include = include_set_from(&include);
             if include.includes_archived() {
                 bail!("--include archived is not valid for survey");
             }
+            let all_roots = repo::root::fetch_all(db.conn())?;
+            let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
+            if resolved.auto_include_archived {
+                include.archived = true;
+            }
+            let scope_paths: Vec<PathBuf> =
+                resolved.prefixes.iter().map(PathBuf::from).collect();
             let options = survey::SurveyOptions {
                 original_filters: filters,
                 include,
@@ -826,8 +865,9 @@ fn main() -> Result<()> {
                 detail,
                 null_delim,
                 verbose,
+                scope: resolved,
             };
-            survey::run(&mut db, &paths, &expanded, &options)?;
+            survey::run(&mut db, &scope_paths, &expanded, &options)?;
         }
         Commands::Compare {
             path_a,

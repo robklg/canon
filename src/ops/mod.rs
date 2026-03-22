@@ -14,6 +14,7 @@ pub mod fs;
 pub mod import_facts;
 pub mod ls;
 pub mod scan;
+pub mod scope;
 pub mod selection;
 pub mod survey;
 pub mod worklist;

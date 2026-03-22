@@ -10,6 +10,7 @@ use crate::expr::filter::Filter;
 use crate::ops;
 use crate::ops::coverage::CoverageStats;
 use crate::repo::{self, Db};
+use crate::ops::scope::ResolvedScope;
 
 pub fn run(
     db: &mut Db,
@@ -18,6 +19,7 @@ pub fn run(
     archive_spec: Option<&str>,
     include: &IncludeSet,
     compact: bool,
+    scope: &ResolvedScope,
 ) -> Result<()> {
     let conn = db.conn();
 
@@ -60,39 +62,39 @@ pub fn run(
     if !scope_prefixes.is_empty() {
         // Scoped mode
         let stats = ops::coverage::compute_scoped(conn, &scopes, &filters, archive_root_id, include)?;
-        let scope_display = if scope_prefixes.len() == 1 {
-            Some(scope_prefixes[0].as_str())
-        } else {
-            None
-        };
         if compact {
-            display_compact_scoped(&stats, scope_display);
+            display_compact_scoped(&stats, scope);
         } else {
-            display_scoped_stats(&stats, scope_display, archive_spec);
+            display_scoped_stats(&stats, scope, archive_spec);
         }
     } else {
-        // Per-root breakdown mode
+        // Per-root breakdown mode (global)
         let (per_root_stats, overall) =
             ops::coverage::compute_per_root(conn, &filters, archive_root_id, include)?;
         if compact {
-            display_compact_per_root(&per_root_stats, &overall);
+            display_compact_per_root(&per_root_stats, &overall, scope);
         } else {
-            display_per_root_stats(&per_root_stats, &overall, archive_spec);
+            display_per_root_stats(&per_root_stats, &overall, archive_spec, scope);
         }
     }
 
     Ok(())
 }
 
-fn display_compact_scoped(stats: &CoverageStats, scope: Option<&str>) {
-    let label = scope.unwrap_or("(all)");
-    print_compact_line(label, stats, true);
+fn display_compact_scoped(stats: &CoverageStats, scope: &ResolvedScope) {
+    let label = if scope.prefixes.len() == 1 {
+        scope.prefixes[0].clone()
+    } else {
+        "(scoped)".to_string()
+    };
+    print_compact_line(&label, stats, true);
 }
 
-fn display_compact_per_root(per_root: &[CoverageStats], overall: &CoverageStats) {
+fn display_compact_per_root(per_root: &[CoverageStats], overall: &CoverageStats, scope: &ResolvedScope) {
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
+    crate::scope::print_report_scope(&mut handle, "Coverage", scope);
     let mut first = true;
     for stats in per_root {
         if stats.total_sources == 0 {
@@ -177,15 +179,16 @@ fn print_compact_line_handle<W: std::io::Write>(
     )
 }
 
-fn display_scoped_stats(stats: &CoverageStats, scope: Option<&str>, archive: Option<&str>) {
-    if let Some(arch) = archive {
-        println!("Archive Coverage (relative to {arch})");
-    } else {
-        println!("Archive Coverage");
+fn display_scoped_stats(stats: &CoverageStats, scope: &ResolvedScope, archive: Option<&str>) {
+    {
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        crate::scope::print_report_scope(&mut handle, "Coverage", scope);
     }
 
-    if let Some(s) = scope {
-        println!("Scope: {s}\n");
+    if let Some(arch) = archive {
+        println!("Archive: {arch}\n");
     } else {
         println!();
     }
@@ -233,15 +236,17 @@ fn display_per_root_stats(
     per_root: &[CoverageStats],
     overall: &CoverageStats,
     archive: Option<&str>,
+    scope: &ResolvedScope,
 ) {
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
 
+    crate::scope::print_report_scope(&mut handle, "Coverage", scope);
     if let Some(arch) = archive {
-        let _ = writeln!(handle, "Archive Coverage Report (relative to {arch})\n");
+        let _ = writeln!(handle, "Archive: {arch}\n");
     } else {
-        let _ = writeln!(handle, "Archive Coverage Report\n");
+        let _ = writeln!(handle);
     }
 
     if per_root.is_empty() || overall.total_sources == 0 {

@@ -11,6 +11,7 @@ use crate::ops;
 use crate::ops::facts::{AllKeysResult, DistributionResult, GroupedDistributionResult};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Db};
+use crate::ops::scope::ResolvedScope;
 
 /// Check if a parsed key represents source.root (for special display formatting)
 fn is_root_key(key: &ParsedFactKey) -> bool {
@@ -33,6 +34,7 @@ pub fn run(
     include: &IncludeSet,
     by_root: bool,
     group_by: &[String],
+    scope: &ResolvedScope,
 ) -> Result<()> {
     // Validate grouping requires --key
     let has_grouping = by_root || !group_by.is_empty();
@@ -87,6 +89,7 @@ pub fn run(
         use std::io::Write;
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
+        crate::scope::print_report_scope(&mut handle, "Facts", scope);
         if include.is_expanded() && (sel.included_excluded_count > 0 || sel.included_archived_count > 0)
         {
             let mut parts = Vec::new();

@@ -167,6 +167,20 @@ pub fn format_path(full_path: &str, cwd: Option<&str>) -> String {
     }
 }
 
+/// Verify that all resolved paths are under a known root.
+/// Returns error on the first path not under any root.
+/// Uses find_containing_root() which checks all roots (including suspended),
+/// preserving offline root support — paths matching known roots pass
+/// regardless of whether the root's disk is mounted.
+pub fn validate_paths_in_roots(paths: &[String], roots: &[Root]) -> Result<()> {
+    for path in paths {
+        if find_containing_root(path, roots).is_none() {
+            bail!("{path} is not under any known root");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,5 +397,56 @@ mod tests {
     #[test]
     fn test_format_path_no_cwd() {
         assert_eq!(format_path("/a/b/c.jpg", None), "/a/b/c.jpg");
+    }
+
+    // ========================================================================
+    // validate_paths_in_roots tests
+    // ========================================================================
+
+    #[test]
+    fn validate_path_under_active_root() {
+        let roots = vec![make_test_root(1, "/a/b")];
+        assert!(validate_paths_in_roots(&["/a/b/c".to_string()], &roots).is_ok());
+    }
+
+    #[test]
+    fn validate_path_under_suspended_root() {
+        let roots = vec![Root {
+            suspended: true,
+            ..make_test_root(1, "/a/b")
+        }];
+        // Suspended root is still "known"
+        assert!(validate_paths_in_roots(&["/a/b/c".to_string()], &roots).is_ok());
+    }
+
+    #[test]
+    fn validate_path_not_under_any_root() {
+        let roots = vec![make_test_root(1, "/a/b")];
+        let result = validate_paths_in_roots(&["/x/y/z".to_string()], &roots);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not under any known root"));
+    }
+
+    #[test]
+    fn validate_multiple_valid_paths() {
+        let roots = vec![make_test_root(1, "/a/b"), make_test_root(2, "/c/d")];
+        assert!(
+            validate_paths_in_roots(&["/a/b/c".to_string(), "/c/d/e".to_string()], &roots).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_multiple_paths_second_invalid() {
+        let roots = vec![make_test_root(1, "/a/b")];
+        let result =
+            validate_paths_in_roots(&["/a/b/c".to_string(), "/x/y".to_string()], &roots);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("/x/y"));
+    }
+
+    #[test]
+    fn validate_empty_paths() {
+        let roots = vec![make_test_root(1, "/a/b")];
+        assert!(validate_paths_in_roots(&[], &roots).is_ok());
     }
 }
