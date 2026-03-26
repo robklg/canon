@@ -12,24 +12,19 @@ canon ls --where 'source.ext=jpg'
 # Filter by source ID
 canon ls --where 'source.id=12345'
 
-# List only archived sources (content exists in an archive)
-canon ls --archived
+# Filter by archive status using status predicates
+canon ls --where 'archived?'
+canon ls --where 'NOT archived?'
+canon ls --where 'NOT archived? AND hashed?'
 
-# List archived sources with their archive location(s)
-# Output: source_path<TAB>archive_path (one line per archive location)
-canon ls --archived=show
-
-# List only unarchived sources (hashed but not in any archive)
-canon ls --unarchived
-
-# List only unhashed sources (no content hash yet)
-canon ls --unhashed
+# Filter by hash status
+canon ls --where 'NOT hashed?'
 
 # Show duplicate files (same content hash), grouped by hash
 canon ls --duplicates
 
-# Show only excluded sources (source-level and object-level)
-canon ls --excluded
+# View excluded sources (requires --include for visibility)
+canon ls --include excluded --where 'excluded?'
 
 # Include sources from archive roots (automatic when scope is in an archive)
 canon ls --include archived
@@ -48,11 +43,16 @@ canon ls -l
 
 # Null-delimited output for xargs (handles spaces in paths, macOS)
 canon ls -0 --where 'source.ext=jpg' | xargs -0 open -a Preview
+
+# Combine status predicates with fact filters
+canon ls --where 'NOT archived? AND mime~image/*'
 ```
 
-**Filter modes** (`--archived`, `--unarchived`, `--unhashed`, `--duplicates`, `--excluded`) are mutually exclusive -- only one can be active at a time.
+**Status predicates** (`archived?`, `hashed?`, `excluded?`, `enriched?`) replace the old `--archived`, `--unarchived`, `--unhashed`, `--excluded` filter flags. Status predicates compose freely with other `--where` expressions. See [Filter Syntax](../../reference/filter.md#status-predicates) for details.
 
-**Status column in long format:** When `--include` is used or `--excluded` mode is active, `ls -l` shows a status column indicating source state: `E` (source-level exclusion), `X` (object-level exclusion), `A` (archived), or blank.
+**`--duplicates`** is a display mode (changes output format to grouped by hash), not a filter. It can be combined with `--where`.
+
+**Status column in long format:** When `--include` is used, `ls -l` shows a status column indicating source state: `E` (source-level exclusion), `X` (object-level exclusion), `A` (archived), or blank.
 
 **Scope display:** When scoped (via CWD or explicit path), `ls` prints `scope: /path` to stderr so you always know what you're looking at. When global, no scope line is printed.
 

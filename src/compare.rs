@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::domain::path::resolve_path;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
-use crate::expr::filter::Filter;
+use crate::expr::filter::{Filter, UsedStatus};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Db};
 
@@ -36,9 +36,9 @@ pub fn run(
     let prefix_b = resolve_path(path_b, &all_roots, &cwd)?;
 
     // Query sources in each scope
-    let (sources_a, unhashed_a) =
+    let (sources_a, unhashed_a, used_status_a, excluded_count_a) =
         select_and_build_map(conn, &prefix_a, &filters, &options.include)?;
-    let (sources_b, unhashed_b) =
+    let (sources_b, unhashed_b, used_status_b, excluded_count_b) =
         select_and_build_map(conn, &prefix_b, &filters, &options.include)?;
 
     // Build object_id sets
@@ -115,6 +115,16 @@ pub fn run(
         }
     }
 
+    // Visibility hint: if excluded? was used but --include excluded wasn't set
+    let used_excluded = used_status_a.excluded || used_status_b.excluded;
+    let total_excluded = excluded_count_a + excluded_count_b;
+    if used_excluded && !options.include.includes_excluded() && total_excluded > 0 {
+        eprintln!(
+            "({} excluded sources hidden, use --include excluded to show)",
+            total_excluded
+        );
+    }
+
     Ok(is_identical)
 }
 
@@ -127,7 +137,7 @@ fn select_and_build_map(
     scope_prefix: &str,
     filters: &[Filter],
     include: &IncludeSet,
-) -> Result<(HashMap<i64, String>, usize)> {
+) -> Result<(HashMap<i64, String>, usize, UsedStatus, usize)> {
     let scopes = ScopeMatch::classify_all(&[scope_prefix.to_string()]);
     let params = SelectionParams {
         scopes,
@@ -152,5 +162,5 @@ fn select_and_build_map(
         }
     }
 
-    Ok((result, unhashed))
+    Ok((result, unhashed, sel.used_status, sel.excluded_count))
 }

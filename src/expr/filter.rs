@@ -21,6 +21,27 @@ pub enum CompareOp {
     NotGlob, // !~
 }
 
+/// Status predicates — computed boolean state, not stored facts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StatusPredicate {
+    /// Content exists in at least one archive root (including suspended).
+    Archived,
+    /// Content hash has been computed (source has object_id).
+    Hashed,
+    /// Source or object is excluded.
+    Excluded,
+    /// Source has any stored fact, excluding content.hash.sha256.
+    Enriched,
+}
+
+/// Keywords recognized as status predicates before normalization.
+const STATUS_KEYWORDS: &[(&str, StatusPredicate)] = &[
+    ("archived", StatusPredicate::Archived),
+    ("hashed", StatusPredicate::Hashed),
+    ("excluded", StatusPredicate::Excluded),
+    ("enriched", StatusPredicate::Enriched),
+];
+
 /// Filter expression AST - supports boolean logic
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -39,6 +60,22 @@ pub enum Expr {
         key: String,
         values: Vec<String>,
     },
+    Status(StatusPredicate),
+}
+
+/// Result of applying filters, including metadata about which status predicates were used.
+pub struct FilterResult {
+    pub source_ids: Vec<i64>,
+    pub used_status: UsedStatus,
+}
+
+/// Flags indicating which status predicates appeared in the filter expression.
+#[derive(Debug, Default, Clone)]
+pub struct UsedStatus {
+    pub archived: bool,
+    pub hashed: bool,
+    pub excluded: bool,
+    pub enriched: bool,
 }
 
 // Keep Filter as alias for backwards compatibility
@@ -58,6 +95,13 @@ struct FactCache {
     source_objects: HashMap<i64, i64>,
     /// Keys that were prefetched (for existence checks)
     prefetched_keys: HashSet<String>,
+    // Lazily populated status predicate data
+    /// Object IDs that exist in archive roots (for `archived?`).
+    archived_objects: Option<HashSet<i64>>,
+    /// Source IDs that are excluded at source or object level (for `excluded?`).
+    excluded_sources: Option<HashSet<i64>>,
+    /// Source IDs with facts beyond content.hash.sha256 (for `enriched?`).
+    enriched_sources: Option<HashSet<i64>>,
 }
 
 impl FactCache {
@@ -67,6 +111,9 @@ impl FactCache {
             object_facts: HashMap::new(),
             source_objects: HashMap::new(),
             prefetched_keys: HashSet::new(),
+            archived_objects: None,
+            excluded_sources: None,
+            enriched_sources: None,
         }
     }
 
@@ -114,6 +161,23 @@ fn prefetch_facts(conn: &mut Connection, source_ids: &[i64], keys: &[String]) ->
     }
 
     if stored_keys.is_empty() {
+        // content.hash.sha256? needs source_objects even with no stored keys.
+        if base_keys.iter().any(|k| k == "content.hash.sha256") {
+            populate_temp_sources(conn, source_ids)?;
+            let mappings: Vec<(i64, i64)> = conn
+                .prepare(
+                    "SELECT ts.id, s.object_id
+                     FROM temp_sources ts
+                     JOIN sources s ON s.id = ts.id
+                     WHERE s.object_id IS NOT NULL",
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for (source_id, object_id) in mappings {
+                cache.source_objects.insert(source_id, object_id);
+            }
+            conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+        }
         return Ok(cache);
     }
 
@@ -599,13 +663,29 @@ impl<'a> Parser<'a> {
         self.parse_atom()
     }
 
-    /// atom := ident '?' | ident 'IN' '(' value_list ')' | ident op value
+    /// atom := status_keyword '?' | ident '?' | ident 'IN' '(' value_list ')' | ident op value
     fn parse_atom(&mut self) -> Result<Expr> {
-        let key = match self.advance() {
-            Some(Token::Ident(k)) => expr::normalize_key_string(k),
+        let raw_key = match self.advance() {
+            Some(Token::Ident(k)) => k.clone(),
             Some(t) => bail!("Expected identifier, got {t:?}"),
             None => bail!("Expected identifier, got end of input"),
         };
+
+        // Check for status predicate keywords before normalization
+        if let Some((_, predicate)) = STATUS_KEYWORDS.iter().find(|(kw, _)| *kw == raw_key) {
+            if matches!(self.peek(), Some(Token::Exists)) {
+                self.advance();
+                return Ok(Expr::Status(*predicate));
+            } else {
+                bail!(
+                    "'{}' is a status predicate and only supports the '?' operator",
+                    raw_key
+                );
+            }
+        }
+
+        // Normalize key (adds content. prefix for non-builtin keys)
+        let key = expr::normalize_key_string(&raw_key);
 
         // Check for existence test: key?
         if matches!(self.peek(), Some(Token::Exists)) {
@@ -677,9 +757,14 @@ pub fn apply_filters(
     conn: &mut Connection,
     source_ids: &[i64],
     filters: &[Filter],
-) -> Result<Vec<i64>> {
+) -> Result<FilterResult> {
+    let used_status = detect_status_predicates(filters);
+
     if filters.is_empty() {
-        return Ok(source_ids.to_vec());
+        return Ok(FilterResult {
+            source_ids: source_ids.to_vec(),
+            used_status,
+        });
     }
 
     // Validate that all keys in filters are known
@@ -690,7 +775,10 @@ pub fn apply_filters(
     for filter in filters {
         extract_keys(filter, &mut all_keys);
     }
-    let cache = prefetch_facts(conn, source_ids, &all_keys)?;
+    let mut cache = prefetch_facts(conn, source_ids, &all_keys)?;
+
+    // Prefetch status predicate data (only what's needed)
+    prefetch_status_data(conn, source_ids, &used_status, &mut cache)?;
 
     // Combine all filters with AND
     let combined = if filters.len() == 1 {
@@ -705,7 +793,95 @@ pub fn apply_filters(
             result.push(source_id);
         }
     }
-    Ok(result)
+    Ok(FilterResult {
+        source_ids: result,
+        used_status,
+    })
+}
+
+/// Prefetch status predicate data into the cache based on which predicates are used.
+fn prefetch_status_data(
+    conn: &mut Connection,
+    source_ids: &[i64],
+    used: &UsedStatus,
+    cache: &mut FactCache,
+) -> Result<()> {
+    if source_ids.is_empty() {
+        return Ok(());
+    }
+
+    // Ensure source_objects is populated when hashed? or archived? need it.
+    // prefetch_facts only populates this when there are stored fact keys to fetch.
+    if (used.hashed || used.archived) && cache.source_objects.is_empty() {
+        populate_temp_sources(conn, source_ids)?;
+        let mappings: Vec<(i64, i64)> = conn
+            .prepare(
+                "SELECT ts.id, s.object_id
+                 FROM temp_sources ts
+                 JOIN sources s ON s.id = ts.id
+                 WHERE s.object_id IS NOT NULL",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (source_id, object_id) in mappings {
+            cache.source_objects.insert(source_id, object_id);
+        }
+        conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+    }
+
+    if used.archived {
+        // Collect object_ids from the cache's source_objects mapping
+        let object_ids: Vec<i64> = cache
+            .source_objects
+            .values()
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let archived = crate::repo::object::batch_check_archived(conn, &object_ids, None)?;
+        cache.archived_objects = Some(archived);
+    }
+
+    if used.excluded {
+        populate_temp_sources(conn, source_ids)?;
+        let excluded: HashSet<i64> = conn
+            .prepare(
+                "SELECT DISTINCT s.id FROM temp_sources ts
+                 JOIN sources s ON s.id = ts.id
+                 WHERE s.excluded = 1
+                 UNION
+                 SELECT DISTINCT s.id FROM temp_sources ts
+                 JOIN sources s ON s.id = ts.id
+                 JOIN objects o ON o.id = s.object_id
+                 WHERE o.excluded = 1",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<HashSet<_>, _>>()?;
+        conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+        cache.excluded_sources = Some(excluded);
+    }
+
+    if used.enriched {
+        populate_temp_sources(conn, source_ids)?;
+        let enriched: HashSet<i64> = conn
+            .prepare(
+                "SELECT DISTINCT ts.id FROM temp_sources ts
+                 JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id
+                     AND f.key != 'content.hash.sha256'
+                 UNION
+                 SELECT DISTINCT s.id FROM temp_sources ts
+                 JOIN sources s ON s.id = ts.id
+                 JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id
+                     AND f.key != 'content.hash.sha256'",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<HashSet<_>, _>>()?;
+        conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+        cache.enriched_sources = Some(enriched);
+    }
+
+    // hashed? uses existing source_objects map — no extra prefetch needed
+    Ok(())
 }
 
 /// Validate that all keys used in filters are known (built-in or exist in facts table)
@@ -736,6 +912,34 @@ fn extract_keys(expr: &Expr, keys: &mut Vec<String>) {
         Expr::Exists { key } => keys.push(key.clone()),
         Expr::Compare { key, .. } => keys.push(key.clone()),
         Expr::In { key, .. } => keys.push(key.clone()),
+        Expr::Status(_) => {} // No keys to extract
+    }
+}
+
+/// Detect which status predicates appear in a filter expression tree.
+fn detect_status_predicates(exprs: &[Filter]) -> UsedStatus {
+    let mut used = UsedStatus::default();
+    for expr in exprs {
+        detect_status_in_expr(expr, &mut used);
+    }
+    used
+}
+
+fn detect_status_in_expr(expr: &Expr, used: &mut UsedStatus) {
+    match expr {
+        Expr::And(exprs) | Expr::Or(exprs) => {
+            for e in exprs {
+                detect_status_in_expr(e, used);
+            }
+        }
+        Expr::Not(e) => detect_status_in_expr(e, used),
+        Expr::Status(pred) => match pred {
+            StatusPredicate::Archived => used.archived = true,
+            StatusPredicate::Hashed => used.hashed = true,
+            StatusPredicate::Excluded => used.excluded = true,
+            StatusPredicate::Enriched => used.enriched = true,
+        },
+        Expr::Exists { .. } | Expr::Compare { .. } | Expr::In { .. } => {}
     }
 }
 
@@ -1025,6 +1229,23 @@ fn eval_expr_cached(
             check_fact_compare_cached(conn, source_id, key, *op, value, cache)
         }
         Expr::In { key, values } => check_fact_in_cached(conn, source_id, key, values, cache),
+        Expr::Status(predicate) => match predicate {
+            StatusPredicate::Hashed => Ok(cache.get_object_id(source_id).is_some()),
+            StatusPredicate::Archived => {
+                let archived_set = cache.archived_objects.as_ref().unwrap();
+                Ok(cache
+                    .get_object_id(source_id)
+                    .is_some_and(|oid| archived_set.contains(&oid)))
+            }
+            StatusPredicate::Excluded => {
+                let excluded_set = cache.excluded_sources.as_ref().unwrap();
+                Ok(excluded_set.contains(&source_id))
+            }
+            StatusPredicate::Enriched => {
+                let enriched_set = cache.enriched_sources.as_ref().unwrap();
+                Ok(enriched_set.contains(&source_id))
+            }
+        },
     }
 }
 
@@ -1469,7 +1690,7 @@ mod tests {
         let result = apply_filters(&mut conn, &[s1, s2, s3], &[filter]).unwrap();
 
         // s1 silently skipped (out of bounds), s2 matches, s3 doesn't match glob
-        assert_eq!(result, vec![s2]);
+        assert_eq!(result.source_ids, vec![s2]);
     }
 
     #[test]
@@ -1485,7 +1706,7 @@ mod tests {
         let filter = Expr::parse("source.rel_path[-3]=2024").unwrap();
         let result = apply_filters(&mut conn, &[s1, s2], &[filter]).unwrap();
 
-        assert_eq!(result, vec![s2]);
+        assert_eq!(result.source_ids, vec![s2]);
     }
 
     #[test]
@@ -1501,7 +1722,7 @@ mod tests {
         let filter = Expr::parse("source.rel_path[2:4]~'c*'").unwrap();
         let result = apply_filters(&mut conn, &[s1, s2], &[filter]).unwrap();
 
-        assert_eq!(result, vec![s2]);
+        assert_eq!(result.source_ids, vec![s2]);
     }
 
     #[test]
@@ -1516,7 +1737,7 @@ mod tests {
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
 
         // Modifier failure treated as non-match, not error
-        assert!(result.is_empty());
+        assert!(result.source_ids.is_empty());
     }
 
     // ========================================================================
@@ -1729,5 +1950,394 @@ mod tests {
             }
             _ => panic!("Expected And"),
         }
+    }
+
+    // ========================================================================
+    // Status predicate parsing
+    // ========================================================================
+
+    #[test]
+    fn parse_status_predicate_archived() {
+        let expr = Expr::parse("archived?").unwrap();
+        assert!(matches!(expr, Expr::Status(StatusPredicate::Archived)));
+    }
+
+    #[test]
+    fn parse_status_predicate_hashed() {
+        let expr = Expr::parse("hashed?").unwrap();
+        assert!(matches!(expr, Expr::Status(StatusPredicate::Hashed)));
+    }
+
+    #[test]
+    fn parse_status_predicate_excluded() {
+        let expr = Expr::parse("excluded?").unwrap();
+        assert!(matches!(expr, Expr::Status(StatusPredicate::Excluded)));
+    }
+
+    #[test]
+    fn parse_status_predicate_enriched() {
+        let expr = Expr::parse("enriched?").unwrap();
+        assert!(matches!(expr, Expr::Status(StatusPredicate::Enriched)));
+    }
+
+    #[test]
+    fn parse_status_predicate_in_not() {
+        let expr = Expr::parse("NOT archived?").unwrap();
+        match expr {
+            Expr::Not(inner) => {
+                assert!(matches!(*inner, Expr::Status(StatusPredicate::Archived)));
+            }
+            _ => panic!("Expected Not"),
+        }
+    }
+
+    #[test]
+    fn parse_status_predicate_composed() {
+        let expr = Expr::parse("archived? AND mime~image/*").unwrap();
+        match expr {
+            Expr::And(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(parts[0], Expr::Status(StatusPredicate::Archived)));
+                assert!(matches!(parts[1], Expr::Compare { .. }));
+            }
+            _ => panic!("Expected And"),
+        }
+    }
+
+    #[test]
+    fn parse_status_predicate_error_on_compare() {
+        let err = Expr::parse("archived = true").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("status predicate") && msg.contains("'?'"),
+            "Error should mention status predicate and '?': {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_status_predicate_error_on_glob() {
+        let err = Expr::parse("hashed ~ something").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("status predicate"),
+            "Error should mention status predicate: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_non_status_keyword_normalizes() {
+        // "archival" is NOT a status keyword — gets content. prefix
+        let expr = Expr::parse("archival?").unwrap();
+        match expr {
+            Expr::Exists { key } => {
+                assert_eq!(key, "content.archival");
+            }
+            _ => panic!("Expected Exists"),
+        }
+    }
+
+    // ========================================================================
+    // Status predicate evaluation
+    // ========================================================================
+
+    fn insert_source_with_object(
+        conn: &RawConnection,
+        root_id: i64,
+        rel_path: &str,
+        object_id: Option<i64>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
+             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0)",
+            rusqlite::params![root_id, rel_path, object_id],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_object(conn: &RawConnection, hash: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO objects (hash_type, hash_value) VALUES ('sha256', ?)",
+            [hash],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_object_excluded(conn: &RawConnection, hash: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO objects (hash_type, hash_value, excluded) VALUES ('sha256', ?, 1)",
+            [hash],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_archive_root(conn: &RawConnection, path: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO roots (path, role) VALUES (?, 'archive')",
+            [path],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_fact_entry(
+        conn: &RawConnection,
+        entity_type: &str,
+        entity_id: i64,
+        key: &str,
+        value: &str,
+    ) {
+        // observed_basis_rev must be NULL for object-type entities (CHECK constraint)
+        let basis_rev: Option<i64> = if entity_type == "source" {
+            Some(0)
+        } else {
+            None
+        };
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev) VALUES (?, ?, ?, ?, 0, ?)",
+            rusqlite::params![entity_type, entity_id, key, value, basis_rev],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn filter_archived_matches() {
+        let mut conn = setup_test_db();
+        let src_root = insert_root(&conn, "/src");
+        let arc_root = insert_archive_root(&conn, "/archive");
+        let obj = insert_object(&conn, "hash_a");
+
+        // Source in source root with content also in archive
+        let s1 = insert_source_with_object(&conn, src_root, "a.jpg", Some(obj));
+        // Same content in archive
+        insert_source_with_object(&conn, arc_root, "a.jpg", Some(obj));
+
+        let filter = Expr::parse("archived?").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        assert_eq!(result.source_ids, vec![s1]);
+    }
+
+    #[test]
+    fn filter_archived_excludes_unhashed() {
+        let mut conn = setup_test_db();
+        let src_root = insert_root(&conn, "/src");
+        // Unhashed source (no object_id)
+        let s1 = insert_source_with_object(&conn, src_root, "a.jpg", None);
+
+        let filter = Expr::parse("archived?").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        assert!(result.source_ids.is_empty());
+    }
+
+    #[test]
+    fn filter_archived_excludes_unarchived_hashed() {
+        let mut conn = setup_test_db();
+        let src_root = insert_root(&conn, "/src");
+        let obj = insert_object(&conn, "hash_b");
+        // Hashed but not in any archive
+        let s1 = insert_source_with_object(&conn, src_root, "a.jpg", Some(obj));
+
+        let filter = Expr::parse("archived?").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        assert!(result.source_ids.is_empty());
+    }
+
+    #[test]
+    fn filter_not_archived_includes_unhashed() {
+        let mut conn = setup_test_db();
+        let src_root = insert_root(&conn, "/src");
+        let s1 = insert_source_with_object(&conn, src_root, "a.jpg", None);
+
+        let filter = Expr::parse("NOT archived?").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        assert_eq!(result.source_ids, vec![s1]);
+    }
+
+    #[test]
+    fn filter_hashed_matches() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        let obj = insert_object(&conn, "hash_c");
+        let s1 = insert_source_with_object(&conn, root, "a.jpg", Some(obj));
+        let s2 = insert_source_with_object(&conn, root, "b.jpg", None);
+
+        let filter = Expr::parse("hashed?").unwrap();
+        let result = apply_filters(&mut conn, &[s1, s2], &[filter]).unwrap();
+        assert_eq!(result.source_ids, vec![s1]);
+    }
+
+    #[test]
+    fn filter_hashed_equivalence() {
+        // hashed? and content.hash.sha256? should produce identical results
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        let obj = insert_object(&conn, "hash_d");
+        let s1 = insert_source_with_object(&conn, root, "a.jpg", Some(obj));
+        let s2 = insert_source_with_object(&conn, root, "b.jpg", None);
+        let ids = [s1, s2];
+
+        let f1 = Expr::parse("hashed?").unwrap();
+        let f2 = Expr::parse("content.hash.sha256?").unwrap();
+        let r1 = apply_filters(&mut conn, &ids, &[f1]).unwrap();
+        let r2 = apply_filters(&mut conn, &ids, &[f2]).unwrap();
+        assert_eq!(r1.source_ids, r2.source_ids);
+    }
+
+    #[test]
+    fn filter_excluded_source_level() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        // Source-level excluded
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode, excluded)
+             VALUES (?, 'excl.jpg', 1000, 1704067200, '', 0, 0, 0, 0, 1)",
+            [root],
+        )
+        .unwrap();
+        let s1 = conn.last_insert_rowid();
+
+        let filter = Expr::parse("excluded?").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        assert_eq!(result.source_ids, vec![s1]);
+    }
+
+    #[test]
+    fn filter_excluded_object_level() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        let obj = insert_object_excluded(&conn, "hash_excl");
+        let s1 = insert_source_with_object(&conn, root, "a.jpg", Some(obj));
+
+        let filter = Expr::parse("excluded?").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        assert_eq!(result.source_ids, vec![s1]);
+    }
+
+    #[test]
+    fn filter_excluded_non_excluded_fails() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        let s1 = insert_source_with_object(&conn, root, "a.jpg", None);
+
+        let filter = Expr::parse("excluded?").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        assert!(result.source_ids.is_empty());
+    }
+
+    #[test]
+    fn filter_enriched_with_object_facts() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        let obj = insert_object(&conn, "hash_e");
+        let s1 = insert_source_with_object(&conn, root, "a.jpg", Some(obj));
+        // Object-level fact (not hash)
+        insert_fact_entry(&conn, "object", obj, "content.mime", "image/jpeg");
+
+        let filter = Expr::parse("enriched?").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        assert_eq!(result.source_ids, vec![s1]);
+    }
+
+    #[test]
+    fn filter_enriched_with_source_facts() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        // Unhashed source with source-level fact
+        let s1 = insert_source_with_object(&conn, root, "a.jpg", None);
+        insert_fact_entry(&conn, "source", s1, "policy.tag", "keep");
+
+        let filter = Expr::parse("enriched?").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        assert_eq!(result.source_ids, vec![s1]);
+    }
+
+    #[test]
+    fn filter_enriched_hash_only_fails() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        let obj = insert_object(&conn, "hash_f");
+        let s1 = insert_source_with_object(&conn, root, "a.jpg", Some(obj));
+        // Only content.hash.sha256 fact — should NOT count as enriched
+        insert_fact_entry(&conn, "object", obj, "content.hash.sha256", "hash_f");
+
+        let filter = Expr::parse("enriched?").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        assert!(result.source_ids.is_empty());
+    }
+
+    #[test]
+    fn filter_enriched_no_facts_fails() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        let s1 = insert_source_with_object(&conn, root, "a.jpg", None);
+
+        let filter = Expr::parse("enriched?").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        assert!(result.source_ids.is_empty());
+    }
+
+    #[test]
+    fn filter_composed_not_archived_and_hashed() {
+        let mut conn = setup_test_db();
+        let src_root = insert_root(&conn, "/src");
+        let arc_root = insert_archive_root(&conn, "/archive");
+        let obj_a = insert_object(&conn, "hash_archived");
+        let obj_b = insert_object(&conn, "hash_not_archived");
+
+        // s1: hashed + archived
+        let s1 = insert_source_with_object(&conn, src_root, "a.jpg", Some(obj_a));
+        insert_source_with_object(&conn, arc_root, "a.jpg", Some(obj_a));
+        // s2: hashed + not archived
+        let s2 = insert_source_with_object(&conn, src_root, "b.jpg", Some(obj_b));
+        // s3: unhashed
+        let s3 = insert_source_with_object(&conn, src_root, "c.jpg", None);
+
+        let filter = Expr::parse("NOT archived? AND hashed?").unwrap();
+        let result = apply_filters(&mut conn, &[s1, s2, s3], &[filter]).unwrap();
+        assert_eq!(result.source_ids, vec![s2]);
+    }
+
+    // ========================================================================
+    // Status predicate metadata
+    // ========================================================================
+
+    #[test]
+    fn filter_result_flags_archived_used() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        let s1 = insert_source(&conn, root, "a.jpg");
+
+        let filter = Expr::parse("archived?").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        assert!(result.used_status.archived);
+        assert!(!result.used_status.hashed);
+        assert!(!result.used_status.excluded);
+        assert!(!result.used_status.enriched);
+    }
+
+    #[test]
+    fn filter_result_flags_not_set_when_unused() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        let s1 = insert_source(&conn, root, "a.jpg");
+
+        let filter = Expr::parse("source.ext=jpg").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        assert!(!result.used_status.archived);
+        assert!(!result.used_status.hashed);
+        assert!(!result.used_status.excluded);
+        assert!(!result.used_status.enriched);
+    }
+
+    #[test]
+    fn filter_result_flags_nested_detection() {
+        let filter = Expr::parse("NOT (archived? AND excluded?)").unwrap();
+        let used = detect_status_predicates(&[filter]);
+        assert!(used.archived);
+        assert!(used.excluded);
+        assert!(!used.hashed);
+        assert!(!used.enriched);
     }
 }

@@ -7,8 +7,6 @@ use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
-use crate::ops;
-use crate::ops::ls::LsMode;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::Db;
 
@@ -17,10 +15,6 @@ pub fn run(
     scope_paths: &[std::path::PathBuf],
     roots: &[Root],
     filter_strs: &[String],
-    archived_mode: Option<&str>,
-    unarchived_only: bool,
-    unhashed_only: bool,
-    excluded_only: bool,
     include: &IncludeSet,
     use_relative_paths: bool,
     long_format: bool,
@@ -28,8 +22,6 @@ pub fn run(
     reverse: bool,
     null_delim: bool,
 ) -> Result<()> {
-    let archived_only = archived_mode.is_some();
-    let show_archive_paths = archived_mode == Some("show");
     let conn = db.conn_mut();
 
     // Validate sort option
@@ -76,44 +68,25 @@ pub fn run(
         return Ok(());
     }
 
-    // Determine mode for post-selection filtering
-    let mode = match (archived_mode, unarchived_only, unhashed_only, excluded_only) {
-        (Some("show"), _, _, _) => LsMode::ArchivedShow,
-        (Some(_), _, _, _) => LsMode::Archived,
-        (_, true, _, _) => LsMode::Unarchived,
-        (_, _, true, _) => LsMode::Unhashed,
-        (_, _, _, true) => LsMode::Excluded,
-        _ => LsMode::All,
-    };
-
-    let mode_result = ops::ls::filter_by_mode(conn, &sel.sources, &mode)?;
-    let unhashed_count = mode_result.unhashed_skipped;
-
     // Determine whether to show status column
-    let show_status = include.is_expanded() || excluded_only;
+    let show_status = include.is_expanded();
 
-    // Build output lines from filtered entries (formatting stays here)
-    let mut output_lines: Vec<(String, Option<String>, i64, i64, String)> = mode_result
-        .entries
+    // Build output lines (formatting stays here)
+    let mut output_lines: Vec<(String, i64, i64, String)> = sel
+        .sources
         .iter()
-        .map(|e| {
-            let formatted = format_path(&e.source.path(), cwd.as_deref());
-            let status = status_indicator(e.source);
-            (
-                formatted,
-                e.archive_path.clone(),
-                e.source.size,
-                e.source.mtime,
-                status.to_string(),
-            )
+        .map(|s| {
+            let formatted = format_path(&s.path(), cwd.as_deref());
+            let status = status_indicator(s);
+            (formatted, s.size, s.mtime, status.to_string())
         })
         .collect();
 
     // Sort output (all ascending by default, -r reverses)
     match sort_by {
         "path" => output_lines.sort_by(|a, b| a.0.cmp(&b.0)),
-        "size" => output_lines.sort_by(|a, b| a.2.cmp(&b.2)),
-        "mtime" => output_lines.sort_by(|a, b| a.3.cmp(&b.3)),
+        "size" => output_lines.sort_by(|a, b| a.1.cmp(&b.1)),
+        "mtime" => output_lines.sort_by(|a, b| a.2.cmp(&b.2)),
         "name" => output_lines.sort_by(|a, b| {
             let name_a = a.0.rsplit('/').next().unwrap_or(&a.0);
             let name_b = b.0.rsplit('/').next().unwrap_or(&b.0);
@@ -130,23 +103,15 @@ pub fn run(
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     let line_end = if null_delim { "\0" } else { "\n" };
-    for (source_path, archive_path, size, mtime, status) in &output_lines {
+    for (source_path, size, mtime, status) in &output_lines {
         let line = if long_format {
             let size_str = format_size(*size);
             let date_str = format_date(*mtime);
             if show_status {
-                if let Some(ap) = archive_path {
-                    format!("{status}{size_str:>8}  {date_str}  {source_path}\t{ap}{line_end}")
-                } else {
-                    format!("{status}{size_str:>8}  {date_str}  {source_path}{line_end}")
-                }
-            } else if let Some(ap) = archive_path {
-                format!("{size_str:>8}  {date_str}  {source_path}\t{ap}{line_end}")
+                format!("{status}{size_str:>8}  {date_str}  {source_path}{line_end}")
             } else {
                 format!("{size_str:>8}  {date_str}  {source_path}{line_end}")
             }
-        } else if let Some(ap) = archive_path {
-            format!("{source_path}\t{ap}{line_end}")
         } else {
             format!("{source_path}{line_end}")
         };
@@ -157,24 +122,10 @@ pub fn run(
     }
 
     // Print footer to stderr
-    // Count unique sources (not archive locations)
-    let source_count = if show_archive_paths {
-        output_lines
-            .iter()
-            .map(|(s, _, _, _, _)| s)
-            .collect::<std::collections::HashSet<_>>()
-            .len()
-    } else {
-        output_lines.len()
-    };
+    let source_count = output_lines.len();
     let mut footer_parts = vec![format!("{} sources", source_count)];
     if sel.excluded_count > 0 {
         footer_parts.push(format!("{} excluded hidden", sel.excluded_count));
-    }
-    if (archived_only || unarchived_only) && unhashed_count > 0 {
-        footer_parts.push(format!(
-            "{unhashed_count} unhashed skipped, use --unhashed to see"
-        ));
     }
 
     if footer_parts.len() > 1 {
@@ -340,108 +291,4 @@ pub fn show_duplicates(
     }
 
     Ok(())
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use crate::repo::{self, open_in_memory_for_test};
-    use rusqlite::Connection as RusqliteConnection;
-
-    fn setup_test_db() -> RusqliteConnection {
-        open_in_memory_for_test()
-    }
-
-    fn insert_root(conn: &RusqliteConnection, path: &str, role: &str, suspended: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",
-            rusqlite::params![path, role, suspended as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_object(conn: &RusqliteConnection, hash: &str, excluded: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO objects (hash_type, hash_value, excluded) VALUES ('sha256', ?, ?)",
-            rusqlite::params![hash, excluded as i64],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    fn insert_source(
-        conn: &RusqliteConnection,
-        root_id: i64,
-        rel_path: &str,
-        object_id: Option<i64>,
-    ) -> i64 {
-        conn.execute(
-            "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
-             VALUES (?, ?, ?, 1000, 1704067200, '', 0, 0, 0, 0)",
-            rusqlite::params![root_id, rel_path, object_id],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    /// Test that --archived counts sources, not unique objects.
-    ///
-    /// This guards against a regression where someone might use archived_set.len()
-    /// instead of counting sources whose object is in the set.
-    #[test]
-    fn test_ls_archived_flag_counts_sources_not_objects() {
-        let conn = setup_test_db();
-
-        // Create source root and archive root
-        let source_root = insert_root(&conn, "/photos", "source", false);
-        let archive_root = insert_root(&conn, "/archive", "archive", false);
-
-        // Create ONE object that is archived
-        let archived_obj = insert_object(&conn, "abc123archived", false);
-
-        // Create 3 source files pointing to the SAME archived object
-        let source1 = insert_source(&conn, source_root, "photo1.jpg", Some(archived_obj));
-        let source2 = insert_source(&conn, source_root, "photo2.jpg", Some(archived_obj));
-        let source3 = insert_source(&conn, source_root, "photo3.jpg", Some(archived_obj));
-
-        // Create another object that is NOT archived
-        let unarchived_obj = insert_object(&conn, "def456unarchived", false);
-        let _source4 = insert_source(&conn, source_root, "photo4.jpg", Some(unarchived_obj));
-
-        // Put the archived object in the archive root (this makes it "archived")
-        insert_source(&conn, archive_root, "photo_backup.jpg", Some(archived_obj));
-
-        // Get archived status using the same function ls.rs uses
-        let object_ids = vec![archived_obj, unarchived_obj];
-        let archived_set = repo::object::batch_check_archived(&conn, &object_ids, None).unwrap();
-
-        // Verify archived_set contains only the archived object
-        assert!(archived_set.contains(&archived_obj));
-        assert!(!archived_set.contains(&unarchived_obj));
-        assert_eq!(
-            archived_set.len(),
-            1,
-            "Only 1 unique object should be archived"
-        );
-
-        // NOW THE CRITICAL TEST:
-        // If we filter sources by "has archived object", we should get 3 sources, not 1
-        let source_ids = [source1, source2, source3];
-        let archived_source_count = source_ids
-            .iter()
-            .filter(|_| {
-                // Each source points to archived_obj
-                archived_set.contains(&archived_obj)
-            })
-            .count();
-
-        assert_eq!(
-            archived_source_count, 3,
-            "Should count 3 SOURCES with archived objects, not 1 unique object"
-        );
-    }
 }

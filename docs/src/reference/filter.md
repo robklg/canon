@@ -49,6 +49,43 @@ The `~` operator supports shell-style glob patterns:
 
 Values after operators like `~`, `=`, `!=` accept most characters without quoting — including `/`, `-`, `?`, `*`, `[`, `]`. Quoting (single or double) is still supported for values containing spaces or parentheses.
 
+## Status Predicates
+
+Status predicates check computed state about a source — not stored data, but whether a source is in a particular condition. They look like fact-existence checks (`key?`) but evaluate differently.
+
+| Predicate | True when |
+|-----------|-----------|
+| `archived?` | Content exists in at least one archive root |
+| `hashed?` | Content hash has been computed |
+| `excluded?` | Source or object is excluded |
+| `enriched?` | Has any stored metadata beyond the content hash |
+
+Status predicates are boolean-only — they work with `?` and `NOT ... ?` but not with comparison operators.
+
+```bash
+# What still needs archiving? (the treasure hunt)
+canon facts --key mime --where 'NOT archived?'
+
+# Orient toward unresolved content
+canon survey --where 'NOT archived?'
+
+# Unidentified files
+canon worklist --where 'NOT hashed?'
+
+# Combine status predicates with fact filters
+canon ls --where 'NOT archived? AND hashed? AND mime~image/*'
+
+# View excluded sources (requires --include)
+canon ls --include excluded --where 'excluded?'
+```
+
+**Key distinctions:**
+
+- `archived?` vs `content.hash.sha256?`: `archived?` asks "is this content in an archive?" — `content.hash.sha256?` asks "does this fact value exist?" Both are valid, but `archived?` is the canonical way to check archive status.
+- `hashed?` vs `content.hash.sha256?`: Equivalent results, different paths. `hashed?` is the idiomatic form.
+- `NOT archived?` includes unhashed sources — they are not archived. Use `NOT archived? AND hashed?` to exclude unhashed sources.
+- The set of status predicates is closed — four predicates, not extensible by users.
+
 ## Boolean Operators
 
 | Syntax | Meaning |

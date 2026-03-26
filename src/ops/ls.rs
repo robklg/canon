@@ -1,130 +1,13 @@
-//! Ls operations — mode filtering and duplicate detection.
-//!
-//! `filter_by_mode()` applies post-selection mode filtering (archived, unarchived,
-//! unhashed, excluded) with batch archive status lookups.
+//! Ls operations — duplicate detection.
 //!
 //! `find_duplicate_groups()` groups sources by content hash and returns groups
 //! with 2+ sources.
 
-use std::collections::HashMap;
-
 use anyhow::Result;
 use rusqlite::types::Value;
 
-use crate::domain::source::Source;
-use crate::repo::{self, Connection};
 use crate::repo::source::BATCH_SIZE;
-
-/// The active ls filter mode (mutually exclusive).
-pub enum LsMode {
-    /// Show all sources (default).
-    All,
-    /// Show only sources whose content exists in an archive.
-    Archived,
-    /// Like Archived, but expand each archive location as a separate entry.
-    ArchivedShow,
-    /// Show only sources whose content does NOT exist in an archive.
-    Unarchived,
-    /// Show only sources without an object_id.
-    Unhashed,
-    /// Show only excluded sources (source-level or object-level).
-    Excluded,
-}
-
-/// A source entry after mode filtering, with optional archive path annotation.
-pub struct LsEntry<'a> {
-    pub source: &'a Source,
-    /// Present only in ArchivedShow mode (one LsEntry per archive location).
-    pub archive_path: Option<String>,
-}
-
-/// Result of applying ls mode filtering to a selection.
-pub struct LsModeResult<'a> {
-    /// Filtered entries (may have duplicated sources in ArchivedShow mode).
-    pub entries: Vec<LsEntry<'a>>,
-    /// Unhashed sources skipped during archived/unarchived filtering.
-    pub unhashed_skipped: usize,
-}
-
-/// Apply mode filtering to a set of selected sources.
-///
-/// Performs batch archive status lookups as needed (only for Archived/ArchivedShow/
-/// Unarchived modes). Returns filtered entries and metadata.
-pub fn filter_by_mode<'a>(
-    conn: &Connection,
-    sources: &'a [Source],
-    mode: &LsMode,
-) -> Result<LsModeResult<'a>> {
-    match mode {
-        LsMode::All => {
-            let entries = sources.iter().map(|s| LsEntry { source: s, archive_path: None }).collect();
-            Ok(LsModeResult { entries, unhashed_skipped: 0 })
-        }
-        LsMode::Unhashed => {
-            let entries = sources
-                .iter()
-                .filter(|s| s.object_id.is_none())
-                .map(|s| LsEntry { source: s, archive_path: None })
-                .collect();
-            Ok(LsModeResult { entries, unhashed_skipped: 0 })
-        }
-        LsMode::Excluded => {
-            let entries = sources
-                .iter()
-                .filter(|s| s.is_excluded())
-                .map(|s| LsEntry { source: s, archive_path: None })
-                .collect();
-            Ok(LsModeResult { entries, unhashed_skipped: 0 })
-        }
-        LsMode::Archived | LsMode::ArchivedShow | LsMode::Unarchived => {
-            let object_ids: Vec<i64> = sources.iter().filter_map(|s| s.object_id).collect();
-            let archived_set = repo::object::batch_check_archived(conn, &object_ids, None)?;
-
-            let archive_paths_map: HashMap<i64, Vec<String>> =
-                if matches!(mode, LsMode::ArchivedShow) {
-                    repo::object::batch_find_archive_paths(conn, &object_ids)?
-                } else {
-                    HashMap::new()
-                };
-
-            let mut entries = Vec::new();
-            let mut unhashed_skipped = 0usize;
-
-            for source in sources {
-                match source.object_id {
-                    None => {
-                        unhashed_skipped += 1;
-                    }
-                    Some(obj_id) => match mode {
-                        LsMode::ArchivedShow => {
-                            if let Some(paths) = archive_paths_map.get(&obj_id) {
-                                for path in paths {
-                                    entries.push(LsEntry {
-                                        source,
-                                        archive_path: Some(path.clone()),
-                                    });
-                                }
-                            }
-                        }
-                        LsMode::Archived => {
-                            if archived_set.contains(&obj_id) {
-                                entries.push(LsEntry { source, archive_path: None });
-                            }
-                        }
-                        LsMode::Unarchived => {
-                            if !archived_set.contains(&obj_id) {
-                                entries.push(LsEntry { source, archive_path: None });
-                            }
-                        }
-                        _ => unreachable!(),
-                    },
-                }
-            }
-
-            Ok(LsModeResult { entries, unhashed_skipped })
-        }
-    }
-}
+use crate::repo::Connection;
 
 /// A group of sources sharing the same content hash.
 pub struct DuplicateGroup {

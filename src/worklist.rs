@@ -49,11 +49,10 @@ pub fn run(
     }
 
     // Report stats to stderr
-    let excluded_count = sel.excluded_count;
     if include.includes_excluded() && sel.included_excluded_count > 0 {
         eprintln!("Included {} excluded sources", sel.included_excluded_count);
-    } else if excluded_count > 0 {
-        eprintln!("Skipped {excluded_count} excluded sources");
+    } else if sel.excluded_count > 0 {
+        eprintln!("Skipped {0} excluded sources", sel.excluded_count);
     }
     if unique_content && (result.skipped_unhashed > 0 || result.skipped_duplicate > 0) {
         eprintln!(

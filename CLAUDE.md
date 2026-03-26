@@ -111,9 +111,9 @@ Three unified flags control visibility, awareness, and scope across all commands
 
 **Non-root error**: When an explicit path is not under any known root, commands error immediately. CWD-not-in-root falls back to global silently.
 
-**Filter modes on `ls`**: `--archived`, `--unarchived`, `--unhashed`, `--duplicates`, `--excluded` are mutually exclusive filter modes. `--excluded` implicitly includes excluded sources and shows both source-level and object-level excluded.
+**`ls` display mode**: `--duplicates` is the sole display mode on `ls` — it changes output format to grouped by hash. Status filtering (archived, unarchived, unhashed, excluded) is now done via `--where` status predicates (e.g., `--where 'archived?'`, `--where 'NOT hashed?'`).
 
-**Status column in `ls -l`**: When `--include` is used or `--excluded` mode is active, long format shows a status indicator: `E` (source-excluded), `X` (object-excluded), `A` (archive source), or blank.
+**Status column in `ls -l`**: When `--include` is used, long format shows a status indicator: `E` (source-excluded), `X` (object-excluded), `A` (archive source), or blank.
 
 ### Canon Home Directory
 
@@ -160,11 +160,14 @@ Used with `--where`. Supports full boolean logic:
 --where "NOT content.hash.sha256?"
 --where "source.mtime|year=2023"
 --where "source.rel_path[-1]=photo.jpg"
+--where "NOT archived? AND mime~image/*"
 ```
 
 **Operators**: `=`, `!=`, `~` (glob), `!~` (not glob), `>`, `<`, `>=`, `<=`, `IN (a, b, c)`, `NOT IN (...)`, `?` (exists)
 
 Note: `=` and `!=` are case-sensitive. Use `|lowercase` modifier for case-insensitive matching.
+
+**Status predicates**: `archived?`, `hashed?`, `excluded?`, `enriched?` — computed boolean state, not stored facts. Recognized as bare keywords before `content.` normalization. Boolean-only (`?` and `NOT ... ?`); using with comparison operators produces an error. Represented as `Expr::Status(StatusPredicate)` in the AST, evaluated via batch-prefetched `HashSet`s in `FactCache`. `apply_filters()` returns `FilterResult` with both `source_ids` and `UsedStatus` metadata. `UsedStatus` propagates through `Selection` and `SurveyResult` to enable visibility mismatch hints in the interface layer.
 
 **Glob patterns** (`~` operator): `*` (any chars), `?` (one char), `[abc]` (char set), `[a-z]` (range), `[!abc]` (negated set)
 

@@ -311,6 +311,17 @@ pub fn run(
                     );
                 }
             }
+
+            // Visibility hint for status predicates
+            if result.used_status.excluded
+                && !options.include.includes_excluded()
+                && result.excluded_count > 0
+            {
+                eprintln!(
+                    "({} excluded sources hidden, use --include excluded to show)",
+                    result.excluded_count
+                );
+            }
         }
     }
 

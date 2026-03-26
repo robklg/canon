@@ -75,7 +75,7 @@ pub fn run(
 
     if total_sources == 0 {
         println!("No sources match the given filters.");
-        if sel.excluded_count > 0 {
+        if !include.includes_excluded() && sel.excluded_count > 0 {
             println!(
                 "\n({} excluded sources hidden, use --include excluded to show)",
                 sel.excluded_count
@@ -130,10 +130,10 @@ pub fn run(
         display_root_distribution(&result);
     } else {
         let result = ops::facts::compute_all_keys(conn, &source_ids, show_all)?;
-        display_all_keys(&result, show_all);
+        display_all_keys(&result, show_all, filter_strs.is_empty());
     }
 
-    if sel.excluded_count > 0 {
+    if !include.includes_excluded() && sel.excluded_count > 0 {
         eprintln!(
             "\n({} excluded sources hidden, use --include excluded to show)",
             sel.excluded_count
@@ -192,7 +192,7 @@ fn display_root_distribution(result: &ops::facts::RootDistributionResult) {
     }
 }
 
-fn display_all_keys(result: &AllKeysResult, show_all: bool) {
+fn display_all_keys(result: &AllKeysResult, show_all: bool, show_status_predicates: bool) {
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
@@ -231,6 +231,14 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool) {
             .filter(|k| k.visibility() == crate::expr::BuiltinKeyVisibility::Hidden)
             .count();
         let _ = writeln!(handle, "\n({hidden_count} built-in/derived facts hidden, use --all to show)");
+    }
+
+    if show_status_predicates {
+        let _ = writeln!(handle, "\nStatus Predicates (use in --where):");
+        let _ = writeln!(handle, "  {:<14} content exists in an archive", "archived?");
+        let _ = writeln!(handle, "  {:<14} content hash has been computed", "hashed?");
+        let _ = writeln!(handle, "  {:<14} source or object is excluded", "excluded?");
+        let _ = writeln!(handle, "  {:<14} has metadata beyond content hash", "enriched?");
     }
 }
 

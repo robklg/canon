@@ -175,27 +175,15 @@ enum Commands {
     Ls {
         /// Directory paths to scope the query (resolved to realpath)
         paths: Vec<PathBuf>,
-        /// Filter expressions (e.g., "source.ext=jpg" or "content.hash.sha256?")
+        /// Filter expressions (e.g., "source.ext=jpg" or "archived?")
         #[arg(long = "where")]
         filters: Vec<String>,
         /// Show results across all roots, ignoring current directory scope
         #[arg(long)]
         global: bool,
-        /// Only show archived sources (use --archived=show to include archive paths)
-        #[arg(long, value_name = "MODE", num_args = 0..=1, default_missing_value = "list", conflicts_with_all = ["unarchived", "unhashed", "duplicates"])]
-        archived: Option<String>,
-        /// Only show unarchived sources (hashed but not in any archive)
-        #[arg(long, conflicts_with_all = ["archived", "unhashed", "duplicates"])]
-        unarchived: bool,
-        /// Only show unhashed sources (no content hash yet)
-        #[arg(long, conflicts_with_all = ["archived", "unarchived", "duplicates"])]
-        unhashed: bool,
         /// Show sources with duplicate content (same hash), grouped by hash
-        #[arg(long, conflicts_with_all = ["archived", "unarchived", "unhashed"])]
+        #[arg(long)]
         duplicates: bool,
-        /// Only show excluded sources (source-level and object-level)
-        #[arg(long, conflicts_with_all = ["archived", "unarchived", "unhashed", "duplicates"])]
-        excluded: bool,
         /// Include additional sources: excluded, archived, all
         #[arg(long, value_delimiter = ',')]
         include: Vec<IncludeValue>,
@@ -675,11 +663,7 @@ fn main() -> Result<()> {
             paths,
             filters,
             global,
-            archived,
-            unarchived,
-            unhashed,
             duplicates,
-            excluded,
             include,
             long,
             sort,
@@ -693,9 +677,6 @@ fn main() -> Result<()> {
             let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
             if resolved.auto_include_archived {
                 include.archived = true;
-            }
-            if excluded {
-                include.excluded = true;
             }
 
             // Convert resolved scope to PathBuf for command modules
@@ -720,10 +701,6 @@ fn main() -> Result<()> {
                     &scope_paths,
                     &all_roots,
                     &filters,
-                    archived.as_deref(),
-                    unarchived,
-                    unhashed,
-                    excluded,
                     &include,
                     use_relative,
                     long,

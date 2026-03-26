@@ -59,23 +59,33 @@ pub fn run(
     }
 
     // Compute and display stats
-    if !scope_prefixes.is_empty() {
+    let (used_status, excluded_count) = if !scope_prefixes.is_empty() {
         // Scoped mode
-        let stats = ops::coverage::compute_scoped(conn, &scopes, &filters, archive_root_id, include)?;
+        let (stats, used_status, excluded_count) =
+            ops::coverage::compute_scoped(conn, &scopes, &filters, archive_root_id, include)?;
         if compact {
             display_compact_scoped(&stats, scope);
         } else {
             display_scoped_stats(&stats, scope, archive_spec);
         }
+        (used_status, excluded_count)
     } else {
         // Per-root breakdown mode (global)
-        let (per_root_stats, overall) =
+        let (per_root_stats, overall, used_status, excluded_count) =
             ops::coverage::compute_per_root(conn, &filters, archive_root_id, include)?;
         if compact {
             display_compact_per_root(&per_root_stats, &overall, scope);
         } else {
             display_per_root_stats(&per_root_stats, &overall, archive_spec, scope);
         }
+        (used_status, excluded_count)
+    };
+
+    if used_status.excluded && !include.includes_excluded() && excluded_count > 0 {
+        eprintln!(
+            "({} excluded sources hidden, use --include excluded to show)",
+            excluded_count
+        );
     }
 
     Ok(())

@@ -216,9 +216,11 @@ pub fn plan_clear(conn: &mut Connection, params: &ExcludeClearParams) -> Result<
         filtered
     } else {
         let ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-        let filtered_ids: HashSet<i64> = filter::apply_filters(conn, &ids, &params.filters)?
-            .into_iter()
-            .collect();
+        let filtered_ids: HashSet<i64> =
+            filter::apply_filters(conn, &ids, &params.filters)?
+                .source_ids
+                .into_iter()
+                .collect();
         filtered
             .into_iter()
             .filter(|s| filtered_ids.contains(&s.id))

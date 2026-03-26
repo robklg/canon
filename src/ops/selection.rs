@@ -11,7 +11,7 @@ use anyhow::Result;
 use crate::domain::include::IncludeSet;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
-use crate::expr::filter::{self, Filter};
+use crate::expr::filter::{self, Filter, UsedStatus};
 use crate::repo::{self, Connection};
 
 /// How to handle root role filtering during source selection.
@@ -53,6 +53,8 @@ pub struct Selection {
     pub included_excluded_count: usize,
     /// Archive-role sources that were kept (when `include.archived` is set).
     pub included_archived_count: usize,
+    /// Which status predicates appeared in filter expressions.
+    pub used_status: UsedStatus,
 }
 
 impl Selection {
@@ -107,13 +109,14 @@ pub fn select_sources(conn: &mut Connection, params: &SelectionParams) -> Result
             excluded_count,
             included_excluded_count,
             included_archived_count,
+            used_status: UsedStatus::default(),
         });
     }
 
     // Apply --where filters: get passing IDs, then keep matching sources
     let source_ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-    let passing_ids = filter::apply_filters(conn, &source_ids, &params.filters)?;
-    let passing_set: HashSet<i64> = passing_ids.into_iter().collect();
+    let filter_result = filter::apply_filters(conn, &source_ids, &params.filters)?;
+    let passing_set: HashSet<i64> = filter_result.source_ids.into_iter().collect();
 
     let result: Vec<Source> = filtered
         .into_iter()
@@ -125,6 +128,7 @@ pub fn select_sources(conn: &mut Connection, params: &SelectionParams) -> Result
         excluded_count,
         included_excluded_count,
         included_archived_count,
+        used_status: filter_result.used_status,
     })
 }
 
@@ -395,5 +399,26 @@ mod tests {
         assert_eq!(ids[1], sel.sources[1].id);
         assert!(ids.contains(&id1));
         assert!(ids.contains(&id2));
+    }
+
+    #[test]
+    fn select_sources_propagates_used_status() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/root", "source", false);
+        insert_source_with_size(&conn, root, "a.jpg", None, 100);
+
+        // With status predicate in filter
+        let mut params = make_params(RolePolicy::SourceUnlessIncluded);
+        params.filters = vec![Filter::parse("hashed?").unwrap()];
+        let sel = select_sources(&mut conn, &params).unwrap();
+        assert!(sel.used_status.hashed);
+        assert!(!sel.used_status.archived);
+
+        // Without status predicates
+        let mut params = make_params(RolePolicy::SourceUnlessIncluded);
+        params.filters = vec![Filter::parse("source.size > 50").unwrap()];
+        let sel = select_sources(&mut conn, &params).unwrap();
+        assert!(!sel.used_status.hashed);
+        assert!(!sel.used_status.archived);
     }
 }

@@ -60,6 +60,10 @@ pub struct SurveyResult {
     /// File-level archive detail: selection sources grouped by archive location
     /// with counterpart paths. Only populated when compute_archived_pairs is true.
     pub archived_details: Vec<ArchivedLocationDetail>,
+    /// Which status predicates appeared in filter expressions.
+    pub used_status: filter::UsedStatus,
+    /// Count of excluded sources hidden from selection (for visibility hints).
+    pub excluded_count: usize,
 }
 
 /// A selection-side path paired with its counterpart paths at a location.
@@ -122,18 +126,31 @@ pub fn compute_survey(
         .filter(|s| params.include.includes_excluded() || !s.is_excluded())
         .collect();
 
+    // Count excluded sources hidden from selection (for visibility hints)
+    let excluded_count = if !params.include.includes_excluded() {
+        all_sources
+            .iter()
+            .filter(|s| s.is_active())
+            .filter(|s| s.is_from_role("source"))
+            .filter(|s| s.matches_scope(&scopes))
+            .filter(|s| s.is_excluded())
+            .count()
+    } else {
+        0
+    };
+
     // Apply --where filters to selection
-    let selection = if filters.is_empty() {
-        selection
+    let (selection, used_status) = if filters.is_empty() {
+        (selection, filter::UsedStatus::default())
     } else {
         let ids: Vec<i64> = selection.iter().map(|s| s.id).collect();
-        let passed: HashSet<i64> = filter::apply_filters(conn, &ids, filters)?
-            .into_iter()
-            .collect();
-        selection
+        let filter_result = filter::apply_filters(conn, &ids, filters)?;
+        let passed: HashSet<i64> = filter_result.source_ids.into_iter().collect();
+        let filtered = selection
             .into_iter()
             .filter(|s| passed.contains(&s.id))
-            .collect()
+            .collect();
+        (filtered, filter_result.used_status)
     };
 
     // Partition: unhashed vs hashed
@@ -287,9 +304,11 @@ pub fn compute_survey(
 
                 // Step 2: Apply --where filters to location sources
                 let loc_ids: Vec<i64> = loc_sources.iter().map(|s| s.id).collect();
-                let passed: HashSet<i64> = filter::apply_filters(conn, &loc_ids, filters)?
-                    .into_iter()
-                    .collect();
+                let passed: HashSet<i64> =
+                    filter::apply_filters(conn, &loc_ids, filters)?
+                        .source_ids
+                        .into_iter()
+                        .collect();
 
                 // Step 3: Partition into overlap vs complementary
                 // CRITICAL: filter to hashed-only BEFORE partitioning.
@@ -525,6 +544,8 @@ pub fn compute_survey(
         is_other_mode,
         archive_label: None, // set by run() after return
         archived_details,
+        used_status,
+        excluded_count,
     }))
 }
 

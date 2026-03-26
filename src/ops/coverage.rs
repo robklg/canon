@@ -8,7 +8,7 @@ use anyhow::Result;
 use crate::domain::root::Root;
 use crate::domain::source::Source;
 use crate::domain::IncludeSet;
-use crate::expr::filter::Filter;
+use crate::expr::filter::{Filter, UsedStatus};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Connection};
 
@@ -108,7 +108,7 @@ pub fn compute_scoped(
     filters: &[Filter],
     archive_root_id: Option<i64>,
     include: &IncludeSet,
-) -> Result<CoverageStats> {
+) -> Result<(CoverageStats, UsedStatus, usize)> {
     let params = SelectionParams {
         scopes: scopes.to_vec(),
         include: include.clone(),
@@ -116,8 +116,11 @@ pub fn compute_scoped(
         role_policy: RolePolicy::SourceUnlessIncluded,
     };
     let sel = selection::select_sources(conn, &params)?;
+    let used_status = sel.used_status.clone();
+    let excluded_count = sel.excluded_count;
     let refs: Vec<&Source> = sel.sources.iter().collect();
-    compute_stats(conn, &refs, archive_root_id)
+    let stats = compute_stats(conn, &refs, archive_root_id)?;
+    Ok((stats, used_status, excluded_count))
 }
 
 /// Compute per-root breakdown plus overall totals.
@@ -126,7 +129,7 @@ pub fn compute_per_root(
     filters: &[Filter],
     archive_root_id: Option<i64>,
     include: &IncludeSet,
-) -> Result<(Vec<CoverageStats>, CoverageStats)> {
+) -> Result<(Vec<CoverageStats>, CoverageStats, UsedStatus, usize)> {
     let all_roots = repo::root::fetch_all(conn)?;
     let roots: Vec<&Root> = all_roots
         .iter()
@@ -165,7 +168,7 @@ pub fn compute_per_root(
         per_root_stats.push(stats);
     }
 
-    Ok((per_root_stats, overall))
+    Ok((per_root_stats, overall, all_sel.used_status, all_sel.excluded_count))
 }
 
 #[cfg(test)]

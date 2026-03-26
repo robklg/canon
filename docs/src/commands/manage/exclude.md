@@ -19,9 +19,9 @@ canon exclude set --where 'source.ext=bak' --dry-run
 # Skip confirmation prompt (for scripting)
 canon exclude set --where 'source.ext=bak' --yes
 
-# View excluded sources (use ls --excluded instead of the removed exclude list)
-canon ls --excluded
-canon ls --excluded /path/to/photos
+# View excluded sources
+canon ls --include excluded --where 'excluded?'
+canon ls --include excluded --where 'excluded?' /path/to/photos
 
 # Remove exclusions
 canon exclude clear
