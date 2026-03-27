@@ -381,6 +381,9 @@ enum ExcludeAction {
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
+        /// Operate on all roots (bypass CWD scope defaulting)
+        #[arg(long)]
+        global: bool,
     },
     /// Remove exclusions from sources
     Clear {
@@ -395,6 +398,9 @@ enum ExcludeAction {
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
+        /// Operate on all roots (bypass CWD scope defaulting)
+        #[arg(long)]
+        global: bool,
     },
     /// Exclude duplicate sources, keeping copies in preferred path
     Duplicates {
@@ -429,6 +435,9 @@ enum ExcludeAction {
         /// Show all source locations (default shows up to 3)
         #[arg(long, short)]
         verbose: bool,
+        /// Operate on all roots (bypass CWD scope defaulting)
+        #[arg(long)]
+        global: bool,
     },
     /// Clear exclusion from an object by hash
     ClearObject {
@@ -532,6 +541,9 @@ enum ClusterAction {
         /// Don't open manifest in $VISUAL/$EDITOR after generation
         #[arg(long)]
         no_edit: bool,
+        /// Operate on all roots (bypass CWD scope defaulting)
+        #[arg(long)]
+        global: bool,
     },
     /// Regenerate lock file from existing manifest config
     Refresh {
@@ -898,8 +910,13 @@ fn main() -> Result<()> {
                 allow,
                 show_archived,
                 no_edit,
+                global,
             } => {
                 let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
+                let all_roots = repo::root::fetch_all(db.conn())?;
+                let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
+                let scope_paths: Vec<PathBuf> =
+                    resolved.prefixes.iter().map(PathBuf::from).collect();
                 let options = cluster::GenerateOptions {
                     force,
                     allow_archived: allow.contains(&ClusterAllow::Archived),
@@ -919,7 +936,7 @@ fn main() -> Result<()> {
                 };
                 cluster::generate(
                     &mut db,
-                    &paths,
+                    &scope_paths,
                     &filters,
                     &expanded,
                     &dest,
@@ -972,6 +989,7 @@ fn main() -> Result<()> {
                 id,
                 dry_run,
                 yes,
+                global,
             } => {
                 let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::SetOptions {
@@ -985,7 +1003,11 @@ fn main() -> Result<()> {
                     // Single file path with no filters: exclude exact file
                     exclude::set_by_path(&db, &paths[0], &options)?;
                 } else {
-                    exclude::set(&mut db, &paths, &filters, &options)?;
+                    let all_roots = repo::root::fetch_all(db.conn())?;
+                    let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
+                    let scope_paths: Vec<PathBuf> =
+                        resolved.prefixes.iter().map(PathBuf::from).collect();
+                    exclude::set(&mut db, &scope_paths, &filters, &options)?;
                 }
             }
             ExcludeAction::Clear {
@@ -993,10 +1015,15 @@ fn main() -> Result<()> {
                 filters,
                 dry_run,
                 yes,
+                global,
             } => {
                 let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::ClearOptions { dry_run, yes };
-                exclude::clear(&mut db, &paths, &filters, &options)?;
+                let all_roots = repo::root::fetch_all(db.conn())?;
+                let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
+                let scope_paths: Vec<PathBuf> =
+                    resolved.prefixes.iter().map(PathBuf::from).collect();
+                exclude::clear(&mut db, &scope_paths, &filters, &options)?;
             }
             ExcludeAction::Duplicates {
                 path,
@@ -1021,6 +1048,7 @@ fn main() -> Result<()> {
                 hash,
                 yes,
                 verbose,
+                global,
             } => {
                 let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::SetOptions {
@@ -1033,11 +1061,15 @@ fn main() -> Result<()> {
                 } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {
                     // Single file path: exclude that file's object
                     exclude::set_object_by_file(&db, &paths[0], &options)?;
-                } else if !paths.is_empty() || !filters.is_empty() {
-                    // Paths and/or filters: exclude matching objects
-                    exclude::set_objects_by_filter(&mut db, &paths, &filters, &options)?;
                 } else {
-                    anyhow::bail!("Provide a hash (--hash), file path, or filters (--where)");
+                    let all_roots = repo::root::fetch_all(db.conn())?;
+                    let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
+                    let scope_paths: Vec<PathBuf> =
+                        resolved.prefixes.iter().map(PathBuf::from).collect();
+                    if scope_paths.is_empty() && filters.is_empty() {
+                        anyhow::bail!("Provide a hash (--hash), file path, or filters (--where)");
+                    }
+                    exclude::set_objects_by_filter(&mut db, &scope_paths, &filters, &options)?;
                 }
             }
             ExcludeAction::ClearObject { hash, dry_run } => {

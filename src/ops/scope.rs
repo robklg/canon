@@ -1,12 +1,12 @@
-//! Scope resolution for discovery commands.
+//! Scope resolution for Canon commands.
 //!
-//! Discovery commands (ls, survey, facts, coverage, worklist) follow a unified
-//! scope model: CWD is an intentional context switch. When the user is inside a
-//! scanned root, Canon scopes to that directory. When outside any root, Canon
-//! operates globally. The `--global` flag overrides CWD defaulting.
+//! All scope-taking commands follow a unified scope model: CWD is an intentional
+//! context switch. When the user is inside a scanned root, Canon scopes to that
+//! directory. When outside any root, Canon operates globally. The `--global` flag
+//! overrides CWD defaulting.
 //!
-//! Effectful commands (exclude, cluster generate) do NOT use this — they require
-//! explicit scope.
+//! This applies to both discovery commands (ls, survey, facts, coverage, worklist)
+//! and effectful commands (cluster generate, exclude set/clear/duplicates).
 
 use anyhow::Result;
 use std::path::PathBuf;
