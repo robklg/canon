@@ -190,22 +190,23 @@ pub fn count_fact_keys(
     // Populate temp table with source IDs
     populate_temp_sources(conn, source_ids)?;
 
-    // Count distinct source IDs per key, determine dominant type
-    // We count sources (not entities) because multiple sources can share an object
-    // The outer SELECT DISTINCT ensures each source is counted once per key
+    // Count distinct source IDs per key, determine dominant type.
+    // We count sources (not entities) because multiple sources can share an object.
+    // A source with the same key at both source-level and object-level is counted
+    // once (COUNT(DISTINCT id)), not twice.
     let query = r#"
         SELECT key,
-               COUNT(*) as cnt,
+               COUNT(DISTINCT id) as cnt,
                MAX(CASE WHEN value_time IS NOT NULL THEN 1 ELSE 0 END) as is_time,
                MAX(CASE WHEN value_num IS NOT NULL THEN 1 ELSE 0 END) as is_num
         FROM (
-            SELECT DISTINCT ts.id, f.key, f.value_text, f.value_num, f.value_time
+            SELECT ts.id, f.key, f.value_text, f.value_num, f.value_time
             FROM temp_sources ts
             JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id
 
             UNION ALL
 
-            SELECT DISTINCT ts.id, f.key, f.value_text, f.value_num, f.value_time
+            SELECT ts.id, f.key, f.value_text, f.value_num, f.value_time
             FROM temp_sources ts
             JOIN sources s ON s.id = ts.id
             JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id
@@ -1085,6 +1086,26 @@ mod tests {
         let make = result.iter().find(|(k, _, _)| k == "content.Make").unwrap();
         // Should count 2 (both sources) even though fact is on one object
         assert_eq!(make.1, 2);
+    }
+
+    /// Regression test: a source with the same key at both source-level and
+    /// object-level must be counted once, not twice. This was the root cause
+    /// of coverage >100% (e.g., content.mime at 101.8%).
+    /// See commits dc6d301, 0374f5e, 50aacad for the history of this bug.
+    #[test]
+    fn count_fact_keys_no_double_count_source_and_object_fact() {
+        let mut conn = setup_test_db();
+        insert_root(&conn, 1, "/root");
+        insert_object(&conn, 100, "abc123");
+        insert_source(&conn, 1, 1, "file.txt", Some(100));
+        // Same key at both source-level and object-level
+        insert_fact_text(&conn, "source", 1, "content.mime", "image/jpeg");
+        insert_fact_text(&conn, "object", 100, "content.mime", "image/jpeg");
+
+        let result = count_fact_keys(&mut conn, &[1]).unwrap();
+        let mime = result.iter().find(|(k, _, _)| k == "content.mime").unwrap();
+        // Must be 1, not 2 — one source, one key
+        assert_eq!(mime.1, 1);
     }
 
     // =========================================================================
