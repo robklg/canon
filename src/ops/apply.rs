@@ -463,14 +463,6 @@ pub trait TransferProgress {
     fn on_finish(&self);
 }
 
-/// No-op implementation for tests.
-pub struct NoopProgress;
-impl TransferProgress for NoopProgress {
-    fn on_start(&self, _total: usize) {}
-    fn on_transfer(&self, _index: usize, _total: usize, _source_path: &str, _dest_path: &str, _outcome: &TransferOutcome) {}
-    fn on_finish(&self) {}
-}
-
 /// Parameters for executing an apply operation.
 pub struct ApplyExecuteParams {
     /// Base directory for destination paths (archive root + base_dir from manifest).
@@ -498,6 +490,9 @@ pub struct ApplyResult {
 }
 
 /// An error encountered during a file transfer.
+/// Fields are populated by execute_apply but errors are reported eagerly
+/// via TransferProgress — the struct exists for post-transfer summary access.
+#[allow(dead_code)]
 pub struct TransferError {
     pub path: String,
     pub error: String,
