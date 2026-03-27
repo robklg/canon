@@ -908,6 +908,11 @@ fn main() -> Result<()> {
                 } else {
                     output
                 };
+                let output_path = if output_path.extension().is_none() {
+                    output_path.with_extension("toml")
+                } else {
+                    output_path
+                };
                 cluster::generate(
                     &mut db,
                     &paths,

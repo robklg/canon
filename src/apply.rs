@@ -564,7 +564,8 @@ impl ops::apply::TransferProgress for CliTransferProgress {
 
     fn on_transfer(&self, index: usize, _total: usize, source_path: &str, outcome: &ops::apply::TransferOutcome) {
         if let Some(ref p) = *self.progress.borrow() {
-            p.update(index);
+            let filename = source_path.rsplit('/').next().unwrap_or(source_path);
+            p.update_with_name(index, filename);
         }
         if self.verbose {
             match outcome {

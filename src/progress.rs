@@ -22,6 +22,20 @@ impl Progress {
         }
     }
 
+    pub fn update_with_name(&self, i: usize, name: &str) {
+        if i > 0 && i % self.interval == 0 {
+            let pct = (i * 100) / self.total;
+            // Truncate long filenames to keep the line readable
+            let display_name = if name.len() > 40 {
+                &name[name.len() - 40..]
+            } else {
+                name
+            };
+            eprint!("\r  {}% ({}/{}) {}\x1b[K", pct, i, self.total, display_name);
+            let _ = std::io::stderr().flush();
+        }
+    }
+
     pub fn finish(&self) {
         if self.total > self.interval {
             eprint!("\r  100% ({}/{})\x1b[K\n", self.total, self.total);

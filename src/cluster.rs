@@ -116,7 +116,13 @@ pub fn generate(
             .with_context(|| format!("Failed to launch editor: {editor}"))?;
     }
 
-    eprintln!("\nTo apply: canon apply {}", output_path.display());
+    let path_str = output_path.display().to_string();
+    let escaped = if path_str.contains(' ') {
+        format!("'{path_str}'")
+    } else {
+        path_str
+    };
+    eprintln!("\nTo apply: canon apply {escaped}");
 
     Ok(())
 }
