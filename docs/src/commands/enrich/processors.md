@@ -148,6 +148,44 @@ Numbers from JSON are automatically stored as numbers. But if your extractor out
 
 See [import-facts](import-facts.md#type-hints) for full details.
 
+## Tagging Files with Finder Tags (macOS)
+
+When you're browsing files during archiving work — previewing photos, deciding what belongs together — you can use macOS Finder tags to classify files on the spot. Canon can then import those tags as facts, making them queryable and usable for clustering.
+
+### The Workflow
+
+1. **Browse and tag in Finder.** Right-click files (or select multiple) and assign tags — "vacation", "kids", "junk", whatever makes sense in the moment. Finder makes this fast: no command line, no context switch.
+
+2. **Import tags into Canon:**
+   ```bash
+   canon worklist Photos/2011 | ./scripts/tag-worklist.sh | canon import-facts
+   ```
+
+3. **Query by tags:**
+   ```bash
+   canon ls --where 'tag.vacation?'                         # files tagged "vacation"
+   canon ls --where 'tag.vacation? AND tag.kids?'            # both tags
+   canon ls --where 'tag.vacation? AND NOT tag.kids?'        # vacation without kids
+   canon facts                                               # see all tag.* keys with counts
+   ```
+
+4. **Cluster and archive by tag:**
+   ```bash
+   canon cluster generate --where 'tag.vacation?' --dest /Archive/Media/2011/Vacation ...
+   ```
+
+### How It Works
+
+The `tag-worklist.sh` script reads macOS extended attributes (`com.apple.metadata:_kMDItemUserTags`) from each file. Each Finder tag becomes a fact key like `tag.vacation` or `tag.kids`. The tag name is normalized to lowercase with special characters replaced by underscores.
+
+Tags are presence-based: you query them with the `?` (exists) operator, not by value. `tag.vacation?` means "is this file tagged vacation?" — and that composes with AND/OR/NOT like any other filter expression.
+
+### Why This Matters
+
+When you survey a location and find a mixed bag of content — different events, different people, different time periods — you need a way to classify before you can archive. The content is all in one folder, but it belongs in different places in your archive.
+
+Finder tags let you do that classification *while you're looking at the files*. You're already previewing photos to decide what's worth keeping. Adding a tag in that moment is nearly zero effort. Then Canon takes those tags and turns them into structured queries that drive the archiving workflow.
+
 ## Tips
 
 - Always pass through `source_id` and `basis_rev` unchanged

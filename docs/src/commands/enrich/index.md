@@ -38,6 +38,7 @@ Canon includes ready-to-use processors:
 |-----------|---------|----------|
 | `scripts/exif-worklist.sh` | EXIF, GPS, and media metadata | exiftool, jq |
 | `scripts/hash-worklist.sh` | SHA-256 content hashes | jq |
+| `scripts/tag-worklist.sh` | macOS Finder tags | jq, python3 |
 | `canonargs --fact mime -- file -b --mime-type {}` | MIME type detection | canonargs |
 
 Install `canonargs` with: `cargo install canonargs`
