@@ -583,8 +583,9 @@ fn main() -> Result<()> {
     // Write commands (scan, apply, import-facts) run their own ANALYZE after
     // bulk changes — the periodic check here catches the gap when only reads
     // have happened since the last analyze.
-    if db.maybe_analyze()? {
+    if db.needs_analyze()? {
         eprintln!("Updating query statistics...");
+        db.run_analyze()?;
     }
 
     match cli.command {

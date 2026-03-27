@@ -39,7 +39,7 @@ impl Db {
     /// Check if ANALYZE should be run based on time since last analyze.
     /// If stale (>24 hours), runs ANALYZE and updates metadata.
     pub fn maybe_analyze(&self) -> Result<bool> {
-        if self.is_analyze_stale()? {
+        if self.needs_analyze()? {
             self.run_analyze()?;
             Ok(true)
         } else {
@@ -48,7 +48,7 @@ impl Db {
     }
 
     /// Check if ANALYZE statistics are stale (older than threshold)
-    fn is_analyze_stale(&self) -> Result<bool> {
+    pub fn needs_analyze(&self) -> Result<bool> {
         let last_analyze: Option<i64> = self
             .conn
             .query_row(
