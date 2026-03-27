@@ -20,7 +20,7 @@ pub struct GenerateOptions {
     pub allow_archived: bool,
     pub allow_duplicates: bool,
     pub show_archived: bool,
-    pub edit: bool,
+    pub no_edit: bool,
 }
 
 pub fn generate(
@@ -106,14 +106,8 @@ pub fn generate(
         &result,
     );
 
-    if options.edit {
-        let editor = std::env::var("VISUAL")
-            .or_else(|_| std::env::var("EDITOR"))
-            .unwrap_or_else(|_| "vi".to_string());
-        std::process::Command::new(&editor)
-            .arg(output_path)
-            .status()
-            .with_context(|| format!("Failed to launch editor: {editor}"))?;
+    if !options.no_edit {
+        open_editor(output_path);
     }
 
     let path_str = output_path.display().to_string();
@@ -127,7 +121,24 @@ pub fn generate(
     Ok(())
 }
 
-pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool) -> Result<()> {
+/// Open a file in the user's preferred editor ($VISUAL, $EDITOR, or vi).
+/// Reports errors but does not fail — the file was already written successfully.
+fn open_editor(path: &Path) {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    match std::process::Command::new(&editor).arg(path).status() {
+        Ok(status) if !status.success() => {
+            eprintln!("Warning: editor exited with status {status}");
+        }
+        Err(e) => {
+            eprintln!("Warning: failed to launch editor '{editor}': {e}");
+        }
+        _ => {}
+    }
+}
+
+pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool, no_edit: bool) -> Result<()> {
     let conn = db.conn_mut();
 
     // Read existing manifest content (for notes preservation)
@@ -180,7 +191,7 @@ pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool) -> Result<(
         allow_archived,
         allow_duplicates,
         show_archived,
-        edit: false,
+        no_edit: true,
     };
     display_plan_warnings(&plan, &display_options);
 
@@ -209,6 +220,10 @@ pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool) -> Result<(
         None => {
             println!("No sources matched the query");
         }
+    }
+
+    if !no_edit {
+        open_editor(config_path);
     }
 
     Ok(())

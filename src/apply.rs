@@ -141,12 +141,23 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     let skipped_by_filter = sources.len() - filtered_sources.len();
 
     // Show summary and confirm (unless --yes)
+    let sample_dests = if !options.yes {
+        compute_sample_destinations(
+            conn, &filtered_sources, &pattern, &needed_keys,
+            scope_prefix, &root_paths, &base_dir,
+        )
+    } else {
+        vec![]
+    };
+
     print_apply_summary(
         &config_path,
         &base_dir,
+        &config.output.pattern,
         &filtered_sources,
         options,
         &root_paths,
+        &sample_dests,
     );
 
     if !ceremony::confirm(options.yes)? {
@@ -430,20 +441,91 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
 }
 
 // ============================================================================
+// Sample destination computation
+// ============================================================================
+
+struct SampleDestination {
+    dest_path: String,
+    error: Option<String>,
+}
+
+const SAMPLE_COUNT: usize = 5;
+
+/// Compute sample destination paths for the apply confirmation summary.
+/// Resolves the output pattern for up to SAMPLE_COUNT sources, fetching
+/// only the facts needed for those sources.
+fn compute_sample_destinations(
+    conn: &mut repo::Connection,
+    sources: &[&LockEntry],
+    pattern: &expr::Pattern,
+    needed_keys: &[String],
+    scope_prefix: Option<&str>,
+    root_paths: &HashMap<i64, String>,
+    base_dir: &Path,
+) -> Vec<SampleDestination> {
+    let sample_sources: Vec<&&LockEntry> = sources.iter().take(SAMPLE_COUNT).collect();
+    if sample_sources.is_empty() {
+        return vec![];
+    }
+
+    // Fetch facts for sample sources only (same per-key pattern as plan_apply)
+    let sample_ids: Vec<i64> = sample_sources.iter().map(|s| s.id).collect();
+    let mut all_facts: HashMap<i64, Vec<crate::domain::fact::FactEntry>> = HashMap::new();
+    for key in needed_keys {
+        if key.starts_with("source.") || key.starts_with("scope.") || key == "object.hash" {
+            continue;
+        }
+        match repo::fact::batch_fetch_key_for_sources(conn, &sample_ids, key) {
+            Ok(key_facts) => {
+                for (source_id, entry_opt) in key_facts {
+                    if let Some(entry) = entry_opt {
+                        all_facts.entry(source_id).or_default().push(entry);
+                    }
+                }
+            }
+            Err(_) => return vec![], // Graceful degradation: skip samples on DB error
+        }
+    }
+
+    sample_sources
+        .iter()
+        .map(|source| {
+            match ops::apply::evaluate_pattern(
+                pattern, source, needed_keys, scope_prefix, root_paths, &all_facts,
+            ) {
+                Ok(dest_rel) => {
+                    let full_path = base_dir.join(&dest_rel);
+                    SampleDestination {
+                        dest_path: full_path.display().to_string(),
+                        error: None,
+                    }
+                }
+                Err(e) => SampleDestination {
+                    dest_path: String::new(),
+                    error: Some(format!("pattern error: {e}")),
+                },
+            }
+        })
+        .collect()
+}
+
 // Summary and confirmation helpers
 // ============================================================================
 
 fn print_apply_summary(
     config_path: &Path,
     base_dir: &Path,
+    pattern: &str,
     sources: &[&LockEntry],
     options: &ApplyOptions,
     root_paths: &HashMap<i64, String>,
+    sample_dests: &[SampleDestination],
 ) {
     eprintln!();
     eprintln!("=== Apply Summary ===");
     eprintln!("Manifest: {}", config_path.display());
     eprintln!("Destination: {}", base_dir.display());
+    eprintln!("Pattern: {pattern}");
 
     let mode_name = match options.transfer_mode {
         TransferMode::Copy => "copy",
@@ -468,6 +550,22 @@ fn print_apply_summary(
         eprintln!("Sources from:");
         for (path, count) in &root_entries {
             eprintln!("  {path}  ({count} files)");
+        }
+    }
+
+    // Show sample destinations
+    if !sample_dests.is_empty() {
+        eprintln!();
+        eprintln!("Sample destinations:");
+        for sample in sample_dests {
+            match &sample.error {
+                Some(err) => eprintln!("  ({err})"),
+                None => eprintln!("  {}", sample.dest_path),
+            }
+        }
+        let remaining = sources.len().saturating_sub(sample_dests.len());
+        if remaining > 0 {
+            eprintln!("  ... and {remaining} more");
         }
     }
 
@@ -562,7 +660,7 @@ impl ops::apply::TransferProgress for CliTransferProgress {
         }
     }
 
-    fn on_transfer(&self, index: usize, _total: usize, source_path: &str, outcome: &ops::apply::TransferOutcome) {
+    fn on_transfer(&self, index: usize, _total: usize, source_path: &str, dest_path: &str, outcome: &ops::apply::TransferOutcome) {
         if let Some(ref p) = *self.progress.borrow() {
             let filename = source_path.rsplit('/').next().unwrap_or(source_path);
             p.update_with_name(index, filename);
@@ -570,13 +668,13 @@ impl ops::apply::TransferProgress for CliTransferProgress {
         if self.verbose {
             match outcome {
                 ops::apply::TransferOutcome::Copied => {
-                    println!("Copied: {source_path}");
+                    println!("Copied: {source_path} -> {dest_path}");
                 }
                 ops::apply::TransferOutcome::Renamed => {
-                    println!("Renamed: {source_path}");
+                    println!("Renamed: {source_path} -> {dest_path}");
                 }
                 ops::apply::TransferOutcome::Moved => {
-                    println!("Moved: {source_path}");
+                    println!("Moved: {source_path} -> {dest_path}");
                 }
                 ops::apply::TransferOutcome::Error(msg) => {
                     eprintln!("Error processing {source_path}: {msg}");

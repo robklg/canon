@@ -165,7 +165,7 @@ fn build_eval_context(
 }
 
 /// Evaluate a pattern for a source, returning the destination relative path.
-fn evaluate_pattern(
+pub fn evaluate_pattern(
     pattern: &Pattern,
     source: &LockEntry,
     needed_keys: &[String],
@@ -458,7 +458,7 @@ pub trait TransferProgress {
     /// Called once before the transfer loop begins.
     fn on_start(&self, total: usize);
     /// Called after each transfer completes.
-    fn on_transfer(&self, index: usize, total: usize, source_path: &str, outcome: &TransferOutcome);
+    fn on_transfer(&self, index: usize, total: usize, source_path: &str, dest_path: &str, outcome: &TransferOutcome);
     /// Called once after the transfer loop ends.
     fn on_finish(&self);
 }
@@ -467,7 +467,7 @@ pub trait TransferProgress {
 pub struct NoopProgress;
 impl TransferProgress for NoopProgress {
     fn on_start(&self, _total: usize) {}
-    fn on_transfer(&self, _index: usize, _total: usize, _source_path: &str, _outcome: &TransferOutcome) {}
+    fn on_transfer(&self, _index: usize, _total: usize, _source_path: &str, _dest_path: &str, _outcome: &TransferOutcome) {}
     fn on_finish(&self) {}
 }
 
@@ -679,7 +679,9 @@ pub fn execute_apply(
             }
         }
 
-        progress.on_transfer(i, total, &transfer.source_path, &outcome);
+        let dest_full = params.base_dir.join(&transfer.dest_rel_path);
+        let dest_str = dest_full.display().to_string();
+        progress.on_transfer(i, total, &transfer.source_path, &dest_str, &outcome);
     }
 
     progress.on_finish();

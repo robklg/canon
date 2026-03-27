@@ -529,9 +529,9 @@ enum ClusterAction {
         /// Show which files were excluded because they're already archived
         #[arg(long)]
         show_archived: bool,
-        /// Open manifest in $VISUAL/$EDITOR after generation
-        #[arg(short = 'e', long)]
-        edit: bool,
+        /// Don't open manifest in $VISUAL/$EDITOR after generation
+        #[arg(long)]
+        no_edit: bool,
     },
     /// Regenerate lock file from existing manifest config
     Refresh {
@@ -540,6 +540,9 @@ enum ClusterAction {
         /// Show which files were excluded because they're already archived
         #[arg(long)]
         show_archived: bool,
+        /// Don't open manifest in $VISUAL/$EDITOR after refresh
+        #[arg(long)]
+        no_edit: bool,
     },
 }
 
@@ -893,7 +896,7 @@ fn main() -> Result<()> {
                 force,
                 allow,
                 show_archived,
-                edit,
+                no_edit,
             } => {
                 let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = cluster::GenerateOptions {
@@ -901,7 +904,7 @@ fn main() -> Result<()> {
                     allow_archived: allow.contains(&ClusterAllow::Archived),
                     allow_duplicates: allow.contains(&ClusterAllow::Duplicates),
                     show_archived,
-                    edit,
+                    no_edit,
                 };
                 let output_path = if let Some(name) = dest_output {
                     dest.join(name)
@@ -926,8 +929,9 @@ fn main() -> Result<()> {
             ClusterAction::Refresh {
                 manifest,
                 show_archived,
+                no_edit,
             } => {
-                cluster::refresh(&mut db, &manifest, show_archived)?;
+                cluster::refresh(&mut db, &manifest, show_archived, no_edit)?;
             }
         },
         Commands::Apply {

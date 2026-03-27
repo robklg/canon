@@ -355,6 +355,13 @@ pub fn execute_generate(
     plan: &ClusterGeneratePlan,
     params: &ExecuteGenerateParams,
 ) -> Result<ExecuteGenerateResult> {
+    // Create destination directory if needed (after plan confirmed sources exist)
+    if let Some(parent) = params.manifest_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!("Failed to create directory: {}", parent.display())
+        })?;
+    }
+
     // Write JSONL lock file
     write_lock_file(&params.lock_path, &plan.lock_entries)?;
 
@@ -422,7 +429,7 @@ pub fn execute_generate(
         toml_str.trim_end(),
         fact_help
     );
-    fs::write(&params.manifest_path, &manifest).with_context(|| {
+    write_and_sync(&params.manifest_path, &manifest).with_context(|| {
         format!(
             "Failed to write manifest to {}",
             params.manifest_path.display()
@@ -468,7 +475,7 @@ pub fn execute_refresh(
         config.meta.version = params.config.meta.version;
         let toml_str =
             toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
-        fs::write(&params.manifest_path, &toml_str).with_context(|| {
+        write_and_sync(&params.manifest_path, &toml_str).with_context(|| {
             format!(
                 "Failed to write config: {}",
                 params.manifest_path.display()
@@ -521,7 +528,7 @@ pub fn execute_refresh(
         toml_str.trim_end(),
         fact_help
     );
-    fs::write(&params.manifest_path, &manifest).with_context(|| {
+    write_and_sync(&params.manifest_path, &manifest).with_context(|| {
         format!(
             "Failed to write config: {}",
             params.manifest_path.display()
@@ -700,6 +707,17 @@ fn get_fact_description(key: &str) -> String {
 // ============================================================================
 // Manifest content helpers (moved from interface layer)
 // ============================================================================
+
+/// Write content to a file and fsync to ensure it's flushed to disk.
+/// This prevents race conditions when opening the file in an editor
+/// immediately after writing, especially on network volumes (NAS/SMB).
+fn write_and_sync(path: &Path, content: &str) -> Result<()> {
+    use std::io::Write as _;
+    let mut file = fs::File::create(path)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
 
 /// Write a JSONL lock file from lock entries.
 fn write_lock_file(lock_path: &Path, entries: &[LockEntry]) -> Result<()> {
