@@ -402,7 +402,7 @@ pub fn execute_generate(
                   #\n";
     let summary = generate_summary_comments(plan);
     let notes_block = "# === Notes ===\n#\n";
-    let fact_help = generate_fact_help(plan.lock_entries.len(), &plan.full_coverage_facts);
+    let fact_help = generate_fact_help(plan.lock_entries.len(), &plan.full_coverage_facts, config.meta.scope.is_some());
 
     let toml_str =
         toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
@@ -516,7 +516,7 @@ pub fn execute_refresh(
     let summary = generate_summary_comments(plan);
     let notes = extract_notes(&params.old_manifest_content).unwrap_or_else(|| "\n#\n".to_string());
     let notes_block = format!("# === Notes ==={notes}");
-    let fact_help = generate_fact_help(plan.lock_entries.len(), &plan.full_coverage_facts);
+    let fact_help = generate_fact_help(plan.lock_entries.len(), &plan.full_coverage_facts, config.meta.scope.is_some());
 
     let toml_str =
         toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
@@ -792,6 +792,7 @@ fn generate_summary_comments(plan: &ClusterGeneratePlan) -> String {
 fn generate_fact_help(
     source_count: usize,
     full_coverage_facts: &[(String, FactType, String)],
+    has_scope: bool,
 ) -> String {
     use crate::expr::{BuiltinKeyVisibility, Modifier, ModifierCategory};
     use strum::IntoEnumIterator;
@@ -825,6 +826,12 @@ fn generate_fact_help(
         "#   {:18} {:6} - {}\n",
         "object.hash", "text", "Content hash (if hashed)"
     ));
+    if has_scope {
+        help.push_str(&format!(
+            "#   {:18} {:6} - {}\n",
+            "scope.rel_path", "path", "Path relative to the manifest scope"
+        ));
+    }
     help.push_str("#\n");
 
     // User facts with 100% coverage
