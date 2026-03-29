@@ -205,6 +205,20 @@ fn noclobber_rename(src: &Path, dest: &Path) -> Result<()> {
         if err.raw_os_error() == Some(libc::EEXIST) {
             bail!("Destination already exists: {}", dest.display());
         }
+        // ENOTSUP: filesystem doesn't support renamex_np (e.g., SMB/NFS).
+        // Fall back to stat-then-rename.
+        if err.raw_os_error() == Some(libc::ENOTSUP) {
+            if dest.exists() {
+                bail!("Destination already exists: {}", dest.display());
+            }
+            return fs::rename(src, dest).with_context(|| {
+                format!(
+                    "Failed to rename {} to {}",
+                    src.display(),
+                    dest.display()
+                )
+            });
+        }
         Err(err).with_context(|| {
             format!(
                 "Failed to rename {} to {}",

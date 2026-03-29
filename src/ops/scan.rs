@@ -617,7 +617,7 @@ pub fn hash_files(
         let hash_value = match crate::ops::fs::compute_full_hash(&file.full_path) {
             Ok(h) => h,
             Err(e) => {
-                progress.on_hash_error(&file.full_path, &e.to_string());
+                progress.on_hash_error(&file.full_path, &format!("{:#}", e));
                 stats.errors += 1;
                 continue;
             }

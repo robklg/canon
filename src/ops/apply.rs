@@ -106,8 +106,6 @@ pub struct ApplyViolations {
     pub expansion_failures: Vec<(String, String)>,
     /// Destination paths with multiple sources: (dest_rel_path, source_paths).
     pub collisions: Vec<(String, Vec<String>)>,
-    /// Destination paths with stale DB records (present=1, file likely missing).
-    pub stale_records: Vec<String>,
     /// Destination paths already occupied in DB (non-resume mode only).
     pub dest_conflicts_in_db: Vec<String>,
     /// Sources whose content already exists in destination archive:
@@ -333,12 +331,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
             &archive_rel_paths,
         )?;
 
-        // Stale records: any dest path already in DB (in regular mode, this is unexpected)
-        let mut stale_records: Vec<String> = paths.iter().cloned().collect();
-        stale_records.sort();
-        violations.stale_records = stale_records;
-
-        // Destination conflicts (non-resume only)
+        // Destination conflicts: dest paths already registered in archive DB
         let mut dest_conflicts: Vec<String> = paths.iter().cloned().collect();
         dest_conflicts.sort();
         violations.dest_conflicts_in_db = dest_conflicts;
@@ -819,7 +812,7 @@ pub fn execute_apply(
             params.archive_root_id,
         ) {
             Ok(outcome) => outcome,
-            Err(e) => TransferOutcome::Error(e.to_string()),
+            Err(e) => TransferOutcome::Error(format!("{:#}", e)),
         };
 
         match &outcome {
@@ -1500,7 +1493,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_plan_apply_detects_stale_records() {
+    fn test_plan_apply_detects_dest_conflicts_in_db() {
         let mut conn = setup_test_db();
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
@@ -1520,8 +1513,8 @@ mod tests {
         let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
-        assert_eq!(plan.violations.stale_records.len(), 1);
-        assert_eq!(plan.violations.stale_records[0], "photo.jpg");
+        assert_eq!(plan.violations.dest_conflicts_in_db.len(), 1);
+        assert_eq!(plan.violations.dest_conflicts_in_db[0], "photo.jpg");
     }
 
     #[test]
@@ -1594,8 +1587,7 @@ mod tests {
 
         // In resume mode, dest_conflicts_in_db is not populated
         assert!(plan.violations.dest_conflicts_in_db.is_empty());
-        // stale_records not populated in resume mode
-        assert!(plan.violations.stale_records.is_empty());
+        // dest_conflicts_in_db not populated in resume mode (skipped)
         // File classified as "already there" by filesystem check
         assert!(plan.transfers.is_empty());
         assert_eq!(plan.already_archived_count, 1);

@@ -315,23 +315,6 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         bail!("Aborting due to destination collisions");
     }
 
-    if !v.stale_records.is_empty() {
-        eprintln!(
-            "Error: {} destination paths have stale database records:",
-            v.stale_records.len()
-        );
-        for path in v.stale_records.iter().take(10) {
-            eprintln!("  {path}");
-        }
-        if v.stale_records.len() > 10 {
-            eprintln!("  ... and {} more", v.stale_records.len() - 10);
-        }
-        eprintln!();
-        eprintln!("These paths are marked as present in the database but the files are missing.");
-        eprintln!("Run 'canon scan <archive-path>' to update the database, then retry.");
-        bail!("Aborting due to stale destination records");
-    }
-
     // Destination path conflicts (non-resume only):
     // DB conflicts come from plan, disk-only conflicts checked via ops layer
     if !options.resume {
