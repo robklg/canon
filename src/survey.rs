@@ -60,7 +60,7 @@ pub struct SurveyOptions {
 
 pub fn run(
     db: &mut repo::Db,
-    paths: &[PathBuf],
+    scope_prefixes: &[String],
     filter_strs: &[String],
     options: &SurveyOptions,
 ) -> Result<()> {
@@ -90,10 +90,7 @@ pub fn run(
     // Fetch all roots and sources upfront
     let all_roots = repo::root::fetch_all(conn)?;
 
-    // Scope is now resolved by the caller via scope::resolve_scope() and passed as paths.
-    // Resolve scope prefixes for display and validation.
-    let scope_prefixes = domain::path::resolve_paths(paths, &all_roots)?;
-    domain::path::warn_nonexistent_scope_paths(&scope_prefixes, &all_roots);
+    // Scope is already resolved by the caller via scope::resolve_scope().
 
     // Fetch note context for scope (before compute_survey borrows conn)
     let note_context = if scope_prefixes.len() == 1 {
@@ -114,7 +111,7 @@ pub fn run(
     // Resolve --other paths (same soft resolution as scope paths)
     let other_resolved = if !options.other_paths.is_empty() {
         let resolved = domain::path::resolve_paths(&options.other_paths, &all_roots)?;
-        domain::path::warn_nonexistent_scope_paths(&resolved, &all_roots);
+        crate::ops::scope::validate_sources_exist(conn, &resolved, &all_roots)?;
         resolved
     } else {
         Vec::new()
@@ -154,11 +151,10 @@ pub fn run(
 
     match crate::ops::survey::compute_survey(
         conn,
-        paths,
+        scope_prefixes,
         &filters,
         &params,
         &all_sources,
-        &all_roots,
         &other_resolved,
         archive_root_id,
     )? {
@@ -1014,7 +1010,7 @@ mod tests {
             affinity: true,
             ..test_options()
         };
-        let paths = vec![PathBuf::from("/mnt/drive")];
+        let paths = vec!["/mnt/drive".to_string()];
         let filter_strs: Vec<String> = vec![];
 
         let mut db = repo::Db::from_connection(conn);
@@ -1037,7 +1033,7 @@ mod tests {
             detail: Some(DetailMode::Residual),
             ..test_options()
         };
-        let paths = vec![PathBuf::from("/mnt/drive")];
+        let paths = vec!["/mnt/drive".to_string()];
         let filter_strs: Vec<String> = vec![];
 
         let mut db = repo::Db::from_connection(conn);

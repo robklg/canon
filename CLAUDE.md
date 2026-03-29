@@ -42,7 +42,7 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 
 **Repository Layer** (`src/repo/`) - Database access:
 - `db.rs` - Connection, schema, transactions (`Db`, `open_with_options()`)
-- `source.rs` - Source batch fetching and writes (`batch_fetch_by_roots()`, `fetch_sources_by_object_ids()`, `insert_destination()`, `apply_reconciliation()`)
+- `source.rs` - Source batch fetching and writes (`batch_fetch_by_roots()`, `fetch_sources_by_object_ids()`, `insert_destination()`, `apply_reconciliation()`, `sources_exist_at_scope()`)
 - `root.rs` - Root batch fetching (`fetch_all()`, `batch_fetch_by_ids()`)
 - `object.rs` - Object batch fetching, archive detection (`batch_check_archived()`, `batch_find_archive_info_by_hash()`)
 - `note.rs` - Note CRUD operations, subtree queries, batch counts, temporal/spatial listing queries (`insert()`, `fetch_by_scope()`, `fetch_subtree()`, `fetch_recent()`, `fetch_recent_subtree()`, `fetch_locations()`, `fetch_locations_subtree()`, `clear_by_scope()`, `clear_subtree()`, `batch_count_subtree()`)
@@ -215,7 +215,8 @@ Used with `--root`, `--archive` flags:
 
 In `ops/scope.rs` (operations layer):
 - `ResolvedScope` struct - Result of scope resolution: prefixes, from_cwd flag, auto_include_archived
-- `resolve_scope()` - Unified scope resolution for discovery commands: CWD defaulting, `--global` handling, non-root validation. Composed behavior returning a typed result — same pattern as `select_sources()`.
+- `resolve_scope(conn, paths, global, roots)` - Unified scope resolution: CWD defaulting, `--global` handling, root membership validation, **source-existence validation** (DB-only, errors on unknown subpaths). Takes `&Connection` for the source-existence query. Returns pre-resolved `Vec<String>` prefixes — command modules receive these directly, no re-resolution needed.
+- `validate_sources_exist(conn, paths, roots)` - Standalone source-existence check for commands that don't use `resolve_scope()` (compare, exclude duplicates). Errors on first path with no known sources. Skips root-level paths.
 
 In `scope.rs` (interface layer):
 - `print_report_scope()` - Scope header for report commands (stdout, natural: "Facts: /path" or "Facts: all roots")
@@ -552,8 +553,8 @@ let selection = ops::selection::select_sources(conn, &params)?;
 **Path Handling Principle: SQL NEVER constructs or compares paths.**
 - **Repo layer** returns `Source` objects with `root_path` populated (via JOIN)
 - **Domain layer** computes paths using `Source::path()` and compares using `path_is_under()`. Path resolution utilities (`resolve_paths()`, `resolve_path()`) live in `domain/path.rs` — soft resolution that matches against known roots in the DB (works offline), falling back to `fs::canonicalize` only when no root matches.
-- **Operations layer** resolves scope for discovery commands via `ops::scope::resolve_scope()` — CWD defaulting, `--global` handling, non-root validation, auto-include-archived detection. This is composed behavioral policy (deciding *what* scope to use), not CLI parsing.
-- **Interface layer** parses CLI path arguments, calls `ops::scope::resolve_scope()`, and formats scope display. File-accessing commands (scan) use `fs::canonicalize` directly — hard resolution that requires the path to exist on disk.
+- **Operations layer** resolves scope via `ops::scope::resolve_scope()` — CWD defaulting, `--global` handling, root membership validation, **source-existence validation** (DB-only, errors on unknown subpaths). Scope resolution is the single pipeline for path validation — command modules receive pre-resolved `&[String]` prefixes and go directly to `ScopeMatch::classify_all()`. No re-resolution in command modules.
+- **Interface layer** parses CLI path arguments, calls `ops::scope::resolve_scope()`, passes resolved prefixes to command modules, and formats scope display. File-accessing commands (scan) use `fs::canonicalize` directly — hard resolution that requires the path to exist on disk.
 - See `domain/exclusion.rs` for the reference implementation
 
 **When Adding New Features:**

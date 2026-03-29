@@ -1,18 +1,16 @@
 use anyhow::Result;
 use std::io::{self, Write};
-use std::path::PathBuf;
 
-use crate::domain::path::resolve_paths;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::ops;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
-use crate::repo::{self, Db};
+use crate::repo::Db;
 
 pub fn run(
     db: &mut Db,
-    scope_paths: &[PathBuf],
+    scope_prefixes: &[String],
     filter_strs: &[String],
     include: &IncludeSet,
     unique_content: bool,
@@ -26,10 +24,7 @@ pub fn run(
 
     let conn = db.conn_mut();
 
-    // Resolve scope paths
-    let all_roots = repo::root::fetch_all(conn)?;
-    let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
 
     let params = SelectionParams {
         scopes,

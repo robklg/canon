@@ -689,14 +689,12 @@ fn main() -> Result<()> {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
             let mut include = include_set_from(&include);
             let all_roots = repo::root::fetch_all(db.conn())?;
-            let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
+            let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
             if resolved.auto_include_archived {
                 include.archived = true;
             }
-            let scope_paths: Vec<PathBuf> =
-                resolved.prefixes.iter().map(PathBuf::from).collect();
             scope::print_list_scope(&resolved);
-            worklist::run(&mut db, &scope_paths, &filters, &include, unique_content, &emit)?;
+            worklist::run(&mut db, &resolved.prefixes, &filters, &include, unique_content, &emit)?;
         }
         Commands::ImportFacts { allow, verbose } => {
             let allow_archived = allow.contains(&ImportFactsAllow::Archived);
@@ -717,14 +715,11 @@ fn main() -> Result<()> {
             let mut include = include_set_from(&include);
 
             let all_roots = repo::root::fetch_all(db.conn())?;
-            let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
+            let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
             if resolved.auto_include_archived {
                 include.archived = true;
             }
 
-            // Convert resolved scope to PathBuf for command modules
-            let scope_paths: Vec<PathBuf> =
-                resolved.prefixes.iter().map(PathBuf::from).collect();
             let use_relative = resolved.from_cwd;
 
             scope::print_list_scope(&resolved);
@@ -732,8 +727,7 @@ fn main() -> Result<()> {
             if duplicates {
                 ls::show_duplicates(
                     &mut db,
-                    &scope_paths,
-                    &all_roots,
+                    &resolved.prefixes,
                     &filters,
                     &include,
                     use_relative,
@@ -741,8 +735,7 @@ fn main() -> Result<()> {
             } else {
                 ls::run(
                     &mut db,
-                    &scope_paths,
-                    &all_roots,
+                    &resolved.prefixes,
                     &filters,
                     &include,
                     use_relative,
@@ -780,27 +773,27 @@ fn main() -> Result<()> {
                     yes,
                 }) => {
                     let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+                    let all_roots = repo::root::fetch_all(db.conn())?;
+                    let resolved = ops::scope::resolve_scope(db.conn(), &paths, false, &all_roots)?;
                     let options = facts::DeleteOptions {
                         entity_type: on,
                         value_type,
                         dry_run: !yes,
                     };
-                    facts::delete_facts(&mut db, &key, &paths, &filters, &options)?;
+                    facts::delete_facts(&mut db, &key, &resolved.prefixes, &filters, &options)?;
                 }
                 None => {
                     let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                     let mut include = include_set_from(&include);
                     let all_roots = repo::root::fetch_all(db.conn())?;
-                    let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
+                    let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
                     if resolved.auto_include_archived {
                         include.archived = true;
                     }
-                    let scope_paths: Vec<PathBuf> =
-                        resolved.prefixes.iter().map(PathBuf::from).collect();
                     facts::run(
                         &mut db,
                         key.as_deref(),
-                        &scope_paths,
+                        &resolved.prefixes,
                         &filters,
                         limit,
                         all,
@@ -842,15 +835,13 @@ fn main() -> Result<()> {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
             let mut include = include_set_from(&include);
             let all_roots = repo::root::fetch_all(db.conn())?;
-            let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
+            let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
             if resolved.auto_include_archived {
                 include.archived = true;
             }
-            let scope_paths: Vec<PathBuf> =
-                resolved.prefixes.iter().map(PathBuf::from).collect();
             coverage::run(
                 &mut db,
-                &scope_paths,
+                &resolved.prefixes,
                 &filters,
                 archive.as_deref(),
                 &include,
@@ -877,12 +868,11 @@ fn main() -> Result<()> {
                 bail!("--include archived is not valid for survey");
             }
             let all_roots = repo::root::fetch_all(db.conn())?;
-            let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
+            let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
             if resolved.auto_include_archived {
                 include.archived = true;
             }
-            let scope_paths: Vec<PathBuf> =
-                resolved.prefixes.iter().map(PathBuf::from).collect();
+            let scope_prefixes = resolved.prefixes.clone();
             let options = survey::SurveyOptions {
                 original_filters: filters,
                 include,
@@ -895,7 +885,7 @@ fn main() -> Result<()> {
                 verbose,
                 scope: resolved,
             };
-            survey::run(&mut db, &scope_paths, &expanded, &options)?;
+            survey::run(&mut db, &scope_prefixes, &expanded, &options)?;
         }
         Commands::Compare {
             paths,
@@ -941,9 +931,7 @@ fn main() -> Result<()> {
             } => {
                 let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
                 let all_roots = repo::root::fetch_all(db.conn())?;
-                let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
-                let scope_paths: Vec<PathBuf> =
-                    resolved.prefixes.iter().map(PathBuf::from).collect();
+                let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
                 let options = cluster::GenerateOptions {
                     force,
                     allow_archived: allow.contains(&ClusterAllow::Archived),
@@ -963,7 +951,7 @@ fn main() -> Result<()> {
                 };
                 cluster::generate(
                     &mut db,
-                    &scope_paths,
+                    &resolved.prefixes,
                     &filters,
                     &expanded,
                     &dest,
@@ -1031,10 +1019,8 @@ fn main() -> Result<()> {
                     exclude::set_by_path(&db, &paths[0], &options)?;
                 } else {
                     let all_roots = repo::root::fetch_all(db.conn())?;
-                    let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
-                    let scope_paths: Vec<PathBuf> =
-                        resolved.prefixes.iter().map(PathBuf::from).collect();
-                    exclude::set(&mut db, &scope_paths, &filters, &options)?;
+                    let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+                    exclude::set(&mut db, &resolved.prefixes, &filters, &options)?;
                 }
             }
             ExcludeAction::Clear {
@@ -1047,10 +1033,8 @@ fn main() -> Result<()> {
                 let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::ClearOptions { dry_run, yes };
                 let all_roots = repo::root::fetch_all(db.conn())?;
-                let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
-                let scope_paths: Vec<PathBuf> =
-                    resolved.prefixes.iter().map(PathBuf::from).collect();
-                exclude::clear(&mut db, &scope_paths, &filters, &options)?;
+                let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+                exclude::clear(&mut db, &resolved.prefixes, &filters, &options)?;
             }
             ExcludeAction::Duplicates {
                 path,
@@ -1090,13 +1074,11 @@ fn main() -> Result<()> {
                     exclude::set_object_by_file(&db, &paths[0], &options)?;
                 } else {
                     let all_roots = repo::root::fetch_all(db.conn())?;
-                    let resolved = ops::scope::resolve_scope(&paths, global, &all_roots)?;
-                    let scope_paths: Vec<PathBuf> =
-                        resolved.prefixes.iter().map(PathBuf::from).collect();
-                    if scope_paths.is_empty() && filters.is_empty() {
+                    let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+                    if resolved.prefixes.is_empty() && filters.is_empty() {
                         anyhow::bail!("Provide a hash (--hash), file path, or filters (--where)");
                     }
-                    exclude::set_objects_by_filter(&mut db, &scope_paths, &filters, &options)?;
+                    exclude::set_objects_by_filter(&mut db, &resolved.prefixes, &filters, &options)?;
                 }
             }
             ExcludeAction::ClearObject { hash, dry_run } => {

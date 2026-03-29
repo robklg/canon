@@ -1,9 +1,8 @@
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::ceremony::format_count;
-use crate::domain::path::{resolve_paths, validate_paths_in_roots};
 use crate::domain::root::resolve_archive_path;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::Filter;
@@ -25,7 +24,7 @@ pub struct GenerateOptions {
 
 pub fn generate(
     db: &mut Db,
-    scope_paths: &[PathBuf],
+    scope_prefixes: &[String],
     original_filters: &[String],
     expanded_filters: &[String],
     dest: &Path,
@@ -42,21 +41,17 @@ pub fn generate(
     }
 
     // Require at least one of path scope or filters
-    if scope_paths.is_empty() && expanded_filters.is_empty() {
+    if scope_prefixes.is_empty() && expanded_filters.is_empty() {
         bail!("At least one of path or --where filter is required");
     }
 
     let conn = db.conn_mut();
 
-    // Fetch all roots for path resolution
+    // Fetch all roots for archive path resolution
     let all_roots = repo::root::fetch_all(conn)?;
 
     // Resolve destination to archive root + relative subdir
     let (archive_root_id, _archive_root_path, base_dir) = resolve_archive_path(&all_roots, dest)?;
-
-    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
-    let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
-    validate_paths_in_roots(&scope_prefixes, &all_roots)?;
 
     let parsed_filters: Vec<Filter> = expanded_filters
         .iter()
@@ -64,7 +59,7 @@ pub fn generate(
         .collect::<Result<Vec<_>>>()?;
 
     // Plan
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
     let params = ClusterGenerateParams {
         scopes,
         filters: parsed_filters,
@@ -88,7 +83,7 @@ pub fn generate(
         manifest_path: output_path.to_path_buf(),
         expanded_filters: expanded_filters.to_vec(),
         original_filters: original_filters.to_vec(),
-        scope_prefixes,
+        scope_prefixes: scope_prefixes.to_vec(),
         archive_root_id,
         base_dir,
         allow: allow_values_to_strings(options),

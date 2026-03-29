@@ -282,6 +282,27 @@ pub fn fetch_by_inode(conn: &Connection, device: u64, inode: u64) -> Result<Opti
 ///
 /// # Example
 /// ```ignore
+/// Check if any sources (current or historical) exist at or under a scope path.
+/// Includes present=0 records — Canon once knew this place.
+/// Returns true if at least one source record exists.
+pub fn sources_exist_at_scope(conn: &Connection, root_id: i64, rel_path: &str) -> Result<bool> {
+    let exists: bool = if rel_path.is_empty() {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sources WHERE root_id = ?)",
+            rusqlite::params![root_id],
+            |row| row.get(0),
+        )?
+    } else {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sources WHERE root_id = ? \
+             AND (rel_path = ? OR rel_path LIKE ? || '/%'))",
+            rusqlite::params![root_id, rel_path, rel_path],
+            |row| row.get(0),
+        )?
+    };
+    Ok(exists)
+}
+
 /// let existing = batch_check_paths_exist(conn, archive_id, &["2024/a.jpg", "2024/b.jpg"])?;
 /// if existing.contains("2024/a.jpg") {
 ///     // This path is already occupied
@@ -2483,5 +2504,81 @@ mod tests {
         // Should not error when source doesn't exist
         let result = set_object_id(&conn, 99999, object_id);
         assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // sources_exist_at_scope tests
+    // =========================================================================
+
+    #[test]
+    fn sources_exist_at_scope_with_present() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        insert_test_source(&conn, root_id, "a/1.jpg", 1, 1, 1000, 100);
+
+        assert!(sources_exist_at_scope(&conn, root_id, "a").unwrap());
+    }
+
+    #[test]
+    fn sources_exist_at_scope_with_non_present() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let source_id = insert_test_source(&conn, root_id, "a/1.jpg", 1, 1, 1000, 100);
+        // Mark as not present
+        conn.execute(
+            "UPDATE sources SET present = 0 WHERE id = ?",
+            rusqlite::params![source_id],
+        )
+        .unwrap();
+
+        // Should still return true — Canon knew this place
+        assert!(sources_exist_at_scope(&conn, root_id, "a").unwrap());
+    }
+
+    #[test]
+    fn sources_exist_at_scope_no_sources() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        assert!(!sources_exist_at_scope(&conn, root_id, "nonexistent").unwrap());
+    }
+
+    #[test]
+    fn sources_exist_at_scope_descendant() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        insert_test_source(&conn, root_id, "a/b/c/1.jpg", 1, 1, 1000, 100);
+
+        // Scope "a" should find descendant at "a/b/c/1.jpg"
+        assert!(sources_exist_at_scope(&conn, root_id, "a").unwrap());
+    }
+
+    #[test]
+    fn sources_exist_at_scope_no_false_prefix() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        insert_test_source(&conn, root_id, "ab/1.jpg", 1, 1, 1000, 100);
+
+        // Scope "a" should NOT match "ab/1.jpg"
+        assert!(!sources_exist_at_scope(&conn, root_id, "a").unwrap());
+    }
+
+    #[test]
+    fn sources_exist_at_scope_root_level() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        insert_test_source(&conn, root_id, "1.jpg", 1, 1, 1000, 100);
+
+        // Empty rel_path = root level
+        assert!(sources_exist_at_scope(&conn, root_id, "").unwrap());
+    }
+
+    #[test]
+    fn sources_exist_at_scope_root_level_empty() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        // Root with no sources
+        assert!(!sources_exist_at_scope(&conn, root_id, "").unwrap());
     }
 }

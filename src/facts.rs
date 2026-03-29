@@ -1,8 +1,6 @@
 use anyhow::{bail, Result};
-use std::path::PathBuf;
 
 use crate::ceremony;
-use crate::domain::path::resolve_paths;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
@@ -10,7 +8,7 @@ use crate::expr::{BuiltinKey, BuiltinKeyCategory, ParsedFactKey};
 use crate::ops;
 use crate::ops::facts::{AllKeysResult, DistributionResult, GroupedDistributionResult};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
-use crate::repo::{self, Db};
+use crate::repo::Db;
 use crate::ops::scope::ResolvedScope;
 
 /// Check if a parsed key represents source.root (for special display formatting)
@@ -27,7 +25,7 @@ fn get_fact_category(key: &str) -> BuiltinKeyCategory {
 pub fn run(
     db: &mut Db,
     key_arg: Option<&str>,
-    scope_paths: &[PathBuf],
+    scope_prefixes: &[String],
     filter_strs: &[String],
     limit: usize,
     show_all: bool,
@@ -58,11 +56,7 @@ pub fn run(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
-    let all_roots = repo::root::fetch_all(conn)?;
-    let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
-
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
     let params = SelectionParams {
         scopes,
         include: include.clone(),
@@ -438,7 +432,7 @@ pub struct DeleteOptions {
 pub fn delete_facts(
     db: &mut Db,
     key: &str,
-    scope_paths: &[PathBuf],
+    scope_prefixes: &[String],
     filter_strs: &[String],
     options: &DeleteOptions,
 ) -> Result<()> {
@@ -459,10 +453,7 @@ pub fn delete_facts(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths
-    let all_roots = repo::root::fetch_all(conn)?;
-    let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
 
     // Select all sources (include all for delete operations)
     let include_all = IncludeSet {

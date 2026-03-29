@@ -35,6 +35,13 @@ pub fn run(
     let prefix_a = resolve_path(path_a, &all_roots, &cwd)?;
     let prefix_b = resolve_path(path_b, &all_roots, &cwd)?;
 
+    // Validate source existence for both paths
+    crate::ops::scope::validate_sources_exist(
+        conn,
+        &[prefix_a.clone(), prefix_b.clone()],
+        &all_roots,
+    )?;
+
     // Query sources in each scope
     let (sources_a, unhashed_a, used_status_a, excluded_count_a) =
         select_and_build_map(conn, &prefix_a, &filters, &options.include)?;

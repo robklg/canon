@@ -1,8 +1,6 @@
 use anyhow::Result;
-use std::path::PathBuf;
 
 use crate::ceremony;
-use crate::domain::path::resolve_paths;
 use crate::domain::root::parse_root_spec;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
@@ -14,7 +12,7 @@ use crate::ops::scope::ResolvedScope;
 
 pub fn run(
     db: &mut Db,
-    scope_paths: &[PathBuf],
+    scope_prefixes: &[String],
     filter_strs: &[String],
     archive_spec: Option<&str>,
     include: &IncludeSet,
@@ -29,12 +27,10 @@ pub fn run(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Fetch all roots for path and spec resolution
+    // Fetch all roots for spec resolution
     let roots = repo::root::fetch_all(conn)?;
 
-    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
-    let scope_prefixes = resolve_paths(scope_paths, &roots)?;
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
 
     // Parse and validate archive spec (must be archive role)
     let archive_root_id = if let Some(spec) = archive_spec {

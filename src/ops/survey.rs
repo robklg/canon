@@ -8,7 +8,6 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 
 use crate::domain;
 use crate::domain::scope::ScopeMatch;
@@ -105,17 +104,14 @@ pub struct LocationResult {
 /// other paths. Returns a typed outcome for the interface to format.
 pub fn compute_survey(
     conn: &mut Connection,
-    paths: &[PathBuf],
+    scope_prefixes: &[String],
     filters: &[Filter],
     params: &SurveyParams,
     all_sources: &[Source],
-    all_roots: &[domain::Root],
     other_paths: &[String],
     archive_root_id: Option<i64>,
 ) -> Result<SurveyOutcome> {
-    // Resolve scope paths (soft resolution — offline-capable)
-    let scope_prefixes = domain::path::resolve_paths(paths, all_roots)?;
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
 
     // Build selection from domain predicates (asymmetric visibility model)
     let selection: Vec<&Source> = all_sources
@@ -572,25 +568,24 @@ mod tests {
         scope_paths: &[&str],
         params: &SurveyParams,
         filters: &[Filter],
-        other_paths: &[PathBuf],
+        other_paths: &[&str],
         archive_root_id: Option<i64>,
     ) -> SurveyOutcome {
-        let all_roots = crate::repo::root::fetch_all(conn).unwrap();
-        let root_ids: Vec<i64> = all_roots.iter().map(|r| r.id).collect();
+        let root_ids: Vec<i64> = crate::repo::root::fetch_all(conn)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
         let all_sources = crate::repo::source::batch_fetch_by_roots(conn, &root_ids).unwrap();
 
-        let paths: Vec<PathBuf> = scope_paths.iter().map(PathBuf::from).collect();
-        let other: Vec<String> = other_paths
-            .iter()
-            .map(|p| p.to_string_lossy().to_string())
-            .collect();
+        let prefixes: Vec<String> = scope_paths.iter().map(|s| s.to_string()).collect();
+        let other: Vec<String> = other_paths.iter().map(|s| s.to_string()).collect();
         compute_survey(
             conn,
-            &paths,
+            &prefixes,
             filters,
             params,
             &all_sources,
-            &all_roots,
             &other,
             archive_root_id,
         )
@@ -1283,7 +1278,7 @@ mod tests {
             ..test_params()
         };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
-        let other = vec![PathBuf::from("/mnt/backup/trip")];
+        let other = vec![("/mnt/backup/trip")];
         let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &other, None);
 
         match outcome {
@@ -1324,7 +1319,7 @@ mod tests {
             ..test_params()
         };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
-        let other = vec![PathBuf::from("/mnt/backup")];
+        let other = vec![("/mnt/backup")];
         let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &other, None);
 
         match outcome {
@@ -1359,7 +1354,7 @@ mod tests {
 
         insert_source(&conn, root_c, "backup/a.jpg", Some(obj1));
 
-        let other = vec![PathBuf::from("/mnt/root-c"), PathBuf::from("/mnt/root-b")];
+        let other = vec![("/mnt/root-c"), ("/mnt/root-b")];
         let params = test_params();
         let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &[], &other, None);
 
@@ -1398,7 +1393,7 @@ mod tests {
             ..test_params()
         };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
-        let other = vec![PathBuf::from("/archive")];
+        let other = vec![("/archive")];
         let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &other, None);
 
         match outcome {
@@ -1517,7 +1512,7 @@ mod tests {
         // affinity: true + brief: true → compute_affinity: false
         let params = test_params();
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
-        let other = vec![PathBuf::from("/mnt/backup/trip")];
+        let other = vec![("/mnt/backup/trip")];
         let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &other, None);
 
         match outcome {
@@ -1554,7 +1549,7 @@ mod tests {
             ..test_params()
         };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
-        let other = vec![PathBuf::from("/mnt/drive/documents")];
+        let other = vec![("/mnt/drive/documents")];
         let outcome = run_compute(&mut conn, &["/mnt/drive/photos"], &params, &filters, &other, None);
 
         match outcome {
@@ -1815,7 +1810,7 @@ mod tests {
             ..test_params()
         };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
-        let other = vec![PathBuf::from("/mnt/backup")];
+        let other = vec![("/mnt/backup")];
         let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &other, None);
 
         match outcome {
@@ -2373,7 +2368,7 @@ mod tests {
             compute_overlap_pairs: true,
             ..test_params()
         };
-        let other = vec![PathBuf::from("/mnt/backup/trip")];
+        let other = vec![("/mnt/backup/trip")];
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
 
         match outcome {
@@ -2440,7 +2435,7 @@ mod tests {
             compute_overlap_pairs: true,
             ..test_params()
         };
-        let other = vec![PathBuf::from("/mnt/backup")];
+        let other = vec![("/mnt/backup")];
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
 
         match outcome {
@@ -2575,7 +2570,7 @@ mod tests {
             compute_overlap_pairs: true,
             ..test_params()
         };
-        let other = vec![PathBuf::from("/mnt/backup/trip")];
+        let other = vec![("/mnt/backup/trip")];
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
 
         match outcome {
@@ -2641,7 +2636,7 @@ mod tests {
             compute_residual: true,
             ..test_params()
         };
-        let other = vec![PathBuf::from("/mnt/backup")];
+        let other = vec![("/mnt/backup")];
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
 
         match outcome {
@@ -2676,7 +2671,7 @@ mod tests {
             compute_residual: true,
             ..test_params()
         };
-        let other = vec![PathBuf::from("/mnt/backup")];
+        let other = vec![("/mnt/backup")];
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
 
         match outcome {
@@ -2710,7 +2705,7 @@ mod tests {
             compute_residual: true,
             ..test_params()
         };
-        let other = vec![PathBuf::from("/mnt/backup")];
+        let other = vec![("/mnt/backup")];
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
 
         match outcome {
@@ -2742,7 +2737,7 @@ mod tests {
             compute_residual: true,
             ..test_params()
         };
-        let other = vec![PathBuf::from("/mnt/backup")];
+        let other = vec![("/mnt/backup")];
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
 
         match outcome {
@@ -2782,8 +2777,8 @@ mod tests {
             ..test_params()
         };
         let other = vec![
-            PathBuf::from("/mnt/backup-1"),
-            PathBuf::from("/mnt/backup-2"),
+            ("/mnt/backup-1"),
+            ("/mnt/backup-2"),
         ];
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
 

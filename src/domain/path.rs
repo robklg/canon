@@ -93,26 +93,6 @@ pub fn resolve_paths(paths: &[PathBuf], roots: &[Root]) -> Result<Vec<String>> {
     paths.iter().map(|p| resolve_path(p, roots, &cwd)).collect()
 }
 
-/// Warn on stderr for resolved paths that are under an accessible root
-/// but don't exist on disk. This catches stray words from unquoted
-/// shell arguments (e.g., `--other /path/with spaces` without quotes).
-///
-/// Only warns when the root itself is accessible — disconnected storage
-/// should not trigger warnings.
-pub fn warn_nonexistent_scope_paths(paths: &[String], roots: &[Root]) {
-    for path in paths {
-        if let Some((_id, root_path, _role, _rel)) = find_containing_root(path, roots) {
-            // Root exists in DB. Is the root itself accessible?
-            if Path::new(&root_path).exists() {
-                // Root is mounted. Does the specific subpath exist?
-                if !Path::new(path).exists() {
-                    eprintln!("Warning: path does not exist on disk: {path}");
-                }
-            }
-        }
-    }
-}
-
 // ============================================================================
 // Path Canonicalization (Filesystem I/O)
 // ============================================================================

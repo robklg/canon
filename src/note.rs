@@ -16,7 +16,6 @@ use chrono::{TimeZone, Utc};
 
 use crate::ceremony;
 use crate::domain::note::LocationEntry;
-use crate::domain::path::warn_nonexistent_scope_paths;
 use crate::domain::root::Root;
 use crate::ops;
 use crate::ops::note::{NoteListResult, NoteScope, NoteSpatialResult, NoteViewResult};
@@ -132,16 +131,13 @@ fn resolve_single_scope(
 ) -> Result<NoteScope> {
     let all_roots = repo::root::fetch_all(conn)?;
     let paths: Vec<PathBuf> = path.iter().map(|p| p.to_path_buf()).collect();
-    let resolved = resolve_scope(&paths, global, &all_roots)?;
+    let resolved = resolve_scope(conn, &paths, global, &all_roots)?;
 
     if resolved.is_global() {
         anyhow::bail!(
             "Not inside a known root. Specify a path or cd into a scanned directory."
         );
     }
-
-    // Warn on non-existent scope paths (consistent with other commands)
-    warn_nonexistent_scope_paths(&resolved.prefixes, &all_roots);
 
     // Note operates on a single scope
     if resolved.prefixes.len() != 1 {
@@ -159,13 +155,11 @@ fn resolve_single_scope_optional(
 ) -> Result<Option<NoteScope>> {
     let all_roots = repo::root::fetch_all(conn)?;
     let paths: Vec<PathBuf> = path.iter().map(|p| p.to_path_buf()).collect();
-    let resolved = resolve_scope(&paths, false, &all_roots)?;
+    let resolved = resolve_scope(conn, &paths, false, &all_roots)?;
 
     if resolved.is_global() {
         return Ok(None);
     }
-
-    warn_nonexistent_scope_paths(&resolved.prefixes, &all_roots);
 
     if resolved.prefixes.len() != 1 {
         anyhow::bail!("Note operates on a single scope, got multiple paths");

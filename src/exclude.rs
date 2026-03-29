@@ -1,8 +1,8 @@
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::ceremony;
-use crate::domain::path::{resolve_path, resolve_paths, validate_paths_in_roots};
+use crate::domain::path::{resolve_path, validate_paths_in_roots};
 use crate::domain::root::find_containing_root;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::Filter;
@@ -36,7 +36,7 @@ pub struct ClearOptions {
 
 pub fn set(
     db: &mut Db,
-    scope_paths: &[PathBuf],
+    scope_prefixes: &[String],
     filter_strs: &[String],
     options: &SetOptions,
 ) -> Result<()> {
@@ -48,12 +48,7 @@ pub fn set(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
-    let all_roots = repo::root::fetch_all(conn)?;
-    let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
-    validate_paths_in_roots(&scope_prefixes, &all_roots)?;
-
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
     let plan = plan_set(conn, &ExcludeSetParams { scopes, filters })?;
 
     if plan.source_ids.is_empty() {
@@ -102,7 +97,7 @@ pub fn set(
 
 pub fn clear(
     db: &mut Db,
-    scope_paths: &[PathBuf],
+    scope_prefixes: &[String],
     filter_strs: &[String],
     options: &ClearOptions,
 ) -> Result<()> {
@@ -114,12 +109,7 @@ pub fn clear(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
-    let all_roots = repo::root::fetch_all(conn)?;
-    let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
-    validate_paths_in_roots(&scope_prefixes, &all_roots)?;
-
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
     let plan = plan_clear(conn, &ExcludeClearParams { scopes, filters })?;
 
     if plan.source_ids.is_empty() {
@@ -258,8 +248,10 @@ pub fn exclude_duplicates(
         vec![]
     };
     validate_paths_in_roots(&scope_prefixes, &all_roots)?;
+    crate::ops::scope::validate_sources_exist(conn, &scope_prefixes, &all_roots)?;
     let prefer_prefix = resolve_path(prefer_path, &all_roots, &cwd)?;
     validate_paths_in_roots(&[prefer_prefix.clone()], &all_roots)?;
+    crate::ops::scope::validate_sources_exist(conn, &[prefer_prefix.clone()], &all_roots)?;
 
     // Plan
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
@@ -427,7 +419,7 @@ pub fn set_object_by_file(db: &Db, file_path: &Path, options: &SetOptions) -> Re
 /// Exclude objects matching the given scope and filters.
 pub fn set_objects_by_filter(
     db: &mut Db,
-    scope_paths: &[PathBuf],
+    scope_prefixes: &[String],
     filter_strs: &[String],
     options: &SetOptions,
 ) -> Result<()> {
@@ -439,12 +431,7 @@ pub fn set_objects_by_filter(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
-    let all_roots = repo::root::fetch_all(conn)?;
-    let scope_prefixes = resolve_paths(scope_paths, &all_roots)?;
-    validate_paths_in_roots(&scope_prefixes, &all_roots)?;
-
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
     let plan = plan_set_objects(conn, &ExcludeSetObjectsParams { scopes, filters })?;
 
     if plan.objects.is_empty() {

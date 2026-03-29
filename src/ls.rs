@@ -1,8 +1,6 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 
-use crate::domain::path::resolve_paths;
-use crate::domain::root::Root;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::domain::IncludeSet;
@@ -12,8 +10,7 @@ use crate::repo::Db;
 
 pub fn run(
     db: &mut Db,
-    scope_paths: &[std::path::PathBuf],
-    roots: &[Root],
+    scope_prefixes: &[String],
     filter_strs: &[String],
     include: &IncludeSet,
     use_relative_paths: bool,
@@ -35,9 +32,7 @@ pub fn run(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
-    let scope_prefixes = resolve_paths(scope_paths, roots)?;
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
 
     // Get cwd for relative path display (must be canonicalized to match DB paths)
     let cwd = if use_relative_paths {
@@ -181,8 +176,7 @@ fn status_indicator(source: &Source) -> &'static str {
 /// Show sources with duplicate content, grouped by hash
 pub fn show_duplicates(
     db: &mut Db,
-    scope_paths: &[std::path::PathBuf],
-    roots: &[Root],
+    scope_prefixes: &[String],
     filter_strs: &[String],
     include: &IncludeSet,
     use_relative_paths: bool,
@@ -195,9 +189,7 @@ pub fn show_duplicates(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Resolve scope paths (soft resolution: matches known roots, falls back to fs)
-    let scope_prefixes = resolve_paths(scope_paths, roots)?;
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let scopes = ScopeMatch::classify_all(scope_prefixes);
 
     // Get cwd for relative path display (must be canonicalized to match DB paths)
     let cwd = if use_relative_paths {
