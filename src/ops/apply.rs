@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 
 use super::cluster::LockEntry;
 use super::fs::{compute_partial_hash, copy_file, ensure_parent_dir, move_file, rename_file, MoveOutcome};
-use crate::domain::apply::{classify_destination, DestinationState};
+// domain::apply types no longer used — classification is now filesystem-based
 use crate::domain::fact::FactEntry;
 use crate::domain::path::path_strip_prefix;
 use crate::domain::source::NewSource;
@@ -76,7 +76,7 @@ pub struct ApplyTransfer {
 pub struct ApplyPlan {
     /// Sources validated and ready for transfer with pre-computed destinations.
     /// In regular mode: all sources that passed pattern expansion.
-    /// In resume mode: sources whose destination is NOT already in DB.
+    /// In resume mode: only pending entries (dest missing, source exists).
     pub transfers: Vec<ApplyTransfer>,
     /// All violations found during planning.
     pub violations: ApplyViolations,
@@ -84,7 +84,18 @@ pub struct ApplyPlan {
     /// Computed via DB check. Interface may also do disk-based validation.
     pub stale_sources: Vec<StaleSource>,
     /// Resume mode: count of sources already registered in archive DB.
+    /// Kept for backward compatibility; superseded by resume_already_there in resume mode.
     pub already_archived_count: usize,
+    /// Resume mode: entries to register in DB during execute (already at destination).
+    pub resume_already_there: Vec<ApplyTransfer>,
+    /// Resume mode: count of already-there entries where the source file still exists.
+    pub resume_already_there_source_present: usize,
+    /// Resume mode: entries where source is lost (source missing, dest missing).
+    /// (source_id, source_path)
+    pub resume_source_lost: Vec<(i64, String)>,
+    /// Resume mode: entries with size mismatch at destination.
+    /// (dest_path, expected_size, actual_size)
+    pub resume_size_mismatches: Vec<(String, u64, u64)>,
 }
 
 /// Violations found during apply planning. The interface inspects each field
@@ -312,26 +323,30 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     violations.collisions = collisions;
 
     // --- Check stale records + destination conflicts (DB) ---
-    // One batch_check_paths_exist call serves both checks and resume filtering.
+    // In resume mode, skip these checks — destination DB records are evidence of progress.
 
     let archive_rel_paths: Vec<&str> = transfers.iter().map(|t| t.archive_rel_path.as_str()).collect();
-    let paths_in_db = repo::source::batch_check_paths_exist(
-        conn,
-        params.archive_root_id,
-        &archive_rel_paths,
-    )?;
+    let _paths_in_db = if !params.resume {
+        let paths = repo::source::batch_check_paths_exist(
+            conn,
+            params.archive_root_id,
+            &archive_rel_paths,
+        )?;
 
-    // Stale records: any dest path already in DB (in regular mode, this is unexpected)
-    let mut stale_records: Vec<String> = paths_in_db.iter().cloned().collect();
-    stale_records.sort();
-    violations.stale_records = stale_records;
+        // Stale records: any dest path already in DB (in regular mode, this is unexpected)
+        let mut stale_records: Vec<String> = paths.iter().cloned().collect();
+        stale_records.sort();
+        violations.stale_records = stale_records;
 
-    // Destination conflicts (non-resume only): same data, different violation field
-    if !params.resume {
-        let mut dest_conflicts: Vec<String> = paths_in_db.iter().cloned().collect();
+        // Destination conflicts (non-resume only)
+        let mut dest_conflicts: Vec<String> = paths.iter().cloned().collect();
         dest_conflicts.sort();
         violations.dest_conflicts_in_db = dest_conflicts;
-    }
+
+        paths
+    } else {
+        std::collections::HashSet::new()
+    };
 
     // --- Check archive conflicts ---
 
@@ -396,12 +411,9 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     }
 
     // --- Source existence and readability preflight ---
-    // In resume mode, transfers already contains only pending entries (resume filtering below).
-    // But resume filtering hasn't happened yet at this point — it happens after staleness checks.
-    // We check all transfers here; resume filtering below will remove completed ones.
-    // This is correct: if a source is missing, we want to know even if the dest exists,
-    // because the stale_records violation will also fire for those.
-    for transfer in &transfers {
+    // In resume mode, skip this — classify_resume_entries handles source state.
+    // In regular mode, check all transfers.
+    for transfer in transfers.iter().filter(|_| !params.resume) {
         let path = Path::new(&transfer.source_path);
         match fs::metadata(path) {
             Ok(meta) => {
@@ -496,13 +508,65 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
         }
     }
 
-    // --- Resume mode: filter out sources already in DB ---
+    // --- Resume mode: filesystem-based classification ---
 
     let mut already_archived_count = 0;
+    let mut resume_already_there = Vec::new();
+    let mut resume_already_there_source_present = 0usize;
+    let mut resume_source_lost = Vec::new();
+    let mut resume_size_mismatches = Vec::new();
+
     if params.resume {
-        let before_len = transfers.len();
-        transfers.retain(|t| !paths_in_db.contains(&t.archive_rel_path));
-        already_archived_count = before_len - transfers.len();
+        // Build base_dir from archive root path + base_dir_rel
+        let archive_root_path = params
+            .root_paths
+            .get(&params.archive_root_id)
+            .ok_or_else(|| anyhow::anyhow!("Archive root {} not found in root_paths", params.archive_root_id))?;
+        let base_dir = if params.base_dir_rel.is_empty() {
+            PathBuf::from(archive_root_path)
+        } else {
+            PathBuf::from(archive_root_path).join(params.base_dir_rel)
+        };
+
+        let classification = classify_resume_entries(&transfers, &base_dir);
+
+        // Extract source_lost errors
+        for t in &classification.source_lost {
+            resume_source_lost.push((t.source_id, t.source_path.clone()));
+        }
+
+        // Extract size_mismatches errors
+        for &(t, expected, actual) in &classification.size_mismatches {
+            let dest_path = base_dir.join(&t.dest_rel_path);
+            resume_size_mismatches.push((dest_path.display().to_string(), expected, actual));
+        }
+
+        // Count already-there entries where source is still present
+        resume_already_there_source_present = classification.already_there.iter()
+            .filter(|(_, source_present)| *source_present)
+            .count();
+
+        // Build resume_already_there list (transfers to register in DB during execute)
+        for (t, _source_present) in &classification.already_there {
+            resume_already_there.push(ApplyTransfer {
+                source_id: t.source_id,
+                source_path: t.source_path.clone(),
+                dest_rel_path: t.dest_rel_path.clone(),
+                archive_rel_path: t.archive_rel_path.clone(),
+                object_id: t.object_id,
+                partial_hash: t.partial_hash.clone(),
+                size: t.size,
+                mtime: t.mtime,
+            });
+        }
+
+        already_archived_count = classification.already_there.len();
+
+        // Replace transfers with only pending entries
+        let pending_ids: std::collections::HashSet<i64> = classification.pending.iter()
+            .map(|t| t.source_id)
+            .collect();
+        transfers.retain(|t| pending_ids.contains(&t.source_id));
     }
 
     Ok(ApplyPlan {
@@ -510,6 +574,10 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
         violations,
         stale_sources,
         already_archived_count,
+        resume_already_there,
+        resume_already_there_source_present,
+        resume_source_lost,
+        resume_size_mismatches,
     })
 }
 
@@ -565,10 +633,10 @@ pub struct ApplyResult {
     pub skipped_missing: u64,
     pub skipped_stale: Vec<StaleSource>,
     pub errors: Vec<TransferError>,
-    /// Resume mode: count of sources already registered in archive DB.
-    pub already_archived: u64,
-    /// Resume mode: count of files on disk with correct size (need scan, not transfer).
-    pub resumed: u64,
+    /// Resume mode: count of entries already at destination (registered in DB during execute).
+    pub already_there: u64,
+    /// Resume mode: count of already-there entries where source file still exists.
+    pub already_there_source_present: u64,
     /// Whether the operation was interrupted by Ctrl+C.
     pub interrupted: bool,
     /// Number of files remaining when interrupted.
@@ -584,19 +652,18 @@ pub struct TransferError {
     pub error: String,
 }
 
-/// Result of disk classification in resume mode.
+/// Result of filesystem-based classification in resume mode.
+/// Checks both source and destination state for each lock entry.
 #[derive(Debug)]
-struct ResumeClassification<'a> {
-    /// Transfers that need to be executed (not on disk).
-    to_transfer: Vec<&'a ApplyTransfer>,
-    /// Count of files on disk with correct size (skipped, need scan).
-    resumed: usize,
-}
-
-struct SizeMismatchError {
-    dest_path: String,
-    expected: u64,
-    actual: u64,
+pub struct ResumeClassification<'a> {
+    /// Entries that need transfer (source exists, dest missing).
+    pub pending: Vec<&'a ApplyTransfer>,
+    /// Entries already at destination with correct size (transfer, source_present).
+    pub already_there: Vec<(&'a ApplyTransfer, bool)>,
+    /// Entries where source is lost (source missing, dest missing).
+    pub source_lost: Vec<&'a ApplyTransfer>,
+    /// Entries with size mismatch at destination (transfer, expected, actual).
+    pub size_mismatches: Vec<(&'a ApplyTransfer, u64, u64)>,
 }
 
 // ===========================================================================
@@ -687,8 +754,8 @@ pub fn execute_apply(
         skipped_missing: 0,
         skipped_stale: Vec::new(),
         errors: Vec::new(),
-        already_archived: plan.already_archived_count as u64,
-        resumed: 0,
+        already_there: plan.already_archived_count as u64,
+        already_there_source_present: plan.resume_already_there_source_present as u64,
         interrupted: false,
         remaining: 0,
     };
@@ -720,14 +787,9 @@ pub fn execute_apply(
         );
     }
 
-    // --- Resume mode: disk classification ---
-    let transfers_to_execute: Vec<&ApplyTransfer> = if params.resume {
-        let classification = classify_transfers_disk(&plan.transfers, &params.base_dir)?;
-        result.resumed = classification.resumed as u64;
-        classification.to_transfer
-    } else {
-        plan.transfers.iter().collect()
-    };
+    // In resume mode, plan.transfers already contains only pending entries.
+    // No disk classification needed here — it was done in plan_apply.
+    let transfers_to_execute: Vec<&ApplyTransfer> = plan.transfers.iter().collect();
 
     // --- Batch staleness validation ---
     if !transfers_to_execute.is_empty() {
@@ -794,7 +856,49 @@ pub fn execute_apply(
 
     progress.on_finish();
 
+    // --- Resume mode: register "already there" entries in DB ---
+    if params.resume && !plan.resume_already_there.is_empty() {
+        for transfer in &plan.resume_already_there {
+            let new_source = build_new_source_from_lock(
+                params.archive_root_id,
+                &transfer.archive_rel_path,
+                transfer.object_id,
+                &transfer.partial_hash,
+                transfer.size,
+                transfer.mtime,
+            );
+            if let Err(e) = repo::source::insert_destination(conn, &new_source) {
+                result.errors.push(TransferError {
+                    path: transfer.source_path.clone(),
+                    error: format!("Failed to register in DB: {e}"),
+                });
+            }
+        }
+    }
+
     Ok(result)
+}
+
+/// Build a NewSource from lock entry data for DB registration.
+/// Used for "already there" entries in resume mode — no disk read needed.
+fn build_new_source_from_lock(
+    archive_root_id: i64,
+    rel_path: &str,
+    object_id: Option<i64>,
+    partial_hash: &str,
+    size: i64,
+    mtime: i64,
+) -> NewSource {
+    NewSource {
+        root_id: archive_root_id,
+        rel_path: rel_path.to_string(),
+        size,
+        mtime,
+        partial_hash: partial_hash.to_string(),
+        object_id,
+        device: None,
+        inode: None,
+    }
 }
 
 // ===========================================================================
@@ -945,76 +1049,54 @@ fn validate_transfers_disk(transfers: &[&ApplyTransfer]) -> Vec<StaleSource> {
     stale
 }
 
-/// Classify transfers on disk for resume mode. Separates transfers still
-/// needed from files already on disk with correct size.
-fn classify_transfers_disk<'a>(
+/// Classify lock entries by checking filesystem state of source and destination.
+/// Purely filesystem-based — no DB connection needed.
+///
+/// For each transfer:
+/// - Dest exists as file with correct size -> AlreadyThere (check if source exists)
+/// - Dest exists as file with wrong size -> SizeMismatch
+/// - Dest missing + source exists -> Pending
+/// - Dest missing + source missing -> SourceLost
+fn classify_resume_entries<'a>(
     transfers: &'a [ApplyTransfer],
     base_dir: &Path,
-) -> Result<ResumeClassification<'a>> {
-    let mut to_transfer = Vec::new();
-    let mut resumed = 0usize;
-    let mut size_mismatches = Vec::new();
+) -> ResumeClassification<'a> {
+    let mut result = ResumeClassification {
+        pending: vec![],
+        already_there: vec![],
+        source_lost: vec![],
+        size_mismatches: vec![],
+    };
 
     for transfer in transfers {
-        let full_path = base_dir.join(&transfer.dest_rel_path);
-        let expected_size = transfer.size as u64;
+        let dest_path = base_dir.join(&transfer.dest_rel_path);
+        let source_exists = Path::new(&transfer.source_path).exists();
+        let dest_stat = fs::metadata(&dest_path).ok();
 
-        let on_disk = if full_path.exists() {
-            match fs::metadata(&full_path) {
-                Ok(meta) => Some(meta.len()),
-                Err(_) => None,
+        match dest_stat {
+            Some(meta) if meta.is_file() => {
+                let actual_size = meta.len();
+                let expected_size = transfer.size as u64;
+                if actual_size == expected_size {
+                    // Destination present with correct size — already there
+                    result.already_there.push((transfer, source_exists));
+                } else {
+                    // Size mismatch
+                    result.size_mismatches.push((transfer, expected_size, actual_size));
+                }
             }
-        } else {
-            None
-        };
-
-        let state = classify_destination(false, on_disk, expected_size);
-
-        match state {
-            DestinationState::Available => {
-                to_transfer.push(transfer);
-            }
-            DestinationState::Archived => {
-                // Should not happen (in_db=false always), but handle gracefully
-                to_transfer.push(transfer);
-            }
-            DestinationState::Resumed => {
-                resumed += 1;
-            }
-            DestinationState::SizeMismatch { expected, actual } => {
-                size_mismatches.push(SizeMismatchError {
-                    dest_path: full_path.display().to_string(),
-                    expected,
-                    actual,
-                });
+            _ => {
+                // Destination missing (or not a file)
+                if source_exists {
+                    result.pending.push(transfer);
+                } else {
+                    result.source_lost.push(transfer);
+                }
             }
         }
     }
 
-    if !size_mismatches.is_empty() {
-        let details: Vec<String> = size_mismatches
-            .iter()
-            .take(10)
-            .map(|e| format!("{} (expected {} bytes, found {})", e.dest_path, e.expected, e.actual))
-            .collect();
-        let suffix = if size_mismatches.len() > 10 {
-            format!(" ... and {} more", size_mismatches.len() - 10)
-        } else {
-            String::new()
-        };
-        bail!(
-            "Found {} partial/mismatched files in destination. \
-             Delete the partial files, then re-run with --resume. {}{}",
-            size_mismatches.len(),
-            details.join("; "),
-            suffix
-        );
-    }
-
-    Ok(ResumeClassification {
-        to_transfer,
-        resumed,
-    })
+    result
 }
 
 /// Relocate an existing source to a new location (for rename/move on same device).
@@ -1471,21 +1553,39 @@ mod tests {
 
     #[test]
     fn test_plan_apply_dest_conflicts_skipped_in_resume() {
+        use std::io::Write;
+
+        // Create real filesystem structure for resume classification
+        let src_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let src_path = src_dir.path().to_str().unwrap().to_string();
+        let archive_path = archive_dir.path().to_str().unwrap().to_string();
+
+        // Create source file
+        let src_file = src_dir.path().join("photo.jpg");
+        let mut f = std::fs::File::create(&src_file).unwrap();
+        f.write_all(&vec![0u8; 1000]).unwrap();
+
+        // Create destination file (simulating previous partial apply)
+        let dest_file = archive_dir.path().join("photo.jpg");
+        let mut f = std::fs::File::create(&dest_file).unwrap();
+        f.write_all(&vec![0u8; 1000]).unwrap();
+
         let mut conn = setup_test_db();
-        let root_id = insert_root(&conn, "/photos", "source", false);
-        let archive_id = insert_root(&conn, "/archive", "archive", false);
+        let root_id = insert_root(&conn, &src_path, "source", false);
+        let archive_id = insert_root(&conn, &archive_path, "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
         let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
-        // Same path exists in archive
+        // Same path exists in archive DB
         insert_source_with_metadata(&conn, archive_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(src_id, root_id, &src_file.display().to_string(), Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
-        root_paths.insert(root_id, "/photos".to_string());
-        root_paths.insert(archive_id, "/archive".to_string());
+        root_paths.insert(root_id, src_path);
+        root_paths.insert(archive_id, archive_path);
 
         let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
         params.resume = true;
@@ -1494,9 +1594,14 @@ mod tests {
 
         // In resume mode, dest_conflicts_in_db is not populated
         assert!(plan.violations.dest_conflicts_in_db.is_empty());
-        // But the source IS filtered out of transfers
+        // stale_records not populated in resume mode
+        assert!(plan.violations.stale_records.is_empty());
+        // File classified as "already there" by filesystem check
         assert!(plan.transfers.is_empty());
         assert_eq!(plan.already_archived_count, 1);
+        assert_eq!(plan.resume_already_there.len(), 1);
+        // Source still present
+        assert_eq!(plan.resume_already_there_source_present, 1);
     }
 
     // =========================================================================
@@ -1555,22 +1660,38 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_plan_apply_resume_filters_archived() {
+    fn test_plan_apply_resume_filters_already_there() {
+        use std::io::Write;
+
+        // Create real filesystem structure
+        let src_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let src_path = src_dir.path().to_str().unwrap().to_string();
+        let archive_path = archive_dir.path().to_str().unwrap().to_string();
+
+        // Create source file
+        let src_file = src_dir.path().join("photo.jpg");
+        let mut f = std::fs::File::create(&src_file).unwrap();
+        f.write_all(&vec![0u8; 1000]).unwrap();
+
+        // Create dest file with correct size (already transferred)
+        let dest_file = archive_dir.path().join("photo.jpg");
+        let mut f = std::fs::File::create(&dest_file).unwrap();
+        f.write_all(&vec![0u8; 1000]).unwrap();
+
         let mut conn = setup_test_db();
-        let root_id = insert_root(&conn, "/photos", "source", false);
-        let archive_id = insert_root(&conn, "/archive", "archive", false);
+        let root_id = insert_root(&conn, &src_path, "source", false);
+        let archive_id = insert_root(&conn, &archive_path, "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
         let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
-        // Already in archive at same dest path
-        insert_source_with_metadata(&conn, archive_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(src_id, root_id, &src_file.display().to_string(), Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
-        root_paths.insert(root_id, "/photos".to_string());
-        root_paths.insert(archive_id, "/archive".to_string());
+        root_paths.insert(root_id, src_path);
+        root_paths.insert(archive_id, archive_path);
 
         let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
         params.resume = true;
@@ -1579,24 +1700,39 @@ mod tests {
 
         assert!(plan.transfers.is_empty());
         assert_eq!(plan.already_archived_count, 1);
+        assert_eq!(plan.resume_already_there.len(), 1);
     }
 
     #[test]
-    fn test_plan_apply_resume_keeps_non_archived() {
+    fn test_plan_apply_resume_keeps_pending() {
+        use std::io::Write;
+
+        // Create real filesystem structure
+        let src_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let src_path = src_dir.path().to_str().unwrap().to_string();
+        let archive_path = archive_dir.path().to_str().unwrap().to_string();
+
+        // Create source file
+        let src_file = src_dir.path().join("photo.jpg");
+        let mut f = std::fs::File::create(&src_file).unwrap();
+        f.write_all(&vec![0u8; 1000]).unwrap();
+
+        // No dest file — this should stay as pending
+
         let mut conn = setup_test_db();
-        let root_id = insert_root(&conn, "/photos", "source", false);
-        let archive_id = insert_root(&conn, "/archive", "archive", false);
+        let root_id = insert_root(&conn, &src_path, "source", false);
+        let archive_id = insert_root(&conn, &archive_path, "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
         let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
-        // No existing entry in archive
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(src_id, root_id, &src_file.display().to_string(), Some(obj_id), Some("hash1"));
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
-        root_paths.insert(root_id, "/photos".to_string());
-        root_paths.insert(archive_id, "/archive".to_string());
+        root_paths.insert(root_id, src_path);
+        root_paths.insert(archive_id, archive_path);
 
         let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
         params.resume = true;
@@ -1605,6 +1741,7 @@ mod tests {
 
         assert_eq!(plan.transfers.len(), 1);
         assert_eq!(plan.already_archived_count, 0);
+        assert!(plan.resume_already_there.is_empty());
     }
 
     // =========================================================================
@@ -1786,15 +1923,22 @@ mod tests {
     }
 
     // =========================================================================
-    // classify_transfers_disk tests
+    // classify_resume_entries tests
     // =========================================================================
 
     #[test]
-    fn classify_available_when_dest_missing() {
+    fn test_classify_resume_pending() {
+        use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+        // Create source file
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::File::create(&src_file).unwrap().write_all(b"data").unwrap();
+        // Dest does not exist
+
         let transfers = vec![ApplyTransfer {
             source_id: 1,
-            source_path: "/src/photo.jpg".to_string(),
+            source_path: src_file.display().to_string(),
             dest_rel_path: "photo.jpg".to_string(),
             archive_rel_path: "photo.jpg".to_string(),
             object_id: Some(1),
@@ -1803,22 +1947,29 @@ mod tests {
             mtime: 0,
         }];
 
-        let result = classify_transfers_disk(&transfers, dir.path()).unwrap();
-        assert_eq!(result.to_transfer.len(), 1);
-        assert_eq!(result.resumed, 0);
+        let result = classify_resume_entries(&transfers, dir.path());
+        assert_eq!(result.pending.len(), 1);
+        assert!(result.already_there.is_empty());
+        assert!(result.source_lost.is_empty());
+        assert!(result.size_mismatches.is_empty());
     }
 
     #[test]
-    fn classify_resumed_when_size_matches() {
+    fn test_classify_resume_already_there_source_present() {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+        // Create source file
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::File::create(&src_file).unwrap().write_all(b"data").unwrap();
+        // Create dest file with correct size
         let dest = dir.path().join("photo.jpg");
         let mut f = std::fs::File::create(&dest).unwrap();
         f.write_all(&vec![0u8; 1000]).unwrap();
 
         let transfers = vec![ApplyTransfer {
             source_id: 1,
-            source_path: "/src/photo.jpg".to_string(),
+            source_path: src_file.display().to_string(),
             dest_rel_path: "photo.jpg".to_string(),
             archive_rel_path: "photo.jpg".to_string(),
             object_id: Some(1),
@@ -1827,18 +1978,74 @@ mod tests {
             mtime: 0,
         }];
 
-        let result = classify_transfers_disk(&transfers, dir.path()).unwrap();
-        assert_eq!(result.to_transfer.len(), 0);
-        assert_eq!(result.resumed, 1);
+        let result = classify_resume_entries(&transfers, dir.path());
+        assert!(result.pending.is_empty());
+        assert_eq!(result.already_there.len(), 1);
+        assert!(result.already_there[0].1); // source_present = true
+        assert!(result.source_lost.is_empty());
+        assert!(result.size_mismatches.is_empty());
     }
 
     #[test]
-    fn classify_size_mismatch_errors() {
+    fn test_classify_resume_already_there_source_gone() {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
+        // Dest file exists with correct size
         let dest = dir.path().join("photo.jpg");
         let mut f = std::fs::File::create(&dest).unwrap();
-        f.write_all(&vec![0u8; 500]).unwrap(); // Wrong size
+        f.write_all(&vec![0u8; 1000]).unwrap();
+        // Source does NOT exist
+
+        let transfers = vec![ApplyTransfer {
+            source_id: 1,
+            source_path: "/nonexistent/photo.jpg".to_string(),
+            dest_rel_path: "photo.jpg".to_string(),
+            archive_rel_path: "photo.jpg".to_string(),
+            object_id: Some(1),
+            partial_hash: "hash".to_string(),
+            size: 1000,
+            mtime: 0,
+        }];
+
+        let result = classify_resume_entries(&transfers, dir.path());
+        assert!(result.pending.is_empty());
+        assert_eq!(result.already_there.len(), 1);
+        assert!(!result.already_there[0].1); // source_present = false
+        assert!(result.source_lost.is_empty());
+        assert!(result.size_mismatches.is_empty());
+    }
+
+    #[test]
+    fn test_classify_resume_source_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        // Neither source nor dest exists
+
+        let transfers = vec![ApplyTransfer {
+            source_id: 1,
+            source_path: "/nonexistent/photo.jpg".to_string(),
+            dest_rel_path: "photo.jpg".to_string(),
+            archive_rel_path: "photo.jpg".to_string(),
+            object_id: Some(1),
+            partial_hash: "hash".to_string(),
+            size: 1000,
+            mtime: 0,
+        }];
+
+        let result = classify_resume_entries(&transfers, dir.path());
+        assert!(result.pending.is_empty());
+        assert!(result.already_there.is_empty());
+        assert_eq!(result.source_lost.len(), 1);
+        assert!(result.size_mismatches.is_empty());
+    }
+
+    #[test]
+    fn test_classify_resume_size_mismatch() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        // Dest file exists with WRONG size
+        let dest = dir.path().join("photo.jpg");
+        let mut f = std::fs::File::create(&dest).unwrap();
+        f.write_all(&vec![0u8; 500]).unwrap(); // 500 bytes, not 1000
 
         let transfers = vec![ApplyTransfer {
             source_id: 1,
@@ -1851,10 +2058,13 @@ mod tests {
             mtime: 0,
         }];
 
-        let err = classify_transfers_disk(&transfers, dir.path());
-        assert!(err.is_err());
-        let msg = err.unwrap_err().to_string();
-        assert!(msg.contains("partial/mismatched"), "expected size mismatch error, got: {msg}");
+        let result = classify_resume_entries(&transfers, dir.path());
+        assert!(result.pending.is_empty());
+        assert!(result.already_there.is_empty());
+        assert!(result.source_lost.is_empty());
+        assert_eq!(result.size_mismatches.len(), 1);
+        assert_eq!(result.size_mismatches[0].1, 1000); // expected
+        assert_eq!(result.size_mismatches[0].2, 500);  // actual
     }
 
     // =========================================================================
@@ -2186,6 +2396,10 @@ mod tests {
             violations: ApplyViolations::default(),
             stale_sources: vec![],
             already_archived_count: 0,
+            resume_already_there: vec![],
+            resume_already_there_source_present: 0,
+            resume_source_lost: vec![],
+            resume_size_mismatches: vec![],
         };
 
         // Pre-set the interrupt flag before calling execute
@@ -2221,6 +2435,10 @@ mod tests {
             violations: ApplyViolations::default(),
             stale_sources: vec![],
             already_archived_count: 0,
+            resume_already_there: vec![],
+            resume_already_there_source_present: 0,
+            resume_source_lost: vec![],
+            resume_size_mismatches: vec![],
         };
 
         let flag = Arc::new(AtomicBool::new(true));

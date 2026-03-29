@@ -399,8 +399,9 @@ pub fn insert_destination(conn: &Connection, new: &NewSource) -> Result<Source> 
         .expect("Time went backwards")
         .as_secs() as i64;
 
-    // First try to update an existing stale record (present=0).
+    // First try to update any existing record at this path (present=0 or present=1).
     // This preserves the row and increments basis_rev to reflect new content at this path.
+    // Handles both stale records (present=0) and active records from a scan (present=1).
     let updated = conn.execute(
         "UPDATE sources SET
             device = COALESCE(?, device),
@@ -414,7 +415,7 @@ pub fn insert_destination(conn: &Connection, new: &NewSource) -> Result<Source> 
             last_seen_at = ?,
             present = 1,
             excluded = 0
-         WHERE root_id = ? AND rel_path = ? AND present = 0",
+         WHERE root_id = ? AND rel_path = ?",
         rusqlite::params![
             new.device,
             new.inode,
@@ -1389,14 +1390,14 @@ mod tests {
     }
 
     #[test]
-    fn insert_destination_already_present_fails() {
+    fn insert_destination_update_active_record() {
         let conn = setup_test_db();
 
         let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "abc123hash", false);
 
-        // Insert an active record (present=1)
-        insert_source(&conn, root_id, "existing.jpg", Some(obj_id), true, false);
+        // Insert an active record (present=1) — simulates a scan that ran between apply runs
+        let existing_id = insert_source(&conn, root_id, "existing.jpg", Some(obj_id), true, false);
 
         let new = NewSource {
             root_id,
@@ -1409,13 +1410,72 @@ mod tests {
             inode: Some(12345),
         };
 
-        // Should fail due to UNIQUE constraint on (root_id, rel_path)
-        let result = insert_destination(&conn, &new);
-        assert!(result.is_err());
+        // Should succeed — UPDATE fires on the active record, no UNIQUE error
+        let source = insert_destination(&conn, &new).unwrap();
 
-        // Verify the error mentions constraint violation
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("UNIQUE") || err_msg.contains("constraint"));
+        // Verify the active record was updated with new metadata
+        assert_eq!(source.id, existing_id);
+        assert_eq!(source.rel_path, "existing.jpg");
+        assert_eq!(source.size, 2048);
+        assert_eq!(source.mtime, 1704067200);
+        assert_eq!(source.partial_hash, "newhash");
+        assert_eq!(source.device, 65024);
+        assert_eq!(source.inode, 12345);
+        // basis_rev should be incremented
+        assert!(source.basis_rev > 0);
+        // excluded should be reset
+        assert!(!source.excluded);
+
+        // Verify only one record exists (no duplicate)
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path = ?",
+                rusqlite::params![root_id, "existing.jpg"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn insert_destination_idempotent() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let obj_id = insert_object(&conn, "abc123hash", false);
+
+        let new = NewSource {
+            root_id,
+            rel_path: "idempotent.jpg".to_string(),
+            size: 1024,
+            mtime: 1704067200,
+            partial_hash: "partial123".to_string(),
+            object_id: Some(obj_id),
+            device: Some(65024),
+            inode: Some(12345),
+        };
+
+        // First call — INSERT path
+        let source1 = insert_destination(&conn, &new).unwrap();
+        assert_eq!(source1.size, 1024);
+        assert_eq!(source1.basis_rev, 0);
+
+        // Second call — UPDATE path (same data)
+        let source2 = insert_destination(&conn, &new).unwrap();
+        assert_eq!(source2.size, 1024);
+        // basis_rev increments because UPDATE always increments
+        assert_eq!(source2.basis_rev, 1);
+        assert_eq!(source2.id, source1.id);
+
+        // Verify only one record exists
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path = ?",
+                rusqlite::params![root_id, "idempotent.jpg"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

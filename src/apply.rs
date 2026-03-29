@@ -181,6 +181,53 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         },
     )?;
 
+    // --- Resume mode: display classification and check for fatal errors ---
+
+    if options.resume {
+        let total = plan.transfers.len() + plan.already_archived_count;
+        eprintln!(
+            "Files: {} ({} pending, {} already at destination)",
+            total, plan.transfers.len(), plan.already_archived_count
+        );
+    }
+
+    if options.resume {
+        if !plan.resume_source_lost.is_empty() {
+            eprintln!(
+                "Resume failed: {} source files are missing and not at the destination.",
+                plan.resume_source_lost.len()
+            );
+            eprintln!();
+            for (_, path) in plan.resume_source_lost.iter().take(10) {
+                eprintln!("  {path}");
+            }
+            if plan.resume_source_lost.len() > 10 {
+                eprintln!("  ... and {} more", plan.resume_source_lost.len() - 10);
+            }
+            eprintln!();
+            eprintln!("Check if the source volume is connected. If files are truly lost,");
+            eprintln!("refresh the manifest: canon cluster refresh {}", config_path.display());
+            bail!("Aborting due to missing source files in resume mode");
+        }
+
+        if !plan.resume_size_mismatches.is_empty() {
+            eprintln!(
+                "Resume failed: {} destination files have wrong size.",
+                plan.resume_size_mismatches.len()
+            );
+            eprintln!();
+            for (path, expected, actual) in plan.resume_size_mismatches.iter().take(10) {
+                eprintln!("  {path} (expected {expected} bytes, found {actual} bytes)");
+            }
+            if plan.resume_size_mismatches.len() > 10 {
+                eprintln!("  ... and {} more", plan.resume_size_mismatches.len() - 10);
+            }
+            eprintln!();
+            eprintln!("Delete the corrupt file and retry: canon apply --resume {}", config_path.display());
+            bail!("Aborting due to size mismatches in resume mode");
+        }
+    }
+
     // --- Inspect violations (preserving error messages and bail behavior) ---
 
     let v = &plan.violations;
@@ -405,8 +452,13 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
 
         let mode = " (dry-run)";
         if options.resume {
+            let total = plan.transfers.len() + plan.already_archived_count;
             println!(
-                "Applied{} (--resume): 0 copied, 0 renamed, 0 moved, {} already archived, 0 resumed, 0 errors",
+                "Files: {} ({} pending, {} already at destination)",
+                total, plan.transfers.len(), plan.already_archived_count
+            );
+            println!(
+                "Applied{} (--resume): 0 copied, 0 renamed, 0 moved, {} already at destination, 0 errors",
                 mode, plan.already_archived_count
             );
         } else {
@@ -466,14 +518,14 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         return Ok(());
     } else if options.resume {
         println!(
-            "Applied (--resume): {} copied, {} renamed, {} moved, {} already archived, {} resumed, {} errors",
-            result.copied, result.renamed, result.moved, result.already_archived, result.resumed, result.errors.len()
+            "Applied (--resume): {} copied, {} renamed, {} moved, {} already at destination, {} errors",
+            result.copied, result.renamed, result.moved, result.already_there, result.errors.len()
         );
-        if result.resumed > 0 {
+        if result.already_there_source_present > 0 {
             eprintln!();
             eprintln!(
-                "Note: {} resumed files are not yet registered. Run `canon scan <archive>` to complete.",
-                result.resumed
+                "Note: {} source files from a previous operation may still exist at the original location.",
+                result.already_there_source_present
             );
         }
     } else {
