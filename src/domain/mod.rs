@@ -9,7 +9,6 @@
 // Re-exports are intentional for public API convenience
 #![allow(unused_imports)]
 
-pub mod apply;
 pub mod exclusion;
 pub mod fact;
 pub mod include;
@@ -23,7 +22,6 @@ pub mod source;
 pub mod survey;
 
 // Re-export primary types for convenient access
-pub use apply::{classify_destination, DestinationState};
 pub use exclusion::{find_excludable_duplicates, ExcludableDuplicatesResult};
 pub use fact::{FactEntry, FactType, FactValue};
 pub use include::IncludeSet;

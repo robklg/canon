@@ -767,19 +767,6 @@ pub fn batch_set_excluded(conn: &Connection, source_ids: &[i64], excluded: bool)
 ///
 /// Returns (total, unhashed) where:
 /// - `total` is the count of present sources in the root
-/// - `unhashed` is the count of sources without an object_id (no content hash)
-///
-/// Used to verify archive hash coverage before apply operations.
-pub fn count_unhashed_for_root(conn: &Connection, root_id: i64) -> Result<(i64, i64)> {
-    let (total, unhashed): (i64, i64) = conn.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN object_id IS NULL THEN 1 ELSE 0 END), 0)
-         FROM sources WHERE root_id = ? AND present = 1",
-        [root_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    Ok((total, unhashed))
-}
-
 /// Update a source's location (root and path) after a rename/move operation.
 ///
 /// Used when a source file is relocated to an archive. Updates the root_id,
@@ -2359,66 +2346,6 @@ mod tests {
         assert!(result.contains("file_0.jpg"));
         assert!(result.contains("file_999.jpg"));
         assert!(result.contains("file_1000.jpg"));
-    }
-
-    // =========================================================================
-    // count_unhashed_for_root tests
-    // =========================================================================
-
-    #[test]
-    fn count_unhashed_for_root_empty() {
-        let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
-
-        let (total, unhashed) = count_unhashed_for_root(&conn, root_id).unwrap();
-        assert_eq!(total, 0);
-        assert_eq!(unhashed, 0);
-    }
-
-    #[test]
-    fn count_unhashed_for_root_all_hashed() {
-        let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
-        let obj_id = insert_object(&conn, "abc123", false);
-
-        // Insert 3 sources, all with object_id
-        insert_source(&conn, root_id, "a.jpg", Some(obj_id), true, false);
-        insert_source(&conn, root_id, "b.jpg", Some(obj_id), true, false);
-        insert_source(&conn, root_id, "c.jpg", Some(obj_id), true, false);
-
-        let (total, unhashed) = count_unhashed_for_root(&conn, root_id).unwrap();
-        assert_eq!(total, 3);
-        assert_eq!(unhashed, 0);
-    }
-
-    #[test]
-    fn count_unhashed_for_root_some_unhashed() {
-        let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
-        let obj_id = insert_object(&conn, "abc123", false);
-
-        // 2 hashed, 1 unhashed
-        insert_source(&conn, root_id, "a.jpg", Some(obj_id), true, false);
-        insert_source(&conn, root_id, "b.jpg", Some(obj_id), true, false);
-        insert_source(&conn, root_id, "c.jpg", None, true, false); // No object_id
-
-        let (total, unhashed) = count_unhashed_for_root(&conn, root_id).unwrap();
-        assert_eq!(total, 3);
-        assert_eq!(unhashed, 1);
-    }
-
-    #[test]
-    fn count_unhashed_for_root_excludes_not_present() {
-        let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
-
-        // 1 present without hash, 1 not present without hash
-        insert_source(&conn, root_id, "present.jpg", None, true, false);
-        insert_source(&conn, root_id, "deleted.jpg", None, false, false); // present=0
-
-        let (total, unhashed) = count_unhashed_for_root(&conn, root_id).unwrap();
-        assert_eq!(total, 1); // Only present sources
-        assert_eq!(unhashed, 1);
     }
 
     // =========================================================================

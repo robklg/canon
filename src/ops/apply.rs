@@ -15,7 +15,6 @@ use anyhow::{bail, Context, Result};
 
 use super::cluster::LockEntry;
 use super::fs::{compute_partial_hash, copy_file, ensure_parent_dir, move_file, rename_file, MoveOutcome};
-// domain::apply types no longer used — classification is now filesystem-based
 use crate::domain::fact::FactEntry;
 use crate::domain::path::path_strip_prefix;
 use crate::domain::source::NewSource;
