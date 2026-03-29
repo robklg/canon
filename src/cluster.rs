@@ -12,7 +12,7 @@ use crate::ops::cluster::{
     ExecuteRefreshParams, ManifestConfig,
     parse_manifest_allow, validate_manifest_version,
 };
-use crate::repo::{self, Db};
+use crate::repo::{self, Connection, Db};
 
 pub struct GenerateOptions {
     pub force: bool,
@@ -282,5 +282,154 @@ fn print_cluster_stdout(header: &str, result: &ExecuteGenerateResult) {
         "  {} have no archived copy",
         format_count(result.not_archived_count)
     );
+}
+
+// ============================================================================
+// Status
+// ============================================================================
+
+pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Result<()> {
+    let status = ops::cluster::compute_manifest_status(conn, manifest_path)?;
+
+    // Header
+    println!("Manifest: {}", status.manifest_path);
+    println!("Destination: {}", status.dest_display);
+    println!("Pattern: {}", status.pattern);
+    if !status.lock_hash_valid {
+        eprintln!("Warning: lock file hash mismatch — manifest may be out of sync.");
+    }
+    println!("Lock: {} entries", format_count(status.lock_entry_count));
+    println!();
+
+    // Per-entry table: concerning entries (or all if verbose)
+    let concerning: Vec<&crate::ops::cluster::StatusEntry> = status
+        .entries
+        .iter()
+        .filter(|e| {
+            // Concerning: source lost (no source, no dest), or size mismatch
+            let is_source_lost = !e.source_exists && !e.dest_exists;
+            let is_size_mismatch = e.dest_exists && !e.dest_size_match;
+            is_source_lost || is_size_mismatch
+        })
+        .collect();
+
+    let show_entries: Vec<&crate::ops::cluster::StatusEntry> = if verbose {
+        status.entries.iter().collect()
+    } else {
+        concerning.clone()
+    };
+
+    if !show_entries.is_empty() {
+        // Column headers
+        let hdr_db = "DB registered";
+        let sep_db = "-------------";
+        println!(
+            "  {:<30}  {:<12}  {:<12}  {}",
+            "Source", "Source file", "Dest file", hdr_db
+        );
+        println!(
+            "  {:<30}  {:<12}  {:<12}  {}",
+            "------", "-----------", "---------", sep_db
+        );
+        for entry in &show_entries {
+            let source_status = if entry.source_exists {
+                "present"
+            } else {
+                "MISSING"
+            };
+            let dest_status = if entry.dest_exists && entry.dest_size_match {
+                "at dest"
+            } else if entry.dest_exists {
+                "WRONG SIZE"
+            } else {
+                "not at dest"
+            };
+            let db_status = if entry.db_registered { "yes" } else { "\u{2014}" };
+            // Truncate filename for display
+            let display_name = if entry.source_filename.len() > 30 {
+                format!("{}...", &entry.source_filename[..27])
+            } else {
+                entry.source_filename.clone()
+            };
+            println!(
+                "  {:<30}  {:<12}  {:<12}  {}",
+                display_name, source_status, dest_status, db_status
+            );
+        }
+        if !verbose && !concerning.is_empty() {
+            println!();
+            println!("  (showing {} concerning entries; use --verbose for all)", concerning.len());
+        }
+        println!();
+    }
+
+    // Summary
+    println!(
+        "Summary: {} at destination, {} pending, {} source files missing.",
+        format_count(status.at_destination),
+        format_count(status.pending),
+        format_count(status.source_lost),
+    );
+    if status.source_still_present > 0 {
+        println!(
+            "         {} at destination with source still present.",
+            format_count(status.source_still_present),
+        );
+    }
+    if status.size_mismatch > 0 {
+        println!(
+            "         {} with size mismatch at destination.",
+            format_count(status.size_mismatch),
+        );
+    }
+
+    // Safety assessment
+    if status.all_accounted_for() {
+        println!("All source files accounted for.");
+    } else {
+        if status.source_lost > 0 {
+            println!();
+            println!(
+                "WARNING: {} source files are missing and not at the destination.",
+                format_count(status.source_lost),
+            );
+            let lost_entries: Vec<&crate::ops::cluster::StatusEntry> = status
+                .entries
+                .iter()
+                .filter(|e| !e.source_exists && !(e.dest_exists && e.dest_size_match))
+                .collect();
+            for entry in &lost_entries {
+                println!("  {} (source: {}, dest: {})", entry.source_filename, entry.source_path, entry.dest_path);
+            }
+            println!();
+            println!("Check if the source volume is connected. If files are truly lost,");
+            println!(
+                "refresh the manifest: canon cluster refresh {}",
+                manifest_path.display()
+            );
+        }
+        if status.size_mismatch > 0 {
+            println!();
+            println!(
+                "WARNING: {} files at destination have unexpected size.",
+                format_count(status.size_mismatch),
+            );
+        }
+    }
+
+    // Next-step hint
+    if status.pending > 0 && status.all_accounted_for() {
+        println!();
+        if status.at_destination > 0 {
+            println!(
+                "To complete: canon apply --resume {}",
+                manifest_path.display()
+            );
+        } else {
+            println!("To apply: canon apply {}", manifest_path.display());
+        }
+    }
+
+    Ok(())
 }
 

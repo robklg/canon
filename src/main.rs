@@ -583,6 +583,14 @@ enum ClusterAction {
         #[arg(long)]
         no_edit: bool,
     },
+    /// Show the state of a manifest's entries
+    Status {
+        /// Path to manifest TOML file
+        manifest: PathBuf,
+        /// Show all entries, not just concerning ones
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 fn resolve_canon_home(flag: Option<&Path>) -> Result<PathBuf> {
@@ -965,6 +973,9 @@ fn main() -> Result<()> {
                 no_edit,
             } => {
                 cluster::refresh(&mut db, &manifest, show_archived, no_edit)?;
+            }
+            ClusterAction::Status { manifest, verbose } => {
+                cluster::status(db.conn_mut(), &manifest, verbose)?;
             }
         },
         Commands::Apply {
