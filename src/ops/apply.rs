@@ -109,6 +109,10 @@ pub struct ApplyViolations {
     pub suspended_sources: Vec<(i64, String)>,
     /// Destination paths that resolve outside the archive root: (source_path, resolved_dest).
     pub escaped_paths: Vec<(String, String)>,
+    /// Source files that are missing (stat failed, not found).
+    pub missing_sources: Vec<(i64, String)>,
+    /// Source files that exist but are not readable (permission denied).
+    pub unreadable_sources: Vec<(i64, String)>,
 }
 
 /// A source whose state has changed since the lock file was generated.
@@ -385,6 +389,57 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
                 violations
                     .escaped_paths
                     .push((transfer.source_path.clone(), full_dest));
+            }
+        }
+    }
+
+    // --- Source existence and readability preflight ---
+    // In resume mode, transfers already contains only pending entries (resume filtering below).
+    // But resume filtering hasn't happened yet at this point — it happens after staleness checks.
+    // We check all transfers here; resume filtering below will remove completed ones.
+    // This is correct: if a source is missing, we want to know even if the dest exists,
+    // because the stale_records violation will also fire for those.
+    for transfer in &transfers {
+        let path = Path::new(&transfer.source_path);
+        match fs::metadata(path) {
+            Ok(meta) => {
+                if !meta.is_file() {
+                    violations
+                        .missing_sources
+                        .push((transfer.source_id, transfer.source_path.clone()));
+                    continue;
+                }
+                // Check readability: try to open the file
+                match File::open(path) {
+                    Ok(_) => {} // readable
+                    Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                        violations
+                            .unreadable_sources
+                            .push((transfer.source_id, transfer.source_path.clone()));
+                    }
+                    Err(_) => {
+                        // Other open errors — treat as unreadable
+                        violations
+                            .unreadable_sources
+                            .push((transfer.source_id, transfer.source_path.clone()));
+                    }
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                violations
+                    .missing_sources
+                    .push((transfer.source_id, transfer.source_path.clone()));
+            }
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                violations
+                    .unreadable_sources
+                    .push((transfer.source_id, transfer.source_path.clone()));
+            }
+            Err(_) => {
+                // Other stat errors — treat as missing
+                violations
+                    .missing_sources
+                    .push((transfer.source_id, transfer.source_path.clone()));
             }
         }
     }
@@ -1952,5 +2007,71 @@ mod tests {
         assert_eq!(plan.transfers.len(), 1);
         // The dest_rel_path should be "5.avi", not "/5.avi"
         assert_eq!(plan.transfers[0].dest_rel_path, "5.avi");
+    }
+
+    // =========================================================================
+    // Source existence and readability preflight
+    // =========================================================================
+
+    #[test]
+    fn test_plan_detects_missing_source() {
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let archive_id = insert_root(&conn, "/archive", "archive", false);
+        let obj_id = insert_object(&conn, "hash1", false);
+        let src_id = insert_source_with_metadata(
+            &conn, root_id, "missing.jpg", Some(obj_id), 1000, 1704067200,
+        );
+
+        // Lock entry points to a non-existent file
+        let entry = make_lock_entry(
+            src_id, root_id, "/nonexistent/missing.jpg", Some(obj_id), Some("hash1"),
+        );
+        let sources: Vec<&LockEntry> = vec![&entry];
+        let pattern = expr::parse_pattern("{filename}").unwrap();
+        let needed_keys = expr::extract_fact_keys(&pattern);
+        let mut root_paths = HashMap::new();
+        root_paths.insert(root_id, "/photos".to_string());
+        root_paths.insert(archive_id, "/archive".to_string());
+
+        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let plan = plan_apply(&mut conn, &params).unwrap();
+
+        assert_eq!(plan.violations.missing_sources.len(), 1);
+        assert_eq!(plan.violations.missing_sources[0].0, src_id);
+        assert!(plan.violations.missing_sources[0].1.contains("missing.jpg"));
+    }
+
+    #[test]
+    fn test_plan_detects_source_is_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("subdir");
+        std::fs::create_dir(&sub).unwrap();
+
+        let mut conn = setup_test_db();
+        let root_path = dir.path().to_str().unwrap();
+        let root_id = insert_root(&conn, root_path, "source", false);
+        let archive_id = insert_root(&conn, "/archive", "archive", false);
+        let obj_id = insert_object(&conn, "hash1", false);
+        let src_id = insert_source_with_metadata(
+            &conn, root_id, "subdir", Some(obj_id), 1000, 1704067200,
+        );
+
+        // Lock entry points to a directory, not a file
+        let entry = make_lock_entry(
+            src_id, root_id, &sub.to_string_lossy(), Some(obj_id), Some("hash1"),
+        );
+        let sources: Vec<&LockEntry> = vec![&entry];
+        let pattern = expr::parse_pattern("{filename}").unwrap();
+        let needed_keys = expr::extract_fact_keys(&pattern);
+        let mut root_paths = HashMap::new();
+        root_paths.insert(root_id, root_path.to_string());
+        root_paths.insert(archive_id, "/archive".to_string());
+
+        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let plan = plan_apply(&mut conn, &params).unwrap();
+
+        assert_eq!(plan.violations.missing_sources.len(), 1);
+        assert_eq!(plan.violations.missing_sources[0].0, src_id);
     }
 }

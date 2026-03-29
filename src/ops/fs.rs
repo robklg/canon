@@ -139,64 +139,190 @@ pub fn ensure_parent_dir(path: &Path) -> Result<()> {
 }
 
 /// Copy a file and preserve its metadata (mtime, permissions).
-/// If noclobber is true, errors when dest already exists.
+/// If noclobber is true, uses atomic O_EXCL create to prevent overwriting.
 pub fn copy_file(src: &Path, dest: &Path, noclobber: bool) -> Result<()> {
-    if noclobber && dest.exists() {
-        bail!("Destination already exists: {}", dest.display());
-    }
     let src_meta = fs::metadata(src)
         .with_context(|| format!("Failed to read metadata: {}", src.display()))?;
-    fs::copy(src, dest).with_context(|| {
-        format!(
-            "Failed to copy {} to {}",
-            src.display(),
-            dest.display()
-        )
-    })?;
+
+    if noclobber {
+        // Atomic noclobber: create dest with O_EXCL, then copy content manually
+        let mut src_file = File::open(src)
+            .with_context(|| format!("Failed to open source: {}", src.display()))?;
+        let dest_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true) // O_CREAT | O_EXCL — atomic, fails if exists
+            .open(dest)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    anyhow::anyhow!("Destination already exists: {}", dest.display())
+                } else {
+                    anyhow::anyhow!("Failed to create {}: {}", dest.display(), e)
+                }
+            })?;
+        let mut writer = std::io::BufWriter::new(dest_file);
+        std::io::copy(&mut src_file, &mut writer)
+            .with_context(|| format!("Failed to copy {} to {}", src.display(), dest.display()))?;
+        use std::io::Write;
+        writer
+            .flush()
+            .with_context(|| format!("Failed to flush {}", dest.display()))?;
+    } else {
+        // Allow overwrite
+        fs::copy(src, dest).with_context(|| {
+            format!(
+                "Failed to copy {} to {}",
+                src.display(),
+                dest.display()
+            )
+        })?;
+    }
+
     preserve_metadata(dest, &src_meta)?;
     Ok(())
 }
 
-/// Rename a file (same filesystem only).
-/// If noclobber is true, errors when dest already exists.
-pub fn rename_file(src: &Path, dest: &Path, noclobber: bool) -> Result<()> {
-    if noclobber && dest.exists() {
-        bail!("Destination already exists: {}", dest.display());
-    }
-    fs::rename(src, dest).with_context(|| {
-        format!(
-            "Failed to rename {} to {}",
-            src.display(),
-            dest.display()
-        )
-    })?;
-    Ok(())
-}
+/// Rename with atomic noclobber where the platform supports it.
+/// Falls back to stat-then-rename on unsupported platforms.
+fn noclobber_rename(src: &Path, dest: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
 
-/// Move a file: try rename, fall back to copy+delete on cross-device (EXDEV).
-/// If noclobber is true, errors when dest already exists.
-/// Returns which strategy was used so the caller can take the appropriate DB path.
-pub fn move_file(src: &Path, dest: &Path, noclobber: bool) -> Result<MoveOutcome> {
-    if noclobber && dest.exists() {
-        bail!("Destination already exists: {}", dest.display());
-    }
-    match fs::rename(src, dest) {
-        Ok(()) => Ok(MoveOutcome::Renamed),
-        #[cfg(unix)]
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            // Cross-device: fallback to copy + delete
-            copy_file(src, dest, false)?;
-            fs::remove_file(src)
-                .with_context(|| format!("Failed to delete source: {}", src.display()))?;
-            Ok(MoveOutcome::CopiedAndDeleted)
+        let src_c = CString::new(src.as_os_str().as_bytes())
+            .with_context(|| format!("Invalid source path: {}", src.display()))?;
+        let dest_c = CString::new(dest.as_os_str().as_bytes())
+            .with_context(|| format!("Invalid dest path: {}", dest.display()))?;
+
+        // renamex_np with RENAME_EXCL — atomic noclobber on macOS
+        const RENAME_EXCL: u32 = 0x00000004;
+        let ret =
+            unsafe { libc::renamex_np(src_c.as_ptr(), dest_c.as_ptr(), RENAME_EXCL) };
+        if ret == 0 {
+            return Ok(());
         }
-        Err(e) => Err(e).with_context(|| {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EEXIST) {
+            bail!("Destination already exists: {}", dest.display());
+        }
+        Err(err).with_context(|| {
             format!(
                 "Failed to rename {} to {}",
                 src.display(),
                 dest.display()
             )
-        }),
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let src_c = CString::new(src.as_os_str().as_bytes())
+            .with_context(|| format!("Invalid source path: {}", src.display()))?;
+        let dest_c = CString::new(dest.as_os_str().as_bytes())
+            .with_context(|| format!("Invalid dest path: {}", dest.display()))?;
+
+        // renameat2 with RENAME_NOREPLACE — atomic noclobber on Linux
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                src_c.as_ptr(),
+                libc::AT_FDCWD,
+                dest_c.as_ptr(),
+                1u32, // RENAME_NOREPLACE
+            )
+        };
+        if ret == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EEXIST)
+            || err.raw_os_error() == Some(libc::ENOTEMPTY)
+        {
+            bail!("Destination already exists: {}", dest.display());
+        }
+        Err(err).with_context(|| {
+            format!(
+                "Failed to rename {} to {}",
+                src.display(),
+                dest.display()
+            )
+        })
+    }
+
+    // Fallback: stat-then-rename (TOCTOU gap, but negligible on unsupported platforms)
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        if dest.exists() {
+            bail!("Destination already exists: {}", dest.display());
+        }
+        fs::rename(src, dest).with_context(|| {
+            format!(
+                "Failed to rename {} to {}",
+                src.display(),
+                dest.display()
+            )
+        })?;
+        Ok(())
+    }
+}
+
+/// Rename a file (same filesystem only).
+/// If noclobber is true, uses platform-native atomic noclobber.
+pub fn rename_file(src: &Path, dest: &Path, noclobber: bool) -> Result<()> {
+    if noclobber {
+        noclobber_rename(src, dest)
+    } else {
+        fs::rename(src, dest).with_context(|| {
+            format!(
+                "Failed to rename {} to {}",
+                src.display(),
+                dest.display()
+            )
+        })
+    }
+}
+
+/// Move a file: try rename, fall back to copy+delete on cross-device (EXDEV).
+/// If noclobber is true, uses platform-native atomic noclobber for the rename
+/// and passes noclobber through to the copy fallback.
+/// Returns which strategy was used so the caller can take the appropriate DB path.
+pub fn move_file(src: &Path, dest: &Path, noclobber: bool) -> Result<MoveOutcome> {
+    let rename_result = if noclobber {
+        noclobber_rename(src, dest)
+    } else {
+        fs::rename(src, dest).with_context(|| {
+            format!(
+                "Failed to rename {} to {}",
+                src.display(),
+                dest.display()
+            )
+        })
+    };
+
+    match rename_result {
+        Ok(()) => Ok(MoveOutcome::Renamed),
+        Err(e) => {
+            // Check for cross-device error in the anyhow chain.
+            // noclobber_rename wraps io::Error in context, so we traverse the chain.
+            let is_exdev = e.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .and_then(|io_err| io_err.raw_os_error())
+                    == Some(libc::EXDEV)
+            });
+            if is_exdev {
+                copy_file(src, dest, noclobber)?;
+                fs::remove_file(src)
+                    .with_context(|| format!("Failed to delete source: {}", src.display()))?;
+                Ok(MoveOutcome::CopiedAndDeleted)
+            } else {
+                Err(e)
+            }
+        }
     }
 }
 

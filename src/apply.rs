@@ -218,6 +218,42 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         bail!("Aborting due to escaped destination paths");
     }
 
+    if !v.missing_sources.is_empty() {
+        let manifest_display = config_path.display();
+        eprintln!(
+            "Preflight failed: {} source files are missing.",
+            v.missing_sources.len()
+        );
+        eprintln!();
+        for (_, path) in v.missing_sources.iter().take(10) {
+            eprintln!("  Missing: {path}");
+        }
+        if v.missing_sources.len() > 10 {
+            eprintln!("  ... and {} more", v.missing_sources.len() - 10);
+        }
+        eprintln!();
+        eprintln!("Source files have changed since the manifest was generated.");
+        eprintln!("Refresh the manifest: canon cluster refresh {manifest_display}");
+        bail!("Aborting due to missing source files");
+    }
+
+    if !v.unreadable_sources.is_empty() {
+        eprintln!(
+            "Preflight failed: {} source files are not readable.",
+            v.unreadable_sources.len()
+        );
+        eprintln!();
+        for (_, path) in v.unreadable_sources.iter().take(10) {
+            eprintln!("  Permission denied: {path}");
+        }
+        if v.unreadable_sources.len() > 10 {
+            eprintln!("  ... and {} more", v.unreadable_sources.len() - 10);
+        }
+        eprintln!();
+        eprintln!("Fix file permissions, then retry.");
+        bail!("Aborting due to unreadable source files");
+    }
+
     if !v.collisions.is_empty() {
         eprintln!(
             "Error: {} destination paths have multiple sources:",
