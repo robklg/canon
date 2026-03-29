@@ -37,7 +37,7 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 - `scan.rs` - Scan reconciliation logic (`FileObservation`, `Reconciliation`, `reconcile()`, `find_missing()`)
 - `exclusion.rs` - Duplicate exclusion logic (`find_excludable_duplicates()`)
 - `include.rs` - `IncludeSet` struct for controlling source visibility (`includes_excluded()`, `includes_archived()`, `is_expanded()`)
-- `note.rs` - Note struct, ancestry path computation (`ancestor_paths()`), relative path computation (`relative_to_scope()`)
+- `note.rs` - Note struct, `LocationEntry` struct (spatial listing summary), ancestry path computation (`ancestor_paths()`), relative path computation (`relative_to_scope()`)
 - `survey.rs` - Scope discovery (`discover_scopes()`, `discover_scopes_by_root()`), uniqueness (`count_only_here()`, `find_unique_object_ids()`), `LocationKind` classification (Superset, Lead, Subset, Mirror)
 
 **Repository Layer** (`src/repo/`) - Database access:
@@ -45,7 +45,7 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 - `source.rs` - Source batch fetching and writes (`batch_fetch_by_roots()`, `fetch_sources_by_object_ids()`, `insert_destination()`, `apply_reconciliation()`)
 - `root.rs` - Root batch fetching (`fetch_all()`, `batch_fetch_by_ids()`)
 - `object.rs` - Object batch fetching, archive detection (`batch_check_archived()`, `batch_find_archive_info_by_hash()`)
-- `note.rs` - Note CRUD operations, subtree queries, batch counts (`insert()`, `fetch_by_scope()`, `fetch_subtree()`, `fetch_all()`, `clear_by_scope()`, `clear_subtree()`, `batch_count_subtree()`)
+- `note.rs` - Note CRUD operations, subtree queries, batch counts, temporal/spatial listing queries (`insert()`, `fetch_by_scope()`, `fetch_subtree()`, `fetch_recent()`, `fetch_recent_subtree()`, `fetch_locations()`, `fetch_locations_subtree()`, `clear_by_scope()`, `clear_subtree()`, `batch_count_subtree()`)
 - `fact.rs` - Fact batch fetching (`batch_fetch_for_sources()`, `batch_fetch_key_for_sources()`)
 
 **Expression System** (`src/expr/`) - Pattern and filter handling:
@@ -63,7 +63,7 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 - `ls.rs` - Duplicate detection: `find_duplicate_groups()`, `DuplicateGroup`
 - `survey.rs` - Survey computation: `compute_survey()`, `SurveyParams`, `SurveyOutcome`, `SurveyResult`, `LocationResult`
 - `facts.rs` - Facts distribution: `compute_all_keys()`, `compute_distribution()`, `compute_grouped_distribution()`, `DistributionResult`, `AllKeysResult`
-- `note.rs` - Composed note operations: `resolve_note_scope()`, `view_notes()`, `list_notes_global()`, `list_notes_recursive()`, `plan_clear_recursive()`, `execute_clear_recursive()`, `survey_note_context()`, `NoteScope`, `NoteViewResult`, `NoteListResult`, `ClearPlan`, `SurveyNoteContext`
+- `note.rs` - Composed note operations: `resolve_note_scope()`, `view_notes()`, `list_notes_global()`, `list_notes_recursive()`, `list_locations_global()`, `list_locations_recursive()`, `plan_clear_recursive()`, `execute_clear_recursive()`, `survey_note_context()`, `NoteScope`, `NoteViewResult`, `NoteListResult`, `NoteSpatialResult`, `ClearPlan`, `SurveyNoteContext`
 - `import_facts.rs` - Import facts processing: `init_state()`, `process_record()`, `ImportRecord`, `ImportState`, `ImportStats`, `RecordOutcome`
 - `scan.rs` - Scan pipeline: `scan_root()`, `ScanOptions`, `ScanProgress` trait, `ScanStats`, `FileToHash`, `ScanRootResult`
 - `fs.rs` - Filesystem primitives: `compute_partial_hash()`, `compute_full_hash()`, `preserve_metadata()`, `check_destination_writable()`, `ensure_parent_dir()`, `copy_file()`, `rename_file()`, `move_file()`, `MoveOutcome`

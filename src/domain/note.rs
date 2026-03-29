@@ -9,6 +9,17 @@ pub struct Note {
     pub created_at: i64,
 }
 
+/// Summary of a location's notes — most recent note + count.
+/// Used by spatial listing mode.
+#[derive(Debug, Clone)]
+pub struct LocationEntry {
+    pub root_id: i64,
+    pub rel_path: String,
+    pub note_count: usize,
+    pub latest_text: String,
+    pub latest_created_at: i64,
+}
+
 /// Compute all ancestor rel_paths for a given rel_path.
 /// "a/b/c" → ["a/b", "a", ""]
 /// "a" → [""]

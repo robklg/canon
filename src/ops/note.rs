@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 
-use crate::domain::note::{ancestor_paths, Note};
+use crate::domain::note::{ancestor_paths, LocationEntry, Note};
 use crate::domain::root::Root;
 use crate::repo::{self, Connection};
 
@@ -42,10 +42,19 @@ pub struct NoteViewResult {
     pub descendant_location_count: usize,
 }
 
-/// Result of listing notes.
+/// Result of listing notes (temporal mode).
 pub struct NoteListResult {
     pub notes: Vec<Note>,
     pub roots: HashMap<i64, Root>,
+    pub total_note_count: usize,
+    pub total_location_count: usize,
+}
+
+/// Result of listing locations (spatial mode).
+pub struct NoteSpatialResult {
+    pub locations: Vec<LocationEntry>,
+    pub roots: HashMap<i64, Root>,
+    pub total_location_count: usize,
 }
 
 /// Plan for recursive clear.
@@ -99,20 +108,80 @@ pub fn view_notes(conn: &Connection, scope: &NoteScope) -> Result<NoteViewResult
     })
 }
 
-/// List all notes across all roots.
-pub fn list_notes_global(conn: &Connection) -> Result<NoteListResult> {
-    let notes = repo::note::fetch_all(conn)?;
+/// Default listing cap.
+const DEFAULT_LIMIT: usize = 10;
+
+/// List notes globally, temporal mode.
+/// limit: None = default (10), Some(0) = unlimited, Some(n) = n.
+pub fn list_notes_global(conn: &Connection, limit: Option<usize>) -> Result<NoteListResult> {
+    let effective = limit.unwrap_or(DEFAULT_LIMIT);
+    let (mut notes, total_note_count, total_location_count) =
+        repo::note::fetch_recent(conn, effective)?;
+    notes.reverse(); // oldest-first for display
     let all_roots = repo::root::fetch_all(conn)?;
     let roots: HashMap<i64, Root> = all_roots.into_iter().map(|r| (r.id, r)).collect();
-    Ok(NoteListResult { notes, roots })
+    Ok(NoteListResult {
+        notes,
+        roots,
+        total_note_count,
+        total_location_count,
+    })
 }
 
-/// List notes for a scope and all descendants (chronological order).
-pub fn list_notes_recursive(conn: &Connection, scope: &NoteScope) -> Result<NoteListResult> {
-    let notes = repo::note::fetch_subtree_chronological(conn, scope.root_id, &scope.rel_path)?;
+/// List notes recursively, temporal mode.
+pub fn list_notes_recursive(
+    conn: &Connection,
+    scope: &NoteScope,
+    limit: Option<usize>,
+) -> Result<NoteListResult> {
+    let effective = limit.unwrap_or(DEFAULT_LIMIT);
+    let (mut notes, total_note_count, total_location_count) =
+        repo::note::fetch_recent_subtree(conn, scope.root_id, &scope.rel_path, effective)?;
+    notes.reverse(); // oldest-first for display
     let all_roots = repo::root::fetch_all(conn)?;
     let roots: HashMap<i64, Root> = all_roots.into_iter().map(|r| (r.id, r)).collect();
-    Ok(NoteListResult { notes, roots })
+    Ok(NoteListResult {
+        notes,
+        roots,
+        total_note_count,
+        total_location_count,
+    })
+}
+
+/// List locations globally, spatial mode.
+pub fn list_locations_global(
+    conn: &Connection,
+    limit: Option<usize>,
+) -> Result<NoteSpatialResult> {
+    let effective = limit.unwrap_or(DEFAULT_LIMIT);
+    let (mut locations, total_location_count) = repo::note::fetch_locations(conn, effective)?;
+    locations.reverse(); // oldest-first for display
+    let all_roots = repo::root::fetch_all(conn)?;
+    let roots: HashMap<i64, Root> = all_roots.into_iter().map(|r| (r.id, r)).collect();
+    Ok(NoteSpatialResult {
+        locations,
+        roots,
+        total_location_count,
+    })
+}
+
+/// List locations recursively, spatial mode.
+pub fn list_locations_recursive(
+    conn: &Connection,
+    scope: &NoteScope,
+    limit: Option<usize>,
+) -> Result<NoteSpatialResult> {
+    let effective = limit.unwrap_or(DEFAULT_LIMIT);
+    let (mut locations, total_location_count) =
+        repo::note::fetch_locations_subtree(conn, scope.root_id, &scope.rel_path, effective)?;
+    locations.reverse(); // oldest-first for display
+    let all_roots = repo::root::fetch_all(conn)?;
+    let roots: HashMap<i64, Root> = all_roots.into_iter().map(|r| (r.id, r)).collect();
+    Ok(NoteSpatialResult {
+        locations,
+        roots,
+        total_location_count,
+    })
 }
 
 /// Plan a recursive clear — compute counts without deleting.
@@ -221,7 +290,7 @@ mod tests {
         insert_note(&conn, root1, "a", "root1 note", 100);
         insert_note(&conn, root2, "b", "root2 note", 200);
 
-        let result = list_notes_global(&conn).unwrap();
+        let result = list_notes_global(&conn, Some(0)).unwrap();
 
         assert_eq!(result.notes.len(), 2);
         assert!(result.roots.contains_key(&root1));
@@ -244,7 +313,7 @@ mod tests {
             rel_path: "a".to_string(),
         };
 
-        let result = list_notes_recursive(&conn, &scope).unwrap();
+        let result = list_notes_recursive(&conn, &scope, Some(0)).unwrap();
 
         assert_eq!(result.notes.len(), 3);
         // All notes should be from scope "a" or descendants
@@ -310,5 +379,85 @@ mod tests {
 
         // Ancestor count: root note + parent note = 2
         assert_eq!(result.ancestor_count, 2);
+    }
+
+    #[test]
+    fn list_global_temporal_reverses_to_oldest_first() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        insert_note(&conn, root_id, "a", "oldest", 100);
+        insert_note(&conn, root_id, "b", "middle", 200);
+        insert_note(&conn, root_id, "c", "newest", 300);
+
+        let result = list_notes_global(&conn, Some(0)).unwrap();
+
+        assert_eq!(result.notes.len(), 3);
+        // Oldest first after reversal
+        assert_eq!(result.notes[0].text, "oldest");
+        assert_eq!(result.notes[1].text, "middle");
+        assert_eq!(result.notes[2].text, "newest");
+    }
+
+    #[test]
+    fn list_global_temporal_default_limit() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        for i in 1..=15 {
+            insert_note(&conn, root_id, &format!("loc{}", i % 5), &format!("note {i}"), i * 100);
+        }
+
+        let result = list_notes_global(&conn, None).unwrap(); // default limit = 10
+
+        assert_eq!(result.notes.len(), 10);
+        assert_eq!(result.total_note_count, 15);
+        // Oldest first within the capped set
+        assert!(result.notes[0].created_at < result.notes[9].created_at);
+    }
+
+    #[test]
+    fn list_global_spatial_returns_location_entries() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        insert_note(&conn, root_id, "a", "first at a", 100);
+        insert_note(&conn, root_id, "a", "second at a", 200);
+        insert_note(&conn, root_id, "b", "at b", 150);
+
+        let result = list_locations_global(&conn, Some(0)).unwrap();
+
+        assert_eq!(result.locations.len(), 2);
+        assert_eq!(result.total_location_count, 2);
+        // Oldest first after reversal — b (150) before a (200)
+        assert_eq!(result.locations[0].rel_path, "b");
+        assert_eq!(result.locations[1].rel_path, "a");
+        assert_eq!(result.locations[1].note_count, 2);
+        assert_eq!(result.locations[1].latest_text, "second at a");
+    }
+
+    #[test]
+    fn list_recursive_temporal_scoped() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        insert_note(&conn, root_id, "a", "in scope", 100);
+        insert_note(&conn, root_id, "a/b", "child", 200);
+        insert_note(&conn, root_id, "other", "outside", 300);
+
+        let scope = NoteScope {
+            root_id,
+            root_path: "/photos".to_string(),
+            rel_path: "a".to_string(),
+        };
+
+        let result = list_notes_recursive(&conn, &scope, Some(0)).unwrap();
+
+        assert_eq!(result.notes.len(), 2);
+        assert_eq!(result.total_note_count, 2);
+        assert_eq!(result.total_location_count, 2);
+        // Oldest first
+        assert_eq!(result.notes[0].text, "in scope");
+        assert_eq!(result.notes[1].text, "child");
     }
 }

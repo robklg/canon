@@ -366,6 +366,12 @@ enum Commands {
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
+        /// Group by location, show most recent note per location
+        #[arg(long)]
+        by_scope: bool,
+        /// Maximum number of entries to display (default: 10, 0 = unlimited)
+        #[arg(long)]
+        limit: Option<usize>,
     },
     /// Prune orphaned or stale data from the database
     Prune {
@@ -1108,6 +1114,8 @@ fn main() -> Result<()> {
             global,
             clear,
             yes,
+            by_scope,
+            limit,
         } => {
             note::run(
                 &db,
@@ -1117,6 +1125,8 @@ fn main() -> Result<()> {
                 global,
                 clear,
                 yes,
+                by_scope,
+                limit,
             )?;
         }
         Commands::Roots {

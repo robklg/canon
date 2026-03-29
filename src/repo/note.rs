@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 
 use super::db::Connection;
-use crate::domain::note::Note;
+use crate::domain::note::{LocationEntry, Note};
 
 /// The columns we SELECT for Note construction.
 const NOTE_COLUMNS: &str = "id, root_id, rel_path, text, created_at";
@@ -86,7 +86,7 @@ pub fn fetch_subtree(conn: &Connection, root_id: i64, rel_path: &str) -> Result<
 }
 
 /// Fetch notes for scope + descendants, ordered by path then chronologically (ASC).
-/// Used by listing modes where the user reads top-to-bottom.
+#[allow(dead_code)]
 pub fn fetch_subtree_chronological(
     conn: &Connection,
     root_id: i64,
@@ -120,6 +120,7 @@ pub fn fetch_subtree_chronological(
 }
 
 /// Fetch all notes across all roots, ordered by root_id, rel_path, created_at.
+#[allow(dead_code)]
 pub fn fetch_all(conn: &Connection) -> Result<Vec<Note>> {
     let sql =
         format!("SELECT {NOTE_COLUMNS} FROM notes ORDER BY root_id, rel_path, created_at");
@@ -132,6 +133,225 @@ pub fn fetch_all(conn: &Connection) -> Result<Vec<Note>> {
     }
     Ok(notes)
 }
+
+// ============================================================================
+// Temporal listing queries (recency-capped, with total counts)
+// ============================================================================
+
+/// Fetch the N most recent notes across all roots.
+/// Returns (notes in DESC order, total note count, total distinct location count).
+/// limit=0 means unlimited.
+pub fn fetch_recent(conn: &Connection, limit: usize) -> Result<(Vec<Note>, usize, usize)> {
+    let sql = if limit > 0 {
+        format!(
+            "SELECT {NOTE_COLUMNS} FROM notes ORDER BY created_at DESC LIMIT ?"
+        )
+    } else {
+        format!("SELECT {NOTE_COLUMNS} FROM notes ORDER BY created_at DESC")
+    };
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = if limit > 0 {
+        stmt.query_map(rusqlite::params![limit], note_from_row)?
+    } else {
+        stmt.query_map([], note_from_row)?
+    };
+
+    let mut notes = Vec::new();
+    for row in rows {
+        notes.push(row?);
+    }
+
+    let total_notes: i64 =
+        conn.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))?;
+    let total_locations: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM (SELECT DISTINCT root_id, rel_path FROM notes)",
+        [],
+        |row| row.get(0),
+    )?;
+
+    Ok((notes, total_notes as usize, total_locations as usize))
+}
+
+/// Fetch the N most recent notes within a subtree.
+/// Returns (notes in DESC order, total note count in subtree, total location count in subtree).
+pub fn fetch_recent_subtree(
+    conn: &Connection,
+    root_id: i64,
+    rel_path: &str,
+    limit: usize,
+) -> Result<(Vec<Note>, usize, usize)> {
+    let (where_clause, params) = subtree_where(root_id, rel_path);
+
+    let sql = if limit > 0 {
+        format!(
+            "SELECT {NOTE_COLUMNS} FROM notes WHERE {where_clause} ORDER BY created_at DESC LIMIT ?"
+        )
+    } else {
+        format!(
+            "SELECT {NOTE_COLUMNS} FROM notes WHERE {where_clause} ORDER BY created_at DESC"
+        )
+    };
+
+    let mut all_params: Vec<rusqlite::types::Value> = params.clone();
+    if limit > 0 {
+        all_params.push(rusqlite::types::Value::from(limit as i64));
+    }
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(&all_params), note_from_row)?;
+
+    let mut notes = Vec::new();
+    for row in rows {
+        notes.push(row?);
+    }
+
+    let total_notes = count_subtree_notes(conn, root_id, rel_path)?;
+    let total_locations = count_subtree_locations_inclusive(conn, root_id, rel_path)?;
+
+    Ok((notes, total_notes, total_locations))
+}
+
+// ============================================================================
+// Spatial listing queries (one per location, with counts)
+// ============================================================================
+
+fn location_entry_from_row(row: &rusqlite::Row) -> rusqlite::Result<LocationEntry> {
+    Ok(LocationEntry {
+        root_id: row.get(0)?,
+        rel_path: row.get(1)?,
+        note_count: row.get::<_, i64>(2)? as usize,
+        latest_text: row.get(3)?,
+        latest_created_at: row.get(4)?,
+    })
+}
+
+/// Fetch the most recent note per location across all roots.
+/// Returns (locations in DESC order by most recent note, total location count).
+/// limit=0 means unlimited.
+pub fn fetch_locations(conn: &Connection, limit: usize) -> Result<(Vec<LocationEntry>, usize)> {
+    let limit_clause = if limit > 0 {
+        format!("LIMIT {limit}")
+    } else {
+        String::new()
+    };
+
+    let sql = format!(
+        "SELECT root_id, rel_path, note_count, text, created_at
+         FROM (
+             SELECT root_id, rel_path, text, created_at,
+                    COUNT(*) OVER (PARTITION BY root_id, rel_path) as note_count,
+                    ROW_NUMBER() OVER (PARTITION BY root_id, rel_path ORDER BY created_at DESC) as rn
+             FROM notes
+         ) ranked
+         WHERE rn = 1
+         ORDER BY created_at DESC
+         {limit_clause}"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], location_entry_from_row)?;
+
+    let mut locations = Vec::new();
+    for row in rows {
+        locations.push(row?);
+    }
+
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM (SELECT DISTINCT root_id, rel_path FROM notes)",
+        [],
+        |row| row.get(0),
+    )?;
+
+    Ok((locations, total as usize))
+}
+
+/// Fetch the most recent note per location within a subtree.
+/// Returns (locations in DESC order by most recent note, total location count in subtree).
+pub fn fetch_locations_subtree(
+    conn: &Connection,
+    root_id: i64,
+    rel_path: &str,
+    limit: usize,
+) -> Result<(Vec<LocationEntry>, usize)> {
+    let (where_clause, params) = subtree_where(root_id, rel_path);
+
+    let limit_clause = if limit > 0 {
+        format!("LIMIT {limit}")
+    } else {
+        String::new()
+    };
+
+    let sql = format!(
+        "SELECT root_id, rel_path, note_count, text, created_at
+         FROM (
+             SELECT root_id, rel_path, text, created_at,
+                    COUNT(*) OVER (PARTITION BY root_id, rel_path) as note_count,
+                    ROW_NUMBER() OVER (PARTITION BY root_id, rel_path ORDER BY created_at DESC) as rn
+             FROM notes
+             WHERE {where_clause}
+         ) ranked
+         WHERE rn = 1
+         ORDER BY created_at DESC
+         {limit_clause}"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(&params), location_entry_from_row)?;
+
+    let mut locations = Vec::new();
+    for row in rows {
+        locations.push(row?);
+    }
+
+    let total = count_subtree_locations_inclusive(conn, root_id, rel_path)?;
+
+    Ok((locations, total))
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Build a WHERE clause and params for subtree queries.
+fn subtree_where(root_id: i64, rel_path: &str) -> (String, Vec<rusqlite::types::Value>) {
+    if rel_path.is_empty() {
+        (
+            "root_id = ?".to_string(),
+            vec![rusqlite::types::Value::from(root_id)],
+        )
+    } else {
+        (
+            "root_id = ? AND (rel_path = ? OR rel_path LIKE ? || '/%')".to_string(),
+            vec![
+                rusqlite::types::Value::from(root_id),
+                rusqlite::types::Value::from(rel_path.to_string()),
+                rusqlite::types::Value::from(rel_path.to_string()),
+            ],
+        )
+    }
+}
+
+/// Count distinct locations (including the scope itself) for subtree queries.
+/// Unlike count_subtree_locations which counts descendants only for clear confirmation,
+/// this counts all distinct (root_id, rel_path) in the subtree for listing footers.
+fn count_subtree_locations_inclusive(
+    conn: &Connection,
+    root_id: i64,
+    rel_path: &str,
+) -> Result<usize> {
+    let (where_clause, params) = subtree_where(root_id, rel_path);
+    let sql = format!(
+        "SELECT COUNT(DISTINCT rel_path) FROM notes WHERE {where_clause}"
+    );
+    let count: i64 =
+        conn.query_row(&sql, rusqlite::params_from_iter(&params), |row| row.get(0))?;
+    Ok(count as usize)
+}
+
+// ============================================================================
+// Count queries
+// ============================================================================
 
 /// Count notes on the given ancestor paths within a root.
 /// Empty input returns 0 without querying.
@@ -680,5 +900,217 @@ mod tests {
         assert_eq!(counts.get(&(root2, "x".to_string())), Some(&1));
         // Empty scope not in result (zero count omitted)
         assert!(!counts.contains_key(&(root2, "empty".to_string())));
+    }
+
+    // =========================================================================
+    // fetch_recent tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_recent_returns_most_recent() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        for i in 1..=15 {
+            insert_note(&conn, root_id, &format!("loc{}", i % 5), &format!("note {i}"), i * 100);
+        }
+
+        let (notes, total_notes, total_locations) = fetch_recent(&conn, 5).unwrap();
+
+        assert_eq!(notes.len(), 5);
+        assert_eq!(total_notes, 15);
+        assert_eq!(total_locations, 5);
+        // DESC order — most recent first
+        assert!(notes[0].created_at >= notes[1].created_at);
+        assert_eq!(notes[0].created_at, 1500);
+    }
+
+    #[test]
+    fn fetch_recent_counts_correct() {
+        let conn = setup_test_db();
+        let root1 = insert_root(&conn, "/photos", "source", false);
+        let root2 = insert_root(&conn, "/archive", "archive", false);
+
+        insert_note(&conn, root1, "a", "note1", 100);
+        insert_note(&conn, root1, "a", "note2", 200);
+        insert_note(&conn, root1, "b", "note3", 300);
+        insert_note(&conn, root2, "c", "note4", 400);
+
+        let (notes, total_notes, total_locations) = fetch_recent(&conn, 2).unwrap();
+
+        assert_eq!(notes.len(), 2);
+        assert_eq!(total_notes, 4);
+        assert_eq!(total_locations, 3); // a, b, c
+    }
+
+    #[test]
+    fn fetch_recent_unlimited() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        for i in 1..=20 {
+            insert_note(&conn, root_id, "a", &format!("note {i}"), i * 100);
+        }
+
+        let (notes, total_notes, _) = fetch_recent(&conn, 0).unwrap();
+
+        assert_eq!(notes.len(), 20);
+        assert_eq!(total_notes, 20);
+    }
+
+    #[test]
+    fn fetch_recent_fewer_than_limit() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        insert_note(&conn, root_id, "a", "note1", 100);
+        insert_note(&conn, root_id, "b", "note2", 200);
+        insert_note(&conn, root_id, "c", "note3", 300);
+
+        let (notes, total_notes, total_locations) = fetch_recent(&conn, 10).unwrap();
+
+        assert_eq!(notes.len(), 3);
+        assert_eq!(total_notes, 3);
+        assert_eq!(total_locations, 3);
+    }
+
+    // =========================================================================
+    // fetch_recent_subtree tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_recent_subtree_filters() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        insert_note(&conn, root_id, "a", "in scope", 100);
+        insert_note(&conn, root_id, "a/b", "child", 200);
+        insert_note(&conn, root_id, "other", "outside", 300);
+
+        let (notes, total_notes, total_locations) =
+            fetch_recent_subtree(&conn, root_id, "a", 10).unwrap();
+
+        assert_eq!(notes.len(), 2);
+        assert_eq!(total_notes, 2);
+        assert_eq!(total_locations, 2); // a, a/b
+        for n in &notes {
+            assert!(n.rel_path == "a" || n.rel_path.starts_with("a/"));
+        }
+    }
+
+    #[test]
+    fn fetch_recent_subtree_counts_within_scope() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        insert_note(&conn, root_id, "a", "note1", 100);
+        insert_note(&conn, root_id, "a/b", "note2", 200);
+        insert_note(&conn, root_id, "a/b", "note3", 300);
+        insert_note(&conn, root_id, "other", "outside", 400);
+
+        let (notes, total_notes, total_locations) =
+            fetch_recent_subtree(&conn, root_id, "a", 1).unwrap();
+
+        assert_eq!(notes.len(), 1); // capped at 1
+        assert_eq!(total_notes, 3); // 3 in subtree, not 4
+        assert_eq!(total_locations, 2); // a and a/b
+    }
+
+    // =========================================================================
+    // fetch_locations tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_locations_one_per_location() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        insert_note(&conn, root_id, "a", "first at a", 100);
+        insert_note(&conn, root_id, "a", "second at a", 200);
+        insert_note(&conn, root_id, "a", "third at a", 300);
+        insert_note(&conn, root_id, "b", "only at b", 150);
+
+        let (locations, total) = fetch_locations(&conn, 10).unwrap();
+
+        assert_eq!(locations.len(), 2);
+        assert_eq!(total, 2);
+        // Most recent location first (DESC)
+        assert_eq!(locations[0].rel_path, "a");
+        assert_eq!(locations[0].latest_text, "third at a");
+        assert_eq!(locations[0].note_count, 3);
+        assert_eq!(locations[1].rel_path, "b");
+        assert_eq!(locations[1].note_count, 1);
+    }
+
+    #[test]
+    fn fetch_locations_ordered_by_recency() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        insert_note(&conn, root_id, "old", "note", 100);
+        insert_note(&conn, root_id, "mid", "note", 200);
+        insert_note(&conn, root_id, "new", "note", 300);
+
+        let (locations, _) = fetch_locations(&conn, 10).unwrap();
+
+        assert_eq!(locations[0].rel_path, "new"); // most recent first (DESC)
+        assert_eq!(locations[1].rel_path, "mid");
+        assert_eq!(locations[2].rel_path, "old");
+    }
+
+    #[test]
+    fn fetch_locations_limited() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        for i in 1..=10 {
+            insert_note(&conn, root_id, &format!("loc{i}"), "note", i * 100);
+        }
+
+        let (locations, total) = fetch_locations(&conn, 5).unwrap();
+
+        assert_eq!(locations.len(), 5);
+        assert_eq!(total, 10);
+    }
+
+    #[test]
+    fn fetch_locations_count_per_location() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        insert_note(&conn, root_id, "a", "n1", 100);
+        insert_note(&conn, root_id, "a", "n2", 200);
+        insert_note(&conn, root_id, "a", "n3", 300);
+        insert_note(&conn, root_id, "b", "n1", 150);
+        insert_note(&conn, root_id, "b", "n2", 250);
+
+        let (locations, _) = fetch_locations(&conn, 10).unwrap();
+
+        let loc_a = locations.iter().find(|l| l.rel_path == "a").unwrap();
+        let loc_b = locations.iter().find(|l| l.rel_path == "b").unwrap();
+        assert_eq!(loc_a.note_count, 3);
+        assert_eq!(loc_b.note_count, 2);
+    }
+
+    // =========================================================================
+    // fetch_locations_subtree tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_locations_subtree_filters() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        insert_note(&conn, root_id, "a", "in scope", 100);
+        insert_note(&conn, root_id, "a/b", "child", 200);
+        insert_note(&conn, root_id, "other", "outside", 300);
+
+        let (locations, total) = fetch_locations_subtree(&conn, root_id, "a", 10).unwrap();
+
+        assert_eq!(locations.len(), 2);
+        assert_eq!(total, 2);
+        for loc in &locations {
+            assert!(loc.rel_path == "a" || loc.rel_path.starts_with("a/"));
+        }
     }
 }

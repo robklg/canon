@@ -15,21 +15,25 @@ canon note
 # View notes at a specific path
 canon note /mnt/old-drive/exports
 
-# List all notes across all roots
+# List recent notes across all roots (temporal, capped at 10)
 canon note --global
 
-# List notes recursively under a scope
+# List recent notes recursively under a scope
 canon note -r
 canon note -r /mnt/old-drive
+
+# Show the spatial map — one line per noted location
+canon note --global --by-scope
+canon note -r --by-scope
+
+# Show more entries (or all)
+canon note --global --limit 20
+canon note --global --limit 0
 
 # Clear notes at the current scope
 canon note --clear
 
-# Clear notes at a specific path
-canon note --clear /mnt/old-drive/exports
-
 # Clear all notes under a scope (with confirmation)
-canon note --clear -r
 canon note --clear -r /mnt/old-drive
 
 # Skip confirmation prompt for recursive clear
@@ -43,6 +47,8 @@ canon note --clear -r --yes
 | `-m <TEXT>` | Add a note with the given text. |
 | `-r`, `--recursive` | List or clear notes for scope and all descendants. |
 | `--global` | List all notes across all roots. |
+| `--by-scope` | Group by location, show most recent note per location (spatial view). |
+| `--limit <N>` | Maximum entries to display (default: 10, 0 = unlimited). |
 | `--clear` | Clear notes at the scope (or subtree with `-r`). |
 | `--yes` | Skip confirmation prompt (recursive clear only). |
 
@@ -82,30 +88,61 @@ When there are no notes at the scope but notes exist nearby, the spatial indicat
 1 note on parent scopes · 3 noted locations below
 ```
 
-When CWD is not under any known root, view mode falls back to the global list.
+When CWD is not under any known root, view mode falls back to the global temporal list.
 
-### List global (`--global`)
+### Temporal listing (`--global`, `-r`)
 
-Flat, tab-separated output of all notes across all roots. Designed for grep and scripting.
+Shows the most recent notes ordered by date — oldest at top, most recent at the bottom (closest to the prompt). Capped at 10 entries by default.
 
 ```bash
 $ canon note --global
-/mnt/old-drive/phone-export	2026-03-15	phone backup from 2019, mostly photos
-/mnt/old-drive/phone-export	2026-03-20	confirmed: 95% archived, 12 unique files remain
-/mnt/backup/photos/italy	2026-03-18	best collection of italy trip
+Photos/2011            2026-03-10  mixed bag, vacation + school stuff, worth sorting
+old-laptop/Desktop     2026-03-10  raket project — Daniel's, check with him
+old-laptop/Music       2026-03-12  check for unique .flac files
+Photos/2011            2026-03-15  tagged vacation photos, school stuff still needs triage
+Photos/2011/vacation   2026-03-20  subset tagged and clustered
+(14 more notes, 6 more locations)
 ```
 
-Output format: `path\tdate\ttext`, one line per note.
-
-### List recursive (`-r`)
-
-Flat, tab-separated output of all notes at the scope and below. Same format as global, but scoped.
+The footer (on stderr) shows how many more notes and locations exist beyond the cap. Use `--limit` to see more:
 
 ```bash
-$ canon note -r /mnt/old-drive
-phone-export	2026-03-15	phone backup from 2019, mostly photos
-phone-export	2026-03-20	confirmed: 95% archived, 12 unique files remain
-phone-export/vacation	2026-03-22	unique sunset photos here
+$ canon note --global --limit 20    # show 20 entries
+$ canon note --global --limit 0     # show all entries
+```
+
+Recursive listing (`-r`) is the same but scoped to a subtree:
+
+```bash
+$ cd /mnt/old-drive
+$ canon note -r
+phone-export           2026-03-15  phone backup from 2019, mostly photos
+phone-export           2026-03-20  confirmed: 95% archived, 12 unique files remain
+phone-export/vacation  2026-03-22  unique sunset photos here
+```
+
+### Spatial listing (`--by-scope`)
+
+Shows one line per location — the most recent note and the total note count for that location. Locations ordered by their most recent note date, capped at 10.
+
+```bash
+$ canon note --global --by-scope
+old-laptop/Music       (1)  2026-03-12  check for unique .flac files
+Photos/2012/vacation   (2)  2026-03-14  need to check overlap with phone backup
+old-laptop/Desktop     (2)  2026-03-25  raket — checked with Daniel, archive
+Photos/2011/vacation   (4)  2026-03-28  beach photos assembled, ready to cluster
+(6 more locations with notes)
+```
+
+The note count tells you which locations have deep history worth drilling into with `canon note <path>`.
+
+`--by-scope` without `--global` or `-r` inside a root implies `-r` — spatial map of the subtree:
+
+```bash
+$ cd /mnt/old-drive
+$ canon note --by-scope
+phone-export           (3)  2026-03-20  confirmed: 95% archived, 12 unique files remain
+phone-export/vacation  (1)  2026-03-22  unique sunset photos here
 ```
 
 ### Clear (`--clear`)
@@ -131,15 +168,17 @@ Cleared 5 notes
 When no path argument is given, `canon note` uses the current working directory. This follows the same pattern as other Canon commands — you `cd` into a location and work from there.
 
 - **CWD inside a root**: scope resolves to `(root_id, rel_path)` for that location
-- **CWD not in any root**: view mode falls back to global list; add and clear modes error
+- **CWD not in any root**: view mode falls back to global temporal list; add and clear modes error
 
 ## The directional model
 
-The three listing modes look in different directions:
+The listing modes look in different directions:
 
 - **View** (default): looks at *this level* — notes attached to the exact scope, with counts pointing up and down
 - **Recursive** (`-r`): looks *down* — notes at this scope and everything below it
 - **Global** (`--global`): looks at *everything* — all notes across all roots
+
+Both temporal and spatial modes work with either `--global` or `-r`. Temporal (by date) is the default; `--by-scope` switches to spatial (by location).
 
 ## Notes in survey
 
