@@ -160,7 +160,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         &sample_dests,
     );
 
-    if !ceremony::confirm(options.yes)? {
+    if !options.dry_run && !ceremony::confirm(options.yes)? {
         return Ok(());
     }
 
@@ -448,23 +448,28 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
             bail!("Aborting due to stale sources in manifest");
         }
 
-        display_dry_run_plan(&plan, &base_dir, options.transfer_mode);
+        display_dry_run_plan(&plan, &base_dir, options.transfer_mode, options.resume);
 
-        let mode = " (dry-run)";
         if options.resume {
-            let total = plan.transfers.len() + plan.already_archived_count;
             println!(
-                "Files: {} ({} pending, {} already at destination)",
-                total, plan.transfers.len(), plan.already_archived_count
-            );
-            println!(
-                "Applied{} (--resume): 0 copied, 0 renamed, 0 moved, {} already at destination, 0 errors",
-                mode, plan.already_archived_count
+                "Dry run complete: {} would be {}, {} already at destination.",
+                plan.transfers.len(),
+                match options.transfer_mode {
+                    TransferMode::Copy => "copied",
+                    TransferMode::Rename => "renamed",
+                    TransferMode::Move => "moved",
+                },
+                plan.already_archived_count,
             );
         } else {
             println!(
-                "Applied{}: 0 copied, 0 renamed, 0 moved, 0 skipped (missing), 0 skipped (stale), {} skipped (filtered), 0 errors",
-                mode, skipped_by_filter
+                "Dry run complete: {} would be {}, 0 would fail.",
+                plan.transfers.len(),
+                match options.transfer_mode {
+                    TransferMode::Copy => "copied",
+                    TransferMode::Rename => "renamed",
+                    TransferMode::Move => "moved",
+                },
             );
         }
         return Ok(());
@@ -737,7 +742,12 @@ fn show_directory_preview(dir: &Path, max_items: usize) {
 }
 
 /// Display dry-run transfer plan.
-fn display_dry_run_plan(plan: &ops::apply::ApplyPlan, base_dir: &Path, mode: TransferMode) {
+fn display_dry_run_plan(plan: &ops::apply::ApplyPlan, base_dir: &Path, mode: TransferMode, resume: bool) {
+    if resume {
+        eprintln!("=== DRY RUN (resume) ===");
+    } else {
+        eprintln!("=== DRY RUN ===");
+    }
     let label = match mode {
         TransferMode::Copy => "COPY",
         TransferMode::Rename => "RENAME",
@@ -749,6 +759,12 @@ fn display_dry_run_plan(plan: &ops::apply::ApplyPlan, base_dir: &Path, mode: Tra
             println!("[dry-run] SKIP (missing): {}", transfer.source_path);
         } else {
             println!("[dry-run] {}: {} -> {}", label, transfer.source_path, dest_path.display());
+        }
+    }
+    if resume {
+        for transfer in &plan.resume_already_there {
+            let dest_path = base_dir.join(&transfer.dest_rel_path);
+            println!("[dry-run] Already there: {}", dest_path.display());
         }
     }
 }

@@ -579,9 +579,9 @@ enum ClusterAction {
         /// Show which files were excluded because they're already archived
         #[arg(long)]
         show_archived: bool,
-        /// Don't open manifest in $VISUAL/$EDITOR after refresh
+        /// Open manifest in $VISUAL/$EDITOR after refresh
         #[arg(long)]
-        no_edit: bool,
+        edit: bool,
     },
     /// Show the state of a manifest's entries
     Status {
@@ -970,9 +970,9 @@ fn main() -> Result<()> {
             ClusterAction::Refresh {
                 manifest,
                 show_archived,
-                no_edit,
+                edit,
             } => {
-                cluster::refresh(&mut db, &manifest, show_archived, no_edit)?;
+                cluster::refresh(&mut db, &manifest, show_archived, !edit)?;
             }
             ClusterAction::Status { manifest, verbose } => {
                 cluster::status(db.conn_mut(), &manifest, verbose)?;

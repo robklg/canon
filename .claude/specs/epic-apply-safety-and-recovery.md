@@ -1,7 +1,7 @@
 # Epic: Apply Safety and Recovery
 
 **Design Spec**: [~/store/claude-designs/2026-03-29-apply-safety-and-recovery.md](~/store/claude-designs/2026-03-29-apply-safety-and-recovery.md)
-**Status**: In Progress
+**Status**: Complete
 **Created**: 2026-03-29
 
 ## Objective
@@ -63,7 +63,7 @@ Repository (repo/source.rs)
 | 3 | Signal Handling | ops/apply.rs, apply.rs | — | Complete |
 | 4 | Resume Reconciliation | ops/apply.rs, repo/source.rs | — | Complete |
 | 5 | Manifest Status | ops/cluster.rs, cluster.rs | Story 4 | Complete |
-| 6 | UX Polish | apply.rs, cluster.rs | — | Pending |
+| 6 | UX Polish | apply.rs, cluster.rs | — | Complete |
 
 ### Story 1: Pattern Safety
 
