@@ -13,6 +13,7 @@ pub mod facts;
 pub mod fs;
 pub mod import_facts;
 pub mod ls;
+pub mod note;
 pub mod scan;
 pub mod scope;
 pub mod selection;

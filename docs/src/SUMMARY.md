@@ -27,6 +27,7 @@
     - [`survey`](commands/query/survey.md)
   - [Managing Sources](commands/manage/index.md)
     - [`exclude`](commands/manage/exclude.md)
+    - [`note`](commands/manage/note.md)
   - [Archiving](./commands/archive/index.md)
     - [`coverage`](commands/archive/coverage.md)
     - [`cluster`](commands/archive/cluster.md)

@@ -178,6 +178,16 @@ CREATE TABLE IF NOT EXISTS _meta (
     value_int INTEGER,
     value_text TEXT
 );
+
+-- Notes: timestamped annotations on locations within roots
+CREATE TABLE IF NOT EXISTS notes (
+    id INTEGER PRIMARY KEY,
+    root_id INTEGER NOT NULL REFERENCES roots(id),
+    rel_path TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS notes_root_path ON notes(root_id, rel_path);
 "#;
 
 /// Threshold for auto-ANALYZE: seconds since last analyze (24 hours)

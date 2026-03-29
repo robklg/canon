@@ -13,6 +13,7 @@ pub mod apply;
 pub mod exclusion;
 pub mod fact;
 pub mod include;
+pub mod note;
 pub mod object;
 pub mod path;
 pub mod root;
@@ -26,6 +27,7 @@ pub use apply::{classify_destination, DestinationState};
 pub use exclusion::{find_excludable_duplicates, ExcludableDuplicatesResult};
 pub use fact::{FactEntry, FactType, FactValue};
 pub use include::IncludeSet;
+pub use note::Note;
 pub use object::Object;
 pub use path::{
     canonicalize_maybe_missing, clean_path, path_is_under, path_strip_prefix, resolve_path,

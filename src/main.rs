@@ -65,6 +65,7 @@ mod exclude;
 mod facts;
 mod import_facts;
 mod ls;
+mod note;
 mod roots;
 mod scan;
 mod survey;
@@ -345,6 +346,26 @@ enum Commands {
     Exclude {
         #[command(subcommand)]
         action: ExcludeAction,
+    },
+    /// Annotate locations with notes
+    Note {
+        /// Path to annotate, view, or scope
+        path: Option<PathBuf>,
+        /// Add a note with the given text
+        #[arg(short = 'm')]
+        message: Option<String>,
+        /// List notes for scope and all descendants
+        #[arg(short = 'r', long)]
+        recursive: bool,
+        /// List all notes across all roots
+        #[arg(long)]
+        global: bool,
+        /// Clear notes for the scope
+        #[arg(long)]
+        clear: bool,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
     },
     /// Prune orphaned or stale data from the database
     Prune {
@@ -1080,6 +1101,24 @@ fn main() -> Result<()> {
                 exclude::list_objects(&db)?;
             }
         },
+        Commands::Note {
+            path,
+            message,
+            recursive,
+            global,
+            clear,
+            yes,
+        } => {
+            note::run(
+                &db,
+                path.as_deref(),
+                message.as_deref(),
+                recursive,
+                global,
+                clear,
+                yes,
+            )?;
+        }
         Commands::Roots {
             action,
             path,

@@ -1,18 +1,23 @@
-use anyhow::{bail, Result};
+use std::collections::HashMap;
 use std::path::PathBuf;
+
+use anyhow::{bail, Result};
 
 use crate::ceremony::format_count;
 use crate::domain;
-use crate::domain::root::parse_root_spec;
+use crate::domain::root::{find_containing_root, parse_root_spec};
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
+use crate::note::format_note_date;
+use crate::ops::note::SurveyNoteContext;
+use crate::ops::scope::ResolvedScope;
 use crate::ops::survey::{LocationResult, SurveyOutcome, SurveyParams};
 use crate::repo;
-use crate::ops::scope::ResolvedScope;
 
 const DETAIL_SAMPLE_SIZE: usize = 5;
 const DETAIL_SHOW_ALL_THRESHOLD: usize = 20;
 const DEFAULT_LOCATION_CAP: usize = 10;
+const NOTE_DISPLAY_CAP: usize = 5;
 
 /// Detail output mode for `--detail`.
 #[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
@@ -90,6 +95,22 @@ pub fn run(
     let scope_prefixes = domain::path::resolve_paths(paths, &all_roots)?;
     domain::path::warn_nonexistent_scope_paths(&scope_prefixes, &all_roots);
 
+    // Fetch note context for scope (before compute_survey borrows conn)
+    let note_context = if scope_prefixes.len() == 1 {
+        if let Some((root_id, _, _, rel_path)) =
+            find_containing_root(&scope_prefixes[0], &all_roots)
+        {
+            Some((
+                crate::ops::note::survey_note_context(conn, root_id, &rel_path)?,
+                rel_path,
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Resolve --other paths (same soft resolution as scope paths)
     let other_resolved = if !options.other_paths.is_empty() {
         let resolved = domain::path::resolve_paths(&options.other_paths, &all_roots)?;
@@ -151,6 +172,9 @@ pub fn run(
                 );
             if !suppress {
                 print_survey_header(&options.scope, &options.original_filters, 0, 0, 0, None);
+                if let Some((ref ctx, ref scope_rel)) = note_context {
+                    print_notes_section(ctx, scope_rel, options.verbose);
+                }
             }
         }
         SurveyOutcome::AllUnhashed {
@@ -172,6 +196,9 @@ pub fn run(
                     0,
                     None,
                 );
+                if let Some((ref ctx, ref scope_rel)) = note_context {
+                    print_notes_section(ctx, scope_rel, options.verbose);
+                }
                 println!();
                 println!("No hashed sources in selection. Content comparison requires hashing.");
                 println!("Run `canon scan` to hash these sources.");
@@ -193,6 +220,9 @@ pub fn run(
                             result.total_hashed,
                             Some(result.unique_count),
                         );
+                        if let Some((ref ctx, ref scope_rel)) = note_context {
+                            print_notes_section(ctx, scope_rel, options.verbose);
+                        }
                         println!();
                     }
                     let cwd = if options.null_delim {
@@ -217,6 +247,9 @@ pub fn run(
                         result.total_hashed,
                         Some(result.unique_count),
                     );
+                    if let Some((ref ctx, ref scope_rel)) = note_context {
+                        print_notes_section(ctx, scope_rel, options.verbose);
+                    }
                     println!();
                     print_complement_detail(
                         &result.location_results,
@@ -235,6 +268,9 @@ pub fn run(
                             result.total_hashed,
                             Some(result.unique_count),
                         );
+                        if let Some((ref ctx, ref scope_rel)) = note_context {
+                            print_notes_section(ctx, scope_rel, options.verbose);
+                        }
                         println!();
                     }
                     let cwd = if options.null_delim {
@@ -261,6 +297,9 @@ pub fn run(
                             result.total_hashed,
                             Some(result.unique_count),
                         );
+                        if let Some((ref ctx, ref scope_rel)) = note_context {
+                            print_notes_section(ctx, scope_rel, options.verbose);
+                        }
                         println!();
                     }
                     let cwd = if options.null_delim {
@@ -292,6 +331,9 @@ pub fn run(
                         result.total_hashed,
                         Some(result.unique_count),
                     );
+                    if let Some((ref ctx, ref scope_rel)) = note_context {
+                        print_notes_section(ctx, scope_rel, options.verbose);
+                    }
                     println!();
                     if !result.is_other_mode {
                         print_archive_section(
@@ -303,11 +345,41 @@ pub fn run(
                         );
                         println!();
                     }
+
+                    // Fetch note counts for related locations
+                    let location_scopes: Vec<(i64, String)> = result
+                        .location_results
+                        .iter()
+                        .filter_map(|loc| {
+                            find_containing_root(&loc.path, &all_roots)
+                                .map(|(root_id, _, _, rel_path)| (root_id, rel_path))
+                        })
+                        .collect();
+                    let location_note_counts =
+                        repo::note::batch_count_subtree(conn, &location_scopes)?;
+                    let location_note_map: HashMap<String, usize> = location_scopes
+                        .iter()
+                        .filter_map(|(root_id, rel_path)| {
+                            let key = (*root_id, rel_path.clone());
+                            location_note_counts.get(&key).map(|count| {
+                                let root =
+                                    all_roots.iter().find(|r| r.id == *root_id).unwrap();
+                                let abs_path = if rel_path.is_empty() {
+                                    root.path.clone()
+                                } else {
+                                    format!("{}/{}", root.path, rel_path)
+                                };
+                                (abs_path, *count)
+                            })
+                        })
+                        .collect();
+
                     print_related_locations(
                         &result.location_results,
                         result.total_hashed,
                         result.is_other_mode,
                         options.verbose,
+                        &location_note_map,
                     );
                 }
             }
@@ -357,6 +429,72 @@ fn print_survey_header(
 
     if let Some(unique) = unique_count {
         println!("  {} unique here", format_count(unique));
+    }
+}
+
+fn print_notes_section(ctx: &SurveyNoteContext, scope_rel_path: &str, verbose: bool) {
+    let has_subtree = !ctx.subtree_notes.is_empty();
+    let has_ancestors = ctx.ancestor_count > 0;
+
+    if !has_subtree && !has_ancestors {
+        return;
+    }
+
+    if has_subtree {
+        let cap = if verbose {
+            ctx.subtree_notes.len()
+        } else {
+            NOTE_DISPLAY_CAP
+        };
+        let display_notes = &ctx.subtree_notes[..cap.min(ctx.subtree_notes.len())];
+        let remaining_notes = ctx.subtree_notes.len().saturating_sub(cap);
+
+        // Compute alignment width for relative paths
+        let rel_paths: Vec<String> = display_notes
+            .iter()
+            .map(|n| domain::note::relative_to_scope(&n.rel_path, scope_rel_path))
+            .collect();
+        let max_rel_len = rel_paths.iter().map(|p| p.len()).max().unwrap_or(0);
+
+        println!("  Notes:");
+        for (note, rel) in display_notes.iter().zip(rel_paths.iter()) {
+            println!(
+                "    {}  {:rel_w$}  {}",
+                format_note_date(note.created_at),
+                rel,
+                note.text,
+                rel_w = max_rel_len,
+            );
+        }
+
+        // Summary line for hidden notes and/or ancestor notes
+        let mut parts = Vec::new();
+        if remaining_notes > 0 {
+            // Count distinct locations in the hidden notes
+            let hidden_notes = &ctx.subtree_notes[cap..];
+            let hidden_locations: std::collections::HashSet<&str> =
+                hidden_notes.iter().map(|n| n.rel_path.as_str()).collect();
+            parts.push(format!(
+                "{} earlier notes across {} locations",
+                remaining_notes,
+                hidden_locations.len()
+            ));
+        }
+        if has_ancestors {
+            parts.push(format!(
+                "{} ancestral notes",
+                ctx.ancestor_count
+            ));
+        }
+        if !parts.is_empty() {
+            println!("    ({})", parts.join(", "));
+        }
+    } else {
+        // No subtree notes but ancestors exist
+        println!(
+            "  ({} ancestral notes)",
+            ctx.ancestor_count
+        );
     }
 }
 
@@ -495,6 +633,7 @@ fn print_related_locations(
     total_hashed: usize,
     is_other_mode: bool,
     verbose: bool,
+    note_counts: &HashMap<String, usize>,
 ) {
     if locations.is_empty() {
         if is_other_mode {
@@ -551,6 +690,11 @@ fn print_related_locations(
                 }
             }
             _ => {} // Mirror/Subset or no affinity — no affinity columns
+        }
+
+        // Note indicator
+        if let Some(&count) = note_counts.get(&loc.path) {
+            print!("  ({} notes)", count);
         }
 
         println!();

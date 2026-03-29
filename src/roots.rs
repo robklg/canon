@@ -164,6 +164,9 @@ pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Delete notes for this root before removing the root itself
+    repo::note::delete_by_root(conn, root_id)?;
+
     // Delete facts, sources, and root via repo function
     let deleted_sources = repo::root::remove(conn, root_id)?;
 

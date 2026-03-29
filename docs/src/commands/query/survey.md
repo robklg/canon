@@ -96,6 +96,39 @@ The output has three sections:
 
 Use `--detail overlap` to see which of your files appear at each location. Locations are sorted by overlap count, highest first.
 
+### Notes
+
+If you've annotated locations with [`canon note`](../manage/note.md), those notes surface in survey output between the scope header and the statistics. Survey shows notes from the surveyed scope and its descendants (the subtree), capped at the 5 most recent:
+
+```
+Survey: /mnt/old-drive/exports
+  Notes:
+    2026-03-20  .              confirmed: 95% archived, 12 unique remain
+    2026-03-18  vacation/      interesting sunset photos, check originals
+    2026-03-15  .              phone backup from 2019, mostly photos
+  (2 earlier notes across 1 location)
+  517 sources here (0 unhashed, 517 hashed)
+  ...
+```
+
+Each note shows a date, a relative path indicator (`.` for the scope itself, `subfolder/` for descendant locations), and the note text.
+
+Use `--verbose` to show all notes instead of capping at 5.
+
+When no notes exist in the subtree but ancestor scopes have notes, a summary line appears:
+
+```
+  (3 ancestral notes)
+```
+
+Related locations also show note count indicators when they have notes:
+
+```
+Related locations:
+  /mnt/backup/pictures/phone/                161 of 517 overlap (18,057 total)  (2 notes)
+  /mnt/sandisk-export/camera-roll/2019/dec    82 of 517 overlap (370 total)
+```
+
 ### Adding filters
 
 The summary works without any `--where` filters — it shows the full character of a location. Filters narrow what you're looking at:

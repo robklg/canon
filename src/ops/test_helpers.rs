@@ -110,6 +110,16 @@ pub fn is_source_excluded(conn: &Connection, source_id: i64) -> bool {
     .unwrap()
 }
 
+/// Insert a note with an explicit timestamp (for ordering tests).
+pub fn insert_note(conn: &Connection, root_id: i64, rel_path: &str, text: &str, created_at: i64) -> i64 {
+    conn.execute(
+        "INSERT INTO notes (root_id, rel_path, text, created_at) VALUES (?, ?, ?, ?)",
+        rusqlite::params![root_id, rel_path, text, created_at],
+    )
+    .unwrap();
+    conn.last_insert_rowid()
+}
+
 /// Check if an object is excluded in the DB.
 pub fn is_object_excluded(conn: &Connection, object_id: i64) -> bool {
     conn.query_row(
