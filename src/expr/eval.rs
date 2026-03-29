@@ -779,7 +779,20 @@ pub fn evaluate(pattern: &Pattern, ctx: &EvalContext) -> Result<String> {
     // Sanitize path (remove potentially dangerous characters)
     let result = result.replace("..", "_").replace('\0', "_");
 
+    // Normalize to a clean relative path (strip leading '/', collapse '//', remove '.' segments)
+    let result = normalize_pattern_result(&result);
+
     Ok(result)
+}
+
+/// Normalize a pattern result to a clean relative path.
+/// Strips leading '/', collapses '//' to '/', removes '.' components.
+/// The existing '..' sanitization (replaced with '_') runs before this.
+fn normalize_pattern_result(path: &str) -> String {
+    path.split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Evaluate a single expression
@@ -1548,5 +1561,94 @@ mod tests {
         assert_eq!(key.modifiers[0].modifier, Modifier::YearMonth);
         assert!(!key.is_builtin());
         assert!(key.has_transforms());
+    }
+
+    // =========================================================================
+    // normalize_pattern_result tests
+    // =========================================================================
+
+    #[test]
+    fn normalize_pattern_result_normal_filename() {
+        assert_eq!(normalize_pattern_result("5.avi"), "5.avi");
+    }
+
+    #[test]
+    fn normalize_pattern_result_normal_subdir() {
+        assert_eq!(normalize_pattern_result("subdir/file.jpg"), "subdir/file.jpg");
+    }
+
+    #[test]
+    fn normalize_pattern_result_leading_slash() {
+        assert_eq!(normalize_pattern_result("/5.avi"), "5.avi");
+    }
+
+    #[test]
+    fn normalize_pattern_result_double_leading_slash() {
+        assert_eq!(normalize_pattern_result("//5.avi"), "5.avi");
+    }
+
+    #[test]
+    fn normalize_pattern_result_interior_double_slash() {
+        assert_eq!(normalize_pattern_result("subdir//file.jpg"), "subdir/file.jpg");
+    }
+
+    #[test]
+    fn normalize_pattern_result_leading_dot_slash() {
+        assert_eq!(normalize_pattern_result("./subdir/file.jpg"), "subdir/file.jpg");
+    }
+
+    #[test]
+    fn normalize_pattern_result_interior_dot() {
+        assert_eq!(normalize_pattern_result("subdir/./file.jpg"), "subdir/file.jpg");
+    }
+
+    #[test]
+    fn normalize_pattern_result_empty() {
+        assert_eq!(normalize_pattern_result(""), "");
+    }
+
+    #[test]
+    fn normalize_pattern_result_lone_slash() {
+        assert_eq!(normalize_pattern_result("/"), "");
+    }
+
+    #[test]
+    fn normalize_pattern_result_triple_slash() {
+        assert_eq!(normalize_pattern_result("///"), "");
+    }
+
+    #[test]
+    fn normalize_pattern_result_multi_level() {
+        assert_eq!(normalize_pattern_result("a/b/c"), "a/b/c");
+    }
+
+    // =========================================================================
+    // Pattern normalization integration tests
+    // =========================================================================
+
+    #[test]
+    fn test_pattern_flat_file_no_absolute_path() {
+        // Source with single-component rel_path (flat file, no subdirectory)
+        // Pattern: {source.rel_path[:-1]}/{filename}
+        // rel_path = "5.avi", rel_path[:-1] = "" (empty)
+        // Raw concatenation: "/5.avi" -> Normalized: "5.avi"
+        let pattern = parse_pattern("{source.rel_path[:-1]}/{filename}").unwrap();
+        let mut ctx = EvalContext::new();
+        ctx.set_source_rel_path("5.avi".to_string());
+        let result = evaluate(&pattern, &ctx).unwrap();
+        assert_eq!(result, "5.avi");
+    }
+
+    #[test]
+    fn test_pattern_subdirectory_file_unchanged() {
+        // Source with multi-component rel_path — normalization should not change valid paths
+        // Pattern: {source.rel_path[:-1]}/{filename}
+        // rel_path = "subdir/file.jpg", rel_path[:-1] = "subdir"
+        // Result: "subdir/file.jpg" — unchanged by normalization
+        let pattern = parse_pattern("{source.rel_path[:-1]}/{filename}").unwrap();
+        let mut ctx = EvalContext::new();
+        ctx.set_source_rel_path("subdir/file.jpg".to_string());
+        let result = evaluate(&pattern, &ctx).unwrap();
+        assert_eq!(result, "subdir/file.jpg");
     }
 }

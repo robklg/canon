@@ -201,6 +201,23 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
         bail!("Aborting due to pattern expansion failures");
     }
 
+    if !v.escaped_paths.is_empty() {
+        eprintln!(
+            "Preflight failed: {} destination paths resolve outside the archive root.",
+            v.escaped_paths.len()
+        );
+        eprintln!();
+        for (source_path, resolved_dest) in v.escaped_paths.iter().take(10) {
+            eprintln!("  {resolved_dest} (from source: {source_path})");
+        }
+        if v.escaped_paths.len() > 10 {
+            eprintln!("  ... and {} more", v.escaped_paths.len() - 10);
+        }
+        eprintln!();
+        eprintln!("Check the pattern in your manifest.");
+        bail!("Aborting due to escaped destination paths");
+    }
+
     if !v.collisions.is_empty() {
         eprintln!(
             "Error: {} destination paths have multiple sources:",
