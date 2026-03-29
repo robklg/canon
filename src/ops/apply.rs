@@ -241,16 +241,9 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
         );
     }
 
-    // Check archive has complete hash coverage
-    let (total, archive_unhashed) =
-        repo::source::count_unhashed_for_root(conn, params.archive_root_id)?;
-    if archive_unhashed > 0 {
-        bail!(
-            "Destination archive has {archive_unhashed} files without content hash (out of {total}). \
-             Cannot reliably detect duplicates without complete hash coverage.\n\
-             Run 'canon scan <archive-path>' to index and hash the archive."
-        );
-    }
+    // Note: archive hash coverage is not enforced. Duplicate detection uses
+    // content hashes where available; unhashed files simply won't be detected
+    // as duplicates. Noclobber prevents overwrites at the filesystem level.
 
     // --- Batch fetch facts for pattern evaluation ---
 
@@ -1764,13 +1757,13 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_apply_err_archive_hash_gap() {
+    fn test_plan_apply_allows_archive_with_unhashed_files() {
         let mut conn = setup_test_db();
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
         let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
-        // Archive has an unhashed file
+        // Archive has an unhashed file — should NOT block apply
         insert_source_with_metadata(&conn, archive_id, "unhashed.jpg", None, 500, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
@@ -1782,10 +1775,10 @@ mod tests {
         root_paths.insert(archive_id, "/archive".to_string());
 
         let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
-        let result = plan_apply(&mut conn, &params);
+        let plan = plan_apply(&mut conn, &params).unwrap();
 
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("without content hash"));
+        // Should succeed — unhashed archive files don't block apply
+        assert_eq!(plan.transfers.len(), 1);
     }
 
     // =========================================================================
