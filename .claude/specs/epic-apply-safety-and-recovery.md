@@ -60,7 +60,7 @@ Repository (repo/source.rs)
 |---|-------|-------|--------------|--------|
 | 1 | Pattern Safety | expr/eval.rs, ops/apply.rs | — | Complete |
 | 2 | Preflight Hardening | ops/apply.rs, ops/fs.rs | — | Complete |
-| 3 | Signal Handling | ops/apply.rs, apply.rs | — | Pending |
+| 3 | Signal Handling | ops/apply.rs, apply.rs | — | Complete |
 | 4 | Resume Reconciliation | ops/apply.rs, repo/source.rs | — | Pending |
 | 5 | Manifest Status | ops/cluster.rs, cluster.rs | Story 4 | Pending |
 | 6 | UX Polish | apply.rs, cluster.rs | — | Pending |

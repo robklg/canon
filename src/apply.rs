@@ -432,6 +432,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
             archive_root_id: config.output.archive_root_id,
             transfer_mode: options.transfer_mode,
             resume: options.resume,
+            interrupt_flag: None,
         },
         &progress_impl,
     )?;
@@ -452,7 +453,18 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     }
 
     // Summary output
-    if options.resume {
+    if result.interrupted {
+        let manifest_display = config_path.display();
+        println!(
+            "Applied: {} copied, {} renamed, {} moved, {} errors. Interrupted — {} files remaining.",
+            result.copied, result.renamed, result.moved, result.errors.len(), result.remaining
+        );
+        eprintln!("Resume with: canon apply --resume {manifest_display}");
+        // Update query planner statistics after bulk changes
+        eprintln!("Updating query statistics...");
+        db.run_analyze()?;
+        return Ok(());
+    } else if options.resume {
         println!(
             "Applied (--resume): {} copied, {} renamed, {} moved, {} already archived, {} resumed, {} errors",
             result.copied, result.renamed, result.moved, result.already_archived, result.resumed, result.errors.len()
@@ -737,6 +749,14 @@ impl ops::apply::TransferProgress for CliTransferProgress {
         } else if let ops::apply::TransferOutcome::Error(msg) = outcome {
             eprintln!("Error processing {source_path}: {msg}");
         }
+    }
+
+    fn on_interrupt(&self) {
+        if let Some(ref p) = *self.progress.borrow() {
+            p.finish();
+        }
+        eprintln!();
+        eprintln!("Interrupt received, stopping after current file.");
     }
 
     fn on_finish(&self) {

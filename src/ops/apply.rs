@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -534,6 +536,8 @@ pub trait TransferProgress {
     fn on_start(&self, total: usize);
     /// Called after each transfer completes.
     fn on_transfer(&self, index: usize, total: usize, source_path: &str, dest_path: &str, outcome: &TransferOutcome);
+    /// Called when an interrupt is detected after the current transfer completes.
+    fn on_interrupt(&self);
     /// Called once after the transfer loop ends.
     fn on_finish(&self);
 }
@@ -548,6 +552,9 @@ pub struct ApplyExecuteParams {
     pub transfer_mode: TransferMode,
     /// Whether this is a resume operation.
     pub resume: bool,
+    /// Interrupt flag — set to true to stop after current transfer.
+    /// If None, signal handling is set up automatically.
+    pub interrupt_flag: Option<Arc<AtomicBool>>,
 }
 
 /// Result of executing an apply operation.
@@ -562,6 +569,10 @@ pub struct ApplyResult {
     pub already_archived: u64,
     /// Resume mode: count of files on disk with correct size (need scan, not transfer).
     pub resumed: u64,
+    /// Whether the operation was interrupted by Ctrl+C.
+    pub interrupted: bool,
+    /// Number of files remaining when interrupted.
+    pub remaining: usize,
 }
 
 /// An error encountered during a file transfer.
@@ -646,12 +657,29 @@ pub fn check_disk_conflicts(plan: &ApplyPlan, base_dir: &Path) -> Vec<String> {
 ///
 /// Does NOT handle: manifest parsing, confirmation prompts, dry-run display,
 /// output formatting. These are interface concerns.
+/// Set up two-tier Ctrl+C handling for the transfer loop.
+/// Returns an Arc<AtomicBool> that becomes true on first SIGINT.
+/// Second SIGINT gets default OS termination.
+fn setup_interrupt_flag() -> Result<Arc<AtomicBool>> {
+    let flag = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register_conditional_default(
+        signal_hook::consts::SIGINT,
+        Arc::clone(&flag),
+    )?;
+    Ok(flag)
+}
+
 pub fn execute_apply(
     conn: &Connection,
     plan: &ApplyPlan,
     params: &ApplyExecuteParams,
     progress: &dyn TransferProgress,
 ) -> Result<ApplyResult> {
+    let interrupt_flag = match &params.interrupt_flag {
+        Some(flag) => Arc::clone(flag),
+        None => setup_interrupt_flag()?,
+    };
+
     let mut result = ApplyResult {
         copied: 0,
         renamed: 0,
@@ -661,6 +689,8 @@ pub fn execute_apply(
         errors: Vec::new(),
         already_archived: plan.already_archived_count as u64,
         resumed: 0,
+        interrupted: false,
+        remaining: 0,
     };
 
     // --- Source readability pre-check ---
@@ -752,6 +782,14 @@ pub fn execute_apply(
         let dest_full = params.base_dir.join(&transfer.dest_rel_path);
         let dest_str = dest_full.display().to_string();
         progress.on_transfer(i, total, &transfer.source_path, &dest_str, &outcome);
+
+        // Check interrupt flag AFTER the complete unit of work (file + DB + count)
+        if interrupt_flag.load(Ordering::Relaxed) {
+            progress.on_interrupt();
+            result.interrupted = true;
+            result.remaining = total - (i + 1);
+            break;
+        }
     }
 
     progress.on_finish();
@@ -2073,5 +2111,132 @@ mod tests {
 
         assert_eq!(plan.violations.missing_sources.len(), 1);
         assert_eq!(plan.violations.missing_sources[0].0, src_id);
+    }
+
+    // =========================================================================
+    // Interrupt flag tests
+    // =========================================================================
+
+    /// No-op progress implementation for testing.
+    struct NoopProgress;
+
+    impl TransferProgress for NoopProgress {
+        fn on_start(&self, _total: usize) {}
+        fn on_transfer(&self, _index: usize, _total: usize, _source_path: &str, _dest_path: &str, _outcome: &TransferOutcome) {}
+        fn on_interrupt(&self) {}
+        fn on_finish(&self) {}
+    }
+
+    #[test]
+    fn test_execute_apply_respects_interrupt_flag() {
+        use std::io::Write;
+
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+        let obj1 = insert_object(&conn, "hash1", false);
+        let obj2 = insert_object(&conn, "hash2", false);
+
+        // Create two real source files
+        let src_dir = tempfile::tempdir().unwrap();
+        let src1 = src_dir.path().join("a.jpg");
+        let src2 = src_dir.path().join("b.jpg");
+        std::fs::File::create(&src1).unwrap().write_all(b"data1").unwrap();
+        std::fs::File::create(&src2).unwrap().write_all(b"data2").unwrap();
+
+        let meta1 = std::fs::metadata(&src1).unwrap();
+        let meta2 = std::fs::metadata(&src2).unwrap();
+        #[cfg(unix)]
+        let ((size1, mtime1), (size2, mtime2)) = {
+            use std::os::unix::fs::MetadataExt;
+            ((meta1.size() as i64, meta1.mtime()), (meta2.size() as i64, meta2.mtime()))
+        };
+        #[cfg(not(unix))]
+        let ((size1, mtime1), (size2, mtime2)) = {
+            ((meta1.len() as i64, 0i64), (meta2.len() as i64, 0i64))
+        };
+        let hash1 = compute_partial_hash(&src1, size1 as u64).unwrap();
+        let hash2 = compute_partial_hash(&src2, size2 as u64).unwrap();
+
+        let dest_dir = tempfile::tempdir().unwrap();
+
+        let plan = ApplyPlan {
+            transfers: vec![
+                ApplyTransfer {
+                    source_id: 1,
+                    source_path: src1.display().to_string(),
+                    dest_rel_path: "a.jpg".to_string(),
+                    archive_rel_path: "a.jpg".to_string(),
+                    object_id: Some(obj1),
+                    partial_hash: hash1,
+                    size: size1,
+                    mtime: mtime1,
+                },
+                ApplyTransfer {
+                    source_id: 2,
+                    source_path: src2.display().to_string(),
+                    dest_rel_path: "b.jpg".to_string(),
+                    archive_rel_path: "b.jpg".to_string(),
+                    object_id: Some(obj2),
+                    partial_hash: hash2,
+                    size: size2,
+                    mtime: mtime2,
+                },
+            ],
+            violations: ApplyViolations::default(),
+            stale_sources: vec![],
+            already_archived_count: 0,
+        };
+
+        // Pre-set the interrupt flag before calling execute
+        let flag = Arc::new(AtomicBool::new(true));
+
+        let params = ApplyExecuteParams {
+            base_dir: dest_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: Some(flag),
+        };
+
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress).unwrap();
+
+        // Flag was pre-set, so first transfer executes then loop breaks
+        assert!(result.interrupted);
+        assert_eq!(result.remaining, 1); // 2 total - 1 completed = 1 remaining
+        assert_eq!(result.copied, 1);
+        // First file should exist, second should not
+        assert!(dest_dir.path().join("a.jpg").exists());
+        assert!(!dest_dir.path().join("b.jpg").exists());
+    }
+
+    #[test]
+    fn test_execute_apply_interrupt_empty_plan() {
+        let conn = setup_test_db();
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+        let dest_dir = tempfile::tempdir().unwrap();
+
+        let plan = ApplyPlan {
+            transfers: vec![],
+            violations: ApplyViolations::default(),
+            stale_sources: vec![],
+            already_archived_count: 0,
+        };
+
+        let flag = Arc::new(AtomicBool::new(true));
+
+        let params = ApplyExecuteParams {
+            base_dir: dest_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: Some(flag),
+        };
+
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress).unwrap();
+
+        // No transfers, so not interrupted (loop never runs)
+        assert!(!result.interrupted);
+        assert_eq!(result.remaining, 0);
     }
 }
