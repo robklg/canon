@@ -131,6 +131,18 @@ pub fn scan_root(
     let mut outcomes: Vec<(i64, SourceOutcome)> = Vec::new();
     let mut handled_ids: HashSet<i64> = HashSet::new();
 
+    // Snapshot the walk path's device ID before the walk starts.
+    // If the mount disappears mid-scan (NAS disconnect, volume ejected),
+    // the OS silently tears down the mount — files just vanish rather than
+    // returning errors. We detect this by comparing device IDs before and
+    // after the walk; a mismatch means the mount changed and missing
+    // detection would be unreliable.
+    let walk_root = match scan_prefix {
+        Some(prefix) => root_path.join(prefix),
+        None => root_path.to_path_buf(),
+    };
+    let pre_walk_device = get_dir_device(&walk_root);
+
     // Fetch expected source IDs at start (for missing detection via pure function)
     let expected_ids: HashSet<i64> =
         repo::source::fetch_source_ids_for_root(conn, root_id, scan_prefix)?
@@ -249,12 +261,26 @@ pub fn scan_root(
         }
     }
 
-    // Identify sources that are truly missing using pure domain function
-    // Sources not seen during walk AND not handled by empty-dir logic are missing
-    let all_accounted: HashSet<i64> = seen_source_ids.union(&handled_ids).copied().collect();
-    let missing_ids = find_missing(&expected_ids, &all_accounted);
-    for id in missing_ids {
-        outcomes.push((id, SourceOutcome::Missing));
+    // Check if the mount is still the same device after the walk.
+    // If the device changed (or disappeared), the mount was disrupted during
+    // the scan — skip missing detection to avoid falsely marking files as gone.
+    let post_walk_device = get_dir_device(&walk_root);
+    let mount_stable = pre_walk_device.is_some()
+        && post_walk_device.is_some()
+        && pre_walk_device == post_walk_device;
+
+    if mount_stable {
+        // Identify sources that are truly missing using pure domain function
+        // Sources not seen during walk AND not handled by empty-dir logic are missing
+        let all_accounted: HashSet<i64> = seen_source_ids.union(&handled_ids).copied().collect();
+        let missing_ids = find_missing(&expected_ids, &all_accounted);
+        for id in missing_ids {
+            outcomes.push((id, SourceOutcome::Missing));
+        }
+    } else if pre_walk_device != post_walk_device {
+        warnings.push(
+            "Mount changed during scan — skipping missing detection to avoid data loss".to_string(),
+        );
     }
 
     // Mark missing/disconnected files based on outcomes

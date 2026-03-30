@@ -604,6 +604,16 @@ pub fn apply_reconciliation(
         }
 
         Reconciliation::Moved { source_id, .. } => {
+            // Clear any stale record at the destination path before moving.
+            // A present=0 record can legitimately exist at the target (root_id, rel_path)
+            // from a previous scan where the file was missing. Since fetch_by_path filters
+            // by present=1, the reconciliation logic never sees it, but the UNIQUE constraint
+            // on (root_id, rel_path) still blocks the UPDATE. Delete the stale record first.
+            conn.execute(
+                "DELETE FROM sources WHERE root_id = ? AND rel_path = ? AND present = 0",
+                rusqlite::params![observation.root_id, observation.rel_path],
+            )?;
+
             // UPDATE path and location metadata
             conn.execute(
                 "UPDATE sources SET
@@ -1833,6 +1843,102 @@ mod tests {
         assert_eq!(source.root_id, root2); // Moved to new root
         assert_eq!(source.rel_path, "new_location.jpg"); // New path
         assert_eq!(source.root_path, "/archive"); // Joined field updated
+    }
+
+    #[test]
+    fn apply_reconciliation_moved_clears_stale_record() {
+        // Regression test: Moved reconciliation must handle a stale (present=0) record
+        // at the destination path. Without this, the UNIQUE(root_id, rel_path) constraint
+        // fails because fetch_by_path filters by present=1 (so reconciliation never sees
+        // the stale record) but the constraint covers all records regardless of present.
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        // Create a stale record at the destination path (present=0)
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, basis_rev, scanned_at, last_seen_at, present)
+             VALUES (?, 'destination.jpg', 50, 999, 500, 1600000000, 'oldhash', 0, 0, 0, 0)",
+            rusqlite::params![root_id],
+        ).unwrap();
+
+        // Create the source that will be "moved" to the destination path
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, basis_rev, scanned_at, last_seen_at, present)
+             VALUES (?, 'origin.jpg', 100, 12345, 1000, 1700000000, 'hash123', 1, 0, 0, 1)",
+            rusqlite::params![root_id],
+        ).unwrap();
+        let source_id = conn.last_insert_rowid();
+
+        let observation = FileObservation {
+            root_id,
+            rel_path: "destination.jpg".to_string(),
+            device: 100,
+            inode: 12345,
+            size: 1000,
+            mtime: 1700000000,
+            partial_hash: None,
+        };
+
+        let reconciliation = Reconciliation::Moved {
+            source_id,
+            from_root_id: root_id,
+            from_path: "origin.jpg".to_string(),
+            old_object_id: None,
+        };
+        let now = 1700000001;
+
+        // This would fail with UNIQUE constraint before the fix
+        let source = apply_reconciliation(&conn, &observation, &reconciliation, now).unwrap();
+
+        assert_eq!(source.id, source_id);
+        assert_eq!(source.rel_path, "destination.jpg");
+
+        // Verify only one record exists at the destination path
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path = 'destination.jpg'",
+                rusqlite::params![root_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn apply_reconciliation_moved_no_stale_record() {
+        // Verify the stale-record cleanup is harmless when no stale record exists
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, basis_rev, scanned_at, last_seen_at, present)
+             VALUES (?, 'origin.jpg', 100, 12345, 1000, 1700000000, 'hash123', 1, 0, 0, 1)",
+            rusqlite::params![root_id],
+        ).unwrap();
+        let source_id = conn.last_insert_rowid();
+
+        let observation = FileObservation {
+            root_id,
+            rel_path: "clean_destination.jpg".to_string(),
+            device: 100,
+            inode: 12345,
+            size: 1000,
+            mtime: 1700000000,
+            partial_hash: None,
+        };
+
+        let reconciliation = Reconciliation::Moved {
+            source_id,
+            from_root_id: root_id,
+            from_path: "origin.jpg".to_string(),
+            old_object_id: None,
+        };
+
+        let source = apply_reconciliation(&conn, &observation, &reconciliation, 1700000001).unwrap();
+        assert_eq!(source.id, source_id);
+        assert_eq!(source.rel_path, "clean_destination.jpg");
     }
 
     #[test]
