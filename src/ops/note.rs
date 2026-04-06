@@ -196,9 +196,39 @@ pub fn plan_clear_recursive(conn: &Connection, scope: &NoteScope) -> Result<Clea
     })
 }
 
+/// Result of a recursive note clear.
+#[allow(dead_code)]
+pub struct ClearRecursiveResult {
+    pub deleted: usize,
+    pub summary: String,
+}
+
 /// Execute a recursive clear — delete all notes in scope + descendants.
-pub fn execute_clear_recursive(conn: &Connection, scope: &NoteScope) -> Result<usize> {
-    repo::note::clear_subtree(conn, scope.root_id, &scope.rel_path)
+pub fn execute_clear_recursive(
+    conn: &Connection,
+    scope: &NoteScope,
+) -> Result<ClearRecursiveResult> {
+    let deleted = repo::note::clear_subtree(conn, scope.root_id, &scope.rel_path)?;
+    let summary = format!("Cleared {} notes", deleted);
+    Ok(ClearRecursiveResult { deleted, summary })
+}
+
+/// Result of clearing notes at an exact scope.
+#[allow(dead_code)]
+pub struct ClearExactResult {
+    pub deleted: usize,
+    pub summary: String,
+}
+
+/// Clear notes at an exact scope (not recursive).
+pub fn execute_clear_exact(conn: &Connection, scope: &NoteScope) -> Result<ClearExactResult> {
+    let deleted = repo::note::clear_by_scope(conn, scope.root_id, &scope.rel_path)?;
+    let summary = if deleted == 0 {
+        format!("No notes at {}", scope.display())
+    } else {
+        format!("Cleared {} notes at {}", deleted, scope.display())
+    };
+    Ok(ClearExactResult { deleted, summary })
 }
 
 /// Fetch note context for survey display.
@@ -459,5 +489,44 @@ mod tests {
         // Oldest first
         assert_eq!(result.notes[0].text, "in scope");
         assert_eq!(result.notes[1].text, "child");
+    }
+
+    // =========================================================================
+    // execute_clear_exact tests
+    // =========================================================================
+
+    #[test]
+    fn test_execute_clear_exact_returns_summary() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_note(&conn, root_id, "a", "note 1", 100);
+        insert_note(&conn, root_id, "a", "note 2", 200);
+
+        let scope = NoteScope {
+            root_id,
+            root_path: "/photos".to_string(),
+            rel_path: "a".to_string(),
+        };
+
+        let result = execute_clear_exact(&conn, &scope).unwrap();
+        assert_eq!(result.deleted, 2);
+        assert!(result.summary.contains("Cleared 2 notes"));
+        assert!(result.summary.contains(" a")); // scope.display() returns rel_path
+    }
+
+    #[test]
+    fn test_execute_clear_exact_zero_deleted() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        let scope = NoteScope {
+            root_id,
+            root_path: "/photos".to_string(),
+            rel_path: "empty".to_string(),
+        };
+
+        let result = execute_clear_exact(&conn, &scope).unwrap();
+        assert_eq!(result.deleted, 0);
+        assert!(result.summary.contains("No notes at"));
     }
 }

@@ -59,6 +59,26 @@ pub struct ScanStats {
     pub unexpected_hash_changes: u64,
 }
 
+impl ScanStats {
+    /// Compose the scan summary message.
+    pub fn compose_summary(&self) -> String {
+        let mut summary = format!(
+            "Scanned {} files: {} new, {} updated, {} moved, {} unchanged, {} missing",
+            self.scanned, self.new, self.updated, self.moved, self.unchanged, self.missing
+        );
+        if self.skipped > 0 {
+            summary.push_str(&format!(", {} skipped (read errors)", self.skipped));
+        }
+        if self.disconnected > 0 {
+            summary.push_str(&format!(", {} skipped (disconnected)", self.disconnected));
+        }
+        if self.hashed > 0 {
+            summary.push_str(&format!("\nHashed {} files", self.hashed));
+        }
+        summary
+    }
+}
+
 /// A file that needs full hashing after the walk completes.
 pub struct FileToHash {
     pub source_id: i64,

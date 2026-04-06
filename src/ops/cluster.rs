@@ -332,6 +332,29 @@ pub struct ExecuteGenerateResult {
     pub not_archived_count: usize,
 }
 
+impl ExecuteGenerateResult {
+    /// Compose the cluster summary given a header line (provided by interface
+    /// since it includes display paths that ops doesn't know).
+    pub fn compose_summary(&self, header: &str) -> String {
+        use crate::domain::format_count;
+        let root_word = if self.root_breakdown.len() == 1 {
+            "root"
+        } else {
+            "roots"
+        };
+        let mut lines = vec![header.to_string()];
+        lines.push(format!("  From {} {}:", self.root_breakdown.len(), root_word));
+        for (path, count) in &self.root_breakdown {
+            lines.push(format!("    {}  ({})", path, format_count(*count)));
+        }
+        lines.push(format!(
+            "  {} have no archived copy",
+            format_count(self.not_archived_count)
+        ));
+        lines.join("\n")
+    }
+}
+
 /// Parameters for executing a cluster refresh.
 pub struct ExecuteRefreshParams {
     pub lock_path: PathBuf,
@@ -741,7 +764,7 @@ fn current_timestamp() -> String {
 
 /// Generate cluster summary comment block for the manifest.
 fn generate_summary_comments(plan: &ClusterGeneratePlan) -> String {
-    use crate::ceremony::format_count;
+    use crate::domain::format_count;
 
     let source_count = plan.lock_entries.len();
     let mut s = String::new();

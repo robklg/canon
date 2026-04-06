@@ -608,6 +608,8 @@ pub struct ApplyExecuteParams {
     /// Interrupt flag — set to true to stop after current transfer.
     /// If None, signal handling is set up automatically.
     pub interrupt_flag: Option<Arc<AtomicBool>>,
+    /// Sources skipped by --root filter (for summary).
+    pub skipped_by_filter: usize,
 }
 
 /// Result of executing an apply operation.
@@ -626,6 +628,8 @@ pub struct ApplyResult {
     pub interrupted: bool,
     /// Number of files remaining when interrupted.
     pub remaining: usize,
+    /// Completion summary message.
+    pub summary: String,
 }
 
 /// An error encountered during a file transfer.
@@ -743,6 +747,7 @@ pub fn execute_apply(
         already_there_source_present: plan.resume_already_there_source_present as u64,
         interrupted: false,
         remaining: 0,
+        summary: String::new(),
     };
 
     // --- Source readability pre-check ---
@@ -860,6 +865,25 @@ pub fn execute_apply(
             }
         }
     }
+
+    // Compose summary
+    result.summary = if result.interrupted {
+        format!(
+            "Applied: {} copied, {} renamed, {} moved, {} errors. Interrupted — {} files remaining.",
+            result.copied, result.renamed, result.moved, result.errors.len(), result.remaining
+        )
+    } else if params.resume {
+        format!(
+            "Applied (--resume): {} copied, {} renamed, {} moved, {} already at destination, {} errors",
+            result.copied, result.renamed, result.moved, result.already_there, result.errors.len()
+        )
+    } else {
+        format!(
+            "Applied: {} copied, {} renamed, {} moved, {} skipped (missing), {} skipped (stale), {} skipped (filtered), {} errors",
+            result.copied, result.renamed, result.moved, result.skipped_missing,
+            result.skipped_stale.len(), params.skipped_by_filter, result.errors.len()
+        )
+    };
 
     Ok(result)
 }
@@ -2395,6 +2419,7 @@ mod tests {
             transfer_mode: TransferMode::Copy,
             resume: false,
             interrupt_flag: Some(flag),
+            skipped_by_filter: 0,
         };
 
         let result = execute_apply(&conn, &plan, &params, &NoopProgress).unwrap();
@@ -2433,6 +2458,7 @@ mod tests {
             transfer_mode: TransferMode::Copy,
             resume: false,
             interrupt_flag: Some(flag),
+            skipped_by_filter: 0,
         };
 
         let result = execute_apply(&conn, &plan, &params, &NoopProgress).unwrap();

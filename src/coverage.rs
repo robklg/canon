@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::ceremony;
+use crate::domain::format_count;
 use crate::domain::root::parse_root_spec;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
@@ -151,7 +151,7 @@ fn print_compact_line(label: &str, stats: &CoverageStats, show_legend: bool) {
     println!(
         "{:<42} {:>10}/{:>5.1}%/{:>5.1}%{}",
         label,
-        ceremony::format_count(sources),
+        format_count(sources),
         hashed_pct,
         archived_pct,
         legend
@@ -178,7 +178,7 @@ fn print_compact_line_handle<W: std::io::Write>(
         handle,
         "{:<42} {:>10}/{:>5.1}%/{:>5.1}%{}",
         label,
-        ceremony::format_count(sources),
+        format_count(sources),
         hashed_pct,
         archived_pct,
         legend
@@ -207,33 +207,33 @@ fn display_scoped_stats(stats: &CoverageStats, scope: &ResolvedScope, archive: O
     // Always show included sources as total (excluded are filtered out conceptually)
     println!(
         "  Total sources:   {:>8}",
-        ceremony::format_count(stats.included_sources())
+        format_count(stats.included_sources())
     );
     println!(
         "  Hashed:          {:>8} ({:.1}%)",
-        ceremony::format_count(stats.hashed_sources),
+        format_count(stats.hashed_sources),
         stats.hashed_pct()
     );
 
     if archive.is_some() {
         println!(
             "  In this archive: {:>8} ({:.1}% of hashed)",
-            ceremony::format_count(stats.archived_sources),
+            format_count(stats.archived_sources),
             stats.archived_pct()
         );
         println!(
             "  Not in archive:  {:>8}",
-            ceremony::format_count(stats.unarchived())
+            format_count(stats.unarchived())
         );
     } else {
         println!(
             "  Archived:        {:>8} ({:.1}% of hashed)",
-            ceremony::format_count(stats.archived_sources),
+            format_count(stats.archived_sources),
             stats.archived_pct()
         );
         println!(
             "  Unarchived:      {:>8}",
-            ceremony::format_count(stats.unarchived())
+            format_count(stats.unarchived())
         );
     }
 }
@@ -278,7 +278,7 @@ fn display_per_root_stats(
         if writeln!(
             handle,
             "  Total sources:   {:>8}",
-            ceremony::format_count(stats.included_sources())
+            format_count(stats.included_sources())
         )
         .is_err()
         {
@@ -287,7 +287,7 @@ fn display_per_root_stats(
         if writeln!(
             handle,
             "  Hashed:          {:>8} ({:.1}%)",
-            ceremony::format_count(stats.hashed_sources),
+            format_count(stats.hashed_sources),
             stats.hashed_pct()
         )
         .is_err()
@@ -299,7 +299,7 @@ fn display_per_root_stats(
             if writeln!(
                 handle,
                 "  In this archive: {:>8} ({:.1}% of hashed)",
-                ceremony::format_count(stats.archived_sources),
+                format_count(stats.archived_sources),
                 stats.archived_pct()
             )
             .is_err()
@@ -309,7 +309,7 @@ fn display_per_root_stats(
             if writeln!(
                 handle,
                 "  Not in archive:  {:>8}",
-                ceremony::format_count(stats.unarchived())
+                format_count(stats.unarchived())
             )
             .is_err()
             {
@@ -319,7 +319,7 @@ fn display_per_root_stats(
             if writeln!(
                 handle,
                 "  Archived:        {:>8} ({:.1}% of hashed)",
-                ceremony::format_count(stats.archived_sources),
+                format_count(stats.archived_sources),
                 stats.archived_pct()
             )
             .is_err()
@@ -329,7 +329,7 @@ fn display_per_root_stats(
             if writeln!(
                 handle,
                 "  Unarchived:      {:>8}",
-                ceremony::format_count(stats.unarchived())
+                format_count(stats.unarchived())
             )
             .is_err()
             {
@@ -352,12 +352,12 @@ fn display_per_root_stats(
     let _ = writeln!(
         handle,
         "  Total sources:   {:>8}",
-        ceremony::format_count(overall.included_sources())
+        format_count(overall.included_sources())
     );
     let _ = writeln!(
         handle,
         "  Hashed:          {:>8} ({:.1}%)",
-        ceremony::format_count(overall.hashed_sources),
+        format_count(overall.hashed_sources),
         overall.hashed_pct()
     );
 
@@ -365,25 +365,25 @@ fn display_per_root_stats(
         let _ = writeln!(
             handle,
             "  In this archive: {:>8} ({:.1}% of hashed)",
-            ceremony::format_count(overall.archived_sources),
+            format_count(overall.archived_sources),
             overall.archived_pct()
         );
         let _ = writeln!(
             handle,
             "  Not in archive:  {:>8}",
-            ceremony::format_count(overall.unarchived())
+            format_count(overall.unarchived())
         );
     } else {
         let _ = writeln!(
             handle,
             "  Archived:        {:>8} ({:.1}% of hashed)",
-            ceremony::format_count(overall.archived_sources),
+            format_count(overall.archived_sources),
             overall.archived_pct()
         );
         let _ = writeln!(
             handle,
             "  Unarchived:      {:>8}",
-            ceremony::format_count(overall.unarchived())
+            format_count(overall.unarchived())
         );
     }
 }

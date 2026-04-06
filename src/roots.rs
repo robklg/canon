@@ -6,6 +6,7 @@ use anyhow::Result;
 use crate::ceremony;
 use crate::domain::path::resolve_path;
 use crate::domain::{parse_root_spec, parse_root_spec_any, Root};
+use crate::ops;
 use crate::repo::{self, Db};
 
 pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
@@ -128,35 +129,18 @@ pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
     // Parse the spec to get root id and validate it exists
     let root_id = parse_root_spec(&roots, spec, None)?;
 
-    // Get root info from already-fetched roots
-    let root = roots.iter().find(|r| r.id == root_id).unwrap();
-
-    // Get sources for this root to compute statistics
-    let sources = repo::source::batch_fetch_by_roots(conn, &[root_id])?;
-    let source_count = sources.len() as i64;
-
-    // Check which sources have their content in an archive
-    let object_ids: Vec<i64> = sources.iter().filter_map(|s| s.object_id).collect();
-    let archived_objects = repo::object::batch_check_archived(conn, &object_ids, None)?;
-    let in_archive_count = sources
-        .iter()
-        .filter(|s| {
-            s.object_id
-                .map(|id| archived_objects.contains(&id))
-                .unwrap_or(false)
-        })
-        .count() as i64;
-    let not_in_archive = source_count - in_archive_count;
+    let plan = ops::roots::plan_remove(conn, root_id)?;
 
     if !yes {
-        eprintln!("About to remove {} root: {}", root.role, root.path);
+        eprintln!("About to remove {} root: {}", plan.role, plan.root_path);
         eprintln!(
-            "This will forget {source_count} sources ({in_archive_count} in archive, {not_in_archive} not in archive)."
+            "This will forget {} sources ({} in archive, {} not in archive).",
+            plan.source_count, plan.in_archive_count, plan.not_in_archive
         );
         eprintln!("Files on disk will NOT be deleted.");
         eprintln!();
         eprintln!("To see which sources will be forgotten:");
-        eprintln!("  canon ls {}", root.path);
+        eprintln!("  canon ls {}", plan.root_path);
         eprintln!();
     }
 
@@ -164,13 +148,8 @@ pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Delete notes for this root before removing the root itself
-    repo::note::delete_by_root(conn, root_id)?;
-
-    // Delete facts, sources, and root via repo function
-    let deleted_sources = repo::root::remove(conn, root_id)?;
-
-    println!("Removed root {root_id} and {deleted_sources} sources");
+    let result = ops::roots::execute_remove(conn, &plan)?;
+    println!("{}", result.summary);
 
     Ok(())
 }
@@ -203,24 +182,19 @@ pub fn suspend(db: &Db, spec: &str) -> Result<()> {
     // Use parse_root_spec_any to allow suspending already-suspended roots (no-op)
     let root_id = parse_root_spec_any(&roots, spec)?;
 
-    // Get root info from already-fetched roots
-    let root = roots.iter().find(|r| r.id == root_id).unwrap();
-
-    if root.is_suspended() {
-        println!("Root {} is already suspended: {}", root_id, root.path);
-        return Ok(());
+    match ops::roots::execute_suspend(conn, root_id) {
+        Ok(result) => {
+            println!("{}", result.summary);
+            Ok(())
+        }
+        Err(e) if e.to_string().contains("already suspended") => {
+            // Match the existing behavior: print info message, not error
+            let root = roots.iter().find(|r| r.id == root_id).unwrap();
+            println!("Root {} is already suspended: {}", root_id, root.path);
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
-
-    repo::root::set_suspended(conn, root_id, true)?;
-    let counts = repo::root::fetch_file_counts(conn, &[root_id])?;
-    let count = counts.get(&root_id).copied().unwrap_or(0) as usize;
-    println!(
-        "Suspended root {}: {} ({} sources)",
-        root_id,
-        root.path,
-        ceremony::format_count(count)
-    );
-    Ok(())
 }
 
 pub fn unsuspend(db: &Db, spec: &str) -> Result<()> {
@@ -232,22 +206,17 @@ pub fn unsuspend(db: &Db, spec: &str) -> Result<()> {
     // Use parse_root_spec_any to find suspended roots
     let root_id = parse_root_spec_any(&roots, spec)?;
 
-    // Get root info from already-fetched roots
-    let root = roots.iter().find(|r| r.id == root_id).unwrap();
-
-    if !root.is_suspended() {
-        println!("Root {} is not suspended: {}", root_id, root.path);
-        return Ok(());
+    match ops::roots::execute_unsuspend(conn, root_id) {
+        Ok(result) => {
+            println!("{}", result.summary);
+            Ok(())
+        }
+        Err(e) if e.to_string().contains("not suspended") => {
+            // Match the existing behavior: print info message, not error
+            let root = roots.iter().find(|r| r.id == root_id).unwrap();
+            println!("Root {} is not suspended: {}", root_id, root.path);
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
-
-    repo::root::set_suspended(conn, root_id, false)?;
-    let counts = repo::root::fetch_file_counts(conn, &[root_id])?;
-    let count = counts.get(&root_id).copied().unwrap_or(0) as usize;
-    println!(
-        "Unsuspended root {}: {} ({} sources)",
-        root_id,
-        root.path,
-        ceremony::format_count(count)
-    );
-    Ok(())
 }

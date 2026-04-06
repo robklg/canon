@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 
-use crate::ceremony;
+use crate::domain::format_count;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
@@ -175,7 +175,7 @@ fn display_root_distribution(result: &ops::facts::RootDistributionResult) {
             handle,
             "{:<width$} {:>10} ({:>5.1}%)",
             label,
-            ceremony::format_count(entry.count),
+            format_count(entry.count),
             pct,
             width = col_width,
         )
@@ -351,7 +351,7 @@ fn display_grouped_distribution(
             handle,
             "{} (total: {:>6}, {:>5.1}%)",
             main_display,
-            ceremony::format_count(group.total_count),
+            format_count(group.total_count),
             coverage
         )
         .is_err()
@@ -393,7 +393,7 @@ fn display_grouped_distribution(
                 handle,
                 "  {:<40} {:>8} {:>6.1}%",
                 group_display,
-                ceremony::format_count(sub.count),
+                format_count(sub.count),
                 sub_coverage
             )
             .is_err()
@@ -413,7 +413,7 @@ fn display_grouped_distribution(
         let _ = writeln!(
             handle,
             "(no value) (total: {:>6}, {:>5.1}%)",
-            ceremony::format_count(without_main_value),
+            format_count(without_main_value),
             coverage
         );
     }
@@ -493,25 +493,21 @@ pub fn delete_facts(
     } else if options.dry_run {
         println!(
             "Would delete {} fact rows across {} {}",
-            ceremony::format_count(plan.fact_count),
-            ceremony::format_count(plan.entity_count),
+            format_count(plan.fact_count),
+            format_count(plan.entity_count),
             entity_label
         );
     } else {
         // Execute
-        ops::facts::execute_delete(
+        let result = ops::facts::execute_delete(
             conn,
             &source_ids,
             key,
             &options.entity_type,
             options.value_type.as_deref(),
+            &plan,
         )?;
-        println!(
-            "Deleted {} fact rows across {} {}",
-            ceremony::format_count(plan.fact_count),
-            ceremony::format_count(plan.entity_count),
-            entity_label
-        );
+        println!("{}", result.summary);
     }
 
     Ok(())
@@ -534,14 +530,11 @@ pub fn prune_stale(db: &Db, dry_run: bool) -> Result<()> {
     if dry_run {
         println!(
             "Would delete {} stale fact rows (observed_basis_rev mismatch)",
-            ceremony::format_count(plan.stale_count)
+            format_count(plan.stale_count)
         );
     } else {
-        let deleted = ops::facts::execute_prune_stale(conn)?;
-        println!(
-            "Deleted {} stale fact rows (observed_basis_rev mismatch)",
-            ceremony::format_count(deleted as i64)
-        );
+        let result = ops::facts::execute_prune_stale(conn)?;
+        println!("{}", result.summary);
     }
 
     Ok(())
@@ -565,9 +558,9 @@ pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool) -> Result<()> {
     if dry_run {
         println!(
             "Would delete {} orphaned objects, {} non-present sources, and {} facts",
-            ceremony::format_count(stats.object_count),
-            ceremony::format_count(stats.source_count),
-            ceremony::format_count(stats.total_fact_count())
+            format_count(stats.object_count),
+            format_count(stats.source_count),
+            format_count(stats.total_fact_count())
         );
         println!();
         println!("Note: Orphaned objects represent content you've seen but no longer have.");
@@ -577,13 +570,8 @@ pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool) -> Result<()> {
         );
         println!("Use --yes to proceed with deletion.");
     } else {
-        let deleted = ops::facts::execute_prune_orphaned(db)?;
-        println!(
-            "Deleted {} orphaned objects, {} non-present sources, and {} facts",
-            ceremony::format_count(deleted.object_count),
-            ceremony::format_count(deleted.source_count),
-            ceremony::format_count(deleted.total_fact_count())
-        );
+        let result = ops::facts::execute_prune_orphaned(db)?;
+        println!("{}", result.summary);
     }
 
     Ok(())
@@ -612,18 +600,18 @@ pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
         if prune_sources {
             println!(
                 "  Source facts (excluded sources): {}",
-                ceremony::format_count(plan.source_fact_count)
+                format_count(plan.source_fact_count)
             );
         }
         if prune_objects {
             println!(
                 "  Object facts (excluded objects): {}",
-                ceremony::format_count(plan.object_fact_count)
+                format_count(plan.object_fact_count)
             );
         }
         println!(
             "  Total: {} facts would be deleted",
-            ceremony::format_count(plan.total_count())
+            format_count(plan.total_count())
         );
         println!();
         if scope == "all" {
@@ -633,28 +621,9 @@ pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
         }
         println!("Use --yes to proceed with deletion.");
     } else {
-        let (source_deleted, object_deleted) = ops::facts::execute_prune_excluded(conn, scope)?;
-
-        if source_deleted > 0 {
-            println!(
-                "Deleted {} source facts (from excluded sources)",
-                ceremony::format_count(source_deleted as i64)
-            );
-        }
-
-        if object_deleted > 0 {
-            println!(
-                "Deleted {} object facts (from excluded objects)",
-                ceremony::format_count(object_deleted as i64)
-            );
-        }
-
-        let total_deleted = source_deleted + object_deleted;
-        if total_deleted > 0 {
-            println!(
-                "Total: {} facts deleted",
-                ceremony::format_count(total_deleted as i64)
-            );
+        let result = ops::facts::execute_prune_excluded(conn, scope)?;
+        if !result.summary.is_empty() {
+            println!("{}", result.summary);
         }
     }
 

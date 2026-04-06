@@ -473,6 +473,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
             transfer_mode: options.transfer_mode,
             resume: options.resume,
             interrupt_flag: None,
+            skipped_by_filter,
         },
         &progress_impl,
     )?;
@@ -493,33 +494,20 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     }
 
     // Summary output
+    println!("{}", result.summary);
+
     if result.interrupted {
         let manifest_display = config_path.display();
-        println!(
-            "Applied: {} copied, {} renamed, {} moved, {} errors. Interrupted — {} files remaining.",
-            result.copied, result.renamed, result.moved, result.errors.len(), result.remaining
-        );
         eprintln!("Resume with: canon apply --resume {manifest_display}");
         // Update query planner statistics after bulk changes
         eprintln!("Updating query statistics...");
         db.run_analyze()?;
         return Ok(());
-    } else if options.resume {
-        println!(
-            "Applied (--resume): {} copied, {} renamed, {} moved, {} already at destination, {} errors",
-            result.copied, result.renamed, result.moved, result.already_there, result.errors.len()
-        );
-        if result.already_there_source_present > 0 {
-            eprintln!();
-            eprintln!(
-                "Note: {} source files from a previous operation may still exist at the original location.",
-                result.already_there_source_present
-            );
-        }
-    } else {
-        println!(
-            "Applied: {} copied, {} renamed, {} moved, {} skipped (missing), {} skipped (stale), {} skipped (filtered), {} errors",
-            result.copied, result.renamed, result.moved, result.skipped_missing, result.skipped_stale.len(), skipped_by_filter, result.errors.len()
+    } else if options.resume && result.already_there_source_present > 0 {
+        eprintln!();
+        eprintln!(
+            "Note: {} source files from a previous operation may still exist at the original location.",
+            result.already_there_source_present
         );
     }
 

@@ -62,6 +62,24 @@ pub struct ImportStats {
     pub facts_promoted: u64,
 }
 
+impl ImportStats {
+    /// Compose the import summary message.
+    pub fn compose_summary(&self) -> String {
+        use crate::domain::format_count;
+        format!(
+            "Processed {} lines: {} facts imported, {} skipped (stale), {} skipped (reserved), {} skipped (archived), {} skipped (type mismatch), {} objects created, {} facts promoted",
+            format_count(self.lines_processed),
+            format_count(self.facts_imported),
+            format_count(self.skipped_stale),
+            format_count(self.skipped_reserved),
+            format_count(self.skipped_archived),
+            format_count(self.skipped_type_mismatch),
+            format_count(self.objects_created),
+            format_count(self.facts_promoted),
+        )
+    }
+}
+
 /// Outcome of processing a single import record.
 pub struct RecordOutcome {
     /// Warning messages for display.

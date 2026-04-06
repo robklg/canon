@@ -266,35 +266,16 @@ pub fn run(
         all_files_to_hash.extend(result.files_to_hash);
     }
 
-    // Build summary message
-    let mut summary = format!(
-        "Scanned {} files: {} new, {} updated, {} moved, {} unchanged, {} missing",
-        total_stats.scanned,
-        total_stats.new,
-        total_stats.updated,
-        total_stats.moved,
-        total_stats.unchanged,
-        total_stats.missing
-    );
-    if total_stats.skipped > 0 {
-        summary.push_str(&format!(", {} skipped (read errors)", total_stats.skipped));
-    }
-    if total_stats.disconnected > 0 {
-        summary.push_str(&format!(
-            ", {} skipped (disconnected)",
-            total_stats.disconnected
-        ));
-    }
-    println!("{summary}");
-
     // Hash collected files via ops layer
     if !all_files_to_hash.is_empty() {
         let hash_progress = StderrHashProgress::default();
         let hash_stats = ops::scan::hash_files(conn, &all_files_to_hash, &hash_progress)?;
         total_stats.hashed = hash_stats.hashed;
         total_stats.unexpected_hash_changes = hash_stats.unexpected_hash_changes;
-        println!("Hashed {} files", hash_stats.hashed);
     }
+
+    // Print summary (composed by ops)
+    println!("{}", total_stats.compose_summary());
 
     // Exit with error if there were unexpected hash changes (possible corruption)
     if total_stats.unexpected_hash_changes > 0 {

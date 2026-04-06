@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 
 use crate::domain::exclusion::find_excludable_duplicates;
+use crate::domain::format_count;
 use crate::domain::include::IncludeSet;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::{self, Filter};
@@ -456,36 +457,92 @@ pub fn plan_set_objects(
 // Execute functions
 // ============================================================================
 
+/// Result of an exclude-set execution.
+#[allow(dead_code)]
+pub struct ExcludeSetResult {
+    pub count: usize,
+    pub summary: String,
+}
+
 /// Execute an exclude-set plan — marks sources as excluded.
-pub fn execute_set(conn: &Connection, plan: &ExcludeSetPlan) -> Result<usize> {
+pub fn execute_set(conn: &Connection, plan: &ExcludeSetPlan) -> Result<ExcludeSetResult> {
     for &source_id in &plan.source_ids {
         repo::source::set_excluded(conn, source_id, true)?;
     }
-    Ok(plan.source_ids.len())
+    let count = plan.source_ids.len();
+    let noun = if count == 1 { "source" } else { "sources" };
+    let summary = format!("Excluded {} {noun}", format_count(count));
+    Ok(ExcludeSetResult { count, summary })
+}
+
+/// Result of an exclude-clear execution.
+#[allow(dead_code)]
+pub struct ExcludeClearResult {
+    pub count: usize,
+    pub summary: String,
 }
 
 /// Execute an exclude-clear plan — clears source-level exclusion.
-pub fn execute_clear(conn: &Connection, plan: &ExcludeClearPlan) -> Result<usize> {
+pub fn execute_clear(conn: &Connection, plan: &ExcludeClearPlan) -> Result<ExcludeClearResult> {
     for &source_id in &plan.source_ids {
         repo::source::set_excluded(conn, source_id, false)?;
     }
-    Ok(plan.source_ids.len())
+    let count = plan.source_ids.len();
+    let noun = if count == 1 { "source" } else { "sources" };
+    let summary = format!("Cleared exclusions for {} {noun}", format_count(count));
+    Ok(ExcludeClearResult { count, summary })
+}
+
+/// Result of a duplicate exclusion execution.
+#[allow(dead_code)]
+pub struct ExcludeDuplicatesResult {
+    pub count: usize,
+    pub summary: String,
 }
 
 /// Execute a duplicate exclusion plan — marks sources as excluded.
-pub fn execute_duplicates(conn: &Connection, plan: &ExcludeDuplicatesPlan) -> Result<usize> {
+pub fn execute_duplicates(
+    conn: &Connection,
+    plan: &ExcludeDuplicatesPlan,
+) -> Result<ExcludeDuplicatesResult> {
     for &source_id in &plan.source_ids {
         repo::source::set_excluded(conn, source_id, true)?;
     }
-    Ok(plan.source_ids.len())
+    let count = plan.source_ids.len();
+    let noun = if count == 1 { "source" } else { "sources" };
+    let summary = format!("Excluded {} {noun}", format_count(count));
+    Ok(ExcludeDuplicatesResult { count, summary })
+}
+
+/// Result of an object exclusion execution.
+#[allow(dead_code)]
+pub struct ExcludeSetObjectsResult {
+    pub count: usize,
+    pub total_source_count: usize,
+    pub total_archive_count: usize,
+    pub summary: String,
 }
 
 /// Execute an object exclusion plan — marks objects as excluded.
-pub fn execute_set_objects(conn: &Connection, plan: &ExcludeSetObjectsPlan) -> Result<usize> {
+pub fn execute_set_objects(
+    conn: &Connection,
+    plan: &ExcludeSetObjectsPlan,
+) -> Result<ExcludeSetObjectsResult> {
     for entry in &plan.objects {
         repo::object::set_excluded(conn, entry.object_id, true)?;
     }
-    Ok(plan.objects.len())
+    let count = plan.objects.len();
+    let total_in_source_roots = plan.total_source_count - plan.total_archive_count;
+    let summary = format!(
+        "Excluded {} objects affecting {} sources ({} in source roots, {} in archives)",
+        count, plan.total_source_count, total_in_source_roots, plan.total_archive_count
+    );
+    Ok(ExcludeSetObjectsResult {
+        count,
+        total_source_count: plan.total_source_count,
+        total_archive_count: plan.total_archive_count,
+        summary,
+    })
 }
 
 // ============================================================================
@@ -658,11 +715,38 @@ pub fn check_set_object_by_file(
     })
 }
 
-/// Exclude a single object by ID.
-pub fn exclude_object(conn: &Connection, object_id: i64) -> Result<()> {
-    repo::object::set_excluded(conn, object_id, true)?;
-    Ok(())
+/// Result of excluding a single object.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct ExcludeObjectResult {
+    pub object_id: i64,
+    pub hash_prefix: String,
+    pub source_count: usize,
+    pub summary: String,
 }
+
+/// Exclude a single object by ID, returning a result with summary.
+///
+/// The `hash_prefix` and `sources` come from the preceding check
+/// (`check_set_object_by_hash` or `check_set_object_by_file`).
+pub fn execute_set_object(
+    conn: &Connection,
+    object_id: i64,
+    hash_prefix: &str,
+    sources: &[ObjectSourceInfo],
+) -> Result<ExcludeObjectResult> {
+    repo::object::set_excluded(conn, object_id, true)?;
+
+    let summary = format!("Excluded object: {hash_prefix}...");
+
+    Ok(ExcludeObjectResult {
+        object_id,
+        hash_prefix: hash_prefix.to_string(),
+        source_count: sources.len(),
+        summary,
+    })
+}
+
 
 /// Validate that an object exclusion can be cleared by its hash.
 ///
@@ -684,11 +768,34 @@ pub fn check_clear_object(conn: &Connection, hash: &str) -> Result<ObjectClearCh
     })
 }
 
-/// Clear exclusion from a single object by ID.
-pub fn clear_object_exclusion(conn: &Connection, object_id: i64) -> Result<()> {
-    repo::object::set_excluded(conn, object_id, false)?;
-    Ok(())
+/// Result of clearing exclusion from a single object.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct ClearObjectResult {
+    pub object_id: i64,
+    pub hash_prefix: String,
+    pub summary: String,
 }
+
+/// Clear exclusion from a single object by ID, returning a result with summary.
+///
+/// The `hash_prefix` comes from the preceding check (`check_clear_object`).
+pub fn execute_clear_object(
+    conn: &Connection,
+    object_id: i64,
+    hash_prefix: &str,
+) -> Result<ClearObjectResult> {
+    repo::object::set_excluded(conn, object_id, false)?;
+
+    let summary = format!("Cleared exclusion from object: {hash_prefix}...");
+
+    Ok(ClearObjectResult {
+        object_id,
+        hash_prefix: hash_prefix.to_string(),
+        summary,
+    })
+}
+
 
 /// Fetch source display info for an object.
 ///
@@ -1044,8 +1151,8 @@ mod tests {
             not_archived_count: 1,
         };
 
-        let count = execute_set(&conn, &plan).unwrap();
-        assert_eq!(count, 1);
+        let result = execute_set(&conn, &plan).unwrap();
+        assert_eq!(result.count, 1);
     }
 
     #[test]
@@ -1061,8 +1168,8 @@ mod tests {
             root_count: 1,
         };
 
-        let count = execute_clear(&conn, &plan).unwrap();
-        assert_eq!(count, 2);
+        let result = execute_clear(&conn, &plan).unwrap();
+        assert_eq!(result.count, 2);
     }
 
     // =========================================================================
@@ -1304,8 +1411,8 @@ mod tests {
             skipped_multiple: 0,
         };
 
-        let count = execute_duplicates(&conn, &plan).unwrap();
-        assert_eq!(count, 1);
+        let result = execute_duplicates(&conn, &plan).unwrap();
+        assert_eq!(result.count, 1);
     }
 
     // =========================================================================
@@ -1518,8 +1625,8 @@ mod tests {
             skipped_already_excluded: 0,
         };
 
-        let count = execute_set_objects(&conn, &plan).unwrap();
-        assert_eq!(count, 1);
+        let result = execute_set_objects(&conn, &plan).unwrap();
+        assert_eq!(result.count, 1);
     }
 
     // =========================================================================
@@ -1959,5 +2066,60 @@ mod tests {
         let entries = list_excluded_objects(&conn).unwrap();
 
         assert!(entries.is_empty());
+    }
+
+    // =========================================================================
+    // execute_set_object tests
+    // =========================================================================
+
+    #[test]
+    fn test_execute_set_object_excludes_and_returns_summary() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj_id = insert_object(&conn, "abcdef1234567890", false);
+        let _src = insert_source(&conn, root, "a.jpg", Some(obj_id));
+
+        let sources = fetch_object_sources(&conn, obj_id).unwrap();
+        let result = execute_set_object(&conn, obj_id, "abcdef1234567890", &sources).unwrap();
+
+        assert_eq!(result.object_id, obj_id);
+        assert_eq!(result.summary, "Excluded object: abcdef1234567890...");
+        assert_eq!(result.source_count, 1);
+
+        // Verify actually excluded in DB
+        let objects = crate::repo::object::batch_fetch_by_ids(&conn, &[obj_id]).unwrap();
+        assert!(objects.get(&obj_id).unwrap().is_excluded());
+    }
+
+    #[test]
+    fn test_execute_set_object_summary_includes_hash_prefix() {
+        let conn = setup_test_db();
+        let obj_id = insert_object(&conn, "deadbeef12345678", false);
+
+        let result = execute_set_object(&conn, obj_id, "deadbeef12345678", &[]).unwrap();
+
+        assert!(result.summary.contains("deadbeef12345678"));
+    }
+
+    // =========================================================================
+    // execute_clear_object tests
+    // =========================================================================
+
+    #[test]
+    fn test_execute_clear_object_clears_and_returns_summary() {
+        let conn = setup_test_db();
+        let obj_id = insert_object(&conn, "abcdef1234567890", true); // already excluded
+
+        let result = execute_clear_object(&conn, obj_id, "abcdef1234567890").unwrap();
+
+        assert_eq!(result.object_id, obj_id);
+        assert_eq!(
+            result.summary,
+            "Cleared exclusion from object: abcdef1234567890..."
+        );
+
+        // Verify no longer excluded in DB
+        let objects = crate::repo::object::batch_fetch_by_ids(&conn, &[obj_id]).unwrap();
+        assert!(!objects.get(&obj_id).unwrap().is_excluded());
     }
 }

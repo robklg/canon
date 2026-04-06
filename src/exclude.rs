@@ -8,10 +8,11 @@ use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::Filter;
 use crate::ops::exclude::{
     self, check_clear_object, check_set_object_by_file, check_set_object_by_hash,
-    check_set_source_by_id, check_set_source_by_path, execute_clear, execute_duplicates,
-    execute_set, execute_set_objects, plan_clear, plan_duplicates, plan_set, plan_set_objects,
-    ExcludeClearParams, ExcludeDuplicatesParams, ExcludeSetObjectsParams, ExcludeSetParams,
-    ObjectClearCheck, ObjectExclusionCheck, ObjectSourceInfo, SourceExclusionCheck,
+    check_set_source_by_id, check_set_source_by_path, execute_clear, execute_clear_object,
+    execute_duplicates, execute_set, execute_set_object, execute_set_objects, plan_clear,
+    plan_duplicates, plan_set, plan_set_objects, ExcludeClearParams, ExcludeDuplicatesParams,
+    ExcludeSetObjectsParams, ExcludeSetParams, ObjectClearCheck, ObjectExclusionCheck,
+    ObjectSourceInfo, SourceExclusionCheck,
 };
 use crate::repo::{self, Db};
 
@@ -77,17 +78,8 @@ pub fn set(
         }
     }
 
-    execute_set(conn, &plan)?;
-
-    let noun = if plan.source_ids.len() == 1 {
-        "source"
-    } else {
-        "sources"
-    };
-    println!(
-        "Excluded {} {noun}",
-        ceremony::format_count(plan.source_ids.len())
-    );
+    let result = execute_set(conn, &plan)?;
+    println!("{}", result.summary);
     Ok(())
 }
 
@@ -143,17 +135,8 @@ pub fn clear(
         }
     }
 
-    execute_clear(conn, &plan)?;
-
-    let noun = if plan.source_ids.len() == 1 {
-        "source"
-    } else {
-        "sources"
-    };
-    println!(
-        "Cleared exclusions for {} {noun}",
-        ceremony::format_count(plan.source_ids.len())
-    );
+    let result = execute_clear(conn, &plan)?;
+    println!("{}", result.summary);
     Ok(())
 }
 
@@ -328,14 +311,8 @@ pub fn exclude_duplicates(
     }
 
     // Execute
-    let excluded_count = execute_duplicates(conn, &plan)?;
-
-    let noun = if excluded_count == 1 {
-        "source"
-    } else {
-        "sources"
-    };
-    println!("Excluded {} {noun}", ceremony::format_count(excluded_count));
+    let result = execute_duplicates(conn, &plan)?;
+    println!("{}", result.summary);
     println!();
     println!("Use `canon ls --duplicates` to see remaining duplicates.");
 
@@ -365,8 +342,9 @@ pub fn set_object_by_hash(db: &Db, hash: &str, options: &SetOptions) -> Result<(
                 print_source_locations(&sources, options.verbose);
                 println!("\nUse --yes to execute.");
             } else {
-                exclude::exclude_object(conn, object_id)?;
-                println!("Excluded object: {hash_prefix}...");
+                let result =
+                    execute_set_object(conn, object_id, &hash_prefix, &sources)?;
+                println!("{}", result.summary);
                 print_source_locations(&sources, options.verbose);
             }
         }
@@ -407,8 +385,9 @@ pub fn set_object_by_file(db: &Db, file_path: &Path, options: &SetOptions) -> Re
                 print_source_locations(&sources, options.verbose);
                 println!("\nUse --yes to execute.");
             } else {
-                exclude::exclude_object(conn, object_id)?;
-                println!("Excluded object: {hash_prefix}...");
+                let result =
+                    execute_set_object(conn, object_id, &hash_prefix, &sources)?;
+                println!("{}", result.summary);
                 print_source_locations(&sources, options.verbose);
             }
         }
@@ -498,12 +477,8 @@ pub fn set_objects_by_filter(
     }
 
     // Execute
-    let count = execute_set_objects(conn, &plan)?;
-
-    println!(
-        "Excluded {} objects affecting {} sources ({} in source roots, {} in archives)",
-        count, plan.total_source_count, total_in_source_roots, plan.total_archive_count
-    );
+    let result = execute_set_objects(conn, &plan)?;
+    println!("{}", result.summary);
     Ok(())
 }
 
@@ -551,8 +526,8 @@ pub fn clear_object(db: &Db, hash: &str, options: &ClearOptions) -> Result<()> {
             if options.dry_run {
                 println!("Would clear exclusion from object: {hash_prefix}...");
             } else {
-                exclude::clear_object_exclusion(conn, object_id)?;
-                println!("Cleared exclusion from object: {hash_prefix}...");
+                let result = execute_clear_object(conn, object_id, &hash_prefix)?;
+                println!("{}", result.summary);
             }
         }
     }

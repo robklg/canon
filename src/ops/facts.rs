@@ -575,6 +575,7 @@ fn is_root_grouping_key(key: &ParsedFactKey) -> bool {
 // Write operations (plan/execute)
 // ============================================================================
 
+use crate::domain::format_count;
 use crate::repo::object::OrphanedStats;
 use crate::repo::Db;
 
@@ -639,6 +640,11 @@ pub fn plan_delete(
     })
 }
 
+/// Result of fact deletion.
+pub struct DeleteResult {
+    pub summary: String,
+}
+
 /// Execute fact deletion.
 pub fn execute_delete(
     conn: &mut Connection,
@@ -646,9 +652,21 @@ pub fn execute_delete(
     key: &str,
     entity_type: &str,
     value_type: Option<&str>,
-) -> Result<()> {
+    plan: &DeletePlan,
+) -> Result<DeleteResult> {
     repo::fact::delete_by_criteria(conn, source_ids, key, entity_type, value_type)?;
-    Ok(())
+    let entity_label = if entity_type == "source" {
+        "sources"
+    } else {
+        "objects"
+    };
+    let summary = format!(
+        "Deleted {} fact rows across {} {}",
+        format_count(plan.fact_count),
+        format_count(plan.entity_count),
+        entity_label
+    );
+    Ok(DeleteResult { summary })
 }
 
 /// Plan stale fact pruning: count facts with mismatched basis_rev.
@@ -657,9 +675,21 @@ pub fn plan_prune_stale(conn: &Connection) -> Result<PruneStalePlan> {
     Ok(PruneStalePlan { stale_count })
 }
 
-/// Execute stale fact pruning. Returns the number of rows deleted.
-pub fn execute_prune_stale(conn: &Connection) -> Result<usize> {
-    repo::fact::delete_stale(conn)
+/// Result of stale fact pruning.
+#[allow(dead_code)]
+pub struct PruneStaleResult {
+    pub deleted: usize,
+    pub summary: String,
+}
+
+/// Execute stale fact pruning.
+pub fn execute_prune_stale(conn: &Connection) -> Result<PruneStaleResult> {
+    let deleted = repo::fact::delete_stale(conn)?;
+    let summary = format!(
+        "Deleted {} stale fact rows (observed_basis_rev mismatch)",
+        format_count(deleted as i64)
+    );
+    Ok(PruneStaleResult { deleted, summary })
 }
 
 /// Plan orphaned object pruning: count orphaned objects, sources, and facts.
@@ -667,14 +697,29 @@ pub fn plan_prune_orphaned(conn: &mut Connection) -> Result<OrphanedStats> {
     repo::object::find_orphaned_stats(conn)
 }
 
+/// Result of orphaned object pruning.
+#[allow(dead_code)]
+pub struct PruneOrphanedResult {
+    pub stats: OrphanedStats,
+    pub summary: String,
+}
+
 /// Execute orphaned object pruning. Owns the transaction for atomicity.
-/// Returns stats of what was deleted.
-pub fn execute_prune_orphaned(db: &mut Db) -> Result<OrphanedStats> {
+pub fn execute_prune_orphaned(db: &mut Db) -> Result<PruneOrphanedResult> {
     let conn = db.conn_mut();
     let tx = conn.transaction()?;
     let deleted = repo::object::delete_orphaned(&tx)?;
     tx.commit()?;
-    Ok(deleted)
+    let summary = format!(
+        "Deleted {} orphaned objects, {} non-present sources, and {} facts",
+        format_count(deleted.object_count),
+        format_count(deleted.source_count),
+        format_count(deleted.total_fact_count())
+    );
+    Ok(PruneOrphanedResult {
+        stats: deleted,
+        summary,
+    })
 }
 
 /// Validate the scope parameter for excluded fact pruning.
@@ -695,9 +740,43 @@ pub fn plan_prune_excluded(conn: &Connection, scope: &str) -> Result<PruneExclud
     })
 }
 
-/// Execute excluded fact pruning. Returns (source_deleted, object_deleted).
-pub fn execute_prune_excluded(conn: &Connection, scope: &str) -> Result<(usize, usize)> {
-    repo::fact::delete_excluded(conn, scope)
+/// Result of excluded fact pruning.
+#[allow(dead_code)]
+pub struct PruneExcludedResult {
+    pub source_deleted: usize,
+    pub object_deleted: usize,
+    pub summary: String,
+}
+
+/// Execute excluded fact pruning.
+pub fn execute_prune_excluded(conn: &Connection, scope: &str) -> Result<PruneExcludedResult> {
+    let (source_deleted, object_deleted) = repo::fact::delete_excluded(conn, scope)?;
+    let total_deleted = source_deleted + object_deleted;
+    let mut parts = Vec::new();
+    if source_deleted > 0 {
+        parts.push(format!(
+            "Deleted {} source facts (from excluded sources)",
+            format_count(source_deleted as i64)
+        ));
+    }
+    if object_deleted > 0 {
+        parts.push(format!(
+            "Deleted {} object facts (from excluded objects)",
+            format_count(object_deleted as i64)
+        ));
+    }
+    if total_deleted > 0 {
+        parts.push(format!(
+            "Total: {} facts deleted",
+            format_count(total_deleted as i64)
+        ));
+    }
+    let summary = parts.join("\n");
+    Ok(PruneExcludedResult {
+        source_deleted,
+        object_deleted,
+        summary,
+    })
 }
 
 // ============================================================================

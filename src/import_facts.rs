@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use std::io::{self, BufRead};
 
-use crate::ceremony;
 use crate::ops;
 use crate::ops::import_facts::ImportRecord;
 use crate::repo::Db;
@@ -63,18 +62,7 @@ pub fn run(db: &mut Db, allow_archived: bool, verbose: bool) -> Result<()> {
         eprintln!("Then re-import with the new type.");
     }
 
-    let stats = &state.stats;
-    println!(
-        "Processed {} lines: {} facts imported, {} skipped (stale), {} skipped (reserved), {} skipped (archived), {} skipped (type mismatch), {} objects created, {} facts promoted",
-        ceremony::format_count(stats.lines_processed),
-        ceremony::format_count(stats.facts_imported),
-        ceremony::format_count(stats.skipped_stale),
-        ceremony::format_count(stats.skipped_reserved),
-        ceremony::format_count(stats.skipped_archived),
-        ceremony::format_count(stats.skipped_type_mismatch),
-        ceremony::format_count(stats.objects_created),
-        ceremony::format_count(stats.facts_promoted)
-    );
+    println!("{}", state.stats.compose_summary());
 
     // Update query planner statistics after bulk changes
     eprintln!("Updating query statistics...");

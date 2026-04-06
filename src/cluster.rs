@@ -2,13 +2,13 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
 
-use crate::ceremony::format_count;
+use crate::domain::format_count;
 use crate::domain::root::resolve_archive_path;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::Filter;
 use crate::ops;
 use crate::ops::cluster::{
-    ClusterGenerateParams, ClusterGeneratePlan, ExecuteGenerateParams, ExecuteGenerateResult,
+    ClusterGenerateParams, ClusterGeneratePlan, ExecuteGenerateParams,
     ExecuteRefreshParams, ManifestConfig,
     parse_manifest_allow, validate_manifest_version,
 };
@@ -91,14 +91,14 @@ pub fn generate(
 
     let result = ops::cluster::execute_generate(&plan, &exec_params)?;
 
-    print_cluster_stdout(
-        &format!(
+    println!(
+        "{}",
+        result.compose_summary(&format!(
             "Generated manifest: {} ({} sources in {})",
             output_path.display(),
             result.source_count,
             lock_path.display()
-        ),
-        &result,
+        ))
     );
 
     if !options.no_edit {
@@ -203,13 +203,13 @@ pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool, no_edit: bo
 
     match result.outcome {
         Some(r) => {
-            print_cluster_stdout(
-                &format!(
+            println!(
+                "{}",
+                r.compose_summary(&format!(
                     "Refreshed lock file: {} ({} sources)",
                     lock_path.display(),
                     r.source_count
-                ),
-                &r,
+                ))
             );
         }
         None => {
@@ -267,22 +267,6 @@ fn allow_values_to_strings(options: &GenerateOptions) -> Vec<String> {
     v
 }
 
-fn print_cluster_stdout(header: &str, result: &ExecuteGenerateResult) {
-    println!("{header}");
-    let root_word = if result.root_breakdown.len() == 1 {
-        "root"
-    } else {
-        "roots"
-    };
-    println!("  From {} {}:", result.root_breakdown.len(), root_word);
-    for (path, count) in &result.root_breakdown {
-        println!("    {}  ({})", path, format_count(*count));
-    }
-    println!(
-        "  {} have no archived copy",
-        format_count(result.not_archived_count)
-    );
-}
 
 // ============================================================================
 // Status

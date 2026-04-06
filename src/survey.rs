@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 
-use crate::ceremony::format_count;
+use crate::domain::format_count;
 use crate::domain;
 use crate::domain::root::{find_containing_root, parse_root_spec};
 use crate::domain::IncludeSet;

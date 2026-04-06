@@ -69,16 +69,12 @@ pub fn run(
             if !ceremony::confirm(yes)? {
                 return Ok(());
             }
-            let deleted = ops::note::execute_clear_recursive(conn, &scope)?;
-            eprintln!("Cleared {deleted} notes");
+            let result = ops::note::execute_clear_recursive(conn, &scope)?;
+            eprintln!("{}", result.summary);
         } else {
             // Clear exact scope
-            let deleted = repo::note::clear_by_scope(conn, scope.root_id, &scope.rel_path)?;
-            if deleted == 0 {
-                eprintln!("No notes at {}", scope.display());
-            } else {
-                eprintln!("Cleared {deleted} notes at {}", scope.display());
-            }
+            let result = ops::note::execute_clear_exact(conn, &scope)?;
+            eprintln!("{}", result.summary);
         }
         return Ok(());
     }
