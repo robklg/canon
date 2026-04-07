@@ -12,6 +12,7 @@
   - [Objects](concepts/object.md)
   - [Sources v. Objects](./concepts/source-object.md)
   - [Facts](concepts/facts.md)
+  - [Decision Provenance](concepts/decisions.md)
 - [Commands](commands/index.md)
   - [Managing Roots](commands/roots/index.md)
     - [`scan`](commands/roots/scan.md)

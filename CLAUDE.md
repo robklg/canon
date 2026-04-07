@@ -32,6 +32,8 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 - `root.rs` - Root struct, RootSpec enum, predicates (`is_suspended()`, `is_source()`)
 - `object.rs` - Object struct and `is_excluded()` predicate
 - `fact.rs` - FactEntry struct, re-exports FactValue/FactType
+- `decision.rs` - `DecisionCommand` enum (stable command identifiers), `DecisionStatus` enum, `Decision` struct
+- `format.rs` - Pure formatting utilities (`format_count()` — thousands separators)
 - `scope.rs` - ScopeMatch enum for file vs directory scope matching
 - `path.rs` - Pure path utilities (`path_is_under()`, `path_strip_prefix()`, `format_path()`)
 - `scan.rs` - Scan reconciliation logic (`FileObservation`, `Reconciliation`, `reconcile()`, `find_missing()`)
@@ -46,6 +48,7 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 - `root.rs` - Root batch fetching (`fetch_all()`, `batch_fetch_by_ids()`)
 - `object.rs` - Object batch fetching, archive detection (`batch_check_archived()`, `batch_find_archive_info_by_hash()`)
 - `note.rs` - Note CRUD operations, subtree queries, batch counts, temporal/spatial listing queries (`insert()`, `fetch_by_scope()`, `fetch_subtree()`, `fetch_recent()`, `fetch_recent_subtree()`, `fetch_locations()`, `fetch_locations_subtree()`, `clear_by_scope()`, `clear_subtree()`, `batch_count_subtree()`)
+- `decision.rs` - Decision record INSERT/UPDATE (`insert_started()`, `update_completed()`)
 - `fact.rs` - Fact batch fetching (`batch_fetch_for_sources()`, `batch_fetch_key_for_sources()`)
 
 **Expression System** (`src/expr/`) - Pattern and filter handling:
@@ -63,7 +66,9 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 - `ls.rs` - Duplicate detection: `find_duplicate_groups()`, `DuplicateGroup`
 - `survey.rs` - Survey computation: `compute_survey()`, `SurveyParams`, `SurveyOutcome`, `SurveyResult`, `LocationResult`
 - `facts.rs` - Facts distribution: `compute_all_keys()`, `compute_distribution()`, `compute_grouped_distribution()`, `DistributionResult`, `AllKeysResult`
-- `note.rs` - Composed note operations: `resolve_note_scope()`, `view_notes()`, `list_notes_global()`, `list_notes_recursive()`, `list_locations_global()`, `list_locations_recursive()`, `plan_clear_recursive()`, `execute_clear_recursive()`, `survey_note_context()`, `NoteScope`, `NoteViewResult`, `NoteListResult`, `NoteSpatialResult`, `ClearPlan`, `SurveyNoteContext`
+- `decision.rs` - Decision recording: `DecisionRecorder` (two-phase start/complete), `DecisionParams`, `DecisionCounts`
+- `roots.rs` - Root operations: `plan_remove()`, `execute_remove()`, `execute_suspend()`, `execute_unsuspend()`
+- `note.rs` - Composed note operations: `resolve_note_scope()`, `view_notes()`, `list_notes_global()`, `list_notes_recursive()`, `list_locations_global()`, `list_locations_recursive()`, `plan_clear_recursive()`, `execute_clear_recursive()`, `execute_clear_exact()`, `survey_note_context()`, `NoteScope`, `NoteViewResult`, `NoteListResult`, `NoteSpatialResult`, `ClearPlan`, `SurveyNoteContext`
 - `import_facts.rs` - Import facts processing: `init_state()`, `process_record()`, `ImportRecord`, `ImportState`, `ImportStats`, `RecordOutcome`
 - `scan.rs` - Scan pipeline: `scan_root()`, `ScanOptions`, `ScanProgress` trait, `ScanStats`, `FileToHash`, `ScanRootResult`
 - `fs.rs` - Filesystem primitives: `compute_partial_hash()`, `compute_full_hash()`, `preserve_metadata()`, `check_destination_writable()`, `ensure_parent_dir()`, `copy_file()`, `rename_file()`, `move_file()`, `MoveOutcome`
@@ -71,7 +76,7 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 **Command Modules** (flat in `src/`):
 - `main.rs` - CLI entry point using clap (canon home resolution, alias expansion dispatch)
 - `alias.rs` - Alias file I/O and filter expansion orchestration (`expand_filter_strings()`)
-- `ceremony.rs` - Shared confirmation infrastructure (`confirm()`, `format_count()`)
+- `ceremony.rs` - Shared confirmation infrastructure (`confirm()`)
 - `ls.rs` - List and query sources
 - `coverage.rs` - Archive coverage statistics
 - `cluster.rs` - Manifest generation with query filters, summary/notes comment sections
@@ -110,6 +115,11 @@ Three unified flags control visibility, awareness, and scope across all commands
 - **`--allow`** (effectful commands: `cluster generate`, `apply`, `import-facts`): Acknowledges non-default source selection. Canon's defaults surface information (e.g., duplicates present); `--allow` is the user saying "I'm aware, proceed." Per-command values. Not available on `cluster refresh` (reads from manifest `[options]`).
 - **`--global`** (scope-taking commands: `ls`, `facts`, `coverage`, `worklist`, `survey`, `cluster generate`, `exclude set/clear/set-object`): Operates on all roots, bypassing CWD-based scope defaulting. Only meaningful when no explicit paths are given. Not on `compare` (requires a path).
 
+Two additional flags support decision provenance:
+
+- **`--no-record`** (global, all commands): Suppresses decision recording for this invocation. Per-invocation opt-out, not a persistent setting.
+- **`--reason`** (effectful commands: `exclude set/clear/duplicates/set-object`, `apply`, `scan`, `roots rm`): Attaches user reasoning to the decision record. Optional — no prompting when omitted. Empty strings treated as no reason.
+
 **CWD scope defaulting**: All scope-taking commands default to CWD when no paths are given and CWD is inside a known root. When CWD is inside an archive root, `--include archived` is auto-enabled. When CWD is not under any root, commands operate globally. Use `--global` to force global scope while inside a root. This applies to both discovery commands (`ls`, `survey`, `facts`, `coverage`, `worklist`) and effectful commands (`cluster generate`, `exclude set/clear/set-object`). Effectful commands have confirmation prompts that show scope, count, and root breakdown — the user always sees what they're about to affect.
 
 **Scope display**: Discovery commands show their active scope. Report commands (`survey`, `facts`, `coverage`, `compare`) display scope on stdout as part of the report (e.g., `Facts: /path` or `Facts: all roots`). List commands (`ls`, `worklist`) display scope on stderr when scoped (e.g., `scope: /path`); silent when global.
@@ -145,7 +155,7 @@ Alias expansion happens in `main.rs` before command dispatch. The pure expansion
 
 Default location: `$CANON_HOME/canon.db`
 
-Key tables: `roots`, `sources`, `objects`, `facts`, `notes`
+Key tables: `roots`, `sources`, `objects`, `facts`, `notes`, `decisions`
 
 Roots table columns include `suspended` (integer, default 0) for temporarily hiding roots from operations, `comment` for user notes, and `last_scanned_at` timestamp.
 
@@ -332,8 +342,10 @@ The `cluster generate` and `apply` commands work together:
 
 **Ceremony infrastructure** (`ceremony.rs`):
 - `confirm(yes: bool)` — shared confirmation prompt ("Proceed? [y/N]"). Returns `Ok(false)` on decline (not an error). Used by `roots rm`, `apply`, `exclude set/clear/duplicates`.
-- `format_count(n)` — formats numbers with thousands separators (e.g., 3847 → "3,847"). Used in manifest summary comments and stdout summaries.
+- `format_count(n)` — in `domain/format.rs`. Formats numbers with thousands separators (e.g., 3847 → "3,847"). Used by both ops and interface layers.
 - Confirmation content is gated behind `!yes` — when `--yes` is passed, both content and expensive queries are skipped.
+
+**Summary composition convention**: All effectful command execute functions return a typed result struct with a `summary: String` field. The ops layer composes the completion message; the interface layer prints it. This single summary string also serves as the decision record's summary — one composition, two uses.
 
 **Key design decisions**:
 - Lock file does NOT store fact snapshots — simplifies format, avoids "refresh required" friction
@@ -491,11 +503,14 @@ let plan = ops::exclude::plan_set(conn, &params)?;
 // Interface decides: dry-run display, confirmation prompt, or proceed
 // ...
 
-// Execute: perform the writes
-let count = ops::exclude::execute_set(conn, &plan)?;
+// Execute: perform the writes + record the decision
+let result = ops::exclude::execute_set(conn, &plan, Some(&decision))?;
+// result.summary — the completion message (composed by ops)
 ```
 
-Plan/execute separates computation from side effects. The plan function returns a typed struct with all data needed for display and confirmation. The execute function performs writes and returns a count. The interface layer decides what happens between plan and execute (dry-run, confirmation, or immediate execution). This makes operations testable without CLI and supports multiple interface types.
+Plan/execute separates computation from side effects. The plan function returns a typed struct with all data needed for display and confirmation. The execute function performs writes, composes a summary, optionally records a decision, and returns a typed result. The interface layer decides what happens between plan and execute (dry-run, confirmation, or immediate execution). This makes operations testable without CLI and supports multiple interface types.
+
+**Decision recording** (`ops/decision.rs`): The `DecisionRecorder` provides two-phase recording — `start()` INSERTs a "started" record, `complete()` UPDATEs with outcome. Execute functions accept `Option<&DecisionParams>` — `None` skips recording (used in tests), `Some` enables it. The recorder catches its own errors; recording failure warns but never blocks the command. For commands without a single execute function (scan, cluster, import-facts), the interface creates the recorder and wraps the operation calls.
 
 **Filesystem Layer** (`src/ops/fs.rs`):
 
