@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
 
+use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::format_count;
 use crate::domain::root::resolve_archive_path;
 use crate::domain::scope::ScopeMatch;
@@ -12,6 +13,7 @@ use crate::ops::cluster::{
     ExecuteRefreshParams, ManifestConfig,
     parse_manifest_allow, validate_manifest_version,
 };
+use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::repo::{self, Connection, Db};
 
 pub struct GenerateOptions {
@@ -30,6 +32,8 @@ pub fn generate(
     dest: &Path,
     output_path: &Path,
     options: &GenerateOptions,
+    command_line: &str,
+    no_record: bool,
 ) -> Result<()> {
     // Prevent overwriting existing TOML config (unless --force)
     if output_path.exists() && !options.force {
@@ -89,17 +93,38 @@ pub fn generate(
         allow: allow_values_to_strings(options),
     };
 
+    let decision = DecisionParams {
+        command: DecisionCommand::ClusterGenerate,
+        scope: Some(scope_prefixes.to_vec()),
+        command_line: command_line.to_string(),
+        reason: None,
+        enabled: !no_record,
+    };
+    let recorder = DecisionRecorder::start(conn, &decision);
+
     let result = ops::cluster::execute_generate(&plan, &exec_params)?;
 
-    println!(
-        "{}",
-        result.compose_summary(&format!(
-            "Generated manifest: {} ({} sources in {})",
-            output_path.display(),
-            result.source_count,
-            lock_path.display()
-        ))
+    let gen_summary = format!(
+        "Generated manifest: {} ({} sources in {})",
+        output_path.display(),
+        result.source_count,
+        lock_path.display()
     );
+    let full_summary = result.compose_summary(&gen_summary);
+
+    recorder.complete(
+        conn,
+        DecisionStatus::Completed,
+        DecisionCounts {
+            attempted: Some(result.source_count as i64),
+            completed: Some(result.source_count as i64),
+            failed: None,
+            skipped: None,
+        },
+        &full_summary,
+    );
+
+    println!("{}", full_summary);
 
     if !options.no_edit {
         open_editor(output_path);
@@ -133,7 +158,7 @@ fn open_editor(path: &Path) {
     }
 }
 
-pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool, no_edit: bool) -> Result<()> {
+pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool, no_edit: bool, command_line: &str, no_record: bool) -> Result<()> {
     let conn = db.conn_mut();
 
     // Read existing manifest content (for notes preservation)
@@ -190,6 +215,11 @@ pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool, no_edit: bo
     };
     display_plan_warnings(&plan, &display_options);
 
+    // Extract scope for decision recording before config is moved
+    let refresh_scope: Option<Vec<String>> = config.meta.scope.as_ref().map(|s| {
+        s.split(", ").map(|p| p.to_string()).collect()
+    });
+
     // Execute
     let lock_path = config_path.with_extension("lock");
     let exec_params = ExecuteRefreshParams {
@@ -198,21 +228,50 @@ pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool, no_edit: bo
         old_manifest_content: old_content,
         config,
     };
+    let decision = DecisionParams {
+        command: DecisionCommand::ClusterRefresh,
+        scope: refresh_scope,
+        command_line: command_line.to_string(),
+        reason: None,
+        enabled: !no_record,
+    };
+    let recorder = DecisionRecorder::start(conn, &decision);
 
     let result = ops::cluster::execute_refresh(&plan, &exec_params)?;
 
     match result.outcome {
         Some(r) => {
-            println!(
-                "{}",
-                r.compose_summary(&format!(
-                    "Refreshed lock file: {} ({} sources)",
-                    lock_path.display(),
-                    r.source_count
-                ))
+            let refresh_summary = format!(
+                "Refreshed lock file: {} ({} sources)",
+                lock_path.display(),
+                r.source_count
             );
+            let full_summary = r.compose_summary(&refresh_summary);
+            recorder.complete(
+                conn,
+                DecisionStatus::Completed,
+                DecisionCounts {
+                    attempted: Some(r.source_count as i64),
+                    completed: Some(r.source_count as i64),
+                    failed: None,
+                    skipped: None,
+                },
+                &full_summary,
+            );
+            println!("{}", full_summary);
         }
         None => {
+            recorder.complete(
+                conn,
+                DecisionStatus::Completed,
+                DecisionCounts {
+                    attempted: Some(0),
+                    completed: Some(0),
+                    failed: None,
+                    skipped: None,
+                },
+                "No sources matched the query",
+            );
             println!("No sources matched the query");
         }
     }

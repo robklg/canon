@@ -2,7 +2,7 @@
 
 **Design Spec**: [~/store/claude-designs/2026-04-05-decision-provenance-ground-layer.md](~/store/claude-designs/2026-04-05-decision-provenance-ground-layer.md)
 **Epic**: [epic-decision-provenance.md](epic-decision-provenance.md)
-**Status**: Pending
+**Status**: Complete
 **Created**: 2026-04-06
 
 ## Objective
@@ -522,11 +522,11 @@ See per-phase test sections above. Summary: ~50 new tests across domain, repo, o
 
 ## Implementation Checklist
 
-- [ ] Phase 1: Infrastructure — schema, domain, repo, ops
-- [ ] Phase 2: Recording integration — exclude commands
-- [ ] Phase 3: Recording integration — apply, scan, cluster
-- [ ] Phase 4: Recording integration — remaining commands + CLI
-- [ ] Verify all existing tests pass
+- [x] Phase 1: Infrastructure — schema, domain, repo, ops
+- [x] Phase 2: Recording integration — exclude commands
+- [x] Phase 3: Recording integration — apply, scan, cluster
+- [x] Phase 4: Recording integration — remaining commands + CLI
+- [x] Verify all existing tests pass (972 tests, 21 new)
 - [ ] Update CLAUDE.md
 - [ ] Update docs/
 

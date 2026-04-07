@@ -3,8 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::resolve_root_path_any;
 use crate::ops;
+use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::scan::{FileToHash, ScanOptions, ScanStats};
 use crate::progress::Progress;
 use crate::repo::{self, Connection, Db};
@@ -106,6 +108,9 @@ pub fn run(
     verify: bool,
     ignore_device_id: bool,
     missing: bool,
+    command_line: &str,
+    no_record: bool,
+    reason: Option<&str>,
 ) -> Result<()> {
     // Validate role if provided
     if let Some(r) = role {
@@ -144,6 +149,21 @@ pub fn run(
     } else {
         paths.to_vec()
     };
+
+    let scan_scope: Vec<String> = paths_to_scan
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let decision = DecisionParams {
+        command: DecisionCommand::Scan,
+        scope: Some(scan_scope),
+        command_line: command_line.to_string(),
+        reason: reason
+            .map(|r| r.to_string())
+            .filter(|r| !r.trim().is_empty()),
+        enabled: !no_record,
+    };
+    let recorder = DecisionRecorder::start(conn, &decision);
 
     let mut total_stats = ScanStats::default();
     let mut all_files_to_hash: Vec<FileToHash> = Vec::new();
@@ -275,7 +295,22 @@ pub fn run(
     }
 
     // Print summary (composed by ops)
-    println!("{}", total_stats.compose_summary());
+    let summary = total_stats.compose_summary();
+    println!("{}", summary);
+
+    // Complete decision recording
+    let total_processed = total_stats.new + total_stats.updated + total_stats.moved + total_stats.unchanged;
+    recorder.complete(
+        conn,
+        DecisionStatus::Completed,
+        DecisionCounts {
+            attempted: Some(total_stats.scanned as i64),
+            completed: Some(total_processed as i64),
+            failed: None,
+            skipped: Some(total_stats.skipped as i64),
+        },
+        &summary,
+    );
 
     // Exit with error if there were unexpected hash changes (possible corruption)
     if total_stats.unexpected_hash_changes > 0 {

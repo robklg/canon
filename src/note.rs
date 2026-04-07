@@ -15,9 +15,11 @@ use anyhow::Result;
 use chrono::{TimeZone, Utc};
 
 use crate::ceremony;
+use crate::domain::decision::DecisionCommand;
 use crate::domain::note::LocationEntry;
 use crate::domain::root::Root;
 use crate::ops;
+use crate::ops::decision::DecisionParams;
 use crate::ops::note::{NoteListResult, NoteScope, NoteSpatialResult, NoteViewResult};
 use crate::ops::scope::resolve_scope;
 use crate::repo::{self, Db};
@@ -32,6 +34,8 @@ pub fn run(
     yes: bool,
     by_scope: bool,
     limit: Option<usize>,
+    command_line: &str,
+    no_record: bool,
 ) -> Result<()> {
     let conn = db.conn();
 
@@ -69,11 +73,25 @@ pub fn run(
             if !ceremony::confirm(yes)? {
                 return Ok(());
             }
-            let result = ops::note::execute_clear_recursive(conn, &scope)?;
+            let decision = DecisionParams {
+                command: DecisionCommand::NoteClear,
+                scope: Some(vec![scope.display()]),
+                command_line: command_line.to_string(),
+                reason: None,
+                enabled: !no_record && yes,
+            };
+            let result = ops::note::execute_clear_recursive(conn, &scope, Some(&decision))?;
             eprintln!("{}", result.summary);
         } else {
             // Clear exact scope
-            let result = ops::note::execute_clear_exact(conn, &scope)?;
+            let decision = DecisionParams {
+                command: DecisionCommand::NoteClear,
+                scope: Some(vec![scope.display()]),
+                command_line: command_line.to_string(),
+                reason: None,
+                enabled: !no_record,
+            };
+            let result = ops::note::execute_clear_exact(conn, &scope, Some(&decision))?;
             eprintln!("{}", result.summary);
         }
         return Ok(());

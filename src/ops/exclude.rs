@@ -9,8 +9,10 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
+use crate::domain::decision::DecisionStatus;
 use crate::domain::exclusion::find_excludable_duplicates;
 use crate::domain::format_count;
+use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::domain::include::IncludeSet;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::{self, Filter};
@@ -465,13 +467,34 @@ pub struct ExcludeSetResult {
 }
 
 /// Execute an exclude-set plan — marks sources as excluded.
-pub fn execute_set(conn: &Connection, plan: &ExcludeSetPlan) -> Result<ExcludeSetResult> {
+pub fn execute_set(
+    conn: &Connection,
+    plan: &ExcludeSetPlan,
+    decision: Option<&DecisionParams>,
+) -> Result<ExcludeSetResult> {
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+
     for &source_id in &plan.source_ids {
         repo::source::set_excluded(conn, source_id, true)?;
     }
     let count = plan.source_ids.len();
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Excluded {} {noun}", format_count(count));
+
+    if let Some(recorder) = &recorder {
+        recorder.complete(
+            conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(count as i64),
+                completed: Some(count as i64),
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+    }
+
     Ok(ExcludeSetResult { count, summary })
 }
 
@@ -483,13 +506,34 @@ pub struct ExcludeClearResult {
 }
 
 /// Execute an exclude-clear plan — clears source-level exclusion.
-pub fn execute_clear(conn: &Connection, plan: &ExcludeClearPlan) -> Result<ExcludeClearResult> {
+pub fn execute_clear(
+    conn: &Connection,
+    plan: &ExcludeClearPlan,
+    decision: Option<&DecisionParams>,
+) -> Result<ExcludeClearResult> {
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+
     for &source_id in &plan.source_ids {
         repo::source::set_excluded(conn, source_id, false)?;
     }
     let count = plan.source_ids.len();
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Cleared exclusions for {} {noun}", format_count(count));
+
+    if let Some(recorder) = &recorder {
+        recorder.complete(
+            conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(count as i64),
+                completed: Some(count as i64),
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+    }
+
     Ok(ExcludeClearResult { count, summary })
 }
 
@@ -504,13 +548,31 @@ pub struct ExcludeDuplicatesResult {
 pub fn execute_duplicates(
     conn: &Connection,
     plan: &ExcludeDuplicatesPlan,
+    decision: Option<&DecisionParams>,
 ) -> Result<ExcludeDuplicatesResult> {
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+
     for &source_id in &plan.source_ids {
         repo::source::set_excluded(conn, source_id, true)?;
     }
     let count = plan.source_ids.len();
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Excluded {} {noun}", format_count(count));
+
+    if let Some(recorder) = &recorder {
+        recorder.complete(
+            conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(count as i64),
+                completed: Some(count as i64),
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+    }
+
     Ok(ExcludeDuplicatesResult { count, summary })
 }
 
@@ -527,7 +589,10 @@ pub struct ExcludeSetObjectsResult {
 pub fn execute_set_objects(
     conn: &Connection,
     plan: &ExcludeSetObjectsPlan,
+    decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSetObjectsResult> {
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+
     for entry in &plan.objects {
         repo::object::set_excluded(conn, entry.object_id, true)?;
     }
@@ -537,6 +602,20 @@ pub fn execute_set_objects(
         "Excluded {} objects affecting {} sources ({} in source roots, {} in archives)",
         count, plan.total_source_count, total_in_source_roots, plan.total_archive_count
     );
+    if let Some(recorder) = &recorder {
+        recorder.complete(
+            conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(count as i64),
+                completed: Some(count as i64),
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+    }
+
     Ok(ExcludeSetObjectsResult {
         count,
         total_source_count: plan.total_source_count,
@@ -734,10 +813,27 @@ pub fn execute_set_object(
     object_id: i64,
     hash_prefix: &str,
     sources: &[ObjectSourceInfo],
+    decision: Option<&DecisionParams>,
 ) -> Result<ExcludeObjectResult> {
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+
     repo::object::set_excluded(conn, object_id, true)?;
 
     let summary = format!("Excluded object: {hash_prefix}...");
+
+    if let Some(recorder) = &recorder {
+        recorder.complete(
+            conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(1),
+                completed: Some(1),
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+    }
 
     Ok(ExcludeObjectResult {
         object_id,
@@ -784,10 +880,27 @@ pub fn execute_clear_object(
     conn: &Connection,
     object_id: i64,
     hash_prefix: &str,
+    decision: Option<&DecisionParams>,
 ) -> Result<ClearObjectResult> {
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+
     repo::object::set_excluded(conn, object_id, false)?;
 
     let summary = format!("Cleared exclusion from object: {hash_prefix}...");
+
+    if let Some(recorder) = &recorder {
+        recorder.complete(
+            conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(1),
+                completed: Some(1),
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+    }
 
     Ok(ClearObjectResult {
         object_id,
@@ -1113,7 +1226,7 @@ mod tests {
             not_archived_count: 2,
         };
 
-        execute_set(&conn, &plan).unwrap();
+        execute_set(&conn, &plan, None).unwrap();
 
         assert!(is_source_excluded(&conn, id1));
         assert!(is_source_excluded(&conn, id2));
@@ -1132,7 +1245,7 @@ mod tests {
             root_count: 1,
         };
 
-        execute_clear(&conn, &plan).unwrap();
+        execute_clear(&conn, &plan, None).unwrap();
 
         assert!(!is_source_excluded(&conn, id1));
         assert!(!is_source_excluded(&conn, id2));
@@ -1151,7 +1264,7 @@ mod tests {
             not_archived_count: 1,
         };
 
-        let result = execute_set(&conn, &plan).unwrap();
+        let result = execute_set(&conn, &plan, None).unwrap();
         assert_eq!(result.count, 1);
     }
 
@@ -1168,7 +1281,7 @@ mod tests {
             root_count: 1,
         };
 
-        let result = execute_clear(&conn, &plan).unwrap();
+        let result = execute_clear(&conn, &plan, None).unwrap();
         assert_eq!(result.count, 2);
     }
 
@@ -1387,7 +1500,7 @@ mod tests {
             skipped_multiple: 0,
         };
 
-        execute_duplicates(&conn, &plan).unwrap();
+        execute_duplicates(&conn, &plan, None).unwrap();
 
         assert!(is_source_excluded(&conn, id1));
         assert!(is_source_excluded(&conn, id2));
@@ -1411,7 +1524,7 @@ mod tests {
             skipped_multiple: 0,
         };
 
-        let result = execute_duplicates(&conn, &plan).unwrap();
+        let result = execute_duplicates(&conn, &plan, None).unwrap();
         assert_eq!(result.count, 1);
     }
 
@@ -1600,7 +1713,7 @@ mod tests {
             skipped_already_excluded: 0,
         };
 
-        execute_set_objects(&conn, &plan).unwrap();
+        execute_set_objects(&conn, &plan, None).unwrap();
 
         assert!(is_object_excluded(&conn, obj1));
         assert!(is_object_excluded(&conn, obj2));
@@ -1625,7 +1738,7 @@ mod tests {
             skipped_already_excluded: 0,
         };
 
-        let result = execute_set_objects(&conn, &plan).unwrap();
+        let result = execute_set_objects(&conn, &plan, None).unwrap();
         assert_eq!(result.count, 1);
     }
 
@@ -2080,7 +2193,7 @@ mod tests {
         let _src = insert_source(&conn, root, "a.jpg", Some(obj_id));
 
         let sources = fetch_object_sources(&conn, obj_id).unwrap();
-        let result = execute_set_object(&conn, obj_id, "abcdef1234567890", &sources).unwrap();
+        let result = execute_set_object(&conn, obj_id, "abcdef1234567890", &sources, None).unwrap();
 
         assert_eq!(result.object_id, obj_id);
         assert_eq!(result.summary, "Excluded object: abcdef1234567890...");
@@ -2096,7 +2209,7 @@ mod tests {
         let conn = setup_test_db();
         let obj_id = insert_object(&conn, "deadbeef12345678", false);
 
-        let result = execute_set_object(&conn, obj_id, "deadbeef12345678", &[]).unwrap();
+        let result = execute_set_object(&conn, obj_id, "deadbeef12345678", &[], None).unwrap();
 
         assert!(result.summary.contains("deadbeef12345678"));
     }
@@ -2110,7 +2223,7 @@ mod tests {
         let conn = setup_test_db();
         let obj_id = insert_object(&conn, "abcdef1234567890", true); // already excluded
 
-        let result = execute_clear_object(&conn, obj_id, "abcdef1234567890").unwrap();
+        let result = execute_clear_object(&conn, obj_id, "abcdef1234567890", None).unwrap();
 
         assert_eq!(result.object_id, obj_id);
         assert_eq!(

@@ -7,8 +7,10 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 
+use crate::domain::decision::DecisionStatus;
 use crate::domain::note::{ancestor_paths, LocationEntry, Note};
 use crate::domain::root::Root;
+use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::repo::{self, Connection};
 
 // ============================================================================
@@ -207,9 +209,27 @@ pub struct ClearRecursiveResult {
 pub fn execute_clear_recursive(
     conn: &Connection,
     scope: &NoteScope,
+    decision: Option<&DecisionParams>,
 ) -> Result<ClearRecursiveResult> {
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+
     let deleted = repo::note::clear_subtree(conn, scope.root_id, &scope.rel_path)?;
     let summary = format!("Cleared {} notes", deleted);
+
+    if let Some(recorder) = &recorder {
+        recorder.complete(
+            conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(deleted as i64),
+                completed: Some(deleted as i64),
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+    }
+
     Ok(ClearRecursiveResult { deleted, summary })
 }
 
@@ -221,13 +241,34 @@ pub struct ClearExactResult {
 }
 
 /// Clear notes at an exact scope (not recursive).
-pub fn execute_clear_exact(conn: &Connection, scope: &NoteScope) -> Result<ClearExactResult> {
+pub fn execute_clear_exact(
+    conn: &Connection,
+    scope: &NoteScope,
+    decision: Option<&DecisionParams>,
+) -> Result<ClearExactResult> {
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+
     let deleted = repo::note::clear_by_scope(conn, scope.root_id, &scope.rel_path)?;
     let summary = if deleted == 0 {
         format!("No notes at {}", scope.display())
     } else {
         format!("Cleared {} notes at {}", deleted, scope.display())
     };
+
+    if let Some(recorder) = &recorder {
+        recorder.complete(
+            conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(deleted as i64),
+                completed: Some(deleted as i64),
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+    }
+
     Ok(ClearExactResult { deleted, summary })
 }
 
@@ -508,7 +549,7 @@ mod tests {
             rel_path: "a".to_string(),
         };
 
-        let result = execute_clear_exact(&conn, &scope).unwrap();
+        let result = execute_clear_exact(&conn, &scope, None).unwrap();
         assert_eq!(result.deleted, 2);
         assert!(result.summary.contains("Cleared 2 notes"));
         assert!(result.summary.contains(" a")); // scope.display() returns rel_path
@@ -525,7 +566,7 @@ mod tests {
             rel_path: "empty".to_string(),
         };
 
-        let result = execute_clear_exact(&conn, &scope).unwrap();
+        let result = execute_clear_exact(&conn, &scope, None).unwrap();
         assert_eq!(result.deleted, 0);
         assert!(result.summary.contains("No notes at"));
     }

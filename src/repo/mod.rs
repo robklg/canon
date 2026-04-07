@@ -9,6 +9,7 @@
 #![allow(unused_imports)]
 
 pub mod db;
+pub mod decision;
 pub mod fact;
 pub mod note;
 pub mod object;

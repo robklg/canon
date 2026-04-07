@@ -87,6 +87,10 @@ struct Cli {
     #[arg(long, global = true)]
     profile: bool,
 
+    /// Suppress decision recording for this invocation
+    #[arg(long, global = true)]
+    no_record: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -127,6 +131,9 @@ enum Commands {
         /// Use for deleted folders that no longer exist on disk.
         #[arg(long, conflicts_with_all = ["all", "add"])]
         missing: bool,
+        /// Reason for this operation (recorded in decision log)
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// List and manage roots
     #[command(args_conflicts_with_subcommands = true)]
@@ -341,6 +348,9 @@ enum Commands {
         /// Resume a previously interrupted apply (skip already-copied files)
         #[arg(long)]
         resume: bool,
+        /// Reason for this operation (recorded in decision log; falls back to manifest notes)
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Manage source exclusions
     Exclude {
@@ -411,6 +421,9 @@ enum ExcludeAction {
         /// Operate on all roots (bypass CWD scope defaulting)
         #[arg(long)]
         global: bool,
+        /// Reason for this operation (recorded in decision log)
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Remove exclusions from sources
     Clear {
@@ -428,6 +441,9 @@ enum ExcludeAction {
         /// Operate on all roots (bypass CWD scope defaulting)
         #[arg(long)]
         global: bool,
+        /// Reason for this operation (recorded in decision log)
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Exclude duplicate sources, keeping copies in preferred path
     Duplicates {
@@ -445,6 +461,9 @@ enum ExcludeAction {
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
+        /// Reason for this operation (recorded in decision log)
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Exclude objects by hash, file, or filter (affects all sources with matching content)
     SetObject {
@@ -465,6 +484,9 @@ enum ExcludeAction {
         /// Operate on all roots (bypass CWD scope defaulting)
         #[arg(long)]
         global: bool,
+        /// Reason for this operation (recorded in decision log)
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Clear exclusion from an object by hash
     ClearObject {
@@ -518,6 +540,9 @@ enum RootsAction {
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
+        /// Reason for this operation (recorded in decision log)
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Set or clear a comment on a root
     Comment {
@@ -606,6 +631,7 @@ fn resolve_canon_home(flag: Option<&Path>) -> Result<PathBuf> {
 }
 
 fn main() -> Result<()> {
+    let command_line = std::env::args().collect::<Vec<_>>().join(" ");
     let cli = Cli::parse();
 
     let canon_home = resolve_canon_home(cli.canon_home.as_deref())?;
@@ -647,6 +673,7 @@ fn main() -> Result<()> {
             candidates,
             ignore_device_id,
             missing,
+            reason,
         } => {
             if candidates {
                 if paths.is_empty() {
@@ -684,6 +711,9 @@ fn main() -> Result<()> {
                 verify,
                 ignore_device_id,
                 missing,
+                &command_line,
+                cli.no_record,
+                reason.as_deref(),
             )?;
         }
         Commands::Worklist {
@@ -706,7 +736,7 @@ fn main() -> Result<()> {
         }
         Commands::ImportFacts { allow, verbose } => {
             let allow_archived = allow.contains(&ImportFactsAllow::Archived);
-            import_facts::run(&mut db, allow_archived, verbose)?;
+            import_facts::run(&mut db, allow_archived, verbose, &command_line, cli.no_record)?;
         }
         Commands::Ls {
             paths,
@@ -788,7 +818,7 @@ fn main() -> Result<()> {
                         value_type,
                         dry_run: !yes,
                     };
-                    facts::delete_facts(&mut db, &key, &resolved.prefixes, &filters, &options)?;
+                    facts::delete_facts(&mut db, &key, &resolved.prefixes, &filters, &options, &command_line, cli.no_record)?;
                 }
                 None => {
                     let filters = alias::expand_filter_strings(&filters, &canon_home)?;
@@ -823,13 +853,13 @@ fn main() -> Result<()> {
                 anyhow::bail!("At least one of --orphaned-objects, --stale-facts, or --excluded-facts is required");
             }
             if stale_facts {
-                facts::prune_stale(&db, !yes)?;
+                facts::prune_stale(&db, !yes, &command_line, cli.no_record)?;
             }
             if orphaned_objects {
-                facts::prune_orphaned_objects(&mut db, !yes)?;
+                facts::prune_orphaned_objects(&mut db, !yes, &command_line, cli.no_record)?;
             }
             if let Some(scope) = excluded_facts {
-                facts::prune_excluded_facts(&db, &scope, !yes)?;
+                facts::prune_excluded_facts(&db, &scope, !yes, &command_line, cli.no_record)?;
             }
         }
         Commands::Coverage {
@@ -965,6 +995,8 @@ fn main() -> Result<()> {
                     &dest,
                     &output_path,
                     &options,
+                    &command_line,
+                    cli.no_record,
                 )?;
             }
             ClusterAction::Refresh {
@@ -972,7 +1004,7 @@ fn main() -> Result<()> {
                 show_archived,
                 edit,
             } => {
-                cluster::refresh(&mut db, &manifest, show_archived, !edit)?;
+                cluster::refresh(&mut db, &manifest, show_archived, !edit, &command_line, cli.no_record)?;
             }
             ClusterAction::Status { manifest, verbose } => {
                 cluster::status(db.conn_mut(), &manifest, verbose)?;
@@ -988,6 +1020,7 @@ fn main() -> Result<()> {
             move_files,
             yes,
             resume,
+            reason,
         } => {
             let transfer_mode = if rename {
                 ops::apply::TransferMode::Rename
@@ -1006,7 +1039,7 @@ fn main() -> Result<()> {
                 yes,
                 resume,
             };
-            apply::run(&mut db, &manifest, &options)?;
+            apply::run(&mut db, &manifest, &options, &command_line, cli.no_record, reason.as_deref())?;
         }
         Commands::Exclude { action } => match action {
             ExcludeAction::Set {
@@ -1016,6 +1049,7 @@ fn main() -> Result<()> {
                 dry_run,
                 yes,
                 global,
+                reason,
             } => {
                 let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::SetOptions {
@@ -1024,14 +1058,14 @@ fn main() -> Result<()> {
                     yes,
                 };
                 if let Some(source_id) = id {
-                    exclude::set_by_id(&db, source_id, &options)?;
+                    exclude::set_by_id(&db, source_id, &options, &command_line, cli.no_record, reason.as_deref())?;
                 } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {
                     // Single file path with no filters: exclude exact file
-                    exclude::set_by_path(&db, &paths[0], &options)?;
+                    exclude::set_by_path(&db, &paths[0], &options, &command_line, cli.no_record, reason.as_deref())?;
                 } else {
                     let all_roots = repo::root::fetch_all(db.conn())?;
                     let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
-                    exclude::set(&mut db, &resolved.prefixes, &filters, &options)?;
+                    exclude::set(&mut db, &resolved.prefixes, &filters, &options, &command_line, cli.no_record, reason.as_deref())?;
                 }
             }
             ExcludeAction::Clear {
@@ -1040,12 +1074,13 @@ fn main() -> Result<()> {
                 dry_run,
                 yes,
                 global,
+                reason,
             } => {
                 let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::ClearOptions { dry_run, yes };
                 let all_roots = repo::root::fetch_all(db.conn())?;
                 let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
-                exclude::clear(&mut db, &resolved.prefixes, &filters, &options)?;
+                exclude::clear(&mut db, &resolved.prefixes, &filters, &options, &command_line, cli.no_record, reason.as_deref())?;
             }
             ExcludeAction::Duplicates {
                 path,
@@ -1053,6 +1088,7 @@ fn main() -> Result<()> {
                 filters,
                 dry_run,
                 yes,
+                reason,
             } => {
                 let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 exclude::exclude_duplicates(
@@ -1062,6 +1098,9 @@ fn main() -> Result<()> {
                     &filters,
                     dry_run,
                     yes,
+                    &command_line,
+                    cli.no_record,
+                    reason.as_deref(),
                 )?;
             }
             ExcludeAction::SetObject {
@@ -1071,6 +1110,7 @@ fn main() -> Result<()> {
                 yes,
                 verbose,
                 global,
+                reason,
             } => {
                 let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::SetOptions {
@@ -1079,22 +1119,22 @@ fn main() -> Result<()> {
                     yes,
                 };
                 if let Some(h) = hash {
-                    exclude::set_object_by_hash(&db, &h, &options)?;
+                    exclude::set_object_by_hash(&db, &h, &options, &command_line, cli.no_record, reason.as_deref())?;
                 } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {
                     // Single file path: exclude that file's object
-                    exclude::set_object_by_file(&db, &paths[0], &options)?;
+                    exclude::set_object_by_file(&db, &paths[0], &options, &command_line, cli.no_record, reason.as_deref())?;
                 } else {
                     let all_roots = repo::root::fetch_all(db.conn())?;
                     let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
                     if resolved.prefixes.is_empty() && filters.is_empty() {
                         anyhow::bail!("Provide a hash (--hash), file path, or filters (--where)");
                     }
-                    exclude::set_objects_by_filter(&mut db, &resolved.prefixes, &filters, &options)?;
+                    exclude::set_objects_by_filter(&mut db, &resolved.prefixes, &filters, &options, &command_line, cli.no_record, reason.as_deref())?;
                 }
             }
             ExcludeAction::ClearObject { hash, dry_run } => {
                 let options = exclude::ClearOptions { dry_run, yes: true };
-                exclude::clear_object(&db, &hash, &options)?;
+                exclude::clear_object(&db, &hash, &options, &command_line, cli.no_record)?;
             }
             ExcludeAction::ListObjects => {
                 exclude::list_objects(&db)?;
@@ -1120,6 +1160,8 @@ fn main() -> Result<()> {
                 yes,
                 by_scope,
                 limit,
+                &command_line,
+                cli.no_record,
             )?;
         }
         Commands::Roots {
@@ -1133,17 +1175,17 @@ fn main() -> Result<()> {
             None => {
                 roots::list(&db, path.as_deref(), suspended)?;
             }
-            Some(RootsAction::Rm { spec, yes }) => {
-                roots::remove(&db, &spec, yes)?;
+            Some(RootsAction::Rm { spec, yes, reason }) => {
+                roots::remove(&db, &spec, yes, &command_line, cli.no_record, reason.as_deref())?;
             }
             Some(RootsAction::Comment { spec, comment }) => {
                 roots::set_comment(&db, &spec, comment.as_deref())?;
             }
             Some(RootsAction::Suspend { spec }) => {
-                roots::suspend(&db, &spec)?;
+                roots::suspend(&db, &spec, &command_line, cli.no_record)?;
             }
             Some(RootsAction::Unsuspend { spec }) => {
-                roots::unsuspend(&db, &spec)?;
+                roots::unsuspend(&db, &spec, &command_line, cli.no_record)?;
             }
         },
     }

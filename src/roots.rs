@@ -4,9 +4,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 
 use crate::ceremony;
+use crate::domain::decision::DecisionCommand;
 use crate::domain::path::resolve_path;
 use crate::domain::{parse_root_spec, parse_root_spec_any, Root};
 use crate::ops;
+use crate::ops::decision::DecisionParams;
 use crate::repo::{self, Db};
 
 pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
@@ -120,7 +122,14 @@ fn format_time_ago(timestamp: Option<i64>, now: i64) -> String {
     }
 }
 
-pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
+pub fn remove(
+    db: &Db,
+    spec: &str,
+    yes: bool,
+    command_line: &str,
+    no_record: bool,
+    reason: Option<&str>,
+) -> Result<()> {
     let conn = db.conn();
 
     // Fetch all roots for spec resolution
@@ -148,7 +157,16 @@ pub fn remove(db: &Db, spec: &str, yes: bool) -> Result<()> {
         return Ok(());
     }
 
-    let result = ops::roots::execute_remove(conn, &plan)?;
+    let decision = DecisionParams {
+        command: DecisionCommand::RootsRm,
+        scope: Some(vec![plan.root_path.clone()]),
+        command_line: command_line.to_string(),
+        reason: reason
+            .map(|r| r.to_string())
+            .filter(|r| !r.trim().is_empty()),
+        enabled: !no_record && yes,
+    };
+    let result = ops::roots::execute_remove(conn, &plan, Some(&decision))?;
     println!("{}", result.summary);
 
     Ok(())
@@ -173,7 +191,7 @@ pub fn set_comment(db: &Db, spec: &str, comment: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-pub fn suspend(db: &Db, spec: &str) -> Result<()> {
+pub fn suspend(db: &Db, spec: &str, command_line: &str, no_record: bool) -> Result<()> {
     let conn = db.conn();
 
     // Fetch all roots for spec resolution
@@ -182,7 +200,19 @@ pub fn suspend(db: &Db, spec: &str) -> Result<()> {
     // Use parse_root_spec_any to allow suspending already-suspended roots (no-op)
     let root_id = parse_root_spec_any(&roots, spec)?;
 
-    match ops::roots::execute_suspend(conn, root_id) {
+    let root_path = roots
+        .iter()
+        .find(|r| r.id == root_id)
+        .map(|r| r.path.clone());
+    let decision = DecisionParams {
+        command: DecisionCommand::RootsSuspend,
+        scope: root_path.map(|p| vec![p]),
+        command_line: command_line.to_string(),
+        reason: None,
+        enabled: !no_record,
+    };
+
+    match ops::roots::execute_suspend(conn, root_id, Some(&decision)) {
         Ok(result) => {
             println!("{}", result.summary);
             Ok(())
@@ -197,7 +227,7 @@ pub fn suspend(db: &Db, spec: &str) -> Result<()> {
     }
 }
 
-pub fn unsuspend(db: &Db, spec: &str) -> Result<()> {
+pub fn unsuspend(db: &Db, spec: &str, command_line: &str, no_record: bool) -> Result<()> {
     let conn = db.conn();
 
     // Fetch all roots for spec resolution
@@ -206,7 +236,19 @@ pub fn unsuspend(db: &Db, spec: &str) -> Result<()> {
     // Use parse_root_spec_any to find suspended roots
     let root_id = parse_root_spec_any(&roots, spec)?;
 
-    match ops::roots::execute_unsuspend(conn, root_id) {
+    let root_path = roots
+        .iter()
+        .find(|r| r.id == root_id)
+        .map(|r| r.path.clone());
+    let decision = DecisionParams {
+        command: DecisionCommand::RootsUnsuspend,
+        scope: root_path.map(|p| vec![p]),
+        command_line: command_line.to_string(),
+        reason: None,
+        enabled: !no_record,
+    };
+
+    match ops::roots::execute_unsuspend(conn, root_id, Some(&decision)) {
         Ok(result) => {
             println!("{}", result.summary);
             Ok(())

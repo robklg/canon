@@ -7,6 +7,7 @@
 
 pub mod apply;
 pub mod cluster;
+pub mod decision;
 pub mod coverage;
 pub mod exclude;
 pub mod facts;

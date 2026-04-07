@@ -1,7 +1,9 @@
 use anyhow::{bail, Result};
 use rusqlite::Connection;
 
+use crate::domain::decision::DecisionStatus;
 use crate::domain::format_count;
+use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::repo;
 
 // =============================================================================
@@ -63,7 +65,13 @@ pub fn plan_remove(conn: &Connection, root_id: i64) -> Result<RemoveRootPlan> {
 }
 
 /// Execute the removal. Deletes notes, facts, sources, and the root.
-pub fn execute_remove(conn: &Connection, plan: &RemoveRootPlan) -> Result<RemoveRootResult> {
+pub fn execute_remove(
+    conn: &Connection,
+    plan: &RemoveRootPlan,
+    decision: Option<&DecisionParams>,
+) -> Result<RemoveRootResult> {
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+
     let deleted_notes = repo::note::delete_by_root(conn, plan.root_id)?;
     let deleted_sources = repo::root::remove(conn, plan.root_id)?;
 
@@ -71,6 +79,20 @@ pub fn execute_remove(conn: &Connection, plan: &RemoveRootPlan) -> Result<Remove
         "Removed root {} and {} sources",
         plan.root_id, deleted_sources
     );
+
+    if let Some(recorder) = &recorder {
+        recorder.complete(
+            conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(plan.source_count),
+                completed: Some(deleted_sources),
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+    }
 
     Ok(RemoveRootResult {
         deleted_sources,
@@ -93,7 +115,13 @@ pub struct SuspendResult {
 }
 
 /// Suspend a root. Returns info message if already suspended.
-pub fn execute_suspend(conn: &Connection, root_id: i64) -> Result<SuspendResult> {
+pub fn execute_suspend(
+    conn: &Connection,
+    root_id: i64,
+    decision: Option<&DecisionParams>,
+) -> Result<SuspendResult> {
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+
     let roots = repo::root::fetch_all(conn)?;
     let root = roots
         .iter()
@@ -115,6 +143,20 @@ pub fn execute_suspend(conn: &Connection, root_id: i64) -> Result<SuspendResult>
         format_count(source_count)
     );
 
+    if let Some(recorder) = &recorder {
+        recorder.complete(
+            conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: None,
+                completed: None,
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+    }
+
     Ok(SuspendResult {
         root_id,
         root_path: root.path.clone(),
@@ -124,7 +166,13 @@ pub fn execute_suspend(conn: &Connection, root_id: i64) -> Result<SuspendResult>
 }
 
 /// Unsuspend a root. Returns info message if not suspended.
-pub fn execute_unsuspend(conn: &Connection, root_id: i64) -> Result<SuspendResult> {
+pub fn execute_unsuspend(
+    conn: &Connection,
+    root_id: i64,
+    decision: Option<&DecisionParams>,
+) -> Result<SuspendResult> {
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+
     let roots = repo::root::fetch_all(conn)?;
     let root = roots
         .iter()
@@ -145,6 +193,20 @@ pub fn execute_unsuspend(conn: &Connection, root_id: i64) -> Result<SuspendResul
         root.path,
         format_count(source_count)
     );
+
+    if let Some(recorder) = &recorder {
+        recorder.complete(
+            conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: None,
+                completed: None,
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+    }
 
     Ok(SuspendResult {
         root_id,
@@ -242,7 +304,7 @@ mod tests {
         insert_note(&conn, root_id, "", "a note");
 
         let plan = plan_remove(&conn, root_id).unwrap();
-        let result = execute_remove(&conn, &plan).unwrap();
+        let result = execute_remove(&conn, &plan, None).unwrap();
 
         assert_eq!(result.deleted_sources, 2);
         assert_eq!(result.deleted_notes, 1);
@@ -259,7 +321,7 @@ mod tests {
         insert_source(&conn, root_id, "a.jpg");
 
         let plan = plan_remove(&conn, root_id).unwrap();
-        let result = execute_remove(&conn, &plan).unwrap();
+        let result = execute_remove(&conn, &plan, None).unwrap();
 
         assert_eq!(
             result.summary,
@@ -278,7 +340,7 @@ mod tests {
         insert_source(&conn, root_id, "a.jpg");
         insert_source(&conn, root_id, "b.jpg");
 
-        let result = execute_suspend(&conn, root_id).unwrap();
+        let result = execute_suspend(&conn, root_id, None).unwrap();
 
         assert_eq!(result.root_id, root_id);
         assert_eq!(result.root_path, "/photos");
@@ -297,7 +359,7 @@ mod tests {
         let conn = setup_test_db();
         let root_id = insert_root(&conn, "/photos", "source", true);
 
-        let result = execute_suspend(&conn, root_id);
+        let result = execute_suspend(&conn, root_id, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already suspended"));
     }
@@ -307,7 +369,7 @@ mod tests {
         let conn = setup_test_db();
         let root_id = insert_root(&conn, "/mnt/drive", "source", false);
         // No sources — count should be 0
-        let result = execute_suspend(&conn, root_id).unwrap();
+        let result = execute_suspend(&conn, root_id, None).unwrap();
         assert_eq!(
             result.summary,
             format!("Suspended root {}: /mnt/drive (0 sources)", root_id)
@@ -324,7 +386,7 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", true);
         insert_source(&conn, root_id, "a.jpg");
 
-        let result = execute_unsuspend(&conn, root_id).unwrap();
+        let result = execute_unsuspend(&conn, root_id, None).unwrap();
 
         assert_eq!(result.root_id, root_id);
         assert!(result.summary.contains("Unsuspended root"));
@@ -340,7 +402,7 @@ mod tests {
         let conn = setup_test_db();
         let root_id = insert_root(&conn, "/photos", "source", false);
 
-        let result = execute_unsuspend(&conn, root_id);
+        let result = execute_unsuspend(&conn, root_id, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not suspended"));
     }
@@ -353,7 +415,7 @@ mod tests {
         insert_source(&conn, root_id, "b.jpg");
         insert_source(&conn, root_id, "c.jpg");
 
-        let result = execute_unsuspend(&conn, root_id).unwrap();
+        let result = execute_unsuspend(&conn, root_id, None).unwrap();
         assert_eq!(
             result.summary,
             format!("Unsuspended root {}: /mnt/drive (3 sources)", root_id)

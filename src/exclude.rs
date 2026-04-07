@@ -2,10 +2,12 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::ceremony;
+use crate::domain::decision::DecisionCommand;
 use crate::domain::path::{resolve_path, validate_paths_in_roots};
 use crate::domain::root::find_containing_root;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::Filter;
+use crate::ops::decision::DecisionParams;
 use crate::ops::exclude::{
     self, check_clear_object, check_set_object_by_file, check_set_object_by_hash,
     check_set_source_by_id, check_set_source_by_path, execute_clear, execute_clear_object,
@@ -15,6 +17,25 @@ use crate::ops::exclude::{
     ObjectSourceInfo, SourceExclusionCheck,
 };
 use crate::repo::{self, Db};
+
+fn make_decision(
+    command: DecisionCommand,
+    scope: Option<Vec<String>>,
+    command_line: &str,
+    no_record: bool,
+    reason: Option<&str>,
+    dry_run: bool,
+) -> DecisionParams {
+    DecisionParams {
+        command,
+        scope,
+        command_line: command_line.to_string(),
+        reason: reason
+            .map(|r| r.to_string())
+            .filter(|r| !r.trim().is_empty()),
+        enabled: !no_record && !dry_run,
+    }
+}
 
 // ============================================================================
 // Options
@@ -40,6 +61,9 @@ pub fn set(
     scope_prefixes: &[String],
     filter_strs: &[String],
     options: &SetOptions,
+    command_line: &str,
+    no_record: bool,
+    reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn_mut();
 
@@ -78,7 +102,15 @@ pub fn set(
         }
     }
 
-    let result = execute_set(conn, &plan)?;
+    let decision = make_decision(
+        DecisionCommand::ExcludeSet,
+        Some(scope_prefixes.to_vec()),
+        command_line,
+        no_record,
+        reason,
+        options.dry_run,
+    );
+    let result = execute_set(conn, &plan, Some(&decision))?;
     println!("{}", result.summary);
     Ok(())
 }
@@ -92,6 +124,9 @@ pub fn clear(
     scope_prefixes: &[String],
     filter_strs: &[String],
     options: &ClearOptions,
+    command_line: &str,
+    no_record: bool,
+    reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn_mut();
 
@@ -135,13 +170,28 @@ pub fn clear(
         }
     }
 
-    let result = execute_clear(conn, &plan)?;
+    let decision = make_decision(
+        DecisionCommand::ExcludeClear,
+        Some(scope_prefixes.to_vec()),
+        command_line,
+        no_record,
+        reason,
+        options.dry_run,
+    );
+    let result = execute_clear(conn, &plan, Some(&decision))?;
     println!("{}", result.summary);
     Ok(())
 }
 
 /// Exclude a specific source by ID
-pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
+pub fn set_by_id(
+    db: &Db,
+    source_id: i64,
+    options: &SetOptions,
+    command_line: &str,
+    no_record: bool,
+    reason: Option<&str>,
+) -> Result<()> {
     let conn = db.conn();
 
     match check_set_source_by_id(conn, source_id)? {
@@ -153,7 +203,27 @@ pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
                 println!("Would exclude source (id: {source_id}):");
                 println!("  {path}");
             } else {
+                let decision = make_decision(
+                    DecisionCommand::ExcludeSet,
+                    Some(vec![path.clone()]),
+                    command_line,
+                    no_record,
+                    reason,
+                    options.dry_run,
+                );
+                let recorder = crate::ops::decision::DecisionRecorder::start(conn, &decision);
                 exclude::exclude_source(conn, source_id)?;
+                recorder.complete(
+                    conn,
+                    crate::domain::decision::DecisionStatus::Completed,
+                    crate::ops::decision::DecisionCounts {
+                        attempted: Some(1),
+                        completed: Some(1),
+                        failed: None,
+                        skipped: None,
+                    },
+                    &format!("Excluded source (id: {source_id})"),
+                );
                 println!("Excluded source (id: {source_id}): {path}");
             }
         }
@@ -162,7 +232,14 @@ pub fn set_by_id(db: &Db, source_id: i64, options: &SetOptions) -> Result<()> {
 }
 
 /// Exclude a specific source by exact file path
-pub fn set_by_path(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()> {
+pub fn set_by_path(
+    db: &Db,
+    file_path: &Path,
+    options: &SetOptions,
+    command_line: &str,
+    no_record: bool,
+    reason: Option<&str>,
+) -> Result<()> {
     let conn = db.conn();
 
     // Resolve path (soft resolution: matches known roots, falls back to fs)
@@ -186,7 +263,27 @@ pub fn set_by_path(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()
                 println!("Would exclude:");
                 println!("  {path}");
             } else {
+                let decision = make_decision(
+                    DecisionCommand::ExcludeSet,
+                    Some(vec![path.clone()]),
+                    command_line,
+                    no_record,
+                    reason,
+                    options.dry_run,
+                );
+                let recorder = crate::ops::decision::DecisionRecorder::start(conn, &decision);
                 exclude::exclude_source(conn, source_id)?;
+                recorder.complete(
+                    conn,
+                    crate::domain::decision::DecisionStatus::Completed,
+                    crate::ops::decision::DecisionCounts {
+                        attempted: Some(1),
+                        completed: Some(1),
+                        failed: None,
+                        skipped: None,
+                    },
+                    &format!("Excluded: {path}"),
+                );
                 println!("Excluded: {path}");
             }
         }
@@ -213,6 +310,9 @@ pub fn exclude_duplicates(
     filter_strs: &[String],
     dry_run: bool,
     yes: bool,
+    command_line: &str,
+    no_record: bool,
+    reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn_mut();
 
@@ -311,7 +411,15 @@ pub fn exclude_duplicates(
     }
 
     // Execute
-    let result = execute_duplicates(conn, &plan)?;
+    let decision = make_decision(
+        DecisionCommand::ExcludeDuplicates,
+        Some(scope_prefixes.clone()),
+        command_line,
+        no_record,
+        reason,
+        dry_run,
+    );
+    let result = execute_duplicates(conn, &plan, Some(&decision))?;
     println!("{}", result.summary);
     println!();
     println!("Use `canon ls --duplicates` to see remaining duplicates.");
@@ -325,7 +433,14 @@ pub fn exclude_duplicates(
 
 /// Exclude an object by its hash. All sources with this content will be excluded.
 /// This is the only way to exclude empty files (size = 0).
-pub fn set_object_by_hash(db: &Db, hash: &str, options: &SetOptions) -> Result<()> {
+pub fn set_object_by_hash(
+    db: &Db,
+    hash: &str,
+    options: &SetOptions,
+    command_line: &str,
+    no_record: bool,
+    reason: Option<&str>,
+) -> Result<()> {
     let conn = db.conn();
 
     match check_set_object_by_hash(conn, hash)? {
@@ -342,8 +457,16 @@ pub fn set_object_by_hash(db: &Db, hash: &str, options: &SetOptions) -> Result<(
                 print_source_locations(&sources, options.verbose);
                 println!("\nUse --yes to execute.");
             } else {
+                let decision = make_decision(
+                    DecisionCommand::ExcludeSetObject,
+                    None,
+                    command_line,
+                    no_record,
+                    reason,
+                    options.dry_run,
+                );
                 let result =
-                    execute_set_object(conn, object_id, &hash_prefix, &sources)?;
+                    execute_set_object(conn, object_id, &hash_prefix, &sources, Some(&decision))?;
                 println!("{}", result.summary);
                 print_source_locations(&sources, options.verbose);
             }
@@ -353,7 +476,14 @@ pub fn set_object_by_hash(db: &Db, hash: &str, options: &SetOptions) -> Result<(
 }
 
 /// Exclude an object by file path. Looks up the source, gets its object, and excludes it.
-pub fn set_object_by_file(db: &Db, file_path: &Path, options: &SetOptions) -> Result<()> {
+pub fn set_object_by_file(
+    db: &Db,
+    file_path: &Path,
+    options: &SetOptions,
+    command_line: &str,
+    no_record: bool,
+    reason: Option<&str>,
+) -> Result<()> {
     let conn = db.conn();
 
     // Resolve path (soft resolution: matches known roots, falls back to fs)
@@ -385,8 +515,16 @@ pub fn set_object_by_file(db: &Db, file_path: &Path, options: &SetOptions) -> Re
                 print_source_locations(&sources, options.verbose);
                 println!("\nUse --yes to execute.");
             } else {
+                let decision = make_decision(
+                    DecisionCommand::ExcludeSetObject,
+                    Some(vec![path_str]),
+                    command_line,
+                    no_record,
+                    reason,
+                    options.dry_run,
+                );
                 let result =
-                    execute_set_object(conn, object_id, &hash_prefix, &sources)?;
+                    execute_set_object(conn, object_id, &hash_prefix, &sources, Some(&decision))?;
                 println!("{}", result.summary);
                 print_source_locations(&sources, options.verbose);
             }
@@ -401,6 +539,9 @@ pub fn set_objects_by_filter(
     scope_prefixes: &[String],
     filter_strs: &[String],
     options: &SetOptions,
+    command_line: &str,
+    no_record: bool,
+    reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn_mut();
 
@@ -477,7 +618,15 @@ pub fn set_objects_by_filter(
     }
 
     // Execute
-    let result = execute_set_objects(conn, &plan)?;
+    let decision = make_decision(
+        DecisionCommand::ExcludeSetObject,
+        Some(scope_prefixes.to_vec()),
+        command_line,
+        no_record,
+        reason,
+        options.dry_run,
+    );
+    let result = execute_set_objects(conn, &plan, Some(&decision))?;
     println!("{}", result.summary);
     Ok(())
 }
@@ -512,7 +661,13 @@ fn print_source_locations(sources: &[ObjectSourceInfo], verbose: bool) {
 }
 
 /// Clear exclusion from an object by its hash
-pub fn clear_object(db: &Db, hash: &str, options: &ClearOptions) -> Result<()> {
+pub fn clear_object(
+    db: &Db,
+    hash: &str,
+    options: &ClearOptions,
+    command_line: &str,
+    no_record: bool,
+) -> Result<()> {
     let conn = db.conn();
 
     match check_clear_object(conn, hash)? {
@@ -526,7 +681,15 @@ pub fn clear_object(db: &Db, hash: &str, options: &ClearOptions) -> Result<()> {
             if options.dry_run {
                 println!("Would clear exclusion from object: {hash_prefix}...");
             } else {
-                let result = execute_clear_object(conn, object_id, &hash_prefix)?;
+                let decision = make_decision(
+                    DecisionCommand::ExcludeClearObject,
+                    None,
+                    command_line,
+                    no_record,
+                    None,
+                    options.dry_run,
+                );
+                let result = execute_clear_object(conn, object_id, &hash_prefix, Some(&decision))?;
                 println!("{}", result.summary);
             }
         }
@@ -653,7 +816,7 @@ mod tests {
             yes: true,
         };
 
-        let result = set_by_id(&db, source_id, &options);
+        let result = set_by_id(&db, source_id, &options, "test", true, None);
         assert!(result.is_ok());
 
         assert!(
@@ -677,7 +840,7 @@ mod tests {
         };
 
         // Path that definitely doesn't exist
-        let result = set_by_path(&db, Path::new("/nonexistent/path/to/file.jpg"), &options);
+        let result = set_by_path(&db, Path::new("/nonexistent/path/to/file.jpg"), &options, "test", true, None);
         assert!(result.is_err());
 
         let err_msg = result.unwrap_err().to_string();
@@ -699,7 +862,7 @@ mod tests {
 
         // Use a path that exists on disk but isn't in the database
         // /tmp should exist on most Unix systems
-        let result = set_by_path(&db, Path::new("/tmp"), &options);
+        let result = set_by_path(&db, Path::new("/tmp"), &options, "test", true, None);
         assert!(result.is_err());
 
         let err_msg = result.unwrap_err().to_string();
@@ -744,6 +907,9 @@ mod tests {
             &[], // no scope restriction
             &[], // no filters
             &options,
+            "test",
+            true,
+            None,
         );
 
         assert!(result.is_ok());
@@ -768,7 +934,7 @@ mod tests {
             yes: true,
         };
 
-        let result = set_objects_by_filter(&mut db, &[], &[], &options);
+        let result = set_objects_by_filter(&mut db, &[], &[], &options, "test", true, None);
 
         assert!(result.is_ok());
         // Object should NOT be excluded (dry run)
@@ -796,7 +962,7 @@ mod tests {
         };
 
         // Use empty scopes so we don't try to canonicalize non-existent paths
-        let result = set(&mut db, &[], &[], &options);
+        let result = set(&mut db, &[], &[], &options, "test", true, None);
         assert!(result.is_ok());
 
         // Verify the source was excluded
@@ -830,6 +996,9 @@ mod tests {
             &[],
             false,
             false, // yes=false, but count=1 so no prompt
+            "test",
+            true,
+            None,
         );
 
         assert!(result.is_ok());

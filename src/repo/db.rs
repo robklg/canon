@@ -179,6 +179,25 @@ CREATE TABLE IF NOT EXISTS _meta (
     value_text TEXT
 );
 
+-- Decisions: record of effectful actions taken by the user
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY,
+    command TEXT NOT NULL,
+    scope TEXT,                  -- JSON array of path strings, or NULL for global
+    command_line TEXT NOT NULL,
+    reason TEXT,
+    status TEXT NOT NULL DEFAULT 'started',
+    count_attempted INTEGER,
+    count_completed INTEGER,
+    count_failed INTEGER,
+    count_skipped INTEGER,
+    summary TEXT,
+    canon_version TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS decisions_command ON decisions(command);
+CREATE INDEX IF NOT EXISTS decisions_created_at ON decisions(created_at);
+
 -- Notes: timestamped annotations on locations within roots
 CREATE TABLE IF NOT EXISTS notes (
     id INTEGER PRIMARY KEY,

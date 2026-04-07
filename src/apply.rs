@@ -5,7 +5,9 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::ceremony;
+use crate::domain::decision::DecisionCommand;
 use crate::ops::cluster::{ManifestConfig, parse_manifest_allow, validate_manifest_version};
+use crate::ops::decision::DecisionParams;
 use crate::expr;
 use crate::ops;
 use crate::ops::apply::TransferMode;
@@ -23,7 +25,14 @@ pub struct ApplyOptions {
     pub resume: bool,
 }
 
-pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<()> {
+pub fn run(
+    db: &mut Db,
+    manifest_path: &Path,
+    options: &ApplyOptions,
+    command_line: &str,
+    no_record: bool,
+    reason: Option<&str>,
+) -> Result<()> {
     // Platform checks: --rename and --move are Unix-only
     #[cfg(not(unix))]
     if options.transfer_mode == TransferMode::Rename || options.transfer_mode == TransferMode::Move
@@ -463,6 +472,22 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
     eprintln!("Checking destination write permissions...");
     ops::fs::check_destination_writable(&base_dir)?;
 
+    // Construct decision: reason falls back to manifest notes
+    let effective_reason = if let Some(r) = reason.filter(|r| !r.trim().is_empty()) {
+        Some(r.to_string())
+    } else {
+        ops::cluster::extract_notes(&config_content).filter(|n| !n.trim().is_empty())
+    };
+    let decision = DecisionParams {
+        command: DecisionCommand::Apply,
+        scope: config.meta.scope.as_ref().map(|s| {
+            s.split(", ").map(|p| p.to_string()).collect()
+        }),
+        command_line: command_line.to_string(),
+        reason: effective_reason,
+        enabled: !no_record && !options.dry_run,
+    };
+
     let progress_impl = CliTransferProgress::new(options.verbose);
     let result = ops::apply::execute_apply(
         conn,
@@ -476,6 +501,7 @@ pub fn run(db: &mut Db, manifest_path: &Path, options: &ApplyOptions) -> Result<
             skipped_by_filter,
         },
         &progress_impl,
+        Some(&decision),
     )?;
 
     // Display stale sources found during transfer (race conditions)

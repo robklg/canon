@@ -15,10 +15,12 @@ use anyhow::{bail, Context, Result};
 
 use super::cluster::LockEntry;
 use super::fs::{compute_partial_hash, copy_file, ensure_parent_dir, move_file, rename_file, MoveOutcome};
+use crate::domain::decision::DecisionStatus;
 use crate::domain::fact::FactEntry;
 use crate::domain::path::path_strip_prefix;
 use crate::domain::source::NewSource;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
+use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::repo::{self, Connection};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -730,7 +732,10 @@ pub fn execute_apply(
     plan: &ApplyPlan,
     params: &ApplyExecuteParams,
     progress: &dyn TransferProgress,
+    decision: Option<&DecisionParams>,
 ) -> Result<ApplyResult> {
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+
     let interrupt_flag = match &params.interrupt_flag {
         Some(flag) => Arc::clone(flag),
         None => setup_interrupt_flag()?,
@@ -884,6 +889,33 @@ pub fn execute_apply(
             result.skipped_stale.len(), params.skipped_by_filter, result.errors.len()
         )
     };
+
+    if let Some(recorder) = &recorder {
+        let total = plan.transfers.len() as i64;
+        let completed = (result.copied + result.renamed + result.moved) as i64;
+        let failed = result.errors.len() as i64;
+        let skipped = (result.skipped_missing as i64)
+            + (result.skipped_stale.len() as i64)
+            + (params.skipped_by_filter as i64);
+        let status = if result.interrupted {
+            DecisionStatus::Interrupted
+        } else if !result.errors.is_empty() {
+            DecisionStatus::Partial
+        } else {
+            DecisionStatus::Completed
+        };
+        recorder.complete(
+            conn,
+            status,
+            DecisionCounts {
+                attempted: Some(total),
+                completed: Some(completed),
+                failed: Some(failed),
+                skipped: Some(skipped),
+            },
+            &result.summary,
+        );
+    }
 
     Ok(result)
 }
@@ -2422,7 +2454,7 @@ mod tests {
             skipped_by_filter: 0,
         };
 
-        let result = execute_apply(&conn, &plan, &params, &NoopProgress).unwrap();
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, None).unwrap();
 
         // Flag was pre-set, so first transfer executes then loop breaks
         assert!(result.interrupted);
@@ -2461,7 +2493,7 @@ mod tests {
             skipped_by_filter: 0,
         };
 
-        let result = execute_apply(&conn, &plan, &params, &NoopProgress).unwrap();
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, None).unwrap();
 
         // No transfers, so not interrupted (loop never runs)
         assert!(!result.interrupted);

@@ -82,8 +82,8 @@ Summary composition moves from interface to ops for all effectful commands (prer
 
 | # | Story | Scope | Dependencies | Status |
 |---|-------|-------|--------------|--------|
-| 1 | Ops layer completion for effectful commands | Extract roots + object exclusion to ops. Move summary composition to ops for all effectful commands. | — | Pending |
-| 2 | Decision provenance | Schema, domain types, repo, recording integration, `--reason`, `--no-record`, manifest notes flow. | Story 1 | Pending |
+| 1 | Ops layer completion for effectful commands | Extract roots + object exclusion to ops. Move summary composition to ops for all effectful commands. | — | Complete |
+| 2 | Decision provenance | Schema, domain types, repo, recording integration, `--reason`, `--no-record`, manifest notes flow. | Story 1 | Complete |
 
 ### Story 1: Ops Layer Completion for Effectful Commands
 

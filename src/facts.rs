@@ -1,11 +1,13 @@
 use anyhow::{bail, Result};
 
+use crate::domain::decision::DecisionCommand;
 use crate::domain::format_count;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::expr::{BuiltinKey, BuiltinKeyCategory, ParsedFactKey};
 use crate::ops;
+use crate::ops::decision::DecisionParams;
 use crate::ops::facts::{AllKeysResult, DistributionResult, GroupedDistributionResult};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::Db;
@@ -435,6 +437,8 @@ pub fn delete_facts(
     scope_prefixes: &[String],
     filter_strs: &[String],
     options: &DeleteOptions,
+    command_line: &str,
+    no_record: bool,
 ) -> Result<()> {
     // Validate key and entity type
     ops::facts::validate_delete_key(key)?;
@@ -499,6 +503,13 @@ pub fn delete_facts(
         );
     } else {
         // Execute
+        let decision = DecisionParams {
+            command: DecisionCommand::FactsDelete,
+            scope: Some(scope_prefixes.to_vec()),
+            command_line: command_line.to_string(),
+            reason: None,
+            enabled: !no_record && !options.dry_run,
+        };
         let result = ops::facts::execute_delete(
             conn,
             &source_ids,
@@ -506,6 +517,7 @@ pub fn delete_facts(
             &options.entity_type,
             options.value_type.as_deref(),
             &plan,
+            Some(&decision),
         )?;
         println!("{}", result.summary);
     }
@@ -517,7 +529,7 @@ pub fn delete_facts(
 // Prune Stale Facts
 // ============================================================================
 
-pub fn prune_stale(db: &Db, dry_run: bool) -> Result<()> {
+pub fn prune_stale(db: &Db, dry_run: bool, command_line: &str, no_record: bool) -> Result<()> {
     let conn = db.conn();
 
     let plan = ops::facts::plan_prune_stale(conn)?;
@@ -533,7 +545,14 @@ pub fn prune_stale(db: &Db, dry_run: bool) -> Result<()> {
             format_count(plan.stale_count)
         );
     } else {
-        let result = ops::facts::execute_prune_stale(conn)?;
+        let decision = DecisionParams {
+            command: DecisionCommand::Prune,
+            scope: None,
+            command_line: command_line.to_string(),
+            reason: None,
+            enabled: !no_record && !dry_run,
+        };
+        let result = ops::facts::execute_prune_stale(conn, Some(&decision))?;
         println!("{}", result.summary);
     }
 
@@ -545,7 +564,7 @@ pub fn prune_stale(db: &Db, dry_run: bool) -> Result<()> {
 // Prune Orphaned Objects
 // ============================================================================
 
-pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool) -> Result<()> {
+pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool, command_line: &str, no_record: bool) -> Result<()> {
     let conn = db.conn_mut();
 
     let stats = ops::facts::plan_prune_orphaned(conn)?;
@@ -570,7 +589,14 @@ pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool) -> Result<()> {
         );
         println!("Use --yes to proceed with deletion.");
     } else {
-        let result = ops::facts::execute_prune_orphaned(db)?;
+        let decision = DecisionParams {
+            command: DecisionCommand::Prune,
+            scope: None,
+            command_line: command_line.to_string(),
+            reason: None,
+            enabled: !no_record && !dry_run,
+        };
+        let result = ops::facts::execute_prune_orphaned(db, Some(&decision))?;
         println!("{}", result.summary);
     }
 
@@ -581,7 +607,7 @@ pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool) -> Result<()> {
 // Prune Excluded Facts
 // ============================================================================
 
-pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
+pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool, command_line: &str, no_record: bool) -> Result<()> {
     ops::facts::validate_prune_excluded_scope(scope)?;
     let conn = db.conn();
 
@@ -621,7 +647,14 @@ pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool) -> Result<()> {
         }
         println!("Use --yes to proceed with deletion.");
     } else {
-        let result = ops::facts::execute_prune_excluded(conn, scope)?;
+        let decision = DecisionParams {
+            command: DecisionCommand::Prune,
+            scope: None,
+            command_line: command_line.to_string(),
+            reason: None,
+            enabled: !no_record && !dry_run,
+        };
+        let result = ops::facts::execute_prune_excluded(conn, scope, Some(&decision))?;
         if !result.summary.is_empty() {
             println!("{}", result.summary);
         }

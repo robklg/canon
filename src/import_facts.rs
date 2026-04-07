@@ -1,13 +1,24 @@
 use anyhow::{Context, Result};
 use std::io::{self, BufRead};
 
+use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::ops;
+use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::import_facts::ImportRecord;
 use crate::repo::Db;
 
-pub fn run(db: &mut Db, allow_archived: bool, verbose: bool) -> Result<()> {
+pub fn run(db: &mut Db, allow_archived: bool, verbose: bool, command_line: &str, no_record: bool) -> Result<()> {
     let conn = db.conn_mut();
     let mut state = ops::import_facts::init_state(conn)?;
+
+    let decision = DecisionParams {
+        command: DecisionCommand::ImportFacts,
+        scope: None,
+        command_line: command_line.to_string(),
+        reason: None,
+        enabled: !no_record,
+    };
+    let recorder = DecisionRecorder::start(conn, &decision);
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -62,7 +73,21 @@ pub fn run(db: &mut Db, allow_archived: bool, verbose: bool) -> Result<()> {
         eprintln!("Then re-import with the new type.");
     }
 
-    println!("{}", state.stats.compose_summary());
+    let summary = state.stats.compose_summary();
+
+    recorder.complete(
+        conn,
+        DecisionStatus::Completed,
+        DecisionCounts {
+            attempted: Some(state.stats.lines_processed as i64),
+            completed: Some(state.stats.facts_imported as i64),
+            failed: None,
+            skipped: Some(state.stats.skipped_stale as i64),
+        },
+        &summary,
+    );
+
+    println!("{}", summary);
 
     // Update query planner statistics after bulk changes
     eprintln!("Updating query statistics...");

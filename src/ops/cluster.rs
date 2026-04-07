@@ -911,7 +911,7 @@ fn generate_fact_help(
 }
 
 /// Extract notes section from an existing manifest.
-fn extract_notes(content: &str) -> Option<String> {
+pub fn extract_notes(content: &str) -> Option<String> {
     let marker = "# === Notes ===";
     let start_idx = content.find(marker)?;
     let after_marker = start_idx + marker.len();
