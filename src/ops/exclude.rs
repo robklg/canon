@@ -472,7 +472,7 @@ pub fn execute_set(
     plan: &ExcludeSetPlan,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSetResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     for &source_id in &plan.source_ids {
         repo::source::set_excluded(conn, source_id, true)?;
@@ -481,7 +481,7 @@ pub fn execute_set(
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Excluded {} {noun}", format_count(count));
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         recorder.complete(
             conn,
             DecisionStatus::Completed,
@@ -511,7 +511,7 @@ pub fn execute_clear(
     plan: &ExcludeClearPlan,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeClearResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     for &source_id in &plan.source_ids {
         repo::source::set_excluded(conn, source_id, false)?;
@@ -520,7 +520,7 @@ pub fn execute_clear(
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Cleared exclusions for {} {noun}", format_count(count));
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         recorder.complete(
             conn,
             DecisionStatus::Completed,
@@ -550,7 +550,7 @@ pub fn execute_duplicates(
     plan: &ExcludeDuplicatesPlan,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeDuplicatesResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     for &source_id in &plan.source_ids {
         repo::source::set_excluded(conn, source_id, true)?;
@@ -559,7 +559,7 @@ pub fn execute_duplicates(
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Excluded {} {noun}", format_count(count));
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         recorder.complete(
             conn,
             DecisionStatus::Completed,
@@ -591,7 +591,7 @@ pub fn execute_set_objects(
     plan: &ExcludeSetObjectsPlan,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSetObjectsResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     for entry in &plan.objects {
         repo::object::set_excluded(conn, entry.object_id, true)?;
@@ -602,7 +602,7 @@ pub fn execute_set_objects(
         "Excluded {} objects affecting {} sources ({} in source roots, {} in archives)",
         count, plan.total_source_count, total_in_source_roots, plan.total_archive_count
     );
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         recorder.complete(
             conn,
             DecisionStatus::Completed,
@@ -711,10 +711,46 @@ pub fn check_set_source_by_path(
     })
 }
 
-/// Exclude a single source by ID.
-pub fn exclude_source(conn: &Connection, source_id: i64) -> Result<()> {
+/// Result of excluding a single source.
+#[allow(dead_code)]
+pub struct ExcludeSourceResult {
+    pub source_id: i64,
+    pub path: String,
+    pub summary: String,
+}
+
+/// Exclude a single source by ID, composing a summary and recording the decision.
+pub fn execute_set_source(
+    conn: &Connection,
+    source_id: i64,
+    path: &str,
+    decision: Option<&DecisionParams>,
+) -> Result<ExcludeSourceResult> {
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+
     repo::source::set_excluded(conn, source_id, true)?;
-    Ok(())
+
+    let summary = format!("Excluded: {path}");
+
+    if let Some(recorder) = recorder.as_mut() {
+        recorder.complete(
+            conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(1),
+                completed: Some(1),
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+    }
+
+    Ok(ExcludeSourceResult {
+        source_id,
+        path: path.to_string(),
+        summary,
+    })
 }
 
 /// Validate that an object can be excluded by its hash.
@@ -815,13 +851,13 @@ pub fn execute_set_object(
     sources: &[ObjectSourceInfo],
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeObjectResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     repo::object::set_excluded(conn, object_id, true)?;
 
     let summary = format!("Excluded object: {hash_prefix}...");
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         recorder.complete(
             conn,
             DecisionStatus::Completed,
@@ -882,13 +918,13 @@ pub fn execute_clear_object(
     hash_prefix: &str,
     decision: Option<&DecisionParams>,
 ) -> Result<ClearObjectResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     repo::object::set_excluded(conn, object_id, false)?;
 
     let summary = format!("Cleared exclusion from object: {hash_prefix}...");
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         recorder.complete(
             conn,
             DecisionStatus::Completed,

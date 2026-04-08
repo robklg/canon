@@ -70,7 +70,7 @@ pub fn execute_remove(
     plan: &RemoveRootPlan,
     decision: Option<&DecisionParams>,
 ) -> Result<RemoveRootResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     let deleted_notes = repo::note::delete_by_root(conn, plan.root_id)?;
     let deleted_sources = repo::root::remove(conn, plan.root_id)?;
@@ -80,7 +80,7 @@ pub fn execute_remove(
         plan.root_id, deleted_sources
     );
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         recorder.complete(
             conn,
             DecisionStatus::Completed,
@@ -120,7 +120,7 @@ pub fn execute_suspend(
     root_id: i64,
     decision: Option<&DecisionParams>,
 ) -> Result<SuspendResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     let roots = repo::root::fetch_all(conn)?;
     let root = roots
@@ -143,7 +143,7 @@ pub fn execute_suspend(
         format_count(source_count)
     );
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         recorder.complete(
             conn,
             DecisionStatus::Completed,
@@ -171,7 +171,7 @@ pub fn execute_unsuspend(
     root_id: i64,
     decision: Option<&DecisionParams>,
 ) -> Result<SuspendResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     let roots = repo::root::fetch_all(conn)?;
     let root = roots
@@ -194,7 +194,7 @@ pub fn execute_unsuspend(
         format_count(source_count)
     );
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         recorder.complete(
             conn,
             DecisionStatus::Completed,

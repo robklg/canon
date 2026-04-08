@@ -657,7 +657,7 @@ pub fn execute_delete(
     plan: &DeletePlan,
     decision: Option<&DecisionParams>,
 ) -> Result<DeleteResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     repo::fact::delete_by_criteria(conn, source_ids, key, entity_type, value_type)?;
     let entity_label = if entity_type == "source" {
@@ -672,7 +672,7 @@ pub fn execute_delete(
         entity_label
     );
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         recorder.complete(
             conn,
             DecisionStatus::Completed,
@@ -707,7 +707,7 @@ pub fn execute_prune_stale(
     conn: &Connection,
     decision: Option<&DecisionParams>,
 ) -> Result<PruneStaleResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     let deleted = repo::fact::delete_stale(conn)?;
     let summary = format!(
@@ -715,7 +715,7 @@ pub fn execute_prune_stale(
         format_count(deleted as i64)
     );
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         recorder.complete(
             conn,
             DecisionStatus::Completed,
@@ -749,7 +749,7 @@ pub fn execute_prune_orphaned(
     db: &mut Db,
     decision: Option<&DecisionParams>,
 ) -> Result<PruneOrphanedResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(db.conn(), d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(db.conn(), d));
 
     let conn = db.conn_mut();
     let tx = conn.transaction()?;
@@ -762,7 +762,7 @@ pub fn execute_prune_orphaned(
         format_count(deleted.total_fact_count())
     );
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         let total_deleted = deleted.object_count + deleted.source_count + deleted.total_fact_count();
         recorder.complete(
             db.conn(),
@@ -815,7 +815,7 @@ pub fn execute_prune_excluded(
     scope: &str,
     decision: Option<&DecisionParams>,
 ) -> Result<PruneExcludedResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     let (source_deleted, object_deleted) = repo::fact::delete_excluded(conn, scope)?;
     let total_deleted = source_deleted + object_deleted;
@@ -840,7 +840,7 @@ pub fn execute_prune_excluded(
     }
     let summary = parts.join("\n");
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         recorder.complete(
             conn,
             DecisionStatus::Completed,

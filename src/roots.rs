@@ -164,7 +164,7 @@ pub fn remove(
         reason: reason
             .map(|r| r.to_string())
             .filter(|r| !r.trim().is_empty()),
-        enabled: !no_record && yes,
+        enabled: !no_record,
     };
     let result = ops::roots::execute_remove(conn, &plan, Some(&decision))?;
     println!("{}", result.summary);

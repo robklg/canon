@@ -163,7 +163,7 @@ pub fn run(
             .filter(|r| !r.trim().is_empty()),
         enabled: !no_record,
     };
-    let recorder = DecisionRecorder::start(conn, &decision);
+    let mut recorder = DecisionRecorder::start(conn, &decision);
 
     let mut total_stats = ScanStats::default();
     let mut all_files_to_hash: Vec<FileToHash> = Vec::new();
@@ -311,6 +311,9 @@ pub fn run(
         },
         &summary,
     );
+    for w in recorder.take_warnings() {
+        eprintln!("{w}");
+    }
 
     // Exit with error if there were unexpected hash changes (possible corruption)
     if total_stats.unexpected_hash_changes > 0 {

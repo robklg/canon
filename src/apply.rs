@@ -499,6 +499,7 @@ pub fn run(
             resume: options.resume,
             interrupt_flag: None,
             skipped_by_filter,
+            manifest_display: format!("{}", config_path.display()),
         },
         &progress_impl,
         Some(&decision),

@@ -612,6 +612,8 @@ pub struct ApplyExecuteParams {
     pub interrupt_flag: Option<Arc<AtomicBool>>,
     /// Sources skipped by --root filter (for summary).
     pub skipped_by_filter: usize,
+    /// Manifest display path (for summary and decision record).
+    pub manifest_display: String,
 }
 
 /// Result of executing an apply operation.
@@ -734,7 +736,7 @@ pub fn execute_apply(
     progress: &dyn TransferProgress,
     decision: Option<&DecisionParams>,
 ) -> Result<ApplyResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     let interrupt_flag = match &params.interrupt_flag {
         Some(flag) => Arc::clone(flag),
@@ -874,23 +876,26 @@ pub fn execute_apply(
     // Compose summary
     result.summary = if result.interrupted {
         format!(
-            "Applied: {} copied, {} renamed, {} moved, {} errors. Interrupted — {} files remaining.",
+            "Applied {}: {} copied, {} renamed, {} moved, {} errors. Interrupted — {} files remaining.",
+            params.manifest_display,
             result.copied, result.renamed, result.moved, result.errors.len(), result.remaining
         )
     } else if params.resume {
         format!(
-            "Applied (--resume): {} copied, {} renamed, {} moved, {} already at destination, {} errors",
+            "Applied {} (--resume): {} copied, {} renamed, {} moved, {} already at destination, {} errors",
+            params.manifest_display,
             result.copied, result.renamed, result.moved, result.already_there, result.errors.len()
         )
     } else {
         format!(
-            "Applied: {} copied, {} renamed, {} moved, {} skipped (missing), {} skipped (stale), {} skipped (filtered), {} errors",
+            "Applied {}: {} copied, {} renamed, {} moved, {} skipped (missing), {} skipped (stale), {} skipped (filtered), {} errors",
+            params.manifest_display,
             result.copied, result.renamed, result.moved, result.skipped_missing,
             result.skipped_stale.len(), params.skipped_by_filter, result.errors.len()
         )
     };
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         let total = plan.transfers.len() as i64;
         let completed = (result.copied + result.renamed + result.moved) as i64;
         let failed = result.errors.len() as i64;
@@ -2452,6 +2457,7 @@ mod tests {
             resume: false,
             interrupt_flag: Some(flag),
             skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
         };
 
         let result = execute_apply(&conn, &plan, &params, &NoopProgress, None).unwrap();
@@ -2491,6 +2497,7 @@ mod tests {
             resume: false,
             interrupt_flag: Some(flag),
             skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
         };
 
         let result = execute_apply(&conn, &plan, &params, &NoopProgress, None).unwrap();

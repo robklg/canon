@@ -18,7 +18,7 @@ pub fn run(db: &mut Db, allow_archived: bool, verbose: bool, command_line: &str,
         reason: None,
         enabled: !no_record,
     };
-    let recorder = DecisionRecorder::start(conn, &decision);
+    let mut recorder = DecisionRecorder::start(conn, &decision);
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -86,6 +86,9 @@ pub fn run(db: &mut Db, allow_archived: bool, verbose: bool, command_line: &str,
         },
         &summary,
     );
+    for w in recorder.take_warnings() {
+        eprintln!("{w}");
+    }
 
     println!("{}", summary);
 

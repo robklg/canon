@@ -33,7 +33,7 @@ Each decision captures:
 - **Counts** — attempted, completed, failed, skipped
 - **Summary** — the completion message you saw
 - **Canon version** — which version produced the record
-- **Timestamp** — when the command ran
+- **Timestamp** — when the command started
 
 ## Two-Phase Recording
 

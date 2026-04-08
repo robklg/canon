@@ -211,12 +211,12 @@ pub fn execute_clear_recursive(
     scope: &NoteScope,
     decision: Option<&DecisionParams>,
 ) -> Result<ClearRecursiveResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     let deleted = repo::note::clear_subtree(conn, scope.root_id, &scope.rel_path)?;
     let summary = format!("Cleared {} notes", deleted);
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         recorder.complete(
             conn,
             DecisionStatus::Completed,
@@ -246,7 +246,7 @@ pub fn execute_clear_exact(
     scope: &NoteScope,
     decision: Option<&DecisionParams>,
 ) -> Result<ClearExactResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     let deleted = repo::note::clear_by_scope(conn, scope.root_id, &scope.rel_path)?;
     let summary = if deleted == 0 {
@@ -255,7 +255,7 @@ pub fn execute_clear_exact(
         format!("Cleared {} notes at {}", deleted, scope.display())
     };
 
-    if let Some(recorder) = &recorder {
+    if let Some(recorder) = recorder.as_mut() {
         recorder.complete(
             conn,
             DecisionStatus::Completed,

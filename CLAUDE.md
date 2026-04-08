@@ -338,7 +338,8 @@ The `cluster generate` and `apply` commands work together:
 **Manifest comment sections**:
 - `# === Cluster Summary ===` — generated on `cluster generate` and regenerated on `cluster refresh`. Shows source count, root breakdown, archive coverage, and skipped counts.
 - `# === Notes ===` — empty placeholder on generate. Preserved verbatim on refresh (extracted via string matching since TOML parsers strip comments). Users can add free-form notes here.
-- `extract_notes()` finds notes content between `# === Notes ===` and the next `# === ` or `[` section header.
+- `extract_notes_raw()` finds raw notes content (with `#` comment markers) between `# === Notes ===` and the next `# === ` or `[` section header. Used by manifest refresh.
+- `extract_notes()` returns the same content but strips `#` comment prefixes and trims whitespace. Used for decision reason when manifest notes flow into apply records.
 
 **Ceremony infrastructure** (`ceremony.rs`):
 - `confirm(yes: bool)` — shared confirmation prompt ("Proceed? [y/N]"). Returns `Ok(false)` on decline (not an error). Used by `roots rm`, `apply`, `exclude set/clear/duplicates`.
@@ -510,7 +511,7 @@ let result = ops::exclude::execute_set(conn, &plan, Some(&decision))?;
 
 Plan/execute separates computation from side effects. The plan function returns a typed struct with all data needed for display and confirmation. The execute function performs writes, composes a summary, optionally records a decision, and returns a typed result. The interface layer decides what happens between plan and execute (dry-run, confirmation, or immediate execution). This makes operations testable without CLI and supports multiple interface types.
 
-**Decision recording** (`ops/decision.rs`): The `DecisionRecorder` provides two-phase recording — `start()` INSERTs a "started" record, `complete()` UPDATEs with outcome. Execute functions accept `Option<&DecisionParams>` — `None` skips recording (used in tests), `Some` enables it. The recorder catches its own errors; recording failure warns but never blocks the command. For commands without a single execute function (scan, cluster, import-facts), the interface creates the recorder and wraps the operation calls.
+**Decision recording** (`ops/decision.rs`): The `DecisionRecorder` provides two-phase recording — `start()` INSERTs a "started" record, `complete()` UPDATEs with outcome. Execute functions accept `Option<&DecisionParams>` — `None` skips recording (used in tests), `Some` enables it. The recorder catches its own errors by collecting warnings in a `Vec<String>` (never writes to stderr — that's the interface's job). For recorders owned by the interface (scan, cluster, import-facts), call `take_warnings()` and display them. For recorders inside ops execute functions, warnings are dropped with the recorder. For commands without a single execute function (scan, cluster, import-facts), the interface creates the recorder and wraps the operation calls.
 
 **Filesystem Layer** (`src/ops/fs.rs`):
 

@@ -11,7 +11,7 @@ use crate::ops::decision::DecisionParams;
 use crate::ops::exclude::{
     self, check_clear_object, check_set_object_by_file, check_set_object_by_hash,
     check_set_source_by_id, check_set_source_by_path, execute_clear, execute_clear_object,
-    execute_duplicates, execute_set, execute_set_object, execute_set_objects, plan_clear,
+    execute_duplicates, execute_set, execute_set_object, execute_set_objects, execute_set_source, plan_clear,
     plan_duplicates, plan_set, plan_set_objects, ExcludeClearParams, ExcludeDuplicatesParams,
     ExcludeSetObjectsParams, ExcludeSetParams, ObjectClearCheck, ObjectExclusionCheck,
     ObjectSourceInfo, SourceExclusionCheck,
@@ -211,20 +211,8 @@ pub fn set_by_id(
                     reason,
                     options.dry_run,
                 );
-                let recorder = crate::ops::decision::DecisionRecorder::start(conn, &decision);
-                exclude::exclude_source(conn, source_id)?;
-                recorder.complete(
-                    conn,
-                    crate::domain::decision::DecisionStatus::Completed,
-                    crate::ops::decision::DecisionCounts {
-                        attempted: Some(1),
-                        completed: Some(1),
-                        failed: None,
-                        skipped: None,
-                    },
-                    &format!("Excluded source (id: {source_id})"),
-                );
-                println!("Excluded source (id: {source_id}): {path}");
+                let result = execute_set_source(conn, source_id, &path, Some(&decision))?;
+                println!("{}", result.summary);
             }
         }
     }
@@ -271,20 +259,8 @@ pub fn set_by_path(
                     reason,
                     options.dry_run,
                 );
-                let recorder = crate::ops::decision::DecisionRecorder::start(conn, &decision);
-                exclude::exclude_source(conn, source_id)?;
-                recorder.complete(
-                    conn,
-                    crate::domain::decision::DecisionStatus::Completed,
-                    crate::ops::decision::DecisionCounts {
-                        attempted: Some(1),
-                        completed: Some(1),
-                        failed: None,
-                        skipped: None,
-                    },
-                    &format!("Excluded: {path}"),
-                );
-                println!("Excluded: {path}");
+                let result = execute_set_source(conn, source_id, &path, Some(&decision))?;
+                println!("{}", result.summary);
             }
         }
     }

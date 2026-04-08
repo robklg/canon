@@ -78,7 +78,7 @@ pub fn run(
                 scope: Some(vec![scope.display()]),
                 command_line: command_line.to_string(),
                 reason: None,
-                enabled: !no_record && yes,
+                enabled: !no_record,
             };
             let result = ops::note::execute_clear_recursive(conn, &scope, Some(&decision))?;
             eprintln!("{}", result.summary);

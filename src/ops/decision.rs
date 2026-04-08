@@ -19,18 +19,28 @@ pub struct DecisionCounts {
 }
 
 /// Records a decision. Created before execution, completed after.
-/// Catches its own errors — recording failure warns, never halts the command.
+/// Catches its own errors — recording failure collects warnings, never halts the command.
+///
+/// Warnings are accumulated in the recorder and can be retrieved via `take_warnings()`.
+/// For recorders owned by the interface layer, the interface drains and displays warnings.
+/// For recorders created inside ops execute functions, warnings are dropped with the
+/// recorder — this is acceptable because database failures that cause recording to fail
+/// will also manifest through the main operation's error path.
 pub struct DecisionRecorder {
     id: Option<i64>, // None if recording is disabled or start failed
+    warnings: Vec<String>,
 }
 
 impl DecisionRecorder {
     /// Insert the initial "started" record.
     /// If disabled (--no-record, --dry-run), returns a no-op recorder.
-    /// If the INSERT fails, logs a warning and returns a no-op recorder.
+    /// If the INSERT fails, collects a warning and returns a no-op recorder.
     pub fn start(conn: &Connection, params: &DecisionParams) -> Self {
         if !params.enabled {
-            return DecisionRecorder { id: None };
+            return DecisionRecorder {
+                id: None,
+                warnings: Vec::new(),
+            };
         }
 
         let canon_version = env!("CARGO_PKG_VERSION");
@@ -43,18 +53,21 @@ impl DecisionRecorder {
             params.reason.as_deref(),
             canon_version,
         ) {
-            Ok(id) => DecisionRecorder { id: Some(id) },
-            Err(e) => {
-                eprintln!("Warning: failed to record decision: {e}");
-                DecisionRecorder { id: None }
-            }
+            Ok(id) => DecisionRecorder {
+                id: Some(id),
+                warnings: Vec::new(),
+            },
+            Err(e) => DecisionRecorder {
+                id: None,
+                warnings: vec![format!("Warning: failed to record decision: {e}")],
+            },
         }
     }
 
     /// Update the record with completion data. No-op if disabled or start failed.
-    /// Logs a warning if the UPDATE fails.
+    /// Collects a warning if the UPDATE fails.
     pub fn complete(
-        &self,
+        &mut self,
         conn: &Connection,
         status: DecisionStatus,
         counts: DecisionCounts,
@@ -74,12 +87,13 @@ impl DecisionRecorder {
             counts.skipped,
             Some(summary),
         ) {
-            eprintln!("Warning: failed to update decision record: {e}");
+            self.warnings
+                .push(format!("Warning: failed to update decision record: {e}"));
         }
     }
 
     /// Update to interrupted status. Best-effort.
-    pub fn interrupted(&self, conn: &Connection) {
+    pub fn interrupted(&mut self, conn: &Connection) {
         let Some(id) = self.id else {
             return;
         };
@@ -94,8 +108,14 @@ impl DecisionRecorder {
             None,
             None,
         ) {
-            eprintln!("Warning: failed to update decision record: {e}");
+            self.warnings
+                .push(format!("Warning: failed to update decision record: {e}"));
         }
+    }
+
+    /// Drain accumulated warnings. Returns an empty vec if no warnings.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
     }
 }
 
@@ -131,6 +151,7 @@ mod tests {
         let recorder = DecisionRecorder::start(&conn, &params);
 
         assert!(recorder.id.is_some());
+        assert!(recorder.warnings.is_empty());
         assert_eq!(count_decisions(&conn), 1);
     }
 
@@ -138,7 +159,7 @@ mod tests {
     fn recorder_complete_updates_record() {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::ExcludeSet, true);
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let mut recorder = DecisionRecorder::start(&conn, &params);
 
         recorder.complete(
             &conn,
@@ -176,7 +197,7 @@ mod tests {
     fn recorder_interrupted_sets_status() {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::Apply, true);
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let mut recorder = DecisionRecorder::start(&conn, &params);
 
         recorder.interrupted(&conn);
 
@@ -190,7 +211,7 @@ mod tests {
     fn recorder_disabled_complete_is_noop() {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::Scan, false);
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let mut recorder = DecisionRecorder::start(&conn, &params);
 
         // Should not panic
         recorder.complete(

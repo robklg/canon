@@ -100,7 +100,7 @@ pub fn generate(
         reason: None,
         enabled: !no_record,
     };
-    let recorder = DecisionRecorder::start(conn, &decision);
+    let mut recorder = DecisionRecorder::start(conn, &decision);
 
     let result = ops::cluster::execute_generate(&plan, &exec_params)?;
 
@@ -123,6 +123,9 @@ pub fn generate(
         },
         &full_summary,
     );
+    for w in recorder.take_warnings() {
+        eprintln!("{w}");
+    }
 
     println!("{}", full_summary);
 
@@ -235,7 +238,7 @@ pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool, no_edit: bo
         reason: None,
         enabled: !no_record,
     };
-    let recorder = DecisionRecorder::start(conn, &decision);
+    let mut recorder = DecisionRecorder::start(conn, &decision);
 
     let result = ops::cluster::execute_refresh(&plan, &exec_params)?;
 
@@ -274,6 +277,9 @@ pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool, no_edit: bo
             );
             println!("No sources matched the query");
         }
+    }
+    for w in recorder.take_warnings() {
+        eprintln!("{w}");
     }
 
     if !no_edit {

@@ -537,7 +537,7 @@ pub fn execute_refresh(
                   # Other fields are managed by Canon — do not edit.\n\
                   #\n";
     let summary = generate_summary_comments(plan);
-    let notes = extract_notes(&params.old_manifest_content).unwrap_or_else(|| "\n#\n".to_string());
+    let notes = extract_notes_raw(&params.old_manifest_content).unwrap_or_else(|| "\n#\n".to_string());
     let notes_block = format!("# === Notes ==={notes}");
     let fact_help = generate_fact_help(plan.lock_entries.len(), &plan.full_coverage_facts, config.meta.scope.is_some());
 
@@ -911,7 +911,9 @@ fn generate_fact_help(
 }
 
 /// Extract notes section from an existing manifest.
-pub fn extract_notes(content: &str) -> Option<String> {
+/// Extract the raw notes section from a manifest (preserves `#` comment markers).
+/// Used by manifest refresh to re-emit the notes block verbatim.
+pub fn extract_notes_raw(content: &str) -> Option<String> {
     let marker = "# === Notes ===";
     let start_idx = content.find(marker)?;
     let after_marker = start_idx + marker.len();
@@ -928,6 +930,27 @@ pub fn extract_notes(content: &str) -> Option<String> {
         .unwrap_or(rest.len());
 
     Some(rest[..end].to_string())
+}
+
+/// Extract notes from a manifest as clean text (strips `#` comment markers).
+/// Used for decision reason when manifest notes flow into apply records.
+pub fn extract_notes(content: &str) -> Option<String> {
+    let raw = extract_notes_raw(content)?;
+    let stripped: String = raw
+        .lines()
+        .map(|line| {
+            line.strip_prefix("# ")
+                .or_else(|| line.strip_prefix("#"))
+                .unwrap_or(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let trimmed = stripped.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 /// Insert comment lines before a key in a TOML string.
@@ -1675,11 +1698,47 @@ base_dir = "photos"
     // extract_notes
     // =========================================================================
 
+    // extract_notes_raw — preserves # markers for manifest refresh
+
+    #[test]
+    fn test_extract_notes_raw_empty_placeholder() {
+        let content = "# === Notes ===\n#\n\n[meta]\nversion = 1\n";
+        let notes = extract_notes_raw(content).unwrap();
+        assert_eq!(notes, "\n#\n\n");
+    }
+
+    #[test]
+    fn test_extract_notes_raw_with_content() {
+        let content =
+            "# === Notes ===\n# This cluster has family photos\n# from 2020-2023\n\n[meta]\n";
+        let notes = extract_notes_raw(content).unwrap();
+        assert_eq!(
+            notes,
+            "\n# This cluster has family photos\n# from 2020-2023\n\n"
+        );
+    }
+
+    #[test]
+    fn test_extract_notes_raw_before_meta() {
+        let content = "# === Notes ===\n# Some note\n[meta]\nversion = 1\n";
+        let notes = extract_notes_raw(content).unwrap();
+        assert_eq!(notes, "\n# Some note\n");
+    }
+
+    #[test]
+    fn test_extract_notes_raw_before_next_section() {
+        let content = "# === Notes ===\n# My notes\n# === Cluster Summary ===\n# stuff\n";
+        let notes = extract_notes_raw(content).unwrap();
+        assert_eq!(notes, "\n# My notes\n");
+    }
+
+    // extract_notes — strips # markers for decision reason
+
     #[test]
     fn test_extract_notes_empty_placeholder() {
         let content = "# === Notes ===\n#\n\n[meta]\nversion = 1\n";
-        let notes = extract_notes(content).unwrap();
-        assert_eq!(notes, "\n#\n\n");
+        // Empty placeholder: after stripping # prefix, content is whitespace-only → None
+        assert!(extract_notes(content).is_none());
     }
 
     #[test]
@@ -1689,7 +1748,7 @@ base_dir = "photos"
         let notes = extract_notes(content).unwrap();
         assert_eq!(
             notes,
-            "\n# This cluster has family photos\n# from 2020-2023\n\n"
+            "This cluster has family photos\nfrom 2020-2023"
         );
     }
 
@@ -1700,17 +1759,17 @@ base_dir = "photos"
     }
 
     #[test]
-    fn test_extract_notes_before_meta() {
+    fn test_extract_notes_strips_comment_markers() {
         let content = "# === Notes ===\n# Some note\n[meta]\nversion = 1\n";
         let notes = extract_notes(content).unwrap();
-        assert_eq!(notes, "\n# Some note\n");
+        assert_eq!(notes, "Some note");
     }
 
     #[test]
-    fn test_extract_notes_before_next_section() {
+    fn test_extract_notes_stops_at_next_section() {
         let content = "# === Notes ===\n# My notes\n# === Cluster Summary ===\n# stuff\n";
         let notes = extract_notes(content).unwrap();
-        assert_eq!(notes, "\n# My notes\n");
+        assert_eq!(notes, "My notes");
     }
 
     // =========================================================================
