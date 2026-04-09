@@ -120,8 +120,6 @@ pub fn execute_suspend(
     root_id: i64,
     decision: Option<&DecisionParams>,
 ) -> Result<SuspendResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
-
     let roots = repo::root::fetch_all(conn)?;
     let root = roots
         .iter()
@@ -131,6 +129,8 @@ pub fn execute_suspend(
     if root.is_suspended() {
         bail!("Root {} is already suspended: {}", root_id, root.path);
     }
+
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     repo::root::set_suspended(conn, root_id, true)?;
     let counts = repo::root::fetch_file_counts(conn, &[root_id])?;
@@ -171,8 +171,6 @@ pub fn execute_unsuspend(
     root_id: i64,
     decision: Option<&DecisionParams>,
 ) -> Result<SuspendResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
-
     let roots = repo::root::fetch_all(conn)?;
     let root = roots
         .iter()
@@ -182,6 +180,8 @@ pub fn execute_unsuspend(
     if !root.is_suspended() {
         bail!("Root {} is not suspended: {}", root_id, root.path);
     }
+
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
 
     repo::root::set_suspended(conn, root_id, false)?;
     let counts = repo::root::fetch_file_counts(conn, &[root_id])?;
