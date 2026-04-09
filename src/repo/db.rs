@@ -167,6 +167,7 @@ CREATE TABLE IF NOT EXISTS facts (
 CREATE INDEX IF NOT EXISTS sources_object_id ON sources(object_id);
 CREATE INDEX IF NOT EXISTS sources_excluded ON sources(excluded);
 CREATE INDEX IF NOT EXISTS sources_root_present ON sources(root_id, present);
+CREATE INDEX IF NOT EXISTS sources_device_inode ON sources(device, inode) WHERE present = 1;
 CREATE INDEX IF NOT EXISTS facts_entity ON facts(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS facts_key ON facts(key);
 CREATE INDEX IF NOT EXISTS facts_key_entity ON facts(key, entity_type, entity_id);

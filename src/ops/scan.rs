@@ -37,13 +37,6 @@ pub enum FileAction {
     Unchanged,
 }
 
-/// Per-file processing result.
-pub struct ProcessResult {
-    pub source_id: i64,
-    pub action: FileAction,
-    pub old_object_id: Option<i64>,
-}
-
 /// Accumulated scan statistics.
 #[derive(Default)]
 pub struct ScanStats {
@@ -151,6 +144,9 @@ pub fn scan_root(
     let mut outcomes: Vec<(i64, SourceOutcome)> = Vec::new();
     let mut handled_ids: HashSet<i64> = HashSet::new();
 
+    // Batch buffer for unchanged file updates (source_id, device, inode)
+    let mut unchanged_batch: Vec<(i64, i64, i64)> = Vec::new();
+
     // Snapshot the walk path's device ID before the walk starts.
     // If the mount disappears mid-scan (NAS disconnect, volume ejected),
     // the OS silently tears down the mount — files just vanish rather than
@@ -228,7 +224,8 @@ pub fn scan_root(
 
         stats.scanned += 1;
 
-        let result = match process_file(
+        // Phase 1: Reconcile (read DB state, determine outcome, compute partial hash)
+        let reconciled = match reconcile_file(
             conn,
             root_id,
             rel_path_str,
@@ -237,7 +234,6 @@ pub fn scan_root(
             inode,
             size,
             mtime,
-            now,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -250,14 +246,59 @@ pub fn scan_root(
             }
         };
 
+        // Phase 2: Persist — unchanged files are batched, others get individual transactions
+        let (action, source_id, old_object_id) = match &reconciled.reconciliation {
+            Reconciliation::Unchanged { source_id } => {
+                unchanged_batch.push((*source_id, device, inode));
+                if unchanged_batch.len() >= UNCHANGED_BATCH_SIZE {
+                    flush_unchanged(conn, &unchanged_batch, now)?;
+                    unchanged_batch.clear();
+                }
+                (
+                    FileAction::Unchanged,
+                    *source_id,
+                    reconciled.source_at_path.and_then(|s| s.object_id),
+                )
+            }
+            _ => {
+                let source = match persist_file(
+                    conn,
+                    &reconciled.observation,
+                    &reconciled.reconciliation,
+                    now,
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        progress.on_process_error(
+                            &full_path.display().to_string(),
+                            &e.to_string(),
+                        );
+                        stats.skipped += 1;
+                        continue;
+                    }
+                };
+                let (action, old_oid) = match &reconciled.reconciliation {
+                    Reconciliation::New => (FileAction::New, None),
+                    Reconciliation::Modified { old_object_id, .. } => {
+                        (FileAction::Modified, *old_object_id)
+                    }
+                    Reconciliation::Moved { old_object_id, .. } => {
+                        (FileAction::Moved, *old_object_id)
+                    }
+                    Reconciliation::Unchanged { .. } => unreachable!(),
+                };
+                (action, source.id, old_oid)
+            }
+        };
+
         // Notify progress
-        progress.on_file(rel_path_str, &result.action);
+        progress.on_file(rel_path_str, &action);
 
         // Track seen sources
-        seen_source_ids.insert(result.source_id);
-        outcomes.push((result.source_id, SourceOutcome::Seen));
+        seen_source_ids.insert(source_id);
+        outcomes.push((source_id, SourceOutcome::Seen));
 
-        match result.action {
+        match action {
             FileAction::New => stats.new += 1,
             FileAction::Modified => stats.updated += 1,
             FileAction::Moved => stats.moved += 1,
@@ -266,20 +307,23 @@ pub fn scan_root(
 
         // Collect files for hashing based on mode
         if options.hash {
-            let needs_hash = match result.action {
+            let needs_hash = match action {
                 FileAction::New | FileAction::Modified => true,
                 FileAction::Moved | FileAction::Unchanged => options.hash_all,
             };
             if needs_hash {
                 files_to_hash.push(FileToHash {
-                    source_id: result.source_id,
+                    source_id,
                     full_path: full_path.to_path_buf(),
-                    old_object_id: result.old_object_id,
-                    basis_changed: matches!(result.action, FileAction::New | FileAction::Modified),
+                    old_object_id,
+                    basis_changed: matches!(action, FileAction::New | FileAction::Modified),
                 });
             }
         }
     }
+
+    // Flush remaining unchanged files
+    flush_unchanged(conn, &unchanged_batch, now)?;
 
     // Check if the mount is still the same device after the walk.
     // If the device changed (or disappeared), the mount was disrupted during
@@ -317,8 +361,17 @@ pub fn scan_root(
     })
 }
 
-/// Process a single file through observe→reconcile→persist.
-fn process_file(
+/// Intermediate result from reconciling a file against DB state (before persistence).
+struct ReconcileResult {
+    observation: FileObservation,
+    reconciliation: Reconciliation,
+    /// The source at this path before reconciliation (for old_object_id on Unchanged).
+    source_at_path: Option<crate::domain::source::Source>,
+}
+
+/// Reconcile a single file: read DB state, determine outcome, compute partial hash if needed.
+/// Does NOT persist — caller decides how to write (batch or individual transaction).
+fn reconcile_file(
     conn: &Connection,
     root_id: i64,
     rel_path: &str,
@@ -327,9 +380,7 @@ fn process_file(
     inode: i64,
     size: i64,
     mtime: i64,
-    now: i64,
-) -> Result<ProcessResult> {
-    // Create observation from file metadata
+) -> Result<ReconcileResult> {
     let mut observation = FileObservation {
         root_id,
         rel_path: rel_path.to_string(),
@@ -337,10 +388,9 @@ fn process_file(
         inode: inode as u64,
         size,
         mtime,
-        partial_hash: None, // Computed after reconciliation if needed
+        partial_hash: None,
     };
 
-    // Read DB state to determine what happened (no write lock held)
     let source_at_path = repo::source::fetch_by_path(conn, root_id, rel_path)?;
     let source_by_inode = repo::source::fetch_by_inode(conn, device as u64, inode as u64)?;
 
@@ -356,29 +406,42 @@ fn process_file(
         observation.partial_hash = Some(compute_partial_hash(full_path, size as u64)?);
     }
 
-    // Short write transaction (DB-only, no filesystem I/O).
-    // Uses Immediate for reliable busy-handler support under concurrency.
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let source = repo::source::apply_reconciliation(&tx, &observation, &reconciliation, now)?;
-    tx.commit()?;
-
-    // Map reconciliation to FileAction and extract old_object_id
-    let (action, old_object_id) = match &reconciliation {
-        Reconciliation::New => (FileAction::New, None),
-        Reconciliation::Unchanged { .. } => (
-            FileAction::Unchanged,
-            source_at_path.and_then(|s| s.object_id),
-        ),
-        Reconciliation::Modified { old_object_id, .. } => (FileAction::Modified, *old_object_id),
-        Reconciliation::Moved { old_object_id, .. } => (FileAction::Moved, *old_object_id),
-    };
-
-    Ok(ProcessResult {
-        source_id: source.id,
-        action,
-        old_object_id,
+    Ok(ReconcileResult {
+        observation,
+        reconciliation,
+        source_at_path,
     })
 }
+
+/// Persist a non-unchanged reconciliation in its own transaction.
+fn persist_file(
+    conn: &Connection,
+    observation: &FileObservation,
+    reconciliation: &Reconciliation,
+    now: i64,
+) -> Result<crate::domain::source::Source> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let source = repo::source::apply_reconciliation(&tx, observation, reconciliation, now)?;
+    tx.commit()?;
+    Ok(source)
+}
+
+/// Flush accumulated unchanged file updates in a single transaction.
+fn flush_unchanged(
+    conn: &Connection,
+    batch: &[(i64, i64, i64)],
+    now: i64,
+) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    repo::source::batch_update_unchanged(&tx, batch, now)?;
+    tx.commit()?;
+    Ok(())
+}
+
+const UNCHANGED_BATCH_SIZE: usize = 500;
 
 /// Translate source outcomes to DB mutations.
 /// Returns (missing_count, disconnected_count, warnings).
@@ -732,6 +795,54 @@ mod tests {
         fn on_file(&self, _path: &str, _action: &FileAction) {}
         fn on_walk_error(&self, _error: &str) {}
         fn on_process_error(&self, _path: &str, _error: &str) {}
+    }
+
+    /// Test result from process_file helper.
+    struct ProcessResult {
+        source_id: i64,
+        action: FileAction,
+        old_object_id: Option<i64>,
+    }
+
+    /// Test helper: reconcile + persist a single file (replicates old process_file behavior).
+    fn process_file(
+        conn: &Connection,
+        root_id: i64,
+        rel_path: &str,
+        full_path: &Path,
+        device: i64,
+        inode: i64,
+        size: i64,
+        mtime: i64,
+        now: i64,
+    ) -> Result<ProcessResult> {
+        let reconciled = reconcile_file(conn, root_id, rel_path, full_path, device, inode, size, mtime)?;
+
+        match &reconciled.reconciliation {
+            Reconciliation::Unchanged { source_id } => {
+                // Persist unchanged inline (no batching in tests)
+                flush_unchanged(conn, &[(*source_id, device, inode)], now)?;
+                Ok(ProcessResult {
+                    source_id: *source_id,
+                    action: FileAction::Unchanged,
+                    old_object_id: reconciled.source_at_path.and_then(|s| s.object_id),
+                })
+            }
+            _ => {
+                let source = persist_file(conn, &reconciled.observation, &reconciled.reconciliation, now)?;
+                let (action, old_object_id) = match &reconciled.reconciliation {
+                    Reconciliation::New => (FileAction::New, None),
+                    Reconciliation::Modified { old_object_id, .. } => (FileAction::Modified, *old_object_id),
+                    Reconciliation::Moved { old_object_id, .. } => (FileAction::Moved, *old_object_id),
+                    Reconciliation::Unchanged { .. } => unreachable!(),
+                };
+                Ok(ProcessResult {
+                    source_id: source.id,
+                    action,
+                    old_object_id,
+                })
+            }
+        }
     }
 
     /// Create a temp file with content and return (path, device, inode, size, mtime).

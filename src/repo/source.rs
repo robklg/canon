@@ -685,6 +685,33 @@ pub fn mark_missing(conn: &Connection, source_ids: &[i64], now: i64) -> Result<u
     Ok(total_updated)
 }
 
+/// Batch update last_seen_at and device/inode for unchanged sources.
+///
+/// For unchanged files during scan, we only need to update location metadata
+/// (device/inode may change on remount) and the last_seen_at timestamp.
+/// Batching these updates avoids per-file transactions.
+///
+/// Each entry is (source_id, device, inode).
+pub fn batch_update_unchanged(
+    conn: &Connection,
+    entries: &[(i64, i64, i64)],
+    now: i64,
+) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let mut stmt = conn.prepare_cached(
+        "UPDATE sources SET device = ?, inode = ?, last_seen_at = ? WHERE id = ?",
+    )?;
+
+    for &(source_id, device, inode) in entries {
+        stmt.execute(rusqlite::params![device, inode, now, source_id])?;
+    }
+
+    Ok(())
+}
+
 /// Fetch source IDs for a given root (for missing detection).
 ///
 /// Returns the set of present source IDs for the specified root.
