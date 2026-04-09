@@ -884,11 +884,15 @@ fn prefetch_status_data(
     Ok(())
 }
 
-/// Validate that all keys used in filters are known (built-in or exist in facts table)
+/// Validate that all keys used in filters are known (built-in or exist in facts table).
+///
+/// Exists (`?`) expressions are excluded from validation because their purpose
+/// is to test whether a fact is present — an unknown key simply means "not present"
+/// for every source, which is a valid (false) result, not an error.
 fn validate_filter_keys(conn: &Connection, filters: &[Filter]) -> Result<()> {
     let mut all_keys = Vec::new();
     for filter in filters {
-        extract_keys(filter, &mut all_keys);
+        extract_comparable_keys(filter, &mut all_keys);
     }
 
     for key in all_keys {
@@ -900,7 +904,7 @@ fn validate_filter_keys(conn: &Connection, filters: &[Filter]) -> Result<()> {
     Ok(())
 }
 
-/// Extract all keys used in an expression
+/// Extract all keys used in an expression (for prefetching).
 fn extract_keys(expr: &Expr, keys: &mut Vec<String>) {
     match expr {
         Expr::And(exprs) | Expr::Or(exprs) => {
@@ -912,7 +916,26 @@ fn extract_keys(expr: &Expr, keys: &mut Vec<String>) {
         Expr::Exists { key } => keys.push(key.clone()),
         Expr::Compare { key, .. } => keys.push(key.clone()),
         Expr::In { key, .. } => keys.push(key.clone()),
-        Expr::Status(_) => {} // No keys to extract
+        Expr::Status(_) => {}
+    }
+}
+
+/// Extract keys used in comparison/IN expressions (not Exists).
+///
+/// Exists expressions are intentionally excluded — they test for presence,
+/// so unknown keys are a valid "not present" result, not an error.
+fn extract_comparable_keys(expr: &Expr, keys: &mut Vec<String>) {
+    match expr {
+        Expr::And(exprs) | Expr::Or(exprs) => {
+            for e in exprs {
+                extract_comparable_keys(e, keys);
+            }
+        }
+        Expr::Not(e) => extract_comparable_keys(e, keys),
+        Expr::Exists { .. } => {} // Existence checks don't need key validation
+        Expr::Compare { key, .. } => keys.push(key.clone()),
+        Expr::In { key, .. } => keys.push(key.clone()),
+        Expr::Status(_) => {}
     }
 }
 
@@ -2339,5 +2362,49 @@ mod tests {
         assert!(used.excluded);
         assert!(!used.hashed);
         assert!(!used.enriched);
+    }
+
+    /// Regression: `NOT content.mime?` must not error when no facts are ingested.
+    /// Existence checks should return false (not error) for unknown keys.
+    #[test]
+    fn exists_unknown_key_returns_false_not_error() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let s1 = insert_source(&conn, root, "a.jpg");
+        let s2 = insert_source(&conn, root, "b.jpg");
+
+        // No facts ingested — content.mime doesn't exist in facts table
+        let filter = Expr::parse("NOT content.mime?").unwrap();
+        let result = apply_filters(&mut conn, &[s1, s2], &[filter]).unwrap();
+
+        // All sources should match (content.mime doesn't exist for any)
+        assert_eq!(result.source_ids.len(), 2);
+    }
+
+    /// Existence check with unknown key (positive) should match nothing.
+    #[test]
+    fn exists_unknown_key_positive_matches_nothing() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let s1 = insert_source(&conn, root, "a.jpg");
+
+        let filter = Expr::parse("content.mime?").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+
+        assert!(result.source_ids.is_empty());
+    }
+
+    /// Compare with unknown key should still error (typo protection).
+    #[test]
+    fn compare_unknown_key_still_errors() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let s1 = insert_source(&conn, root, "a.jpg");
+
+        let filter = Expr::parse("content.mime=image/jpeg").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]);
+
+        let err = result.err().expect("should error on unknown key in comparison");
+        assert!(err.to_string().contains("Unknown fact key"));
     }
 }
