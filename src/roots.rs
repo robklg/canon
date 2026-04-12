@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 
 use crate::ceremony;
-use crate::domain::config::LedgerConfig;
+use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
 use crate::domain::path::resolve_path;
 use crate::domain::{parse_root_spec, parse_root_spec_any, Root};
@@ -128,7 +128,8 @@ pub fn remove(
     spec: &str,
     yes: bool,
     command_line: &str,
-    no_record: bool,
+    config: &LedgerConfig,
+    no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn();
@@ -165,9 +166,9 @@ pub fn remove(
         reason: reason
             .map(|r| r.to_string())
             .filter(|r| !r.trim().is_empty()),
-        record_enabled: !no_record,
-        receipt_enabled: false,
-        ledger_config: LedgerConfig::default(),
+        record_enabled: config.recording != RecordingMode::Off,
+        receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
+        ledger_config: config.clone(),
     };
     let result = ops::roots::execute_remove(conn, &plan, Some(&decision))?;
     println!("{}", result.summary);
@@ -194,7 +195,7 @@ pub fn set_comment(db: &Db, spec: &str, comment: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-pub fn suspend(db: &Db, spec: &str, command_line: &str, no_record: bool) -> Result<()> {
+pub fn suspend(db: &Db, spec: &str, command_line: &str, config: &LedgerConfig, no_receipt: bool) -> Result<()> {
     let conn = db.conn();
 
     // Fetch all roots for spec resolution
@@ -212,9 +213,9 @@ pub fn suspend(db: &Db, spec: &str, command_line: &str, no_record: bool) -> Resu
         scope: root_path.map(|p| vec![p]),
         command_line: command_line.to_string(),
         reason: None,
-        record_enabled: !no_record,
-        receipt_enabled: false,
-        ledger_config: LedgerConfig::default(),
+        record_enabled: config.recording != RecordingMode::Off,
+        receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
+        ledger_config: config.clone(),
     };
 
     match ops::roots::execute_suspend(conn, root_id, Some(&decision)) {
@@ -232,7 +233,7 @@ pub fn suspend(db: &Db, spec: &str, command_line: &str, no_record: bool) -> Resu
     }
 }
 
-pub fn unsuspend(db: &Db, spec: &str, command_line: &str, no_record: bool) -> Result<()> {
+pub fn unsuspend(db: &Db, spec: &str, command_line: &str, config: &LedgerConfig, no_receipt: bool) -> Result<()> {
     let conn = db.conn();
 
     // Fetch all roots for spec resolution
@@ -250,9 +251,9 @@ pub fn unsuspend(db: &Db, spec: &str, command_line: &str, no_record: bool) -> Re
         scope: root_path.map(|p| vec![p]),
         command_line: command_line.to_string(),
         reason: None,
-        record_enabled: !no_record,
-        receipt_enabled: false,
-        ledger_config: LedgerConfig::default(),
+        record_enabled: config.recording != RecordingMode::Off,
+        receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
+        ledger_config: config.clone(),
     };
 
     match ops::roots::execute_unsuspend(conn, root_id, Some(&decision)) {

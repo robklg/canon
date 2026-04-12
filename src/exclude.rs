@@ -7,7 +7,7 @@ use crate::domain::path::{resolve_path, validate_paths_in_roots};
 use crate::domain::root::find_containing_root;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::Filter;
-use crate::domain::config::LedgerConfig;
+use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::ops::decision::DecisionParams;
 use crate::ops::exclude::{
     self, check_clear_object, check_set_object_by_file, check_set_object_by_hash,
@@ -23,7 +23,8 @@ fn make_decision(
     command: DecisionCommand,
     scope: Option<Vec<String>>,
     command_line: &str,
-    no_record: bool,
+    config: &LedgerConfig,
+    no_receipt: bool,
     reason: Option<&str>,
     dry_run: bool,
 ) -> DecisionParams {
@@ -34,9 +35,9 @@ fn make_decision(
         reason: reason
             .map(|r| r.to_string())
             .filter(|r| !r.trim().is_empty()),
-        record_enabled: !no_record && !dry_run,
-        receipt_enabled: false, // threaded in Phase 5
-        ledger_config: LedgerConfig::default(), // threaded in Phase 5
+        record_enabled: config.recording != RecordingMode::Off && !dry_run,
+        receipt_enabled: config.recording == RecordingMode::Full && !no_receipt && !dry_run,
+        ledger_config: config.clone(),
     }
 }
 
@@ -65,7 +66,8 @@ pub fn set(
     filter_strs: &[String],
     options: &SetOptions,
     command_line: &str,
-    no_record: bool,
+    config: &LedgerConfig,
+    no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn_mut();
@@ -109,7 +111,8 @@ pub fn set(
         DecisionCommand::ExcludeSet,
         Some(scope_prefixes.to_vec()),
         command_line,
-        no_record,
+        config,
+        no_receipt,
         reason,
         options.dry_run,
     );
@@ -128,7 +131,8 @@ pub fn clear(
     filter_strs: &[String],
     options: &ClearOptions,
     command_line: &str,
-    no_record: bool,
+    config: &LedgerConfig,
+    no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn_mut();
@@ -177,7 +181,8 @@ pub fn clear(
         DecisionCommand::ExcludeClear,
         Some(scope_prefixes.to_vec()),
         command_line,
-        no_record,
+        config,
+        no_receipt,
         reason,
         options.dry_run,
     );
@@ -192,7 +197,8 @@ pub fn set_by_id(
     source_id: i64,
     options: &SetOptions,
     command_line: &str,
-    no_record: bool,
+    config: &LedgerConfig,
+    no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn();
@@ -210,7 +216,8 @@ pub fn set_by_id(
                     DecisionCommand::ExcludeSet,
                     Some(vec![path.clone()]),
                     command_line,
-                    no_record,
+                    config,
+                    no_receipt,
                     reason,
                     options.dry_run,
                 );
@@ -228,7 +235,8 @@ pub fn set_by_path(
     file_path: &Path,
     options: &SetOptions,
     command_line: &str,
-    no_record: bool,
+    config: &LedgerConfig,
+    no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn();
@@ -258,7 +266,8 @@ pub fn set_by_path(
                     DecisionCommand::ExcludeSet,
                     Some(vec![path.clone()]),
                     command_line,
-                    no_record,
+                    config,
+                    no_receipt,
                     reason,
                     options.dry_run,
                 );
@@ -290,7 +299,8 @@ pub fn exclude_duplicates(
     dry_run: bool,
     yes: bool,
     command_line: &str,
-    no_record: bool,
+    config: &LedgerConfig,
+    no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn_mut();
@@ -394,7 +404,8 @@ pub fn exclude_duplicates(
         DecisionCommand::ExcludeDuplicates,
         Some(scope_prefixes.clone()),
         command_line,
-        no_record,
+        config,
+        no_receipt,
         reason,
         dry_run,
     );
@@ -417,7 +428,8 @@ pub fn set_object_by_hash(
     hash: &str,
     options: &SetOptions,
     command_line: &str,
-    no_record: bool,
+    config: &LedgerConfig,
+    no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn();
@@ -440,7 +452,8 @@ pub fn set_object_by_hash(
                     DecisionCommand::ExcludeSetObject,
                     None,
                     command_line,
-                    no_record,
+                    config,
+                    no_receipt,
                     reason,
                     options.dry_run,
                 );
@@ -460,7 +473,8 @@ pub fn set_object_by_file(
     file_path: &Path,
     options: &SetOptions,
     command_line: &str,
-    no_record: bool,
+    config: &LedgerConfig,
+    no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn();
@@ -498,7 +512,8 @@ pub fn set_object_by_file(
                     DecisionCommand::ExcludeSetObject,
                     Some(vec![path_str]),
                     command_line,
-                    no_record,
+                    config,
+                    no_receipt,
                     reason,
                     options.dry_run,
                 );
@@ -519,7 +534,8 @@ pub fn set_objects_by_filter(
     filter_strs: &[String],
     options: &SetOptions,
     command_line: &str,
-    no_record: bool,
+    config: &LedgerConfig,
+    no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn_mut();
@@ -601,7 +617,8 @@ pub fn set_objects_by_filter(
         DecisionCommand::ExcludeSetObject,
         Some(scope_prefixes.to_vec()),
         command_line,
-        no_record,
+        config,
+        no_receipt,
         reason,
         options.dry_run,
     );
@@ -645,7 +662,8 @@ pub fn clear_object(
     hash: &str,
     options: &ClearOptions,
     command_line: &str,
-    no_record: bool,
+    config: &LedgerConfig,
+    no_receipt: bool,
 ) -> Result<()> {
     let conn = db.conn();
 
@@ -664,7 +682,8 @@ pub fn clear_object(
                     DecisionCommand::ExcludeClearObject,
                     None,
                     command_line,
-                    no_record,
+                    config,
+                    no_receipt,
                     None,
                     options.dry_run,
                 );
@@ -795,7 +814,7 @@ mod tests {
             yes: true,
         };
 
-        let result = set_by_id(&db, source_id, &options, "test", true, None);
+        let result = set_by_id(&db, source_id, &options, "test", &LedgerConfig::default(), false, None);
         assert!(result.is_ok());
 
         assert!(
@@ -819,7 +838,7 @@ mod tests {
         };
 
         // Path that definitely doesn't exist
-        let result = set_by_path(&db, Path::new("/nonexistent/path/to/file.jpg"), &options, "test", true, None);
+        let result = set_by_path(&db, Path::new("/nonexistent/path/to/file.jpg"), &options, "test", &LedgerConfig::default(), false, None);
         assert!(result.is_err());
 
         let err_msg = result.unwrap_err().to_string();
@@ -841,7 +860,7 @@ mod tests {
 
         // Use a path that exists on disk but isn't in the database
         // /tmp should exist on most Unix systems
-        let result = set_by_path(&db, Path::new("/tmp"), &options, "test", true, None);
+        let result = set_by_path(&db, Path::new("/tmp"), &options, "test", &LedgerConfig::default(), false, None);
         assert!(result.is_err());
 
         let err_msg = result.unwrap_err().to_string();
@@ -887,7 +906,8 @@ mod tests {
             &[], // no filters
             &options,
             "test",
-            true,
+            &LedgerConfig::default(),
+            false,
             None,
         );
 
@@ -913,7 +933,7 @@ mod tests {
             yes: true,
         };
 
-        let result = set_objects_by_filter(&mut db, &[], &[], &options, "test", true, None);
+        let result = set_objects_by_filter(&mut db, &[], &[], &options, "test", &LedgerConfig::default(), false, None);
 
         assert!(result.is_ok());
         // Object should NOT be excluded (dry run)
@@ -941,7 +961,7 @@ mod tests {
         };
 
         // Use empty scopes so we don't try to canonicalize non-existent paths
-        let result = set(&mut db, &[], &[], &options, "test", true, None);
+        let result = set(&mut db, &[], &[], &options, "test", &LedgerConfig::default(), false, None);
         assert!(result.is_ok());
 
         // Verify the source was excluded
@@ -976,7 +996,8 @@ mod tests {
             false,
             false, // yes=false, but count=1 so no prompt
             "test",
-            true,
+            &LedgerConfig::default(),
+            false,
             None,
         );
 

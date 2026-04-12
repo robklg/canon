@@ -136,7 +136,7 @@ impl DecisionRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::config::LedgerConfig;
+    use crate::domain::config::{LedgerConfig, RecordingMode};
     use crate::repo::db::open_in_memory_for_test;
 
     fn setup_test_db() -> Connection {
@@ -375,5 +375,65 @@ mod tests {
         );
         let warnings = recorder.take_warnings();
         assert!(warnings.is_empty());
+    }
+
+    // =========================================================================
+    // Phase 5: recording mode tests
+    // =========================================================================
+
+    fn make_params_with_config(command: DecisionCommand, config: LedgerConfig, no_receipt: bool) -> DecisionParams {
+        DecisionParams {
+            command,
+            scope: None,
+            command_line: "canon test".to_string(),
+            reason: None,
+            record_enabled: config.recording != RecordingMode::Off,
+            receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
+            ledger_config: config,
+        }
+    }
+
+    #[test]
+    fn test_recording_off_no_db_record() {
+        // recording=Off → no DB row created
+        let conn = setup_test_db();
+        let config = LedgerConfig {
+            recording: RecordingMode::Off,
+            ..LedgerConfig::default()
+        };
+        let params = make_params_with_config(DecisionCommand::Scan, config, false);
+        let recorder = DecisionRecorder::start(&conn, &params);
+        assert!(recorder.decision_id().is_none());
+        assert_eq!(count_decisions(&conn), 0);
+    }
+
+    #[test]
+    fn test_recording_records_db_only() {
+        // recording=Records → DB row exists, receipt_enabled=false
+        let conn = setup_test_db();
+        let config = LedgerConfig {
+            recording: RecordingMode::Records,
+            ..LedgerConfig::default()
+        };
+        let params = make_params_with_config(DecisionCommand::Scan, config, false);
+        assert!(!params.receipt_enabled);
+        let recorder = DecisionRecorder::start(&conn, &params);
+        assert!(recorder.decision_id().is_some());
+        assert_eq!(count_decisions(&conn), 1);
+    }
+
+    #[test]
+    fn test_recording_full_both() {
+        // recording=Full → DB row exists, receipt_enabled=true
+        let conn = setup_test_db();
+        let config = LedgerConfig {
+            recording: RecordingMode::Full,
+            ..LedgerConfig::default()
+        };
+        let params = make_params_with_config(DecisionCommand::Scan, config, false);
+        assert!(params.receipt_enabled);
+        let recorder = DecisionRecorder::start(&conn, &params);
+        assert!(recorder.decision_id().is_some());
+        assert_eq!(count_decisions(&conn), 1);
     }
 }

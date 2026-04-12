@@ -3,7 +3,7 @@
 **Design Spec**: [~/store/claude-designs/2026-04-11-decision-receipts.md](~/store/claude-designs/2026-04-11-decision-receipts.md)
 **Lineage Spec**: [~/store/claude-designs/2026-04-12-destination-provenance.md](~/store/claude-designs/2026-04-12-destination-provenance.md)
 **Epic**: [epic-decision-receipts.md](epic-decision-receipts.md)
-**Status**: In Progress (Phases 1-4 complete, Phase 5 pending)
+**Status**: Complete
 **Created**: 2026-04-12
 
 ## Objective
@@ -546,9 +546,9 @@ All existing tests. The `DecisionParams.enabled` → `record_enabled` rename and
 - [x] Phase 2: Schema changes (3 tables, domain structs, repo queries)
 - [x] Phase 3: DecisionParams/DecisionRecorder rework + ops/fs primitives
 - [x] Phase 4: Source decision_id in insert_destination + apply_reconciliation
-- [ ] Phase 5: CLI migration (--no-record → --no-receipt) + config threading + scan exclusion
-- [ ] Verify all existing tests pass
-- [ ] Update CLAUDE.md: domain/config.rs, sources.decision_id, decisions receipt columns, decision_scopes table, --no-receipt flag, config.toml in Canon Home section, recording mode
+- [x] Phase 5: CLI migration (--no-record → --no-receipt) + config threading + scan exclusion
+- [x] Verify all existing tests pass
+- [x] Update CLAUDE.md: domain/config.rs, sources.decision_id, decisions receipt columns, decision_scopes table, --no-receipt flag, config.toml in Canon Home section, recording mode
 
 ## Documentation Updates
 

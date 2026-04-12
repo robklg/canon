@@ -32,6 +32,7 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 - `root.rs` - Root struct, RootSpec enum, predicates (`is_suspended()`, `is_source()`)
 - `object.rs` - Object struct and `is_excluded()` predicate
 - `fact.rs` - FactEntry struct, re-exports FactValue/FactType
+- `config.rs` - Ledger configuration (`LedgerConfig`, `RecordingMode` enum: `Full`/`Records`/`Off`, `ReceiptLayout` enum: `Central`/`Alongside`). Loaded from `$CANON_HOME/config.toml`.
 - `decision.rs` - `DecisionCommand` enum (stable command identifiers), `DecisionStatus` enum, `Decision` struct
 - `format.rs` - Pure formatting utilities (`format_count()` — thousands separators)
 - `scope.rs` - ScopeMatch enum for file vs directory scope matching
@@ -66,12 +67,12 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 - `ls.rs` - Duplicate detection: `find_duplicate_groups()`, `DuplicateGroup`
 - `survey.rs` - Survey computation: `compute_survey()`, `SurveyParams`, `SurveyOutcome`, `SurveyResult`, `LocationResult`
 - `facts.rs` - Facts distribution: `compute_all_keys()`, `compute_distribution()`, `compute_grouped_distribution()`, `DistributionResult`, `AllKeysResult`
-- `decision.rs` - Decision recording: `DecisionRecorder` (two-phase start/complete), `DecisionParams`, `DecisionCounts`
+- `decision.rs` - Decision recording: `DecisionRecorder` (two-phase start/complete), `DecisionParams` (`record_enabled`, `receipt_enabled`, `ledger_config`), `DecisionCounts`. `recorder.decision_id()` exposes the inserted ID for threading to scan/apply.
 - `roots.rs` - Root operations: `plan_remove()`, `execute_remove()`, `execute_suspend()`, `execute_unsuspend()`
 - `note.rs` - Composed note operations: `resolve_note_scope()`, `view_notes()`, `list_notes_global()`, `list_notes_recursive()`, `list_locations_global()`, `list_locations_recursive()`, `plan_clear_recursive()`, `execute_clear_recursive()`, `execute_clear_exact()`, `survey_note_context()`, `NoteScope`, `NoteViewResult`, `NoteListResult`, `NoteSpatialResult`, `ClearPlan`, `SurveyNoteContext`
 - `import_facts.rs` - Import facts processing: `init_state()`, `process_record()`, `ImportRecord`, `ImportState`, `ImportStats`, `RecordOutcome`
 - `scan.rs` - Scan pipeline: `scan_root()`, `ScanOptions`, `ScanProgress` trait, `ScanStats`, `FileToHash`, `ScanRootResult`
-- `fs.rs` - Filesystem primitives: `compute_partial_hash()`, `compute_full_hash()`, `preserve_metadata()`, `check_destination_writable()`, `ensure_parent_dir()`, `copy_file()`, `rename_file()`, `move_file()`, `MoveOutcome`
+- `fs.rs` - Filesystem primitives: `compute_partial_hash()`, `compute_full_hash()`, `preserve_metadata()`, `check_destination_writable()`, `ensure_parent_dir()`, `copy_file()`, `rename_file()`, `move_file()`, `MoveOutcome`. Atomic write primitives: `write_file_incomplete()` (writes `.tmp` suffix), `finalize_file()` (renames into place).
 
 **Command Modules** (flat in `src/`):
 - `main.rs` - CLI entry point using clap (canon home resolution, alias expansion dispatch)
@@ -117,8 +118,13 @@ Three unified flags control visibility, awareness, and scope across all commands
 
 Two additional flags support decision provenance:
 
-- **`--no-record`** (global, all commands): Suppresses decision recording for this invocation. Per-invocation opt-out, not a persistent setting.
+- **`--no-receipt`** (global, all commands): Suppresses receipt file generation for this invocation (recording to DB still happens per `RecordingMode`). Per-invocation opt-out, not a persistent setting.
 - **`--reason`** (effectful commands: `exclude set/clear/duplicates/set-object`, `apply`, `scan`, `roots rm`): Attaches user reasoning to the decision record. Optional — no prompting when omitted. Empty strings treated as no reason.
+
+**Recording modes** (configured in `$CANON_HOME/config.toml` via `ledger.recording`):
+- `Full` — record to DB and write receipt files to the ledger directory
+- `Records` — record to DB only, no receipt files
+- `Off` — no recording at all (disables both DB records and receipts)
 
 **CWD scope defaulting**: All scope-taking commands default to CWD when no paths are given and CWD is inside a known root. When CWD is inside an archive root, `--include archived` is auto-enabled. When CWD is not under any root, commands operate globally. Use `--global` to force global scope while inside a root. This applies to both discovery commands (`ls`, `survey`, `facts`, `coverage`, `worklist`) and effectful commands (`cluster generate`, `exclude set/clear/set-object`). Effectful commands have confirmation prompts that show scope, count, and root breakdown — the user always sees what they're about to affect.
 
@@ -136,7 +142,15 @@ All Canon state lives under a single "canon home" directory:
 - Default: `~/.canon/`
 - Override with `CANON_HOME` env var or `--canon-home` flag
 - Precedence: `--canon-home` flag > `CANON_HOME` env var > `~/.canon/`
-- Contains: `canon.db` (database), `aliases.toml` (expression aliases)
+- Contains: `canon.db` (database), `aliases.toml` (expression aliases), `config.toml` (ledger/recording settings)
+
+**`config.toml`** format:
+```toml
+[ledger]
+recording = "Full"   # Full | Records | Off
+layout = "Central"   # Central (receipts under $CANON_HOME/.canon-ledger/) | Alongside (receipts beside sources)
+```
+Missing or empty `config.toml` is fine — `LedgerConfig::default()` is `recording = Full`, `layout = Central`.
 
 ### Expression Aliases
 
@@ -155,9 +169,15 @@ Alias expansion happens in `main.rs` before command dispatch. The pure expansion
 
 Default location: `$CANON_HOME/canon.db`
 
-Key tables: `roots`, `sources`, `objects`, `facts`, `notes`, `decisions`
+Key tables: `roots`, `sources`, `objects`, `facts`, `notes`, `decisions`, `decision_scopes`
 
 Roots table columns include `suspended` (integer, default 0) for temporarily hiding roots from operations, `comment` for user notes, and `last_scanned_at` timestamp.
+
+Sources table includes `decision_id` (integer, nullable FK to `decisions.id`): records which decision caused the most recent state transition. Set on `New` reconciliations and `insert_destination()` (apply). `Modified`/`Moved`/`Unchanged` paths preserve the existing value — the column is omitted from their UPDATE statements entirely.
+
+Decisions table includes `receipt_root_id` (integer, nullable FK to `roots.id`) and `receipt_rel_path` (text, nullable): location of the receipt file when `RecordingMode::Full` is active and `--no-receipt` is not set.
+
+`decision_scopes` table: durable root-based scope index for decisions. Rows: `(decision_id, root_id, rel_prefix)`. Table exists but is not yet populated — scope index writing is planned for a future story.
 
 **SQL Batching Requirement:** Any SQL with `WHERE ... IN (...)` clauses MUST handle large ID lists. SQLite has a variable limit (~999-32K depending on version). Use one of these patterns:
 - **Chunking:** `for chunk in ids.chunks(BATCH_SIZE)` with `BATCH_SIZE = 1000` (see `repo/source.rs`)

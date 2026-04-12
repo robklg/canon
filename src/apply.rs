@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::ceremony;
-use crate::domain::config::LedgerConfig;
+use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
 use crate::ops::cluster::{ManifestConfig, parse_manifest_allow, validate_manifest_version};
 use crate::ops::decision::DecisionParams;
@@ -31,7 +31,8 @@ pub fn run(
     manifest_path: &Path,
     options: &ApplyOptions,
     command_line: &str,
-    no_record: bool,
+    ledger: &LedgerConfig,
+    no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
     // Platform checks: --rename and --move are Unix-only
@@ -486,9 +487,9 @@ pub fn run(
         }),
         command_line: command_line.to_string(),
         reason: effective_reason,
-        record_enabled: !no_record && !options.dry_run,
-        receipt_enabled: false,
-        ledger_config: LedgerConfig::default(),
+        record_enabled: ledger.recording != RecordingMode::Off && !options.dry_run,
+        receipt_enabled: ledger.recording == RecordingMode::Full && !no_receipt && !options.dry_run,
+        ledger_config: ledger.clone(),
     };
 
     let progress_impl = CliTransferProgress::new(options.verbose);

@@ -87,9 +87,9 @@ struct Cli {
     #[arg(long, global = true)]
     profile: bool,
 
-    /// Suppress decision recording for this invocation
+    /// Suppress receipt generation for this invocation
     #[arg(long, global = true)]
-    no_record: bool,
+    no_receipt: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -793,7 +793,7 @@ fn main() -> Result<()> {
                 ignore_device_id,
                 missing,
                 &command_line,
-                cli.no_record,
+                &config, cli.no_receipt,
                 reason.as_deref(),
             )?;
         }
@@ -817,7 +817,7 @@ fn main() -> Result<()> {
         }
         Commands::ImportFacts { allow, verbose } => {
             let allow_archived = allow.contains(&ImportFactsAllow::Archived);
-            import_facts::run(&mut db, allow_archived, verbose, &command_line, cli.no_record)?;
+            import_facts::run(&mut db, allow_archived, verbose, &command_line, &config, cli.no_receipt)?;
         }
         Commands::Ls {
             paths,
@@ -899,7 +899,7 @@ fn main() -> Result<()> {
                         value_type,
                         dry_run: !yes,
                     };
-                    facts::delete_facts(&mut db, &key, &resolved.prefixes, &filters, &options, &command_line, cli.no_record)?;
+                    facts::delete_facts(&mut db, &key, &resolved.prefixes, &filters, &options, &command_line, &config, cli.no_receipt)?;
                 }
                 None => {
                     let filters = alias::expand_filter_strings(&filters, &canon_home)?;
@@ -934,13 +934,13 @@ fn main() -> Result<()> {
                 anyhow::bail!("At least one of --orphaned-objects, --stale-facts, or --excluded-facts is required");
             }
             if stale_facts {
-                facts::prune_stale(&db, !yes, &command_line, cli.no_record)?;
+                facts::prune_stale(&db, !yes, &command_line, &config, cli.no_receipt)?;
             }
             if orphaned_objects {
-                facts::prune_orphaned_objects(&mut db, !yes, &command_line, cli.no_record)?;
+                facts::prune_orphaned_objects(&mut db, !yes, &command_line, &config, cli.no_receipt)?;
             }
             if let Some(scope) = excluded_facts {
-                facts::prune_excluded_facts(&db, &scope, !yes, &command_line, cli.no_record)?;
+                facts::prune_excluded_facts(&db, &scope, !yes, &command_line, &config, cli.no_receipt)?;
             }
         }
         Commands::Coverage {
@@ -1077,7 +1077,7 @@ fn main() -> Result<()> {
                     &output_path,
                     &options,
                     &command_line,
-                    cli.no_record,
+                    &config, cli.no_receipt,
                 )?;
             }
             ClusterAction::Refresh {
@@ -1085,7 +1085,7 @@ fn main() -> Result<()> {
                 show_archived,
                 edit,
             } => {
-                cluster::refresh(&mut db, &manifest, show_archived, !edit, &command_line, cli.no_record)?;
+                cluster::refresh(&mut db, &manifest, show_archived, !edit, &command_line, &config, cli.no_receipt)?;
             }
             ClusterAction::Status { manifest, verbose } => {
                 cluster::status(db.conn_mut(), &manifest, verbose)?;
@@ -1120,7 +1120,7 @@ fn main() -> Result<()> {
                 yes,
                 resume,
             };
-            apply::run(&mut db, &manifest, &options, &command_line, cli.no_record, reason.as_deref())?;
+            apply::run(&mut db, &manifest, &options, &command_line, &config, cli.no_receipt, reason.as_deref())?;
         }
         Commands::Exclude { action } => match action {
             ExcludeAction::Set {
@@ -1139,14 +1139,14 @@ fn main() -> Result<()> {
                     yes,
                 };
                 if let Some(source_id) = id {
-                    exclude::set_by_id(&db, source_id, &options, &command_line, cli.no_record, reason.as_deref())?;
+                    exclude::set_by_id(&db, source_id, &options, &command_line, &config, cli.no_receipt, reason.as_deref())?;
                 } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {
                     // Single file path with no filters: exclude exact file
-                    exclude::set_by_path(&db, &paths[0], &options, &command_line, cli.no_record, reason.as_deref())?;
+                    exclude::set_by_path(&db, &paths[0], &options, &command_line, &config, cli.no_receipt, reason.as_deref())?;
                 } else {
                     let all_roots = repo::root::fetch_all(db.conn())?;
                     let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
-                    exclude::set(&mut db, &resolved.prefixes, &filters, &options, &command_line, cli.no_record, reason.as_deref())?;
+                    exclude::set(&mut db, &resolved.prefixes, &filters, &options, &command_line, &config, cli.no_receipt, reason.as_deref())?;
                 }
             }
             ExcludeAction::Clear {
@@ -1161,7 +1161,7 @@ fn main() -> Result<()> {
                 let options = exclude::ClearOptions { dry_run, yes };
                 let all_roots = repo::root::fetch_all(db.conn())?;
                 let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
-                exclude::clear(&mut db, &resolved.prefixes, &filters, &options, &command_line, cli.no_record, reason.as_deref())?;
+                exclude::clear(&mut db, &resolved.prefixes, &filters, &options, &command_line, &config, cli.no_receipt, reason.as_deref())?;
             }
             ExcludeAction::Duplicates {
                 path,
@@ -1180,7 +1180,7 @@ fn main() -> Result<()> {
                     dry_run,
                     yes,
                     &command_line,
-                    cli.no_record,
+                    &config, cli.no_receipt,
                     reason.as_deref(),
                 )?;
             }
@@ -1200,22 +1200,22 @@ fn main() -> Result<()> {
                     yes,
                 };
                 if let Some(h) = hash {
-                    exclude::set_object_by_hash(&db, &h, &options, &command_line, cli.no_record, reason.as_deref())?;
+                    exclude::set_object_by_hash(&db, &h, &options, &command_line, &config, cli.no_receipt, reason.as_deref())?;
                 } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {
                     // Single file path: exclude that file's object
-                    exclude::set_object_by_file(&db, &paths[0], &options, &command_line, cli.no_record, reason.as_deref())?;
+                    exclude::set_object_by_file(&db, &paths[0], &options, &command_line, &config, cli.no_receipt, reason.as_deref())?;
                 } else {
                     let all_roots = repo::root::fetch_all(db.conn())?;
                     let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
                     if resolved.prefixes.is_empty() && filters.is_empty() {
                         anyhow::bail!("Provide a hash (--hash), file path, or filters (--where)");
                     }
-                    exclude::set_objects_by_filter(&mut db, &resolved.prefixes, &filters, &options, &command_line, cli.no_record, reason.as_deref())?;
+                    exclude::set_objects_by_filter(&mut db, &resolved.prefixes, &filters, &options, &command_line, &config, cli.no_receipt, reason.as_deref())?;
                 }
             }
             ExcludeAction::ClearObject { hash, dry_run } => {
                 let options = exclude::ClearOptions { dry_run, yes: true };
-                exclude::clear_object(&db, &hash, &options, &command_line, cli.no_record)?;
+                exclude::clear_object(&db, &hash, &options, &command_line, &config, cli.no_receipt)?;
             }
             ExcludeAction::ListObjects => {
                 exclude::list_objects(&db)?;
@@ -1242,7 +1242,7 @@ fn main() -> Result<()> {
                 by_scope,
                 limit,
                 &command_line,
-                cli.no_record,
+                &config, cli.no_receipt,
             )?;
         }
         Commands::Roots {
@@ -1257,16 +1257,16 @@ fn main() -> Result<()> {
                 roots::list(&db, path.as_deref(), suspended)?;
             }
             Some(RootsAction::Rm { spec, yes, reason }) => {
-                roots::remove(&db, &spec, yes, &command_line, cli.no_record, reason.as_deref())?;
+                roots::remove(&db, &spec, yes, &command_line, &config, cli.no_receipt, reason.as_deref())?;
             }
             Some(RootsAction::Comment { spec, comment }) => {
                 roots::set_comment(&db, &spec, comment.as_deref())?;
             }
             Some(RootsAction::Suspend { spec }) => {
-                roots::suspend(&db, &spec, &command_line, cli.no_record)?;
+                roots::suspend(&db, &spec, &command_line, &config, cli.no_receipt)?;
             }
             Some(RootsAction::Unsuspend { spec }) => {
-                roots::unsuspend(&db, &spec, &command_line, cli.no_record)?;
+                roots::unsuspend(&db, &spec, &command_line, &config, cli.no_receipt)?;
             }
         },
     }

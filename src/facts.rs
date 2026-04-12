@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 
-use crate::domain::config::LedgerConfig;
+use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
 use crate::domain::format_count;
 use crate::domain::scope::ScopeMatch;
@@ -439,7 +439,8 @@ pub fn delete_facts(
     filter_strs: &[String],
     options: &DeleteOptions,
     command_line: &str,
-    no_record: bool,
+    config: &LedgerConfig,
+    no_receipt: bool,
 ) -> Result<()> {
     // Validate key and entity type
     ops::facts::validate_delete_key(key)?;
@@ -509,9 +510,9 @@ pub fn delete_facts(
             scope: Some(scope_prefixes.to_vec()),
             command_line: command_line.to_string(),
             reason: None,
-            record_enabled: !no_record && !options.dry_run,
-            receipt_enabled: false,
-            ledger_config: LedgerConfig::default(),
+            record_enabled: config.recording != RecordingMode::Off && !options.dry_run,
+            receipt_enabled: config.recording == RecordingMode::Full && !no_receipt && !options.dry_run,
+            ledger_config: config.clone(),
         };
         let result = ops::facts::execute_delete(
             conn,
@@ -532,7 +533,7 @@ pub fn delete_facts(
 // Prune Stale Facts
 // ============================================================================
 
-pub fn prune_stale(db: &Db, dry_run: bool, command_line: &str, no_record: bool) -> Result<()> {
+pub fn prune_stale(db: &Db, dry_run: bool, command_line: &str, config: &LedgerConfig, no_receipt: bool) -> Result<()> {
     let conn = db.conn();
 
     let plan = ops::facts::plan_prune_stale(conn)?;
@@ -553,9 +554,9 @@ pub fn prune_stale(db: &Db, dry_run: bool, command_line: &str, no_record: bool) 
             scope: None,
             command_line: command_line.to_string(),
             reason: None,
-            record_enabled: !no_record && !dry_run,
-            receipt_enabled: false,
-            ledger_config: LedgerConfig::default(),
+            record_enabled: config.recording != RecordingMode::Off && !dry_run,
+            receipt_enabled: config.recording == RecordingMode::Full && !no_receipt && !dry_run,
+            ledger_config: config.clone(),
         };
         let result = ops::facts::execute_prune_stale(conn, Some(&decision))?;
         println!("{}", result.summary);
@@ -569,7 +570,7 @@ pub fn prune_stale(db: &Db, dry_run: bool, command_line: &str, no_record: bool) 
 // Prune Orphaned Objects
 // ============================================================================
 
-pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool, command_line: &str, no_record: bool) -> Result<()> {
+pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool, command_line: &str, config: &LedgerConfig, no_receipt: bool) -> Result<()> {
     let conn = db.conn_mut();
 
     let stats = ops::facts::plan_prune_orphaned(conn)?;
@@ -599,9 +600,9 @@ pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool, command_line: &str, no
             scope: None,
             command_line: command_line.to_string(),
             reason: None,
-            record_enabled: !no_record && !dry_run,
-            receipt_enabled: false,
-            ledger_config: LedgerConfig::default(),
+            record_enabled: config.recording != RecordingMode::Off && !dry_run,
+            receipt_enabled: config.recording == RecordingMode::Full && !no_receipt && !dry_run,
+            ledger_config: config.clone(),
         };
         let result = ops::facts::execute_prune_orphaned(db, Some(&decision))?;
         println!("{}", result.summary);
@@ -614,7 +615,7 @@ pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool, command_line: &str, no
 // Prune Excluded Facts
 // ============================================================================
 
-pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool, command_line: &str, no_record: bool) -> Result<()> {
+pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool, command_line: &str, config: &LedgerConfig, no_receipt: bool) -> Result<()> {
     ops::facts::validate_prune_excluded_scope(scope)?;
     let conn = db.conn();
 
@@ -659,9 +660,9 @@ pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool, command_line: &
             scope: None,
             command_line: command_line.to_string(),
             reason: None,
-            record_enabled: !no_record && !dry_run,
-            receipt_enabled: false,
-            ledger_config: LedgerConfig::default(),
+            record_enabled: config.recording != RecordingMode::Off && !dry_run,
+            receipt_enabled: config.recording == RecordingMode::Full && !no_receipt && !dry_run,
+            ledger_config: config.clone(),
         };
         let result = ops::facts::execute_prune_excluded(conn, scope, Some(&decision))?;
         if !result.summary.is_empty() {

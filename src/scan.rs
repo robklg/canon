@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use crate::domain::config::LedgerConfig;
+use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::resolve_root_path_any;
 use crate::ops;
@@ -110,7 +110,8 @@ pub fn run(
     ignore_device_id: bool,
     missing: bool,
     command_line: &str,
-    no_record: bool,
+    config: &LedgerConfig,
+    no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
     // Validate role if provided
@@ -162,9 +163,9 @@ pub fn run(
         reason: reason
             .map(|r| r.to_string())
             .filter(|r| !r.trim().is_empty()),
-        record_enabled: !no_record,
-        receipt_enabled: false, // threaded in Phase 5
-        ledger_config: LedgerConfig::default(), // threaded in Phase 5
+        record_enabled: config.recording != RecordingMode::Off,
+        receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
+        ledger_config: config.clone(),
     };
     let mut recorder = DecisionRecorder::start(conn, &decision);
 
@@ -253,14 +254,19 @@ pub fn run(
             Some(prefix) => root_path.join(prefix),
             None => root_path.clone(),
         };
-        let walker = WalkDir::new(&walk_path).follow_links(false);
+        let walker = WalkDir::new(&walk_path)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                !(e.file_type().is_dir() && e.file_name() == ".canon-ledger")
+            });
 
         let result = ops::scan::scan_root(
             conn,
             root_id,
             root_path.to_str().context("Root path is not valid UTF-8")?,
             scan_prefix.as_deref(),
-            walker.into_iter(),
+            walker,
             &scan_options,
             &StderrProgress,
             now,
@@ -619,5 +625,76 @@ mod tests {
         mark_missing_path(&conn, Path::new("/photos/empty"), &roots, 9999, &mut stats).unwrap();
 
         assert_eq!(stats.missing, 0);
+    }
+
+    // =========================================================================
+    // Phase 5: .canon-ledger/ scan exclusion tests
+    // =========================================================================
+
+    use std::fs;
+    use walkdir::WalkDir;
+    use crate::ops::scan::{ScanOptions, ScanProgress, FileAction, scan_root};
+
+    struct NoopProgress;
+    impl ScanProgress for NoopProgress {
+        fn on_file(&self, _: &str, _: &FileAction) {}
+        fn on_walk_error(&self, _: &str) {}
+        fn on_process_error(&self, _: &str, _: &str) {}
+    }
+
+    fn run_filtered_scan(root_path: &std::path::Path) -> crate::ops::scan::ScanRootResult {
+        let conn = repo::open_in_memory_for_test();
+        let root_path_str = root_path.to_str().unwrap();
+        let root_id = repo::insert_test_root(&conn, root_path_str, "source", false);
+        let options = ScanOptions { hash: false, hash_all: false, ignore_device_id: true };
+        let now = crate::ops::scan::current_timestamp();
+
+        let walker = WalkDir::new(root_path)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                !(e.file_type().is_dir() && e.file_name() == ".canon-ledger")
+            });
+
+        scan_root(&conn, root_id, root_path_str, None, walker, &options, &NoopProgress, now, None).unwrap()
+    }
+
+    #[test]
+    fn test_scan_skips_canon_ledger_dir() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        // A regular file that should be indexed
+        fs::write(root.join("photo.jpg"), "data").unwrap();
+
+        // Files inside .canon-ledger/ — should be skipped entirely
+        fs::create_dir(root.join(".canon-ledger")).unwrap();
+        fs::write(root.join(".canon-ledger").join("receipt.toml"), "data").unwrap();
+        fs::write(root.join(".canon-ledger").join("other.toml"), "data").unwrap();
+
+        let result = run_filtered_scan(root);
+
+        // Only photo.jpg should be scanned, nothing from .canon-ledger/
+        assert_eq!(result.stats.new, 1);
+        assert_eq!(result.stats.scanned, 1);
+    }
+
+    #[test]
+    fn test_scan_does_not_skip_similar_names() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        // These directories should NOT be excluded
+        fs::create_dir(root.join(".canon-ledger-old")).unwrap();
+        fs::write(root.join(".canon-ledger-old").join("file.toml"), "data").unwrap();
+
+        fs::create_dir(root.join("canon-ledger")).unwrap();
+        fs::write(root.join("canon-ledger").join("file.toml"), "data").unwrap();
+
+        let result = run_filtered_scan(root);
+
+        // Both files should be scanned
+        assert_eq!(result.stats.new, 2);
+        assert_eq!(result.stats.scanned, 2);
     }
 }

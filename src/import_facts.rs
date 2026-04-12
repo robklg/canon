@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
 use std::io::{self, BufRead};
 
-use crate::domain::config::LedgerConfig;
+use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::ops;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::import_facts::ImportRecord;
 use crate::repo::Db;
 
-pub fn run(db: &mut Db, allow_archived: bool, verbose: bool, command_line: &str, no_record: bool) -> Result<()> {
+pub fn run(db: &mut Db, allow_archived: bool, verbose: bool, command_line: &str, config: &LedgerConfig, no_receipt: bool) -> Result<()> {
     let conn = db.conn_mut();
     let mut state = ops::import_facts::init_state(conn)?;
 
@@ -17,9 +17,9 @@ pub fn run(db: &mut Db, allow_archived: bool, verbose: bool, command_line: &str,
         scope: None,
         command_line: command_line.to_string(),
         reason: None,
-        record_enabled: !no_record,
-        receipt_enabled: false,
-        ledger_config: LedgerConfig::default(),
+        record_enabled: config.recording != RecordingMode::Off,
+        receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
+        ledger_config: config.clone(),
     };
     let mut recorder = DecisionRecorder::start(conn, &decision);
 
