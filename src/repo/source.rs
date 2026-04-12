@@ -416,7 +416,8 @@ pub fn insert_destination(conn: &Connection, new: &NewSource) -> Result<Source> 
             scanned_at = ?,
             last_seen_at = ?,
             present = 1,
-            excluded = 0
+            excluded = 0,
+            decision_id = ?
          WHERE root_id = ? AND rel_path = ?",
         rusqlite::params![
             new.device,
@@ -427,6 +428,7 @@ pub fn insert_destination(conn: &Connection, new: &NewSource) -> Result<Source> 
             new.object_id,
             now,
             now,
+            new.decision_id,
             new.root_id,
             new.rel_path,
         ],
@@ -438,8 +440,9 @@ pub fn insert_destination(conn: &Connection, new: &NewSource) -> Result<Source> 
         conn.execute(
             "INSERT INTO sources (
                 root_id, rel_path, device, inode, size, mtime, partial_hash,
-                object_id, basis_rev, scanned_at, last_seen_at, present, excluded
-             ) VALUES (?, ?, COALESCE(?, 0), COALESCE(?, 0), ?, ?, ?, ?, 0, ?, ?, 1, 0)",
+                object_id, basis_rev, scanned_at, last_seen_at, present, excluded,
+                decision_id
+             ) VALUES (?, ?, COALESCE(?, 0), COALESCE(?, 0), ?, ?, ?, ?, 0, ?, ?, 1, 0, ?)",
             rusqlite::params![
                 new.root_id,
                 new.rel_path,
@@ -451,6 +454,7 @@ pub fn insert_destination(conn: &Connection, new: &NewSource) -> Result<Source> 
                 new.object_id,
                 now,
                 now,
+                new.decision_id,
             ],
         )?;
     }
@@ -496,6 +500,7 @@ pub fn apply_reconciliation(
     observation: &FileObservation,
     reconciliation: &Reconciliation,
     now: i64,
+    decision_id: Option<i64>,
 ) -> Result<Source> {
     match reconciliation {
         Reconciliation::New => {
@@ -508,6 +513,9 @@ pub fn apply_reconciliation(
             // We use the same two-step pattern as insert_destination():
             // - First try UPDATE WHERE present=0 (revive stale record)
             // - If no rows updated, INSERT new record
+            //
+            // decision_id is set on New only — scan UPDATEs (Modified, Moved, Unchanged)
+            // preserve the existing value to maintain provenance.
             let partial_hash = observation
                 .partial_hash
                 .as_ref()
@@ -520,7 +528,7 @@ pub fn apply_reconciliation(
                 "UPDATE sources SET
                     device = ?, inode = ?, size = ?, mtime = ?, partial_hash = ?,
                     basis_rev = 0, scanned_at = ?, last_seen_at = ?,
-                    present = 1, excluded = 0, object_id = NULL
+                    present = 1, excluded = 0, object_id = NULL, decision_id = ?
                  WHERE root_id = ? AND rel_path = ?",
                 rusqlite::params![
                     observation.device as i64,
@@ -530,6 +538,7 @@ pub fn apply_reconciliation(
                     partial_hash,
                     now,
                     now,
+                    decision_id,
                     observation.root_id,
                     observation.rel_path,
                 ],
@@ -540,8 +549,8 @@ pub fn apply_reconciliation(
                 conn.execute(
                     "INSERT INTO sources (
                         root_id, rel_path, device, inode, size, mtime, partial_hash,
-                        basis_rev, scanned_at, last_seen_at, present, excluded
-                     ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1, 0)",
+                        basis_rev, scanned_at, last_seen_at, present, excluded, decision_id
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1, 0, ?)",
                     rusqlite::params![
                         observation.root_id,
                         observation.rel_path,
@@ -552,6 +561,7 @@ pub fn apply_reconciliation(
                         partial_hash,
                         now,
                         now,
+                        decision_id,
                     ],
                 )?;
             }
@@ -1550,6 +1560,88 @@ mod tests {
     }
 
     // =========================================================================
+    // Phase 4: insert_destination decision_id tests
+    // =========================================================================
+
+    #[test]
+    fn test_insert_destination_sets_decision_id() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let obj_id = insert_object(&conn, "hash1", false);
+
+        let new = NewSource {
+            root_id,
+            rel_path: "photo.jpg".to_string(),
+            size: 1024,
+            mtime: 1704067200,
+            partial_hash: "partial".to_string(),
+            object_id: Some(obj_id),
+            device: Some(1),
+            inode: Some(100),
+            decision_id: Some(42),
+        };
+
+        let source = insert_destination(&conn, &new).unwrap();
+        assert_eq!(source.decision_id, Some(42));
+
+        // Verify it's in the DB
+        let db_val: Option<i64> = conn.query_row(
+            "SELECT decision_id FROM sources WHERE id = ?",
+            [source.id],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(db_val, Some(42));
+    }
+
+    #[test]
+    fn test_insert_destination_updates_decision_id() {
+        // Re-inserting the same path with a new decision_id overwrites it
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let obj_id = insert_object(&conn, "hash2", false);
+
+        let new = NewSource {
+            root_id,
+            rel_path: "photo.jpg".to_string(),
+            size: 1024,
+            mtime: 1704067200,
+            partial_hash: "partial".to_string(),
+            object_id: Some(obj_id),
+            device: Some(1),
+            inode: Some(100),
+            decision_id: Some(10),
+        };
+        insert_destination(&conn, &new).unwrap();
+
+        // Re-insert with a new decision_id
+        let new2 = NewSource { decision_id: Some(20), ..new };
+        let source = insert_destination(&conn, &new2).unwrap();
+        assert_eq!(source.decision_id, Some(20));
+    }
+
+    #[test]
+    fn test_insert_destination_null_decision_id() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let obj_id = insert_object(&conn, "hash3", false);
+
+        let new = NewSource {
+            root_id,
+            rel_path: "photo.jpg".to_string(),
+            size: 1024,
+            mtime: 1704067200,
+            partial_hash: "partial".to_string(),
+            object_id: Some(obj_id),
+            device: Some(1),
+            inode: Some(100),
+            decision_id: None,
+        };
+
+        let source = insert_destination(&conn, &new).unwrap();
+        assert_eq!(source.decision_id, None);
+    }
+
+    // =========================================================================
     // decision_id schema tests
     // =========================================================================
 
@@ -1736,7 +1828,7 @@ mod tests {
         let reconciliation = Reconciliation::New;
         let now = 1700000001;
 
-        let source = apply_reconciliation(&conn, &observation, &reconciliation, now).unwrap();
+        let source = apply_reconciliation(&conn, &observation, &reconciliation, now, None).unwrap();
 
         assert_eq!(source.rel_path, "new_file.jpg");
         assert_eq!(source.size, 2048);
@@ -1776,7 +1868,7 @@ mod tests {
         let reconciliation = Reconciliation::New;
         let now = 1700000001;
 
-        let source = apply_reconciliation(&conn, &observation, &reconciliation, now).unwrap();
+        let source = apply_reconciliation(&conn, &observation, &reconciliation, now, None).unwrap();
 
         // Should revive the same record
         assert_eq!(source.id, old_id);
@@ -1823,7 +1915,7 @@ mod tests {
         let reconciliation = Reconciliation::Unchanged { source_id };
         let now = 1700000001;
 
-        let source = apply_reconciliation(&conn, &observation, &reconciliation, now).unwrap();
+        let source = apply_reconciliation(&conn, &observation, &reconciliation, now, None).unwrap();
 
         assert_eq!(source.id, source_id);
         assert_eq!(source.rel_path, "existing.jpg");
@@ -1869,7 +1961,7 @@ mod tests {
         };
         let now = 1700000101;
 
-        let source = apply_reconciliation(&conn, &observation, &reconciliation, now).unwrap();
+        let source = apply_reconciliation(&conn, &observation, &reconciliation, now, None).unwrap();
 
         assert_eq!(source.id, source_id);
         assert_eq!(source.size, 2048);
@@ -1912,7 +2004,7 @@ mod tests {
         };
         let now = 1700000001;
 
-        let source = apply_reconciliation(&conn, &observation, &reconciliation, now).unwrap();
+        let source = apply_reconciliation(&conn, &observation, &reconciliation, now, None).unwrap();
 
         assert_eq!(source.id, source_id);
         assert_eq!(source.root_id, root2); // Moved to new root
@@ -1964,7 +2056,7 @@ mod tests {
         let now = 1700000001;
 
         // This would fail with UNIQUE constraint before the fix
-        let source = apply_reconciliation(&conn, &observation, &reconciliation, now).unwrap();
+        let source = apply_reconciliation(&conn, &observation, &reconciliation, now, None).unwrap();
 
         assert_eq!(source.id, source_id);
         assert_eq!(source.rel_path, "destination.jpg");
@@ -2011,7 +2103,7 @@ mod tests {
             old_object_id: None,
         };
 
-        let source = apply_reconciliation(&conn, &observation, &reconciliation, 1700000001).unwrap();
+        let source = apply_reconciliation(&conn, &observation, &reconciliation, 1700000001, None).unwrap();
         assert_eq!(source.id, source_id);
         assert_eq!(source.rel_path, "clean_destination.jpg");
     }
@@ -2035,9 +2127,163 @@ mod tests {
         let reconciliation = Reconciliation::New;
         let now = 1700000001;
 
-        let result = apply_reconciliation(&conn, &observation, &reconciliation, now);
+        let result = apply_reconciliation(&conn, &observation, &reconciliation, now, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("partial_hash"));
+    }
+
+    #[test]
+    fn test_scan_new_sets_decision_id() {
+        // New reconciliation with a decision_id sets it on the source record
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        let observation = FileObservation {
+            root_id,
+            rel_path: "new.jpg".to_string(),
+            device: 1,
+            inode: 100,
+            size: 1024,
+            mtime: 1700000000,
+            partial_hash: Some("hash".to_string()),
+        };
+
+        let source = apply_reconciliation(&conn, &observation, &Reconciliation::New, 1700000001, Some(99)).unwrap();
+        assert_eq!(source.decision_id, Some(99));
+
+        let db_val: Option<i64> = conn.query_row(
+            "SELECT decision_id FROM sources WHERE id = ?",
+            [source.id],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(db_val, Some(99));
+    }
+
+    #[test]
+    fn test_scan_new_null_when_disabled() {
+        // New reconciliation with decision_id=None leaves decision_id NULL
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        let observation = FileObservation {
+            root_id,
+            rel_path: "new.jpg".to_string(),
+            device: 1,
+            inode: 100,
+            size: 1024,
+            mtime: 1700000000,
+            partial_hash: Some("hash".to_string()),
+        };
+
+        let source = apply_reconciliation(&conn, &observation, &Reconciliation::New, 1700000001, None).unwrap();
+        assert_eq!(source.decision_id, None);
+    }
+
+    #[test]
+    fn test_scan_unchanged_preserves_decision_id() {
+        // Unchanged reconciliation must not overwrite an existing decision_id
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        // Insert with a decision_id
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
+             basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
+             VALUES (?, 'existing.jpg', 1, 100, 1000, 1704067200, 'hash', 0, 0, 0, 1, 0, 55)",
+            rusqlite::params![root_id],
+        ).unwrap();
+        let source_id = conn.last_insert_rowid();
+
+        let observation = FileObservation {
+            root_id,
+            rel_path: "existing.jpg".to_string(),
+            device: 1,
+            inode: 100,
+            size: 1000,
+            mtime: 1704067200,
+            partial_hash: None,
+        };
+
+        // Pass a different decision_id — Unchanged must ignore it
+        let source = apply_reconciliation(
+            &conn, &observation, &Reconciliation::Unchanged { source_id }, 1700000001, Some(77),
+        ).unwrap();
+
+        // Should still be 55 (the original), not 77
+        assert_eq!(source.decision_id, Some(55));
+    }
+
+    #[test]
+    fn test_scan_modified_preserves_decision_id() {
+        // Modified reconciliation must not overwrite an existing decision_id
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
+             basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
+             VALUES (?, 'file.jpg', 1, 100, 1000, 1700000000, 'oldhash', 2, 0, 0, 1, 0, 33)",
+            rusqlite::params![root_id],
+        ).unwrap();
+        let source_id = conn.last_insert_rowid();
+
+        let observation = FileObservation {
+            root_id,
+            rel_path: "file.jpg".to_string(),
+            device: 1,
+            inode: 100,
+            size: 2048,
+            mtime: 1700000100,
+            partial_hash: Some("newhash".to_string()),
+        };
+
+        let source = apply_reconciliation(
+            &conn, &observation,
+            &Reconciliation::Modified { source_id, old_object_id: None },
+            1700000101, Some(88),
+        ).unwrap();
+
+        // decision_id should still be 33 (unchanged by Modified)
+        assert_eq!(source.decision_id, Some(33));
+    }
+
+    #[test]
+    fn test_scan_moved_preserves_decision_id() {
+        // Moved reconciliation must not overwrite an existing decision_id
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
+             basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
+             VALUES (?, 'origin.jpg', 1, 100, 1000, 1700000000, 'hash', 1, 0, 0, 1, 0, 11)",
+            rusqlite::params![root_id],
+        ).unwrap();
+        let source_id = conn.last_insert_rowid();
+
+        let observation = FileObservation {
+            root_id,
+            rel_path: "destination.jpg".to_string(),
+            device: 1,
+            inode: 100,
+            size: 1000,
+            mtime: 1700000000,
+            partial_hash: None,
+        };
+
+        let source = apply_reconciliation(
+            &conn, &observation,
+            &Reconciliation::Moved {
+                source_id,
+                from_root_id: root_id,
+                from_path: "origin.jpg".to_string(),
+                old_object_id: None,
+            },
+            1700000001, Some(22),
+        ).unwrap();
+
+        // decision_id should still be 11 (unchanged by Moved)
+        assert_eq!(source.decision_id, Some(11));
     }
 
     // =========================================================================

@@ -340,6 +340,29 @@ pub fn move_file(src: &Path, dest: &Path, noclobber: bool) -> Result<MoveOutcome
     }
 }
 
+/// Write content to a `.incomplete` file at the same location as `path`.
+///
+/// The `.incomplete` file survives crashes as recoverable evidence.
+/// The final path is not touched — call `finalize_file()` to rename on success.
+pub fn write_file_incomplete(path: &Path, content: &[u8]) -> Result<()> {
+    let incomplete = path.with_extension("incomplete");
+    if let Some(parent) = incomplete.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&incomplete, content)?;
+    Ok(())
+}
+
+/// Rename the `.incomplete` file to the final path (e.g., `.toml`).
+///
+/// Called after all work is done to atomically publish the receipt.
+/// If the `.incomplete` file does not exist, returns an error.
+pub fn finalize_file(path: &Path) -> Result<()> {
+    let incomplete = path.with_extension("incomplete");
+    std::fs::rename(&incomplete, path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,5 +612,35 @@ mod tests {
 
         let err = move_file(&src, &dest, true).unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn test_write_file_incomplete_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("receipt.toml");
+        write_file_incomplete(&final_path, b"content here").unwrap();
+        let incomplete = dir.path().join("receipt.incomplete");
+        assert!(incomplete.exists());
+        assert!(!final_path.exists());
+        assert_eq!(std::fs::read(&incomplete).unwrap(), b"content here");
+    }
+
+    #[test]
+    fn test_finalize_file_renames() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("receipt.toml");
+        write_file_incomplete(&final_path, b"content").unwrap();
+        finalize_file(&final_path).unwrap();
+        assert!(final_path.exists());
+        assert!(!dir.path().join("receipt.incomplete").exists());
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"content");
+    }
+
+    #[test]
+    fn test_finalize_file_missing_incomplete_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("receipt.toml");
+        let err = finalize_file(&final_path).unwrap_err();
+        assert!(err.to_string().contains("receipt.incomplete") || err.to_string().contains("No such file"));
     }
 }

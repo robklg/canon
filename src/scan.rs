@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+use crate::domain::config::LedgerConfig;
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::resolve_root_path_any;
 use crate::ops;
@@ -161,7 +162,9 @@ pub fn run(
         reason: reason
             .map(|r| r.to_string())
             .filter(|r| !r.trim().is_empty()),
-        enabled: !no_record,
+        record_enabled: !no_record,
+        receipt_enabled: false, // threaded in Phase 5
+        ledger_config: LedgerConfig::default(), // threaded in Phase 5
     };
     let mut recorder = DecisionRecorder::start(conn, &decision);
 
@@ -261,6 +264,7 @@ pub fn run(
             &scan_options,
             &StderrProgress,
             now,
+            recorder.decision_id(),
         )?;
 
         // Display warnings from ops layer

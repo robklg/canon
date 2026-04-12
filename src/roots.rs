@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 
 use crate::ceremony;
+use crate::domain::config::LedgerConfig;
 use crate::domain::decision::DecisionCommand;
 use crate::domain::path::resolve_path;
 use crate::domain::{parse_root_spec, parse_root_spec_any, Root};
@@ -164,7 +165,9 @@ pub fn remove(
         reason: reason
             .map(|r| r.to_string())
             .filter(|r| !r.trim().is_empty()),
-        enabled: !no_record,
+        record_enabled: !no_record,
+        receipt_enabled: false,
+        ledger_config: LedgerConfig::default(),
     };
     let result = ops::roots::execute_remove(conn, &plan, Some(&decision))?;
     println!("{}", result.summary);
@@ -209,7 +212,9 @@ pub fn suspend(db: &Db, spec: &str, command_line: &str, no_record: bool) -> Resu
         scope: root_path.map(|p| vec![p]),
         command_line: command_line.to_string(),
         reason: None,
-        enabled: !no_record,
+        record_enabled: !no_record,
+        receipt_enabled: false,
+        ledger_config: LedgerConfig::default(),
     };
 
     match ops::roots::execute_suspend(conn, root_id, Some(&decision)) {
@@ -245,7 +250,9 @@ pub fn unsuspend(db: &Db, spec: &str, command_line: &str, no_record: bool) -> Re
         scope: root_path.map(|p| vec![p]),
         command_line: command_line.to_string(),
         reason: None,
-        enabled: !no_record,
+        record_enabled: !no_record,
+        receipt_enabled: false,
+        ledger_config: LedgerConfig::default(),
     };
 
     match ops::roots::execute_unsuspend(conn, root_id, Some(&decision)) {

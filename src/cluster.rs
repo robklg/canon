@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
 
+use crate::domain::config::LedgerConfig;
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::format_count;
 use crate::domain::root::resolve_archive_path;
@@ -98,7 +99,9 @@ pub fn generate(
         scope: Some(scope_prefixes.to_vec()),
         command_line: command_line.to_string(),
         reason: None,
-        enabled: !no_record,
+        record_enabled: !no_record,
+        receipt_enabled: false,
+        ledger_config: LedgerConfig::default(),
     };
     let mut recorder = DecisionRecorder::start(conn, &decision);
 
@@ -236,7 +239,9 @@ pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool, no_edit: bo
         scope: refresh_scope,
         command_line: command_line.to_string(),
         reason: None,
-        enabled: !no_record,
+        record_enabled: !no_record,
+        receipt_enabled: false,
+        ledger_config: LedgerConfig::default(),
     };
     let mut recorder = DecisionRecorder::start(conn, &decision);
 

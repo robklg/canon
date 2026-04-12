@@ -7,6 +7,7 @@ use crate::domain::path::{resolve_path, validate_paths_in_roots};
 use crate::domain::root::find_containing_root;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::Filter;
+use crate::domain::config::LedgerConfig;
 use crate::ops::decision::DecisionParams;
 use crate::ops::exclude::{
     self, check_clear_object, check_set_object_by_file, check_set_object_by_hash,
@@ -33,7 +34,9 @@ fn make_decision(
         reason: reason
             .map(|r| r.to_string())
             .filter(|r| !r.trim().is_empty()),
-        enabled: !no_record && !dry_run,
+        record_enabled: !no_record && !dry_run,
+        receipt_enabled: false, // threaded in Phase 5
+        ledger_config: LedgerConfig::default(), // threaded in Phase 5
     }
 }
 

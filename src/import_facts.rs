@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::io::{self, BufRead};
 
+use crate::domain::config::LedgerConfig;
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::ops;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
@@ -16,7 +17,9 @@ pub fn run(db: &mut Db, allow_archived: bool, verbose: bool, command_line: &str,
         scope: None,
         command_line: command_line.to_string(),
         reason: None,
-        enabled: !no_record,
+        record_enabled: !no_record,
+        receipt_enabled: false,
+        ledger_config: LedgerConfig::default(),
     };
     let mut recorder = DecisionRecorder::start(conn, &decision);
 

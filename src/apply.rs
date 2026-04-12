@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::ceremony;
+use crate::domain::config::LedgerConfig;
 use crate::domain::decision::DecisionCommand;
 use crate::ops::cluster::{ManifestConfig, parse_manifest_allow, validate_manifest_version};
 use crate::ops::decision::DecisionParams;
@@ -485,7 +486,9 @@ pub fn run(
         }),
         command_line: command_line.to_string(),
         reason: effective_reason,
-        enabled: !no_record && !options.dry_run,
+        record_enabled: !no_record && !options.dry_run,
+        receipt_enabled: false,
+        ledger_config: LedgerConfig::default(),
     };
 
     let progress_impl = CliTransferProgress::new(options.verbose);

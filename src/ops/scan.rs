@@ -133,6 +133,7 @@ pub fn scan_root(
     options: &ScanOptions,
     progress: &dyn ScanProgress,
     now: i64,
+    decision_id: Option<i64>,
 ) -> Result<ScanRootResult> {
     let root_path = Path::new(root_path);
     let mut stats = ScanStats::default();
@@ -261,11 +262,18 @@ pub fn scan_root(
                 )
             }
             _ => {
+                // Only New reconciliations receive decision_id (conservative scan semantics).
+                // Modified, Moved preserve the existing value via omission in SQL.
+                let file_decision_id = match &reconciled.reconciliation {
+                    Reconciliation::New => decision_id,
+                    _ => None,
+                };
                 let source = match persist_file(
                     conn,
                     &reconciled.observation,
                     &reconciled.reconciliation,
                     now,
+                    file_decision_id,
                 ) {
                     Ok(s) => s,
                     Err(e) => {
@@ -419,9 +427,10 @@ fn persist_file(
     observation: &FileObservation,
     reconciliation: &Reconciliation,
     now: i64,
+    decision_id: Option<i64>,
 ) -> Result<crate::domain::source::Source> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let source = repo::source::apply_reconciliation(&tx, observation, reconciliation, now)?;
+    let source = repo::source::apply_reconciliation(&tx, observation, reconciliation, now, decision_id)?;
     tx.commit()?;
     Ok(source)
 }
@@ -829,7 +838,7 @@ mod tests {
                 })
             }
             _ => {
-                let source = persist_file(conn, &reconciled.observation, &reconciled.reconciliation, now)?;
+                let source = persist_file(conn, &reconciled.observation, &reconciled.reconciliation, now, None)?;
                 let (action, old_object_id) = match &reconciled.reconciliation {
                     Reconciliation::New => (FileAction::New, None),
                     Reconciliation::Modified { old_object_id, .. } => (FileAction::Modified, *old_object_id),

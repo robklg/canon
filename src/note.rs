@@ -15,6 +15,7 @@ use anyhow::Result;
 use chrono::{TimeZone, Utc};
 
 use crate::ceremony;
+use crate::domain::config::LedgerConfig;
 use crate::domain::decision::DecisionCommand;
 use crate::domain::note::LocationEntry;
 use crate::domain::root::Root;
@@ -78,7 +79,9 @@ pub fn run(
                 scope: Some(vec![scope.display()]),
                 command_line: command_line.to_string(),
                 reason: None,
-                enabled: !no_record,
+                record_enabled: !no_record,
+                receipt_enabled: false,
+                ledger_config: LedgerConfig::default(),
             };
             let result = ops::note::execute_clear_recursive(conn, &scope, Some(&decision))?;
             eprintln!("{}", result.summary);
@@ -89,7 +92,9 @@ pub fn run(
                 scope: Some(vec![scope.display()]),
                 command_line: command_line.to_string(),
                 reason: None,
-                enabled: !no_record,
+                record_enabled: !no_record,
+                receipt_enabled: false,
+                ledger_config: LedgerConfig::default(),
             };
             let result = ops::note::execute_clear_exact(conn, &scope, Some(&decision))?;
             eprintln!("{}", result.summary);

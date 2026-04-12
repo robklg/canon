@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 
+use crate::domain::config::LedgerConfig;
 use crate::domain::decision::DecisionCommand;
 use crate::domain::format_count;
 use crate::domain::scope::ScopeMatch;
@@ -508,7 +509,9 @@ pub fn delete_facts(
             scope: Some(scope_prefixes.to_vec()),
             command_line: command_line.to_string(),
             reason: None,
-            enabled: !no_record && !options.dry_run,
+            record_enabled: !no_record && !options.dry_run,
+            receipt_enabled: false,
+            ledger_config: LedgerConfig::default(),
         };
         let result = ops::facts::execute_delete(
             conn,
@@ -550,7 +553,9 @@ pub fn prune_stale(db: &Db, dry_run: bool, command_line: &str, no_record: bool) 
             scope: None,
             command_line: command_line.to_string(),
             reason: None,
-            enabled: !no_record && !dry_run,
+            record_enabled: !no_record && !dry_run,
+            receipt_enabled: false,
+            ledger_config: LedgerConfig::default(),
         };
         let result = ops::facts::execute_prune_stale(conn, Some(&decision))?;
         println!("{}", result.summary);
@@ -594,7 +599,9 @@ pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool, command_line: &str, no
             scope: None,
             command_line: command_line.to_string(),
             reason: None,
-            enabled: !no_record && !dry_run,
+            record_enabled: !no_record && !dry_run,
+            receipt_enabled: false,
+            ledger_config: LedgerConfig::default(),
         };
         let result = ops::facts::execute_prune_orphaned(db, Some(&decision))?;
         println!("{}", result.summary);
@@ -652,7 +659,9 @@ pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool, command_line: &
             scope: None,
             command_line: command_line.to_string(),
             reason: None,
-            enabled: !no_record && !dry_run,
+            record_enabled: !no_record && !dry_run,
+            receipt_enabled: false,
+            ledger_config: LedgerConfig::default(),
         };
         let result = ops::facts::execute_prune_excluded(conn, scope, Some(&decision))?;
         if !result.summary.is_empty() {
