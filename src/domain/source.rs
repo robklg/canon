@@ -69,6 +69,8 @@ pub struct NewSource {
     pub device: Option<i64>,
     /// Inode number (Unix only, for move detection)
     pub inode: Option<i64>,
+    /// Decision that caused the most recent state transition (None when recording is off)
+    pub decision_id: Option<i64>,
 }
 
 /// Core source data — sufficient for most read operations.
@@ -114,6 +116,8 @@ pub struct Source {
     pub root_role: String,
     /// Whether the root is suspended (denormalized)
     pub root_suspended: bool,
+    /// Decision that caused the most recent state transition
+    pub decision_id: Option<i64>,
 }
 
 impl Source {
@@ -209,6 +213,7 @@ mod tests {
             basis_rev: 0,
             root_role: "source".to_string(),
             root_suspended: false,
+            decision_id: None,
         }
     }
 

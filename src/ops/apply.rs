@@ -944,6 +944,7 @@ fn build_new_source_from_lock(
         object_id,
         device: None,
         inode: None,
+        decision_id: None,
     }
 }
 
@@ -1192,6 +1193,7 @@ fn build_new_source(
         object_id,
         device: Some(meta.dev() as i64),
         inode: Some(meta.ino() as i64),
+        decision_id: None,
     })
 }
 
@@ -1221,6 +1223,7 @@ fn build_new_source(
         object_id,
         device: None,
         inode: None,
+        decision_id: None,
     })
 }
 

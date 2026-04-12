@@ -240,6 +240,7 @@ mod tests {
             basis_rev: 0,
             root_role: "source".to_string(),
             root_suspended: false,
+            decision_id: None,
         }
     }
 

@@ -50,7 +50,8 @@ const SOURCE_COLUMNS: &str = r#"
     s.partial_hash,
     s.basis_rev,
     r.role as root_role,
-    r.suspended as root_suspended
+    r.suspended as root_suspended,
+    s.decision_id
 "#;
 
 /// The base FROM/JOIN clause for Source queries.
@@ -78,6 +79,7 @@ fn source_from_row(row: &rusqlite::Row) -> rusqlite::Result<Source> {
         basis_rev: row.get(12)?,
         root_role: row.get(13)?,
         root_suspended: row.get(14)?,
+        decision_id: row.get(15)?,
     })
 }
 
@@ -1313,6 +1315,7 @@ mod tests {
             object_id: Some(obj_id),
             device: Some(65024),
             inode: Some(12345),
+            decision_id: None,
         };
 
         let source = insert_destination(&conn, &new).unwrap();
@@ -1357,6 +1360,7 @@ mod tests {
             object_id: Some(obj_id),
             device: Some(65024),
             inode: Some(99999),
+            decision_id: None,
         };
 
         let source = insert_destination(&conn, &new).unwrap();
@@ -1402,6 +1406,7 @@ mod tests {
             object_id: Some(obj_id),
             device: None, // Not available
             inode: None,  // Not available
+            decision_id: None,
         };
 
         let source = insert_destination(&conn, &new).unwrap();
@@ -1432,6 +1437,7 @@ mod tests {
             object_id: Some(obj_id),
             device: Some(65024),
             inode: Some(12345),
+            decision_id: None,
         };
 
         // Should succeed — UPDATE fires on the active record, no UNIQUE error
@@ -1477,6 +1483,7 @@ mod tests {
             object_id: Some(obj_id),
             device: Some(65024),
             inode: Some(12345),
+            decision_id: None,
         };
 
         // First call — INSERT path
@@ -1519,6 +1526,7 @@ mod tests {
             object_id: Some(obj_id),
             device: Some(65024),
             inode: Some(12345),
+            decision_id: None,
         };
 
         let source = insert_destination(&conn, &new).unwrap();
@@ -1539,6 +1547,46 @@ mod tests {
 
         // Verify path() works
         assert_eq!(source.path(), "/archive/complete.jpg");
+    }
+
+    // =========================================================================
+    // decision_id schema tests
+    // =========================================================================
+
+    #[test]
+    fn test_sources_decision_id_exists() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
+             basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
+             VALUES (?, 'photo.jpg', 0, 0, 1024, 0, 'hash', 0, 0, 0, 1, 0, 42)",
+            rusqlite::params![root_id],
+        ).unwrap();
+        let decision_id: Option<i64> = conn.query_row(
+            "SELECT decision_id FROM sources WHERE root_id = ? AND rel_path = 'photo.jpg'",
+            [root_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(decision_id, Some(42));
+    }
+
+    #[test]
+    fn test_sources_decision_id_nullable() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
+             basis_rev, scanned_at, last_seen_at, present, excluded)
+             VALUES (?, 'photo.jpg', 0, 0, 1024, 0, 'hash', 0, 0, 0, 1, 0)",
+            rusqlite::params![root_id],
+        ).unwrap();
+        let decision_id: Option<i64> = conn.query_row(
+            "SELECT decision_id FROM sources WHERE root_id = ? AND rel_path = 'photo.jpg'",
+            [root_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(decision_id, None);
     }
 
     // =========================================================================

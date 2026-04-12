@@ -83,6 +83,8 @@ pub struct Decision {
     pub summary: Option<String>,
     pub canon_version: String,
     pub created_at: i64,
+    pub receipt_root_id: Option<i64>,
+    pub receipt_rel_path: Option<String>,
 }
 
 #[cfg(test)]

@@ -52,6 +52,8 @@ impl DecisionRecorder {
             &params.command_line,
             params.reason.as_deref(),
             canon_version,
+            None, // receipt_root_id — populated in Story 2
+            None, // receipt_rel_path — populated in Story 2
         ) {
             Ok(id) => DecisionRecorder {
                 id: Some(id),

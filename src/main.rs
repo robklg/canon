@@ -618,6 +618,67 @@ enum ClusterAction {
     },
 }
 
+const DEFAULT_CONFIG_CONTENT: &str = r#"# Canon ledger configuration
+# This file controls decision provenance and receipt behavior.
+
+[ledger]
+
+# Recording mode controls how much provenance Canon stores.
+# Options:
+#   "full"    - Record decisions in the database AND write receipt files (default)
+#   "records" - Record decisions in the database only (no receipt files)
+#   "off"     - No provenance recording (disables both DB records and receipts)
+recording = "full"
+
+# Receipt layout controls where receipt files are placed within an archive root.
+# Options:
+#   "central"    - Receipts mirror the destination path under .canon-ledger/ (default)
+#   "alongside"  - Receipts go in .canon-ledger/ next to the destination directory
+layout = "central"
+
+# Ledger root: the archive root ID where non-targeted receipts (e.g., exclusions)
+# are stored. Defaults to the lowest-ID archive root when unset.
+# Use `canon roots` to find root IDs. Must be an archive root, not a source root.
+# root = 1
+"#;
+
+fn load_or_create_config(canon_home: &Path) -> (domain::config::LedgerConfig, Vec<String>) {
+    let path = canon_home.join("config.toml");
+    if !path.exists() {
+        let mut warnings = Vec::new();
+        match write_default_config(&path) {
+            Ok(()) => {
+                eprintln!("Created {}", path.display());
+            }
+            Err(e) => {
+                warnings.push(format!(
+                    "Warning: could not create {}: {e}",
+                    path.display()
+                ));
+            }
+        }
+        return (domain::config::LedgerConfig::default(), warnings);
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(content) => domain::config::parse_ledger_config(&content),
+        Err(e) => {
+            let warnings = vec![format!(
+                "Warning: could not read {}: {e}, using defaults",
+                path.display()
+            )];
+            (domain::config::LedgerConfig::default(), warnings)
+        }
+    }
+}
+
+fn write_default_config(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, DEFAULT_CONFIG_CONTENT)?;
+    Ok(())
+}
+
 fn resolve_canon_home(flag: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = flag {
         return Ok(path.to_path_buf());
@@ -641,6 +702,12 @@ fn main() -> Result<()> {
             canon_home.display()
         );
     }
+
+    let (config, config_warnings) = load_or_create_config(&canon_home);
+    for w in &config_warnings {
+        eprintln!("{w}");
+    }
+
     let db_path = canon_home.join("canon.db");
 
     let mut db = repo::open_with_options(
@@ -659,6 +726,20 @@ fn main() -> Result<()> {
     if db.needs_analyze()? {
         eprintln!("Updating query statistics...");
         db.run_analyze()?;
+    }
+
+    // Validate config.root after DB open (semantic validation: must be archive, not source).
+    if let Some(root_id) = config.root {
+        let roots = repo::root::fetch_all(db.conn())?;
+        if let Some(root) = roots.iter().find(|r| r.id == root_id) {
+            if root.is_source() {
+                bail!(
+                    "Ledger root (id:{root_id}) is a source root, not an archive. \
+                     Update [ledger].root in {}",
+                    canon_home.join("config.toml").display()
+                );
+            }
+        }
     }
 
     match cli.command {

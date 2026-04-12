@@ -153,6 +153,7 @@ mod tests {
             basis_rev: 1,
             root_role: "source".to_string(),
             root_suspended: false,
+            decision_id: None,
         }
     }
 

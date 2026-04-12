@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS sources (
     present INTEGER NOT NULL DEFAULT 1,
     object_id INTEGER REFERENCES objects(id),
     excluded INTEGER NOT NULL DEFAULT 0,  -- 1 if source is excluded from processing
+    decision_id INTEGER,                  -- decision that caused the most recent state transition
     UNIQUE(root_id, rel_path)
 );
 
@@ -194,10 +195,21 @@ CREATE TABLE IF NOT EXISTS decisions (
     count_skipped INTEGER,
     summary TEXT,
     canon_version TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    receipt_root_id INTEGER,     -- references roots table (receipt storage location)
+    receipt_rel_path TEXT        -- relative path within receipt root (always the .toml name)
 );
 CREATE INDEX IF NOT EXISTS decisions_command ON decisions(command);
 CREATE INDEX IF NOT EXISTS decisions_created_at ON decisions(created_at);
+
+-- Decision scopes: durable root-based scope index for future consumption
+CREATE TABLE IF NOT EXISTS decision_scopes (
+    decision_id INTEGER NOT NULL,
+    root_id INTEGER NOT NULL,
+    rel_prefix TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS decision_scopes_decision_id ON decision_scopes(decision_id);
+CREATE INDEX IF NOT EXISTS decision_scopes_root_id ON decision_scopes(root_id);
 
 -- Notes: timestamped annotations on locations within roots
 CREATE TABLE IF NOT EXISTS notes (
