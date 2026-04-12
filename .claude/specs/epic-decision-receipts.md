@@ -97,9 +97,6 @@ Phase 4 consumption commands can look up `receipt_rel_path` from the DB (always 
 **`domain/decision.rs`** (changes):
 - `Decision` struct gains `receipt_root_id: Option<i64>` and `receipt_rel_path: Option<String>`
 
-**`domain/path.rs`** (addition):
-- `common_ancestor()` — pure function computing shared path prefix for scattered apply destinations
-
 ### New Repository Functions
 
 **`repo/decision.rs`** (changes):
@@ -253,7 +250,7 @@ previous_decision_id = 12
 
 **Targeted receipts** (apply — decisions that write to a specific archive location):
 - Written to the target archive's `.canon-ledger/` directory
-- `central` layout: `.canon-ledger/{mirrored-destination-path}/` at archive root
+- `central` layout: `.canon-ledger/{base_dir_rel}/` at archive root (uses the manifest's configured base directory)
 - `alongside` layout: `.canon-ledger/` subdirectory at the destination directory itself
 
 **Filename format**: `{decision_id:06}-{command}.toml` (6-digit zero-padded)
@@ -296,8 +293,8 @@ Config loads before DB open (parse-time validation for values). Root validation 
 
 | # | Story | Scope | Dependencies | Status |
 |---|-------|-------|--------------|--------|
-| 1 | Infrastructure Foundation | Config, schema (all 3 tables), scan exclusion, CLI flag migration, recording mode, atomic write, source decision_id column | — | Pending |
-| 2 | Apply Receipts | Receipt format, path computation, receipt writer, apply integration, destination decision_id + previous_decision_id chain | Story 1 | Pending |
+| 1 | Infrastructure Foundation | Config, schema (all 3 tables), scan exclusion, CLI flag migration, recording mode, atomic write, source decision_id column | — | Completed |
+| 2 | Apply Receipts | Receipt format, path computation, receipt writer, apply integration, destination decision_id + previous_decision_id chain | Story 1 | Completed |
 | 3 | Exclusion Receipts | Plan enrichment, per-command receipt content, duplicates group format, exclusion decision_id + previous_decision_id chain | Stories 1 + 2 | Pending |
 | 4 | Durable Scope Index | decision_scopes population, scope decomposition, scan timing | Story 1 (schema) | Pending |
 
@@ -335,8 +332,7 @@ Config loads before DB open (parse-time validation for values). Root validation 
 - `ops/receipt.rs` (new) — `ReceiptMeta`, `ApplyReceipt`, `ApplyReceiptItem`, `ReceiptPlacement`, `ReceiptRef`
 - `ops/receipt.rs` — `write_receipt()` generic writer (serialize, comment header, atomic write, graceful degradation)
 - `ops/receipt.rs` — `resolve_ledger_root()`, `compute_receipt_path()`, filename formatting
-- `ops/receipt.rs` — Targeted placement: central (mirrored path) and alongside
-- `domain/path.rs` — `common_ancestor()` for scattered applies
+- `ops/receipt.rs` — Targeted placement: central (using manifest `base_dir`) and alongside
 - `ops/apply.rs` — collect per-item data during transfer loop (source root, source rel_path, dest rel_path, hash, size, mtime), call `write_receipt()` after completion, pass `ReceiptRef` to recorder
 - `ops/apply.rs` — pass `recorder.decision_id()` to `insert_destination()` for each completed transfer, setting `decision_id` on the destination source record
 - `ops/apply.rs` — read existing `decision_id` from destination source (returned by `insert_destination()`) before overwrite, populate `previous_decision_id` on each receipt item
@@ -349,7 +345,7 @@ Config loads before DB open (parse-time validation for values). Root validation 
 - Ledger root resolution happens at receipt write time (deferred validation)
 - mtime preserved per item (guards against destination metadata loss)
 - `insert_destination()` always sets `decision_id` — apply is intentional placement, re-apply updates provenance
-- `previous_decision_id` is read from the existing record before overwrite — no extra DB query needed since `insert_destination()` already fetches before update
+- `previous_decision_id` is read from the existing record via a lightweight SELECT before the transfer overwrites it
 
 ### Story 3: Exclusion Receipts
 
@@ -435,7 +431,6 @@ Config loads before DB open (parse-time validation for values). Root validation 
 ### Story 2 (~25 tests)
 - Receipt serialization: meta round-trip, version field, optional fields omitted, comment header
 - Path computation: non-targeted flat, targeted central mirrored, targeted alongside, filename padding
-- Common ancestor: single, shared prefix, no common, empty
 - Apply integration: receipt file exists, all items present, partial only completed, no receipt on dry-run/all-failures/--no-receipt, meta has manifest, central vs alongside placement
 - Ledger root resolution: no archives, default lowest-ID, configured valid, configured invalid
 - Atomic write: creates file, no partial on error

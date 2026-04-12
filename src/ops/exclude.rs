@@ -472,7 +472,7 @@ pub fn execute_set(
     plan: &ExcludeSetPlan,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSetResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
     for &source_id in &plan.source_ids {
         repo::source::set_excluded(conn, source_id, true)?;
@@ -511,7 +511,7 @@ pub fn execute_clear(
     plan: &ExcludeClearPlan,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeClearResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
     for &source_id in &plan.source_ids {
         repo::source::set_excluded(conn, source_id, false)?;
@@ -550,7 +550,7 @@ pub fn execute_duplicates(
     plan: &ExcludeDuplicatesPlan,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeDuplicatesResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
     for &source_id in &plan.source_ids {
         repo::source::set_excluded(conn, source_id, true)?;
@@ -591,7 +591,7 @@ pub fn execute_set_objects(
     plan: &ExcludeSetObjectsPlan,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSetObjectsResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
     for entry in &plan.objects {
         repo::object::set_excluded(conn, entry.object_id, true)?;
@@ -726,7 +726,7 @@ pub fn execute_set_source(
     path: &str,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSourceResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
     repo::source::set_excluded(conn, source_id, true)?;
 
@@ -851,7 +851,7 @@ pub fn execute_set_object(
     sources: &[ObjectSourceInfo],
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeObjectResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
     repo::object::set_excluded(conn, object_id, true)?;
 
@@ -918,7 +918,7 @@ pub fn execute_clear_object(
     hash_prefix: &str,
     decision: Option<&DecisionParams>,
 ) -> Result<ClearObjectResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
     repo::object::set_excluded(conn, object_id, false)?;
 

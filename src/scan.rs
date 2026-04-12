@@ -167,7 +167,7 @@ pub fn run(
         receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
         ledger_config: config.clone(),
     };
-    let mut recorder = DecisionRecorder::start(conn, &decision);
+    let mut recorder = DecisionRecorder::start(conn, &decision, None);
 
     let mut total_stats = ScanStats::default();
     let mut all_files_to_hash: Vec<FileToHash> = Vec::new();

@@ -45,11 +45,11 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 
 **Repository Layer** (`src/repo/`) - Database access:
 - `db.rs` - Connection, schema, transactions (`Db`, `open_with_options()`)
-- `source.rs` - Source batch fetching and writes (`batch_fetch_by_roots()`, `fetch_sources_by_object_ids()`, `insert_destination()`, `apply_reconciliation()`, `sources_exist_at_scope()`)
+- `source.rs` - Source batch fetching and writes (`batch_fetch_by_roots()`, `fetch_sources_by_object_ids()`, `insert_destination()`, `apply_reconciliation()`, `sources_exist_at_scope()`, `fetch_decision_id_at_path()`)
 - `root.rs` - Root batch fetching (`fetch_all()`, `batch_fetch_by_ids()`)
 - `object.rs` - Object batch fetching, archive detection (`batch_check_archived()`, `batch_find_archive_info_by_hash()`)
 - `note.rs` - Note CRUD operations, subtree queries, batch counts, temporal/spatial listing queries (`insert()`, `fetch_by_scope()`, `fetch_subtree()`, `fetch_recent()`, `fetch_recent_subtree()`, `fetch_locations()`, `fetch_locations_subtree()`, `clear_by_scope()`, `clear_subtree()`, `batch_count_subtree()`)
-- `decision.rs` - Decision record INSERT/UPDATE (`insert_started()`, `update_completed()`)
+- `decision.rs` - Decision record INSERT/UPDATE (`insert_started()`, `update_completed()`, `update_receipt_path()`)
 - `fact.rs` - Fact batch fetching (`batch_fetch_for_sources()`, `batch_fetch_key_for_sources()`)
 
 **Expression System** (`src/expr/`) - Pattern and filter handling:
@@ -67,7 +67,8 @@ The codebase is organized into four namespaces (domain/, repo/, ops/, expr/) plu
 - `ls.rs` - Duplicate detection: `find_duplicate_groups()`, `DuplicateGroup`
 - `survey.rs` - Survey computation: `compute_survey()`, `SurveyParams`, `SurveyOutcome`, `SurveyResult`, `LocationResult`
 - `facts.rs` - Facts distribution: `compute_all_keys()`, `compute_distribution()`, `compute_grouped_distribution()`, `DistributionResult`, `AllKeysResult`
-- `decision.rs` - Decision recording: `DecisionRecorder` (two-phase start/complete), `DecisionParams` (`record_enabled`, `receipt_enabled`, `ledger_config`), `DecisionCounts`. `recorder.decision_id()` exposes the inserted ID for threading to scan/apply.
+- `decision.rs` - Decision recording: `DecisionRecorder` (two-phase start/complete), `DecisionParams` (`record_enabled`, `receipt_enabled`, `ledger_config`), `DecisionCounts`, `ReceiptContext` (`archive_root_id`, `archive_root_path`, `base_dir_rel` — receipt placement data for targeted receipts). `recorder.decision_id()` exposes the inserted ID for threading to scan/apply. `recorder.receipt_abs_path()` and `recorder.receipt_ref()` expose receipt location for writing and DB linkage. `DecisionRecorder::start()` signature: `(conn, params, receipt_ctx: Option<&ReceiptContext>)`.
+- `receipt.rs` - Receipt writing facility: `ReceiptRef` (root_id + rel_path), `ReceiptMeta` (shared TOML `[meta]` section), `ApplyReceipt` / `ApplyReceiptItem` structs. Pure path helpers: `receipt_filename(decision_id, command)` (6-digit zero-padded), `compute_targeted_receipt_rel_path(decision_id, command, base_dir_rel, layout)`. Writers: `write_receipt(path, receipt, comment_summary)` (writes `.incomplete` file), `finalize_receipt(path)` (renames `.incomplete` → `.toml`).
 - `roots.rs` - Root operations: `plan_remove()`, `execute_remove()`, `execute_suspend()`, `execute_unsuspend()`
 - `note.rs` - Composed note operations: `resolve_note_scope()`, `view_notes()`, `list_notes_global()`, `list_notes_recursive()`, `list_locations_global()`, `list_locations_recursive()`, `plan_clear_recursive()`, `execute_clear_recursive()`, `execute_clear_exact()`, `survey_note_context()`, `NoteScope`, `NoteViewResult`, `NoteListResult`, `NoteSpatialResult`, `ClearPlan`, `SurveyNoteContext`
 - `import_facts.rs` - Import facts processing: `init_state()`, `process_record()`, `ImportRecord`, `ImportState`, `ImportStats`, `RecordOutcome`
@@ -173,7 +174,7 @@ Key tables: `roots`, `sources`, `objects`, `facts`, `notes`, `decisions`, `decis
 
 Roots table columns include `suspended` (integer, default 0) for temporarily hiding roots from operations, `comment` for user notes, and `last_scanned_at` timestamp.
 
-Sources table includes `decision_id` (integer, nullable FK to `decisions.id`): records which decision caused the most recent state transition. Set on `New` reconciliations and `insert_destination()` (apply). `Modified`/`Moved`/`Unchanged` paths preserve the existing value — the column is omitted from their UPDATE statements entirely.
+Sources table includes `decision_id` (integer, nullable FK to `decisions.id`): records which decision caused the most recent state transition. Set on `New` reconciliations, `insert_destination()` (apply copy/move), and `update_location()` (apply rename). Scan `Modified`/`Moved`/`Unchanged` paths preserve the existing value — the column is omitted from their UPDATE statements entirely.
 
 Decisions table includes `receipt_root_id` (integer, nullable FK to `roots.id`) and `receipt_rel_path` (text, nullable): location of the receipt file when `RecordingMode::Full` is active and `--no-receipt` is not set.
 
@@ -531,7 +532,11 @@ let result = ops::exclude::execute_set(conn, &plan, Some(&decision))?;
 
 Plan/execute separates computation from side effects. The plan function returns a typed struct with all data needed for display and confirmation. The execute function performs writes, composes a summary, optionally records a decision, and returns a typed result. The interface layer decides what happens between plan and execute (dry-run, confirmation, or immediate execution). This makes operations testable without CLI and supports multiple interface types.
 
-**Decision recording** (`ops/decision.rs`): The `DecisionRecorder` provides two-phase recording — `start()` INSERTs a "started" record, `complete()` UPDATEs with outcome. Execute functions accept `Option<&DecisionParams>` — `None` skips recording (used in tests), `Some` enables it. The recorder catches its own errors by collecting warnings in a `Vec<String>` (never writes to stderr — that's the interface's job). For recorders owned by the interface (scan, cluster, import-facts), call `take_warnings()` and display them. For recorders inside ops execute functions, warnings are dropped with the recorder. For commands without a single execute function (scan, cluster, import-facts), the interface creates the recorder and wraps the operation calls.
+**Decision recording** (`ops/decision.rs`): The `DecisionRecorder` provides two-phase recording — `start()` INSERTs a "started" record, `complete()` UPDATEs with outcome and (for receipts) finalizes the `.incomplete` file to `.toml`. Execute functions accept `Option<&DecisionParams>` — `None` skips recording (used in tests), `Some` enables it. The recorder catches its own errors by collecting warnings in a `Vec<String>` (never writes to stderr — that's the interface's job). For recorders owned by the interface (scan, cluster, import-facts), call `take_warnings()` and display them. For recorders inside ops execute functions, warnings are dropped with the recorder. For commands without a single execute function (scan, cluster, import-facts), the interface creates the recorder and wraps the operation calls.
+
+**Receipt writing** (`ops/receipt.rs`): For apply, `execute_apply()` receives a `ReceiptContext` via `ApplyExecuteParams.receipt_ctx` and passes it to `DecisionRecorder::start()`. The recorder computes the receipt path, creates the directory, registers the path in the DB, and stores the abs path for use by the caller. After the transfer loop, `execute_apply()` constructs an `ApplyReceipt` from the collected `ApplyReceiptItem`s and calls `write_receipt()` to write the `.incomplete` file. `recorder.complete()` then calls `finalize_receipt()` to rename it to `.toml`. Receipt items record per-transfer: `source_root`, `source_rel_path`, `destination_rel_path`, `hash`, `size`, `mtime`, and `previous_decision_id` (the decision_id on the destination source before this apply).
+
+**`previous_decision_id`**: Before each transfer, `execute_single_transfer()` calls `repo::source::fetch_decision_id_at_path()` to read the existing destination record's `decision_id`. This value is stored in the receipt item as `previous_decision_id`, creating a walkable provenance chain for destination files that are re-applied.
 
 **Filesystem Layer** (`src/ops/fs.rs`):
 

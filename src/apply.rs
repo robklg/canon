@@ -8,7 +8,7 @@ use crate::ceremony;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
 use crate::ops::cluster::{ManifestConfig, parse_manifest_allow, validate_manifest_version};
-use crate::ops::decision::DecisionParams;
+use crate::ops::decision::{DecisionParams, ReceiptContext};
 use crate::expr;
 use crate::ops;
 use crate::ops::apply::TransferMode;
@@ -492,6 +492,16 @@ pub fn run(
         ledger_config: ledger.clone(),
     };
 
+    let receipt_ctx = if decision.receipt_enabled {
+        Some(ReceiptContext {
+            archive_root_id: config.output.archive_root_id,
+            archive_root_path: archive_root_path.clone(),
+            base_dir_rel: config.output.base_dir.clone(),
+        })
+    } else {
+        None
+    };
+
     let progress_impl = CliTransferProgress::new(options.verbose);
     let result = ops::apply::execute_apply(
         conn,
@@ -504,6 +514,7 @@ pub fn run(
             interrupt_flag: None,
             skipped_by_filter,
             manifest_display: format!("{}", config_path.display()),
+            receipt_ctx,
         },
         &progress_impl,
         Some(&decision),

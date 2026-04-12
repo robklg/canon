@@ -21,7 +21,7 @@ pub fn run(db: &mut Db, allow_archived: bool, verbose: bool, command_line: &str,
         receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
         ledger_config: config.clone(),
     };
-    let mut recorder = DecisionRecorder::start(conn, &decision);
+    let mut recorder = DecisionRecorder::start(conn, &decision, None);
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {

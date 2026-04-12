@@ -243,6 +243,24 @@ pub fn fetch_by_id(conn: &Connection, source_id: i64) -> Result<Option<Source>> 
     Ok(result)
 }
 
+/// Fetch the current decision_id for a source at the given path.
+///
+/// Returns None if no present source exists at this path, or if its decision_id is NULL.
+/// Used by apply before overwriting a destination to capture the provenance chain.
+pub fn fetch_decision_id_at_path(
+    conn: &Connection,
+    root_id: i64,
+    rel_path: &str,
+) -> Result<Option<i64>> {
+    conn.prepare_cached(
+        "SELECT decision_id FROM sources WHERE root_id = ? AND rel_path = ? AND present = 1",
+    )?
+    .query_row(rusqlite::params![root_id, rel_path], |row| row.get::<_, Option<i64>>(0))
+    .optional()
+    .map(|opt| opt.flatten())
+    .map_err(Into::into)
+}
+
 /// Fetch a source by its device and inode.
 ///
 /// Searches across ALL roots to detect file moves (including cross-root moves).
@@ -833,11 +851,12 @@ pub fn update_location(
     new_root_id: i64,
     new_rel_path: &str,
     now: i64,
+    decision_id: Option<i64>,
 ) -> Result<()> {
     conn.execute(
-        "UPDATE sources SET root_id = ?, rel_path = ?, scanned_at = ?, last_seen_at = ?
+        "UPDATE sources SET root_id = ?, rel_path = ?, scanned_at = ?, last_seen_at = ?, decision_id = ?
          WHERE id = ?",
-        rusqlite::params![new_root_id, new_rel_path, now, now, source_id],
+        rusqlite::params![new_root_id, new_rel_path, now, now, decision_id, source_id],
     )?;
     Ok(())
 }
@@ -1679,6 +1698,61 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(decision_id, None);
+    }
+
+    // =========================================================================
+    // fetch_decision_id_at_path tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_decision_id_at_path_returns_value() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
+             basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
+             VALUES (?, 'photo.jpg', 0, 0, 1024, 0, 'hash', 0, 0, 0, 1, 0, 42)",
+            rusqlite::params![root_id],
+        ).unwrap();
+        let result = fetch_decision_id_at_path(&conn, root_id, "photo.jpg").unwrap();
+        assert_eq!(result, Some(42));
+    }
+
+    #[test]
+    fn fetch_decision_id_at_path_null_returns_none() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
+             basis_rev, scanned_at, last_seen_at, present, excluded)
+             VALUES (?, 'photo.jpg', 0, 0, 1024, 0, 'hash', 0, 0, 0, 1, 0)",
+            rusqlite::params![root_id],
+        ).unwrap();
+        let result = fetch_decision_id_at_path(&conn, root_id, "photo.jpg").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn fetch_decision_id_at_path_missing_returns_none() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let result = fetch_decision_id_at_path(&conn, root_id, "nonexistent.jpg").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn fetch_decision_id_at_path_not_present_returns_none() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
+             basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
+             VALUES (?, 'photo.jpg', 0, 0, 1024, 0, 'hash', 0, 0, 0, 0, 0, 99)",
+            rusqlite::params![root_id],
+        ).unwrap();
+        // present = 0, should not be returned
+        let result = fetch_decision_id_at_path(&conn, root_id, "photo.jpg").unwrap();
+        assert_eq!(result, None);
     }
 
     // =========================================================================
@@ -2788,14 +2862,14 @@ mod tests {
         let source_id = insert_source(&conn, source_root, "original.jpg", None, true, false);
 
         let now = 1700000001i64;
-        update_location(&conn, source_id, archive_root, "new/path.jpg", now).unwrap();
+        update_location(&conn, source_id, archive_root, "new/path.jpg", now, Some(55)).unwrap();
 
         // Verify fields updated
-        let (root_id, rel_path, scanned_at, last_seen_at): (i64, String, i64, i64) = conn
+        let (root_id, rel_path, scanned_at, last_seen_at, decision_id): (i64, String, i64, i64, Option<i64>) = conn
             .query_row(
-                "SELECT root_id, rel_path, scanned_at, last_seen_at FROM sources WHERE id = ?",
+                "SELECT root_id, rel_path, scanned_at, last_seen_at, decision_id FROM sources WHERE id = ?",
                 rusqlite::params![source_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .unwrap();
 
@@ -2803,6 +2877,7 @@ mod tests {
         assert_eq!(rel_path, "new/path.jpg");
         assert_eq!(scanned_at, now);
         assert_eq!(last_seen_at, now);
+        assert_eq!(decision_id, Some(55));
     }
 
     #[test]
@@ -2811,7 +2886,7 @@ mod tests {
         let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
 
         // Should not error when source doesn't exist (0 rows affected)
-        let result = update_location(&conn, 99999, root_id, "path.jpg", 1700000001);
+        let result = update_location(&conn, 99999, root_id, "path.jpg", 1700000001, None);
         assert!(result.is_ok());
     }
 

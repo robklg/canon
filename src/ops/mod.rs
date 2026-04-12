@@ -15,6 +15,7 @@ pub mod fs;
 pub mod import_facts;
 pub mod ls;
 pub mod note;
+pub mod receipt;
 pub mod roots;
 pub mod scan;
 pub mod scope;

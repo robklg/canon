@@ -104,7 +104,7 @@ pub fn generate(
         receipt_enabled: ledger.recording == RecordingMode::Full && !no_receipt,
         ledger_config: ledger.clone(),
     };
-    let mut recorder = DecisionRecorder::start(conn, &decision);
+    let mut recorder = DecisionRecorder::start(conn, &decision, None);
 
     let result = ops::cluster::execute_generate(&plan, &exec_params)?;
 
@@ -244,7 +244,7 @@ pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool, no_edit: bo
         receipt_enabled: ledger.recording == RecordingMode::Full && !no_receipt,
         ledger_config: ledger.clone(),
     };
-    let mut recorder = DecisionRecorder::start(conn, &decision);
+    let mut recorder = DecisionRecorder::start(conn, &decision, None);
 
     let result = ops::cluster::execute_refresh(&plan, &exec_params)?;
 

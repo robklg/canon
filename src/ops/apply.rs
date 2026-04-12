@@ -20,7 +20,8 @@ use crate::domain::fact::FactEntry;
 use crate::domain::path::path_strip_prefix;
 use crate::domain::source::NewSource;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
-use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
+use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder, ReceiptContext};
+use crate::ops::receipt::{self as receipt_ops, ApplyReceipt, ApplyReceiptItem, ReceiptMeta};
 use crate::repo::{self, Connection};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +58,10 @@ pub struct ApplyTransfer {
     pub source_id: i64,
     /// Absolute source path.
     pub source_path: String,
+    /// Absolute path of the source root (for receipt items).
+    pub source_root_path: String,
+    /// Path relative to source root (for receipt items).
+    pub source_rel_path: String,
     /// Destination path relative to base_dir (for filesystem operations).
     pub dest_rel_path: String,
     /// Destination path relative to archive root (for DB registration).
@@ -69,6 +74,8 @@ pub struct ApplyTransfer {
     pub size: i64,
     /// File mtime from lock file (for staleness validation).
     pub mtime: i64,
+    /// Content hash formatted as "sha256:{value}" (for receipt items). None if not hashed.
+    pub hash: Option<String>,
 }
 
 /// Computed plan for an apply operation. Contains all data the interface
@@ -278,15 +285,28 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
             Ok(dest_rel) => {
                 let archive_rel_path =
                     compute_archive_rel_path(params.base_dir_rel, &dest_rel);
+                let source_root_path = params.root_paths
+                    .get(&source.root_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let source_rel_path = path_strip_prefix(&source.path, &source_root_path)
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| source.path.clone());
+                let hash = source.hash_type.as_deref()
+                    .zip(source.hash_value.as_deref())
+                    .map(|(t, v)| format!("{t}:{v}"));
                 transfers.push(ApplyTransfer {
                     source_id: source.id,
                     source_path: source.path.clone(),
+                    source_root_path,
+                    source_rel_path,
                     dest_rel_path: dest_rel,
                     archive_rel_path,
                     object_id: source.object_id,
                     partial_hash: source.partial_hash.clone(),
                     size: source.size,
                     mtime: source.mtime,
+                    hash,
                 });
             }
             Err(e) => {
@@ -538,12 +558,15 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
             resume_already_there.push(ApplyTransfer {
                 source_id: t.source_id,
                 source_path: t.source_path.clone(),
+                source_root_path: t.source_root_path.clone(),
+                source_rel_path: t.source_rel_path.clone(),
                 dest_rel_path: t.dest_rel_path.clone(),
                 archive_rel_path: t.archive_rel_path.clone(),
                 object_id: t.object_id,
                 partial_hash: t.partial_hash.clone(),
                 size: t.size,
                 mtime: t.mtime,
+                hash: t.hash.clone(),
             });
         }
 
@@ -614,6 +637,8 @@ pub struct ApplyExecuteParams {
     pub skipped_by_filter: usize,
     /// Manifest display path (for summary and decision record).
     pub manifest_display: String,
+    /// Receipt context for targeted placement. None if receipts are disabled.
+    pub receipt_ctx: Option<ReceiptContext>,
 }
 
 /// Result of executing an apply operation.
@@ -736,7 +761,9 @@ pub fn execute_apply(
     progress: &dyn TransferProgress,
     decision: Option<&DecisionParams>,
 ) -> Result<ApplyResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| {
+        DecisionRecorder::start(conn, d, params.receipt_ctx.as_ref())
+    });
 
     let interrupt_flag = match &params.interrupt_flag {
         Some(flag) => Arc::clone(flag),
@@ -806,18 +833,36 @@ pub fn execute_apply(
     // --- Transfer loop ---
     let total = transfers_to_execute.len();
     progress.on_start(total);
+    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
+    let mut receipt_items: Vec<ApplyReceiptItem> = Vec::new();
 
     for (i, transfer) in transfers_to_execute.iter().enumerate() {
-        let outcome = match execute_single_transfer(
+        let (outcome, prev_decision_id) = match execute_single_transfer(
             transfer,
             &params.base_dir,
             params.transfer_mode,
             conn,
             params.archive_root_id,
+            decision_id,
         ) {
-            Ok(outcome) => outcome,
-            Err(e) => TransferOutcome::Error(format!("{:#}", e)),
+            Ok(pair) => pair,
+            Err(e) => (TransferOutcome::Error(format!("{:#}", e)), None),
         };
+
+        match &outcome {
+            TransferOutcome::Copied | TransferOutcome::Renamed | TransferOutcome::Moved => {
+                receipt_items.push(ApplyReceiptItem {
+                    source_root: transfer.source_root_path.clone(),
+                    source_rel_path: transfer.source_rel_path.clone(),
+                    destination_rel_path: transfer.archive_rel_path.clone(),
+                    hash: transfer.hash.clone(),
+                    size: transfer.size,
+                    mtime: transfer.mtime,
+                    previous_decision_id: prev_decision_id,
+                });
+            }
+            _ => {}
+        }
 
         match &outcome {
             TransferOutcome::Copied => result.copied += 1,
@@ -863,6 +908,7 @@ pub fn execute_apply(
                 &transfer.partial_hash,
                 transfer.size,
                 transfer.mtime,
+                decision_id,
             );
             if let Err(e) = repo::source::insert_destination(conn, &new_source) {
                 result.errors.push(TransferError {
@@ -894,6 +940,38 @@ pub fn execute_apply(
             result.skipped_stale.len(), params.skipped_by_filter, result.errors.len()
         )
     };
+
+    // --- Write receipt (before complete so finalize happens inside complete()) ---
+    if let Some(ref mut recorder) = recorder {
+        if let Some(receipt_path) = recorder.receipt_abs_path().map(|p| p.to_owned()) {
+            if !receipt_items.is_empty() {
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let receipt = ApplyReceipt {
+                    meta: ReceiptMeta {
+                        receipt_version: 1,
+                        decision_id: recorder.decision_id().unwrap_or(0),
+                        command: "apply".to_string(),
+                        timestamp,
+                        scope: decision.and_then(|d| d.scope.clone()),
+                        reason: decision.and_then(|d| d.reason.clone()),
+                        summary: result.summary.clone(),
+                        canon_version: env!("CARGO_PKG_VERSION").to_string(),
+                        command_line: decision
+                            .map(|d| d.command_line.clone())
+                            .unwrap_or_default(),
+                        manifest: Some(params.manifest_display.clone()),
+                    },
+                    items: receipt_items,
+                };
+                if let Err(e) = receipt_ops::write_receipt(&receipt_path, &receipt, &result.summary) {
+                    recorder.push_warning(format!("Receipt write failed: {e:#}"));
+                }
+            }
+        }
+    }
 
     if let Some(recorder) = recorder.as_mut() {
         let total = plan.transfers.len() as i64;
@@ -934,6 +1012,7 @@ fn build_new_source_from_lock(
     partial_hash: &str,
     size: i64,
     mtime: i64,
+    decision_id: Option<i64>,
 ) -> NewSource {
     NewSource {
         root_id: archive_root_id,
@@ -944,7 +1023,7 @@ fn build_new_source_from_lock(
         object_id,
         device: None,
         inode: None,
-        decision_id: None,
+        decision_id,
     }
 }
 
@@ -952,26 +1031,35 @@ fn build_new_source_from_lock(
 // Execute helpers (private)
 // ===========================================================================
 
-/// Execute a single file transfer. Returns the outcome.
+/// Execute a single file transfer. Returns the outcome and the previous decision_id
+/// for the destination path (None if no prior source existed there).
 fn execute_single_transfer(
     transfer: &ApplyTransfer,
     base_dir: &Path,
     transfer_mode: TransferMode,
     conn: &Connection,
     archive_root_id: i64,
-) -> Result<TransferOutcome> {
+    decision_id: Option<i64>,
+) -> Result<(TransferOutcome, Option<i64>)> {
     let src_path = Path::new(&transfer.source_path);
     let dest_path = base_dir.join(&transfer.dest_rel_path);
 
     // Check if source exists
     if !src_path.exists() {
-        return Ok(TransferOutcome::SkippedMissing);
+        return Ok((TransferOutcome::SkippedMissing, None));
     }
 
     // Per-transfer staleness validation (catches race conditions)
     if let Err(reason) = validate_source_state(transfer) {
-        return Ok(TransferOutcome::SkippedStale(reason));
+        return Ok((TransferOutcome::SkippedStale(reason), None));
     }
+
+    // Capture previous decision_id before the transfer overwrites the destination record
+    let prev_decision_id = repo::source::fetch_decision_id_at_path(
+        conn,
+        archive_root_id,
+        &transfer.archive_rel_path,
+    )?;
 
     // Create parent directories
     ensure_parent_dir(&dest_path)?;
@@ -985,20 +1073,21 @@ fn execute_single_transfer(
                 &transfer.archive_rel_path,
                 transfer.object_id,
                 &transfer.partial_hash,
+                decision_id,
             )?;
             repo::source::insert_destination(conn, &new_source)?;
-            Ok(TransferOutcome::Copied)
+            Ok((TransferOutcome::Copied, prev_decision_id))
         }
         TransferMode::Rename => {
             rename_file(src_path, &dest_path, true)?;
-            relocate_source(conn, transfer.source_id, archive_root_id, &transfer.archive_rel_path)?;
-            Ok(TransferOutcome::Renamed)
+            relocate_source(conn, transfer.source_id, archive_root_id, &transfer.archive_rel_path, decision_id)?;
+            Ok((TransferOutcome::Renamed, prev_decision_id))
         }
         TransferMode::Move => {
             match move_file(src_path, &dest_path, true)? {
                 MoveOutcome::Renamed => {
-                    relocate_source(conn, transfer.source_id, archive_root_id, &transfer.archive_rel_path)?;
-                    Ok(TransferOutcome::Renamed)
+                    relocate_source(conn, transfer.source_id, archive_root_id, &transfer.archive_rel_path, decision_id)?;
+                    Ok((TransferOutcome::Renamed, prev_decision_id))
                 }
                 MoveOutcome::CopiedAndDeleted => {
                     mark_source_not_present(conn, transfer.source_id)?;
@@ -1008,9 +1097,10 @@ fn execute_single_transfer(
                         &transfer.archive_rel_path,
                         transfer.object_id,
                         &transfer.partial_hash,
+                        decision_id,
                     )?;
                     repo::source::insert_destination(conn, &new_source)?;
-                    Ok(TransferOutcome::Moved)
+                    Ok((TransferOutcome::Moved, prev_decision_id))
                 }
             }
         }
@@ -1153,12 +1243,13 @@ fn relocate_source(
     source_id: i64,
     archive_root_id: i64,
     rel_path: &str,
+    decision_id: Option<i64>,
 ) -> Result<()> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs() as i64;
-    repo::source::update_location(conn, source_id, archive_root_id, rel_path, now)
+    repo::source::update_location(conn, source_id, archive_root_id, rel_path, now, decision_id)
 }
 
 /// Mark a source as no longer present (for cross-device move after deletion).
@@ -1179,6 +1270,7 @@ fn build_new_source(
     rel_path: &str,
     object_id: Option<i64>,
     partial_hash: &str,
+    decision_id: Option<i64>,
 ) -> Result<NewSource> {
     use std::os::unix::fs::MetadataExt;
     let meta = fs::metadata(dest_path).with_context(|| {
@@ -1193,7 +1285,7 @@ fn build_new_source(
         object_id,
         device: Some(meta.dev() as i64),
         inode: Some(meta.ino() as i64),
-        decision_id: None,
+        decision_id,
     })
 }
 
@@ -1204,6 +1296,7 @@ fn build_new_source(
     rel_path: &str,
     object_id: Option<i64>,
     partial_hash: &str,
+    decision_id: Option<i64>,
 ) -> Result<NewSource> {
     let meta = fs::metadata(dest_path).with_context(|| {
         format!("Failed to read metadata for registration: {}", dest_path.display())
@@ -1223,7 +1316,7 @@ fn build_new_source(
         object_id,
         device: None,
         inode: None,
-        decision_id: None,
+        decision_id,
     })
 }
 
@@ -1875,12 +1968,15 @@ mod tests {
         ApplyTransfer {
             source_id: 1,
             source_path: path.display().to_string(),
+            source_root_path: String::new(),
+            source_rel_path: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
             dest_rel_path: "dest.jpg".to_string(),
             archive_rel_path: "dest.jpg".to_string(),
             object_id: Some(1),
             partial_hash: partial_hash.to_string(),
             size,
             mtime,
+            hash: None,
         }
     }
 
@@ -1993,6 +2089,9 @@ mod tests {
             partial_hash: "hash".to_string(),
             size: 1000,
             mtime: 0,
+            source_root_path: String::new(),
+            source_rel_path: String::new(),
+            hash: None,
         }];
 
         let result = classify_resume_entries(&transfers, dir.path());
@@ -2024,6 +2123,9 @@ mod tests {
             partial_hash: "hash".to_string(),
             size: 1000,
             mtime: 0,
+            source_root_path: String::new(),
+            source_rel_path: String::new(),
+            hash: None,
         }];
 
         let result = classify_resume_entries(&transfers, dir.path());
@@ -2053,6 +2155,9 @@ mod tests {
             partial_hash: "hash".to_string(),
             size: 1000,
             mtime: 0,
+            source_root_path: String::new(),
+            source_rel_path: String::new(),
+            hash: None,
         }];
 
         let result = classify_resume_entries(&transfers, dir.path());
@@ -2077,6 +2182,9 @@ mod tests {
             partial_hash: "hash".to_string(),
             size: 1000,
             mtime: 0,
+            source_root_path: String::new(),
+            source_rel_path: String::new(),
+            hash: None,
         }];
 
         let result = classify_resume_entries(&transfers, dir.path());
@@ -2104,6 +2212,9 @@ mod tests {
             partial_hash: "hash".to_string(),
             size: 1000,
             mtime: 0,
+            source_root_path: String::new(),
+            source_rel_path: String::new(),
+            hash: None,
         }];
 
         let result = classify_resume_entries(&transfers, dir.path());
@@ -2153,14 +2264,18 @@ mod tests {
             partial_hash: hash,
             size,
             mtime,
+            source_root_path: String::new(),
+            source_rel_path: String::new(),
+            hash: None,
         };
 
-        let outcome = execute_single_transfer(
+        let (outcome, _prev) = execute_single_transfer(
             &transfer,
             dest_dir.path(),
             TransferMode::Copy,
             &conn,
             archive_root,
+            None,
         )
         .unwrap();
 
@@ -2201,6 +2316,9 @@ mod tests {
             partial_hash: hash,
             size,
             mtime,
+            source_root_path: String::new(),
+            source_rel_path: String::new(),
+            hash: None,
         };
 
         let result = execute_single_transfer(
@@ -2209,6 +2327,7 @@ mod tests {
             TransferMode::Copy,
             &conn,
             archive_root,
+            None,
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
@@ -2229,18 +2348,189 @@ mod tests {
             partial_hash: "hash".to_string(),
             size: 1000,
             mtime: 0,
+            source_root_path: String::new(),
+            source_rel_path: String::new(),
+            hash: None,
         };
 
-        let outcome = execute_single_transfer(
+        let (outcome, _prev) = execute_single_transfer(
             &transfer,
             dest_dir.path(),
             TransferMode::Copy,
             &conn,
             archive_root,
+            None,
         )
         .unwrap();
 
         assert!(matches!(outcome, TransferOutcome::SkippedMissing));
+    }
+
+    // =========================================================================
+    // decision_id threading and previous_decision_id capture
+    // =========================================================================
+
+    #[test]
+    fn execute_copy_sets_decision_id_on_destination() {
+        use std::io::Write;
+        let conn = setup_test_db();
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::File::create(&src_file).unwrap().write_all(b"data").unwrap();
+
+        let meta = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        #[cfg(not(unix))]
+        let (size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&src_file, size as u64).unwrap();
+
+        let dest_dir = tempfile::tempdir().unwrap();
+        let transfer = ApplyTransfer {
+            source_id: 1,
+            source_path: src_file.display().to_string(),
+            dest_rel_path: "photo.jpg".to_string(),
+            archive_rel_path: "photo.jpg".to_string(),
+            object_id: None,
+            partial_hash: hash,
+            size,
+            mtime,
+            source_root_path: String::new(),
+            source_rel_path: String::new(),
+            hash: None,
+        };
+
+        let decision_id = Some(77i64);
+        execute_single_transfer(
+            &transfer, dest_dir.path(), TransferMode::Copy, &conn, archive_root, decision_id,
+        ).unwrap();
+
+        // Destination source should have decision_id = 77
+        let stored_decision_id: Option<i64> = conn.query_row(
+            "SELECT decision_id FROM sources WHERE root_id = ? AND rel_path = 'photo.jpg'",
+            rusqlite::params![archive_root],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(stored_decision_id, decision_id);
+    }
+
+    #[test]
+    fn execute_copy_re_apply_updates_decision_id() {
+        use std::io::Write;
+        let conn = setup_test_db();
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::File::create(&src_file).unwrap().write_all(b"data").unwrap();
+
+        let meta = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        #[cfg(not(unix))]
+        let (size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&src_file, size as u64).unwrap();
+
+        let dest_dir = tempfile::tempdir().unwrap();
+        let transfer = ApplyTransfer {
+            source_id: 1,
+            source_path: src_file.display().to_string(),
+            dest_rel_path: "photo.jpg".to_string(),
+            archive_rel_path: "photo.jpg".to_string(),
+            object_id: None,
+            partial_hash: hash.clone(),
+            size,
+            mtime,
+            source_root_path: String::new(),
+            source_rel_path: String::new(),
+            hash: None,
+        };
+
+        // First apply: decision 10
+        execute_single_transfer(
+            &transfer, dest_dir.path(), TransferMode::Copy, &conn, archive_root, Some(10),
+        ).unwrap();
+
+        // Recreate source file for second apply (clobber protection requires dest be renamed/moved)
+        let dest_file = dest_dir.path().join("photo.jpg");
+        std::fs::remove_file(&dest_file).unwrap();
+        std::fs::File::create(&src_file).unwrap().write_all(b"data2").unwrap();
+        let meta2 = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size2, mtime2) = { use std::os::unix::fs::MetadataExt; (meta2.size() as i64, meta2.mtime()) };
+        #[cfg(not(unix))]
+        let (size2, mtime2) = (meta2.len() as i64, 0i64);
+        let hash2 = compute_partial_hash(&src_file, size2 as u64).unwrap();
+
+        let transfer2 = ApplyTransfer {
+            source_id: 1,
+            source_path: src_file.display().to_string(),
+            dest_rel_path: "photo.jpg".to_string(),
+            archive_rel_path: "photo.jpg".to_string(),
+            object_id: None,
+            partial_hash: hash2,
+            size: size2,
+            mtime: mtime2,
+            source_root_path: String::new(),
+            source_rel_path: String::new(),
+            hash: None,
+        };
+
+        // Second apply: decision 20 — also captures previous_decision_id = 10
+        let (outcome, prev_decision_id) = execute_single_transfer(
+            &transfer2, dest_dir.path(), TransferMode::Copy, &conn, archive_root, Some(20),
+        ).unwrap();
+        assert!(matches!(outcome, TransferOutcome::Copied));
+        assert_eq!(prev_decision_id, Some(10));
+
+        // DB should now show decision_id = 20
+        let stored: Option<i64> = conn.query_row(
+            "SELECT decision_id FROM sources WHERE root_id = ? AND rel_path = 'photo.jpg'",
+            rusqlite::params![archive_root],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(stored, Some(20));
+    }
+
+    #[test]
+    fn execute_copy_previous_decision_id_none_for_new_destination() {
+        use std::io::Write;
+        let conn = setup_test_db();
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::File::create(&src_file).unwrap().write_all(b"data").unwrap();
+
+        let meta = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        #[cfg(not(unix))]
+        let (size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&src_file, size as u64).unwrap();
+
+        let dest_dir = tempfile::tempdir().unwrap();
+        let transfer = ApplyTransfer {
+            source_id: 1,
+            source_path: src_file.display().to_string(),
+            dest_rel_path: "photo.jpg".to_string(),
+            archive_rel_path: "photo.jpg".to_string(),
+            object_id: None,
+            partial_hash: hash,
+            size,
+            mtime,
+            source_root_path: String::new(),
+            source_rel_path: String::new(),
+            hash: None,
+        };
+
+        // Fresh destination — no prior record
+        let (_outcome, prev_decision_id) = execute_single_transfer(
+            &transfer, dest_dir.path(), TransferMode::Copy, &conn, archive_root, Some(5),
+        ).unwrap();
+        assert_eq!(prev_decision_id, None);
     }
 
     // =========================================================================
@@ -2429,6 +2719,9 @@ mod tests {
                     partial_hash: hash1,
                     size: size1,
                     mtime: mtime1,
+                    source_root_path: String::new(),
+                    source_rel_path: String::new(),
+                    hash: None,
                 },
                 ApplyTransfer {
                     source_id: 2,
@@ -2439,6 +2732,9 @@ mod tests {
                     partial_hash: hash2,
                     size: size2,
                     mtime: mtime2,
+                    source_root_path: String::new(),
+                    source_rel_path: String::new(),
+                    hash: None,
                 },
             ],
             violations: ApplyViolations::default(),
@@ -2461,6 +2757,7 @@ mod tests {
             interrupt_flag: Some(flag),
             skipped_by_filter: 0,
             manifest_display: "test.toml".to_string(),
+            receipt_ctx: None,
         };
 
         let result = execute_apply(&conn, &plan, &params, &NoopProgress, None).unwrap();
@@ -2501,6 +2798,7 @@ mod tests {
             interrupt_flag: Some(flag),
             skipped_by_filter: 0,
             manifest_display: "test.toml".to_string(),
+            receipt_ctx: None,
         };
 
         let result = execute_apply(&conn, &plan, &params, &NoopProgress, None).unwrap();
@@ -2508,5 +2806,577 @@ mod tests {
         // No transfers, so not interrupted (loop never runs)
         assert!(!result.interrupted);
         assert_eq!(result.remaining, 0);
+    }
+
+    // =========================================================================
+    // Apply receipt integration
+    // =========================================================================
+
+    fn make_decision_params(receipt_enabled: bool) -> DecisionParams {
+        use crate::domain::config::{LedgerConfig, RecordingMode, ReceiptLayout};
+        DecisionParams {
+            command: crate::domain::decision::DecisionCommand::Apply,
+            scope: None,
+            command_line: "canon apply test.toml".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled,
+            ledger_config: LedgerConfig {
+                recording: if receipt_enabled { RecordingMode::Full } else { RecordingMode::Records },
+                layout: ReceiptLayout::Central,
+                root: None,
+            },
+        }
+    }
+
+    #[test]
+    fn test_apply_receipt_written_on_completion() {
+        use std::io::Write;
+        let conn = setup_test_db();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::File::create(&src_file).unwrap().write_all(b"image data").unwrap();
+        let meta = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        #[cfg(not(unix))]
+        let (size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&src_file, size as u64).unwrap();
+
+        let plan = ApplyPlan {
+            transfers: vec![ApplyTransfer {
+                source_id: 1,
+                source_path: src_file.display().to_string(),
+                source_root_path: src_dir.path().display().to_string(),
+                source_rel_path: "photo.jpg".to_string(),
+                dest_rel_path: "photo.jpg".to_string(),
+                archive_rel_path: "photo.jpg".to_string(),
+                object_id: None,
+                partial_hash: hash,
+                size,
+                mtime,
+                hash: None,
+            }],
+            violations: ApplyViolations::default(),
+            stale_sources: vec![],
+            already_archived_count: 0,
+            resume_already_there: vec![],
+            resume_already_there_source_present: 0,
+            resume_source_lost: vec![],
+            resume_size_mismatches: vec![],
+        };
+
+        let receipt_ctx = ReceiptContext {
+            archive_root_id: archive_root,
+            archive_root_path: archive_dir.path().display().to_string(),
+            base_dir_rel: String::new(),
+        };
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: Some(receipt_ctx),
+        };
+
+        let decision = make_decision_params(true);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        assert_eq!(result.copied, 1);
+
+        // Receipt should exist in .canon-ledger/
+        let receipt_files: Vec<_> = std::fs::read_dir(archive_dir.path().join(".canon-ledger"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|x| x == "toml").unwrap_or(false))
+            .collect();
+        assert_eq!(receipt_files.len(), 1, "Expected one .toml receipt file");
+
+        let receipt_content = std::fs::read_to_string(&receipt_files[0].path()).unwrap();
+        assert!(receipt_content.contains("# Canon Decision Receipt"));
+        assert!(receipt_content.contains("[meta]"));
+        assert!(receipt_content.contains("[[items]]"));
+        assert!(receipt_content.contains("source_rel_path = \"photo.jpg\""));
+        assert!(receipt_content.contains("destination_rel_path = \"photo.jpg\""));
+        assert!(receipt_content.contains("manifest = \"test.toml\""));
+    }
+
+    #[test]
+    fn test_apply_no_receipt_when_disabled() {
+        use std::io::Write;
+        let conn = setup_test_db();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::File::create(&src_file).unwrap().write_all(b"image data").unwrap();
+        let meta = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        #[cfg(not(unix))]
+        let (size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&src_file, size as u64).unwrap();
+
+        let plan = ApplyPlan {
+            transfers: vec![ApplyTransfer {
+                source_id: 1,
+                source_path: src_file.display().to_string(),
+                source_root_path: src_dir.path().display().to_string(),
+                source_rel_path: "photo.jpg".to_string(),
+                dest_rel_path: "photo.jpg".to_string(),
+                archive_rel_path: "photo.jpg".to_string(),
+                object_id: None,
+                partial_hash: hash,
+                size,
+                mtime,
+                hash: None,
+            }],
+            violations: ApplyViolations::default(),
+            stale_sources: vec![],
+            already_archived_count: 0,
+            resume_already_there: vec![],
+            resume_already_there_source_present: 0,
+            resume_source_lost: vec![],
+            resume_size_mismatches: vec![],
+        };
+
+        // receipt_ctx is None — no receipt written
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: None,
+        };
+
+        let decision = make_decision_params(false);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        assert_eq!(result.copied, 1);
+
+        // No .canon-ledger directory should exist
+        assert!(!archive_dir.path().join(".canon-ledger").exists());
+    }
+
+    #[test]
+    fn test_apply_receipt_db_fields_populated() {
+        use std::io::Write;
+        let conn = setup_test_db();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::File::create(&src_file).unwrap().write_all(b"image data").unwrap();
+        let meta = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        #[cfg(not(unix))]
+        let (size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&src_file, size as u64).unwrap();
+
+        let plan = ApplyPlan {
+            transfers: vec![ApplyTransfer {
+                source_id: 1,
+                source_path: src_file.display().to_string(),
+                source_root_path: src_dir.path().display().to_string(),
+                source_rel_path: "photo.jpg".to_string(),
+                dest_rel_path: "photo.jpg".to_string(),
+                archive_rel_path: "photo.jpg".to_string(),
+                object_id: None,
+                partial_hash: hash,
+                size,
+                mtime,
+                hash: None,
+            }],
+            violations: ApplyViolations::default(),
+            stale_sources: vec![],
+            already_archived_count: 0,
+            resume_already_there: vec![],
+            resume_already_there_source_present: 0,
+            resume_source_lost: vec![],
+            resume_size_mismatches: vec![],
+        };
+
+        let receipt_ctx = ReceiptContext {
+            archive_root_id: archive_root,
+            archive_root_path: archive_dir.path().display().to_string(),
+            base_dir_rel: String::new(),
+        };
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: Some(receipt_ctx),
+        };
+
+        let decision = make_decision_params(true);
+        execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+
+        // Verify DB receipt fields are populated
+        let (receipt_root_id, receipt_rel_path): (Option<i64>, Option<String>) = conn.query_row(
+            "SELECT receipt_root_id, receipt_rel_path FROM decisions ORDER BY id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(receipt_root_id, Some(archive_root));
+        assert!(receipt_rel_path.is_some());
+        let rel_path = receipt_rel_path.unwrap();
+        assert!(rel_path.contains(".canon-ledger"), "rel_path should contain .canon-ledger: {rel_path}");
+        assert!(rel_path.ends_with("-apply.toml"), "rel_path should end with -apply.toml: {rel_path}");
+    }
+
+    #[test]
+    fn test_apply_receipt_alongside_layout() {
+        use std::io::Write;
+        use crate::domain::config::{LedgerConfig, RecordingMode, ReceiptLayout};
+
+        let conn = setup_test_db();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+
+        // Create base_dir inside archive
+        let base_dir = archive_dir.path().join("Media/2024");
+        std::fs::create_dir_all(&base_dir).unwrap();
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::File::create(&src_file).unwrap().write_all(b"image data").unwrap();
+        let meta = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        #[cfg(not(unix))]
+        let (size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&src_file, size as u64).unwrap();
+
+        let plan = ApplyPlan {
+            transfers: vec![ApplyTransfer {
+                source_id: 1,
+                source_path: src_file.display().to_string(),
+                source_root_path: src_dir.path().display().to_string(),
+                source_rel_path: "photo.jpg".to_string(),
+                dest_rel_path: "photo.jpg".to_string(),
+                archive_rel_path: "Media/2024/photo.jpg".to_string(),
+                object_id: None,
+                partial_hash: hash,
+                size,
+                mtime,
+                hash: None,
+            }],
+            violations: ApplyViolations::default(),
+            stale_sources: vec![],
+            already_archived_count: 0,
+            resume_already_there: vec![],
+            resume_already_there_source_present: 0,
+            resume_source_lost: vec![],
+            resume_size_mismatches: vec![],
+        };
+
+        let receipt_ctx = ReceiptContext {
+            archive_root_id: archive_root,
+            archive_root_path: archive_dir.path().display().to_string(),
+            base_dir_rel: "Media/2024".to_string(),
+        };
+
+        let decision = DecisionParams {
+            command: crate::domain::decision::DecisionCommand::Apply,
+            scope: None,
+            command_line: "canon apply test.toml".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: true,
+            ledger_config: LedgerConfig {
+                recording: RecordingMode::Full,
+                layout: ReceiptLayout::Alongside,
+                root: None,
+            },
+        };
+
+        let params = ApplyExecuteParams {
+            base_dir: base_dir.clone(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: Some(receipt_ctx),
+        };
+
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        assert_eq!(result.copied, 1);
+
+        // Alongside: receipt at {base_dir_rel}/.canon-ledger/{id}-apply.toml
+        let ledger_dir = archive_dir.path().join("Media/2024/.canon-ledger");
+        assert!(ledger_dir.exists(), ".canon-ledger should exist under base_dir");
+        let receipt_files: Vec<_> = std::fs::read_dir(&ledger_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|x| x == "toml").unwrap_or(false))
+            .collect();
+        assert_eq!(receipt_files.len(), 1, "Expected one receipt in alongside layout");
+    }
+
+    #[test]
+    fn test_apply_no_receipt_when_all_transfers_error() {
+        use std::io::Write;
+        // Source passes staleness but dest already exists → copy error → no receipt items
+        let conn = setup_test_db();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::File::create(&src_file).unwrap().write_all(b"image data").unwrap();
+        let meta = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        #[cfg(not(unix))]
+        let (size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&src_file, size as u64).unwrap();
+
+        // Pre-create destination so copy_file fails with "already exists"
+        std::fs::File::create(archive_dir.path().join("photo.jpg")).unwrap();
+
+        let plan = ApplyPlan {
+            transfers: vec![ApplyTransfer {
+                source_id: 1,
+                source_path: src_file.display().to_string(),
+                source_root_path: src_dir.path().display().to_string(),
+                source_rel_path: "photo.jpg".to_string(),
+                dest_rel_path: "photo.jpg".to_string(),
+                archive_rel_path: "photo.jpg".to_string(),
+                object_id: None,
+                partial_hash: hash,
+                size,
+                mtime,
+                hash: None,
+            }],
+            violations: ApplyViolations::default(),
+            stale_sources: vec![],
+            already_archived_count: 0,
+            resume_already_there: vec![],
+            resume_already_there_source_present: 0,
+            resume_source_lost: vec![],
+            resume_size_mismatches: vec![],
+        };
+
+        let receipt_ctx = ReceiptContext {
+            archive_root_id: archive_root,
+            archive_root_path: archive_dir.path().display().to_string(),
+            base_dir_rel: String::new(),
+        };
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: Some(receipt_ctx),
+        };
+
+        let decision = make_decision_params(true);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        assert_eq!(result.errors.len(), 1, "Transfer should error on existing dest");
+        assert_eq!(result.copied, 0);
+
+        // No receipt .toml should exist (no completed transfers → empty items → skipped)
+        let ledger_dir = archive_dir.path().join(".canon-ledger");
+        if ledger_dir.exists() {
+            let receipt_toml_files: Vec<_> = std::fs::read_dir(&ledger_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map(|x| x == "toml").unwrap_or(false))
+                .collect();
+            assert_eq!(receipt_toml_files.len(), 0, "No receipt .toml when all transfers error");
+        }
+    }
+
+    #[test]
+    fn test_apply_receipt_interrupted_contains_only_completed() {
+        use std::io::Write;
+        let conn = setup_test_db();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src1 = src_dir.path().join("a.jpg");
+        let src2 = src_dir.path().join("b.jpg");
+        std::fs::File::create(&src1).unwrap().write_all(b"data1").unwrap();
+        std::fs::File::create(&src2).unwrap().write_all(b"data2").unwrap();
+
+        let meta1 = std::fs::metadata(&src1).unwrap();
+        let meta2 = std::fs::metadata(&src2).unwrap();
+        #[cfg(unix)]
+        let (size1, mtime1) = { use std::os::unix::fs::MetadataExt; (meta1.size() as i64, meta1.mtime()) };
+        #[cfg(not(unix))]
+        let (size1, mtime1) = (meta1.len() as i64, 0i64);
+        #[cfg(unix)]
+        let (size2, mtime2) = { use std::os::unix::fs::MetadataExt; (meta2.size() as i64, meta2.mtime()) };
+        #[cfg(not(unix))]
+        let (size2, mtime2) = (meta2.len() as i64, 0i64);
+        let hash1 = compute_partial_hash(&src1, size1 as u64).unwrap();
+        let hash2 = compute_partial_hash(&src2, size2 as u64).unwrap();
+        let obj1 = insert_object(&conn, "hash_a", false);
+        let obj2 = insert_object(&conn, "hash_b", false);
+
+        let plan = ApplyPlan {
+            transfers: vec![
+                ApplyTransfer {
+                    source_id: 1,
+                    source_path: src1.display().to_string(),
+                    source_root_path: src_dir.path().display().to_string(),
+                    source_rel_path: "a.jpg".to_string(),
+                    dest_rel_path: "a.jpg".to_string(),
+                    archive_rel_path: "a.jpg".to_string(),
+                    object_id: Some(obj1),
+                    partial_hash: hash1,
+                    size: size1,
+                    mtime: mtime1,
+                    hash: None,
+                },
+                ApplyTransfer {
+                    source_id: 2,
+                    source_path: src2.display().to_string(),
+                    source_root_path: src_dir.path().display().to_string(),
+                    source_rel_path: "b.jpg".to_string(),
+                    dest_rel_path: "b.jpg".to_string(),
+                    archive_rel_path: "b.jpg".to_string(),
+                    object_id: Some(obj2),
+                    partial_hash: hash2,
+                    size: size2,
+                    mtime: mtime2,
+                    hash: None,
+                },
+            ],
+            violations: ApplyViolations::default(),
+            stale_sources: vec![],
+            already_archived_count: 0,
+            resume_already_there: vec![],
+            resume_already_there_source_present: 0,
+            resume_source_lost: vec![],
+            resume_size_mismatches: vec![],
+        };
+
+        let receipt_ctx = ReceiptContext {
+            archive_root_id: archive_root,
+            archive_root_path: archive_dir.path().display().to_string(),
+            base_dir_rel: String::new(),
+        };
+
+        // Pre-set interrupt flag — first transfer completes, then loop breaks
+        let flag = Arc::new(AtomicBool::new(true));
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: Some(flag),
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: Some(receipt_ctx),
+        };
+
+        let decision = make_decision_params(true);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        assert!(result.interrupted);
+        assert_eq!(result.copied, 1); // Only first transfer completed
+
+        // Receipt should exist with exactly 1 item (the completed transfer)
+        let ledger_dir = archive_dir.path().join(".canon-ledger");
+        assert!(ledger_dir.exists());
+        let receipt_files: Vec<_> = std::fs::read_dir(&ledger_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|x| x == "toml").unwrap_or(false))
+            .collect();
+        assert_eq!(receipt_files.len(), 1, "Receipt should be finalized even on interrupt");
+
+        let content = std::fs::read_to_string(&receipt_files[0].path()).unwrap();
+        // Should contain exactly one [[items]] section
+        let items_count = content.matches("[[items]]").count();
+        assert_eq!(items_count, 1, "Interrupted receipt should contain only completed items");
+        assert!(content.contains("a.jpg"), "Should contain the completed transfer");
+        assert!(!content.contains("b.jpg"), "Should NOT contain the interrupted transfer");
+    }
+
+    #[test]
+    fn test_rename_transfer_sets_decision_id() {
+        use std::io::Write;
+        let conn = setup_test_db();
+        let src_root = insert_root(&conn, "/photos", "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+
+        // Create a source file inside the archive dir (rename = same filesystem)
+        let src_file = archive_dir.path().join("original.jpg");
+        std::fs::File::create(&src_file).unwrap().write_all(b"data").unwrap();
+
+        let meta = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        #[cfg(not(unix))]
+        let (size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&src_file, size as u64).unwrap();
+
+        // Insert source record in DB so relocate_source has something to update
+        let source_id = {
+            conn.execute(
+                "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
+                 basis_rev, scanned_at, last_seen_at, present, excluded)
+                 VALUES (?, 'original.jpg', 0, 0, ?, ?, ?, 0, 0, 0, 1, 0)",
+                rusqlite::params![src_root, size, mtime, hash],
+            ).unwrap();
+            conn.last_insert_rowid()
+        };
+
+        let dest_dir = archive_dir.path().join("dest");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+
+        let transfer = ApplyTransfer {
+            source_id,
+            source_path: src_file.display().to_string(),
+            source_root_path: archive_dir.path().display().to_string(),
+            source_rel_path: "original.jpg".to_string(),
+            dest_rel_path: "renamed.jpg".to_string(),
+            archive_rel_path: "dest/renamed.jpg".to_string(),
+            object_id: None,
+            partial_hash: hash,
+            size,
+            mtime,
+            hash: None,
+        };
+
+        let (outcome, _prev) = execute_single_transfer(
+            &transfer, &dest_dir, TransferMode::Rename, &conn, archive_root, Some(42),
+        ).unwrap();
+
+        assert!(matches!(outcome, TransferOutcome::Renamed));
+
+        // Verify decision_id was set on the relocated source
+        let stored_decision_id: Option<i64> = conn.query_row(
+            "SELECT decision_id FROM sources WHERE id = ?",
+            rusqlite::params![source_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(stored_decision_id, Some(42), "Rename should set decision_id");
     }
 }

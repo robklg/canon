@@ -1,5 +1,8 @@
+use std::path::PathBuf;
+
 use crate::domain::config::LedgerConfig;
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
+use crate::ops::receipt::{compute_targeted_receipt_rel_path, finalize_receipt, ReceiptRef};
 use crate::repo::{self, Connection};
 
 /// Parameters for starting a decision record.
@@ -12,8 +15,20 @@ pub struct DecisionParams {
     pub record_enabled: bool,
     /// Whether to write a receipt file. False unless recording=full and no --no-receipt.
     pub receipt_enabled: bool,
-    /// Ledger config for receipt path computation (used in Story 2+).
+    /// Ledger config for receipt path computation.
     pub ledger_config: LedgerConfig,
+}
+
+/// Context needed to compute receipt placement for targeted receipts (apply).
+///
+/// Passed to `DecisionRecorder::start()` when the command writes to a specific
+/// archive location. Non-targeted commands (exclusions, scan) pass `None` until
+/// their receipt support is implemented in Story 3+.
+pub struct ReceiptContext {
+    pub archive_root_id: i64,
+    pub archive_root_path: String,
+    /// Relative base directory within the archive root (from manifest config).
+    pub base_dir_rel: String,
 }
 
 /// Outcome counts for a decision record.
@@ -33,7 +48,11 @@ pub struct DecisionCounts {
 /// recorder — this is acceptable because database failures that cause recording to fail
 /// will also manifest through the main operation's error path.
 pub struct DecisionRecorder {
-    id: Option<i64>, // None if recording is disabled or start failed
+    id: Option<i64>,
+    /// Stored ReceiptRef for callers that need root_id/rel_path (e.g. receipt DB linkage).
+    receipt_ref: Option<ReceiptRef>,
+    /// Absolute path to the final `.toml` file, used for write and finalize.
+    receipt_abs_path: Option<PathBuf>,
     warnings: Vec<String>,
 }
 
@@ -44,42 +63,98 @@ impl DecisionRecorder {
         self.id
     }
 
+    /// Expose the receipt reference (root_id + rel_path) stored in the DB.
+    /// Returns None if receipts are disabled or path computation failed.
+    pub fn receipt_ref(&self) -> Option<&ReceiptRef> {
+        self.receipt_ref.as_ref()
+    }
+
+    /// Expose the absolute path for receipt writing.
+    /// Returns None if receipts are disabled or path computation failed.
+    pub fn receipt_abs_path(&self) -> Option<&std::path::Path> {
+        self.receipt_abs_path.as_deref()
+    }
+
+    /// Collect an external warning into the recorder's warning list.
+    /// Used by callers (e.g. execute_apply) to report receipt write failures.
+    pub fn push_warning(&mut self, msg: String) {
+        self.warnings.push(msg);
+    }
+
     /// Insert the initial "started" record.
-    /// If record_enabled is false (recording=off, dry-run), returns a no-op recorder.
+    ///
+    /// If `receipt_enabled` and `receipt_ctx` is `Some`, computes the receipt
+    /// path, creates the `.canon-ledger/` directory, and updates the decision
+    /// record with the receipt location. Failures here are collected as warnings
+    /// and don't prevent the recorder from functioning.
+    ///
+    /// If `record_enabled` is false (recording=off, dry-run), returns a no-op recorder.
     /// If the INSERT fails, collects a warning and returns a no-op recorder.
-    pub fn start(conn: &Connection, params: &DecisionParams) -> Self {
+    pub fn start(
+        conn: &Connection,
+        params: &DecisionParams,
+        receipt_ctx: Option<&ReceiptContext>,
+    ) -> Self {
         if !params.record_enabled {
             return DecisionRecorder {
                 id: None,
+                receipt_ref: None,
+                receipt_abs_path: None,
                 warnings: Vec::new(),
             };
         }
 
         let canon_version = env!("CARGO_PKG_VERSION");
 
-        match repo::decision::insert_started(
+        let id = match repo::decision::insert_started(
             conn,
             params.command.as_str(),
             params.scope.as_deref(),
             &params.command_line,
             params.reason.as_deref(),
             canon_version,
-            None, // receipt_root_id — populated in Story 2
-            None, // receipt_rel_path — populated in Story 2
+            None, // receipt fields populated below via update_receipt_path
+            None,
         ) {
-            Ok(id) => DecisionRecorder {
-                id: Some(id),
-                warnings: Vec::new(),
-            },
-            Err(e) => DecisionRecorder {
-                id: None,
-                warnings: vec![format!("Warning: failed to record decision: {e}")],
-            },
+            Ok(id) => id,
+            Err(e) => {
+                return DecisionRecorder {
+                    id: None,
+                    receipt_ref: None,
+                    receipt_abs_path: None,
+                    warnings: vec![format!("Warning: failed to record decision: {e}")],
+                };
+            }
+        };
+
+        // Compute receipt path if receipts are enabled and context is provided.
+        let (receipt_ref, receipt_abs_path, warnings) =
+            if params.receipt_enabled {
+                if let Some(ctx) = receipt_ctx {
+                    compute_and_register_receipt(conn, id, params, ctx)
+                } else {
+                    (None, None, Vec::new())
+                }
+            } else {
+                (None, None, Vec::new())
+            };
+
+        // Warn if receipt was requested but couldn't be set up (ctx missing is not a warning).
+        let _ = &warnings; // consumed below
+
+        DecisionRecorder {
+            id: Some(id),
+            receipt_ref,
+            receipt_abs_path,
+            warnings,
         }
     }
 
     /// Update the record with completion data. No-op if disabled or start failed.
     /// Collects a warning if the UPDATE fails.
+    ///
+    /// If a receipt path is stored, renames the `.incomplete` file to `.toml`
+    /// as part of completion. Finalization failure collects a warning.
     pub fn complete(
         &mut self,
         conn: &Connection,
@@ -104,6 +179,14 @@ impl DecisionRecorder {
             self.warnings
                 .push(format!("Warning: failed to update decision record: {e}"));
         }
+
+        // Finalize the receipt file: .incomplete → .toml
+        if let Some(ref path) = self.receipt_abs_path {
+            if let Err(e) = finalize_receipt(path) {
+                self.warnings
+                    .push(format!("Warning: failed to finalize receipt: {e}"));
+            }
+        }
     }
 
     /// Update to interrupted status. Best-effort.
@@ -125,6 +208,14 @@ impl DecisionRecorder {
             self.warnings
                 .push(format!("Warning: failed to update decision record: {e}"));
         }
+
+        // Finalize even on interrupt — partial receipt is better than .incomplete.
+        if let Some(ref path) = self.receipt_abs_path {
+            if let Err(e) = finalize_receipt(path) {
+                self.warnings
+                    .push(format!("Warning: failed to finalize receipt: {e}"));
+            }
+        }
     }
 
     /// Drain accumulated warnings. Returns an empty vec if no warnings.
@@ -133,11 +224,68 @@ impl DecisionRecorder {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Private helper
+// ---------------------------------------------------------------------------
+
+/// Compute the receipt path, create the directory, and update the DB record.
+///
+/// Returns `(receipt_ref, receipt_abs_path, warnings)`.
+/// On any failure, returns `(None, None, [warning])` — the command proceeds without receipt.
+fn compute_and_register_receipt(
+    conn: &Connection,
+    decision_id: i64,
+    params: &DecisionParams,
+    ctx: &ReceiptContext,
+) -> (Option<ReceiptRef>, Option<PathBuf>, Vec<String>) {
+    let rel_path = compute_targeted_receipt_rel_path(
+        decision_id,
+        params.command.as_str(),
+        &ctx.base_dir_rel,
+        &params.ledger_config.layout,
+    );
+
+    let abs_path = PathBuf::from(&ctx.archive_root_path).join(&rel_path);
+
+    // Ensure the directory exists before the first write.
+    if let Some(parent) = abs_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return (
+                None,
+                None,
+                vec![format!("Warning: could not create receipt directory {}: {e}", parent.display())],
+            );
+        }
+    }
+
+    // Update the DB record with the receipt location.
+    if let Err(e) = repo::decision::update_receipt_path(
+        conn,
+        decision_id,
+        Some(ctx.archive_root_id),
+        Some(&rel_path),
+    ) {
+        return (
+            None,
+            None,
+            vec![format!("Warning: failed to store receipt path in decision record: {e}")],
+        );
+    }
+
+    let receipt_ref = ReceiptRef {
+        root_id: ctx.archive_root_id,
+        rel_path,
+    };
+
+    (Some(receipt_ref), Some(abs_path), Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::config::{LedgerConfig, RecordingMode};
     use crate::repo::db::open_in_memory_for_test;
+    use tempfile::tempdir;
 
     fn setup_test_db() -> Connection {
         open_in_memory_for_test()
@@ -165,7 +313,7 @@ mod tests {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::Scan, true);
 
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let recorder = DecisionRecorder::start(&conn, &params, None);
 
         assert!(recorder.id.is_some());
         assert!(recorder.warnings.is_empty());
@@ -176,7 +324,7 @@ mod tests {
     fn recorder_complete_updates_record() {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::ExcludeSet, true);
-        let mut recorder = DecisionRecorder::start(&conn, &params);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
 
         recorder.complete(
             &conn,
@@ -204,7 +352,7 @@ mod tests {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::Scan, false);
 
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let recorder = DecisionRecorder::start(&conn, &params, None);
 
         assert!(recorder.id.is_none());
         assert_eq!(count_decisions(&conn), 0);
@@ -214,7 +362,7 @@ mod tests {
     fn recorder_interrupted_sets_status() {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::Apply, true);
-        let mut recorder = DecisionRecorder::start(&conn, &params);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
 
         recorder.interrupted(&conn);
 
@@ -228,7 +376,7 @@ mod tests {
     fn recorder_disabled_complete_is_noop() {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::Scan, false);
-        let mut recorder = DecisionRecorder::start(&conn, &params);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
 
         // Should not panic
         recorder.complete(
@@ -259,7 +407,7 @@ mod tests {
             ledger_config: LedgerConfig::default(),
         };
 
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let recorder = DecisionRecorder::start(&conn, &params, None);
 
         let decision = repo::decision::fetch_by_id(&conn, recorder.id.unwrap())
             .unwrap()
@@ -274,7 +422,7 @@ mod tests {
     fn recorder_canon_version_populated() {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::Scan, true);
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let recorder = DecisionRecorder::start(&conn, &params, None);
 
         let decision = repo::decision::fetch_by_id(&conn, recorder.id.unwrap())
             .unwrap()
@@ -286,7 +434,7 @@ mod tests {
     fn test_recorder_record_enabled_creates_row() {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::Scan, true);
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let recorder = DecisionRecorder::start(&conn, &params, None);
         assert!(recorder.decision_id().is_some());
         assert_eq!(count_decisions(&conn), 1);
     }
@@ -295,7 +443,7 @@ mod tests {
     fn test_recorder_record_disabled_no_row() {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::Scan, false);
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let recorder = DecisionRecorder::start(&conn, &params, None);
         assert!(recorder.decision_id().is_none());
         assert_eq!(count_decisions(&conn), 0);
     }
@@ -312,7 +460,7 @@ mod tests {
             receipt_enabled: false,
             ledger_config: LedgerConfig::default(),
         };
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let recorder = DecisionRecorder::start(&conn, &params, None);
         assert!(recorder.decision_id().is_some());
         assert_eq!(count_decisions(&conn), 1);
     }
@@ -321,7 +469,7 @@ mod tests {
     fn test_recorder_decision_id_some_when_enabled() {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::Scan, true);
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let recorder = DecisionRecorder::start(&conn, &params, None);
         assert!(recorder.decision_id().is_some());
     }
 
@@ -329,26 +477,28 @@ mod tests {
     fn test_recorder_decision_id_none_when_disabled() {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::Scan, false);
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let recorder = DecisionRecorder::start(&conn, &params, None);
         assert!(recorder.decision_id().is_none());
     }
 
     #[test]
-    fn test_recorder_insert_started_receipt_columns_null() {
+    fn test_recorder_insert_started_receipt_columns_null_without_ctx() {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::Apply, true);
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let recorder = DecisionRecorder::start(&conn, &params, None);
         let id = recorder.decision_id().unwrap();
         let d = repo::decision::fetch_by_id(&conn, id).unwrap().unwrap();
         assert!(d.receipt_root_id.is_none());
         assert!(d.receipt_rel_path.is_none());
+        assert!(recorder.receipt_ref().is_none());
+        assert!(recorder.receipt_abs_path().is_none());
     }
 
     #[test]
     fn test_recorder_complete_updates() {
         let conn = setup_test_db();
         let params = make_params(DecisionCommand::ExcludeSet, true);
-        let mut recorder = DecisionRecorder::start(&conn, &params);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
         recorder.complete(
             &conn,
             DecisionStatus::Completed,
@@ -363,9 +513,8 @@ mod tests {
     #[test]
     fn test_recorder_warnings_collected() {
         let conn = setup_test_db();
-        // Start with recording enabled, then complete — no warnings in happy path
         let params = make_params(DecisionCommand::Scan, true);
-        let mut recorder = DecisionRecorder::start(&conn, &params);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
         assert!(recorder.warnings.is_empty());
         recorder.complete(
             &conn,
@@ -378,7 +527,147 @@ mod tests {
     }
 
     // =========================================================================
-    // Phase 5: recording mode tests
+    // Receipt context tests
+    // =========================================================================
+
+    fn make_receipt_params() -> DecisionParams {
+        DecisionParams {
+            command: DecisionCommand::Apply,
+            scope: None,
+            command_line: "canon apply manifest.toml".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: true,
+            ledger_config: LedgerConfig::default(),
+        }
+    }
+
+    #[test]
+    fn test_recorder_with_receipt_ctx_sets_receipt_ref() {
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = make_receipt_params();
+        let ctx = ReceiptContext {
+            archive_root_id: 7,
+            archive_root_path: dir.path().to_str().unwrap().to_string(),
+            base_dir_rel: "Media/2016/Italy".to_string(),
+        };
+
+        let recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
+
+        assert!(recorder.decision_id().is_some());
+        assert!(recorder.receipt_ref().is_some(), "receipt_ref should be set");
+        assert!(recorder.receipt_abs_path().is_some(), "receipt_abs_path should be set");
+
+        let rr = recorder.receipt_ref().unwrap();
+        assert_eq!(rr.root_id, 7);
+        assert!(rr.rel_path.contains("000001-apply.toml"), "got: {}", rr.rel_path);
+        assert!(rr.rel_path.starts_with(".canon-ledger/"), "got: {}", rr.rel_path);
+    }
+
+    #[test]
+    fn test_recorder_with_receipt_ctx_db_updated() {
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = make_receipt_params();
+        let ctx = ReceiptContext {
+            archive_root_id: 7,
+            archive_root_path: dir.path().to_str().unwrap().to_string(),
+            base_dir_rel: "Media".to_string(),
+        };
+
+        let recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
+        let id = recorder.decision_id().unwrap();
+        let d = repo::decision::fetch_by_id(&conn, id).unwrap().unwrap();
+
+        assert_eq!(d.receipt_root_id, Some(7));
+        assert!(d.receipt_rel_path.is_some());
+        assert!(d.receipt_rel_path.unwrap().contains("apply.toml"));
+    }
+
+    #[test]
+    fn test_recorder_receipt_disabled_with_ctx_no_receipt_ref() {
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = DecisionParams {
+            command: DecisionCommand::Apply,
+            scope: None,
+            command_line: "canon apply m.lock".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: false, // disabled
+            ledger_config: LedgerConfig::default(),
+        };
+        let ctx = ReceiptContext {
+            archive_root_id: 1,
+            archive_root_path: dir.path().to_str().unwrap().to_string(),
+            base_dir_rel: "Media".to_string(),
+        };
+
+        let recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
+
+        assert!(recorder.receipt_ref().is_none());
+        assert!(recorder.receipt_abs_path().is_none());
+    }
+
+    #[test]
+    fn test_recorder_complete_finalizes_receipt() {
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = make_receipt_params();
+        let ctx = ReceiptContext {
+            archive_root_id: 1,
+            archive_root_path: dir.path().to_str().unwrap().to_string(),
+            base_dir_rel: String::new(),
+        };
+
+        let mut recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
+
+        // Manually create the .incomplete file so finalize_receipt has something to rename
+        let receipt_path = recorder.receipt_abs_path().unwrap().to_path_buf();
+        let incomplete = receipt_path.with_extension("incomplete");
+        std::fs::create_dir_all(incomplete.parent().unwrap()).unwrap();
+        std::fs::write(&incomplete, b"receipt content").unwrap();
+
+        recorder.complete(
+            &conn,
+            DecisionStatus::Completed,
+            DecisionCounts { attempted: Some(1), completed: Some(1), failed: Some(0), skipped: None },
+            "Applied 1 file",
+        );
+
+        // .toml should exist, .incomplete should be gone
+        assert!(receipt_path.exists(), ".toml should exist after complete()");
+        assert!(!incomplete.exists(), ".incomplete should be gone");
+        assert!(recorder.warnings.is_empty(), "unexpected warnings: {:?}", recorder.warnings);
+    }
+
+    #[test]
+    fn test_recorder_interrupted_finalizes_receipt() {
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = make_receipt_params();
+        let ctx = ReceiptContext {
+            archive_root_id: 1,
+            archive_root_path: dir.path().to_str().unwrap().to_string(),
+            base_dir_rel: String::new(),
+        };
+
+        let mut recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
+
+        let receipt_path = recorder.receipt_abs_path().unwrap().to_path_buf();
+        let incomplete = receipt_path.with_extension("incomplete");
+        std::fs::create_dir_all(incomplete.parent().unwrap()).unwrap();
+        std::fs::write(&incomplete, b"partial receipt").unwrap();
+
+        recorder.interrupted(&conn);
+
+        assert!(receipt_path.exists(), ".toml should exist after interrupted()");
+        assert!(!incomplete.exists());
+    }
+
+    // =========================================================================
+    // Recording mode tests
     // =========================================================================
 
     fn make_params_with_config(command: DecisionCommand, config: LedgerConfig, no_receipt: bool) -> DecisionParams {
@@ -395,21 +684,19 @@ mod tests {
 
     #[test]
     fn test_recording_off_no_db_record() {
-        // recording=Off → no DB row created
         let conn = setup_test_db();
         let config = LedgerConfig {
             recording: RecordingMode::Off,
             ..LedgerConfig::default()
         };
         let params = make_params_with_config(DecisionCommand::Scan, config, false);
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let recorder = DecisionRecorder::start(&conn, &params, None);
         assert!(recorder.decision_id().is_none());
         assert_eq!(count_decisions(&conn), 0);
     }
 
     #[test]
     fn test_recording_records_db_only() {
-        // recording=Records → DB row exists, receipt_enabled=false
         let conn = setup_test_db();
         let config = LedgerConfig {
             recording: RecordingMode::Records,
@@ -417,14 +704,13 @@ mod tests {
         };
         let params = make_params_with_config(DecisionCommand::Scan, config, false);
         assert!(!params.receipt_enabled);
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let recorder = DecisionRecorder::start(&conn, &params, None);
         assert!(recorder.decision_id().is_some());
         assert_eq!(count_decisions(&conn), 1);
     }
 
     #[test]
     fn test_recording_full_both() {
-        // recording=Full → DB row exists, receipt_enabled=true
         let conn = setup_test_db();
         let config = LedgerConfig {
             recording: RecordingMode::Full,
@@ -432,7 +718,7 @@ mod tests {
         };
         let params = make_params_with_config(DecisionCommand::Scan, config, false);
         assert!(params.receipt_enabled);
-        let recorder = DecisionRecorder::start(&conn, &params);
+        let recorder = DecisionRecorder::start(&conn, &params, None);
         assert!(recorder.decision_id().is_some());
         assert_eq!(count_decisions(&conn), 1);
     }

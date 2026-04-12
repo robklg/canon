@@ -70,7 +70,7 @@ pub fn execute_remove(
     plan: &RemoveRootPlan,
     decision: Option<&DecisionParams>,
 ) -> Result<RemoveRootResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
     let deleted_notes = repo::note::delete_by_root(conn, plan.root_id)?;
     let deleted_sources = repo::root::remove(conn, plan.root_id)?;
@@ -130,7 +130,7 @@ pub fn execute_suspend(
         bail!("Root {} is already suspended: {}", root_id, root.path);
     }
 
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
     repo::root::set_suspended(conn, root_id, true)?;
     let counts = repo::root::fetch_file_counts(conn, &[root_id])?;
@@ -181,7 +181,7 @@ pub fn execute_unsuspend(
         bail!("Root {} is not suspended: {}", root_id, root.path);
     }
 
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d));
+    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
     repo::root::set_suspended(conn, root_id, false)?;
     let counts = repo::root::fetch_file_counts(conn, &[root_id])?;

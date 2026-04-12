@@ -58,6 +58,23 @@ pub fn update_completed(
     Ok(())
 }
 
+/// Update the receipt location on an existing decision record.
+///
+/// Called after `insert_started` once the decision_id is known and the
+/// receipt path has been computed and the directory confirmed writable.
+pub fn update_receipt_path(
+    conn: &Connection,
+    id: i64,
+    receipt_root_id: Option<i64>,
+    receipt_rel_path: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE decisions SET receipt_root_id = ?1, receipt_rel_path = ?2 WHERE id = ?3",
+        rusqlite::params![receipt_root_id, receipt_rel_path, id],
+    )?;
+    Ok(())
+}
+
 /// Fetch a decision by ID. For testing.
 #[cfg(test)]
 pub fn fetch_by_id(conn: &Connection, id: i64) -> Result<Option<crate::domain::decision::Decision>> {
