@@ -10,9 +10,9 @@ use crate::expr::{BuiltinKey, BuiltinKeyCategory, ParsedFactKey};
 use crate::ops;
 use crate::ops::decision::DecisionParams;
 use crate::ops::facts::{AllKeysResult, DistributionResult, GroupedDistributionResult};
+use crate::ops::scope::ResolvedScope;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::Db;
-use crate::ops::scope::ResolvedScope;
 
 /// Check if a parsed key represents source.root (for special display formatting)
 fn is_root_key(key: &ParsedFactKey) -> bool {
@@ -86,7 +86,8 @@ pub fn run(
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
         crate::scope::print_report_scope(&mut handle, "Facts", scope);
-        if include.is_expanded() && (sel.included_excluded_count > 0 || sel.included_archived_count > 0)
+        if include.is_expanded()
+            && (sel.included_excluded_count > 0 || sel.included_archived_count > 0)
         {
             let mut parts = Vec::new();
             if sel.included_excluded_count > 0 {
@@ -118,8 +119,7 @@ pub fn run(
             )?;
             display_grouped_distribution(&result, &main_key, &grouping_keys, total_sources);
         } else {
-            let result =
-                ops::facts::compute_distribution(conn, &source_ids, &main_key, limit)?;
+            let result = ops::facts::compute_distribution(conn, &source_ids, &main_key, limit)?;
             display_distribution(&result, fact_key, &main_key);
         }
     } else if by_root {
@@ -227,7 +227,10 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool, show_status_predicat
         let hidden_count = BuiltinKey::iter()
             .filter(|k| k.visibility() == crate::expr::BuiltinKeyVisibility::Hidden)
             .count();
-        let _ = writeln!(handle, "\n({hidden_count} built-in/derived facts hidden, use --all to show)");
+        let _ = writeln!(
+            handle,
+            "\n({hidden_count} built-in/derived facts hidden, use --all to show)"
+        );
     }
 
     if show_status_predicates {
@@ -235,7 +238,11 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool, show_status_predicat
         let _ = writeln!(handle, "  {:<14} content exists in an archive", "archived?");
         let _ = writeln!(handle, "  {:<14} content hash has been computed", "hashed?");
         let _ = writeln!(handle, "  {:<14} source or object is excluded", "excluded?");
-        let _ = writeln!(handle, "  {:<14} has metadata beyond content hash", "enriched?");
+        let _ = writeln!(
+            handle,
+            "  {:<14} has metadata beyond content hash",
+            "enriched?"
+        );
     }
 }
 
@@ -267,7 +274,12 @@ fn display_distribution(result: &DistributionResult, display_key: &str, key: &Pa
             entry.value.clone()
         };
         let coverage = (entry.count as f64 / result.total_sources as f64) * 100.0;
-        if writeln!(handle, "{display_val:<40} {:>10} {:>9.1}%", entry.count, coverage).is_err()
+        if writeln!(
+            handle,
+            "{display_val:<40} {:>10} {:>9.1}%",
+            entry.count, coverage
+        )
+        .is_err()
         {
             break;
         }
@@ -511,7 +523,9 @@ pub fn delete_facts(
             command_line: command_line.to_string(),
             reason: None,
             record_enabled: config.recording != RecordingMode::Off && !options.dry_run,
-            receipt_enabled: config.recording == RecordingMode::Full && !no_receipt && !options.dry_run,
+            receipt_enabled: config.recording == RecordingMode::Full
+                && !no_receipt
+                && !options.dry_run,
             ledger_config: config.clone(),
         };
         let result = ops::facts::execute_delete(
@@ -533,7 +547,13 @@ pub fn delete_facts(
 // Prune Stale Facts
 // ============================================================================
 
-pub fn prune_stale(db: &Db, dry_run: bool, command_line: &str, config: &LedgerConfig, no_receipt: bool) -> Result<()> {
+pub fn prune_stale(
+    db: &Db,
+    dry_run: bool,
+    command_line: &str,
+    config: &LedgerConfig,
+    no_receipt: bool,
+) -> Result<()> {
     let conn = db.conn();
 
     let plan = ops::facts::plan_prune_stale(conn)?;
@@ -565,12 +585,17 @@ pub fn prune_stale(db: &Db, dry_run: bool, command_line: &str, config: &LedgerCo
     Ok(())
 }
 
-
 // ============================================================================
 // Prune Orphaned Objects
 // ============================================================================
 
-pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool, command_line: &str, config: &LedgerConfig, no_receipt: bool) -> Result<()> {
+pub fn prune_orphaned_objects(
+    db: &mut Db,
+    dry_run: bool,
+    command_line: &str,
+    config: &LedgerConfig,
+    no_receipt: bool,
+) -> Result<()> {
     let conn = db.conn_mut();
 
     let stats = ops::facts::plan_prune_orphaned(conn)?;
@@ -615,7 +640,14 @@ pub fn prune_orphaned_objects(db: &mut Db, dry_run: bool, command_line: &str, co
 // Prune Excluded Facts
 // ============================================================================
 
-pub fn prune_excluded_facts(db: &Db, scope: &str, dry_run: bool, command_line: &str, config: &LedgerConfig, no_receipt: bool) -> Result<()> {
+pub fn prune_excluded_facts(
+    db: &Db,
+    scope: &str,
+    dry_run: bool,
+    command_line: &str,
+    config: &LedgerConfig,
+    no_receipt: bool,
+) -> Result<()> {
     ops::facts::validate_prune_excluded_scope(scope)?;
     let conn = db.conn();
 

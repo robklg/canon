@@ -170,7 +170,10 @@ fn default_grouping(base_key: &str, value: FactValue) -> String {
 
 /// Aggregate values into sorted (value, count) entries, truncated to limit.
 /// Returns (entries, total_distinct_values_before_truncation).
-fn aggregate_and_sort(counts: HashMap<String, i64>, limit: usize) -> (Vec<DistributionEntry>, usize) {
+fn aggregate_and_sort(
+    counts: HashMap<String, i64>,
+    limit: usize,
+) -> (Vec<DistributionEntry>, usize) {
     let mut entries: Vec<DistributionEntry> = counts
         .into_iter()
         .map(|(value, count)| DistributionEntry { value, count })
@@ -530,13 +533,14 @@ pub fn compute_grouped_distribution(
     let mut by_main_value: HashMap<String, GroupedValueResult> = HashMap::new();
 
     for (composite, info) in aggregated {
-        let entry = by_main_value
-            .entry(composite.main_value.clone())
-            .or_insert(GroupedValueResult {
-                main_value: composite.main_value,
-                total_count: 0,
-                sub_groups: Vec::new(),
-            });
+        let entry =
+            by_main_value
+                .entry(composite.main_value.clone())
+                .or_insert(GroupedValueResult {
+                    main_value: composite.main_value,
+                    total_count: 0,
+                    sub_groups: Vec::new(),
+                });
         entry.total_count += info.count;
         entry.sub_groups.push(GroupedEntry {
             group_values: composite.group_values,
@@ -763,7 +767,8 @@ pub fn execute_prune_orphaned(
     );
 
     if let Some(recorder) = recorder.as_mut() {
-        let total_deleted = deleted.object_count + deleted.source_count + deleted.total_fact_count();
+        let total_deleted =
+            deleted.object_count + deleted.source_count + deleted.total_fact_count();
         recorder.complete(
             db.conn(),
             DecisionStatus::Completed,
@@ -868,9 +873,7 @@ pub fn execute_prune_excluded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{
-        insert_object, insert_root, insert_source, setup_test_db,
-    };
+    use crate::ops::test_helpers::{insert_object, insert_root, insert_source, setup_test_db};
 
     /// Insert a source fact with a time value.
     fn insert_time_fact(conn: &Connection, source_id: i64, key: &str, timestamp: i64) {
@@ -905,7 +908,11 @@ mod tests {
         assert_eq!(ext_key.category, BuiltinKeyCategory::BuiltIn);
 
         // Should include stored fact with count == 1
-        let make_key = result.keys.iter().find(|k| k.key == "content.Make").unwrap();
+        let make_key = result
+            .keys
+            .iter()
+            .find(|k| k.key == "content.Make")
+            .unwrap();
         assert_eq!(make_key.count, 1);
         assert_eq!(make_key.category, BuiltinKeyCategory::Stored);
 
@@ -1064,22 +1071,25 @@ mod tests {
 
         let main_key = ParsedFactKey::parse("source.ext").unwrap();
         let group_key = ParsedFactKey::parse("source.root").unwrap();
-        let result = compute_grouped_distribution(
-            &mut conn,
-            &[s1, s2, s3],
-            &main_key,
-            &[group_key],
-            0,
-        )
-        .unwrap();
+        let result =
+            compute_grouped_distribution(&mut conn, &[s1, s2, s3], &main_key, &[group_key], 0)
+                .unwrap();
 
         // "jpg" should have total_count=2 (from both roots), "png" should have 1
         assert_eq!(result.groups.len(), 2);
-        let jpg_group = result.groups.iter().find(|g| g.main_value == "jpg").unwrap();
+        let jpg_group = result
+            .groups
+            .iter()
+            .find(|g| g.main_value == "jpg")
+            .unwrap();
         assert_eq!(jpg_group.total_count, 2);
         assert_eq!(jpg_group.sub_groups.len(), 2); // one per root
 
-        let png_group = result.groups.iter().find(|g| g.main_value == "png").unwrap();
+        let png_group = result
+            .groups
+            .iter()
+            .find(|g| g.main_value == "png")
+            .unwrap();
         assert_eq!(png_group.total_count, 1);
 
         assert_eq!(result.sources_with_value, 3);
@@ -1099,14 +1109,8 @@ mod tests {
 
         let main_key = ParsedFactKey::parse("content.Make").unwrap();
         let group_key = ParsedFactKey::parse("source.root").unwrap();
-        let result = compute_grouped_distribution(
-            &mut conn,
-            &[s1, s2],
-            &main_key,
-            &[group_key],
-            0,
-        )
-        .unwrap();
+        let result =
+            compute_grouped_distribution(&mut conn, &[s1, s2], &main_key, &[group_key], 0).unwrap();
 
         // Only 1 source has the main value, s2 is excluded
         assert_eq!(result.sources_with_value, 1);

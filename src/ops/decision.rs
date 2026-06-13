@@ -119,16 +119,15 @@ impl DecisionRecorder {
         };
 
         // Compute receipt path if receipts are enabled and context is provided.
-        let (receipt_ref, receipt_abs_path, warnings) =
-            if params.receipt_enabled {
-                if let Some(placement) = placement {
-                    compute_and_register_receipt(conn, id, params, placement)
-                } else {
-                    (None, None, Vec::new())
-                }
+        let (receipt_ref, receipt_abs_path, warnings) = if params.receipt_enabled {
+            if let Some(placement) = placement {
+                compute_and_register_receipt(conn, id, params, placement)
             } else {
                 (None, None, Vec::new())
-            };
+            }
+        } else {
+            (None, None, Vec::new())
+        };
 
         // Warn if receipt was requested but couldn't be set up (ctx missing is not a warning).
         let _ = &warnings; // consumed below
@@ -258,7 +257,10 @@ fn compute_and_register_receipt(
             return (
                 None,
                 None,
-                vec![format!("Warning: could not create receipt directory {}: {e}", parent.display())],
+                vec![format!(
+                    "Warning: could not create receipt directory {}: {e}",
+                    parent.display()
+                )],
             );
         }
     }
@@ -270,7 +272,9 @@ fn compute_and_register_receipt(
         return (
             None,
             None,
-            vec![format!("Warning: failed to store receipt path in decision record: {e}")],
+            vec![format!(
+                "Warning: failed to store receipt path in decision record: {e}"
+            )],
         );
     }
 
@@ -501,10 +505,17 @@ mod tests {
         recorder.complete(
             &conn,
             DecisionStatus::Completed,
-            DecisionCounts { attempted: Some(5), completed: Some(5), failed: Some(0), skipped: None },
+            DecisionCounts {
+                attempted: Some(5),
+                completed: Some(5),
+                failed: Some(0),
+                skipped: None,
+            },
             "Excluded 5 sources",
         );
-        let d = repo::decision::fetch_by_id(&conn, recorder.decision_id().unwrap()).unwrap().unwrap();
+        let d = repo::decision::fetch_by_id(&conn, recorder.decision_id().unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(d.status, "completed");
         assert_eq!(d.count_completed, Some(5));
     }
@@ -518,7 +529,12 @@ mod tests {
         recorder.complete(
             &conn,
             DecisionStatus::Completed,
-            DecisionCounts { attempted: None, completed: None, failed: None, skipped: None },
+            DecisionCounts {
+                attempted: None,
+                completed: None,
+                failed: None,
+                skipped: None,
+            },
             "done",
         );
         let warnings = recorder.take_warnings();
@@ -555,13 +571,27 @@ mod tests {
         let recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
 
         assert!(recorder.decision_id().is_some());
-        assert!(recorder.receipt_ref().is_some(), "receipt_ref should be set");
-        assert!(recorder.receipt_abs_path().is_some(), "receipt_abs_path should be set");
+        assert!(
+            recorder.receipt_ref().is_some(),
+            "receipt_ref should be set"
+        );
+        assert!(
+            recorder.receipt_abs_path().is_some(),
+            "receipt_abs_path should be set"
+        );
 
         let rr = recorder.receipt_ref().unwrap();
         assert_eq!(rr.root_id, 7);
-        assert!(rr.rel_path.contains("000001-apply.toml"), "got: {}", rr.rel_path);
-        assert!(rr.rel_path.starts_with(".canon-ledger/"), "got: {}", rr.rel_path);
+        assert!(
+            rr.rel_path.contains("000001-apply.toml"),
+            "got: {}",
+            rr.rel_path
+        );
+        assert!(
+            rr.rel_path.starts_with(".canon-ledger/"),
+            "got: {}",
+            rr.rel_path
+        );
     }
 
     #[test]
@@ -631,14 +661,23 @@ mod tests {
         recorder.complete(
             &conn,
             DecisionStatus::Completed,
-            DecisionCounts { attempted: Some(1), completed: Some(1), failed: Some(0), skipped: None },
+            DecisionCounts {
+                attempted: Some(1),
+                completed: Some(1),
+                failed: Some(0),
+                skipped: None,
+            },
             "Applied 1 file",
         );
 
         // .toml should exist, .incomplete should be gone
         assert!(receipt_path.exists(), ".toml should exist after complete()");
         assert!(!incomplete.exists(), ".incomplete should be gone");
-        assert!(recorder.warnings.is_empty(), "unexpected warnings: {:?}", recorder.warnings);
+        assert!(
+            recorder.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            recorder.warnings
+        );
     }
 
     #[test]
@@ -661,7 +700,10 @@ mod tests {
 
         recorder.interrupted(&conn);
 
-        assert!(receipt_path.exists(), ".toml should exist after interrupted()");
+        assert!(
+            receipt_path.exists(),
+            ".toml should exist after interrupted()"
+        );
         assert!(!incomplete.exists());
     }
 
@@ -669,7 +711,11 @@ mod tests {
     // Recording mode tests
     // =========================================================================
 
-    fn make_params_with_config(command: DecisionCommand, config: LedgerConfig, no_receipt: bool) -> DecisionParams {
+    fn make_params_with_config(
+        command: DecisionCommand,
+        config: LedgerConfig,
+        no_receipt: bool,
+    ) -> DecisionParams {
         DecisionParams {
             command,
             scope: None,
@@ -760,6 +806,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(d.receipt_root_id, Some(3));
-        assert_eq!(d.receipt_rel_path.as_deref(), Some(".canon-ledger/000001-exclude_set.toml"));
+        assert_eq!(
+            d.receipt_rel_path.as_deref(),
+            Some(".canon-ledger/000001-exclude_set.toml")
+        );
     }
 }

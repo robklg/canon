@@ -2,20 +2,20 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::ceremony;
+use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
 use crate::domain::path::{resolve_path, validate_paths_in_roots};
 use crate::domain::root::find_containing_root;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::Filter;
-use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::ops::decision::DecisionParams;
 use crate::ops::exclude::{
     self, check_clear_object, check_set_object_by_file, check_set_object_by_hash,
     check_set_source_by_id, check_set_source_by_path, execute_clear, execute_clear_object,
-    execute_duplicates, execute_set, execute_set_object, execute_set_objects, execute_set_source, plan_clear,
-    plan_duplicates, plan_set, plan_set_objects, ExcludeClearParams, ExcludeDuplicatesParams,
-    ExcludeSetObjectsParams, ExcludeSetParams, ObjectClearCheck, ObjectExclusionCheck,
-    ObjectSourceInfo, SourceExclusionCheck,
+    execute_duplicates, execute_set, execute_set_object, execute_set_objects, execute_set_source,
+    plan_clear, plan_duplicates, plan_set, plan_set_objects, ExcludeClearParams,
+    ExcludeDuplicatesParams, ExcludeSetObjectsParams, ExcludeSetParams, ObjectClearCheck,
+    ObjectExclusionCheck, ObjectSourceInfo, SourceExclusionCheck,
 };
 use crate::repo::{self, Db};
 
@@ -814,7 +814,15 @@ mod tests {
             yes: true,
         };
 
-        let result = set_by_id(&db, source_id, &options, "test", &LedgerConfig::default(), false, None);
+        let result = set_by_id(
+            &db,
+            source_id,
+            &options,
+            "test",
+            &LedgerConfig::default(),
+            false,
+            None,
+        );
         assert!(result.is_ok());
 
         assert!(
@@ -838,7 +846,15 @@ mod tests {
         };
 
         // Path that definitely doesn't exist
-        let result = set_by_path(&db, Path::new("/nonexistent/path/to/file.jpg"), &options, "test", &LedgerConfig::default(), false, None);
+        let result = set_by_path(
+            &db,
+            Path::new("/nonexistent/path/to/file.jpg"),
+            &options,
+            "test",
+            &LedgerConfig::default(),
+            false,
+            None,
+        );
         assert!(result.is_err());
 
         let err_msg = result.unwrap_err().to_string();
@@ -860,7 +876,15 @@ mod tests {
 
         // Use a path that exists on disk but isn't in the database
         // /tmp should exist on most Unix systems
-        let result = set_by_path(&db, Path::new("/tmp"), &options, "test", &LedgerConfig::default(), false, None);
+        let result = set_by_path(
+            &db,
+            Path::new("/tmp"),
+            &options,
+            "test",
+            &LedgerConfig::default(),
+            false,
+            None,
+        );
         assert!(result.is_err());
 
         let err_msg = result.unwrap_err().to_string();
@@ -933,7 +957,16 @@ mod tests {
             yes: true,
         };
 
-        let result = set_objects_by_filter(&mut db, &[], &[], &options, "test", &LedgerConfig::default(), false, None);
+        let result = set_objects_by_filter(
+            &mut db,
+            &[],
+            &[],
+            &options,
+            "test",
+            &LedgerConfig::default(),
+            false,
+            None,
+        );
 
         assert!(result.is_ok());
         // Object should NOT be excluded (dry run)
@@ -961,7 +994,16 @@ mod tests {
         };
 
         // Use empty scopes so we don't try to canonicalize non-existent paths
-        let result = set(&mut db, &[], &[], &options, "test", &LedgerConfig::default(), false, None);
+        let result = set(
+            &mut db,
+            &[],
+            &[],
+            &options,
+            "test",
+            &LedgerConfig::default(),
+            false,
+            None,
+        );
         assert!(result.is_ok());
 
         // Verify the source was excluded

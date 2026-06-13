@@ -1574,7 +1574,10 @@ mod tests {
 
     #[test]
     fn normalize_pattern_result_normal_subdir() {
-        assert_eq!(normalize_pattern_result("subdir/file.jpg"), "subdir/file.jpg");
+        assert_eq!(
+            normalize_pattern_result("subdir/file.jpg"),
+            "subdir/file.jpg"
+        );
     }
 
     #[test]
@@ -1589,17 +1592,26 @@ mod tests {
 
     #[test]
     fn normalize_pattern_result_interior_double_slash() {
-        assert_eq!(normalize_pattern_result("subdir//file.jpg"), "subdir/file.jpg");
+        assert_eq!(
+            normalize_pattern_result("subdir//file.jpg"),
+            "subdir/file.jpg"
+        );
     }
 
     #[test]
     fn normalize_pattern_result_leading_dot_slash() {
-        assert_eq!(normalize_pattern_result("./subdir/file.jpg"), "subdir/file.jpg");
+        assert_eq!(
+            normalize_pattern_result("./subdir/file.jpg"),
+            "subdir/file.jpg"
+        );
     }
 
     #[test]
     fn normalize_pattern_result_interior_dot() {
-        assert_eq!(normalize_pattern_result("subdir/./file.jpg"), "subdir/file.jpg");
+        assert_eq!(
+            normalize_pattern_result("subdir/./file.jpg"),
+            "subdir/file.jpg"
+        );
     }
 
     #[test]

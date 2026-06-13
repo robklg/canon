@@ -7,8 +7,8 @@ use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::ops;
 use crate::ops::coverage::CoverageStats;
-use crate::repo::{self, Db};
 use crate::ops::scope::ResolvedScope;
+use crate::repo::{self, Db};
 
 pub fn run(
     db: &mut Db,
@@ -96,7 +96,11 @@ fn display_compact_scoped(stats: &CoverageStats, scope: &ResolvedScope) {
     print_compact_line(&label, stats, true);
 }
 
-fn display_compact_per_root(per_root: &[CoverageStats], overall: &CoverageStats, scope: &ResolvedScope) {
+fn display_compact_per_root(
+    per_root: &[CoverageStats],
+    overall: &CoverageStats,
+    scope: &ResolvedScope,
+) {
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
@@ -221,20 +225,14 @@ fn display_scoped_stats(stats: &CoverageStats, scope: &ResolvedScope, archive: O
             format_count(stats.archived_sources),
             stats.archived_pct()
         );
-        println!(
-            "  Not in archive:  {:>8}",
-            format_count(stats.unarchived())
-        );
+        println!("  Not in archive:  {:>8}", format_count(stats.unarchived()));
     } else {
         println!(
             "  Archived:        {:>8} ({:.1}% of hashed)",
             format_count(stats.archived_sources),
             stats.archived_pct()
         );
-        println!(
-            "  Unarchived:      {:>8}",
-            format_count(stats.unarchived())
-        );
+        println!("  Unarchived:      {:>8}", format_count(stats.unarchived()));
     }
 }
 
@@ -387,5 +385,3 @@ fn display_per_root_stats(
         );
     }
 }
-
-

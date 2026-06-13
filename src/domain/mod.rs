@@ -26,8 +26,8 @@ pub mod survey;
 
 // Re-export primary types for convenient access
 pub use exclusion::{find_excludable_duplicates, ExcludableDuplicatesResult};
-pub use format::format_count;
 pub use fact::{FactEntry, FactType, FactValue};
+pub use format::format_count;
 pub use include::IncludeSet;
 pub use note::Note;
 pub use object::Object;

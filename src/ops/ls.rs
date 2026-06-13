@@ -23,10 +23,7 @@ pub struct DuplicateSource {
 
 /// Find groups of sources that share the same object_id.
 /// Returns groups sorted by first path, sources sorted within each group.
-pub fn find_duplicate_groups(
-    conn: &Connection,
-    source_ids: &[i64],
-) -> Result<Vec<DuplicateGroup>> {
+pub fn find_duplicate_groups(conn: &Connection, source_ids: &[i64]) -> Result<Vec<DuplicateGroup>> {
     if source_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -106,9 +103,7 @@ pub fn find_duplicate_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{
-        insert_object, insert_root, insert_source, setup_test_db,
-    };
+    use crate::ops::test_helpers::{insert_object, insert_root, insert_source, setup_test_db};
 
     #[test]
     fn find_duplicates_groups_by_object() {

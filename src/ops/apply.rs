@@ -14,7 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 
 use super::cluster::LockEntry;
-use super::fs::{compute_partial_hash, copy_file, ensure_parent_dir, move_file, rename_file, MoveOutcome};
+use super::fs::{
+    compute_partial_hash, copy_file, ensure_parent_dir, move_file, rename_file, MoveOutcome,
+};
 use crate::domain::decision::DecisionStatus;
 use crate::domain::fact::FactEntry;
 use crate::domain::path::path_strip_prefix;
@@ -285,16 +287,18 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
             &all_facts,
         ) {
             Ok(dest_rel) => {
-                let archive_rel_path =
-                    compute_archive_rel_path(params.base_dir_rel, &dest_rel);
-                let source_root_path = params.root_paths
+                let archive_rel_path = compute_archive_rel_path(params.base_dir_rel, &dest_rel);
+                let source_root_path = params
+                    .root_paths
                     .get(&source.root_id)
                     .cloned()
                     .unwrap_or_default();
                 let source_rel_path = path_strip_prefix(&source.path, &source_root_path)
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| source.path.clone());
-                let hash = source.hash_type.as_deref()
+                let hash = source
+                    .hash_type
+                    .as_deref()
                     .zip(source.hash_value.as_deref())
                     .map(|(t, v)| format!("{t}:{v}"));
                 transfers.push(ApplyTransfer {
@@ -331,7 +335,12 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     let mut collisions: Vec<(String, Vec<String>)> = dest_to_sources
         .into_iter()
         .filter(|(_, srcs)| srcs.len() > 1)
-        .map(|(dest, srcs)| (dest.to_string(), srcs.into_iter().map(|s| s.to_string()).collect()))
+        .map(|(dest, srcs)| {
+            (
+                dest.to_string(),
+                srcs.into_iter().map(|s| s.to_string()).collect(),
+            )
+        })
         .collect();
     collisions.sort_by(|a, b| a.0.cmp(&b.0));
     violations.collisions = collisions;
@@ -339,7 +348,10 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     // --- Check stale records + destination conflicts (DB) ---
     // In resume mode, skip these checks — destination DB records are evidence of progress.
 
-    let archive_rel_paths: Vec<&str> = transfers.iter().map(|t| t.archive_rel_path.as_str()).collect();
+    let archive_rel_paths: Vec<&str> = transfers
+        .iter()
+        .map(|t| t.archive_rel_path.as_str())
+        .collect();
     let _paths_in_db = if !params.resume {
         let paths = repo::source::batch_check_paths_exist(
             conn,
@@ -385,15 +397,13 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
                 if let Some(info_list) = archive_info.get(hash) {
                     if let Some(&(archive_id, ref archive_path)) = info_list.first() {
                         if archive_id == params.archive_root_id {
-                            violations.archive_conflicts_dest.push((
-                                transfer.source_path.clone(),
-                                archive_path.clone(),
-                            ));
+                            violations
+                                .archive_conflicts_dest
+                                .push((transfer.source_path.clone(), archive_path.clone()));
                         } else {
-                            violations.archive_conflicts_other.push((
-                                transfer.source_path.clone(),
-                                archive_path.clone(),
-                            ));
+                            violations
+                                .archive_conflicts_other
+                                .push((transfer.source_path.clone(), archive_path.clone()));
                         }
                     }
                 }
@@ -404,10 +414,16 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     // --- Check destination paths stay under archive root ---
 
     if !transfers.is_empty() {
-        let archive_root_path = params
-            .root_paths
-            .get(&params.archive_root_id)
-            .ok_or_else(|| anyhow::anyhow!("Archive root {} not found in root_paths", params.archive_root_id))?;
+        let archive_root_path =
+            params
+                .root_paths
+                .get(&params.archive_root_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Archive root {} not found in root_paths",
+                        params.archive_root_id
+                    )
+                })?;
 
         for transfer in &transfers {
             let full_dest = format!("{}/{}", archive_root_path, transfer.archive_rel_path);
@@ -527,10 +543,16 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
 
     if params.resume {
         // Build base_dir from archive root path + base_dir_rel
-        let archive_root_path = params
-            .root_paths
-            .get(&params.archive_root_id)
-            .ok_or_else(|| anyhow::anyhow!("Archive root {} not found in root_paths", params.archive_root_id))?;
+        let archive_root_path =
+            params
+                .root_paths
+                .get(&params.archive_root_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Archive root {} not found in root_paths",
+                        params.archive_root_id
+                    )
+                })?;
         let base_dir = if params.base_dir_rel.is_empty() {
             PathBuf::from(archive_root_path)
         } else {
@@ -551,7 +573,9 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
         }
 
         // Count already-there entries where source is still present
-        resume_already_there_source_present = classification.already_there.iter()
+        resume_already_there_source_present = classification
+            .already_there
+            .iter()
             .filter(|(_, source_present)| *source_present)
             .count();
 
@@ -575,9 +599,8 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
         already_archived_count = classification.already_there.len();
 
         // Replace transfers with only pending entries
-        let pending_ids: std::collections::HashSet<i64> = classification.pending.iter()
-            .map(|t| t.source_id)
-            .collect();
+        let pending_ids: std::collections::HashSet<i64> =
+            classification.pending.iter().map(|t| t.source_id).collect();
         transfers.retain(|t| pending_ids.contains(&t.source_id));
     }
 
@@ -615,7 +638,14 @@ pub trait TransferProgress {
     /// Called once before the transfer loop begins.
     fn on_start(&self, total: usize);
     /// Called after each transfer completes.
-    fn on_transfer(&self, index: usize, total: usize, source_path: &str, dest_path: &str, outcome: &TransferOutcome);
+    fn on_transfer(
+        &self,
+        index: usize,
+        total: usize,
+        source_path: &str,
+        dest_path: &str,
+        outcome: &TransferOutcome,
+    );
     /// Called when an interrupt is detected after the current transfer completes.
     fn on_interrupt(&self);
     /// Called once after the transfer loop ends.
@@ -766,9 +796,8 @@ pub fn execute_apply(
     progress: &dyn TransferProgress,
     decision: Option<&DecisionParams>,
 ) -> Result<ApplyResult> {
-    let mut recorder = decision.map(|d| {
-        DecisionRecorder::start(conn, d, params.receipt_ctx.as_ref())
-    });
+    let mut recorder =
+        decision.map(|d| DecisionRecorder::start(conn, d, params.receipt_ctx.as_ref()));
 
     let interrupt_flag = match &params.interrupt_flag {
         Some(flag) => Arc::clone(flag),
@@ -797,7 +826,10 @@ pub fn execute_apply(
             Ok(_) => {}
             Err(e) if e.kind() == ErrorKind::NotFound => continue,
             Err(e) if e.kind() == ErrorKind::PermissionDenied => {
-                unreadable.push((transfer.source_path.clone(), "permission denied".to_string()));
+                unreadable.push((
+                    transfer.source_path.clone(),
+                    "permission denied".to_string(),
+                ));
             }
             Err(e) => {
                 unreadable.push((transfer.source_path.clone(), e.to_string()));
@@ -965,14 +997,13 @@ pub fn execute_apply(
                         reason: decision.and_then(|d| d.reason.clone()),
                         summary: result.summary.clone(),
                         canon_version: env!("CARGO_PKG_VERSION").to_string(),
-                        command_line: decision
-                            .map(|d| d.command_line.clone())
-                            .unwrap_or_default(),
+                        command_line: decision.map(|d| d.command_line.clone()).unwrap_or_default(),
                         manifest: Some(params.manifest_display.clone()),
                     },
                     items: receipt_items,
                 };
-                if let Err(e) = receipt_ops::write_receipt(&receipt_path, &receipt, &result.summary) {
+                if let Err(e) = receipt_ops::write_receipt(&receipt_path, &receipt, &result.summary)
+                {
                     recorder.push_warning(format!("Receipt write failed: {e:#}"));
                 }
             }
@@ -1062,11 +1093,8 @@ fn execute_single_transfer(
     }
 
     // Capture previous decision_id before the transfer overwrites the destination record
-    let prev_decision_id = repo::source::fetch_decision_id_at_path(
-        conn,
-        archive_root_id,
-        &transfer.archive_rel_path,
-    )?;
+    let prev_decision_id =
+        repo::source::fetch_decision_id_at_path(conn, archive_root_id, &transfer.archive_rel_path)?;
 
     // Create parent directories
     ensure_parent_dir(&dest_path)?;
@@ -1087,30 +1115,40 @@ fn execute_single_transfer(
         }
         TransferMode::Rename => {
             rename_file(src_path, &dest_path, true)?;
-            relocate_source(conn, transfer.source_id, archive_root_id, &transfer.archive_rel_path, decision_id)?;
+            relocate_source(
+                conn,
+                transfer.source_id,
+                archive_root_id,
+                &transfer.archive_rel_path,
+                decision_id,
+            )?;
             Ok((TransferOutcome::Renamed, prev_decision_id))
         }
-        TransferMode::Move => {
-            match move_file(src_path, &dest_path, true)? {
-                MoveOutcome::Renamed => {
-                    relocate_source(conn, transfer.source_id, archive_root_id, &transfer.archive_rel_path, decision_id)?;
-                    Ok((TransferOutcome::Renamed, prev_decision_id))
-                }
-                MoveOutcome::CopiedAndDeleted => {
-                    mark_source_not_present(conn, transfer.source_id)?;
-                    let new_source = build_new_source(
-                        &dest_path,
-                        archive_root_id,
-                        &transfer.archive_rel_path,
-                        transfer.object_id,
-                        &transfer.partial_hash,
-                        decision_id,
-                    )?;
-                    repo::source::insert_destination(conn, &new_source)?;
-                    Ok((TransferOutcome::Moved, prev_decision_id))
-                }
+        TransferMode::Move => match move_file(src_path, &dest_path, true)? {
+            MoveOutcome::Renamed => {
+                relocate_source(
+                    conn,
+                    transfer.source_id,
+                    archive_root_id,
+                    &transfer.archive_rel_path,
+                    decision_id,
+                )?;
+                Ok((TransferOutcome::Renamed, prev_decision_id))
             }
-        }
+            MoveOutcome::CopiedAndDeleted => {
+                mark_source_not_present(conn, transfer.source_id)?;
+                let new_source = build_new_source(
+                    &dest_path,
+                    archive_root_id,
+                    &transfer.archive_rel_path,
+                    transfer.object_id,
+                    &transfer.partial_hash,
+                    decision_id,
+                )?;
+                repo::source::insert_destination(conn, &new_source)?;
+                Ok((TransferOutcome::Moved, prev_decision_id))
+            }
+        },
     }
 }
 
@@ -1161,9 +1199,8 @@ fn validate_source_state(transfer: &ApplyTransfer) -> std::result::Result<(), St
     }
 
     // Partial hash check — recompute from disk and compare to lock
-    let current_hash =
-        compute_partial_hash(Path::new(&transfer.source_path), transfer.size as u64)
-            .map_err(|e| format!("failed to compute partial hash: {e}"))?;
+    let current_hash = compute_partial_hash(Path::new(&transfer.source_path), transfer.size as u64)
+        .map_err(|e| format!("failed to compute partial hash: {e}"))?;
     if current_hash != transfer.partial_hash {
         mismatches.push(format!(
             "partial hash mismatch: {}... → {}...",
@@ -1226,7 +1263,9 @@ fn classify_resume_entries<'a>(
                     result.already_there.push((transfer, source_exists));
                 } else {
                     // Size mismatch
-                    result.size_mismatches.push((transfer, expected_size, actual_size));
+                    result
+                        .size_mismatches
+                        .push((transfer, expected_size, actual_size));
                 }
             }
             _ => {
@@ -1281,7 +1320,10 @@ fn build_new_source(
 ) -> Result<NewSource> {
     use std::os::unix::fs::MetadataExt;
     let meta = fs::metadata(dest_path).with_context(|| {
-        format!("Failed to read metadata for registration: {}", dest_path.display())
+        format!(
+            "Failed to read metadata for registration: {}",
+            dest_path.display()
+        )
     })?;
     Ok(NewSource {
         root_id: archive_root_id,
@@ -1306,7 +1348,10 @@ fn build_new_source(
     decision_id: Option<i64>,
 ) -> Result<NewSource> {
     let meta = fs::metadata(dest_path).with_context(|| {
-        format!("Failed to read metadata for registration: {}", dest_path.display())
+        format!(
+            "Failed to read metadata for registration: {}",
+            dest_path.display()
+        )
     })?;
     let mtime = meta
         .modified()
@@ -1335,11 +1380,17 @@ fn build_new_source(
 mod tests {
     use super::*;
     use crate::ops::test_helpers::{
-        insert_fact, insert_object, insert_root, insert_source_excluded, insert_source_with_metadata,
-        setup_test_db,
+        insert_fact, insert_object, insert_root, insert_source_excluded,
+        insert_source_with_metadata, setup_test_db,
     };
 
-    fn make_lock_entry(id: i64, root_id: i64, path: &str, object_id: Option<i64>, hash: Option<&str>) -> LockEntry {
+    fn make_lock_entry(
+        id: i64,
+        root_id: i64,
+        path: &str,
+        object_id: Option<i64>,
+        hash: Option<&str>,
+    ) -> LockEntry {
         LockEntry {
             id,
             root_id,
@@ -1384,10 +1435,23 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "vacation/photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "vacation/photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
         insert_fact(&conn, src_id, "content.Make", "Canon");
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/vacation/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/vacation/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{content.Make}/{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1410,9 +1474,22 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1426,7 +1503,10 @@ mod tests {
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert_eq!(plan.transfers[0].dest_rel_path, "photo.jpg");
-        assert_eq!(plan.transfers[0].archive_rel_path, "2024/vacation/photo.jpg");
+        assert_eq!(
+            plan.transfers[0].archive_rel_path,
+            "2024/vacation/photo.jpg"
+        );
     }
 
     #[test]
@@ -1435,10 +1515,23 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
         // No fact inserted — pattern requires content.Make
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{content.Make}/{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1466,13 +1559,39 @@ mod tests {
         let obj1 = insert_object(&conn, "hash1", false);
         let obj2 = insert_object(&conn, "hash2", false);
         // Two sources with different names but same content.Make → same dest
-        let src1 = insert_source_with_metadata(&conn, root_id, "a/photo.jpg", Some(obj1), 1000, 1704067200);
-        let src2 = insert_source_with_metadata(&conn, root_id, "b/photo.jpg", Some(obj2), 1000, 1704067200);
+        let src1 = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "a/photo.jpg",
+            Some(obj1),
+            1000,
+            1704067200,
+        );
+        let src2 = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "b/photo.jpg",
+            Some(obj2),
+            1000,
+            1704067200,
+        );
         insert_fact(&conn, src1, "content.Make", "Canon");
         insert_fact(&conn, src2, "content.Make", "Canon");
 
-        let e1 = make_lock_entry(src1, root_id, "/photos/a/photo.jpg", Some(obj1), Some("hash1"));
-        let e2 = make_lock_entry(src2, root_id, "/photos/b/photo.jpg", Some(obj2), Some("hash2"));
+        let e1 = make_lock_entry(
+            src1,
+            root_id,
+            "/photos/a/photo.jpg",
+            Some(obj1),
+            Some("hash1"),
+        );
+        let e2 = make_lock_entry(
+            src2,
+            root_id,
+            "/photos/b/photo.jpg",
+            Some(obj2),
+            Some("hash2"),
+        );
         let sources: Vec<&LockEntry> = vec![&e1, &e2];
         // Pattern uses only Make + filename → both expand to "Canon/photo.jpg"
         let pattern = expr::parse_pattern("{content.Make}/{filename}").unwrap();
@@ -1496,8 +1615,10 @@ mod tests {
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj1 = insert_object(&conn, "hash1", false);
         let obj2 = insert_object(&conn, "hash2", false);
-        let src1 = insert_source_with_metadata(&conn, root_id, "a.jpg", Some(obj1), 1000, 1704067200);
-        let src2 = insert_source_with_metadata(&conn, root_id, "b.jpg", Some(obj2), 1000, 1704067200);
+        let src1 =
+            insert_source_with_metadata(&conn, root_id, "a.jpg", Some(obj1), 1000, 1704067200);
+        let src2 =
+            insert_source_with_metadata(&conn, root_id, "b.jpg", Some(obj2), 1000, 1704067200);
 
         let e1 = make_lock_entry(src1, root_id, "/photos/a.jpg", Some(obj1), Some("hash1"));
         let e2 = make_lock_entry(src2, root_id, "/photos/b.jpg", Some(obj2), Some("hash2"));
@@ -1526,11 +1647,31 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
         // Same hash already in destination archive
-        insert_source_with_metadata(&conn, archive_id, "existing/photo.jpg", Some(obj_id), 1000, 1704067200);
+        insert_source_with_metadata(
+            &conn,
+            archive_id,
+            "existing/photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1552,11 +1693,31 @@ mod tests {
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let other_archive = insert_root(&conn, "/other-archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
         // Same hash in OTHER archive
-        insert_source_with_metadata(&conn, other_archive, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        insert_source_with_metadata(
+            &conn,
+            other_archive,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1577,9 +1738,22 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1606,7 +1780,13 @@ mod tests {
         let obj_id = insert_object(&conn, "hash1", false);
         let src_id = insert_source_excluded(&conn, root_id, "photo.jpg", Some(obj_id));
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1627,9 +1807,22 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", true); // suspended
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1654,11 +1847,31 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
         // Destination path already has a record in archive
-        insert_source_with_metadata(&conn, archive_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        insert_source_with_metadata(
+            &conn,
+            archive_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1679,12 +1892,25 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
         // Destination path occupied
         let obj2 = insert_object(&conn, "different_hash", false);
         insert_source_with_metadata(&conn, archive_id, "photo.jpg", Some(obj2), 1000, 1704067200);
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1724,11 +1950,31 @@ mod tests {
         let root_id = insert_root(&conn, &src_path, "source", false);
         let archive_id = insert_root(&conn, &archive_path, "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
         // Same path exists in archive DB
-        insert_source_with_metadata(&conn, archive_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        insert_source_with_metadata(
+            &conn,
+            archive_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
 
-        let entry = make_lock_entry(src_id, root_id, &src_file.display().to_string(), Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            &src_file.display().to_string(),
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1763,9 +2009,22 @@ mod tests {
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
         // DB has size=2000 but lock entry has size=1000
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 2000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            2000,
+            1704067200,
+        );
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1787,9 +2046,22 @@ mod tests {
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
         // DB matches lock entry exactly
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1831,9 +2103,22 @@ mod tests {
         let root_id = insert_root(&conn, &src_path, "source", false);
         let archive_id = insert_root(&conn, &archive_path, "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
 
-        let entry = make_lock_entry(src_id, root_id, &src_file.display().to_string(), Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            &src_file.display().to_string(),
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1872,9 +2157,22 @@ mod tests {
         let root_id = insert_root(&conn, &src_path, "source", false);
         let archive_id = insert_root(&conn, &archive_path, "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
 
-        let entry = make_lock_entry(src_id, root_id, &src_file.display().to_string(), Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            &src_file.display().to_string(),
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1902,7 +2200,8 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         // Source without object_id
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", None, 1000, 1704067200);
+        let src_id =
+            insert_source_with_metadata(&conn, root_id, "photo.jpg", None, 1000, 1704067200);
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", None, None);
         let sources: Vec<&LockEntry> = vec![&entry];
@@ -1916,7 +2215,10 @@ mod tests {
         let result = plan_apply(&mut conn, &params);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("without content hash"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("without content hash"));
     }
 
     #[test]
@@ -1925,11 +2227,24 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
         // Archive has an unhashed file — should NOT block apply
         insert_source_with_metadata(&conn, archive_id, "unhashed.jpg", None, 500, 1704067200);
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -1971,12 +2286,20 @@ mod tests {
     // validate_source_state tests
     // =========================================================================
 
-    fn make_transfer_for_file(path: &Path, size: i64, mtime: i64, partial_hash: &str) -> ApplyTransfer {
+    fn make_transfer_for_file(
+        path: &Path,
+        size: i64,
+        mtime: i64,
+        partial_hash: &str,
+    ) -> ApplyTransfer {
         ApplyTransfer {
             source_id: 1,
             source_path: path.display().to_string(),
             source_root_path: String::new(),
-            source_rel_path: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            source_rel_path: path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
             dest_rel_path: "dest.jpg".to_string(),
             archive_rel_path: "dest.jpg".to_string(),
             object_id: Some(1),
@@ -2001,9 +2324,7 @@ mod tests {
             (meta.size() as i64, meta.mtime())
         };
         #[cfg(not(unix))]
-        let (size, mtime) = {
-            (meta.len() as i64, 0i64)
-        };
+        let (size, mtime) = { (meta.len() as i64, 0i64) };
 
         let hash = compute_partial_hash(f.path(), size as u64).unwrap();
         let transfer = make_transfer_for_file(f.path(), size, mtime, &hash);
@@ -2019,7 +2340,10 @@ mod tests {
             "testhash",
         );
         let err = validate_source_state(&transfer).unwrap_err();
-        assert!(err.contains("not found"), "expected 'not found', got: {err}");
+        assert!(
+            err.contains("not found"),
+            "expected 'not found', got: {err}"
+        );
     }
 
     #[test]
@@ -2063,14 +2387,15 @@ mod tests {
             (meta.size() as i64, meta.mtime())
         };
         #[cfg(not(unix))]
-        let (size, mtime) = {
-            (meta.len() as i64, 0i64)
-        };
+        let (size, mtime) = { (meta.len() as i64, 0i64) };
 
         // Correct size/mtime but wrong hash
         let transfer = make_transfer_for_file(f.path(), size, mtime, "wrong_hash_value_here");
         let err = validate_source_state(&transfer).unwrap_err();
-        assert!(err.contains("partial hash"), "expected 'partial hash' in error, got: {err}");
+        assert!(
+            err.contains("partial hash"),
+            "expected 'partial hash' in error, got: {err}"
+        );
     }
 
     // =========================================================================
@@ -2084,7 +2409,10 @@ mod tests {
         let src_dir = tempfile::tempdir().unwrap();
         // Create source file
         let src_file = src_dir.path().join("photo.jpg");
-        std::fs::File::create(&src_file).unwrap().write_all(b"data").unwrap();
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"data")
+            .unwrap();
         // Dest does not exist
 
         let transfers = vec![ApplyTransfer {
@@ -2115,7 +2443,10 @@ mod tests {
         let src_dir = tempfile::tempdir().unwrap();
         // Create source file
         let src_file = src_dir.path().join("photo.jpg");
-        std::fs::File::create(&src_file).unwrap().write_all(b"data").unwrap();
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"data")
+            .unwrap();
         // Create dest file with correct size
         let dest = dir.path().join("photo.jpg");
         let mut f = std::fs::File::create(&dest).unwrap();
@@ -2230,7 +2561,7 @@ mod tests {
         assert!(result.source_lost.is_empty());
         assert_eq!(result.size_mismatches.len(), 1);
         assert_eq!(result.size_mismatches[0].1, 1000); // expected
-        assert_eq!(result.size_mismatches[0].2, 500);  // actual
+        assert_eq!(result.size_mismatches[0].2, 500); // actual
     }
 
     // =========================================================================
@@ -2298,7 +2629,10 @@ mod tests {
 
         let src_dir = tempfile::tempdir().unwrap();
         let src_file = src_dir.path().join("photo.jpg");
-        std::fs::File::create(&src_file).unwrap().write_all(b"data").unwrap();
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"data")
+            .unwrap();
 
         let meta = std::fs::metadata(&src_file).unwrap();
         #[cfg(unix)]
@@ -2385,11 +2719,17 @@ mod tests {
 
         let src_dir = tempfile::tempdir().unwrap();
         let src_file = src_dir.path().join("photo.jpg");
-        std::fs::File::create(&src_file).unwrap().write_all(b"data").unwrap();
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"data")
+            .unwrap();
 
         let meta = std::fs::metadata(&src_file).unwrap();
         #[cfg(unix)]
-        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
         #[cfg(not(unix))]
         let (size, mtime) = (meta.len() as i64, 0i64);
         let hash = compute_partial_hash(&src_file, size as u64).unwrap();
@@ -2411,15 +2751,23 @@ mod tests {
 
         let decision_id = Some(77i64);
         execute_single_transfer(
-            &transfer, dest_dir.path(), TransferMode::Copy, &conn, archive_root, decision_id,
-        ).unwrap();
+            &transfer,
+            dest_dir.path(),
+            TransferMode::Copy,
+            &conn,
+            archive_root,
+            decision_id,
+        )
+        .unwrap();
 
         // Destination source should have decision_id = 77
-        let stored_decision_id: Option<i64> = conn.query_row(
-            "SELECT decision_id FROM sources WHERE root_id = ? AND rel_path = 'photo.jpg'",
-            rusqlite::params![archive_root],
-            |row| row.get(0),
-        ).unwrap();
+        let stored_decision_id: Option<i64> = conn
+            .query_row(
+                "SELECT decision_id FROM sources WHERE root_id = ? AND rel_path = 'photo.jpg'",
+                rusqlite::params![archive_root],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(stored_decision_id, decision_id);
     }
 
@@ -2431,11 +2779,17 @@ mod tests {
 
         let src_dir = tempfile::tempdir().unwrap();
         let src_file = src_dir.path().join("photo.jpg");
-        std::fs::File::create(&src_file).unwrap().write_all(b"data").unwrap();
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"data")
+            .unwrap();
 
         let meta = std::fs::metadata(&src_file).unwrap();
         #[cfg(unix)]
-        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
         #[cfg(not(unix))]
         let (size, mtime) = (meta.len() as i64, 0i64);
         let hash = compute_partial_hash(&src_file, size as u64).unwrap();
@@ -2457,16 +2811,28 @@ mod tests {
 
         // First apply: decision 10
         execute_single_transfer(
-            &transfer, dest_dir.path(), TransferMode::Copy, &conn, archive_root, Some(10),
-        ).unwrap();
+            &transfer,
+            dest_dir.path(),
+            TransferMode::Copy,
+            &conn,
+            archive_root,
+            Some(10),
+        )
+        .unwrap();
 
         // Recreate source file for second apply (clobber protection requires dest be renamed/moved)
         let dest_file = dest_dir.path().join("photo.jpg");
         std::fs::remove_file(&dest_file).unwrap();
-        std::fs::File::create(&src_file).unwrap().write_all(b"data2").unwrap();
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"data2")
+            .unwrap();
         let meta2 = std::fs::metadata(&src_file).unwrap();
         #[cfg(unix)]
-        let (size2, mtime2) = { use std::os::unix::fs::MetadataExt; (meta2.size() as i64, meta2.mtime()) };
+        let (size2, mtime2) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta2.size() as i64, meta2.mtime())
+        };
         #[cfg(not(unix))]
         let (size2, mtime2) = (meta2.len() as i64, 0i64);
         let hash2 = compute_partial_hash(&src_file, size2 as u64).unwrap();
@@ -2487,17 +2853,25 @@ mod tests {
 
         // Second apply: decision 20 — also captures previous_decision_id = 10
         let (outcome, prev_decision_id) = execute_single_transfer(
-            &transfer2, dest_dir.path(), TransferMode::Copy, &conn, archive_root, Some(20),
-        ).unwrap();
+            &transfer2,
+            dest_dir.path(),
+            TransferMode::Copy,
+            &conn,
+            archive_root,
+            Some(20),
+        )
+        .unwrap();
         assert!(matches!(outcome, TransferOutcome::Copied));
         assert_eq!(prev_decision_id, Some(10));
 
         // DB should now show decision_id = 20
-        let stored: Option<i64> = conn.query_row(
-            "SELECT decision_id FROM sources WHERE root_id = ? AND rel_path = 'photo.jpg'",
-            rusqlite::params![archive_root],
-            |row| row.get(0),
-        ).unwrap();
+        let stored: Option<i64> = conn
+            .query_row(
+                "SELECT decision_id FROM sources WHERE root_id = ? AND rel_path = 'photo.jpg'",
+                rusqlite::params![archive_root],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(stored, Some(20));
     }
 
@@ -2509,11 +2883,17 @@ mod tests {
 
         let src_dir = tempfile::tempdir().unwrap();
         let src_file = src_dir.path().join("photo.jpg");
-        std::fs::File::create(&src_file).unwrap().write_all(b"data").unwrap();
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"data")
+            .unwrap();
 
         let meta = std::fs::metadata(&src_file).unwrap();
         #[cfg(unix)]
-        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
         #[cfg(not(unix))]
         let (size, mtime) = (meta.len() as i64, 0i64);
         let hash = compute_partial_hash(&src_file, size as u64).unwrap();
@@ -2535,8 +2915,14 @@ mod tests {
 
         // Fresh destination — no prior record
         let (_outcome, prev_decision_id) = execute_single_transfer(
-            &transfer, dest_dir.path(), TransferMode::Copy, &conn, archive_root, Some(5),
-        ).unwrap();
+            &transfer,
+            dest_dir.path(),
+            TransferMode::Copy,
+            &conn,
+            archive_root,
+            Some(5),
+        )
+        .unwrap();
         assert_eq!(prev_decision_id, None);
     }
 
@@ -2553,9 +2939,22 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "photo.jpg", Some(obj_id), 1000, 1704067200);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         // Pattern produces a normal path — no escape expected
         let pattern = expr::parse_pattern("{filename}").unwrap();
@@ -2582,9 +2981,16 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(&conn, root_id, "5.avi", Some(obj_id), 1000, 1704067200);
+        let src_id =
+            insert_source_with_metadata(&conn, root_id, "5.avi", Some(obj_id), 1000, 1704067200);
 
-        let entry = make_lock_entry(src_id, root_id, "/photos/5.avi", Some(obj_id), Some("hash1"));
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/5.avi",
+            Some(obj_id),
+            Some("hash1"),
+        );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{source.rel_path[:-1]}/{filename}").unwrap();
         let needed_keys = expr::extract_fact_keys(&pattern);
@@ -2613,12 +3019,21 @@ mod tests {
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
         let src_id = insert_source_with_metadata(
-            &conn, root_id, "missing.jpg", Some(obj_id), 1000, 1704067200,
+            &conn,
+            root_id,
+            "missing.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
         );
 
         // Lock entry points to a non-existent file
         let entry = make_lock_entry(
-            src_id, root_id, "/nonexistent/missing.jpg", Some(obj_id), Some("hash1"),
+            src_id,
+            root_id,
+            "/nonexistent/missing.jpg",
+            Some(obj_id),
+            Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
@@ -2646,13 +3061,16 @@ mod tests {
         let root_id = insert_root(&conn, root_path, "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(
-            &conn, root_id, "subdir", Some(obj_id), 1000, 1704067200,
-        );
+        let src_id =
+            insert_source_with_metadata(&conn, root_id, "subdir", Some(obj_id), 1000, 1704067200);
 
         // Lock entry points to a directory, not a file
         let entry = make_lock_entry(
-            src_id, root_id, &sub.to_string_lossy(), Some(obj_id), Some("hash1"),
+            src_id,
+            root_id,
+            &sub.to_string_lossy(),
+            Some(obj_id),
+            Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = expr::parse_pattern("{filename}").unwrap();
@@ -2677,7 +3095,15 @@ mod tests {
 
     impl TransferProgress for NoopProgress {
         fn on_start(&self, _total: usize) {}
-        fn on_transfer(&self, _index: usize, _total: usize, _source_path: &str, _dest_path: &str, _outcome: &TransferOutcome) {}
+        fn on_transfer(
+            &self,
+            _index: usize,
+            _total: usize,
+            _source_path: &str,
+            _dest_path: &str,
+            _outcome: &TransferOutcome,
+        ) {
+        }
         fn on_interrupt(&self) {}
         fn on_finish(&self) {}
     }
@@ -2696,20 +3122,28 @@ mod tests {
         let src_dir = tempfile::tempdir().unwrap();
         let src1 = src_dir.path().join("a.jpg");
         let src2 = src_dir.path().join("b.jpg");
-        std::fs::File::create(&src1).unwrap().write_all(b"data1").unwrap();
-        std::fs::File::create(&src2).unwrap().write_all(b"data2").unwrap();
+        std::fs::File::create(&src1)
+            .unwrap()
+            .write_all(b"data1")
+            .unwrap();
+        std::fs::File::create(&src2)
+            .unwrap()
+            .write_all(b"data2")
+            .unwrap();
 
         let meta1 = std::fs::metadata(&src1).unwrap();
         let meta2 = std::fs::metadata(&src2).unwrap();
         #[cfg(unix)]
         let ((size1, mtime1), (size2, mtime2)) = {
             use std::os::unix::fs::MetadataExt;
-            ((meta1.size() as i64, meta1.mtime()), (meta2.size() as i64, meta2.mtime()))
+            (
+                (meta1.size() as i64, meta1.mtime()),
+                (meta2.size() as i64, meta2.mtime()),
+            )
         };
         #[cfg(not(unix))]
-        let ((size1, mtime1), (size2, mtime2)) = {
-            ((meta1.len() as i64, 0i64), (meta2.len() as i64, 0i64))
-        };
+        let ((size1, mtime1), (size2, mtime2)) =
+            { ((meta1.len() as i64, 0i64), (meta2.len() as i64, 0i64)) };
         let hash1 = compute_partial_hash(&src1, size1 as u64).unwrap();
         let hash2 = compute_partial_hash(&src2, size2 as u64).unwrap();
 
@@ -2820,7 +3254,7 @@ mod tests {
     // =========================================================================
 
     fn make_decision_params(receipt_enabled: bool) -> DecisionParams {
-        use crate::domain::config::{LedgerConfig, RecordingMode, ReceiptLayout};
+        use crate::domain::config::{LedgerConfig, ReceiptLayout, RecordingMode};
         DecisionParams {
             command: crate::domain::decision::DecisionCommand::Apply,
             scope: None,
@@ -2829,7 +3263,11 @@ mod tests {
             record_enabled: true,
             receipt_enabled,
             ledger_config: LedgerConfig {
-                recording: if receipt_enabled { RecordingMode::Full } else { RecordingMode::Records },
+                recording: if receipt_enabled {
+                    RecordingMode::Full
+                } else {
+                    RecordingMode::Records
+                },
                 layout: ReceiptLayout::Central,
                 root: None,
             },
@@ -2841,14 +3279,25 @@ mod tests {
         use std::io::Write;
         let conn = setup_test_db();
         let archive_dir = tempfile::tempdir().unwrap();
-        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
 
         let src_dir = tempfile::tempdir().unwrap();
         let src_file = src_dir.path().join("photo.jpg");
-        std::fs::File::create(&src_file).unwrap().write_all(b"image data").unwrap();
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"image data")
+            .unwrap();
         let meta = std::fs::metadata(&src_file).unwrap();
         #[cfg(unix)]
-        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
         #[cfg(not(unix))]
         let (size, mtime) = (meta.len() as i64, 0i64);
         let hash = compute_partial_hash(&src_file, size as u64).unwrap();
@@ -2919,19 +3368,33 @@ mod tests {
         use std::io::Write;
         let conn = setup_test_db();
         let archive_dir = tempfile::tempdir().unwrap();
-        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
 
         // A regular file standing where the receipt's archive root should be:
         // create_dir_all under it fails, forcing receipt setup to fail.
         let blocker = archive_dir.path().join("blocker");
-        std::fs::File::create(&blocker).unwrap().write_all(b"x").unwrap();
+        std::fs::File::create(&blocker)
+            .unwrap()
+            .write_all(b"x")
+            .unwrap();
 
         let src_dir = tempfile::tempdir().unwrap();
         let src_file = src_dir.path().join("photo.jpg");
-        std::fs::File::create(&src_file).unwrap().write_all(b"image data").unwrap();
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"image data")
+            .unwrap();
         let meta = std::fs::metadata(&src_file).unwrap();
         #[cfg(unix)]
-        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
         #[cfg(not(unix))]
         let (size, mtime) = (meta.len() as i64, 0i64);
         let hash = compute_partial_hash(&src_file, size as u64).unwrap();
@@ -2999,14 +3462,25 @@ mod tests {
         use std::io::Write;
         let conn = setup_test_db();
         let archive_dir = tempfile::tempdir().unwrap();
-        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
 
         let src_dir = tempfile::tempdir().unwrap();
         let src_file = src_dir.path().join("photo.jpg");
-        std::fs::File::create(&src_file).unwrap().write_all(b"image data").unwrap();
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"image data")
+            .unwrap();
         let meta = std::fs::metadata(&src_file).unwrap();
         #[cfg(unix)]
-        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
         #[cfg(not(unix))]
         let (size, mtime) = (meta.len() as i64, 0i64);
         let hash = compute_partial_hash(&src_file, size as u64).unwrap();
@@ -3059,14 +3533,25 @@ mod tests {
         use std::io::Write;
         let conn = setup_test_db();
         let archive_dir = tempfile::tempdir().unwrap();
-        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
 
         let src_dir = tempfile::tempdir().unwrap();
         let src_file = src_dir.path().join("photo.jpg");
-        std::fs::File::create(&src_file).unwrap().write_all(b"image data").unwrap();
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"image data")
+            .unwrap();
         let meta = std::fs::metadata(&src_file).unwrap();
         #[cfg(unix)]
-        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
         #[cfg(not(unix))]
         let (size, mtime) = (meta.len() as i64, 0i64);
         let hash = compute_partial_hash(&src_file, size as u64).unwrap();
@@ -3115,26 +3600,39 @@ mod tests {
         execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
 
         // Verify DB receipt fields are populated
-        let (receipt_root_id, receipt_rel_path): (Option<i64>, Option<String>) = conn.query_row(
-            "SELECT receipt_root_id, receipt_rel_path FROM decisions ORDER BY id DESC LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
+        let (receipt_root_id, receipt_rel_path): (Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT receipt_root_id, receipt_rel_path FROM decisions ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(receipt_root_id, Some(archive_root));
         assert!(receipt_rel_path.is_some());
         let rel_path = receipt_rel_path.unwrap();
-        assert!(rel_path.contains(".canon-ledger"), "rel_path should contain .canon-ledger: {rel_path}");
-        assert!(rel_path.ends_with("-apply.toml"), "rel_path should end with -apply.toml: {rel_path}");
+        assert!(
+            rel_path.contains(".canon-ledger"),
+            "rel_path should contain .canon-ledger: {rel_path}"
+        );
+        assert!(
+            rel_path.ends_with("-apply.toml"),
+            "rel_path should end with -apply.toml: {rel_path}"
+        );
     }
 
     #[test]
     fn test_apply_receipt_alongside_layout() {
+        use crate::domain::config::{LedgerConfig, ReceiptLayout, RecordingMode};
         use std::io::Write;
-        use crate::domain::config::{LedgerConfig, RecordingMode, ReceiptLayout};
 
         let conn = setup_test_db();
         let archive_dir = tempfile::tempdir().unwrap();
-        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
 
         // Create base_dir inside archive
         let base_dir = archive_dir.path().join("Media/2024");
@@ -3142,10 +3640,16 @@ mod tests {
 
         let src_dir = tempfile::tempdir().unwrap();
         let src_file = src_dir.path().join("photo.jpg");
-        std::fs::File::create(&src_file).unwrap().write_all(b"image data").unwrap();
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"image data")
+            .unwrap();
         let meta = std::fs::metadata(&src_file).unwrap();
         #[cfg(unix)]
-        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
         #[cfg(not(unix))]
         let (size, mtime) = (meta.len() as i64, 0i64);
         let hash = compute_partial_hash(&src_file, size as u64).unwrap();
@@ -3209,13 +3713,20 @@ mod tests {
 
         // Alongside: receipt at {base_dir_rel}/.canon-ledger/{id}-apply.toml
         let ledger_dir = archive_dir.path().join("Media/2024/.canon-ledger");
-        assert!(ledger_dir.exists(), ".canon-ledger should exist under base_dir");
+        assert!(
+            ledger_dir.exists(),
+            ".canon-ledger should exist under base_dir"
+        );
         let receipt_files: Vec<_> = std::fs::read_dir(&ledger_dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map(|x| x == "toml").unwrap_or(false))
             .collect();
-        assert_eq!(receipt_files.len(), 1, "Expected one receipt in alongside layout");
+        assert_eq!(
+            receipt_files.len(),
+            1,
+            "Expected one receipt in alongside layout"
+        );
     }
 
     #[test]
@@ -3224,14 +3735,25 @@ mod tests {
         // Source passes staleness but dest already exists → copy error → no receipt items
         let conn = setup_test_db();
         let archive_dir = tempfile::tempdir().unwrap();
-        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
 
         let src_dir = tempfile::tempdir().unwrap();
         let src_file = src_dir.path().join("photo.jpg");
-        std::fs::File::create(&src_file).unwrap().write_all(b"image data").unwrap();
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"image data")
+            .unwrap();
         let meta = std::fs::metadata(&src_file).unwrap();
         #[cfg(unix)]
-        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
         #[cfg(not(unix))]
         let (size, mtime) = (meta.len() as i64, 0i64);
         let hash = compute_partial_hash(&src_file, size as u64).unwrap();
@@ -3281,7 +3803,11 @@ mod tests {
 
         let decision = make_decision_params(true);
         let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
-        assert_eq!(result.errors.len(), 1, "Transfer should error on existing dest");
+        assert_eq!(
+            result.errors.len(),
+            1,
+            "Transfer should error on existing dest"
+        );
         assert_eq!(result.copied, 0);
 
         // No receipt .toml should exist (no completed transfers → empty items → skipped)
@@ -3292,7 +3818,11 @@ mod tests {
                 .filter_map(|e| e.ok())
                 .filter(|e| e.path().extension().map(|x| x == "toml").unwrap_or(false))
                 .collect();
-            assert_eq!(receipt_toml_files.len(), 0, "No receipt .toml when all transfers error");
+            assert_eq!(
+                receipt_toml_files.len(),
+                0,
+                "No receipt .toml when all transfers error"
+            );
         }
     }
 
@@ -3301,22 +3831,39 @@ mod tests {
         use std::io::Write;
         let conn = setup_test_db();
         let archive_dir = tempfile::tempdir().unwrap();
-        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
 
         let src_dir = tempfile::tempdir().unwrap();
         let src1 = src_dir.path().join("a.jpg");
         let src2 = src_dir.path().join("b.jpg");
-        std::fs::File::create(&src1).unwrap().write_all(b"data1").unwrap();
-        std::fs::File::create(&src2).unwrap().write_all(b"data2").unwrap();
+        std::fs::File::create(&src1)
+            .unwrap()
+            .write_all(b"data1")
+            .unwrap();
+        std::fs::File::create(&src2)
+            .unwrap()
+            .write_all(b"data2")
+            .unwrap();
 
         let meta1 = std::fs::metadata(&src1).unwrap();
         let meta2 = std::fs::metadata(&src2).unwrap();
         #[cfg(unix)]
-        let (size1, mtime1) = { use std::os::unix::fs::MetadataExt; (meta1.size() as i64, meta1.mtime()) };
+        let (size1, mtime1) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta1.size() as i64, meta1.mtime())
+        };
         #[cfg(not(unix))]
         let (size1, mtime1) = (meta1.len() as i64, 0i64);
         #[cfg(unix)]
-        let (size2, mtime2) = { use std::os::unix::fs::MetadataExt; (meta2.size() as i64, meta2.mtime()) };
+        let (size2, mtime2) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta2.size() as i64, meta2.mtime())
+        };
         #[cfg(not(unix))]
         let (size2, mtime2) = (meta2.len() as i64, 0i64);
         let hash1 = compute_partial_hash(&src1, size1 as u64).unwrap();
@@ -3395,14 +3942,27 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map(|x| x == "toml").unwrap_or(false))
             .collect();
-        assert_eq!(receipt_files.len(), 1, "Receipt should be finalized even on interrupt");
+        assert_eq!(
+            receipt_files.len(),
+            1,
+            "Receipt should be finalized even on interrupt"
+        );
 
         let content = std::fs::read_to_string(&receipt_files[0].path()).unwrap();
         // Should contain exactly one [[items]] section
         let items_count = content.matches("[[items]]").count();
-        assert_eq!(items_count, 1, "Interrupted receipt should contain only completed items");
-        assert!(content.contains("a.jpg"), "Should contain the completed transfer");
-        assert!(!content.contains("b.jpg"), "Should NOT contain the interrupted transfer");
+        assert_eq!(
+            items_count, 1,
+            "Interrupted receipt should contain only completed items"
+        );
+        assert!(
+            content.contains("a.jpg"),
+            "Should contain the completed transfer"
+        );
+        assert!(
+            !content.contains("b.jpg"),
+            "Should NOT contain the interrupted transfer"
+        );
     }
 
     #[test]
@@ -3411,15 +3971,26 @@ mod tests {
         let conn = setup_test_db();
         let src_root = insert_root(&conn, "/photos", "source", false);
         let archive_dir = tempfile::tempdir().unwrap();
-        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
 
         // Create a source file inside the archive dir (rename = same filesystem)
         let src_file = archive_dir.path().join("original.jpg");
-        std::fs::File::create(&src_file).unwrap().write_all(b"data").unwrap();
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"data")
+            .unwrap();
 
         let meta = std::fs::metadata(&src_file).unwrap();
         #[cfg(unix)]
-        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
         #[cfg(not(unix))]
         let (size, mtime) = (meta.len() as i64, 0i64);
         let hash = compute_partial_hash(&src_file, size as u64).unwrap();
@@ -3431,7 +4002,8 @@ mod tests {
                  basis_rev, scanned_at, last_seen_at, present, excluded)
                  VALUES (?, 'original.jpg', 0, 0, ?, ?, ?, 0, 0, 0, 1, 0)",
                 rusqlite::params![src_root, size, mtime, hash],
-            ).unwrap();
+            )
+            .unwrap();
             conn.last_insert_rowid()
         };
 
@@ -3453,17 +4025,29 @@ mod tests {
         };
 
         let (outcome, _prev) = execute_single_transfer(
-            &transfer, &dest_dir, TransferMode::Rename, &conn, archive_root, Some(42),
-        ).unwrap();
+            &transfer,
+            &dest_dir,
+            TransferMode::Rename,
+            &conn,
+            archive_root,
+            Some(42),
+        )
+        .unwrap();
 
         assert!(matches!(outcome, TransferOutcome::Renamed));
 
         // Verify decision_id was set on the relocated source
-        let stored_decision_id: Option<i64> = conn.query_row(
-            "SELECT decision_id FROM sources WHERE id = ?",
-            rusqlite::params![source_id],
-            |row| row.get(0),
-        ).unwrap();
-        assert_eq!(stored_decision_id, Some(42), "Rename should set decision_id");
+        let stored_decision_id: Option<i64> = conn
+            .query_row(
+                "SELECT decision_id FROM sources WHERE id = ?",
+                rusqlite::params![source_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored_decision_id,
+            Some(42),
+            "Rename should set decision_id"
+        );
     }
 }

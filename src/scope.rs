@@ -79,20 +79,13 @@ mod tests {
         };
         let mut buf = Vec::new();
         print_report_scope(&mut buf, "Survey", &scope);
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "Survey: /a/b, /c/d\n"
-        );
+        assert_eq!(String::from_utf8(buf).unwrap(), "Survey: /a/b, /c/d\n");
     }
 
     #[test]
     fn print_report_scope_many_paths() {
         let scope = ResolvedScope {
-            prefixes: vec![
-                "/a".to_string(),
-                "/b".to_string(),
-                "/c".to_string(),
-            ],
+            prefixes: vec!["/a".to_string(), "/b".to_string(), "/c".to_string()],
             from_cwd: false,
             auto_include_archived: false,
         };

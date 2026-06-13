@@ -93,9 +93,7 @@ pub fn fetch_subtree_chronological(
     rel_path: &str,
 ) -> Result<Vec<Note>> {
     let sql = if rel_path.is_empty() {
-        format!(
-            "SELECT {NOTE_COLUMNS} FROM notes WHERE root_id = ? ORDER BY rel_path, created_at"
-        )
+        format!("SELECT {NOTE_COLUMNS} FROM notes WHERE root_id = ? ORDER BY rel_path, created_at")
     } else {
         format!(
             "SELECT {NOTE_COLUMNS} FROM notes WHERE root_id = ? AND (rel_path = ? OR rel_path LIKE ? || '/%') ORDER BY rel_path, created_at"
@@ -122,8 +120,7 @@ pub fn fetch_subtree_chronological(
 /// Fetch all notes across all roots, ordered by root_id, rel_path, created_at.
 #[allow(dead_code)]
 pub fn fetch_all(conn: &Connection) -> Result<Vec<Note>> {
-    let sql =
-        format!("SELECT {NOTE_COLUMNS} FROM notes ORDER BY root_id, rel_path, created_at");
+    let sql = format!("SELECT {NOTE_COLUMNS} FROM notes ORDER BY root_id, rel_path, created_at");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], note_from_row)?;
 
@@ -143,9 +140,7 @@ pub fn fetch_all(conn: &Connection) -> Result<Vec<Note>> {
 /// limit=0 means unlimited.
 pub fn fetch_recent(conn: &Connection, limit: usize) -> Result<(Vec<Note>, usize, usize)> {
     let sql = if limit > 0 {
-        format!(
-            "SELECT {NOTE_COLUMNS} FROM notes ORDER BY created_at DESC LIMIT ?"
-        )
+        format!("SELECT {NOTE_COLUMNS} FROM notes ORDER BY created_at DESC LIMIT ?")
     } else {
         format!("SELECT {NOTE_COLUMNS} FROM notes ORDER BY created_at DESC")
     };
@@ -162,8 +157,7 @@ pub fn fetch_recent(conn: &Connection, limit: usize) -> Result<(Vec<Note>, usize
         notes.push(row?);
     }
 
-    let total_notes: i64 =
-        conn.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))?;
+    let total_notes: i64 = conn.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))?;
     let total_locations: i64 = conn.query_row(
         "SELECT COUNT(*) FROM (SELECT DISTINCT root_id, rel_path FROM notes)",
         [],
@@ -188,9 +182,7 @@ pub fn fetch_recent_subtree(
             "SELECT {NOTE_COLUMNS} FROM notes WHERE {where_clause} ORDER BY created_at DESC LIMIT ?"
         )
     } else {
-        format!(
-            "SELECT {NOTE_COLUMNS} FROM notes WHERE {where_clause} ORDER BY created_at DESC"
-        )
+        format!("SELECT {NOTE_COLUMNS} FROM notes WHERE {where_clause} ORDER BY created_at DESC")
     };
 
     let mut all_params: Vec<rusqlite::types::Value> = params.clone();
@@ -341,11 +333,8 @@ fn count_subtree_locations_inclusive(
     rel_path: &str,
 ) -> Result<usize> {
     let (where_clause, params) = subtree_where(root_id, rel_path);
-    let sql = format!(
-        "SELECT COUNT(DISTINCT rel_path) FROM notes WHERE {where_clause}"
-    );
-    let count: i64 =
-        conn.query_row(&sql, rusqlite::params_from_iter(&params), |row| row.get(0))?;
+    let sql = format!("SELECT COUNT(DISTINCT rel_path) FROM notes WHERE {where_clause}");
+    let count: i64 = conn.query_row(&sql, rusqlite::params_from_iter(&params), |row| row.get(0))?;
     Ok(count as usize)
 }
 
@@ -370,15 +359,12 @@ pub fn count_ancestor_notes(
         placeholders.join(",")
     );
 
-    let mut params: Vec<rusqlite::types::Value> =
-        vec![rusqlite::types::Value::from(root_id)];
+    let mut params: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::from(root_id)];
     for path in ancestor_paths {
         params.push(rusqlite::types::Value::from(path.clone()));
     }
 
-    let count: i64 = conn.query_row(&sql, rusqlite::params_from_iter(params), |row| {
-        row.get(0)
-    })?;
+    let count: i64 = conn.query_row(&sql, rusqlite::params_from_iter(params), |row| row.get(0))?;
     Ok(count as usize)
 }
 
@@ -423,11 +409,7 @@ pub fn count_subtree_notes(conn: &Connection, root_id: i64, rel_path: &str) -> R
 }
 
 /// Count distinct rel_paths with notes for scope + descendants.
-pub fn count_subtree_locations(
-    conn: &Connection,
-    root_id: i64,
-    rel_path: &str,
-) -> Result<usize> {
+pub fn count_subtree_locations(conn: &Connection, root_id: i64, rel_path: &str) -> Result<usize> {
     let count: i64 = if rel_path.is_empty() {
         conn.query_row(
             "SELECT COUNT(DISTINCT rel_path) FROM notes WHERE root_id = ?",
@@ -912,7 +894,13 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
 
         for i in 1..=15 {
-            insert_note(&conn, root_id, &format!("loc{}", i % 5), &format!("note {i}"), i * 100);
+            insert_note(
+                &conn,
+                root_id,
+                &format!("loc{}", i % 5),
+                &format!("note {i}"),
+                i * 100,
+            );
         }
 
         let (notes, total_notes, total_locations) = fetch_recent(&conn, 5).unwrap();

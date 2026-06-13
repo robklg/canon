@@ -257,9 +257,7 @@ pub fn run(
         let walker = WalkDir::new(&walk_path)
             .follow_links(false)
             .into_iter()
-            .filter_entry(|e| {
-                !(e.file_type().is_dir() && e.file_name() == ".canon-ledger")
-            });
+            .filter_entry(|e| !(e.file_type().is_dir() && e.file_name() == ".canon-ledger"));
 
         let result = ops::scan::scan_root(
             conn,
@@ -309,7 +307,8 @@ pub fn run(
     println!("{}", summary);
 
     // Complete decision recording
-    let total_processed = total_stats.new + total_stats.updated + total_stats.moved + total_stats.unchanged;
+    let total_processed =
+        total_stats.new + total_stats.updated + total_stats.moved + total_stats.unchanged;
     recorder.complete(
         conn,
         DecisionStatus::Completed,
@@ -631,9 +630,9 @@ mod tests {
     // Phase 5: .canon-ledger/ scan exclusion tests
     // =========================================================================
 
+    use crate::ops::scan::{scan_root, FileAction, ScanOptions, ScanProgress};
     use std::fs;
     use walkdir::WalkDir;
-    use crate::ops::scan::{ScanOptions, ScanProgress, FileAction, scan_root};
 
     struct NoopProgress;
     impl ScanProgress for NoopProgress {
@@ -646,17 +645,30 @@ mod tests {
         let conn = repo::open_in_memory_for_test();
         let root_path_str = root_path.to_str().unwrap();
         let root_id = repo::insert_test_root(&conn, root_path_str, "source", false);
-        let options = ScanOptions { hash: false, hash_all: false, ignore_device_id: true };
+        let options = ScanOptions {
+            hash: false,
+            hash_all: false,
+            ignore_device_id: true,
+        };
         let now = crate::ops::scan::current_timestamp();
 
         let walker = WalkDir::new(root_path)
             .follow_links(false)
             .into_iter()
-            .filter_entry(|e| {
-                !(e.file_type().is_dir() && e.file_name() == ".canon-ledger")
-            });
+            .filter_entry(|e| !(e.file_type().is_dir() && e.file_name() == ".canon-ledger"));
 
-        scan_root(&conn, root_id, root_path_str, None, walker, &options, &NoopProgress, now, None).unwrap()
+        scan_root(
+            &conn,
+            root_id,
+            root_path_str,
+            None,
+            walker,
+            &options,
+            &NoopProgress,
+            now,
+            None,
+        )
+        .unwrap()
     }
 
     #[test]

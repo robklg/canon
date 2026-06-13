@@ -35,10 +35,7 @@ pub enum ReceiptPlacement {
     },
     /// Constructed by the exclusion path in Phase 3 (`src/exclude.rs`); tests construct it now.
     #[allow(dead_code)]
-    LedgerRoot {
-        root_id: i64,
-        root_path: String,
-    },
+    LedgerRoot { root_id: i64, root_path: String },
 }
 
 /// Shared meta section for all receipt types.
@@ -166,11 +163,7 @@ pub fn resolve_ledger_root(roots: &[Root], config: &LedgerConfig) -> Option<(i64
 ///
 /// Returns `Err` on failure — the caller decides whether to warn or propagate.
 /// Receipt writing failure never halts a command.
-pub fn write_receipt<T: Serialize>(
-    path: &Path,
-    receipt: &T,
-    comment_summary: &str,
-) -> Result<()> {
+pub fn write_receipt<T: Serialize>(path: &Path, receipt: &T, comment_summary: &str) -> Result<()> {
     let toml_body = toml::to_string_pretty(receipt)
         .with_context(|| format!("Failed to serialize receipt to TOML: {}", path.display()))?;
 
@@ -185,8 +178,7 @@ pub fn write_receipt<T: Serialize>(
 /// Wraps `ops::fs::finalize_file`. Returns `Err` if the `.incomplete` file
 /// does not exist — the caller collects a warning.
 pub fn finalize_receipt(path: &Path) -> Result<()> {
-    finalize_file(path)
-        .with_context(|| format!("Failed to finalize receipt: {}", path.display()))
+    finalize_file(path).with_context(|| format!("Failed to finalize receipt: {}", path.display()))
 }
 
 #[cfg(test)]
@@ -215,7 +207,10 @@ mod tests {
 
     #[test]
     fn test_receipt_filename_command_variety() {
-        assert_eq!(receipt_filename(1, "exclude-set"), "000001-exclude-set.toml");
+        assert_eq!(
+            receipt_filename(1, "exclude-set"),
+            "000001-exclude-set.toml"
+        );
     }
 
     // =========================================================================
@@ -225,7 +220,10 @@ mod tests {
     #[test]
     fn test_path_central_with_base_dir() {
         let path = compute_targeted_receipt_rel_path(
-            43, "apply", "Media/2016/Italy", &ReceiptLayout::Central,
+            43,
+            "apply",
+            "Media/2016/Italy",
+            &ReceiptLayout::Central,
         );
         assert_eq!(path, ".canon-ledger/Media/2016/Italy/000043-apply.toml");
     }
@@ -233,7 +231,10 @@ mod tests {
     #[test]
     fn test_path_alongside_with_base_dir() {
         let path = compute_targeted_receipt_rel_path(
-            43, "apply", "Media/2016/Italy", &ReceiptLayout::Alongside,
+            43,
+            "apply",
+            "Media/2016/Italy",
+            &ReceiptLayout::Alongside,
         );
         assert_eq!(path, "Media/2016/Italy/.canon-ledger/000043-apply.toml");
     }
@@ -295,7 +296,10 @@ mod tests {
     fn test_serialize_items_present() {
         let receipt = make_apply_receipt();
         let toml_str = toml::to_string_pretty(&receipt).unwrap();
-        assert!(toml_str.contains("[[items]]"), "missing [[items]]\n{toml_str}");
+        assert!(
+            toml_str.contains("[[items]]"),
+            "missing [[items]]\n{toml_str}"
+        );
         assert!(toml_str.contains("source_root = \"/Volumes/old-laptop\""));
         assert!(toml_str.contains("destination_rel_path = \"Media/2016/Italy/IMG_001.jpg\""));
         assert!(toml_str.contains("previous_decision_id = 12"));
@@ -319,9 +323,18 @@ mod tests {
             items: vec![],
         };
         let toml_str = toml::to_string_pretty(&receipt).unwrap();
-        assert!(!toml_str.contains("scope"), "scope should be absent\n{toml_str}");
-        assert!(!toml_str.contains("reason"), "reason should be absent\n{toml_str}");
-        assert!(!toml_str.contains("manifest"), "manifest should be absent\n{toml_str}");
+        assert!(
+            !toml_str.contains("scope"),
+            "scope should be absent\n{toml_str}"
+        );
+        assert!(
+            !toml_str.contains("reason"),
+            "reason should be absent\n{toml_str}"
+        );
+        assert!(
+            !toml_str.contains("manifest"),
+            "manifest should be absent\n{toml_str}"
+        );
     }
 
     #[test]
@@ -354,7 +367,10 @@ mod tests {
             !toml_str.contains("previous_decision_id"),
             "previous_decision_id should be absent\n{toml_str}"
         );
-        assert!(!toml_str.contains("hash"), "hash should be absent\n{toml_str}");
+        assert!(
+            !toml_str.contains("hash"),
+            "hash should be absent\n{toml_str}"
+        );
     }
 
     // =========================================================================
@@ -453,22 +469,40 @@ mod tests {
     #[test]
     fn test_resolve_ledger_root_configured_valid() {
         let roots = vec![mk_root(1, "archive", false), mk_root(5, "archive", false)];
-        let cfg = LedgerConfig { root: Some(5), ..LedgerConfig::default() };
-        assert_eq!(resolve_ledger_root(&roots, &cfg), Some((5, "/root5".to_string())));
+        let cfg = LedgerConfig {
+            root: Some(5),
+            ..LedgerConfig::default()
+        };
+        assert_eq!(
+            resolve_ledger_root(&roots, &cfg),
+            Some((5, "/root5".to_string()))
+        );
     }
 
     #[test]
     fn test_resolve_ledger_root_configured_missing_falls_back() {
         let roots = vec![mk_root(1, "archive", false), mk_root(2, "archive", false)];
-        let cfg = LedgerConfig { root: Some(9), ..LedgerConfig::default() };
-        assert_eq!(resolve_ledger_root(&roots, &cfg), Some((1, "/root1".to_string())));
+        let cfg = LedgerConfig {
+            root: Some(9),
+            ..LedgerConfig::default()
+        };
+        assert_eq!(
+            resolve_ledger_root(&roots, &cfg),
+            Some((1, "/root1".to_string()))
+        );
     }
 
     #[test]
     fn test_resolve_ledger_root_configured_source_falls_back() {
         let roots = vec![mk_root(1, "archive", false), mk_root(2, "source", false)];
-        let cfg = LedgerConfig { root: Some(2), ..LedgerConfig::default() };
-        assert_eq!(resolve_ledger_root(&roots, &cfg), Some((1, "/root1".to_string())));
+        let cfg = LedgerConfig {
+            root: Some(2),
+            ..LedgerConfig::default()
+        };
+        assert_eq!(
+            resolve_ledger_root(&roots, &cfg),
+            Some((1, "/root1".to_string()))
+        );
     }
 
     #[test]

@@ -109,11 +109,7 @@ pub fn resolve_scope(
 /// Errors on the first path with no known sources.
 /// Skips root-level paths (empty rel_path) — roots are always valid.
 /// Assumes paths are already validated as under known roots.
-pub fn validate_sources_exist(
-    conn: &Connection,
-    paths: &[String],
-    roots: &[Root],
-) -> Result<()> {
+pub fn validate_sources_exist(conn: &Connection, paths: &[String], roots: &[Root]) -> Result<()> {
     for path in paths {
         if let Some((root_id, _root_path, _role, rel_path)) =
             domain::root::find_containing_root(path, roots)
@@ -163,7 +159,8 @@ mod tests {
         let root_id = insert_root(&conn, "/archive", "archive", false);
         insert_source(&conn, root_id, "photos/file.jpg", None);
         let roots = vec![make_test_root(root_id, "/archive", "archive")];
-        let result = resolve_scope(&conn, &[PathBuf::from("/archive/photos")], false, &roots).unwrap();
+        let result =
+            resolve_scope(&conn, &[PathBuf::from("/archive/photos")], false, &roots).unwrap();
         assert!(result.auto_include_archived);
         assert!(!result.from_cwd);
     }

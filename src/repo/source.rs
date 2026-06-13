@@ -255,7 +255,9 @@ pub fn fetch_decision_id_at_path(
     conn.prepare_cached(
         "SELECT decision_id FROM sources WHERE root_id = ? AND rel_path = ? AND present = 1",
     )?
-    .query_row(rusqlite::params![root_id, rel_path], |row| row.get::<_, Option<i64>>(0))
+    .query_row(rusqlite::params![root_id, rel_path], |row| {
+        row.get::<_, Option<i64>>(0)
+    })
     .optional()
     .map(|opt| opt.flatten())
     .map_err(Into::into)
@@ -1604,11 +1606,13 @@ mod tests {
         assert_eq!(source.decision_id, Some(42));
 
         // Verify it's in the DB
-        let db_val: Option<i64> = conn.query_row(
-            "SELECT decision_id FROM sources WHERE id = ?",
-            [source.id],
-            |r| r.get(0),
-        ).unwrap();
+        let db_val: Option<i64> = conn
+            .query_row(
+                "SELECT decision_id FROM sources WHERE id = ?",
+                [source.id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(db_val, Some(42));
     }
 
@@ -1633,7 +1637,10 @@ mod tests {
         insert_destination(&conn, &new).unwrap();
 
         // Re-insert with a new decision_id
-        let new2 = NewSource { decision_id: Some(20), ..new };
+        let new2 = NewSource {
+            decision_id: Some(20),
+            ..new
+        };
         let source = insert_destination(&conn, &new2).unwrap();
         assert_eq!(source.decision_id, Some(20));
     }
@@ -1673,12 +1680,15 @@ mod tests {
              basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
              VALUES (?, 'photo.jpg', 0, 0, 1024, 0, 'hash', 0, 0, 0, 1, 0, 42)",
             rusqlite::params![root_id],
-        ).unwrap();
-        let decision_id: Option<i64> = conn.query_row(
-            "SELECT decision_id FROM sources WHERE root_id = ? AND rel_path = 'photo.jpg'",
-            [root_id],
-            |row| row.get(0),
-        ).unwrap();
+        )
+        .unwrap();
+        let decision_id: Option<i64> = conn
+            .query_row(
+                "SELECT decision_id FROM sources WHERE root_id = ? AND rel_path = 'photo.jpg'",
+                [root_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(decision_id, Some(42));
     }
 
@@ -1691,12 +1701,15 @@ mod tests {
              basis_rev, scanned_at, last_seen_at, present, excluded)
              VALUES (?, 'photo.jpg', 0, 0, 1024, 0, 'hash', 0, 0, 0, 1, 0)",
             rusqlite::params![root_id],
-        ).unwrap();
-        let decision_id: Option<i64> = conn.query_row(
-            "SELECT decision_id FROM sources WHERE root_id = ? AND rel_path = 'photo.jpg'",
-            [root_id],
-            |row| row.get(0),
-        ).unwrap();
+        )
+        .unwrap();
+        let decision_id: Option<i64> = conn
+            .query_row(
+                "SELECT decision_id FROM sources WHERE root_id = ? AND rel_path = 'photo.jpg'",
+                [root_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(decision_id, None);
     }
 
@@ -1713,7 +1726,8 @@ mod tests {
              basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
              VALUES (?, 'photo.jpg', 0, 0, 1024, 0, 'hash', 0, 0, 0, 1, 0, 42)",
             rusqlite::params![root_id],
-        ).unwrap();
+        )
+        .unwrap();
         let result = fetch_decision_id_at_path(&conn, root_id, "photo.jpg").unwrap();
         assert_eq!(result, Some(42));
     }
@@ -1727,7 +1741,8 @@ mod tests {
              basis_rev, scanned_at, last_seen_at, present, excluded)
              VALUES (?, 'photo.jpg', 0, 0, 1024, 0, 'hash', 0, 0, 0, 1, 0)",
             rusqlite::params![root_id],
-        ).unwrap();
+        )
+        .unwrap();
         let result = fetch_decision_id_at_path(&conn, root_id, "photo.jpg").unwrap();
         assert_eq!(result, None);
     }
@@ -1749,7 +1764,8 @@ mod tests {
              basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
              VALUES (?, 'photo.jpg', 0, 0, 1024, 0, 'hash', 0, 0, 0, 0, 0, 99)",
             rusqlite::params![root_id],
-        ).unwrap();
+        )
+        .unwrap();
         // present = 0, should not be returned
         let result = fetch_decision_id_at_path(&conn, root_id, "photo.jpg").unwrap();
         assert_eq!(result, None);
@@ -2177,7 +2193,8 @@ mod tests {
             old_object_id: None,
         };
 
-        let source = apply_reconciliation(&conn, &observation, &reconciliation, 1700000001, None).unwrap();
+        let source =
+            apply_reconciliation(&conn, &observation, &reconciliation, 1700000001, None).unwrap();
         assert_eq!(source.id, source_id);
         assert_eq!(source.rel_path, "clean_destination.jpg");
     }
@@ -2222,14 +2239,23 @@ mod tests {
             partial_hash: Some("hash".to_string()),
         };
 
-        let source = apply_reconciliation(&conn, &observation, &Reconciliation::New, 1700000001, Some(99)).unwrap();
+        let source = apply_reconciliation(
+            &conn,
+            &observation,
+            &Reconciliation::New,
+            1700000001,
+            Some(99),
+        )
+        .unwrap();
         assert_eq!(source.decision_id, Some(99));
 
-        let db_val: Option<i64> = conn.query_row(
-            "SELECT decision_id FROM sources WHERE id = ?",
-            [source.id],
-            |r| r.get(0),
-        ).unwrap();
+        let db_val: Option<i64> = conn
+            .query_row(
+                "SELECT decision_id FROM sources WHERE id = ?",
+                [source.id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(db_val, Some(99));
     }
 
@@ -2249,7 +2275,9 @@ mod tests {
             partial_hash: Some("hash".to_string()),
         };
 
-        let source = apply_reconciliation(&conn, &observation, &Reconciliation::New, 1700000001, None).unwrap();
+        let source =
+            apply_reconciliation(&conn, &observation, &Reconciliation::New, 1700000001, None)
+                .unwrap();
         assert_eq!(source.decision_id, None);
     }
 
@@ -2265,7 +2293,8 @@ mod tests {
              basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
              VALUES (?, 'existing.jpg', 1, 100, 1000, 1704067200, 'hash', 0, 0, 0, 1, 0, 55)",
             rusqlite::params![root_id],
-        ).unwrap();
+        )
+        .unwrap();
         let source_id = conn.last_insert_rowid();
 
         let observation = FileObservation {
@@ -2280,8 +2309,13 @@ mod tests {
 
         // Pass a different decision_id — Unchanged must ignore it
         let source = apply_reconciliation(
-            &conn, &observation, &Reconciliation::Unchanged { source_id }, 1700000001, Some(77),
-        ).unwrap();
+            &conn,
+            &observation,
+            &Reconciliation::Unchanged { source_id },
+            1700000001,
+            Some(77),
+        )
+        .unwrap();
 
         // Should still be 55 (the original), not 77
         assert_eq!(source.decision_id, Some(55));
@@ -2298,7 +2332,8 @@ mod tests {
              basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
              VALUES (?, 'file.jpg', 1, 100, 1000, 1700000000, 'oldhash', 2, 0, 0, 1, 0, 33)",
             rusqlite::params![root_id],
-        ).unwrap();
+        )
+        .unwrap();
         let source_id = conn.last_insert_rowid();
 
         let observation = FileObservation {
@@ -2312,10 +2347,16 @@ mod tests {
         };
 
         let source = apply_reconciliation(
-            &conn, &observation,
-            &Reconciliation::Modified { source_id, old_object_id: None },
-            1700000101, Some(88),
-        ).unwrap();
+            &conn,
+            &observation,
+            &Reconciliation::Modified {
+                source_id,
+                old_object_id: None,
+            },
+            1700000101,
+            Some(88),
+        )
+        .unwrap();
 
         // decision_id should still be 33 (unchanged by Modified)
         assert_eq!(source.decision_id, Some(33));
@@ -2332,7 +2373,8 @@ mod tests {
              basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
              VALUES (?, 'origin.jpg', 1, 100, 1000, 1700000000, 'hash', 1, 0, 0, 1, 0, 11)",
             rusqlite::params![root_id],
-        ).unwrap();
+        )
+        .unwrap();
         let source_id = conn.last_insert_rowid();
 
         let observation = FileObservation {
@@ -2346,15 +2388,18 @@ mod tests {
         };
 
         let source = apply_reconciliation(
-            &conn, &observation,
+            &conn,
+            &observation,
             &Reconciliation::Moved {
                 source_id,
                 from_root_id: root_id,
                 from_path: "origin.jpg".to_string(),
                 old_object_id: None,
             },
-            1700000001, Some(22),
-        ).unwrap();
+            1700000001,
+            Some(22),
+        )
+        .unwrap();
 
         // decision_id should still be 11 (unchanged by Moved)
         assert_eq!(source.decision_id, Some(11));
@@ -2862,7 +2907,15 @@ mod tests {
         let source_id = insert_source(&conn, source_root, "original.jpg", None, true, false);
 
         let now = 1700000001i64;
-        update_location(&conn, source_id, archive_root, "new/path.jpg", now, Some(55)).unwrap();
+        update_location(
+            &conn,
+            source_id,
+            archive_root,
+            "new/path.jpg",
+            now,
+            Some(55),
+        )
+        .unwrap();
 
         // Verify fields updated
         let (root_id, rel_path, scanned_at, last_seen_at, decision_id): (i64, String, i64, i64, Option<i64>) = conn

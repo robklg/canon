@@ -243,7 +243,11 @@ pub fn show_duplicates(
     let mut handle = stdout.lock();
     let mut total_sources = 0usize;
     for group in &duplicate_groups {
-        let short_hash = if group.hash_value.len() > 12 { &group.hash_value[..12] } else { &group.hash_value };
+        let short_hash = if group.hash_value.len() > 12 {
+            &group.hash_value[..12]
+        } else {
+            &group.hash_value
+        };
         let size_str = format_size(group.total_size);
         if writeln!(
             handle,

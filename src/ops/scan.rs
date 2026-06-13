@@ -238,10 +238,7 @@ pub fn scan_root(
         ) {
             Ok(r) => r,
             Err(e) => {
-                progress.on_process_error(
-                    &full_path.display().to_string(),
-                    &e.to_string(),
-                );
+                progress.on_process_error(&full_path.display().to_string(), &e.to_string());
                 stats.skipped += 1;
                 continue;
             }
@@ -277,10 +274,7 @@ pub fn scan_root(
                 ) {
                     Ok(s) => s,
                     Err(e) => {
-                        progress.on_process_error(
-                            &full_path.display().to_string(),
-                            &e.to_string(),
-                        );
+                        progress.on_process_error(&full_path.display().to_string(), &e.to_string());
                         stats.skipped += 1;
                         continue;
                     }
@@ -430,17 +424,14 @@ fn persist_file(
     decision_id: Option<i64>,
 ) -> Result<crate::domain::source::Source> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let source = repo::source::apply_reconciliation(&tx, observation, reconciliation, now, decision_id)?;
+    let source =
+        repo::source::apply_reconciliation(&tx, observation, reconciliation, now, decision_id)?;
     tx.commit()?;
     Ok(source)
 }
 
 /// Flush accumulated unchanged file updates in a single transaction.
-fn flush_unchanged(
-    conn: &Connection,
-    batch: &[(i64, i64, i64)],
-    now: i64,
-) -> Result<()> {
+fn flush_unchanged(conn: &Connection, batch: &[(i64, i64, i64)], now: i64) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
     }
@@ -575,10 +566,7 @@ pub struct CandidateResult {
 /// then collapse the results into candidate root directories.
 ///
 /// `root_paths` should contain only active (non-suspended) root paths.
-pub fn find_root_candidates(
-    scope: &Path,
-    root_paths: &[PathBuf],
-) -> Result<CandidateResult> {
+pub fn find_root_candidates(scope: &Path, root_paths: &[PathBuf]) -> Result<CandidateResult> {
     let mut dirs_with_files: HashSet<PathBuf> = HashSet::new();
     let mut warnings: Vec<String> = Vec::new();
 
@@ -589,7 +577,10 @@ pub fn find_root_candidates(
         .map(|(path, dir_count)| RootCandidate { path, dir_count })
         .collect();
 
-    Ok(CandidateResult { candidates, warnings })
+    Ok(CandidateResult {
+        candidates,
+        warnings,
+    })
 }
 
 /// Recursively scan for directories with files not under any root.
@@ -825,7 +816,9 @@ mod tests {
         mtime: i64,
         now: i64,
     ) -> Result<ProcessResult> {
-        let reconciled = reconcile_file(conn, root_id, rel_path, full_path, device, inode, size, mtime)?;
+        let reconciled = reconcile_file(
+            conn, root_id, rel_path, full_path, device, inode, size, mtime,
+        )?;
 
         match &reconciled.reconciliation {
             Reconciliation::Unchanged { source_id } => {
@@ -838,11 +831,21 @@ mod tests {
                 })
             }
             _ => {
-                let source = persist_file(conn, &reconciled.observation, &reconciled.reconciliation, now, None)?;
+                let source = persist_file(
+                    conn,
+                    &reconciled.observation,
+                    &reconciled.reconciliation,
+                    now,
+                    None,
+                )?;
                 let (action, old_object_id) = match &reconciled.reconciliation {
                     Reconciliation::New => (FileAction::New, None),
-                    Reconciliation::Modified { old_object_id, .. } => (FileAction::Modified, *old_object_id),
-                    Reconciliation::Moved { old_object_id, .. } => (FileAction::Moved, *old_object_id),
+                    Reconciliation::Modified { old_object_id, .. } => {
+                        (FileAction::Modified, *old_object_id)
+                    }
+                    Reconciliation::Moved { old_object_id, .. } => {
+                        (FileAction::Moved, *old_object_id)
+                    }
                     Reconciliation::Unchanged { .. } => unreachable!(),
                 };
                 Ok(ProcessResult {
@@ -953,7 +956,15 @@ mod tests {
         let (path, device, inode, size, mtime) =
             create_temp_file(&temp_dir, "modified.txt", "new content");
 
-        repo::insert_test_source(&conn, root_id, "modified.txt", device as i64, inode as i64, 5, mtime);
+        repo::insert_test_source(
+            &conn,
+            root_id,
+            "modified.txt",
+            device as i64,
+            inode as i64,
+            5,
+            mtime,
+        );
 
         let now = current_timestamp();
         let result = process_file(
@@ -983,7 +994,13 @@ mod tests {
             create_temp_file(&temp_dir, "new_name.txt", "content");
 
         repo::insert_test_source(
-            &conn, root_id, "old_name.txt", device as i64, inode as i64, size, mtime,
+            &conn,
+            root_id,
+            "old_name.txt",
+            device as i64,
+            inode as i64,
+            size,
+            mtime,
         );
 
         let now = current_timestamp();
@@ -1017,7 +1034,15 @@ mod tests {
 
         let now = current_timestamp();
         let result = process_file(
-            &conn, root_id, "file.txt", &path, device as i64, inode as i64, size, mtime, now,
+            &conn,
+            root_id,
+            "file.txt",
+            &path,
+            device as i64,
+            inode as i64,
+            size,
+            mtime,
+            now,
         )
         .unwrap();
 
@@ -1041,12 +1066,26 @@ mod tests {
 
         let old_inode = inode + 99999;
         repo::insert_test_source(
-            &conn, root_id, "replaced.txt", device as i64, old_inode as i64, 50, mtime,
+            &conn,
+            root_id,
+            "replaced.txt",
+            device as i64,
+            old_inode as i64,
+            50,
+            mtime,
         );
 
         let now = current_timestamp();
         let result = process_file(
-            &conn, root_id, "replaced.txt", &path, device as i64, inode as i64, size, mtime, now,
+            &conn,
+            root_id,
+            "replaced.txt",
+            &path,
+            device as i64,
+            inode as i64,
+            size,
+            mtime,
+            now,
         )
         .unwrap();
 
@@ -1079,12 +1118,23 @@ mod tests {
             create_temp_file(&temp_dir, "revived.txt", "new content");
 
         let old_source_id = repo::insert_test_source(&conn, root_id, "revived.txt", 1, 1, 50, 1000);
-        conn.execute("UPDATE sources SET present = 0 WHERE id = ?", [old_source_id])
-            .unwrap();
+        conn.execute(
+            "UPDATE sources SET present = 0 WHERE id = ?",
+            [old_source_id],
+        )
+        .unwrap();
 
         let now = current_timestamp();
         let result = process_file(
-            &conn, root_id, "revived.txt", &path, device as i64, inode as i64, size, mtime, now,
+            &conn,
+            root_id,
+            "revived.txt",
+            &path,
+            device as i64,
+            inode as i64,
+            size,
+            mtime,
+            now,
         )
         .unwrap();
 
@@ -1113,23 +1163,62 @@ mod tests {
             create_temp_file(&temp_dir, "modified.txt", "modified content");
 
         repo::insert_test_source(
-            &conn, root_id, "existing.txt", dev2 as i64, ino2 as i64, size2, mtime2,
+            &conn,
+            root_id,
+            "existing.txt",
+            dev2 as i64,
+            ino2 as i64,
+            size2,
+            mtime2,
         );
         repo::insert_test_source(
-            &conn, root_id, "modified.txt", dev3 as i64, ino3 as i64, 5, mtime3,
+            &conn,
+            root_id,
+            "modified.txt",
+            dev3 as i64,
+            ino3 as i64,
+            5,
+            mtime3,
         );
 
         let now = current_timestamp();
 
         let r1 = process_file(
-            &conn, root_id, "new.txt", &path1, dev1 as i64, ino1 as i64, size1, mtime1, now,
-        ).unwrap();
+            &conn,
+            root_id,
+            "new.txt",
+            &path1,
+            dev1 as i64,
+            ino1 as i64,
+            size1,
+            mtime1,
+            now,
+        )
+        .unwrap();
         let r2 = process_file(
-            &conn, root_id, "existing.txt", &path2, dev2 as i64, ino2 as i64, size2, mtime2, now,
-        ).unwrap();
+            &conn,
+            root_id,
+            "existing.txt",
+            &path2,
+            dev2 as i64,
+            ino2 as i64,
+            size2,
+            mtime2,
+            now,
+        )
+        .unwrap();
         let r3 = process_file(
-            &conn, root_id, "modified.txt", &path3, dev3 as i64, ino3 as i64, size3, mtime3, now,
-        ).unwrap();
+            &conn,
+            root_id,
+            "modified.txt",
+            &path3,
+            dev3 as i64,
+            ino3 as i64,
+            size3,
+            mtime3,
+            now,
+        )
+        .unwrap();
 
         assert!(matches!(r1.action, FileAction::New));
         assert!(matches!(r2.action, FileAction::Unchanged));
@@ -1174,12 +1263,16 @@ mod tests {
         assert!(s1.is_some());
 
         let s2: i64 = conn
-            .query_row("SELECT present FROM sources WHERE id = ?", [id2], |r| r.get(0))
+            .query_row("SELECT present FROM sources WHERE id = ?", [id2], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(s2, 0);
 
         let s3: i64 = conn
-            .query_row("SELECT present FROM sources WHERE id = ?", [id3], |r| r.get(0))
+            .query_row("SELECT present FROM sources WHERE id = ?", [id3], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(s3, 1);
     }

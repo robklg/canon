@@ -361,7 +361,10 @@ mod tests {
 
         let result = execute_suspend(&conn, root_id, None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already suspended"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("already suspended"));
     }
 
     #[test]

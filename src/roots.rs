@@ -195,7 +195,13 @@ pub fn set_comment(db: &Db, spec: &str, comment: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-pub fn suspend(db: &Db, spec: &str, command_line: &str, config: &LedgerConfig, no_receipt: bool) -> Result<()> {
+pub fn suspend(
+    db: &Db,
+    spec: &str,
+    command_line: &str,
+    config: &LedgerConfig,
+    no_receipt: bool,
+) -> Result<()> {
     let conn = db.conn();
 
     // Fetch all roots for spec resolution
@@ -233,7 +239,13 @@ pub fn suspend(db: &Db, spec: &str, command_line: &str, config: &LedgerConfig, n
     }
 }
 
-pub fn unsuspend(db: &Db, spec: &str, command_line: &str, config: &LedgerConfig, no_receipt: bool) -> Result<()> {
+pub fn unsuspend(
+    db: &Db,
+    spec: &str,
+    command_line: &str,
+    config: &LedgerConfig,
+    no_receipt: bool,
+) -> Result<()> {
     let conn = db.conn();
 
     // Fetch all roots for spec resolution

@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use crate::ceremony;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
-use crate::ops::cluster::{ManifestConfig, parse_manifest_allow, validate_manifest_version};
-use crate::ops::decision::DecisionParams;
-use crate::ops::receipt::ReceiptPlacement;
 use crate::expr;
 use crate::ops;
 use crate::ops::apply::TransferMode;
 use crate::ops::cluster::LockEntry;
+use crate::ops::cluster::{parse_manifest_allow, validate_manifest_version, ManifestConfig};
+use crate::ops::decision::DecisionParams;
+use crate::ops::receipt::ReceiptPlacement;
 use crate::repo::{self, Db};
 
 pub struct ApplyOptions {
@@ -155,8 +155,13 @@ pub fn run(
     // Show summary and confirm (unless --yes)
     let sample_dests = if !options.yes {
         compute_sample_destinations(
-            conn, &filtered_sources, &pattern, &needed_keys,
-            scope_prefix, &root_paths, &base_dir,
+            conn,
+            &filtered_sources,
+            &pattern,
+            &needed_keys,
+            scope_prefix,
+            &root_paths,
+            &base_dir,
         )
     } else {
         vec![]
@@ -199,7 +204,9 @@ pub fn run(
         let total = plan.transfers.len() + plan.already_archived_count;
         eprintln!(
             "Files: {} ({} pending, {} already at destination)",
-            total, plan.transfers.len(), plan.already_archived_count
+            total,
+            plan.transfers.len(),
+            plan.already_archived_count
         );
     }
 
@@ -218,7 +225,10 @@ pub fn run(
             }
             eprintln!();
             eprintln!("Check if the source volume is connected. If files are truly lost,");
-            eprintln!("refresh the manifest: canon cluster refresh {}", config_path.display());
+            eprintln!(
+                "refresh the manifest: canon cluster refresh {}",
+                config_path.display()
+            );
             bail!("Aborting due to missing source files in resume mode");
         }
 
@@ -235,7 +245,10 @@ pub fn run(
                 eprintln!("  ... and {} more", plan.resume_size_mismatches.len() - 10);
             }
             eprintln!();
-            eprintln!("Delete the corrupt file and retry: canon apply --resume {}", config_path.display());
+            eprintln!(
+                "Delete the corrupt file and retry: canon apply --resume {}",
+                config_path.display()
+            );
             bail!("Aborting due to size mismatches in resume mode");
         }
     }
@@ -483,9 +496,11 @@ pub fn run(
     };
     let decision = DecisionParams {
         command: DecisionCommand::Apply,
-        scope: config.meta.scope.as_ref().map(|s| {
-            s.split(", ").map(|p| p.to_string()).collect()
-        }),
+        scope: config
+            .meta
+            .scope
+            .as_ref()
+            .map(|s| s.split(", ").map(|p| p.to_string()).collect()),
         command_line: command_line.to_string(),
         reason: effective_reason,
         record_enabled: ledger.recording != RecordingMode::Off && !options.dry_run,
@@ -632,7 +647,12 @@ fn compute_sample_destinations(
         .iter()
         .map(|source| {
             match ops::apply::evaluate_pattern(
-                pattern, source, needed_keys, scope_prefix, root_paths, &all_facts,
+                pattern,
+                source,
+                needed_keys,
+                scope_prefix,
+                root_paths,
+                &all_facts,
             ) {
                 Ok(dest_rel) => {
                     let full_path = base_dir.join(&dest_rel);
@@ -761,7 +781,12 @@ fn show_directory_preview(dir: &Path, max_items: usize) {
 }
 
 /// Display dry-run transfer plan.
-fn display_dry_run_plan(plan: &ops::apply::ApplyPlan, base_dir: &Path, mode: TransferMode, resume: bool) {
+fn display_dry_run_plan(
+    plan: &ops::apply::ApplyPlan,
+    base_dir: &Path,
+    mode: TransferMode,
+    resume: bool,
+) {
     if resume {
         eprintln!("=== DRY RUN (resume) ===");
     } else {
@@ -777,7 +802,12 @@ fn display_dry_run_plan(plan: &ops::apply::ApplyPlan, base_dir: &Path, mode: Tra
         if !Path::new(&transfer.source_path).exists() {
             println!("[dry-run] SKIP (missing): {}", transfer.source_path);
         } else {
-            println!("[dry-run] {}: {} -> {}", label, transfer.source_path, dest_path.display());
+            println!(
+                "[dry-run] {}: {} -> {}",
+                label,
+                transfer.source_path,
+                dest_path.display()
+            );
         }
     }
     if resume {
@@ -812,7 +842,14 @@ impl ops::apply::TransferProgress for CliTransferProgress {
         }
     }
 
-    fn on_transfer(&self, index: usize, _total: usize, source_path: &str, dest_path: &str, outcome: &ops::apply::TransferOutcome) {
+    fn on_transfer(
+        &self,
+        index: usize,
+        _total: usize,
+        source_path: &str,
+        dest_path: &str,
+        outcome: &ops::apply::TransferOutcome,
+    ) {
         if let Some(ref p) = *self.progress.borrow() {
             let filename = source_path.rsplit('/').next().unwrap_or(source_path);
             p.update_with_name(index, filename);

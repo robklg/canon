@@ -10,9 +10,8 @@ use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::Filter;
 use crate::ops;
 use crate::ops::cluster::{
-    ClusterGenerateParams, ClusterGeneratePlan, ExecuteGenerateParams,
-    ExecuteRefreshParams, ManifestConfig,
-    parse_manifest_allow, validate_manifest_version,
+    parse_manifest_allow, validate_manifest_version, ClusterGenerateParams, ClusterGeneratePlan,
+    ExecuteGenerateParams, ExecuteRefreshParams, ManifestConfig,
 };
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::repo::{self, Connection, Db};
@@ -165,7 +164,15 @@ fn open_editor(path: &Path) {
     }
 }
 
-pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool, no_edit: bool, command_line: &str, ledger: &LedgerConfig, no_receipt: bool) -> Result<()> {
+pub fn refresh(
+    db: &mut Db,
+    config_path: &Path,
+    show_archived: bool,
+    no_edit: bool,
+    command_line: &str,
+    ledger: &LedgerConfig,
+    no_receipt: bool,
+) -> Result<()> {
     let conn = db.conn_mut();
 
     // Read existing manifest content (for notes preservation)
@@ -223,9 +230,11 @@ pub fn refresh(db: &mut Db, config_path: &Path, show_archived: bool, no_edit: bo
     display_plan_warnings(&plan, &display_options);
 
     // Extract scope for decision recording before config is moved
-    let refresh_scope: Option<Vec<String>> = config.meta.scope.as_ref().map(|s| {
-        s.split(", ").map(|p| p.to_string()).collect()
-    });
+    let refresh_scope: Option<Vec<String>> = config
+        .meta
+        .scope
+        .as_ref()
+        .map(|s| s.split(", ").map(|p| p.to_string()).collect());
 
     // Execute
     let lock_path = config_path.with_extension("lock");
@@ -338,7 +347,6 @@ fn allow_values_to_strings(options: &GenerateOptions) -> Vec<String> {
     v
 }
 
-
 // ============================================================================
 // Status
 // ============================================================================
@@ -399,7 +407,11 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
             } else {
                 "not at dest"
             };
-            let db_status = if entry.db_registered { "yes" } else { "\u{2014}" };
+            let db_status = if entry.db_registered {
+                "yes"
+            } else {
+                "\u{2014}"
+            };
             // Truncate filename for display
             let display_name = if entry.source_filename.len() > 30 {
                 format!("{}...", &entry.source_filename[..27])
@@ -413,7 +425,10 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
         }
         if !verbose && !concerning.is_empty() {
             println!();
-            println!("  (showing {} concerning entries; use --verbose for all)", concerning.len());
+            println!(
+                "  (showing {} concerning entries; use --verbose for all)",
+                concerning.len()
+            );
         }
         println!();
     }
@@ -454,7 +469,10 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
                 .filter(|e| !e.source_exists && !(e.dest_exists && e.dest_size_match))
                 .collect();
             for entry in &lost_entries {
-                println!("  {} (source: {}, dest: {})", entry.source_filename, entry.source_path, entry.dest_path);
+                println!(
+                    "  {} (source: {}, dest: {})",
+                    entry.source_filename, entry.source_path, entry.dest_path
+                );
             }
             println!();
             println!("Check if the source volume is connected. If files are truly lost,");
@@ -487,4 +505,3 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
 
     Ok(())
 }
-

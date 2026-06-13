@@ -168,15 +168,18 @@ pub fn compute_per_root(
         per_root_stats.push(stats);
     }
 
-    Ok((per_root_stats, overall, all_sel.used_status, all_sel.excluded_count))
+    Ok((
+        per_root_stats,
+        overall,
+        all_sel.used_status,
+        all_sel.excluded_count,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{
-        insert_object, insert_root, insert_source, setup_test_db,
-    };
+    use crate::ops::test_helpers::{insert_object, insert_root, insert_source, setup_test_db};
 
     /// Test that archived counts sources, not unique objects.
     /// Guards against the Object Infrastructure bug pattern where
@@ -205,7 +208,10 @@ mod tests {
         let refs: Vec<&Source> = sources.iter().collect();
         let stats = compute_stats(&mut conn, &refs, None).unwrap();
 
-        assert_eq!(stats.archived_sources, 3, "Should count 3 sources, not 1 object");
+        assert_eq!(
+            stats.archived_sources, 3,
+            "Should count 3 sources, not 1 object"
+        );
         assert_eq!(stats.total_sources, 4);
         assert_eq!(stats.hashed_sources, 4);
     }

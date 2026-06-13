@@ -1846,8 +1846,7 @@ mod tests {
 
     #[test]
     fn tokenize_in_list_with_unquoted_values() {
-        let expr =
-            Expr::parse("mime IN (application/octet-stream, image/jpeg)").unwrap();
+        let expr = Expr::parse("mime IN (application/octet-stream, image/jpeg)").unwrap();
         match expr {
             Expr::In { key: _, values } => {
                 assert_eq!(values, vec!["application/octet-stream", "image/jpeg"]);
@@ -1881,8 +1880,7 @@ mod tests {
 
     #[test]
     fn tokenize_parenthesized_expression_with_values() {
-        let expr =
-            Expr::parse("(mime=image/jpeg OR mime=image/png) AND source.size>0").unwrap();
+        let expr = Expr::parse("(mime=image/jpeg OR mime=image/png) AND source.size>0").unwrap();
         match expr {
             Expr::And(parts) => {
                 assert_eq!(parts.len(), 2);
@@ -1957,8 +1955,7 @@ mod tests {
 
     #[test]
     fn tokenize_value_inside_parens() {
-        let expr =
-            Expr::parse("(source.ext=jpg) AND mime=image/jpeg").unwrap();
+        let expr = Expr::parse("(source.ext=jpg) AND mime=image/jpeg").unwrap();
         match expr {
             Expr::And(parts) => {
                 assert_eq!(parts.len(), 2);
@@ -2404,7 +2401,9 @@ mod tests {
         let filter = Expr::parse("content.mime=image/jpeg").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]);
 
-        let err = result.err().expect("should error on unknown key in comparison");
+        let err = result
+            .err()
+            .expect("should error on unknown key in comparison");
         assert!(err.to_string().contains("Unknown fact key"));
     }
 }

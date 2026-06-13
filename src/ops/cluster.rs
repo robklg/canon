@@ -343,7 +343,11 @@ impl ExecuteGenerateResult {
             "roots"
         };
         let mut lines = vec![header.to_string()];
-        lines.push(format!("  From {} {}:", self.root_breakdown.len(), root_word));
+        lines.push(format!(
+            "  From {} {}:",
+            self.root_breakdown.len(),
+            root_word
+        ));
         for (path, count) in &self.root_breakdown {
             lines.push(format!("    {}  ({})", path, format_count(*count)));
         }
@@ -380,9 +384,8 @@ pub fn execute_generate(
 ) -> Result<ExecuteGenerateResult> {
     // Create destination directory if needed (after plan confirmed sources exist)
     if let Some(parent) = params.manifest_path.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!("Failed to create directory: {}", parent.display())
-        })?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
     }
 
     // Write JSONL lock file
@@ -425,7 +428,11 @@ pub fn execute_generate(
                   #\n";
     let summary = generate_summary_comments(plan);
     let notes_block = "# === Notes ===\n#\n";
-    let fact_help = generate_fact_help(plan.lock_entries.len(), &plan.full_coverage_facts, config.meta.scope.is_some());
+    let fact_help = generate_fact_help(
+        plan.lock_entries.len(),
+        &plan.full_coverage_facts,
+        config.meta.scope.is_some(),
+    );
 
     let toml_str =
         toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
@@ -499,10 +506,7 @@ pub fn execute_refresh(
         let toml_str =
             toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
         write_and_sync(&params.manifest_path, &toml_str).with_context(|| {
-            format!(
-                "Failed to write config: {}",
-                params.manifest_path.display()
-            )
+            format!("Failed to write config: {}", params.manifest_path.display())
         })?;
         return Ok(ExecuteRefreshResult { outcome: None });
     }
@@ -537,9 +541,14 @@ pub fn execute_refresh(
                   # Other fields are managed by Canon — do not edit.\n\
                   #\n";
     let summary = generate_summary_comments(plan);
-    let notes = extract_notes_raw(&params.old_manifest_content).unwrap_or_else(|| "\n#\n".to_string());
+    let notes =
+        extract_notes_raw(&params.old_manifest_content).unwrap_or_else(|| "\n#\n".to_string());
     let notes_block = format!("# === Notes ==={notes}");
-    let fact_help = generate_fact_help(plan.lock_entries.len(), &plan.full_coverage_facts, config.meta.scope.is_some());
+    let fact_help = generate_fact_help(
+        plan.lock_entries.len(),
+        &plan.full_coverage_facts,
+        config.meta.scope.is_some(),
+    );
 
     let toml_str =
         toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
@@ -551,12 +560,8 @@ pub fn execute_refresh(
         toml_str.trim_end(),
         fact_help
     );
-    write_and_sync(&params.manifest_path, &manifest).with_context(|| {
-        format!(
-            "Failed to write config: {}",
-            params.manifest_path.display()
-        )
-    })?;
+    write_and_sync(&params.manifest_path, &manifest)
+        .with_context(|| format!("Failed to write config: {}", params.manifest_path.display()))?;
 
     Ok(ExecuteRefreshResult {
         outcome: Some(ExecuteGenerateResult {
@@ -924,9 +929,7 @@ pub fn extract_notes_raw(content: &str) -> Option<String> {
         .enumerate()
         .skip(1)
         .find(|(_, line)| line.starts_with("# === ") || line.starts_with('['))
-        .map(|(i, _)| {
-            rest.lines().take(i).map(|l| l.len() + 1).sum::<usize>()
-        })
+        .map(|(i, _)| rest.lines().take(i).map(|l| l.len() + 1).sum::<usize>())
         .unwrap_or(rest.len());
 
     Some(rest[..end].to_string())
@@ -976,10 +979,18 @@ fn inject_comments_before_key(toml_str: &str, key: &str, comments: &[String]) ->
 
 /// Read and parse a manifest TOML config file.
 pub fn read_manifest_config(manifest_path: &Path) -> Result<ManifestConfig> {
-    let config_content = fs::read_to_string(manifest_path)
-        .with_context(|| format!("Failed to read manifest config: {}", manifest_path.display()))?;
-    let config: ManifestConfig = toml::from_str(&config_content)
-        .with_context(|| format!("Failed to parse manifest config: {}", manifest_path.display()))?;
+    let config_content = fs::read_to_string(manifest_path).with_context(|| {
+        format!(
+            "Failed to read manifest config: {}",
+            manifest_path.display()
+        )
+    })?;
+    let config: ManifestConfig = toml::from_str(&config_content).with_context(|| {
+        format!(
+            "Failed to parse manifest config: {}",
+            manifest_path.display()
+        )
+    })?;
     validate_manifest_version(config.meta.version)?;
     Ok(config)
 }
@@ -1194,11 +1205,8 @@ pub fn compute_manifest_status(
 
     // 7. Batch check DB registration
     let rel_refs: Vec<&str> = dest_rel_paths.iter().map(|s| s.as_str()).collect();
-    let registered = repo::source::batch_check_paths_exist(
-        conn,
-        config.output.archive_root_id,
-        &rel_refs,
-    )?;
+    let registered =
+        repo::source::batch_check_paths_exist(conn, config.output.archive_root_id, &rel_refs)?;
     for (entry, rel_path) in entries.iter_mut().zip(dest_rel_paths.iter()) {
         if !rel_path.is_empty() && registered.contains(rel_path.as_str()) {
             entry.db_registered = true;
@@ -1443,10 +1451,7 @@ mod tests {
 
         let plan = plan_generate(&mut conn, &default_params()).unwrap();
         assert_eq!(plan.lock_entries.len(), 1);
-        assert_eq!(
-            plan.lock_entries[0].hash_type.as_deref(),
-            Some("sha256")
-        );
+        assert_eq!(plan.lock_entries[0].hash_type.as_deref(), Some("sha256"));
         assert_eq!(
             plan.lock_entries[0].hash_value.as_deref(),
             Some("abcdef1234567890")
@@ -1746,10 +1751,7 @@ base_dir = "photos"
         let content =
             "# === Notes ===\n# This cluster has family photos\n# from 2020-2023\n\n[meta]\n";
         let notes = extract_notes(content).unwrap();
-        assert_eq!(
-            notes,
-            "This cluster has family photos\nfrom 2020-2023"
-        );
+        assert_eq!(notes, "This cluster has family photos\nfrom 2020-2023");
     }
 
     #[test]

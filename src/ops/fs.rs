@@ -141,13 +141,13 @@ pub fn ensure_parent_dir(path: &Path) -> Result<()> {
 /// Copy a file and preserve its metadata (mtime, permissions).
 /// If noclobber is true, uses atomic O_EXCL create to prevent overwriting.
 pub fn copy_file(src: &Path, dest: &Path, noclobber: bool) -> Result<()> {
-    let src_meta = fs::metadata(src)
-        .with_context(|| format!("Failed to read metadata: {}", src.display()))?;
+    let src_meta =
+        fs::metadata(src).with_context(|| format!("Failed to read metadata: {}", src.display()))?;
 
     if noclobber {
         // Atomic noclobber: create dest with O_EXCL, then copy content manually
-        let mut src_file = File::open(src)
-            .with_context(|| format!("Failed to open source: {}", src.display()))?;
+        let mut src_file =
+            File::open(src).with_context(|| format!("Failed to open source: {}", src.display()))?;
         let dest_file = fs::OpenOptions::new()
             .write(true)
             .create_new(true) // O_CREAT | O_EXCL — atomic, fails if exists
@@ -168,13 +168,8 @@ pub fn copy_file(src: &Path, dest: &Path, noclobber: bool) -> Result<()> {
             .with_context(|| format!("Failed to flush {}", dest.display()))?;
     } else {
         // Allow overwrite
-        fs::copy(src, dest).with_context(|| {
-            format!(
-                "Failed to copy {} to {}",
-                src.display(),
-                dest.display()
-            )
-        })?;
+        fs::copy(src, dest)
+            .with_context(|| format!("Failed to copy {} to {}", src.display(), dest.display()))?;
     }
 
     preserve_metadata(dest, &src_meta)?;
@@ -196,8 +191,7 @@ fn noclobber_rename(src: &Path, dest: &Path) -> Result<()> {
 
         // renamex_np with RENAME_EXCL — atomic noclobber on macOS
         const RENAME_EXCL: u32 = 0x00000004;
-        let ret =
-            unsafe { libc::renamex_np(src_c.as_ptr(), dest_c.as_ptr(), RENAME_EXCL) };
+        let ret = unsafe { libc::renamex_np(src_c.as_ptr(), dest_c.as_ptr(), RENAME_EXCL) };
         if ret == 0 {
             return Ok(());
         }
@@ -212,20 +206,11 @@ fn noclobber_rename(src: &Path, dest: &Path) -> Result<()> {
                 bail!("Destination already exists: {}", dest.display());
             }
             return fs::rename(src, dest).with_context(|| {
-                format!(
-                    "Failed to rename {} to {}",
-                    src.display(),
-                    dest.display()
-                )
+                format!("Failed to rename {} to {}", src.display(), dest.display())
             });
         }
-        Err(err).with_context(|| {
-            format!(
-                "Failed to rename {} to {}",
-                src.display(),
-                dest.display()
-            )
-        })
+        Err(err)
+            .with_context(|| format!("Failed to rename {} to {}", src.display(), dest.display()))
     }
 
     #[cfg(target_os = "linux")]
@@ -253,18 +238,11 @@ fn noclobber_rename(src: &Path, dest: &Path) -> Result<()> {
             return Ok(());
         }
         let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EEXIST)
-            || err.raw_os_error() == Some(libc::ENOTEMPTY)
-        {
+        if err.raw_os_error() == Some(libc::EEXIST) || err.raw_os_error() == Some(libc::ENOTEMPTY) {
             bail!("Destination already exists: {}", dest.display());
         }
-        Err(err).with_context(|| {
-            format!(
-                "Failed to rename {} to {}",
-                src.display(),
-                dest.display()
-            )
-        })
+        Err(err)
+            .with_context(|| format!("Failed to rename {} to {}", src.display(), dest.display()))
     }
 
     // Fallback: stat-then-rename (TOCTOU gap, but negligible on unsupported platforms)
@@ -273,13 +251,8 @@ fn noclobber_rename(src: &Path, dest: &Path) -> Result<()> {
         if dest.exists() {
             bail!("Destination already exists: {}", dest.display());
         }
-        fs::rename(src, dest).with_context(|| {
-            format!(
-                "Failed to rename {} to {}",
-                src.display(),
-                dest.display()
-            )
-        })?;
+        fs::rename(src, dest)
+            .with_context(|| format!("Failed to rename {} to {}", src.display(), dest.display()))?;
         Ok(())
     }
 }
@@ -290,13 +263,8 @@ pub fn rename_file(src: &Path, dest: &Path, noclobber: bool) -> Result<()> {
     if noclobber {
         noclobber_rename(src, dest)
     } else {
-        fs::rename(src, dest).with_context(|| {
-            format!(
-                "Failed to rename {} to {}",
-                src.display(),
-                dest.display()
-            )
-        })
+        fs::rename(src, dest)
+            .with_context(|| format!("Failed to rename {} to {}", src.display(), dest.display()))
     }
 }
 
@@ -308,13 +276,8 @@ pub fn move_file(src: &Path, dest: &Path, noclobber: bool) -> Result<MoveOutcome
     let rename_result = if noclobber {
         noclobber_rename(src, dest)
     } else {
-        fs::rename(src, dest).with_context(|| {
-            format!(
-                "Failed to rename {} to {}",
-                src.display(),
-                dest.display()
-            )
-        })
+        fs::rename(src, dest)
+            .with_context(|| format!("Failed to rename {} to {}", src.display(), dest.display()))
     };
 
     match rename_result {
@@ -641,6 +604,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let final_path = dir.path().join("receipt.toml");
         let err = finalize_file(&final_path).unwrap_err();
-        assert!(err.to_string().contains("receipt.incomplete") || err.to_string().contains("No such file"));
+        assert!(
+            err.to_string().contains("receipt.incomplete")
+                || err.to_string().contains("No such file")
+        );
     }
 }

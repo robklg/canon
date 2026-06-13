@@ -8,7 +8,14 @@ use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::import_facts::ImportRecord;
 use crate::repo::Db;
 
-pub fn run(db: &mut Db, allow_archived: bool, verbose: bool, command_line: &str, config: &LedgerConfig, no_receipt: bool) -> Result<()> {
+pub fn run(
+    db: &mut Db,
+    allow_archived: bool,
+    verbose: bool,
+    command_line: &str,
+    config: &LedgerConfig,
+    no_receipt: bool,
+) -> Result<()> {
     let conn = db.conn_mut();
     let mut state = ops::import_facts::init_state(conn)?;
 

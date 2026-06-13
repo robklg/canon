@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 
-use crate::domain::format_count;
 use crate::domain;
+use crate::domain::format_count;
 use crate::domain::root::{find_containing_root, parse_root_spec};
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
@@ -173,9 +173,7 @@ pub fn run(
                 }
             }
         }
-        SurveyOutcome::AllUnhashed {
-            total_count,
-        } => {
+        SurveyOutcome::AllUnhashed { total_count } => {
             let suppress = options.null_delim
                 && matches!(
                     options.detail,
@@ -358,8 +356,7 @@ pub fn run(
                         .filter_map(|(root_id, rel_path)| {
                             let key = (*root_id, rel_path.clone());
                             location_note_counts.get(&key).map(|count| {
-                                let root =
-                                    all_roots.iter().find(|r| r.id == *root_id).unwrap();
+                                let root = all_roots.iter().find(|r| r.id == *root_id).unwrap();
                                 let abs_path = if rel_path.is_empty() {
                                     root.path.clone()
                                 } else {
@@ -477,20 +474,14 @@ fn print_notes_section(ctx: &SurveyNoteContext, scope_rel_path: &str, verbose: b
             ));
         }
         if has_ancestors {
-            parts.push(format!(
-                "{} ancestral notes",
-                ctx.ancestor_count
-            ));
+            parts.push(format!("{} ancestral notes", ctx.ancestor_count));
         }
         if !parts.is_empty() {
             println!("    ({})", parts.join(", "));
         }
     } else {
         // No subtree notes but ancestors exist
-        println!(
-            "  ({} ancestral notes)",
-            ctx.ancestor_count
-        );
+        println!("  ({} ancestral notes)", ctx.ancestor_count);
     }
 }
 

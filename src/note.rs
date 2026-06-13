@@ -154,9 +154,7 @@ fn resolve_single_scope(
     let resolved = resolve_scope(conn, &paths, global, &all_roots)?;
 
     if resolved.is_global() {
-        anyhow::bail!(
-            "Not inside a known root. Specify a path or cd into a scanned directory."
-        );
+        anyhow::bail!("Not inside a known root. Specify a path or cd into a scanned directory.");
     }
 
     // Note operates on a single scope

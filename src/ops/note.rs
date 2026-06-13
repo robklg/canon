@@ -151,10 +151,7 @@ pub fn list_notes_recursive(
 }
 
 /// List locations globally, spatial mode.
-pub fn list_locations_global(
-    conn: &Connection,
-    limit: Option<usize>,
-) -> Result<NoteSpatialResult> {
+pub fn list_locations_global(conn: &Connection, limit: Option<usize>) -> Result<NoteSpatialResult> {
     let effective = limit.unwrap_or(DEFAULT_LIMIT);
     let (mut locations, total_location_count) = repo::note::fetch_locations(conn, effective)?;
     locations.reverse(); // oldest-first for display
@@ -189,8 +186,7 @@ pub fn list_locations_recursive(
 /// Plan a recursive clear — compute counts without deleting.
 pub fn plan_clear_recursive(conn: &Connection, scope: &NoteScope) -> Result<ClearPlan> {
     let note_count = repo::note::count_subtree_notes(conn, scope.root_id, &scope.rel_path)?;
-    let location_count =
-        repo::note::count_subtree_locations(conn, scope.root_id, &scope.rel_path)?;
+    let location_count = repo::note::count_subtree_locations(conn, scope.root_id, &scope.rel_path)?;
     Ok(ClearPlan {
         scope: scope.clone(),
         note_count,
@@ -476,7 +472,13 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
 
         for i in 1..=15 {
-            insert_note(&conn, root_id, &format!("loc{}", i % 5), &format!("note {i}"), i * 100);
+            insert_note(
+                &conn,
+                root_id,
+                &format!("loc{}", i % 5),
+                &format!("note {i}"),
+                i * 100,
+            );
         }
 
         let result = list_notes_global(&conn, None).unwrap(); // default limit = 10

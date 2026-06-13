@@ -38,9 +38,7 @@ pub enum SurveyOutcome {
     /// Empty selection — display header and stop.
     Empty,
     /// All unhashed — display header and hashing guidance.
-    AllUnhashed {
-        total_count: usize,
-    },
+    AllUnhashed { total_count: usize },
 }
 
 pub struct SurveyResult {
@@ -166,9 +164,7 @@ pub fn compute_survey(
 
     // Early exit: all unhashed
     if total_hashed == 0 {
-        return Ok(SurveyOutcome::AllUnhashed {
-            total_count,
-        });
+        return Ok(SurveyOutcome::AllUnhashed { total_count });
     }
 
     // Collect selection identity
@@ -286,81 +282,79 @@ pub fn compute_survey(
             .count();
 
         // Complementary content and classification (only with affinity enabled)
-        let (complementary_count, only_here_count, kind, complementary_paths) =
-            if params.compute_affinity {
-                // Step 1: Get ALL sources within this location
-                // Active, non-excluded, not in selection
-                let loc_sources: Vec<&Source> = all_sources
-                    .iter()
-                    .filter(|s| s.is_active())
-                    .filter(|s| !s.is_excluded())
-                    .filter(|s| s.matches_scope(&loc_scope))
-                    .filter(|s| !sel_source_ids.contains(&s.id))
-                    .collect();
+        let (complementary_count, only_here_count, kind, complementary_paths) = if params
+            .compute_affinity
+        {
+            // Step 1: Get ALL sources within this location
+            // Active, non-excluded, not in selection
+            let loc_sources: Vec<&Source> = all_sources
+                .iter()
+                .filter(|s| s.is_active())
+                .filter(|s| !s.is_excluded())
+                .filter(|s| s.matches_scope(&loc_scope))
+                .filter(|s| !sel_source_ids.contains(&s.id))
+                .collect();
 
-                // Step 2: Apply --where filters to location sources
-                let loc_ids: Vec<i64> = loc_sources.iter().map(|s| s.id).collect();
-                let passed: HashSet<i64> =
-                    filter::apply_filters(conn, &loc_ids, filters)?
-                        .source_ids
-                        .into_iter()
-                        .collect();
+            // Step 2: Apply --where filters to location sources
+            let loc_ids: Vec<i64> = loc_sources.iter().map(|s| s.id).collect();
+            let passed: HashSet<i64> = filter::apply_filters(conn, &loc_ids, filters)?
+                .source_ids
+                .into_iter()
+                .collect();
 
-                // Step 3: Partition into overlap vs complementary
-                // CRITICAL: filter to hashed-only BEFORE partitioning.
-                // Unhashed sources can't participate in content comparison.
-                // Without this guard, unhashed sources leak into complementary
-                // count (their object_id is None, which is never in sel_object_ids,
-                // so they'd always be classified as "complementary").
-                let matching_hashed: Vec<&Source> = loc_sources
-                    .iter()
-                    .filter(|s| passed.contains(&s.id))
-                    .filter(|s| s.object_id.is_some())
-                    .copied()
-                    .collect();
+            // Step 3: Partition into overlap vs complementary
+            // CRITICAL: filter to hashed-only BEFORE partitioning.
+            // Unhashed sources can't participate in content comparison.
+            // Without this guard, unhashed sources leak into complementary
+            // count (their object_id is None, which is never in sel_object_ids,
+            // so they'd always be classified as "complementary").
+            let matching_hashed: Vec<&Source> = loc_sources
+                .iter()
+                .filter(|s| passed.contains(&s.id))
+                .filter(|s| s.object_id.is_some())
+                .copied()
+                .collect();
 
-                let complementary: Vec<&Source> = matching_hashed
-                    .iter()
-                    .filter(|s| !sel_object_ids.contains(&s.object_id.unwrap()))
-                    .copied()
-                    .collect();
+            let complementary: Vec<&Source> = matching_hashed
+                .iter()
+                .filter(|s| !sel_object_ids.contains(&s.object_id.unwrap()))
+                .copied()
+                .collect();
 
-                let comp_count = complementary.len();
+            let comp_count = complementary.len();
 
-                // Step 4: Collect complementary paths relative to location
-                let mut comp_paths: Vec<String> = complementary
-                    .iter()
-                    .filter_map(|s| {
-                        domain::path::path_strip_prefix(&s.path(), scope_path)
-                            .map(|p| p.to_string())
-                    })
-                    .collect();
-                comp_paths.sort_unstable();
+            // Step 4: Collect complementary paths relative to location
+            let mut comp_paths: Vec<String> = complementary
+                .iter()
+                .filter_map(|s| {
+                    domain::path::path_strip_prefix(&s.path(), scope_path).map(|p| p.to_string())
+                })
+                .collect();
+            comp_paths.sort_unstable();
 
-                // Step 5: "Only here" — unique object_ids among complementary
-                let comp_oids: HashSet<i64> =
-                    complementary.iter().filter_map(|s| s.object_id).collect();
-                let only_here =
-                    domain::survey::count_only_here(&comp_oids, scope_path, &by_object_id);
+            // Step 5: "Only here" — unique object_ids among complementary
+            let comp_oids: HashSet<i64> =
+                complementary.iter().filter_map(|s| s.object_id).collect();
+            let only_here = domain::survey::count_only_here(&comp_oids, scope_path, &by_object_id);
 
-                // Step 6: Classify
-                let kind = domain::survey::classify_location(
-                    shared_count,
-                    total_hashed,
-                    comp_count,
-                    SUPERSET_THRESHOLD,
-                    total_count,
-                );
+            // Step 6: Classify
+            let kind = domain::survey::classify_location(
+                shared_count,
+                total_hashed,
+                comp_count,
+                SUPERSET_THRESHOLD,
+                total_count,
+            );
 
-                (
-                    Some(comp_count),
-                    Some(only_here),
-                    Some(kind),
-                    Some(comp_paths),
-                )
-            } else {
-                (None, None, None, None)
-            };
+            (
+                Some(comp_count),
+                Some(only_here),
+                Some(kind),
+                Some(comp_paths),
+            )
+        } else {
+            (None, None, None, None)
+        };
 
         // Overlap pairs: which selection files have copies at this location,
         // paired with their counterpart paths at the location.
@@ -669,9 +663,7 @@ mod tests {
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
 
         match outcome {
-            SurveyOutcome::AllUnhashed {
-                total_count,
-            } => {
+            SurveyOutcome::AllUnhashed { total_count } => {
                 assert_eq!(total_count, 2);
             }
             _ => panic!("Expected SurveyOutcome::AllUnhashed"),
@@ -1194,7 +1186,14 @@ mod tests {
             ..test_params()
         };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
-        let outcome = run_compute(&mut conn, &["/mnt/drive/photos"], &params, &filters, &[], None);
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive/photos"],
+            &params,
+            &filters,
+            &[],
+            None,
+        );
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1279,7 +1278,14 @@ mod tests {
         };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let other = vec![("/mnt/backup/trip")];
-        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &other, None);
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive-a"],
+            &params,
+            &filters,
+            &other,
+            None,
+        );
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1320,7 +1326,14 @@ mod tests {
         };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let other = vec![("/mnt/backup")];
-        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &other, None);
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive-a"],
+            &params,
+            &filters,
+            &other,
+            None,
+        );
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1394,7 +1407,14 @@ mod tests {
         };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let other = vec![("/archive")];
-        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &other, None);
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive-a"],
+            &params,
+            &filters,
+            &other,
+            None,
+        );
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1469,9 +1489,11 @@ mod tests {
         insert_source(&conn, root_b, "trip/c.jpg", Some(obj3));
 
         let params_normal = test_params();
-        let outcome_normal = run_compute(&mut conn, &["/mnt/drive-a"], &params_normal, &[], &[], None);
+        let outcome_normal =
+            run_compute(&mut conn, &["/mnt/drive-a"], &params_normal, &[], &[], None);
         let params_brief = test_params(); // same — both have compute_affinity: false
-        let outcome_brief = run_compute(&mut conn, &["/mnt/drive-a"], &params_brief, &[], &[], None);
+        let outcome_brief =
+            run_compute(&mut conn, &["/mnt/drive-a"], &params_brief, &[], &[], None);
 
         match (outcome_normal, outcome_brief) {
             (SurveyOutcome::Result(normal), SurveyOutcome::Result(brief)) => {
@@ -1513,7 +1535,14 @@ mod tests {
         let params = test_params();
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let other = vec![("/mnt/backup/trip")];
-        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &other, None);
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive-a"],
+            &params,
+            &filters,
+            &other,
+            None,
+        );
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1550,7 +1579,14 @@ mod tests {
         };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let other = vec![("/mnt/drive/documents")];
-        let outcome = run_compute(&mut conn, &["/mnt/drive/photos"], &params, &filters, &other, None);
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive/photos"],
+            &params,
+            &filters,
+            &other,
+            None,
+        );
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1811,7 +1847,14 @@ mod tests {
         };
         let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
         let other = vec![("/mnt/backup")];
-        let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &other, None);
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive-a"],
+            &params,
+            &filters,
+            &other,
+            None,
+        );
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1863,7 +1906,14 @@ mod tests {
             _ => panic!("Expected SurveyOutcome::Result"),
         }
 
-        let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], Some(archive_a));
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive"],
+            &params,
+            &[],
+            &[],
+            Some(archive_a),
+        );
         match outcome {
             SurveyOutcome::Result(result) => {
                 assert_eq!(result.archived_source_count, 2);
@@ -1892,7 +1942,14 @@ mod tests {
         insert_source(&conn, archive_b, "backup/x.jpg", Some(obj1));
 
         let params = test_params();
-        let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], Some(archive_a));
+        let outcome = run_compute(
+            &mut conn,
+            &["/mnt/drive"],
+            &params,
+            &[],
+            &[],
+            Some(archive_a),
+        );
 
         match outcome {
             SurveyOutcome::Result(result) => {
@@ -1927,8 +1984,14 @@ mod tests {
 
         let params = test_params();
         let outcome_all = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
-        let outcome_filtered =
-            run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], Some(archive_a));
+        let outcome_filtered = run_compute(
+            &mut conn,
+            &["/mnt/drive"],
+            &params,
+            &[],
+            &[],
+            Some(archive_a),
+        );
 
         match (outcome_all, outcome_filtered) {
             (SurveyOutcome::Result(all), SurveyOutcome::Result(filtered)) => {
@@ -2776,10 +2839,7 @@ mod tests {
             compute_residual: true,
             ..test_params()
         };
-        let other = vec![
-            ("/mnt/backup-1"),
-            ("/mnt/backup-2"),
-        ];
+        let other = vec![("/mnt/backup-1"), ("/mnt/backup-2")];
         let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
 
         match outcome {

@@ -12,10 +12,10 @@ use anyhow::Result;
 use crate::domain::decision::DecisionStatus;
 use crate::domain::exclusion::find_excludable_duplicates;
 use crate::domain::format_count;
-use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::domain::include::IncludeSet;
 use crate::domain::scope::ScopeMatch;
 use crate::expr::filter::{self, Filter};
+use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Connection};
 
@@ -219,11 +219,10 @@ pub fn plan_clear(conn: &mut Connection, params: &ExcludeClearParams) -> Result<
         filtered
     } else {
         let ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-        let filtered_ids: HashSet<i64> =
-            filter::apply_filters(conn, &ids, &params.filters)?
-                .source_ids
-                .into_iter()
-                .collect();
+        let filtered_ids: HashSet<i64> = filter::apply_filters(conn, &ids, &params.filters)?
+            .source_ids
+            .into_iter()
+            .collect();
         filtered
             .into_iter()
             .filter(|s| filtered_ids.contains(&s.id))
@@ -289,8 +288,11 @@ pub fn plan_duplicates(
     let sources_by_object = repo::source::fetch_sources_by_object_ids(conn, &object_ids)?;
 
     // Use pure domain function to determine what to exclude
-    let result =
-        find_excludable_duplicates(&selection.sources, &sources_by_object, &params.prefer_prefix);
+    let result = find_excludable_duplicates(
+        &selection.sources,
+        &sources_by_object,
+        &params.prefer_prefix,
+    );
 
     // Build plan from domain result
     let mut source_ids = Vec::new();
@@ -390,8 +392,7 @@ pub fn plan_set_objects(
     let objects_map = repo::object::batch_fetch_by_ids(conn, &object_ids_to_check)?;
 
     // Batch fetch all sources per object for display
-    let sources_by_object =
-        repo::source::fetch_sources_by_object_ids(conn, &object_ids_to_check)?;
+    let sources_by_object = repo::source::fetch_sources_by_object_ids(conn, &object_ids_to_check)?;
 
     // Build plan entries, filtering out already-excluded objects
     let mut objects: Vec<ObjectPlanEntry> = Vec::new();
@@ -409,8 +410,7 @@ pub fn plan_set_objects(
             continue;
         }
 
-        let hash_prefix =
-            object.hash_value[..16.min(object.hash_value.len())].to_string();
+        let hash_prefix = object.hash_value[..16.min(object.hash_value.len())].to_string();
 
         // Get and sort sources for this object
         let mut obj_sources: Vec<_> = sources_by_object
@@ -669,10 +669,7 @@ pub struct ExcludedObjectEntry {
 /// Validate that a source can be excluded by its database ID.
 ///
 /// Errors if the source is not found or not present.
-pub fn check_set_source_by_id(
-    conn: &Connection,
-    source_id: i64,
-) -> Result<SourceExclusionCheck> {
+pub fn check_set_source_by_id(conn: &Connection, source_id: i64) -> Result<SourceExclusionCheck> {
     let sources = repo::source::batch_fetch_by_ids(conn, &[source_id])?;
     let Some(source) = sources.get(&source_id) else {
         anyhow::bail!("Source with id {source_id} not found or not present");
@@ -756,10 +753,7 @@ pub fn execute_set_source(
 /// Validate that an object can be excluded by its hash.
 ///
 /// Errors if no object exists with the given hash.
-pub fn check_set_object_by_hash(
-    conn: &Connection,
-    hash: &str,
-) -> Result<ObjectExclusionCheck> {
+pub fn check_set_object_by_hash(conn: &Connection, hash: &str) -> Result<ObjectExclusionCheck> {
     let Some(object) = repo::object::fetch_by_hash(conn, hash)? else {
         anyhow::bail!("No object found with hash: {hash}");
     };
@@ -879,7 +873,6 @@ pub fn execute_set_object(
     })
 }
 
-
 /// Validate that an object exclusion can be cleared by its hash.
 ///
 /// Errors if no object exists with the given hash.
@@ -945,15 +938,11 @@ pub fn execute_clear_object(
     })
 }
 
-
 /// Fetch source display info for an object.
 ///
 /// Returns present sources sorted by role DESC, root_path, rel_path.
 /// Maps to `ObjectSourceInfo` for display.
-pub fn fetch_object_sources(
-    conn: &Connection,
-    object_id: i64,
-) -> Result<Vec<ObjectSourceInfo>> {
+pub fn fetch_object_sources(conn: &Connection, object_id: i64) -> Result<Vec<ObjectSourceInfo>> {
     let sources_map = repo::source::fetch_sources_by_object_ids(conn, &[object_id])?;
     let mut sources: Vec<_> = sources_map.get(&object_id).cloned().unwrap_or_default();
 
@@ -988,8 +977,7 @@ pub fn list_excluded_objects(conn: &Connection) -> Result<Vec<ExcludedObjectEntr
     Ok(excluded
         .iter()
         .map(|object| {
-            let hash_prefix =
-                object.hash_value[..16.min(object.hash_value.len())].to_string();
+            let hash_prefix = object.hash_value[..16.min(object.hash_value.len())].to_string();
             let source_count = sources_by_object
                 .get(&object.id)
                 .map(|sources| sources.len())
@@ -1108,7 +1096,10 @@ mod tests {
 
         let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
 
-        assert_eq!(plan.not_archived_count, 1, "Unhashed counts as not archived");
+        assert_eq!(
+            plan.not_archived_count, 1,
+            "Unhashed counts as not archived"
+        );
     }
 
     #[test]
@@ -1341,8 +1332,7 @@ mod tests {
         let mut conn = setup_test_db();
         let _root = insert_root(&conn, "/source", "source", false);
 
-        let plan =
-            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+        let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
 
         assert!(plan.source_ids.is_empty());
         assert_eq!(plan.scope_count, 0);
@@ -1359,8 +1349,7 @@ mod tests {
         let source_id = insert_source(&conn, source_root, "photo.jpg", Some(obj));
         insert_source(&conn, archive_root, "photo.jpg", Some(obj));
 
-        let plan =
-            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+        let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
 
         assert_eq!(plan.source_ids, vec![source_id]);
         assert_eq!(plan.scope_count, 1);
@@ -1375,8 +1364,7 @@ mod tests {
         let obj = insert_object(&conn, "unique_hash", false);
         insert_source(&conn, source_root, "unique.jpg", Some(obj));
 
-        let plan =
-            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+        let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
 
         assert!(plan.source_ids.is_empty());
         assert_eq!(plan.skipped_not_covered, 1);
@@ -1393,8 +1381,7 @@ mod tests {
         insert_source(&conn, archive_root, "copy1.jpg", Some(obj));
         insert_source(&conn, archive_root, "copy2.jpg", Some(obj));
 
-        let plan =
-            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+        let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
 
         assert!(plan.source_ids.is_empty());
         assert_eq!(plan.skipped_multiple, 1);
@@ -1407,8 +1394,7 @@ mod tests {
 
         insert_source(&conn, source_root, "unhashed.jpg", None);
 
-        let plan =
-            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+        let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
 
         assert!(plan.source_ids.is_empty());
         assert_eq!(plan.skipped_no_hash, 1);
@@ -1424,8 +1410,7 @@ mod tests {
         insert_source(&conn, archive_root, "photo.jpg", Some(obj));
 
         // Source is in the prefer path itself — should be skipped
-        let plan =
-            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+        let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
 
         assert!(plan.source_ids.is_empty());
         assert_eq!(plan.skipped_in_prefer, 1);
@@ -1450,8 +1435,7 @@ mod tests {
         insert_source(&conn, archive_root, "photo1.jpg", Some(obj1));
         insert_source(&conn, archive_root, "photo2.jpg", Some(obj2));
 
-        let plan =
-            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+        let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
 
         assert_eq!(plan.source_ids.len(), 4);
         assert_eq!(plan.group_count, 2, "2 distinct object groups");
@@ -1467,8 +1451,7 @@ mod tests {
         insert_source(&conn, source_root, "subdir/photo.jpg", Some(obj));
         insert_source(&conn, archive_root, "photo.jpg", Some(obj));
 
-        let plan =
-            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+        let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
 
         assert_eq!(plan.paths, vec!["/source/subdir/photo.jpg"]);
     }
@@ -1484,11 +1467,17 @@ mod tests {
         insert_source(&conn, source_root, "b.jpg", None); // unhashed
         insert_source(&conn, archive_root, "a.jpg", Some(obj));
 
-        let plan =
-            plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+        let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
 
-        assert_eq!(plan.scope_count, 2, "Both sources in scope (before analysis)");
-        assert_eq!(plan.source_ids.len(), 1, "Only hashed with prefer copy excluded");
+        assert_eq!(
+            plan.scope_count, 2,
+            "Both sources in scope (before analysis)"
+        );
+        assert_eq!(
+            plan.source_ids.len(),
+            1,
+            "Only hashed with prefer copy excluded"
+        );
     }
 
     #[test]
@@ -1506,8 +1495,7 @@ mod tests {
         insert_source(&conn, archive_root, "photo2.jpg", Some(obj2));
 
         let scopes = ScopeMatch::classify_all(&["/source/2024".to_string()]);
-        let plan =
-            plan_duplicates(&mut conn, &make_duplicates_params(scopes, "/archive")).unwrap();
+        let plan = plan_duplicates(&mut conn, &make_duplicates_params(scopes, "/archive")).unwrap();
 
         assert_eq!(plan.source_ids, vec![in_scope]);
         assert_eq!(plan.scope_count, 1);
@@ -2001,8 +1989,7 @@ mod tests {
         let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
 
-        let result =
-            check_set_object_by_file(&conn, root, "missing.jpg", "/photos/missing.jpg");
+        let result = check_set_object_by_file(&conn, root, "missing.jpg", "/photos/missing.jpg");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -2017,8 +2004,7 @@ mod tests {
         let root = insert_root(&conn, "/photos", "source", false);
         insert_source(&conn, root, "unhashed.jpg", None);
 
-        let result =
-            check_set_object_by_file(&conn, root, "unhashed.jpg", "/photos/unhashed.jpg");
+        let result = check_set_object_by_file(&conn, root, "unhashed.jpg", "/photos/unhashed.jpg");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -2034,8 +2020,7 @@ mod tests {
         let obj = insert_object(&conn, "empty_file_hash_v_", false);
         insert_source_with_size(&conn, root, "empty.txt", Some(obj), 0);
 
-        let result =
-            check_set_object_by_file(&conn, root, "empty.txt", "/photos/empty.txt");
+        let result = check_set_object_by_file(&conn, root, "empty.txt", "/photos/empty.txt");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(

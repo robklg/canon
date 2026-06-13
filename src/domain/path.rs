@@ -404,7 +404,10 @@ mod tests {
         let roots = vec![make_test_root(1, "/a/b")];
         let result = validate_paths_in_roots(&["/x/y/z".to_string()], &roots);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not under any known root"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not under any known root"));
     }
 
     #[test]
@@ -418,8 +421,7 @@ mod tests {
     #[test]
     fn validate_multiple_paths_second_invalid() {
         let roots = vec![make_test_root(1, "/a/b")];
-        let result =
-            validate_paths_in_roots(&["/a/b/c".to_string(), "/x/y".to_string()], &roots);
+        let result = validate_paths_in_roots(&["/a/b/c".to_string(), "/x/y".to_string()], &roots);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("/x/y"));
     }

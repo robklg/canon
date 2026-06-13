@@ -77,7 +77,10 @@ pub fn update_receipt_path(
 
 /// Fetch a decision by ID. For testing.
 #[cfg(test)]
-pub fn fetch_by_id(conn: &Connection, id: i64) -> Result<Option<crate::domain::decision::Decision>> {
+pub fn fetch_by_id(
+    conn: &Connection,
+    id: i64,
+) -> Result<Option<crate::domain::decision::Decision>> {
     let mut stmt = conn.prepare(
         "SELECT id, command, scope, command_line, reason, status,
                 count_attempted, count_completed, count_failed, count_skipped,
@@ -128,14 +131,34 @@ mod tests {
     #[test]
     fn insert_started_returns_id() {
         let conn = setup_test_db();
-        let id = insert_started(&conn, "scan", None, "canon scan /photos", None, "0.4.0", None, None).unwrap();
+        let id = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan /photos",
+            None,
+            "0.4.0",
+            None,
+            None,
+        )
+        .unwrap();
         assert!(id > 0);
     }
 
     #[test]
     fn test_decisions_receipt_columns_exist() {
         let conn = setup_test_db();
-        let id = insert_started(&conn, "apply", None, "canon apply m.lock", None, "0.4.0", Some(3), Some("000001-apply.toml")).unwrap();
+        let id = insert_started(
+            &conn,
+            "apply",
+            None,
+            "canon apply m.lock",
+            None,
+            "0.4.0",
+            Some(3),
+            Some("000001-apply.toml"),
+        )
+        .unwrap();
         let d = fetch_by_id(&conn, id).unwrap().unwrap();
         assert_eq!(d.receipt_root_id, Some(3));
         assert_eq!(d.receipt_rel_path, Some("000001-apply.toml".to_string()));
@@ -144,7 +167,8 @@ mod tests {
     #[test]
     fn test_decisions_receipt_columns_nullable() {
         let conn = setup_test_db();
-        let id = insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
+        let id =
+            insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
         let d = fetch_by_id(&conn, id).unwrap().unwrap();
         assert_eq!(d.receipt_root_id, None);
         assert_eq!(d.receipt_rel_path, None);
@@ -153,11 +177,13 @@ mod tests {
     #[test]
     fn test_decision_scopes_insert_and_select() {
         let conn = setup_test_db();
-        let decision_id = insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
+        let decision_id =
+            insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
         conn.execute(
             "INSERT INTO decision_scopes (decision_id, root_id, rel_prefix) VALUES (?, ?, ?)",
             rusqlite::params![decision_id, 1, "photos"],
-        ).unwrap();
+        )
+        .unwrap();
         let (did, rid, prefix): (i64, i64, String) = conn.query_row(
             "SELECT decision_id, root_id, rel_prefix FROM decision_scopes WHERE decision_id = ?",
             [decision_id],
@@ -171,20 +197,34 @@ mod tests {
     #[test]
     fn test_decision_scopes_multiple_per_decision() {
         let conn = setup_test_db();
-        let decision_id = insert_started(&conn, "exclude_set", None, "canon exclude set", None, "0.4.0", None, None).unwrap();
+        let decision_id = insert_started(
+            &conn,
+            "exclude_set",
+            None,
+            "canon exclude set",
+            None,
+            "0.4.0",
+            None,
+            None,
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO decision_scopes (decision_id, root_id, rel_prefix) VALUES (?, ?, ?)",
             rusqlite::params![decision_id, 1, ""],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO decision_scopes (decision_id, root_id, rel_prefix) VALUES (?, ?, ?)",
             rusqlite::params![decision_id, 2, "photos"],
-        ).unwrap();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM decision_scopes WHERE decision_id = ?",
-            [decision_id],
-            |row| row.get(0),
-        ).unwrap();
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM decision_scopes WHERE decision_id = ?",
+                [decision_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 2);
     }
 
@@ -205,13 +245,26 @@ mod tests {
         .unwrap();
 
         let decision = fetch_by_id(&conn, id).unwrap().unwrap();
-        assert_eq!(decision.scope, Some(vec!["/photos".to_string(), "/videos".to_string()]));
+        assert_eq!(
+            decision.scope,
+            Some(vec!["/photos".to_string(), "/videos".to_string()])
+        );
     }
 
     #[test]
     fn insert_started_null_scope() {
         let conn = setup_test_db();
-        let id = insert_started(&conn, "import_facts", None, "canon import-facts", None, "0.4.0", None, None).unwrap();
+        let id = insert_started(
+            &conn,
+            "import_facts",
+            None,
+            "canon import-facts",
+            None,
+            "0.4.0",
+            None,
+            None,
+        )
+        .unwrap();
 
         let decision = fetch_by_id(&conn, id).unwrap().unwrap();
         assert!(decision.scope.is_none());
@@ -239,7 +292,8 @@ mod tests {
     #[test]
     fn insert_started_null_reason() {
         let conn = setup_test_db();
-        let id = insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
+        let id =
+            insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
 
         let decision = fetch_by_id(&conn, id).unwrap().unwrap();
         assert!(decision.reason.is_none());
@@ -248,7 +302,8 @@ mod tests {
     #[test]
     fn insert_started_status_is_started() {
         let conn = setup_test_db();
-        let id = insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
+        let id =
+            insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
 
         let decision = fetch_by_id(&conn, id).unwrap().unwrap();
         assert_eq!(decision.status, "started");
@@ -257,9 +312,20 @@ mod tests {
     #[test]
     fn update_completed_changes_status() {
         let conn = setup_test_db();
-        let id = insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
+        let id =
+            insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
 
-        update_completed(&conn, id, "completed", Some(100), Some(100), Some(0), None, Some("Scanned 100 files")).unwrap();
+        update_completed(
+            &conn,
+            id,
+            "completed",
+            Some(100),
+            Some(100),
+            Some(0),
+            None,
+            Some("Scanned 100 files"),
+        )
+        .unwrap();
 
         let decision = fetch_by_id(&conn, id).unwrap().unwrap();
         assert_eq!(decision.status, "completed");
@@ -268,9 +334,29 @@ mod tests {
     #[test]
     fn update_completed_with_counts() {
         let conn = setup_test_db();
-        let id = insert_started(&conn, "apply", None, "canon apply m.lock", None, "0.4.0", None, None).unwrap();
+        let id = insert_started(
+            &conn,
+            "apply",
+            None,
+            "canon apply m.lock",
+            None,
+            "0.4.0",
+            None,
+            None,
+        )
+        .unwrap();
 
-        update_completed(&conn, id, "completed", Some(50), Some(48), Some(2), None, Some("Applied")).unwrap();
+        update_completed(
+            &conn,
+            id,
+            "completed",
+            Some(50),
+            Some(48),
+            Some(2),
+            None,
+            Some("Applied"),
+        )
+        .unwrap();
 
         let decision = fetch_by_id(&conn, id).unwrap().unwrap();
         assert_eq!(decision.count_attempted, Some(50));
@@ -282,9 +368,29 @@ mod tests {
     #[test]
     fn update_completed_null_counts() {
         let conn = setup_test_db();
-        let id = insert_started(&conn, "roots_rm", None, "canon roots rm id:1", None, "0.4.0", None, None).unwrap();
+        let id = insert_started(
+            &conn,
+            "roots_rm",
+            None,
+            "canon roots rm id:1",
+            None,
+            "0.4.0",
+            None,
+            None,
+        )
+        .unwrap();
 
-        update_completed(&conn, id, "completed", None, None, None, None, Some("Removed root 1")).unwrap();
+        update_completed(
+            &conn,
+            id,
+            "completed",
+            None,
+            None,
+            None,
+            None,
+            Some("Removed root 1"),
+        )
+        .unwrap();
 
         let decision = fetch_by_id(&conn, id).unwrap().unwrap();
         assert!(decision.count_attempted.is_none());
@@ -294,20 +400,54 @@ mod tests {
     #[test]
     fn update_completed_with_summary() {
         let conn = setup_test_db();
-        let id = insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
+        let id =
+            insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
 
-        update_completed(&conn, id, "completed", None, None, None, None, Some("Scanned 50 files: 10 new")).unwrap();
+        update_completed(
+            &conn,
+            id,
+            "completed",
+            None,
+            None,
+            None,
+            None,
+            Some("Scanned 50 files: 10 new"),
+        )
+        .unwrap();
 
         let decision = fetch_by_id(&conn, id).unwrap().unwrap();
-        assert_eq!(decision.summary, Some("Scanned 50 files: 10 new".to_string()));
+        assert_eq!(
+            decision.summary,
+            Some("Scanned 50 files: 10 new".to_string())
+        );
     }
 
     #[test]
     fn update_completed_partial_status() {
         let conn = setup_test_db();
-        let id = insert_started(&conn, "apply", None, "canon apply m.lock", None, "0.4.0", None, None).unwrap();
+        let id = insert_started(
+            &conn,
+            "apply",
+            None,
+            "canon apply m.lock",
+            None,
+            "0.4.0",
+            None,
+            None,
+        )
+        .unwrap();
 
-        update_completed(&conn, id, "partial", Some(47), Some(45), Some(2), None, Some("Applied 45 of 47")).unwrap();
+        update_completed(
+            &conn,
+            id,
+            "partial",
+            Some(47),
+            Some(45),
+            Some(2),
+            None,
+            Some("Applied 45 of 47"),
+        )
+        .unwrap();
 
         let decision = fetch_by_id(&conn, id).unwrap().unwrap();
         assert_eq!(decision.status, "partial");

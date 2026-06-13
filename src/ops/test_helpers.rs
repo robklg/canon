@@ -35,7 +35,9 @@ pub fn insert_source(
     rel_path: &str,
     object_id: Option<i64>,
 ) -> i64 {
-    insert_source_full(conn, root_id, rel_path, object_id, false, 1000, 1704067200, "testhash")
+    insert_source_full(
+        conn, root_id, rel_path, object_id, false, 1000, 1704067200, "testhash",
+    )
 }
 
 /// Insert a source marked as excluded.
@@ -45,7 +47,9 @@ pub fn insert_source_excluded(
     rel_path: &str,
     object_id: Option<i64>,
 ) -> i64 {
-    insert_source_full(conn, root_id, rel_path, object_id, true, 1000, 1704067200, "testhash")
+    insert_source_full(
+        conn, root_id, rel_path, object_id, true, 1000, 1704067200, "testhash",
+    )
 }
 
 /// Insert a source with a specific size.
@@ -56,7 +60,9 @@ pub fn insert_source_with_size(
     object_id: Option<i64>,
     size: i64,
 ) -> i64 {
-    insert_source_full(conn, root_id, rel_path, object_id, false, size, 1704067200, "testhash")
+    insert_source_full(
+        conn, root_id, rel_path, object_id, false, size, 1704067200, "testhash",
+    )
 }
 
 /// Insert a source with specific size and mtime (for staleness tests).
@@ -68,7 +74,9 @@ pub fn insert_source_with_metadata(
     size: i64,
     mtime: i64,
 ) -> i64 {
-    insert_source_full(conn, root_id, rel_path, object_id, false, size, mtime, "testhash")
+    insert_source_full(
+        conn, root_id, rel_path, object_id, false, size, mtime, "testhash",
+    )
 }
 
 /// Full-control source insertion with all parameters.
@@ -111,7 +119,13 @@ pub fn is_source_excluded(conn: &Connection, source_id: i64) -> bool {
 }
 
 /// Insert a note with an explicit timestamp (for ordering tests).
-pub fn insert_note(conn: &Connection, root_id: i64, rel_path: &str, text: &str, created_at: i64) -> i64 {
+pub fn insert_note(
+    conn: &Connection,
+    root_id: i64,
+    rel_path: &str,
+    text: &str,
+    created_at: i64,
+) -> i64 {
     conn.execute(
         "INSERT INTO notes (root_id, rel_path, text, created_at) VALUES (?, ?, ?, ?)",
         rusqlite::params![root_id, rel_path, text, created_at],

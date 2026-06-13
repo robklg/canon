@@ -44,7 +44,9 @@ pub fn parse_ledger_config(content: &str) -> (LedgerConfig, Vec<String>) {
     let value: toml::Value = match toml::from_str(content) {
         Ok(v) => v,
         Err(e) => {
-            warnings.push(format!("Warning: config.toml parse error ({e}), using defaults"));
+            warnings.push(format!(
+                "Warning: config.toml parse error ({e}), using defaults"
+            ));
             return (config, warnings);
         }
     };
@@ -63,7 +65,8 @@ pub fn parse_ledger_config(content: &str) -> (LedgerConfig, Vec<String>) {
                 other
             )),
             None => warnings.push(
-                "Warning: invalid recording value in config.toml (expected string), using \"full\"".to_string()
+                "Warning: invalid recording value in config.toml (expected string), using \"full\""
+                    .to_string(),
             ),
         }
     }
@@ -77,7 +80,8 @@ pub fn parse_ledger_config(content: &str) -> (LedgerConfig, Vec<String>) {
                 other
             )),
             None => warnings.push(
-                "Warning: invalid layout value in config.toml (expected string), using \"central\"".to_string()
+                "Warning: invalid layout value in config.toml (expected string), using \"central\""
+                    .to_string(),
             ),
         }
     }
@@ -86,7 +90,8 @@ pub fn parse_ledger_config(content: &str) -> (LedgerConfig, Vec<String>) {
         match root.as_integer() {
             Some(id) => config.root = Some(id),
             None => warnings.push(
-                "Warning: invalid root value in config.toml (expected integer), ignoring".to_string()
+                "Warning: invalid root value in config.toml (expected integer), ignoring"
+                    .to_string(),
             ),
         }
     }
