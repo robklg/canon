@@ -812,7 +812,6 @@ pub fn set_excluded(
 ///
 /// # Returns
 /// Count of rows actually updated (may be less than input if some sources don't exist).
-#[allow(dead_code)] // Part of repo API, may be used in future
 pub fn batch_set_excluded(
     conn: &Connection,
     source_ids: &[i64],
@@ -857,7 +856,6 @@ pub fn batch_set_excluded(
 /// link on every present-or-not source pointing at the object.
 ///
 /// `None` writes NULL. Returns the number of source rows updated.
-#[allow(dead_code)] // Part of repo API, may be used in future
 pub fn set_decision_id_by_object(
     conn: &Connection,
     object_id: i64,

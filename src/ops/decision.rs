@@ -1,10 +1,13 @@
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::Serialize;
 
 use crate::domain::config::LedgerConfig;
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::ops::receipt::{
     compute_ledger_root_receipt_rel_path, compute_targeted_receipt_rel_path, finalize_receipt,
-    ReceiptPlacement, ReceiptRef,
+    write_receipt, ReceiptMeta, ReceiptPlacement, ReceiptRef,
 };
 use crate::repo::{self, Connection};
 
@@ -20,6 +23,35 @@ pub struct DecisionParams {
     pub receipt_enabled: bool,
     /// Ledger config for receipt path computation.
     pub ledger_config: LedgerConfig,
+}
+
+impl DecisionParams {
+    /// Build the shared receipt `[meta]` block from these params.
+    ///
+    /// `manifest` is `Some` only for apply receipts; other commands pass `None`.
+    pub fn receipt_meta(
+        &self,
+        decision_id: i64,
+        summary: &str,
+        manifest: Option<String>,
+    ) -> ReceiptMeta {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        ReceiptMeta {
+            receipt_version: 1,
+            decision_id,
+            command: self.command.as_str().to_string(),
+            timestamp,
+            scope: self.scope.clone(),
+            reason: self.reason.clone(),
+            summary: summary.to_string(),
+            canon_version: env!("CARGO_PKG_VERSION").to_string(),
+            command_line: self.command_line.clone(),
+            manifest,
+        }
+    }
 }
 
 /// Outcome counts for a decision record.
@@ -177,6 +209,28 @@ impl DecisionRecorder {
                     .push(format!("Warning: failed to finalize receipt: {e}"));
             }
         }
+    }
+
+    /// Write `receipt` (when a receipt path was set up and `receipt` is `Some`),
+    /// then complete the record. The write happens before completion so the
+    /// `.incomplete` → `.toml` finalize inside `complete()` renames the written
+    /// file. A write failure is collected as a warning, never halting the command.
+    pub fn complete_with_receipt<T: Serialize>(
+        &mut self,
+        conn: &Connection,
+        status: DecisionStatus,
+        counts: DecisionCounts,
+        summary: &str,
+        receipt: Option<&T>,
+    ) {
+        if let Some(receipt) = receipt {
+            if let Some(path) = self.receipt_abs_path().map(|p| p.to_owned()) {
+                if let Err(e) = write_receipt(&path, receipt, summary) {
+                    self.push_warning(format!("Receipt write failed: {e:#}"));
+                }
+            }
+        }
+        self.complete(conn, status, counts, summary);
     }
 
     /// Update to interrupted status. Best-effort.

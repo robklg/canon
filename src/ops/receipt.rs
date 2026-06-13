@@ -34,7 +34,6 @@ pub enum ReceiptPlacement {
         base_dir_rel: String,
     },
     /// Non-targeted receipts: flat at the ledger root's `.canon-ledger/`.
-    #[allow(dead_code)]
     LedgerRoot { root_id: i64, root_path: String },
 }
 
@@ -73,6 +72,97 @@ pub struct ApplyReceiptItem {
     pub destination_rel_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
+    pub size: i64,
+    pub mtime: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_decision_id: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// Exclusion receipts
+// ---------------------------------------------------------------------------
+
+/// Source-level exclusion receipt — `exclude set`/`exclude clear` and the
+/// single-source `set_by_id`/`set_by_path`. Flat list of affected sources.
+#[derive(Serialize)]
+pub struct ExcludeReceipt {
+    pub meta: ReceiptMeta,
+    pub items: Vec<ExcludeReceiptItem>,
+}
+
+/// One item in an exclusion receipt — a single source whose state transitioned.
+#[derive(Serialize)]
+pub struct ExcludeReceiptItem {
+    pub root: String,
+    pub rel_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    pub size: i64,
+    pub mtime: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_decision_id: Option<i64>,
+}
+
+/// Duplicate-exclusion receipt — `exclude duplicates`. Grouped by content hash,
+/// recording which copy was kept vs which were excluded.
+#[derive(Serialize)]
+pub struct DuplicatesReceipt {
+    pub meta: ReceiptMeta,
+    pub groups: Vec<DuplicateGroup>,
+}
+
+/// One duplicate group: the shared content hash, the kept copy/copies (under
+/// the prefer prefix), and the excluded duplicates.
+#[derive(Serialize)]
+pub struct DuplicateGroup {
+    pub hash: String,
+    pub kept: Vec<DuplicateKeptEntry>,
+    pub excluded: Vec<DuplicateExcludedEntry>,
+}
+
+/// A kept copy in a duplicate group — no state transition, so no
+/// `previous_decision_id`.
+#[derive(Serialize)]
+pub struct DuplicateKeptEntry {
+    pub root: String,
+    pub rel_path: String,
+    pub size: i64,
+    pub mtime: i64,
+}
+
+/// An excluded copy in a duplicate group. The content hash lives on the group,
+/// so it is not repeated per entry.
+#[derive(Serialize)]
+pub struct DuplicateExcludedEntry {
+    pub root: String,
+    pub rel_path: String,
+    pub size: i64,
+    pub mtime: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_decision_id: Option<i64>,
+}
+
+/// Object-level exclusion receipt — `exclude set-object`/`clear-object`.
+/// Grouped by content hash; each object lists all present sources sharing it.
+#[derive(Serialize)]
+pub struct ObjectExcludeReceipt {
+    pub meta: ReceiptMeta,
+    pub objects: Vec<ObjectExcludeEntry>,
+}
+
+/// One object in an object-exclusion receipt: the content hash and every
+/// present source sharing it.
+#[derive(Serialize)]
+pub struct ObjectExcludeEntry {
+    pub hash: String,
+    pub sources: Vec<ObjectSourceReceiptEntry>,
+}
+
+/// A source sharing an excluded object's content.
+#[derive(Serialize)]
+pub struct ObjectSourceReceiptEntry {
+    pub root: String,
+    pub rel_path: String,
     pub size: i64,
     pub mtime: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -132,7 +222,6 @@ pub fn compute_ledger_root_receipt_rel_path(decision_id: i64, command: &str) -> 
 /// Uses `config.root` if it names an active archive root; otherwise the lowest-id
 /// active archive root; otherwise `None` (no archive root — the caller warns and
 /// skips the receipt). Returns `(root_id, root_path)`.
-#[allow(dead_code)] // Resolves placement for non-targeted receipts; not yet wired to a caller.
 pub fn resolve_ledger_root(roots: &[Root], config: &LedgerConfig) -> Option<(i64, String)> {
     if let Some(configured) = config.root {
         if let Some(r) = roots
@@ -512,5 +601,111 @@ mod tests {
             resolve_ledger_root(&roots, &LedgerConfig::default()),
             Some((2, "/root2".to_string()))
         );
+    }
+
+    // =========================================================================
+    // Exclusion receipt serialization
+    // =========================================================================
+
+    fn sample_meta(command: &str) -> ReceiptMeta {
+        ReceiptMeta {
+            receipt_version: 1,
+            decision_id: 42,
+            command: command.to_string(),
+            timestamp: 1700000000,
+            scope: None,
+            reason: None,
+            summary: "test".to_string(),
+            canon_version: "0.0.0".to_string(),
+            command_line: "canon test".to_string(),
+            manifest: None,
+        }
+    }
+
+    #[test]
+    fn test_exclude_receipt_serializes() {
+        let receipt = ExcludeReceipt {
+            meta: sample_meta("exclude_set"),
+            items: vec![
+                ExcludeReceiptItem {
+                    root: "/vol".to_string(),
+                    rel_path: "a.dll".to_string(),
+                    hash: Some("sha256:abc".to_string()),
+                    size: 10,
+                    mtime: 100,
+                    previous_decision_id: Some(12),
+                },
+                ExcludeReceiptItem {
+                    root: "/vol".to_string(),
+                    rel_path: "b.tmp".to_string(),
+                    hash: None,
+                    size: 0,
+                    mtime: 200,
+                    previous_decision_id: None,
+                },
+            ],
+        };
+        let out = toml::to_string_pretty(&receipt).unwrap();
+        assert!(out.contains("[[items]]"));
+        assert!(out.contains("hash = \"sha256:abc\""));
+        // Unhashed item omits hash; only the Some item carries it.
+        assert_eq!(out.matches("hash =").count(), 1);
+        // Only the item with a prior decision carries previous_decision_id.
+        assert_eq!(out.matches("previous_decision_id").count(), 1);
+        assert!(out.contains("previous_decision_id = 12"));
+    }
+
+    #[test]
+    fn test_duplicates_receipt_serializes() {
+        let receipt = DuplicatesReceipt {
+            meta: sample_meta("exclude_duplicates"),
+            groups: vec![DuplicateGroup {
+                hash: "sha256:dup".to_string(),
+                kept: vec![DuplicateKeptEntry {
+                    root: "/vol".to_string(),
+                    rel_path: "orig.jpg".to_string(),
+                    size: 5,
+                    mtime: 1,
+                }],
+                excluded: vec![DuplicateExcludedEntry {
+                    root: "/vol".to_string(),
+                    rel_path: "copy.jpg".to_string(),
+                    size: 5,
+                    mtime: 1,
+                    previous_decision_id: Some(9),
+                }],
+            }],
+        };
+        let out = toml::to_string_pretty(&receipt).unwrap();
+        assert!(out.contains("[[groups]]"));
+        assert!(out.contains("hash = \"sha256:dup\""));
+        assert!(out.contains("[[groups.kept]]"));
+        assert!(out.contains("[[groups.excluded]]"));
+        // Kept has no previous_decision_id field; only the excluded entry carries it.
+        assert_eq!(out.matches("previous_decision_id").count(), 1);
+        assert!(out.contains("previous_decision_id = 9"));
+    }
+
+    #[test]
+    fn test_object_exclude_receipt_serializes() {
+        let receipt = ObjectExcludeReceipt {
+            meta: sample_meta("exclude_set_object"),
+            objects: vec![ObjectExcludeEntry {
+                hash: "sha256:obj".to_string(),
+                sources: vec![ObjectSourceReceiptEntry {
+                    root: "/vol".to_string(),
+                    rel_path: "dup.bin".to_string(),
+                    size: 4,
+                    mtime: 7,
+                    previous_decision_id: None,
+                }],
+            }],
+        };
+        let out = toml::to_string_pretty(&receipt).unwrap();
+        assert!(out.contains("[[objects]]"));
+        assert!(out.contains("hash = \"sha256:obj\""));
+        assert!(out.contains("[[objects.sources]]"));
+        // None previous_decision_id is omitted entirely.
+        assert!(!out.contains("previous_decision_id"));
     }
 }

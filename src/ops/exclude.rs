@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::domain::decision::DecisionStatus;
 use crate::domain::exclusion::find_excludable_duplicates;
@@ -19,6 +20,11 @@ use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::expr::filter::{self, Filter};
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
+use crate::ops::receipt::{
+    DuplicateExcludedEntry, DuplicateGroup, DuplicateKeptEntry, DuplicatesReceipt, ExcludeReceipt,
+    ExcludeReceiptItem, ObjectExcludeEntry, ObjectExcludeReceipt, ObjectSourceReceiptEntry,
+    ReceiptPlacement,
+};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Connection};
 
@@ -31,8 +37,7 @@ use crate::repo::{self, Connection};
 /// Single source of truth for both display (via `path()`) and the durable
 /// receipt item. `source_ids()` / `paths()` accessors on the plans derive from
 /// these, replacing the old parallel `source_ids` / `paths` vectors.
-// Several fields are carried for receipt writing and not yet read.
-#[allow(dead_code)]
+#[derive(Debug)]
 pub struct ExcludeItemData {
     pub source_id: i64,
     /// Source root path (absolute).
@@ -77,8 +82,6 @@ impl ExcludeItemData {
 /// One duplicate group in an `exclude duplicates` plan: the content hash, the
 /// kept copies (under the prefer prefix — no state transition), and the
 /// excluded sources (the duplicates being marked excluded).
-// hash/kept are carried for receipt writing and not yet read.
-#[allow(dead_code)]
 pub struct DuplicateGroupData {
     pub hash: String,
     pub kept: Vec<ExcludeItemData>,
@@ -209,15 +212,12 @@ pub struct ObjectPlanEntry {
     /// Hash prefix for display (first 16 chars).
     pub hash_prefix: String,
     /// Full content hash formatted as `sha256:{value}` (for the receipt).
-    #[allow(dead_code)] // Carried for receipt writing; not yet read.
     pub hash: String,
     /// Sources linked to this object (sorted: role DESC, root_path, rel_path).
     pub sources: Vec<ObjectSourceInfo>,
 }
 
 /// Source info for object exclusion display and receipts.
-// Several fields are carried for receipt writing and not yet read.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct ObjectSourceInfo {
     pub path: String,
@@ -592,6 +592,118 @@ pub fn plan_set_objects(
 }
 
 // ============================================================================
+// Receipt helpers
+// ============================================================================
+
+/// Counts for an all-succeeded decision (attempted == completed == n).
+fn counts_all(n: usize) -> DecisionCounts {
+    DecisionCounts {
+        attempted: Some(n as i64),
+        completed: Some(n as i64),
+        failed: None,
+        skipped: None,
+    }
+}
+
+fn exclude_receipt_items(items: &[ExcludeItemData]) -> Vec<ExcludeReceiptItem> {
+    items
+        .iter()
+        .map(|i| ExcludeReceiptItem {
+            root: i.root.clone(),
+            rel_path: i.rel_path.clone(),
+            hash: i.hash.clone(),
+            size: i.size,
+            mtime: i.mtime,
+            previous_decision_id: i.previous_decision_id,
+        })
+        .collect()
+}
+
+fn duplicate_receipt_groups(groups: &[DuplicateGroupData]) -> Vec<DuplicateGroup> {
+    groups
+        .iter()
+        .map(|g| DuplicateGroup {
+            hash: g.hash.clone(),
+            kept: g
+                .kept
+                .iter()
+                .map(|k| DuplicateKeptEntry {
+                    root: k.root.clone(),
+                    rel_path: k.rel_path.clone(),
+                    size: k.size,
+                    mtime: k.mtime,
+                })
+                .collect(),
+            excluded: g
+                .excluded
+                .iter()
+                .map(|e| DuplicateExcludedEntry {
+                    root: e.root.clone(),
+                    rel_path: e.rel_path.clone(),
+                    size: e.size,
+                    mtime: e.mtime,
+                    previous_decision_id: e.previous_decision_id,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn object_source_receipt_entry(s: &ObjectSourceInfo) -> ObjectSourceReceiptEntry {
+    ObjectSourceReceiptEntry {
+        root: s.root.clone(),
+        rel_path: s.rel_path.clone(),
+        size: s.size,
+        mtime: s.mtime,
+        previous_decision_id: s.previous_decision_id,
+    }
+}
+
+/// Build a single-object exclusion receipt (set-object / clear-object).
+fn object_exclude_receipt(
+    decision: &DecisionParams,
+    decision_id: i64,
+    hash: &str,
+    sources: &[ObjectSourceInfo],
+    summary: &str,
+) -> ObjectExcludeReceipt {
+    ObjectExcludeReceipt {
+        meta: decision.receipt_meta(decision_id, summary, None),
+        objects: vec![ObjectExcludeEntry {
+            hash: hash.to_string(),
+            sources: sources.iter().map(object_source_receipt_entry).collect(),
+        }],
+    }
+}
+
+/// Build an `ExcludeItemData` for a single source, resolving its content hash.
+fn item_for_source(conn: &Connection, source: &Source) -> Result<ExcludeItemData> {
+    let objects = match source.object_id {
+        Some(oid) => repo::object::batch_fetch_by_ids(conn, &[oid])?,
+        None => HashMap::new(),
+    };
+    Ok(ExcludeItemData::from_source(source, &objects))
+}
+
+/// Complete an all-succeeded exclusion decision: write the receipt (if any),
+/// complete the DB record, and return any accumulated warnings. Consumes the
+/// recorder; `receipt` is `None` when there is nothing to write. A thin
+/// exclusion-policy wrapper over `DecisionRecorder::complete_with_receipt`.
+fn finish_decision<T: Serialize>(
+    conn: &Connection,
+    recorder: Option<DecisionRecorder>,
+    receipt: Option<&T>,
+    counts: DecisionCounts,
+    summary: &str,
+) -> Vec<String> {
+    let Some(mut recorder) = recorder else {
+        return Vec::new();
+    };
+    recorder.complete_with_receipt(conn, DecisionStatus::Completed, counts, summary, receipt);
+    recorder.take_warnings()
+}
+
+// ============================================================================
 // Execute functions
 // ============================================================================
 
@@ -600,39 +712,46 @@ pub fn plan_set_objects(
 pub struct ExcludeSetResult {
     pub count: usize,
     pub summary: String,
+    pub warnings: Vec<String>,
 }
 
-/// Execute an exclude-set plan — marks sources as excluded.
+/// Execute an exclude-set plan — marks sources as excluded, records the
+/// decision_id on each, and writes a receipt.
 pub fn execute_set(
     conn: &Connection,
     plan: &ExcludeSetPlan,
+    placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSetResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d, placement));
+    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
 
     let source_ids = plan.source_ids();
-    for &source_id in &source_ids {
-        repo::source::set_excluded(conn, source_id, true, None)?;
-    }
+    repo::source::batch_set_excluded(conn, &source_ids, true, decision_id)?;
     let count = source_ids.len();
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Excluded {} {noun}", format_count(count));
 
-    if let Some(recorder) = recorder.as_mut() {
-        recorder.complete(
-            conn,
-            DecisionStatus::Completed,
-            DecisionCounts {
-                attempted: Some(count as i64),
-                completed: Some(count as i64),
-                failed: None,
-                skipped: None,
-            },
-            &summary,
-        );
-    }
+    let receipt = match (decision, decision_id) {
+        (Some(d), Some(did)) if !plan.items.is_empty() => Some(ExcludeReceipt {
+            meta: d.receipt_meta(did, &summary, None),
+            items: exclude_receipt_items(&plan.items),
+        }),
+        _ => None,
+    };
+    let warnings = finish_decision(
+        conn,
+        recorder,
+        receipt.as_ref(),
+        counts_all(count),
+        &summary,
+    );
 
-    Ok(ExcludeSetResult { count, summary })
+    Ok(ExcludeSetResult {
+        count,
+        summary,
+        warnings,
+    })
 }
 
 /// Result of an exclude-clear execution.
@@ -640,39 +759,46 @@ pub fn execute_set(
 pub struct ExcludeClearResult {
     pub count: usize,
     pub summary: String,
+    pub warnings: Vec<String>,
 }
 
-/// Execute an exclude-clear plan — clears source-level exclusion.
+/// Execute an exclude-clear plan — clears source-level exclusion, records the
+/// decision_id on each, and writes a receipt.
 pub fn execute_clear(
     conn: &Connection,
     plan: &ExcludeClearPlan,
+    placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeClearResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d, placement));
+    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
 
     let source_ids = plan.source_ids();
-    for &source_id in &source_ids {
-        repo::source::set_excluded(conn, source_id, false, None)?;
-    }
+    repo::source::batch_set_excluded(conn, &source_ids, false, decision_id)?;
     let count = source_ids.len();
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Cleared exclusions for {} {noun}", format_count(count));
 
-    if let Some(recorder) = recorder.as_mut() {
-        recorder.complete(
-            conn,
-            DecisionStatus::Completed,
-            DecisionCounts {
-                attempted: Some(count as i64),
-                completed: Some(count as i64),
-                failed: None,
-                skipped: None,
-            },
-            &summary,
-        );
-    }
+    let receipt = match (decision, decision_id) {
+        (Some(d), Some(did)) if !plan.items.is_empty() => Some(ExcludeReceipt {
+            meta: d.receipt_meta(did, &summary, None),
+            items: exclude_receipt_items(&plan.items),
+        }),
+        _ => None,
+    };
+    let warnings = finish_decision(
+        conn,
+        recorder,
+        receipt.as_ref(),
+        counts_all(count),
+        &summary,
+    );
 
-    Ok(ExcludeClearResult { count, summary })
+    Ok(ExcludeClearResult {
+        count,
+        summary,
+        warnings,
+    })
 }
 
 /// Result of a duplicate exclusion execution.
@@ -680,39 +806,46 @@ pub fn execute_clear(
 pub struct ExcludeDuplicatesResult {
     pub count: usize,
     pub summary: String,
+    pub warnings: Vec<String>,
 }
 
-/// Execute a duplicate exclusion plan — marks sources as excluded.
+/// Execute a duplicate exclusion plan — marks the excluded copies, records the
+/// decision_id on each, and writes a grouped receipt.
 pub fn execute_duplicates(
     conn: &Connection,
     plan: &ExcludeDuplicatesPlan,
+    placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeDuplicatesResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d, placement));
+    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
 
     let source_ids = plan.source_ids();
-    for &source_id in &source_ids {
-        repo::source::set_excluded(conn, source_id, true, None)?;
-    }
+    repo::source::batch_set_excluded(conn, &source_ids, true, decision_id)?;
     let count = source_ids.len();
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Excluded {} {noun}", format_count(count));
 
-    if let Some(recorder) = recorder.as_mut() {
-        recorder.complete(
-            conn,
-            DecisionStatus::Completed,
-            DecisionCounts {
-                attempted: Some(count as i64),
-                completed: Some(count as i64),
-                failed: None,
-                skipped: None,
-            },
-            &summary,
-        );
-    }
+    let receipt = match (decision, decision_id) {
+        (Some(d), Some(did)) if !plan.groups.is_empty() => Some(DuplicatesReceipt {
+            meta: d.receipt_meta(did, &summary, None),
+            groups: duplicate_receipt_groups(&plan.groups),
+        }),
+        _ => None,
+    };
+    let warnings = finish_decision(
+        conn,
+        recorder,
+        receipt.as_ref(),
+        counts_all(count),
+        &summary,
+    );
 
-    Ok(ExcludeDuplicatesResult { count, summary })
+    Ok(ExcludeDuplicatesResult {
+        count,
+        summary,
+        warnings,
+    })
 }
 
 /// Result of an object exclusion execution.
@@ -722,18 +855,23 @@ pub struct ExcludeSetObjectsResult {
     pub total_source_count: usize,
     pub total_archive_count: usize,
     pub summary: String,
+    pub warnings: Vec<String>,
 }
 
-/// Execute an object exclusion plan — marks objects as excluded.
+/// Execute an object exclusion plan — marks objects as excluded, records the
+/// decision_id on every source sharing each object, and writes a receipt.
 pub fn execute_set_objects(
     conn: &Connection,
     plan: &ExcludeSetObjectsPlan,
+    placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSetObjectsResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d, placement));
+    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
 
     for entry in &plan.objects {
         repo::object::set_excluded(conn, entry.object_id, true)?;
+        repo::source::set_decision_id_by_object(conn, entry.object_id, decision_id)?;
     }
     let count = plan.objects.len();
     let total_in_source_roots = plan.total_source_count - plan.total_archive_count;
@@ -741,25 +879,35 @@ pub fn execute_set_objects(
         "Excluded {} objects affecting {} sources ({} in source roots, {} in archives)",
         count, plan.total_source_count, total_in_source_roots, plan.total_archive_count
     );
-    if let Some(recorder) = recorder.as_mut() {
-        recorder.complete(
-            conn,
-            DecisionStatus::Completed,
-            DecisionCounts {
-                attempted: Some(count as i64),
-                completed: Some(count as i64),
-                failed: None,
-                skipped: None,
-            },
-            &summary,
-        );
-    }
+
+    let receipt = match (decision, decision_id) {
+        (Some(d), Some(did)) if !plan.objects.is_empty() => Some(ObjectExcludeReceipt {
+            meta: d.receipt_meta(did, &summary, None),
+            objects: plan
+                .objects
+                .iter()
+                .map(|o| ObjectExcludeEntry {
+                    hash: o.hash.clone(),
+                    sources: o.sources.iter().map(object_source_receipt_entry).collect(),
+                })
+                .collect(),
+        }),
+        _ => None,
+    };
+    let warnings = finish_decision(
+        conn,
+        recorder,
+        receipt.as_ref(),
+        counts_all(count),
+        &summary,
+    );
 
     Ok(ExcludeSetObjectsResult {
         count,
         total_source_count: plan.total_source_count,
         total_archive_count: plan.total_archive_count,
         summary,
+        warnings,
     })
 }
 
@@ -770,8 +918,8 @@ pub fn execute_set_objects(
 /// Outcome of validating a single source for exclusion.
 #[derive(Debug)]
 pub enum SourceExclusionCheck {
-    /// Source found and eligible for exclusion.
-    Ready { source_id: i64, path: String },
+    /// Source found and eligible for exclusion. Carries the receipt-capable item.
+    Ready { item: ExcludeItemData },
     /// Source is already excluded (at source or object level).
     AlreadyExcluded { path: String },
 }
@@ -783,6 +931,8 @@ pub enum ObjectExclusionCheck {
     Ready {
         object_id: i64,
         hash_prefix: String,
+        /// Full content hash formatted as `sha256:{value}` (for the receipt).
+        hash: String,
         sources: Vec<ObjectSourceInfo>,
     },
     /// Object is already excluded.
@@ -793,7 +943,13 @@ pub enum ObjectExclusionCheck {
 #[derive(Debug)]
 pub enum ObjectClearCheck {
     /// Object found and currently excluded — eligible for clearing.
-    Ready { object_id: i64, hash_prefix: String },
+    Ready {
+        object_id: i64,
+        hash_prefix: String,
+        /// Full content hash formatted as `sha256:{value}` (for the receipt).
+        hash: String,
+        sources: Vec<ObjectSourceInfo>,
+    },
     /// Object is not excluded.
     NotExcluded { hash_prefix: String },
 }
@@ -814,12 +970,14 @@ pub fn check_set_source_by_id(conn: &Connection, source_id: i64) -> Result<Sourc
         anyhow::bail!("Source with id {source_id} not found or not present");
     };
 
-    let path = source.path();
     if source.is_excluded() {
-        return Ok(SourceExclusionCheck::AlreadyExcluded { path });
+        return Ok(SourceExclusionCheck::AlreadyExcluded {
+            path: source.path(),
+        });
     }
 
-    Ok(SourceExclusionCheck::Ready { source_id, path })
+    let item = item_for_source(conn, source)?;
+    Ok(SourceExclusionCheck::Ready { item })
 }
 
 /// Validate that a source can be excluded by its root and relative path.
@@ -836,15 +994,14 @@ pub fn check_set_source_by_path(
         anyhow::bail!("No source found for path: {display_path}");
     };
 
-    let path = source.path();
     if source.is_excluded() {
-        return Ok(SourceExclusionCheck::AlreadyExcluded { path });
+        return Ok(SourceExclusionCheck::AlreadyExcluded {
+            path: source.path(),
+        });
     }
 
-    Ok(SourceExclusionCheck::Ready {
-        source_id: source.id,
-        path,
-    })
+    let item = item_for_source(conn, &source)?;
+    Ok(SourceExclusionCheck::Ready { item })
 }
 
 /// Result of excluding a single source.
@@ -853,39 +1010,39 @@ pub struct ExcludeSourceResult {
     pub source_id: i64,
     pub path: String,
     pub summary: String,
+    pub warnings: Vec<String>,
 }
 
-/// Exclude a single source by ID, composing a summary and recording the decision.
+/// Exclude a single source, recording the decision_id and writing a one-item receipt.
+///
+/// `item` comes from the preceding check (`check_set_source_by_id`/`by_path`).
 pub fn execute_set_source(
     conn: &Connection,
-    source_id: i64,
-    path: &str,
+    item: &ExcludeItemData,
+    placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSourceResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d, placement));
+    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
 
-    repo::source::set_excluded(conn, source_id, true, None)?;
-
+    repo::source::set_excluded(conn, item.source_id, true, decision_id)?;
+    let path = item.path();
     let summary = format!("Excluded: {path}");
 
-    if let Some(recorder) = recorder.as_mut() {
-        recorder.complete(
-            conn,
-            DecisionStatus::Completed,
-            DecisionCounts {
-                attempted: Some(1),
-                completed: Some(1),
-                failed: None,
-                skipped: None,
-            },
-            &summary,
-        );
-    }
+    let receipt = match (decision, decision_id) {
+        (Some(d), Some(did)) => Some(ExcludeReceipt {
+            meta: d.receipt_meta(did, &summary, None),
+            items: exclude_receipt_items(std::slice::from_ref(item)),
+        }),
+        _ => None,
+    };
+    let warnings = finish_decision(conn, recorder, receipt.as_ref(), counts_all(1), &summary);
 
     Ok(ExcludeSourceResult {
-        source_id,
-        path: path.to_string(),
+        source_id: item.source_id,
+        path,
         summary,
+        warnings,
     })
 }
 
@@ -907,6 +1064,7 @@ pub fn check_set_object_by_hash(conn: &Connection, hash: &str) -> Result<ObjectE
     Ok(ObjectExclusionCheck::Ready {
         object_id: object.id,
         hash_prefix,
+        hash: format!("{}:{}", object.hash_type, object.hash_value),
         sources,
     })
 }
@@ -959,6 +1117,7 @@ pub fn check_set_object_by_file(
     Ok(ObjectExclusionCheck::Ready {
         object_id,
         hash_prefix,
+        hash: format!("{}:{}", object.hash_type, object.hash_value),
         sources,
     })
 }
@@ -971,44 +1130,43 @@ pub struct ExcludeObjectResult {
     pub hash_prefix: String,
     pub source_count: usize,
     pub summary: String,
+    pub warnings: Vec<String>,
 }
 
-/// Exclude a single object by ID, returning a result with summary.
+/// Exclude a single object, recording the decision_id on every source sharing
+/// it and writing a one-object receipt.
 ///
-/// The `hash_prefix` and `sources` come from the preceding check
+/// The `hash_prefix`/`hash`/`sources` come from the preceding check
 /// (`check_set_object_by_hash` or `check_set_object_by_file`).
 pub fn execute_set_object(
     conn: &Connection,
     object_id: i64,
     hash_prefix: &str,
+    hash: &str,
     sources: &[ObjectSourceInfo],
+    placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeObjectResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d, placement));
+    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
 
     repo::object::set_excluded(conn, object_id, true)?;
+    repo::source::set_decision_id_by_object(conn, object_id, decision_id)?;
 
     let summary = format!("Excluded object: {hash_prefix}...");
 
-    if let Some(recorder) = recorder.as_mut() {
-        recorder.complete(
-            conn,
-            DecisionStatus::Completed,
-            DecisionCounts {
-                attempted: Some(1),
-                completed: Some(1),
-                failed: None,
-                skipped: None,
-            },
-            &summary,
-        );
-    }
+    let receipt = match (decision, decision_id) {
+        (Some(d), Some(did)) => Some(object_exclude_receipt(d, did, hash, sources, &summary)),
+        _ => None,
+    };
+    let warnings = finish_decision(conn, recorder, receipt.as_ref(), counts_all(1), &summary);
 
     Ok(ExcludeObjectResult {
         object_id,
         hash_prefix: hash_prefix.to_string(),
         source_count: sources.len(),
         summary,
+        warnings,
     })
 }
 
@@ -1026,9 +1184,12 @@ pub fn check_clear_object(conn: &Connection, hash: &str) -> Result<ObjectClearCh
         return Ok(ObjectClearCheck::NotExcluded { hash_prefix });
     }
 
+    let sources = fetch_object_sources(conn, object.id)?;
     Ok(ObjectClearCheck::Ready {
         object_id: object.id,
         hash_prefix,
+        hash: format!("{}:{}", object.hash_type, object.hash_value),
+        sources,
     })
 }
 
@@ -1039,41 +1200,42 @@ pub struct ClearObjectResult {
     pub object_id: i64,
     pub hash_prefix: String,
     pub summary: String,
+    pub warnings: Vec<String>,
 }
 
-/// Clear exclusion from a single object by ID, returning a result with summary.
+/// Clear exclusion from a single object, recording the decision_id on every
+/// source sharing it and writing a one-object receipt.
 ///
-/// The `hash_prefix` comes from the preceding check (`check_clear_object`).
+/// The `hash_prefix`/`hash`/`sources` come from the preceding check
+/// (`check_clear_object`).
 pub fn execute_clear_object(
     conn: &Connection,
     object_id: i64,
     hash_prefix: &str,
+    hash: &str,
+    sources: &[ObjectSourceInfo],
+    placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ClearObjectResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
+    let recorder = decision.map(|d| DecisionRecorder::start(conn, d, placement));
+    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
 
     repo::object::set_excluded(conn, object_id, false)?;
+    repo::source::set_decision_id_by_object(conn, object_id, decision_id)?;
 
     let summary = format!("Cleared exclusion from object: {hash_prefix}...");
 
-    if let Some(recorder) = recorder.as_mut() {
-        recorder.complete(
-            conn,
-            DecisionStatus::Completed,
-            DecisionCounts {
-                attempted: Some(1),
-                completed: Some(1),
-                failed: None,
-                skipped: None,
-            },
-            &summary,
-        );
-    }
+    let receipt = match (decision, decision_id) {
+        (Some(d), Some(did)) => Some(object_exclude_receipt(d, did, hash, sources, &summary)),
+        _ => None,
+    };
+    let warnings = finish_decision(conn, recorder, receipt.as_ref(), counts_all(1), &summary);
 
     Ok(ClearObjectResult {
         object_id,
         hash_prefix: hash_prefix.to_string(),
         summary,
+        warnings,
     })
 }
 
@@ -1491,7 +1653,7 @@ mod tests {
             not_archived_count: 2,
         };
 
-        execute_set(&conn, &plan, None).unwrap();
+        execute_set(&conn, &plan, None, None).unwrap();
 
         assert!(is_source_excluded(&conn, id1));
         assert!(is_source_excluded(&conn, id2));
@@ -1509,7 +1671,7 @@ mod tests {
             root_count: 1,
         };
 
-        execute_clear(&conn, &plan, None).unwrap();
+        execute_clear(&conn, &plan, None, None).unwrap();
 
         assert!(!is_source_excluded(&conn, id1));
         assert!(!is_source_excluded(&conn, id2));
@@ -1527,7 +1689,7 @@ mod tests {
             not_archived_count: 1,
         };
 
-        let result = execute_set(&conn, &plan, None).unwrap();
+        let result = execute_set(&conn, &plan, None, None).unwrap();
         assert_eq!(result.count, 1);
     }
 
@@ -1543,7 +1705,7 @@ mod tests {
             root_count: 1,
         };
 
-        let result = execute_clear(&conn, &plan, None).unwrap();
+        let result = execute_clear(&conn, &plan, None, None).unwrap();
         assert_eq!(result.count, 2);
     }
 
@@ -1823,7 +1985,7 @@ mod tests {
             skipped_multiple: 0,
         };
 
-        execute_duplicates(&conn, &plan, None).unwrap();
+        execute_duplicates(&conn, &plan, None, None).unwrap();
 
         assert!(is_source_excluded(&conn, id1));
         assert!(is_source_excluded(&conn, id2));
@@ -1850,7 +2012,7 @@ mod tests {
             skipped_multiple: 0,
         };
 
-        let result = execute_duplicates(&conn, &plan, None).unwrap();
+        let result = execute_duplicates(&conn, &plan, None, None).unwrap();
         assert_eq!(result.count, 1);
     }
 
@@ -2041,7 +2203,7 @@ mod tests {
             skipped_already_excluded: 0,
         };
 
-        execute_set_objects(&conn, &plan, None).unwrap();
+        execute_set_objects(&conn, &plan, None, None).unwrap();
 
         assert!(is_object_excluded(&conn, obj1));
         assert!(is_object_excluded(&conn, obj2));
@@ -2067,7 +2229,7 @@ mod tests {
             skipped_already_excluded: 0,
         };
 
-        let result = execute_set_objects(&conn, &plan, None).unwrap();
+        let result = execute_set_objects(&conn, &plan, None, None).unwrap();
         assert_eq!(result.count, 1);
     }
 
@@ -2083,9 +2245,9 @@ mod tests {
 
         let result = check_set_source_by_id(&conn, id).unwrap();
         match result {
-            SourceExclusionCheck::Ready { source_id, path } => {
-                assert_eq!(source_id, id);
-                assert_eq!(path, "/photos/photo.jpg");
+            SourceExclusionCheck::Ready { item } => {
+                assert_eq!(item.source_id, id);
+                assert_eq!(item.path(), "/photos/photo.jpg");
             }
             SourceExclusionCheck::AlreadyExcluded { .. } => {
                 panic!("Expected Ready, got AlreadyExcluded");
@@ -2158,9 +2320,9 @@ mod tests {
         let result =
             check_set_source_by_path(&conn, root, "photo.jpg", "/photos/photo.jpg").unwrap();
         match result {
-            SourceExclusionCheck::Ready { source_id, path } => {
-                assert_eq!(source_id, id);
-                assert_eq!(path, "/photos/photo.jpg");
+            SourceExclusionCheck::Ready { item } => {
+                assert_eq!(item.source_id, id);
+                assert_eq!(item.path(), "/photos/photo.jpg");
             }
             SourceExclusionCheck::AlreadyExcluded { .. } => {
                 panic!("Expected Ready, got AlreadyExcluded");
@@ -2217,6 +2379,7 @@ mod tests {
             ObjectExclusionCheck::Ready {
                 object_id,
                 hash_prefix,
+                hash: _,
                 sources,
             } => {
                 assert_eq!(object_id, obj);
@@ -2277,6 +2440,7 @@ mod tests {
             ObjectExclusionCheck::Ready {
                 object_id,
                 hash_prefix,
+                hash: _,
                 sources,
             } => {
                 assert_eq!(object_id, obj);
@@ -2348,6 +2512,8 @@ mod tests {
             ObjectClearCheck::Ready {
                 object_id,
                 hash_prefix,
+                hash: _,
+                sources: _,
             } => {
                 assert_eq!(object_id, obj);
                 assert_eq!(hash_prefix, "clear_ready_hash");
@@ -2519,7 +2685,16 @@ mod tests {
         let _src = insert_source(&conn, root, "a.jpg", Some(obj_id));
 
         let sources = fetch_object_sources(&conn, obj_id).unwrap();
-        let result = execute_set_object(&conn, obj_id, "abcdef1234567890", &sources, None).unwrap();
+        let result = execute_set_object(
+            &conn,
+            obj_id,
+            "abcdef1234567890",
+            "sha256:abcdef1234567890",
+            &sources,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(result.object_id, obj_id);
         assert_eq!(result.summary, "Excluded object: abcdef1234567890...");
@@ -2535,7 +2710,16 @@ mod tests {
         let conn = setup_test_db();
         let obj_id = insert_object(&conn, "deadbeef12345678", false);
 
-        let result = execute_set_object(&conn, obj_id, "deadbeef12345678", &[], None).unwrap();
+        let result = execute_set_object(
+            &conn,
+            obj_id,
+            "deadbeef12345678",
+            "sha256:deadbeef12345678",
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(result.summary.contains("deadbeef12345678"));
     }
@@ -2549,7 +2733,16 @@ mod tests {
         let conn = setup_test_db();
         let obj_id = insert_object(&conn, "abcdef1234567890", true); // already excluded
 
-        let result = execute_clear_object(&conn, obj_id, "abcdef1234567890", None).unwrap();
+        let result = execute_clear_object(
+            &conn,
+            obj_id,
+            "abcdef1234567890",
+            "sha256:abcdef1234567890",
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(result.object_id, obj_id);
         assert_eq!(
@@ -2560,5 +2753,191 @@ mod tests {
         // Verify no longer excluded in DB
         let objects = crate::repo::object::batch_fetch_by_ids(&conn, &[obj_id]).unwrap();
         assert!(!objects.get(&obj_id).unwrap().is_excluded());
+    }
+
+    // =========================================================================
+    // Phase 3: receipt writing + decision_id linkage at the ledger root
+    // =========================================================================
+
+    use crate::domain::config::LedgerConfig;
+    use crate::domain::decision::DecisionCommand;
+    use tempfile::{tempdir, TempDir};
+
+    /// A recording-enabled decision (DB record + receipt file).
+    fn full_decision(command: DecisionCommand) -> DecisionParams {
+        DecisionParams {
+            command,
+            scope: None,
+            command_line: "canon test".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: true,
+            ledger_config: LedgerConfig::default(),
+        }
+    }
+
+    /// Create an active archive root rooted at a temp dir, returning its id, the
+    /// dir handle (kept alive), and a `LedgerRoot` placement pointing at it.
+    fn ledger_root(conn: &Connection) -> (i64, TempDir, ReceiptPlacement) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+        let root_id = insert_root(conn, &path, "archive", false);
+        let placement = ReceiptPlacement::LedgerRoot {
+            root_id,
+            root_path: path,
+        };
+        (root_id, dir, placement)
+    }
+
+    fn fetch_source_decision_id(conn: &Connection, source_id: i64) -> Option<i64> {
+        conn.query_row(
+            "SELECT decision_id FROM sources WHERE id = ?",
+            [source_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_execute_set_writes_receipt_and_links_decision() {
+        let mut conn = setup_test_db();
+        let (_archive, dir, placement) = ledger_root(&conn);
+        let src_root = insert_root(&conn, "/source", "source", false);
+        let obj = insert_object(&conn, "rcpt_hash_val", false);
+        let id = insert_source(&conn, src_root, "junk/a.tmp", Some(obj));
+
+        let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
+        let decision = full_decision(DecisionCommand::ExcludeSet);
+        let result = execute_set(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+
+        assert!(
+            result.warnings.is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+        // Decision linked on the excluded source.
+        assert_eq!(fetch_source_decision_id(&conn, id), Some(1));
+
+        // Receipt landed flat at the ledger root with matching content.
+        let receipt = dir.path().join(".canon-ledger/000001-exclude_set.toml");
+        let content = std::fs::read_to_string(&receipt).unwrap();
+        assert!(content.contains("[[items]]"));
+        assert!(content.contains("rel_path = \"junk/a.tmp\""));
+        assert!(content.contains("hash = \"sha256:rcpt_hash_val\""));
+        assert!(content.contains("command = \"exclude_set\""));
+    }
+
+    #[test]
+    fn test_execute_set_no_placement_records_decision_without_receipt() {
+        let mut conn = setup_test_db();
+        let src_root = insert_root(&conn, "/source", "source", false);
+        let id = insert_source(&conn, src_root, "a.jpg", None);
+
+        let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
+        let decision = full_decision(DecisionCommand::ExcludeSet);
+        // No archive root → placement None → no receipt, but decision still recorded.
+        let result = execute_set(&conn, &plan, None, Some(&decision)).unwrap();
+
+        assert!(result.warnings.is_empty());
+        assert!(is_source_excluded(&conn, id));
+        assert_eq!(fetch_source_decision_id(&conn, id), Some(1));
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "decision recorded even without a receipt");
+    }
+
+    #[test]
+    fn test_execute_set_receipt_failure_surfaces_warning() {
+        let mut conn = setup_test_db();
+        let src_root = insert_root(&conn, "/source", "source", false);
+        let id = insert_source(&conn, src_root, "a.jpg", None);
+
+        // A file where the ledger directory needs to be → dir creation fails.
+        let dir = tempdir().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+        let placement = ReceiptPlacement::LedgerRoot {
+            root_id: src_root,
+            root_path: blocker.to_str().unwrap().to_string(),
+        };
+
+        let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
+        let decision = full_decision(DecisionCommand::ExcludeSet);
+        let result = execute_set(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+
+        // Exclusion still happens; the receipt failure is surfaced, not silent.
+        assert!(is_source_excluded(&conn, id));
+        assert!(!result.warnings.is_empty());
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.to_lowercase().contains("receipt")));
+    }
+
+    #[test]
+    fn test_execute_duplicates_writes_grouped_receipt() {
+        let mut conn = setup_test_db();
+        let (archive, dir, placement) = ledger_root(&conn);
+        let src_root = insert_root(&conn, "/source", "source", false);
+        let obj = insert_object(&conn, "dup_rcpt_hash", false);
+        let excluded_id = insert_source(&conn, src_root, "photo.jpg", Some(obj));
+        insert_source(&conn, archive, "kept.jpg", Some(obj));
+
+        let prefer = dir.path().to_str().unwrap().to_string();
+        let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], &prefer)).unwrap();
+        let decision = full_decision(DecisionCommand::ExcludeDuplicates);
+        let result = execute_duplicates(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+
+        assert!(
+            result.warnings.is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+        assert!(is_source_excluded(&conn, excluded_id));
+
+        let receipt = dir
+            .path()
+            .join(".canon-ledger/000001-exclude_duplicates.toml");
+        let content = std::fs::read_to_string(&receipt).unwrap();
+        assert!(content.contains("[[groups]]"));
+        assert!(content.contains("hash = \"sha256:dup_rcpt_hash\""));
+        assert!(content.contains("[[groups.kept]]"));
+        assert!(content.contains("[[groups.excluded]]"));
+        assert!(content.contains("rel_path = \"photo.jpg\""));
+        assert!(content.contains("rel_path = \"kept.jpg\""));
+    }
+
+    #[test]
+    fn test_execute_set_objects_writes_object_receipt_and_links_all_sources() {
+        let mut conn = setup_test_db();
+        let (_archive, dir, placement) = ledger_root(&conn);
+        let src_root = insert_root(&conn, "/source", "source", false);
+        let obj = insert_object(&conn, "obj_rcpt_hash", false);
+        let a = insert_source(&conn, src_root, "copy1.bin", Some(obj));
+        let b = insert_source(&conn, src_root, "copy2.bin", Some(obj));
+
+        let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+        let decision = full_decision(DecisionCommand::ExcludeSetObject);
+        let result = execute_set_objects(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+
+        assert!(
+            result.warnings.is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+        // decision_id stamped on every source sharing the object.
+        assert_eq!(fetch_source_decision_id(&conn, a), Some(1));
+        assert_eq!(fetch_source_decision_id(&conn, b), Some(1));
+
+        let receipt = dir
+            .path()
+            .join(".canon-ledger/000001-exclude_set_object.toml");
+        let content = std::fs::read_to_string(&receipt).unwrap();
+        assert!(content.contains("[[objects]]"));
+        assert!(content.contains("hash = \"sha256:obj_rcpt_hash\""));
+        assert!(content.contains("[[objects.sources]]"));
+        assert!(content.contains("rel_path = \"copy1.bin\""));
+        assert!(content.contains("rel_path = \"copy2.bin\""));
     }
 }

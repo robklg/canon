@@ -257,7 +257,7 @@ All 1057. Receipt work is additive; the only migrations are `ReceiptContext` →
 ## Implementation Checklist
 - [x] Phase 1: `ReceiptPlacement` + `resolve_ledger_root` + recorder branch; apply → `Targeted`; apply warnings surfaced
 - [x] Phase 2: repo `decision_id` threading; `ExcludeItemData` + plan enrichment + duplicates groups + accessors
-- [ ] Phase 3: three receipt types; wire all exclusion entry points (decision_id + receipt + warnings); `src/exclude.rs` placement + warning printing
+- [x] Phase 3: three receipt types; wire all exclusion entry points (decision_id + receipt + warnings); `src/exclude.rs` placement + warning printing
 - [ ] Phase 4: chain/decision_id tests; `CLAUDE.md`; `docs/`
 - [ ] Verify all existing tests pass
 - [ ] Delete this story's design seed (already removed at spec creation)

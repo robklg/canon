@@ -17,7 +17,8 @@ use crate::ops::exclude::{
     ExcludeDuplicatesParams, ExcludeSetObjectsParams, ExcludeSetParams, ObjectClearCheck,
     ObjectExclusionCheck, ObjectSourceInfo, SourceExclusionCheck,
 };
-use crate::repo::{self, Db};
+use crate::ops::receipt::{resolve_ledger_root, ReceiptPlacement};
+use crate::repo::{self, Connection, Db};
 
 fn make_decision(
     command: DecisionCommand,
@@ -38,6 +39,29 @@ fn make_decision(
         record_enabled: config.recording != RecordingMode::Off && !dry_run,
         receipt_enabled: config.recording == RecordingMode::Full && !no_receipt && !dry_run,
         ledger_config: config.clone(),
+    }
+}
+
+/// Resolve where exclusion receipts land (flat at the ledger root). Warns when a
+/// receipt was expected but no archive root is configured to hold it.
+fn resolve_placement(
+    conn: &Connection,
+    config: &LedgerConfig,
+    decision: &DecisionParams,
+) -> Result<Option<ReceiptPlacement>> {
+    let roots = repo::root::fetch_all(conn)?;
+    let placement = resolve_ledger_root(&roots, config)
+        .map(|(root_id, root_path)| ReceiptPlacement::LedgerRoot { root_id, root_path });
+    if decision.receipt_enabled && placement.is_none() {
+        eprintln!("Warning: No archive root configured — decision details not preserved");
+    }
+    Ok(placement)
+}
+
+/// Print receipt-write warnings (one per line) to stderr.
+fn print_warnings(warnings: &[String]) {
+    for w in warnings {
+        eprintln!("{w}");
     }
 }
 
@@ -116,8 +140,10 @@ pub fn set(
         reason,
         options.dry_run,
     );
-    let result = execute_set(conn, &plan, Some(&decision))?;
+    let placement = resolve_placement(conn, config, &decision)?;
+    let result = execute_set(conn, &plan, placement.as_ref(), Some(&decision))?;
     println!("{}", result.summary);
+    print_warnings(&result.warnings);
     Ok(())
 }
 
@@ -186,8 +212,10 @@ pub fn clear(
         reason,
         options.dry_run,
     );
-    let result = execute_clear(conn, &plan, Some(&decision))?;
+    let placement = resolve_placement(conn, config, &decision)?;
+    let result = execute_clear(conn, &plan, placement.as_ref(), Some(&decision))?;
     println!("{}", result.summary);
+    print_warnings(&result.warnings);
     Ok(())
 }
 
@@ -207,22 +235,24 @@ pub fn set_by_id(
         SourceExclusionCheck::AlreadyExcluded { path } => {
             println!("Source already excluded: {path}");
         }
-        SourceExclusionCheck::Ready { source_id, path } => {
+        SourceExclusionCheck::Ready { item } => {
             if options.dry_run {
-                println!("Would exclude source (id: {source_id}):");
-                println!("  {path}");
+                println!("Would exclude source (id: {}):", item.source_id);
+                println!("  {}", item.path());
             } else {
                 let decision = make_decision(
                     DecisionCommand::ExcludeSet,
-                    Some(vec![path.clone()]),
+                    Some(vec![item.path()]),
                     command_line,
                     config,
                     no_receipt,
                     reason,
                     options.dry_run,
                 );
-                let result = execute_set_source(conn, source_id, &path, Some(&decision))?;
+                let placement = resolve_placement(conn, config, &decision)?;
+                let result = execute_set_source(conn, &item, placement.as_ref(), Some(&decision))?;
                 println!("{}", result.summary);
+                print_warnings(&result.warnings);
             }
         }
     }
@@ -257,22 +287,24 @@ pub fn set_by_path(
         SourceExclusionCheck::AlreadyExcluded { path } => {
             println!("Source already excluded: {path}");
         }
-        SourceExclusionCheck::Ready { source_id, path } => {
+        SourceExclusionCheck::Ready { item } => {
             if options.dry_run {
                 println!("Would exclude:");
-                println!("  {path}");
+                println!("  {}", item.path());
             } else {
                 let decision = make_decision(
                     DecisionCommand::ExcludeSet,
-                    Some(vec![path.clone()]),
+                    Some(vec![item.path()]),
                     command_line,
                     config,
                     no_receipt,
                     reason,
                     options.dry_run,
                 );
-                let result = execute_set_source(conn, source_id, &path, Some(&decision))?;
+                let placement = resolve_placement(conn, config, &decision)?;
+                let result = execute_set_source(conn, &item, placement.as_ref(), Some(&decision))?;
                 println!("{}", result.summary);
+                print_warnings(&result.warnings);
             }
         }
     }
@@ -409,8 +441,10 @@ pub fn exclude_duplicates(
         reason,
         dry_run,
     );
-    let result = execute_duplicates(conn, &plan, Some(&decision))?;
+    let placement = resolve_placement(conn, config, &decision)?;
+    let result = execute_duplicates(conn, &plan, placement.as_ref(), Some(&decision))?;
     println!("{}", result.summary);
+    print_warnings(&result.warnings);
     println!();
     println!("Use `canon ls --duplicates` to see remaining duplicates.");
 
@@ -441,6 +475,7 @@ pub fn set_object_by_hash(
         ObjectExclusionCheck::Ready {
             object_id,
             hash_prefix,
+            hash,
             sources,
         } => {
             if options.dry_run {
@@ -457,10 +492,19 @@ pub fn set_object_by_hash(
                     reason,
                     options.dry_run,
                 );
-                let result =
-                    execute_set_object(conn, object_id, &hash_prefix, &sources, Some(&decision))?;
+                let placement = resolve_placement(conn, config, &decision)?;
+                let result = execute_set_object(
+                    conn,
+                    object_id,
+                    &hash_prefix,
+                    &hash,
+                    &sources,
+                    placement.as_ref(),
+                    Some(&decision),
+                )?;
                 println!("{}", result.summary);
                 print_source_locations(&sources, options.verbose);
+                print_warnings(&result.warnings);
             }
         }
     }
@@ -501,6 +545,7 @@ pub fn set_object_by_file(
         ObjectExclusionCheck::Ready {
             object_id,
             hash_prefix,
+            hash,
             sources,
         } => {
             if options.dry_run {
@@ -517,10 +562,19 @@ pub fn set_object_by_file(
                     reason,
                     options.dry_run,
                 );
-                let result =
-                    execute_set_object(conn, object_id, &hash_prefix, &sources, Some(&decision))?;
+                let placement = resolve_placement(conn, config, &decision)?;
+                let result = execute_set_object(
+                    conn,
+                    object_id,
+                    &hash_prefix,
+                    &hash,
+                    &sources,
+                    placement.as_ref(),
+                    Some(&decision),
+                )?;
                 println!("{}", result.summary);
                 print_source_locations(&sources, options.verbose);
+                print_warnings(&result.warnings);
             }
         }
     }
@@ -622,8 +676,10 @@ pub fn set_objects_by_filter(
         reason,
         options.dry_run,
     );
-    let result = execute_set_objects(conn, &plan, Some(&decision))?;
+    let placement = resolve_placement(conn, config, &decision)?;
+    let result = execute_set_objects(conn, &plan, placement.as_ref(), Some(&decision))?;
     println!("{}", result.summary);
+    print_warnings(&result.warnings);
     Ok(())
 }
 
@@ -674,6 +730,8 @@ pub fn clear_object(
         ObjectClearCheck::Ready {
             object_id,
             hash_prefix,
+            hash,
+            sources,
         } => {
             if options.dry_run {
                 println!("Would clear exclusion from object: {hash_prefix}...");
@@ -687,8 +745,18 @@ pub fn clear_object(
                     None,
                     options.dry_run,
                 );
-                let result = execute_clear_object(conn, object_id, &hash_prefix, Some(&decision))?;
+                let placement = resolve_placement(conn, config, &decision)?;
+                let result = execute_clear_object(
+                    conn,
+                    object_id,
+                    &hash_prefix,
+                    &hash,
+                    &sources,
+                    placement.as_ref(),
+                    Some(&decision),
+                )?;
                 println!("{}", result.summary);
+                print_warnings(&result.warnings);
             }
         }
     }

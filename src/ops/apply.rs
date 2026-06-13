@@ -23,9 +23,7 @@ use crate::domain::path::path_strip_prefix;
 use crate::domain::source::NewSource;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
-use crate::ops::receipt::{
-    self as receipt_ops, ApplyReceipt, ApplyReceiptItem, ReceiptMeta, ReceiptPlacement,
-};
+use crate::ops::receipt::{ApplyReceipt, ApplyReceiptItem, ReceiptPlacement};
 use crate::repo::{self, Connection};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -979,37 +977,6 @@ pub fn execute_apply(
         )
     };
 
-    // --- Write receipt (before complete so finalize happens inside complete()) ---
-    if let Some(ref mut recorder) = recorder {
-        if let Some(receipt_path) = recorder.receipt_abs_path().map(|p| p.to_owned()) {
-            if !receipt_items.is_empty() {
-                let timestamp = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                let receipt = ApplyReceipt {
-                    meta: ReceiptMeta {
-                        receipt_version: 1,
-                        decision_id: recorder.decision_id().unwrap_or(0),
-                        command: "apply".to_string(),
-                        timestamp,
-                        scope: decision.and_then(|d| d.scope.clone()),
-                        reason: decision.and_then(|d| d.reason.clone()),
-                        summary: result.summary.clone(),
-                        canon_version: env!("CARGO_PKG_VERSION").to_string(),
-                        command_line: decision.map(|d| d.command_line.clone()).unwrap_or_default(),
-                        manifest: Some(params.manifest_display.clone()),
-                    },
-                    items: receipt_items,
-                };
-                if let Err(e) = receipt_ops::write_receipt(&receipt_path, &receipt, &result.summary)
-                {
-                    recorder.push_warning(format!("Receipt write failed: {e:#}"));
-                }
-            }
-        }
-    }
-
     if let Some(recorder) = recorder.as_mut() {
         let total = plan.transfers.len() as i64;
         let completed = (result.copied + result.renamed + result.moved) as i64;
@@ -1024,7 +991,21 @@ pub fn execute_apply(
         } else {
             DecisionStatus::Completed
         };
-        recorder.complete(
+
+        // Build the receipt only when there's something to record and a decision exists.
+        let receipt = match decision {
+            Some(d) if !receipt_items.is_empty() => Some(ApplyReceipt {
+                meta: d.receipt_meta(
+                    recorder.decision_id().unwrap_or(0),
+                    &result.summary,
+                    Some(params.manifest_display.clone()),
+                ),
+                items: receipt_items,
+            }),
+            _ => None,
+        };
+
+        recorder.complete_with_receipt(
             conn,
             status,
             DecisionCounts {
@@ -1034,6 +1015,7 @@ pub fn execute_apply(
                 skipped: Some(skipped),
             },
             &result.summary,
+            receipt.as_ref(),
         );
         result.warnings = recorder.take_warnings();
     }
