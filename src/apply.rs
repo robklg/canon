@@ -8,7 +8,8 @@ use crate::ceremony;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
 use crate::ops::cluster::{ManifestConfig, parse_manifest_allow, validate_manifest_version};
-use crate::ops::decision::{DecisionParams, ReceiptContext};
+use crate::ops::decision::DecisionParams;
+use crate::ops::receipt::ReceiptPlacement;
 use crate::expr;
 use crate::ops;
 use crate::ops::apply::TransferMode;
@@ -493,7 +494,7 @@ pub fn run(
     };
 
     let receipt_ctx = if decision.receipt_enabled {
-        Some(ReceiptContext {
+        Some(ReceiptPlacement::Targeted {
             archive_root_id: config.output.archive_root_id,
             archive_root_path: archive_root_path.clone(),
             base_dir_rel: config.output.base_dir.clone(),
@@ -537,6 +538,11 @@ pub fn run(
 
     // Summary output
     println!("{}", result.summary);
+
+    // Surface any warnings collected during execution (e.g. receipt-write failures).
+    for w in &result.warnings {
+        eprintln!("{w}");
+    }
 
     if result.interrupted {
         let manifest_display = config_path.display();

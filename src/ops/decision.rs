@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use crate::domain::config::LedgerConfig;
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
-use crate::ops::receipt::{compute_targeted_receipt_rel_path, finalize_receipt, ReceiptRef};
+use crate::ops::receipt::{
+    compute_ledger_root_receipt_rel_path, compute_targeted_receipt_rel_path, finalize_receipt,
+    ReceiptPlacement, ReceiptRef,
+};
 use crate::repo::{self, Connection};
 
 /// Parameters for starting a decision record.
@@ -17,18 +20,6 @@ pub struct DecisionParams {
     pub receipt_enabled: bool,
     /// Ledger config for receipt path computation.
     pub ledger_config: LedgerConfig,
-}
-
-/// Context needed to compute receipt placement for targeted receipts (apply).
-///
-/// Passed to `DecisionRecorder::start()` when the command writes to a specific
-/// archive location. Non-targeted commands (exclusions, scan) pass `None` until
-/// their receipt support is implemented in Story 3+.
-pub struct ReceiptContext {
-    pub archive_root_id: i64,
-    pub archive_root_path: String,
-    /// Relative base directory within the archive root (from manifest config).
-    pub base_dir_rel: String,
 }
 
 /// Outcome counts for a decision record.
@@ -93,7 +84,7 @@ impl DecisionRecorder {
     pub fn start(
         conn: &Connection,
         params: &DecisionParams,
-        receipt_ctx: Option<&ReceiptContext>,
+        placement: Option<&ReceiptPlacement>,
     ) -> Self {
         if !params.record_enabled {
             return DecisionRecorder {
@@ -130,8 +121,8 @@ impl DecisionRecorder {
         // Compute receipt path if receipts are enabled and context is provided.
         let (receipt_ref, receipt_abs_path, warnings) =
             if params.receipt_enabled {
-                if let Some(ctx) = receipt_ctx {
-                    compute_and_register_receipt(conn, id, params, ctx)
+                if let Some(placement) = placement {
+                    compute_and_register_receipt(conn, id, params, placement)
                 } else {
                     (None, None, Vec::new())
                 }
@@ -236,16 +227,30 @@ fn compute_and_register_receipt(
     conn: &Connection,
     decision_id: i64,
     params: &DecisionParams,
-    ctx: &ReceiptContext,
+    placement: &ReceiptPlacement,
 ) -> (Option<ReceiptRef>, Option<PathBuf>, Vec<String>) {
-    let rel_path = compute_targeted_receipt_rel_path(
-        decision_id,
-        params.command.as_str(),
-        &ctx.base_dir_rel,
-        &params.ledger_config.layout,
-    );
+    let (root_id, base_abs, rel_path) = match placement {
+        ReceiptPlacement::Targeted {
+            archive_root_id,
+            archive_root_path,
+            base_dir_rel,
+        } => {
+            let rel_path = compute_targeted_receipt_rel_path(
+                decision_id,
+                params.command.as_str(),
+                base_dir_rel,
+                &params.ledger_config.layout,
+            );
+            (*archive_root_id, archive_root_path.clone(), rel_path)
+        }
+        ReceiptPlacement::LedgerRoot { root_id, root_path } => {
+            let rel_path =
+                compute_ledger_root_receipt_rel_path(decision_id, params.command.as_str());
+            (*root_id, root_path.clone(), rel_path)
+        }
+    };
 
-    let abs_path = PathBuf::from(&ctx.archive_root_path).join(&rel_path);
+    let abs_path = PathBuf::from(&base_abs).join(&rel_path);
 
     // Ensure the directory exists before the first write.
     if let Some(parent) = abs_path.parent() {
@@ -259,12 +264,9 @@ fn compute_and_register_receipt(
     }
 
     // Update the DB record with the receipt location.
-    if let Err(e) = repo::decision::update_receipt_path(
-        conn,
-        decision_id,
-        Some(ctx.archive_root_id),
-        Some(&rel_path),
-    ) {
+    if let Err(e) =
+        repo::decision::update_receipt_path(conn, decision_id, Some(root_id), Some(&rel_path))
+    {
         return (
             None,
             None,
@@ -272,10 +274,7 @@ fn compute_and_register_receipt(
         );
     }
 
-    let receipt_ref = ReceiptRef {
-        root_id: ctx.archive_root_id,
-        rel_path,
-    };
+    let receipt_ref = ReceiptRef { root_id, rel_path };
 
     (Some(receipt_ref), Some(abs_path), Vec::new())
 }
@@ -547,7 +546,7 @@ mod tests {
         let conn = setup_test_db();
         let dir = tempdir().unwrap();
         let params = make_receipt_params();
-        let ctx = ReceiptContext {
+        let ctx = ReceiptPlacement::Targeted {
             archive_root_id: 7,
             archive_root_path: dir.path().to_str().unwrap().to_string(),
             base_dir_rel: "Media/2016/Italy".to_string(),
@@ -570,7 +569,7 @@ mod tests {
         let conn = setup_test_db();
         let dir = tempdir().unwrap();
         let params = make_receipt_params();
-        let ctx = ReceiptContext {
+        let ctx = ReceiptPlacement::Targeted {
             archive_root_id: 7,
             archive_root_path: dir.path().to_str().unwrap().to_string(),
             base_dir_rel: "Media".to_string(),
@@ -598,7 +597,7 @@ mod tests {
             receipt_enabled: false, // disabled
             ledger_config: LedgerConfig::default(),
         };
-        let ctx = ReceiptContext {
+        let ctx = ReceiptPlacement::Targeted {
             archive_root_id: 1,
             archive_root_path: dir.path().to_str().unwrap().to_string(),
             base_dir_rel: "Media".to_string(),
@@ -615,7 +614,7 @@ mod tests {
         let conn = setup_test_db();
         let dir = tempdir().unwrap();
         let params = make_receipt_params();
-        let ctx = ReceiptContext {
+        let ctx = ReceiptPlacement::Targeted {
             archive_root_id: 1,
             archive_root_path: dir.path().to_str().unwrap().to_string(),
             base_dir_rel: String::new(),
@@ -647,7 +646,7 @@ mod tests {
         let conn = setup_test_db();
         let dir = tempdir().unwrap();
         let params = make_receipt_params();
-        let ctx = ReceiptContext {
+        let ctx = ReceiptPlacement::Targeted {
             archive_root_id: 1,
             archive_root_path: dir.path().to_str().unwrap().to_string(),
             base_dir_rel: String::new(),
@@ -721,5 +720,46 @@ mod tests {
         let recorder = DecisionRecorder::start(&conn, &params, None);
         assert!(recorder.decision_id().is_some());
         assert_eq!(count_decisions(&conn), 1);
+    }
+
+    // =========================================================================
+    // Non-targeted (ledger-root) placement
+    // =========================================================================
+
+    #[test]
+    fn test_recorder_ledger_root_placement_flat() {
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = DecisionParams {
+            command: DecisionCommand::ExcludeSet,
+            scope: None,
+            command_line: "canon exclude set".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: true,
+            ledger_config: LedgerConfig::default(),
+        };
+        let placement = ReceiptPlacement::LedgerRoot {
+            root_id: 3,
+            root_path: dir.path().to_str().unwrap().to_string(),
+        };
+
+        let recorder = DecisionRecorder::start(&conn, &params, Some(&placement));
+
+        let rr = recorder.receipt_ref().expect("receipt_ref should be set");
+        assert_eq!(rr.root_id, 3, "receipt root is the ledger root");
+        // Flat at the ledger root — no base_dir subdirectory.
+        assert_eq!(rr.rel_path, ".canon-ledger/000001-exclude_set.toml");
+        assert!(recorder
+            .receipt_abs_path()
+            .unwrap()
+            .ends_with(".canon-ledger/000001-exclude_set.toml"));
+
+        // The DB record points at the same place.
+        let d = repo::decision::fetch_by_id(&conn, recorder.decision_id().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.receipt_root_id, Some(3));
+        assert_eq!(d.receipt_rel_path.as_deref(), Some(".canon-ledger/000001-exclude_set.toml"));
     }
 }

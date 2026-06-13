@@ -9,13 +9,36 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::domain::config::ReceiptLayout;
+use crate::domain::config::{LedgerConfig, ReceiptLayout};
+use crate::domain::root::Root;
 use crate::ops::fs::{finalize_file, write_file_incomplete};
 
 /// Reference to a receipt file on disk, stored in the decision record.
 pub struct ReceiptRef {
     pub root_id: i64,
     pub rel_path: String,
+}
+
+/// Where a receipt file should be written.
+///
+/// `Targeted` is for decisions that write to a specific archive location (apply):
+/// the receipt mirrors the destination path under the archive's `.canon-ledger/`,
+/// per the `layout` setting. `LedgerRoot` is for non-targeted decisions
+/// (exclusions, and future scan/roots-rm): the receipt lands flat in the ledger
+/// root's `.canon-ledger/`, independent of layout.
+pub enum ReceiptPlacement {
+    Targeted {
+        archive_root_id: i64,
+        archive_root_path: String,
+        /// Relative base directory within the archive root (from manifest config).
+        base_dir_rel: String,
+    },
+    /// Constructed by the exclusion path in Phase 3 (`src/exclude.rs`); tests construct it now.
+    #[allow(dead_code)]
+    LedgerRoot {
+        root_id: i64,
+        root_path: String,
+    },
 }
 
 /// Shared meta section for all receipt types.
@@ -97,6 +120,38 @@ pub fn compute_targeted_receipt_rel_path(
             }
         }
     }
+}
+
+/// Compute the receipt rel_path for non-targeted receipts (exclusions, scan).
+///
+/// Flat at the ledger root: `.canon-ledger/{filename}` — no destination
+/// subdirectory, independent of layout.
+pub fn compute_ledger_root_receipt_rel_path(decision_id: i64, command: &str) -> String {
+    format!(".canon-ledger/{}", receipt_filename(decision_id, command))
+}
+
+/// Resolve which archive root holds non-targeted receipts.
+///
+/// Uses `config.root` if it names an active archive root; otherwise the lowest-id
+/// active archive root; otherwise `None` (no archive root — the caller warns and
+/// skips the receipt). Returns `(root_id, root_path)`.
+#[allow(dead_code)] // Wired into src/exclude.rs in Phase 3.
+pub fn resolve_ledger_root(roots: &[Root], config: &LedgerConfig) -> Option<(i64, String)> {
+    if let Some(configured) = config.root {
+        if let Some(r) = roots
+            .iter()
+            .find(|r| r.id == configured && r.is_active() && r.is_archive())
+        {
+            return Some((r.id, r.path.clone()));
+        }
+        // Configured root is invalid (missing, suspended, or not an archive) —
+        // fall through to the default rather than failing.
+    }
+    roots
+        .iter()
+        .filter(|r| r.is_active() && r.is_archive())
+        .min_by_key(|r| r.id)
+        .map(|r| (r.id, r.path.clone()))
 }
 
 // ---------------------------------------------------------------------------
@@ -351,5 +406,77 @@ mod tests {
         let path = std::path::Path::new("/dev/null/receipt.toml");
         let receipt = make_apply_receipt();
         assert!(write_receipt(path, &receipt, "test").is_err());
+    }
+
+    // =========================================================================
+    // Non-targeted (ledger-root) placement
+    // =========================================================================
+
+    fn mk_root(id: i64, role: &str, suspended: bool) -> Root {
+        Root {
+            id,
+            path: format!("/root{id}"),
+            role: role.to_string(),
+            comment: None,
+            last_scanned_at: None,
+            suspended,
+        }
+    }
+
+    #[test]
+    fn test_ledger_root_rel_path_flat() {
+        assert_eq!(
+            compute_ledger_root_receipt_rel_path(42, "exclude_set"),
+            ".canon-ledger/000042-exclude_set.toml"
+        );
+    }
+
+    #[test]
+    fn test_resolve_ledger_root_none_when_no_archive() {
+        let roots = vec![mk_root(1, "source", false)];
+        assert_eq!(resolve_ledger_root(&roots, &LedgerConfig::default()), None);
+    }
+
+    #[test]
+    fn test_resolve_ledger_root_lowest_id_archive_default() {
+        let roots = vec![
+            mk_root(1, "source", false),
+            mk_root(3, "archive", false),
+            mk_root(2, "archive", false),
+        ];
+        assert_eq!(
+            resolve_ledger_root(&roots, &LedgerConfig::default()),
+            Some((2, "/root2".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_resolve_ledger_root_configured_valid() {
+        let roots = vec![mk_root(1, "archive", false), mk_root(5, "archive", false)];
+        let cfg = LedgerConfig { root: Some(5), ..LedgerConfig::default() };
+        assert_eq!(resolve_ledger_root(&roots, &cfg), Some((5, "/root5".to_string())));
+    }
+
+    #[test]
+    fn test_resolve_ledger_root_configured_missing_falls_back() {
+        let roots = vec![mk_root(1, "archive", false), mk_root(2, "archive", false)];
+        let cfg = LedgerConfig { root: Some(9), ..LedgerConfig::default() };
+        assert_eq!(resolve_ledger_root(&roots, &cfg), Some((1, "/root1".to_string())));
+    }
+
+    #[test]
+    fn test_resolve_ledger_root_configured_source_falls_back() {
+        let roots = vec![mk_root(1, "archive", false), mk_root(2, "source", false)];
+        let cfg = LedgerConfig { root: Some(2), ..LedgerConfig::default() };
+        assert_eq!(resolve_ledger_root(&roots, &cfg), Some((1, "/root1".to_string())));
+    }
+
+    #[test]
+    fn test_resolve_ledger_root_skips_suspended() {
+        let roots = vec![mk_root(1, "archive", true), mk_root(2, "archive", false)];
+        assert_eq!(
+            resolve_ledger_root(&roots, &LedgerConfig::default()),
+            Some((2, "/root2".to_string()))
+        );
     }
 }

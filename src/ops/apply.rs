@@ -20,8 +20,10 @@ use crate::domain::fact::FactEntry;
 use crate::domain::path::path_strip_prefix;
 use crate::domain::source::NewSource;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
-use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder, ReceiptContext};
-use crate::ops::receipt::{self as receipt_ops, ApplyReceipt, ApplyReceiptItem, ReceiptMeta};
+use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
+use crate::ops::receipt::{
+    self as receipt_ops, ApplyReceipt, ApplyReceiptItem, ReceiptMeta, ReceiptPlacement,
+};
 use crate::repo::{self, Connection};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -637,8 +639,8 @@ pub struct ApplyExecuteParams {
     pub skipped_by_filter: usize,
     /// Manifest display path (for summary and decision record).
     pub manifest_display: String,
-    /// Receipt context for targeted placement. None if receipts are disabled.
-    pub receipt_ctx: Option<ReceiptContext>,
+    /// Receipt placement for targeted (apply) receipts. None if receipts are disabled.
+    pub receipt_ctx: Option<ReceiptPlacement>,
 }
 
 /// Result of executing an apply operation.
@@ -659,6 +661,9 @@ pub struct ApplyResult {
     pub remaining: usize,
     /// Completion summary message.
     pub summary: String,
+    /// Warnings collected during execution (e.g. receipt-write failures).
+    /// Drained from the decision recorder; the interface surfaces them.
+    pub warnings: Vec<String>,
 }
 
 /// An error encountered during a file transfer.
@@ -782,6 +787,7 @@ pub fn execute_apply(
         interrupted: false,
         remaining: 0,
         summary: String::new(),
+        warnings: Vec::new(),
     };
 
     // --- Source readability pre-check ---
@@ -998,6 +1004,7 @@ pub fn execute_apply(
             },
             &result.summary,
         );
+        result.warnings = recorder.take_warnings();
     }
 
     Ok(result)
@@ -2869,7 +2876,7 @@ mod tests {
             resume_size_mismatches: vec![],
         };
 
-        let receipt_ctx = ReceiptContext {
+        let receipt_ctx = ReceiptPlacement::Targeted {
             archive_root_id: archive_root,
             archive_root_path: archive_dir.path().display().to_string(),
             base_dir_rel: String::new(),
@@ -2905,6 +2912,86 @@ mod tests {
         assert!(receipt_content.contains("source_rel_path = \"photo.jpg\""));
         assert!(receipt_content.contains("destination_rel_path = \"photo.jpg\""));
         assert!(receipt_content.contains("manifest = \"test.toml\""));
+    }
+
+    #[test]
+    fn test_apply_receipt_write_failure_surfaces_warning() {
+        use std::io::Write;
+        let conn = setup_test_db();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(&conn, archive_dir.path().to_str().unwrap(), "archive", false);
+
+        // A regular file standing where the receipt's archive root should be:
+        // create_dir_all under it fails, forcing receipt setup to fail.
+        let blocker = archive_dir.path().join("blocker");
+        std::fs::File::create(&blocker).unwrap().write_all(b"x").unwrap();
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::File::create(&src_file).unwrap().write_all(b"image data").unwrap();
+        let meta = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = { use std::os::unix::fs::MetadataExt; (meta.size() as i64, meta.mtime()) };
+        #[cfg(not(unix))]
+        let (size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&src_file, size as u64).unwrap();
+
+        let plan = ApplyPlan {
+            transfers: vec![ApplyTransfer {
+                source_id: 1,
+                source_path: src_file.display().to_string(),
+                source_root_path: src_dir.path().display().to_string(),
+                source_rel_path: "photo.jpg".to_string(),
+                dest_rel_path: "photo.jpg".to_string(),
+                archive_rel_path: "photo.jpg".to_string(),
+                object_id: None,
+                partial_hash: hash,
+                size,
+                mtime,
+                hash: None,
+            }],
+            violations: ApplyViolations::default(),
+            stale_sources: vec![],
+            already_archived_count: 0,
+            resume_already_there: vec![],
+            resume_already_there_source_present: 0,
+            resume_source_lost: vec![],
+            resume_size_mismatches: vec![],
+        };
+
+        // Placement points at a file, not a directory → receipt setup fails,
+        // but the transfer (which uses base_dir) still succeeds.
+        let receipt_ctx = ReceiptPlacement::Targeted {
+            archive_root_id: archive_root,
+            archive_root_path: blocker.display().to_string(),
+            base_dir_rel: String::new(),
+        };
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: Some(receipt_ctx),
+        };
+
+        let decision = make_decision_params(true);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+
+        // Transfer succeeded, but the receipt failure is surfaced — not swallowed.
+        assert_eq!(result.copied, 1);
+        assert!(
+            !result.warnings.is_empty(),
+            "a receipt setup failure should surface a warning"
+        );
+        assert!(
+            result.warnings.iter().any(|w| w.contains("receipt")),
+            "warning should mention the receipt: {:?}",
+            result.warnings
+        );
     }
 
     #[test]
@@ -3007,7 +3094,7 @@ mod tests {
             resume_size_mismatches: vec![],
         };
 
-        let receipt_ctx = ReceiptContext {
+        let receipt_ctx = ReceiptPlacement::Targeted {
             archive_root_id: archive_root,
             archive_root_path: archive_dir.path().display().to_string(),
             base_dir_rel: String::new(),
@@ -3086,7 +3173,7 @@ mod tests {
             resume_size_mismatches: vec![],
         };
 
-        let receipt_ctx = ReceiptContext {
+        let receipt_ctx = ReceiptPlacement::Targeted {
             archive_root_id: archive_root,
             archive_root_path: archive_dir.path().display().to_string(),
             base_dir_rel: "Media/2024".to_string(),
@@ -3175,7 +3262,7 @@ mod tests {
             resume_size_mismatches: vec![],
         };
 
-        let receipt_ctx = ReceiptContext {
+        let receipt_ctx = ReceiptPlacement::Targeted {
             archive_root_id: archive_root,
             archive_root_path: archive_dir.path().display().to_string(),
             base_dir_rel: String::new(),
@@ -3275,7 +3362,7 @@ mod tests {
             resume_size_mismatches: vec![],
         };
 
-        let receipt_ctx = ReceiptContext {
+        let receipt_ctx = ReceiptPlacement::Targeted {
             archive_root_id: archive_root,
             archive_root_path: archive_dir.path().display().to_string(),
             base_dir_rel: String::new(),
