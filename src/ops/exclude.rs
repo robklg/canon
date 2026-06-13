@@ -434,7 +434,7 @@ pub fn plan_duplicates(
             .get(&oid)
             .map(|o| format!("{}:{}", o.hash_type, o.hash_value))
             .unwrap_or_default();
-        let kept: Vec<ExcludeItemData> = sources_by_object
+        let mut kept: Vec<ExcludeItemData> = sources_by_object
             .get(&oid)
             .map(|ss| {
                 ss.iter()
@@ -443,6 +443,12 @@ pub fn plan_duplicates(
                     .collect()
             })
             .unwrap_or_default();
+        // Deterministic order for a diff-able receipt (DB row order is not stable).
+        kept.sort_by(|a, b| {
+            a.root
+                .cmp(&b.root)
+                .then_with(|| a.rel_path.cmp(&b.rel_path))
+        });
         groups.push(DuplicateGroupData {
             hash,
             kept,
@@ -595,13 +601,15 @@ pub fn plan_set_objects(
 // Receipt helpers
 // ============================================================================
 
-/// Counts for an all-succeeded decision (attempted == completed == n).
+/// Counts for an all-succeeded decision (attempted == completed == n, no
+/// failures or skips). Records `Some(0)` for failed/skipped to match apply's
+/// convention (explicit zero, not NULL).
 fn counts_all(n: usize) -> DecisionCounts {
     DecisionCounts {
         attempted: Some(n as i64),
         completed: Some(n as i64),
-        failed: None,
-        skipped: None,
+        failed: Some(0),
+        skipped: Some(0),
     }
 }
 
@@ -723,7 +731,12 @@ pub fn execute_set(
     placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSetResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d, placement));
+    // Skip recording entirely for an empty plan — no transition, no receipt.
+    let recorder = if plan.items.is_empty() {
+        None
+    } else {
+        decision.map(|d| DecisionRecorder::start(conn, d, placement))
+    };
     let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
 
     let source_ids = plan.source_ids();
@@ -770,7 +783,12 @@ pub fn execute_clear(
     placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeClearResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d, placement));
+    // Skip recording entirely for an empty plan — no transition, no receipt.
+    let recorder = if plan.items.is_empty() {
+        None
+    } else {
+        decision.map(|d| DecisionRecorder::start(conn, d, placement))
+    };
     let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
 
     let source_ids = plan.source_ids();
@@ -817,7 +835,12 @@ pub fn execute_duplicates(
     placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeDuplicatesResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d, placement));
+    // Skip recording entirely for an empty plan — no transition, no receipt.
+    let recorder = if plan.groups.is_empty() {
+        None
+    } else {
+        decision.map(|d| DecisionRecorder::start(conn, d, placement))
+    };
     let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
 
     let source_ids = plan.source_ids();
@@ -866,7 +889,12 @@ pub fn execute_set_objects(
     placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSetObjectsResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d, placement));
+    // Skip recording entirely for an empty plan — no transition, no receipt.
+    let recorder = if plan.objects.is_empty() {
+        None
+    } else {
+        decision.map(|d| DecisionRecorder::start(conn, d, placement))
+    };
     let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
 
     for entry in &plan.objects {
@@ -2939,5 +2967,230 @@ mod tests {
         assert!(content.contains("[[objects.sources]]"));
         assert!(content.contains("rel_path = \"copy1.bin\""));
         assert!(content.contains("rel_path = \"copy2.bin\""));
+    }
+
+    // =========================================================================
+    // Phase 4: decision_id linkage + provenance chain
+    // =========================================================================
+
+    #[test]
+    fn test_execute_clear_links_decision_and_writes_receipt() {
+        let mut conn = setup_test_db();
+        let (_archive, dir, placement) = ledger_root(&conn);
+        let src_root = insert_root(&conn, "/source", "source", false);
+        let obj = insert_object(&conn, "clear_link_hash", false);
+        let id = insert_source_excluded(&conn, src_root, "sub/a.tmp", Some(obj));
+
+        let plan = plan_clear(&mut conn, &make_clear_params(vec![])).unwrap();
+        let decision = full_decision(DecisionCommand::ExcludeClear);
+        let result = execute_clear(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+
+        assert!(
+            result.warnings.is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+        // Clear is itself a transition: source un-excluded AND decision_id stamped.
+        assert!(!is_source_excluded(&conn, id));
+        assert_eq!(fetch_source_decision_id(&conn, id), Some(1));
+
+        let content =
+            std::fs::read_to_string(dir.path().join(".canon-ledger/000001-exclude_clear.toml"))
+                .unwrap();
+        assert!(content.contains("command = \"exclude_clear\""));
+        assert!(content.contains("[[items]]"));
+        assert!(content.contains("rel_path = \"sub/a.tmp\""));
+    }
+
+    #[test]
+    fn test_execute_duplicates_links_excluded_not_kept() {
+        let mut conn = setup_test_db();
+        let (archive, _dir, placement) = ledger_root(&conn);
+        let src_root = insert_root(&conn, "/source", "source", false);
+        let obj = insert_object(&conn, "dup_link_hash", false);
+        let excluded_id = insert_source(&conn, src_root, "photo.jpg", Some(obj));
+        let kept_id = insert_source(&conn, archive, "kept.jpg", Some(obj));
+
+        let prefer = _dir.path().to_str().unwrap().to_string();
+        let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], &prefer)).unwrap();
+        let decision = full_decision(DecisionCommand::ExcludeDuplicates);
+        execute_duplicates(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+
+        // Excluded copy carries the decision_id; the kept archive copy does NOT.
+        assert_eq!(fetch_source_decision_id(&conn, excluded_id), Some(1));
+        assert_eq!(
+            fetch_source_decision_id(&conn, kept_id),
+            None,
+            "kept copy is not a transition — must not be stamped"
+        );
+    }
+
+    #[test]
+    fn test_execute_set_objects_stamps_all_roles_incl_archive() {
+        // D1: object exclusion is universal — every source sharing the object,
+        // including archive-role copies, gets the decision_id and appears in the receipt.
+        let mut conn = setup_test_db();
+        let (archive, dir, placement) = ledger_root(&conn);
+        let src_root = insert_root(&conn, "/source", "source", false);
+        let obj = insert_object(&conn, "universal_hash", false);
+        let source_copy = insert_source(&conn, src_root, "junk.bin", Some(obj));
+        let archive_copy = insert_source(&conn, archive, "kept/junk.bin", Some(obj));
+
+        let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+        let decision = full_decision(DecisionCommand::ExcludeSetObject);
+        let result = execute_set_objects(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+
+        assert!(
+            result.warnings.is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+        assert!(is_object_excluded(&conn, obj));
+        // Both roles stamped.
+        assert_eq!(fetch_source_decision_id(&conn, source_copy), Some(1));
+        assert_eq!(
+            fetch_source_decision_id(&conn, archive_copy),
+            Some(1),
+            "archive-role source must be stamped — object exclusion is universal"
+        );
+        // Both roles listed in the receipt.
+        let content = std::fs::read_to_string(
+            dir.path()
+                .join(".canon-ledger/000001-exclude_set_object.toml"),
+        )
+        .unwrap();
+        assert!(content.contains("rel_path = \"junk.bin\""));
+        assert!(content.contains("rel_path = \"kept/junk.bin\""));
+    }
+
+    #[test]
+    fn test_execute_set_captures_previous_decision_id_chain() {
+        let mut conn = setup_test_db();
+        let (_archive, dir, placement) = ledger_root(&conn);
+        let src_root = insert_root(&conn, "/source", "source", false);
+        let id = insert_source(&conn, src_root, "a.jpg", None);
+        // A prior decision (e.g. scan discovery or an earlier op) on the source.
+        conn.execute(
+            "UPDATE sources SET decision_id = 99 WHERE id = ?",
+            rusqlite::params![id],
+        )
+        .unwrap();
+
+        let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
+        let decision = full_decision(DecisionCommand::ExcludeSet);
+        execute_set(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+
+        // Live pointer advances to the new decision; the receipt preserves the predecessor.
+        assert_eq!(fetch_source_decision_id(&conn, id), Some(1));
+        let content =
+            std::fs::read_to_string(dir.path().join(".canon-ledger/000001-exclude_set.toml"))
+                .unwrap();
+        assert!(
+            content.contains("previous_decision_id = 99"),
+            "receipt should preserve the predecessor decision\n{content}"
+        );
+    }
+
+    #[test]
+    fn test_execute_set_source_links_and_writes_receipt() {
+        let conn = setup_test_db();
+        let (_archive, dir, placement) = ledger_root(&conn);
+        let src_root = insert_root(&conn, "/source", "source", false);
+        let obj = insert_object(&conn, "single_src_hash", false);
+        let id = insert_source(&conn, src_root, "one.tmp", Some(obj));
+
+        // Drive the real check -> execute flow.
+        let SourceExclusionCheck::Ready { item } = check_set_source_by_id(&conn, id).unwrap()
+        else {
+            panic!("expected Ready");
+        };
+        let decision = full_decision(DecisionCommand::ExcludeSet);
+        let result = execute_set_source(&conn, &item, Some(&placement), Some(&decision)).unwrap();
+
+        assert!(
+            result.warnings.is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+        assert!(is_source_excluded(&conn, id));
+        assert_eq!(fetch_source_decision_id(&conn, id), Some(1));
+        let content =
+            std::fs::read_to_string(dir.path().join(".canon-ledger/000001-exclude_set.toml"))
+                .unwrap();
+        assert!(content.contains("rel_path = \"one.tmp\""));
+        assert!(content.contains("hash = \"sha256:single_src_hash\""));
+    }
+
+    #[test]
+    fn test_execute_clear_object_unstamps_and_writes_receipt() {
+        let conn = setup_test_db();
+        let (_archive, dir, placement) = ledger_root(&conn);
+        let src_root = insert_root(&conn, "/source", "source", false);
+        let obj = insert_object(&conn, "clear_obj_hash", true); // already excluded
+        let id = insert_source(&conn, src_root, "dup.bin", Some(obj));
+
+        let ObjectClearCheck::Ready {
+            object_id,
+            hash_prefix,
+            hash,
+            sources,
+        } = check_clear_object(&conn, "clear_obj_hash").unwrap()
+        else {
+            panic!("expected Ready");
+        };
+        let decision = full_decision(DecisionCommand::ExcludeClearObject);
+        let result = execute_clear_object(
+            &conn,
+            object_id,
+            &hash_prefix,
+            &hash,
+            &sources,
+            Some(&placement),
+            Some(&decision),
+        )
+        .unwrap();
+
+        assert!(
+            result.warnings.is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+        assert!(!is_object_excluded(&conn, obj));
+        // clear-object is a transition on every source of the object.
+        assert_eq!(fetch_source_decision_id(&conn, id), Some(1));
+        let content = std::fs::read_to_string(
+            dir.path()
+                .join(".canon-ledger/000001-exclude_clear_object.toml"),
+        )
+        .unwrap();
+        assert!(content.contains("[[objects]]"));
+        assert!(content.contains("hash = \"sha256:clear_obj_hash\""));
+        assert!(content.contains("rel_path = \"dup.bin\""));
+    }
+
+    #[test]
+    fn test_execute_set_empty_plan_records_nothing() {
+        // F4: a 0-item plan reaching execute must not leave a decision row, a
+        // dangling receipt pointer, or a spurious finalize warning.
+        let conn = setup_test_db();
+        let (_archive, _dir, placement) = ledger_root(&conn);
+        let plan = ExcludeSetPlan {
+            items: vec![],
+            root_count: 0,
+            not_archived_count: 0,
+        };
+        let decision = full_decision(DecisionCommand::ExcludeSet);
+        let result = execute_set(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+
+        assert_eq!(result.count, 0);
+        assert!(
+            result.warnings.is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+        let decisions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(decisions, 0, "empty plan must not record a decision");
     }
 }

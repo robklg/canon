@@ -1,6 +1,6 @@
 # Decision Provenance
 
-Canon silently records every effectful action you take — scans, exclusions, applies, and more. These **decision records** build a durable trail of what happened, when, and optionally why.
+Canon silently records every effectful action you take — scans, exclusions, applies, and more. Each decision leaves two linked artifacts: a queryable **record** in the database and a durable **receipt** file on disk. Together they build a trail of what happened, when, optionally why, and — crucially — *which files specifically*.
 
 ## What Gets Recorded
 
@@ -44,6 +44,53 @@ Recording happens in two phases:
 
 If Canon is interrupted (Ctrl+C, crash, power loss), the "started" record survives — a durable trace that the operation was attempted.
 
+## Records vs. Receipts
+
+A decision has two artifacts:
+
+- The **record** — a row in Canon's database (everything above). It answers *what happened, when, and why*, and it's queryable.
+- The **receipt** — a durable TOML file written next to your archive, capturing the *per-item detail* the record only summarizes: every file the decision touched, with its content hash, size, and modification time.
+
+The record is the index; the receipt is the evidence. Together they mean an archived or excluded file can always be traced back to the decision that put it in that state — even years later, even from the files alone.
+
+## Receipts
+
+Receipts live in a `.canon-ledger/` directory under an archive root. Each is named for the decision that produced it, so the id in the filename links it straight back to the record:
+
+```
+.canon-ledger/000042-exclude_set.toml
+.canon-ledger/Media/2016/000041-apply.toml
+```
+
+- **Apply receipts** are *targeted*: they mirror the destination path under `.canon-ledger/`, sitting alongside the content they describe.
+- **Exclusion receipts** are *flat*: they land directly in the ledger root's `.canon-ledger/`, since an exclusion isn't tied to any one destination.
+
+Each receipt records, per item: the source root and relative path, content hash, size, and modification time. Variants carry the shape of their decision — `exclude duplicates` groups items by content hash, recording which copy was **kept** versus **excluded**; object-level exclusions list every source sharing the content.
+
+### The provenance chain
+
+Every source carries a `decision_id` — the decision that last changed its state. When a decision changes a file a previous decision already touched, the receipt records that predecessor as `previous_decision_id`. Because the predecessor's id is also its receipt's filename, you can walk the chain backwards from the files on disk alone — no database required.
+
+## Recording Modes
+
+What Canon writes is controlled by `ledger.recording` in `$CANON_HOME/config.toml`:
+
+| Mode | Database record | Receipt file |
+|------|-----------------|--------------|
+| `Full` (default) | ✓ | ✓ |
+| `Records` | ✓ | — |
+| `Off` | — | — |
+
+`ledger.layout` controls where *targeted* (apply) receipts sit: `Central` (default) collects them under the archive root's `.canon-ledger/`; `Alongside` places them in a `.canon-ledger/` beside each destination directory. Layout does not affect exclusion receipts — those are always flat at the ledger root.
+
+```toml
+[ledger]
+recording = "Full"   # Full | Records | Off
+layout = "Central"   # Central | Alongside
+```
+
+If no archive root is configured, exclusion decisions are still recorded, but no receipt can be written — Canon warns you so the gap is visible rather than silent.
+
 ## Annotating Decisions with `--reason`
 
 Attach a short reason to explain *why* you're taking an action:
@@ -56,27 +103,23 @@ canon scan /mnt/old-laptop --reason "Deleted duplicate movies, originals confirm
 
 `--reason` is available on: `exclude set`, `exclude clear`, `exclude duplicates`, `exclude set-object`, `apply`, `scan`, `roots rm`.
 
-When not provided, no reason is stored — no prompting, no friction.
+When not provided, no reason is stored — no prompting, no friction. When provided, the reason is written into both the decision record and the receipt's `[meta]`, so it travels with the durable artifact.
 
 For `apply`, manifest notes (from the `# === Notes ===` section) automatically become the reason when `--reason` is not explicitly provided.
 
-## Suppressing Recording with `--no-record`
+## Suppressing Receipts with `--no-receipt`
 
-For bulk mechanical operations where recording would clutter the trail:
+To record a decision in the database but skip the receipt file for a single invocation:
 
 ```bash
-canon exclude set --where 'source.ext=dll' --no-record
-canon exclude set --where 'source.ext=sys' --no-record
-
-# This one matters — record it
-canon exclude set --where 'source.ext=exe' --reason "Old game executables, keeping saves only"
+canon exclude set --where 'source.ext=dll' --no-receipt
 ```
 
-`--no-record` is a global flag available on all commands. Per-invocation only — not a persistent setting.
+`--no-receipt` is a global flag, per-invocation only — not a persistent setting. Database recording still happens (per the recording mode above); only the receipt file is suppressed. To turn recording off entirely, set `recording = "Off"` in `config.toml`.
 
 ## When Recording Does Not Happen
 
 - **Dry-run** (`--dry-run`): No side effects occurred, so nothing to record
 - **Declined confirmation**: User said "n" at the prompt
 - **Validation failure**: Command failed before any work began
-- **`--no-record`**: User explicitly suppressed recording
+- **`recording = "Off"`**: Recording disabled in `config.toml`

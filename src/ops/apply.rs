@@ -992,14 +992,10 @@ pub fn execute_apply(
             DecisionStatus::Completed
         };
 
-        // Build the receipt only when there's something to record and a decision exists.
-        let receipt = match decision {
-            Some(d) if !receipt_items.is_empty() => Some(ApplyReceipt {
-                meta: d.receipt_meta(
-                    recorder.decision_id().unwrap_or(0),
-                    &result.summary,
-                    Some(params.manifest_display.clone()),
-                ),
+        // Build the receipt only when there's something to record and a live decision id exists.
+        let receipt = match (decision, recorder.decision_id()) {
+            (Some(d), Some(did)) if !receipt_items.is_empty() => Some(ApplyReceipt {
+                meta: d.receipt_meta(did, &result.summary, Some(params.manifest_display.clone())),
                 items: receipt_items,
             }),
             _ => None,

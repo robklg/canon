@@ -161,9 +161,6 @@ impl DecisionRecorder {
             (None, None, Vec::new())
         };
 
-        // Warn if receipt was requested but couldn't be set up (ctx missing is not a warning).
-        let _ = &warnings; // consumed below
-
         DecisionRecorder {
             id: Some(id),
             receipt_ref,
@@ -864,5 +861,86 @@ mod tests {
             d.receipt_rel_path.as_deref(),
             Some(".canon-ledger/000001-exclude_set.toml")
         );
+    }
+
+    #[test]
+    fn test_complete_with_receipt_writes_finalizes_and_completes() {
+        #[derive(serde::Serialize)]
+        struct Body {
+            note: String,
+        }
+
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = make_receipt_params();
+        let ctx = ReceiptPlacement::Targeted {
+            archive_root_id: 1,
+            archive_root_path: dir.path().to_str().unwrap().to_string(),
+            base_dir_rel: String::new(),
+        };
+        let mut recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
+        let path = recorder.receipt_abs_path().unwrap().to_path_buf();
+
+        let body = Body {
+            note: "hi".to_string(),
+        };
+        recorder.complete_with_receipt(
+            &conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(1),
+                completed: Some(1),
+                failed: Some(0),
+                skipped: None,
+            },
+            "done",
+            Some(&body),
+        );
+
+        // Receipt written and finalized to .toml in one call.
+        assert!(
+            path.exists(),
+            ".toml should exist after complete_with_receipt"
+        );
+        assert!(!path.with_extension("incomplete").exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("note = \"hi\""));
+        // DB row completed.
+        let d = repo::decision::fetch_by_id(&conn, recorder.decision_id().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.status, "completed");
+        assert!(recorder.take_warnings().is_empty());
+    }
+
+    #[test]
+    fn test_complete_with_receipt_none_writes_no_file() {
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = make_receipt_params();
+        let ctx = ReceiptPlacement::Targeted {
+            archive_root_id: 1,
+            archive_root_path: dir.path().to_str().unwrap().to_string(),
+            base_dir_rel: String::new(),
+        };
+        let mut recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
+        let path = recorder.receipt_abs_path().unwrap().to_path_buf();
+
+        // No receipt body → nothing written; complete() still finalizes (no-op rename
+        // target absent) and collects that as a warning, but no file appears.
+        recorder.complete_with_receipt::<()>(
+            &conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(0),
+                completed: Some(0),
+                failed: Some(0),
+                skipped: Some(0),
+            },
+            "nothing",
+            None,
+        );
+
+        assert!(!path.exists(), "no receipt file should be written for None");
     }
 }

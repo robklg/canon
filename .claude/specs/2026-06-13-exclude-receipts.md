@@ -258,9 +258,11 @@ All 1057. Receipt work is additive; the only migrations are `ReceiptContext` →
 - [x] Phase 1: `ReceiptPlacement` + `resolve_ledger_root` + recorder branch; apply → `Targeted`; apply warnings surfaced
 - [x] Phase 2: repo `decision_id` threading; `ExcludeItemData` + plan enrichment + duplicates groups + accessors
 - [x] Phase 3: three receipt types; wire all exclusion entry points (decision_id + receipt + warnings); `src/exclude.rs` placement + warning printing
-- [ ] Phase 4: chain/decision_id tests; `CLAUDE.md`; `docs/`
-- [ ] Verify all existing tests pass
-- [ ] Delete this story's design seed (already removed at spec creation)
+- [x] Phase 4: chain/decision_id tests; `CLAUDE.md`; `docs/`
+- [x] Verify all existing tests pass
+- [x] Delete this story's design seed (already removed at spec creation)
+
+> Phase 4 also folded in review fixes (M6/M8/I3/F4/F6). Deferred review findings (D2–D5 design questions, R1–R11 refactors) are logged in `~/store/canon-reviews/2026-06-13-provenance-review.md`. D1 (object exclusion stamps all roles incl. archive) was investigated and ratified as the documented, intended behavior.
 
 ## Documentation Updates
 - **New/updated page** under the decision-receipts docs: exclusion receipts — what they contain (the three shapes), where they're stored (flat at the ledger root's `.canon-ledger/`), and the `decision_id`/`previous_decision_id` chain. Co-locate with the apply-receipts documentation.
