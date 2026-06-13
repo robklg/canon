@@ -777,34 +777,48 @@ pub fn fetch_source_ids_for_root(
     Ok(ids)
 }
 
-/// Set the exclusion flag for a single source.
+/// Set the exclusion flag for a single source, recording the deciding decision.
 ///
 /// # Behavior
-/// - Updates `excluded` column to the specified value
+/// - Updates `excluded` and `decision_id` columns to the specified values
+/// - `decision_id` is the decision that caused this exclusion state transition;
+///   `None` writes NULL (e.g. when recording is disabled or in tests)
 /// - No error if source doesn't exist (0 rows affected)
 /// - Does NOT affect object-level exclusion
 ///
 /// # Returns
 /// Ok(()) on success. To verify the source existed, use batch variant which returns count.
-pub fn set_excluded(conn: &Connection, source_id: i64, excluded: bool) -> Result<()> {
+pub fn set_excluded(
+    conn: &Connection,
+    source_id: i64,
+    excluded: bool,
+    decision_id: Option<i64>,
+) -> Result<()> {
     conn.execute(
-        "UPDATE sources SET excluded = ? WHERE id = ?",
-        rusqlite::params![excluded as i64, source_id],
+        "UPDATE sources SET excluded = ?, decision_id = ? WHERE id = ?",
+        rusqlite::params![excluded as i64, decision_id, source_id],
     )?;
     Ok(())
 }
 
-/// Set the exclusion flag for multiple sources.
+/// Set the exclusion flag for multiple sources, recording the deciding decision.
 ///
 /// # Behavior
-/// - Updates `excluded` column for all specified sources
+/// - Updates `excluded` and `decision_id` columns for all specified sources
+/// - `decision_id` is the decision that caused this exclusion state transition;
+///   `None` writes NULL
 /// - Handles large inputs via chunking (BATCH_SIZE = 1000)
 /// - Sources that don't exist are silently skipped
 ///
 /// # Returns
 /// Count of rows actually updated (may be less than input if some sources don't exist).
 #[allow(dead_code)] // Part of repo API, may be used in future
-pub fn batch_set_excluded(conn: &Connection, source_ids: &[i64], excluded: bool) -> Result<u64> {
+pub fn batch_set_excluded(
+    conn: &Connection,
+    source_ids: &[i64],
+    excluded: bool,
+    decision_id: Option<i64>,
+) -> Result<u64> {
     if source_ids.is_empty() {
         return Ok(0);
     }
@@ -814,13 +828,17 @@ pub fn batch_set_excluded(conn: &Connection, source_ids: &[i64], excluded: bool)
     for chunk in source_ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
         let sql = format!(
-            "UPDATE sources SET excluded = ? WHERE id IN ({})",
+            "UPDATE sources SET excluded = ?, decision_id = ? WHERE id IN ({})",
             placeholders.join(",")
         );
 
-        // Build params: excluded flag first, then all the IDs
-        let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() + 1);
+        // Build params: excluded flag, decision_id, then all the IDs
+        let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() + 2);
         params.push(rusqlite::types::Value::from(excluded as i64));
+        params.push(match decision_id {
+            Some(id) => rusqlite::types::Value::from(id),
+            None => rusqlite::types::Value::Null,
+        });
         for &id in chunk {
             params.push(rusqlite::types::Value::from(id));
         }
@@ -830,6 +848,26 @@ pub fn batch_set_excluded(conn: &Connection, source_ids: &[i64], excluded: bool)
     }
 
     Ok(total_updated)
+}
+
+/// Set `decision_id` on all sources sharing the given object.
+///
+/// Object-level exclusion flips `objects.excluded`, but the provenance link
+/// (which decision caused the transition) lives on `sources`. This records that
+/// link on every present-or-not source pointing at the object.
+///
+/// `None` writes NULL. Returns the number of source rows updated.
+#[allow(dead_code)] // Part of repo API, may be used in future
+pub fn set_decision_id_by_object(
+    conn: &Connection,
+    object_id: i64,
+    decision_id: Option<i64>,
+) -> Result<u64> {
+    let updated = conn.execute(
+        "UPDATE sources SET decision_id = ? WHERE object_id = ?",
+        rusqlite::params![decision_id, object_id],
+    )?;
+    Ok(updated as u64)
 }
 
 /// Count sources in a root by hash status.
@@ -2558,7 +2596,7 @@ mod tests {
         assert_eq!(excluded, 0);
 
         // Set excluded
-        set_excluded(&conn, source_id, true).unwrap();
+        set_excluded(&conn, source_id, true, None).unwrap();
 
         // Verify now excluded
         let excluded: i64 = conn
@@ -2589,7 +2627,7 @@ mod tests {
         assert_eq!(excluded, 1);
 
         // Clear excluded
-        set_excluded(&conn, source_id, false).unwrap();
+        set_excluded(&conn, source_id, false, None).unwrap();
 
         // Verify now not excluded
         let excluded: i64 = conn
@@ -2607,7 +2645,7 @@ mod tests {
         let conn = setup_test_db();
 
         // Should not error when source doesn't exist
-        let result = set_excluded(&conn, 99999, true);
+        let result = set_excluded(&conn, 99999, true, None);
         assert!(result.is_ok());
     }
 
@@ -2618,7 +2656,7 @@ mod tests {
     #[test]
     fn batch_set_excluded_empty_list() {
         let conn = setup_test_db();
-        let count = batch_set_excluded(&conn, &[], true).unwrap();
+        let count = batch_set_excluded(&conn, &[], true, None).unwrap();
         assert_eq!(count, 0);
     }
 
@@ -2632,7 +2670,7 @@ mod tests {
         let id3 = insert_source(&conn, root_id, "file3.jpg", None, true, false);
 
         // Exclude id1 and id2, leave id3
-        let count = batch_set_excluded(&conn, &[id1, id2], true).unwrap();
+        let count = batch_set_excluded(&conn, &[id1, id2], true, None).unwrap();
         assert_eq!(count, 2);
 
         // Verify exclusion state
@@ -2672,7 +2710,7 @@ mod tests {
         let _id2 = insert_source(&conn, root_id, "file2.jpg", None, true, false);
 
         // Request update for id1 and a nonexistent id
-        let count = batch_set_excluded(&conn, &[id1, 99999], true).unwrap();
+        let count = batch_set_excluded(&conn, &[id1, 99999], true, None).unwrap();
 
         // Only id1 should be updated
         assert_eq!(count, 1);
@@ -2686,7 +2724,7 @@ mod tests {
         let id1 = insert_source(&conn, root_id, "file.jpg", None, true, false);
 
         // Mix of existing and nonexistent IDs
-        let count = batch_set_excluded(&conn, &[id1, 99998, 99999], true).unwrap();
+        let count = batch_set_excluded(&conn, &[id1, 99998, 99999], true, None).unwrap();
 
         // Only the existing source should be updated
         assert_eq!(count, 1);
@@ -2716,7 +2754,7 @@ mod tests {
         }
 
         // Exclude all of them
-        let count = batch_set_excluded(&conn, &source_ids, true).unwrap();
+        let count = batch_set_excluded(&conn, &source_ids, true, None).unwrap();
         assert_eq!(count, 1050);
 
         // Verify a sample from each batch chunk
@@ -2745,6 +2783,87 @@ mod tests {
         assert_eq!(excluded_first, 1);
         assert_eq!(excluded_mid, 1);
         assert_eq!(excluded_last, 1);
+    }
+
+    // =========================================================================
+    // decision_id threading tests
+    // =========================================================================
+
+    fn fetch_decision_id(conn: &RusqliteConnection, source_id: i64) -> Option<i64> {
+        conn.query_row(
+            "SELECT decision_id FROM sources WHERE id = ?",
+            rusqlite::params![source_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn set_excluded_writes_decision_id() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let source_id = insert_source(&conn, root_id, "file.jpg", None, true, false);
+
+        // Some(id) records the deciding decision
+        set_excluded(&conn, source_id, true, Some(42)).unwrap();
+        assert_eq!(fetch_decision_id(&conn, source_id), Some(42));
+
+        // None writes NULL
+        set_excluded(&conn, source_id, false, None).unwrap();
+        assert_eq!(fetch_decision_id(&conn, source_id), None);
+    }
+
+    #[test]
+    fn batch_set_excluded_writes_decision_id() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let id1 = insert_source(&conn, root_id, "a.jpg", None, true, false);
+        let id2 = insert_source(&conn, root_id, "b.jpg", None, true, false);
+
+        set_excluded(&conn, id1, true, Some(7)).unwrap();
+        set_excluded(&conn, id2, true, Some(7)).unwrap();
+
+        // Re-exclude in one batch with a new decision
+        let count = batch_set_excluded(&conn, &[id1, id2], true, Some(99)).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(fetch_decision_id(&conn, id1), Some(99));
+        assert_eq!(fetch_decision_id(&conn, id2), Some(99));
+
+        // None writes NULL across the batch
+        batch_set_excluded(&conn, &[id1, id2], false, None).unwrap();
+        assert_eq!(fetch_decision_id(&conn, id1), None);
+        assert_eq!(fetch_decision_id(&conn, id2), None);
+    }
+
+    #[test]
+    fn set_decision_id_by_object_updates_all_sources() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let obj_id = crate::repo::object::get_or_create(&conn, "sha256", "deadbeef")
+            .unwrap()
+            .id;
+        let id1 = insert_source(&conn, root_id, "copy1.jpg", Some(obj_id), true, false);
+        let id2 = insert_source(&conn, root_id, "copy2.jpg", Some(obj_id), true, false);
+        // A source on a different object must NOT be touched.
+        let other_obj = crate::repo::object::get_or_create(&conn, "sha256", "cafef00d")
+            .unwrap()
+            .id;
+        let id3 = insert_source(&conn, root_id, "other.jpg", Some(other_obj), true, false);
+
+        let count = set_decision_id_by_object(&conn, obj_id, Some(5)).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(fetch_decision_id(&conn, id1), Some(5));
+        assert_eq!(fetch_decision_id(&conn, id2), Some(5));
+        assert_eq!(
+            fetch_decision_id(&conn, id3),
+            None,
+            "other object untouched"
+        );
+
+        // None writes NULL
+        set_decision_id_by_object(&conn, obj_id, None).unwrap();
+        assert_eq!(fetch_decision_id(&conn, id1), None);
+        assert_eq!(fetch_decision_id(&conn, id2), None);
     }
 
     // =========================================================================

@@ -81,23 +81,23 @@ pub fn set(
     let scopes = ScopeMatch::classify_all(scope_prefixes);
     let plan = plan_set(conn, &ExcludeSetParams { scopes, filters })?;
 
-    if plan.source_ids.is_empty() {
+    if plan.source_ids().is_empty() {
         println!("No sources to exclude (0 matching non-excluded sources)");
         return Ok(());
     }
 
     if options.dry_run {
-        println!("Would exclude {} sources:", plan.source_ids.len());
-        for path in &plan.paths {
+        println!("Would exclude {} sources:", plan.source_ids().len());
+        for path in &plan.paths() {
             println!("  {path}");
         }
         return Ok(());
     }
 
     // Confirmation when affecting > 1 source
-    if plan.source_ids.len() > 1 {
+    if plan.source_ids().len() > 1 {
         if !options.yes {
-            eprintln!("Will exclude {} sources", plan.source_ids.len());
+            eprintln!("Will exclude {} sources", plan.source_ids().len());
             eprintln!("  Across {} roots", plan.root_count);
             eprintln!("  {} have no archived copy", plan.not_archived_count);
         }
@@ -146,7 +146,7 @@ pub fn clear(
     let scopes = ScopeMatch::classify_all(scope_prefixes);
     let plan = plan_clear(conn, &ExcludeClearParams { scopes, filters })?;
 
-    if plan.source_ids.is_empty() {
+    if plan.source_ids().is_empty() {
         println!("No excluded sources match the given filters");
         return Ok(());
     }
@@ -154,20 +154,20 @@ pub fn clear(
     if options.dry_run {
         println!(
             "Would clear exclusions for {} sources:",
-            plan.source_ids.len()
+            plan.source_ids().len()
         );
-        for path in &plan.paths {
+        for path in &plan.paths() {
             println!("  {path}");
         }
         return Ok(());
     }
 
     // Confirmation when affecting > 1 source
-    if plan.source_ids.len() > 1 {
+    if plan.source_ids().len() > 1 {
         if !options.yes {
             eprintln!(
                 "Will clear exclusions for {} sources",
-                plan.source_ids.len()
+                plan.source_ids().len()
             );
             eprintln!("  Across {} roots", plan.root_count);
         }
@@ -334,7 +334,7 @@ pub fn exclude_duplicates(
     };
     let plan = plan_duplicates(conn, &params)?;
 
-    if plan.source_ids.is_empty() {
+    if plan.source_ids().is_empty() {
         if plan.scope_count == 0 {
             println!("No sources match the given filters.");
         } else {
@@ -348,7 +348,7 @@ pub fn exclude_duplicates(
             "Sources in scope: {} ({} unhashed skipped)",
             plan.scope_count, plan.skipped_no_hash
         );
-        eprintln!("  Will exclude: {}", plan.source_ids.len());
+        eprintln!("  Will exclude: {}", plan.source_ids().len());
         eprintln!(
             "  Skipped (no copy in --prefer): {}",
             plan.skipped_not_covered
@@ -364,19 +364,19 @@ pub fn exclude_duplicates(
             );
         }
         eprintln!();
-        println!("Would exclude {} sources:", plan.source_ids.len());
-        for path in &plan.paths {
+        println!("Would exclude {} sources:", plan.source_ids().len());
+        for path in &plan.paths() {
             println!("  {path}");
         }
         return Ok(());
     }
 
     // Interactive confirmation for > 1 source
-    if plan.source_ids.len() > 1 {
+    if plan.source_ids().len() > 1 {
         if !yes {
             eprintln!(
                 "Will exclude {} sources ({} duplicate groups)",
-                plan.source_ids.len(),
+                plan.source_ids().len(),
                 plan.group_count
             );
             eprintln!("  Keeping copies in: {}", plan.prefer_prefix);

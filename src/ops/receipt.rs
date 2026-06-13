@@ -33,7 +33,7 @@ pub enum ReceiptPlacement {
         /// Relative base directory within the archive root (from manifest config).
         base_dir_rel: String,
     },
-    /// Constructed by the exclusion path in Phase 3 (`src/exclude.rs`); tests construct it now.
+    /// Non-targeted receipts: flat at the ledger root's `.canon-ledger/`.
     #[allow(dead_code)]
     LedgerRoot { root_id: i64, root_path: String },
 }
@@ -132,7 +132,7 @@ pub fn compute_ledger_root_receipt_rel_path(decision_id: i64, command: &str) -> 
 /// Uses `config.root` if it names an active archive root; otherwise the lowest-id
 /// active archive root; otherwise `None` (no archive root — the caller warns and
 /// skips the receipt). Returns `(root_id, root_path)`.
-#[allow(dead_code)] // Wired into src/exclude.rs in Phase 3.
+#[allow(dead_code)] // Resolves placement for non-targeted receipts; not yet wired to a caller.
 pub fn resolve_ledger_root(roots: &[Root], config: &LedgerConfig) -> Option<(i64, String)> {
     if let Some(configured) = config.root {
         if let Some(r) = roots

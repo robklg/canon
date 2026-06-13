@@ -16,7 +16,7 @@
 //!
 //! let result = find_excludable_duplicates(&scope_sources, &sources_by_object, "/archive");
 //! for source_id in result.to_exclude {
-//!     repo::source::set_excluded(conn, source_id, true)?;
+//!     repo::source::set_excluded(conn, source_id, true, decision_id)?;
 //! }
 //! ```
 
