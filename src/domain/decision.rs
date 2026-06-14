@@ -47,6 +47,7 @@ impl DecisionCommand {
 }
 
 /// Status of a decision record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionStatus {
     Started,
     Completed,

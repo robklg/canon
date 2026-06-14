@@ -676,7 +676,7 @@ fn object_exclude_receipt(
     summary: &str,
 ) -> ObjectExcludeReceipt {
     ObjectExcludeReceipt {
-        meta: decision.receipt_meta(decision_id, summary, None),
+        meta: decision.receipt_meta(decision_id, DecisionStatus::Completed, summary, None),
         objects: vec![ObjectExcludeEntry {
             hash: hash.to_string(),
             sources: sources.iter().map(object_source_receipt_entry).collect(),
@@ -693,22 +693,59 @@ fn item_for_source(conn: &Connection, source: &Source) -> Result<ExcludeItemData
     Ok(ExcludeItemData::from_source(source, &objects))
 }
 
-/// Complete an all-succeeded exclusion decision: write the receipt (if any),
-/// complete the DB record, and return any accumulated warnings. Consumes the
-/// recorder; `receipt` is `None` when there is nothing to write. A thin
-/// exclusion-policy wrapper over `DecisionRecorder::complete_with_receipt`.
-fn finish_decision<T: Serialize>(
-    conn: &Connection,
-    recorder: Option<DecisionRecorder>,
-    receipt: Option<&T>,
+/// Run an exclusion execution transactionally. Opens a transaction, performs the
+/// DB mutations via `mutate` (which also builds the receipt body from the
+/// now-known `decision_id`), completes the decision record inside the
+/// transaction, commits, then writes + finalizes the receipt file *after* commit.
+/// Returns accumulated warnings.
+///
+/// Per the write-path-atomicity ADR: the transaction covers DB mutations only.
+/// The receipt file is a durable artifact written after the DB is committed, so a
+/// receipt-write failure is a warning, never a rollback. A failure inside
+/// `mutate` (or the commit) drops the transaction — the `started` decision row
+/// and any partial flips roll back together, leaving no half-state.
+fn run_exclusion<T, F>(
+    conn: &mut Connection,
+    decision: Option<&DecisionParams>,
+    placement: Option<&ReceiptPlacement>,
+    has_items: bool,
     counts: DecisionCounts,
     summary: &str,
-) -> Vec<String> {
-    let Some(mut recorder) = recorder else {
-        return Vec::new();
+    mutate: F,
+) -> Result<Vec<String>>
+where
+    T: Serialize,
+    F: FnOnce(&Connection, Option<i64>) -> Result<Option<T>>,
+{
+    let tx = conn.transaction()?;
+
+    // Empty plans don't record — no transition, no receipt.
+    let mut recorder = if has_items {
+        decision.map(|d| DecisionRecorder::start(&tx, d, placement))
+    } else {
+        None
     };
-    recorder.complete_with_receipt(conn, DecisionStatus::Completed, counts, summary, receipt);
-    recorder.take_warnings()
+    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
+
+    let receipt = mutate(&tx, decision_id)?;
+
+    if let Some(r) = recorder.as_mut() {
+        r.complete_db(&tx, DecisionStatus::Completed, counts, summary);
+    }
+    tx.commit()?;
+
+    // Receipt file (durable artifact) is written after the DB is committed.
+    let warnings = match recorder {
+        Some(mut r) => {
+            if let Some(receipt) = receipt.as_ref() {
+                r.write_receipt_file(receipt, summary);
+            }
+            r.finalize_receipt_file();
+            r.take_warnings()
+        }
+        None => Vec::new(),
+    };
+    Ok(warnings)
 }
 
 // ============================================================================
@@ -726,39 +763,35 @@ pub struct ExcludeSetResult {
 /// Execute an exclude-set plan — marks sources as excluded, records the
 /// decision_id on each, and writes a receipt.
 pub fn execute_set(
-    conn: &Connection,
+    conn: &mut Connection,
     plan: &ExcludeSetPlan,
     placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSetResult> {
-    // Skip recording entirely for an empty plan — no transition, no receipt.
-    let recorder = if plan.items.is_empty() {
-        None
-    } else {
-        decision.map(|d| DecisionRecorder::start(conn, d, placement))
-    };
-    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
-
     let source_ids = plan.source_ids();
-    repo::source::batch_set_excluded(conn, &source_ids, true, decision_id)?;
     let count = source_ids.len();
+    let has_items = !plan.items.is_empty();
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Excluded {} {noun}", format_count(count));
 
-    let receipt = match (decision, decision_id) {
-        (Some(d), Some(did)) if !plan.items.is_empty() => Some(ExcludeReceipt {
-            meta: d.receipt_meta(did, &summary, None),
-            items: exclude_receipt_items(&plan.items),
-        }),
-        _ => None,
-    };
-    let warnings = finish_decision(
+    let warnings = run_exclusion(
         conn,
-        recorder,
-        receipt.as_ref(),
+        decision,
+        placement,
+        has_items,
         counts_all(count),
         &summary,
-    );
+        |tx, decision_id| {
+            repo::source::batch_set_excluded(tx, &source_ids, true, decision_id)?;
+            Ok(match (decision, decision_id) {
+                (Some(d), Some(did)) if has_items => Some(ExcludeReceipt {
+                    meta: d.receipt_meta(did, DecisionStatus::Completed, &summary, None),
+                    items: exclude_receipt_items(&plan.items),
+                }),
+                _ => None,
+            })
+        },
+    )?;
 
     Ok(ExcludeSetResult {
         count,
@@ -778,39 +811,35 @@ pub struct ExcludeClearResult {
 /// Execute an exclude-clear plan — clears source-level exclusion, records the
 /// decision_id on each, and writes a receipt.
 pub fn execute_clear(
-    conn: &Connection,
+    conn: &mut Connection,
     plan: &ExcludeClearPlan,
     placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeClearResult> {
-    // Skip recording entirely for an empty plan — no transition, no receipt.
-    let recorder = if plan.items.is_empty() {
-        None
-    } else {
-        decision.map(|d| DecisionRecorder::start(conn, d, placement))
-    };
-    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
-
     let source_ids = plan.source_ids();
-    repo::source::batch_set_excluded(conn, &source_ids, false, decision_id)?;
     let count = source_ids.len();
+    let has_items = !plan.items.is_empty();
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Cleared exclusions for {} {noun}", format_count(count));
 
-    let receipt = match (decision, decision_id) {
-        (Some(d), Some(did)) if !plan.items.is_empty() => Some(ExcludeReceipt {
-            meta: d.receipt_meta(did, &summary, None),
-            items: exclude_receipt_items(&plan.items),
-        }),
-        _ => None,
-    };
-    let warnings = finish_decision(
+    let warnings = run_exclusion(
         conn,
-        recorder,
-        receipt.as_ref(),
+        decision,
+        placement,
+        has_items,
         counts_all(count),
         &summary,
-    );
+        |tx, decision_id| {
+            repo::source::batch_set_excluded(tx, &source_ids, false, decision_id)?;
+            Ok(match (decision, decision_id) {
+                (Some(d), Some(did)) if has_items => Some(ExcludeReceipt {
+                    meta: d.receipt_meta(did, DecisionStatus::Completed, &summary, None),
+                    items: exclude_receipt_items(&plan.items),
+                }),
+                _ => None,
+            })
+        },
+    )?;
 
     Ok(ExcludeClearResult {
         count,
@@ -830,39 +859,35 @@ pub struct ExcludeDuplicatesResult {
 /// Execute a duplicate exclusion plan — marks the excluded copies, records the
 /// decision_id on each, and writes a grouped receipt.
 pub fn execute_duplicates(
-    conn: &Connection,
+    conn: &mut Connection,
     plan: &ExcludeDuplicatesPlan,
     placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeDuplicatesResult> {
-    // Skip recording entirely for an empty plan — no transition, no receipt.
-    let recorder = if plan.groups.is_empty() {
-        None
-    } else {
-        decision.map(|d| DecisionRecorder::start(conn, d, placement))
-    };
-    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
-
     let source_ids = plan.source_ids();
-    repo::source::batch_set_excluded(conn, &source_ids, true, decision_id)?;
     let count = source_ids.len();
+    let has_items = !plan.groups.is_empty();
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Excluded {} {noun}", format_count(count));
 
-    let receipt = match (decision, decision_id) {
-        (Some(d), Some(did)) if !plan.groups.is_empty() => Some(DuplicatesReceipt {
-            meta: d.receipt_meta(did, &summary, None),
-            groups: duplicate_receipt_groups(&plan.groups),
-        }),
-        _ => None,
-    };
-    let warnings = finish_decision(
+    let warnings = run_exclusion(
         conn,
-        recorder,
-        receipt.as_ref(),
+        decision,
+        placement,
+        has_items,
         counts_all(count),
         &summary,
-    );
+        |tx, decision_id| {
+            repo::source::batch_set_excluded(tx, &source_ids, true, decision_id)?;
+            Ok(match (decision, decision_id) {
+                (Some(d), Some(did)) if has_items => Some(DuplicatesReceipt {
+                    meta: d.receipt_meta(did, DecisionStatus::Completed, &summary, None),
+                    groups: duplicate_receipt_groups(&plan.groups),
+                }),
+                _ => None,
+            })
+        },
+    )?;
 
     Ok(ExcludeDuplicatesResult {
         count,
@@ -884,51 +909,47 @@ pub struct ExcludeSetObjectsResult {
 /// Execute an object exclusion plan — marks objects as excluded, records the
 /// decision_id on every source sharing each object, and writes a receipt.
 pub fn execute_set_objects(
-    conn: &Connection,
+    conn: &mut Connection,
     plan: &ExcludeSetObjectsPlan,
     placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSetObjectsResult> {
-    // Skip recording entirely for an empty plan — no transition, no receipt.
-    let recorder = if plan.objects.is_empty() {
-        None
-    } else {
-        decision.map(|d| DecisionRecorder::start(conn, d, placement))
-    };
-    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
-
-    for entry in &plan.objects {
-        repo::object::set_excluded(conn, entry.object_id, true)?;
-        repo::source::set_decision_id_by_object(conn, entry.object_id, decision_id)?;
-    }
     let count = plan.objects.len();
+    let has_items = !plan.objects.is_empty();
     let total_in_source_roots = plan.total_source_count - plan.total_archive_count;
     let summary = format!(
         "Excluded {} objects affecting {} sources ({} in source roots, {} in archives)",
         count, plan.total_source_count, total_in_source_roots, plan.total_archive_count
     );
 
-    let receipt = match (decision, decision_id) {
-        (Some(d), Some(did)) if !plan.objects.is_empty() => Some(ObjectExcludeReceipt {
-            meta: d.receipt_meta(did, &summary, None),
-            objects: plan
-                .objects
-                .iter()
-                .map(|o| ObjectExcludeEntry {
-                    hash: o.hash.clone(),
-                    sources: o.sources.iter().map(object_source_receipt_entry).collect(),
-                })
-                .collect(),
-        }),
-        _ => None,
-    };
-    let warnings = finish_decision(
+    let warnings = run_exclusion(
         conn,
-        recorder,
-        receipt.as_ref(),
+        decision,
+        placement,
+        has_items,
         counts_all(count),
         &summary,
-    );
+        |tx, decision_id| {
+            for entry in &plan.objects {
+                repo::object::set_excluded(tx, entry.object_id, true)?;
+                repo::source::set_decision_id_by_object(tx, entry.object_id, decision_id)?;
+            }
+            Ok(match (decision, decision_id) {
+                (Some(d), Some(did)) if has_items => Some(ObjectExcludeReceipt {
+                    meta: d.receipt_meta(did, DecisionStatus::Completed, &summary, None),
+                    objects: plan
+                        .objects
+                        .iter()
+                        .map(|o| ObjectExcludeEntry {
+                            hash: o.hash.clone(),
+                            sources: o.sources.iter().map(object_source_receipt_entry).collect(),
+                        })
+                        .collect(),
+                }),
+                _ => None,
+            })
+        },
+    )?;
 
     Ok(ExcludeSetObjectsResult {
         count,
@@ -1045,26 +1066,32 @@ pub struct ExcludeSourceResult {
 ///
 /// `item` comes from the preceding check (`check_set_source_by_id`/`by_path`).
 pub fn execute_set_source(
-    conn: &Connection,
+    conn: &mut Connection,
     item: &ExcludeItemData,
     placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSourceResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d, placement));
-    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
-
-    repo::source::set_excluded(conn, item.source_id, true, decision_id)?;
     let path = item.path();
     let summary = format!("Excluded: {path}");
 
-    let receipt = match (decision, decision_id) {
-        (Some(d), Some(did)) => Some(ExcludeReceipt {
-            meta: d.receipt_meta(did, &summary, None),
-            items: exclude_receipt_items(std::slice::from_ref(item)),
-        }),
-        _ => None,
-    };
-    let warnings = finish_decision(conn, recorder, receipt.as_ref(), counts_all(1), &summary);
+    let warnings = run_exclusion(
+        conn,
+        decision,
+        placement,
+        true,
+        counts_all(1),
+        &summary,
+        |tx, decision_id| {
+            repo::source::set_excluded(tx, item.source_id, true, decision_id)?;
+            Ok(match (decision, decision_id) {
+                (Some(d), Some(did)) => Some(ExcludeReceipt {
+                    meta: d.receipt_meta(did, DecisionStatus::Completed, &summary, None),
+                    items: exclude_receipt_items(std::slice::from_ref(item)),
+                }),
+                _ => None,
+            })
+        },
+    )?;
 
     Ok(ExcludeSourceResult {
         source_id: item.source_id,
@@ -1167,7 +1194,7 @@ pub struct ExcludeObjectResult {
 /// The `hash_prefix`/`hash`/`sources` come from the preceding check
 /// (`check_set_object_by_hash` or `check_set_object_by_file`).
 pub fn execute_set_object(
-    conn: &Connection,
+    conn: &mut Connection,
     object_id: i64,
     hash_prefix: &str,
     hash: &str,
@@ -1175,19 +1202,26 @@ pub fn execute_set_object(
     placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeObjectResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d, placement));
-    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
-
-    repo::object::set_excluded(conn, object_id, true)?;
-    repo::source::set_decision_id_by_object(conn, object_id, decision_id)?;
-
     let summary = format!("Excluded object: {hash_prefix}...");
 
-    let receipt = match (decision, decision_id) {
-        (Some(d), Some(did)) => Some(object_exclude_receipt(d, did, hash, sources, &summary)),
-        _ => None,
-    };
-    let warnings = finish_decision(conn, recorder, receipt.as_ref(), counts_all(1), &summary);
+    let warnings = run_exclusion(
+        conn,
+        decision,
+        placement,
+        true,
+        counts_all(1),
+        &summary,
+        |tx, decision_id| {
+            repo::object::set_excluded(tx, object_id, true)?;
+            repo::source::set_decision_id_by_object(tx, object_id, decision_id)?;
+            Ok(match (decision, decision_id) {
+                (Some(d), Some(did)) => {
+                    Some(object_exclude_receipt(d, did, hash, sources, &summary))
+                }
+                _ => None,
+            })
+        },
+    )?;
 
     Ok(ExcludeObjectResult {
         object_id,
@@ -1237,7 +1271,7 @@ pub struct ClearObjectResult {
 /// The `hash_prefix`/`hash`/`sources` come from the preceding check
 /// (`check_clear_object`).
 pub fn execute_clear_object(
-    conn: &Connection,
+    conn: &mut Connection,
     object_id: i64,
     hash_prefix: &str,
     hash: &str,
@@ -1245,19 +1279,26 @@ pub fn execute_clear_object(
     placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ClearObjectResult> {
-    let recorder = decision.map(|d| DecisionRecorder::start(conn, d, placement));
-    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
-
-    repo::object::set_excluded(conn, object_id, false)?;
-    repo::source::set_decision_id_by_object(conn, object_id, decision_id)?;
-
     let summary = format!("Cleared exclusion from object: {hash_prefix}...");
 
-    let receipt = match (decision, decision_id) {
-        (Some(d), Some(did)) => Some(object_exclude_receipt(d, did, hash, sources, &summary)),
-        _ => None,
-    };
-    let warnings = finish_decision(conn, recorder, receipt.as_ref(), counts_all(1), &summary);
+    let warnings = run_exclusion(
+        conn,
+        decision,
+        placement,
+        true,
+        counts_all(1),
+        &summary,
+        |tx, decision_id| {
+            repo::object::set_excluded(tx, object_id, false)?;
+            repo::source::set_decision_id_by_object(tx, object_id, decision_id)?;
+            Ok(match (decision, decision_id) {
+                (Some(d), Some(did)) => {
+                    Some(object_exclude_receipt(d, did, hash, sources, &summary))
+                }
+                _ => None,
+            })
+        },
+    )?;
 
     Ok(ClearObjectResult {
         object_id,
@@ -1670,7 +1711,7 @@ mod tests {
 
     #[test]
     fn test_execute_set_marks_excluded() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let id1 = insert_source(&conn, root, "a.jpg", None);
         let id2 = insert_source(&conn, root, "b.jpg", None);
@@ -1681,7 +1722,7 @@ mod tests {
             not_archived_count: 2,
         };
 
-        execute_set(&conn, &plan, None, None).unwrap();
+        execute_set(&mut conn, &plan, None, None).unwrap();
 
         assert!(is_source_excluded(&conn, id1));
         assert!(is_source_excluded(&conn, id2));
@@ -1689,7 +1730,7 @@ mod tests {
 
     #[test]
     fn test_execute_clear_clears_excluded() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let id1 = insert_source_excluded(&conn, root, "a.jpg", None);
         let id2 = insert_source_excluded(&conn, root, "b.jpg", None);
@@ -1699,7 +1740,7 @@ mod tests {
             root_count: 1,
         };
 
-        execute_clear(&conn, &plan, None, None).unwrap();
+        execute_clear(&mut conn, &plan, None, None).unwrap();
 
         assert!(!is_source_excluded(&conn, id1));
         assert!(!is_source_excluded(&conn, id2));
@@ -1707,7 +1748,7 @@ mod tests {
 
     #[test]
     fn test_execute_set_returns_count() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let id1 = insert_source(&conn, root, "a.jpg", None);
 
@@ -1717,13 +1758,13 @@ mod tests {
             not_archived_count: 1,
         };
 
-        let result = execute_set(&conn, &plan, None, None).unwrap();
+        let result = execute_set(&mut conn, &plan, None, None).unwrap();
         assert_eq!(result.count, 1);
     }
 
     #[test]
     fn test_execute_clear_returns_count() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let id1 = insert_source_excluded(&conn, root, "a.jpg", None);
         let id2 = insert_source_excluded(&conn, root, "b.jpg", None);
@@ -1733,7 +1774,7 @@ mod tests {
             root_count: 1,
         };
 
-        let result = execute_clear(&conn, &plan, None, None).unwrap();
+        let result = execute_clear(&mut conn, &plan, None, None).unwrap();
         assert_eq!(result.count, 2);
     }
 
@@ -1993,7 +2034,7 @@ mod tests {
 
     #[test]
     fn test_execute_duplicates_marks_excluded() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let root = insert_root(&conn, "/source", "source", false);
         let id1 = insert_source(&conn, root, "a.jpg", None);
         let id2 = insert_source(&conn, root, "b.jpg", None);
@@ -2013,7 +2054,7 @@ mod tests {
             skipped_multiple: 0,
         };
 
-        execute_duplicates(&conn, &plan, None, None).unwrap();
+        execute_duplicates(&mut conn, &plan, None, None).unwrap();
 
         assert!(is_source_excluded(&conn, id1));
         assert!(is_source_excluded(&conn, id2));
@@ -2021,7 +2062,7 @@ mod tests {
 
     #[test]
     fn test_execute_duplicates_returns_count() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let root = insert_root(&conn, "/source", "source", false);
         let id1 = insert_source(&conn, root, "a.jpg", None);
 
@@ -2040,7 +2081,7 @@ mod tests {
             skipped_multiple: 0,
         };
 
-        let result = execute_duplicates(&conn, &plan, None, None).unwrap();
+        let result = execute_duplicates(&mut conn, &plan, None, None).unwrap();
         assert_eq!(result.count, 1);
     }
 
@@ -2202,7 +2243,7 @@ mod tests {
 
     #[test]
     fn test_execute_set_objects_marks_excluded() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let obj1 = insert_object(&conn, "exec_obj_hash1_xx", false);
         let obj2 = insert_object(&conn, "exec_obj_hash2_xx", false);
@@ -2231,7 +2272,7 @@ mod tests {
             skipped_already_excluded: 0,
         };
 
-        execute_set_objects(&conn, &plan, None, None).unwrap();
+        execute_set_objects(&mut conn, &plan, None, None).unwrap();
 
         assert!(is_object_excluded(&conn, obj1));
         assert!(is_object_excluded(&conn, obj2));
@@ -2239,7 +2280,7 @@ mod tests {
 
     #[test]
     fn test_execute_set_objects_returns_count() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let _root = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "count_obj_hash_xxx", false);
 
@@ -2257,7 +2298,7 @@ mod tests {
             skipped_already_excluded: 0,
         };
 
-        let result = execute_set_objects(&conn, &plan, None, None).unwrap();
+        let result = execute_set_objects(&mut conn, &plan, None, None).unwrap();
         assert_eq!(result.count, 1);
     }
 
@@ -2707,14 +2748,14 @@ mod tests {
 
     #[test]
     fn test_execute_set_object_excludes_and_returns_summary() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let obj_id = insert_object(&conn, "abcdef1234567890", false);
         let _src = insert_source(&conn, root, "a.jpg", Some(obj_id));
 
         let sources = fetch_object_sources(&conn, obj_id).unwrap();
         let result = execute_set_object(
-            &conn,
+            &mut conn,
             obj_id,
             "abcdef1234567890",
             "sha256:abcdef1234567890",
@@ -2735,11 +2776,11 @@ mod tests {
 
     #[test]
     fn test_execute_set_object_summary_includes_hash_prefix() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let obj_id = insert_object(&conn, "deadbeef12345678", false);
 
         let result = execute_set_object(
-            &conn,
+            &mut conn,
             obj_id,
             "deadbeef12345678",
             "sha256:deadbeef12345678",
@@ -2758,11 +2799,11 @@ mod tests {
 
     #[test]
     fn test_execute_clear_object_clears_and_returns_summary() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let obj_id = insert_object(&conn, "abcdef1234567890", true); // already excluded
 
         let result = execute_clear_object(
-            &conn,
+            &mut conn,
             obj_id,
             "abcdef1234567890",
             "sha256:abcdef1234567890",
@@ -2827,6 +2868,109 @@ mod tests {
     }
 
     #[test]
+    fn run_exclusion_rolls_back_on_error() {
+        // The write-path-atomicity guarantee: a failure inside `mutate` rolls
+        // back BOTH the source flip and the `started` decision row — no half-state.
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let id = insert_source(&conn, root, "a.jpg", None);
+
+        let decision = DecisionParams {
+            command: DecisionCommand::ExcludeSet,
+            scope: None,
+            command_line: "canon test".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: false,
+            ledger_config: LedgerConfig::default(),
+        };
+
+        let result = run_exclusion::<ExcludeReceipt, _>(
+            &mut conn,
+            Some(&decision),
+            None,
+            true,
+            counts_all(1),
+            "test",
+            |tx, decision_id| {
+                // Flip the source inside the transaction, then fail.
+                repo::source::set_excluded(tx, id, true, decision_id)?;
+                anyhow::bail!("forced failure mid-flip");
+            },
+        );
+
+        assert!(result.is_err(), "the forced error should propagate");
+        assert!(
+            !is_source_excluded(&conn, id),
+            "the source flip must roll back on error"
+        );
+        let decisions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(decisions, 0, "the started decision row must roll back");
+    }
+
+    #[test]
+    fn decision_scopes_populated_for_scoped_exclude() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let id = insert_source(&conn, root, "a.jpg", None);
+        let plan = ExcludeSetPlan {
+            items: vec![item(id, "/photos", "a.jpg")],
+            root_count: 1,
+            not_archived_count: 1,
+        };
+        let decision = DecisionParams {
+            command: DecisionCommand::ExcludeSet,
+            scope: Some(vec!["/photos".to_string()]),
+            command_line: "canon exclude set /photos".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: false,
+            ledger_config: LedgerConfig::default(),
+        };
+
+        execute_set(&mut conn, &plan, None, Some(&decision)).unwrap();
+
+        let (rid, prefix): (i64, String) = conn
+            .query_row("SELECT root_id, rel_prefix FROM decision_scopes", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(rid, root);
+        assert_eq!(prefix, "", "root-level scope has empty rel_prefix");
+    }
+
+    #[test]
+    fn decision_scopes_empty_for_global_exclude() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let id = insert_source(&conn, root, "a.jpg", None);
+        let plan = ExcludeSetPlan {
+            items: vec![item(id, "/photos", "a.jpg")],
+            root_count: 1,
+            not_archived_count: 1,
+        };
+        // scope: None → global → no scope-index rows.
+        let decision = DecisionParams {
+            command: DecisionCommand::ExcludeSet,
+            scope: None,
+            command_line: "canon exclude set --global".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: false,
+            ledger_config: LedgerConfig::default(),
+        };
+
+        execute_set(&mut conn, &plan, None, Some(&decision)).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM decision_scopes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn test_execute_set_writes_receipt_and_links_decision() {
         let mut conn = setup_test_db();
         let (_archive, dir, placement) = ledger_root(&conn);
@@ -2836,7 +2980,7 @@ mod tests {
 
         let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
         let decision = full_decision(DecisionCommand::ExcludeSet);
-        let result = execute_set(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+        let result = execute_set(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
 
         assert!(
             result.warnings.is_empty(),
@@ -2864,7 +3008,7 @@ mod tests {
         let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
         let decision = full_decision(DecisionCommand::ExcludeSet);
         // No archive root → placement None → no receipt, but decision still recorded.
-        let result = execute_set(&conn, &plan, None, Some(&decision)).unwrap();
+        let result = execute_set(&mut conn, &plan, None, Some(&decision)).unwrap();
 
         assert!(result.warnings.is_empty());
         assert!(is_source_excluded(&conn, id));
@@ -2892,7 +3036,7 @@ mod tests {
 
         let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
         let decision = full_decision(DecisionCommand::ExcludeSet);
-        let result = execute_set(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+        let result = execute_set(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
 
         // Exclusion still happens; the receipt failure is surfaced, not silent.
         assert!(is_source_excluded(&conn, id));
@@ -2915,7 +3059,8 @@ mod tests {
         let prefer = dir.path().to_str().unwrap().to_string();
         let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], &prefer)).unwrap();
         let decision = full_decision(DecisionCommand::ExcludeDuplicates);
-        let result = execute_duplicates(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+        let result =
+            execute_duplicates(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
 
         assert!(
             result.warnings.is_empty(),
@@ -2947,7 +3092,8 @@ mod tests {
 
         let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
         let decision = full_decision(DecisionCommand::ExcludeSetObject);
-        let result = execute_set_objects(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+        let result =
+            execute_set_objects(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
 
         assert!(
             result.warnings.is_empty(),
@@ -2983,7 +3129,7 @@ mod tests {
 
         let plan = plan_clear(&mut conn, &make_clear_params(vec![])).unwrap();
         let decision = full_decision(DecisionCommand::ExcludeClear);
-        let result = execute_clear(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+        let result = execute_clear(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
 
         assert!(
             result.warnings.is_empty(),
@@ -3014,7 +3160,7 @@ mod tests {
         let prefer = _dir.path().to_str().unwrap().to_string();
         let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], &prefer)).unwrap();
         let decision = full_decision(DecisionCommand::ExcludeDuplicates);
-        execute_duplicates(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+        execute_duplicates(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
 
         // Excluded copy carries the decision_id; the kept archive copy does NOT.
         assert_eq!(fetch_source_decision_id(&conn, excluded_id), Some(1));
@@ -3038,7 +3184,8 @@ mod tests {
 
         let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
         let decision = full_decision(DecisionCommand::ExcludeSetObject);
-        let result = execute_set_objects(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+        let result =
+            execute_set_objects(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
 
         assert!(
             result.warnings.is_empty(),
@@ -3078,7 +3225,7 @@ mod tests {
 
         let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
         let decision = full_decision(DecisionCommand::ExcludeSet);
-        execute_set(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+        execute_set(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
 
         // Live pointer advances to the new decision; the receipt preserves the predecessor.
         assert_eq!(fetch_source_decision_id(&conn, id), Some(1));
@@ -3093,7 +3240,7 @@ mod tests {
 
     #[test]
     fn test_execute_set_source_links_and_writes_receipt() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let (_archive, dir, placement) = ledger_root(&conn);
         let src_root = insert_root(&conn, "/source", "source", false);
         let obj = insert_object(&conn, "single_src_hash", false);
@@ -3105,7 +3252,8 @@ mod tests {
             panic!("expected Ready");
         };
         let decision = full_decision(DecisionCommand::ExcludeSet);
-        let result = execute_set_source(&conn, &item, Some(&placement), Some(&decision)).unwrap();
+        let result =
+            execute_set_source(&mut conn, &item, Some(&placement), Some(&decision)).unwrap();
 
         assert!(
             result.warnings.is_empty(),
@@ -3123,7 +3271,7 @@ mod tests {
 
     #[test]
     fn test_execute_clear_object_unstamps_and_writes_receipt() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let (_archive, dir, placement) = ledger_root(&conn);
         let src_root = insert_root(&conn, "/source", "source", false);
         let obj = insert_object(&conn, "clear_obj_hash", true); // already excluded
@@ -3140,7 +3288,7 @@ mod tests {
         };
         let decision = full_decision(DecisionCommand::ExcludeClearObject);
         let result = execute_clear_object(
-            &conn,
+            &mut conn,
             object_id,
             &hash_prefix,
             &hash,
@@ -3172,7 +3320,7 @@ mod tests {
     fn test_execute_set_empty_plan_records_nothing() {
         // F4: a 0-item plan reaching execute must not leave a decision row, a
         // dangling receipt pointer, or a spurious finalize warning.
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let (_archive, _dir, placement) = ledger_root(&conn);
         let plan = ExcludeSetPlan {
             items: vec![],
@@ -3180,7 +3328,7 @@ mod tests {
             not_archived_count: 0,
         };
         let decision = full_decision(DecisionCommand::ExcludeSet);
-        let result = execute_set(&conn, &plan, Some(&placement), Some(&decision)).unwrap();
+        let result = execute_set(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
 
         assert_eq!(result.count, 0);
         assert!(

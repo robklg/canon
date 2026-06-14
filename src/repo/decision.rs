@@ -75,6 +75,21 @@ pub fn update_receipt_path(
     Ok(())
 }
 
+/// Insert durable scope-index rows for a decision — one row per `(root_id, rel_prefix)`.
+///
+/// Powers future subtree-scoped queries ("what decisions touched this path?"). The
+/// pairs come from decomposing the decision's resolved scope. Pair count is small
+/// (one per scoped root/prefix), so no chunking is needed.
+pub fn insert_scopes(conn: &Connection, decision_id: i64, pairs: &[(i64, String)]) -> Result<()> {
+    for (root_id, rel_prefix) in pairs {
+        conn.execute(
+            "INSERT INTO decision_scopes (decision_id, root_id, rel_prefix) VALUES (?1, ?2, ?3)",
+            rusqlite::params![decision_id, root_id, rel_prefix],
+        )?;
+    }
+    Ok(())
+}
+
 /// Fetch a decision by ID. For testing.
 #[cfg(test)]
 pub fn fetch_by_id(
@@ -218,6 +233,38 @@ mod tests {
             rusqlite::params![decision_id, 2, "photos"],
         )
         .unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM decision_scopes WHERE decision_id = ?",
+                [decision_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn insert_scopes_writes_rows() {
+        let conn = setup_test_db();
+        let decision_id = insert_started(
+            &conn,
+            "exclude_set",
+            None,
+            "canon exclude set",
+            None,
+            "0.4.0",
+            None,
+            None,
+        )
+        .unwrap();
+
+        insert_scopes(
+            &conn,
+            decision_id,
+            &[(1, "photos".to_string()), (2, String::new())],
+        )
+        .unwrap();
+
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM decision_scopes WHERE decision_id = ?",

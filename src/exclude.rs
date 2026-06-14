@@ -221,7 +221,7 @@ pub fn clear(
 
 /// Exclude a specific source by ID
 pub fn set_by_id(
-    db: &Db,
+    db: &mut Db,
     source_id: i64,
     options: &SetOptions,
     command_line: &str,
@@ -229,7 +229,7 @@ pub fn set_by_id(
     no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     match check_set_source_by_id(conn, source_id)? {
         SourceExclusionCheck::AlreadyExcluded { path } => {
@@ -261,7 +261,7 @@ pub fn set_by_id(
 
 /// Exclude a specific source by exact file path
 pub fn set_by_path(
-    db: &Db,
+    db: &mut Db,
     file_path: &Path,
     options: &SetOptions,
     command_line: &str,
@@ -269,7 +269,7 @@ pub fn set_by_path(
     no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     // Resolve path (soft resolution: matches known roots, falls back to fs)
     let roots = repo::root::fetch_all(conn)?;
@@ -458,7 +458,7 @@ pub fn exclude_duplicates(
 /// Exclude an object by its hash. All sources with this content will be excluded.
 /// This is the only way to exclude empty files (size = 0).
 pub fn set_object_by_hash(
-    db: &Db,
+    db: &mut Db,
     hash: &str,
     options: &SetOptions,
     command_line: &str,
@@ -466,7 +466,7 @@ pub fn set_object_by_hash(
     no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     match check_set_object_by_hash(conn, hash)? {
         ObjectExclusionCheck::AlreadyExcluded { hash_prefix } => {
@@ -513,7 +513,7 @@ pub fn set_object_by_hash(
 
 /// Exclude an object by file path. Looks up the source, gets its object, and excludes it.
 pub fn set_object_by_file(
-    db: &Db,
+    db: &mut Db,
     file_path: &Path,
     options: &SetOptions,
     command_line: &str,
@@ -521,7 +521,7 @@ pub fn set_object_by_file(
     no_receipt: bool,
     reason: Option<&str>,
 ) -> Result<()> {
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     // Resolve path (soft resolution: matches known roots, falls back to fs)
     let roots = repo::root::fetch_all(conn)?;
@@ -714,14 +714,14 @@ fn print_source_locations(sources: &[ObjectSourceInfo], verbose: bool) {
 
 /// Clear exclusion from an object by its hash
 pub fn clear_object(
-    db: &Db,
+    db: &mut Db,
     hash: &str,
     options: &ClearOptions,
     command_line: &str,
     config: &LedgerConfig,
     no_receipt: bool,
 ) -> Result<()> {
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     match check_clear_object(conn, hash)? {
         ObjectClearCheck::NotExcluded { hash_prefix } => {
@@ -870,7 +870,7 @@ mod tests {
 
     #[test]
     fn test_set_by_id_excludes_source() {
-        let db = make_test_db();
+        let mut db = make_test_db();
         let conn = db.conn();
 
         let root = insert_root(conn, "/photos", "source", false);
@@ -883,7 +883,7 @@ mod tests {
         };
 
         let result = set_by_id(
-            &db,
+            &mut db,
             source_id,
             &options,
             "test",
@@ -894,7 +894,7 @@ mod tests {
         assert!(result.is_ok());
 
         assert!(
-            is_source_excluded(conn, source_id),
+            is_source_excluded(db.conn(), source_id),
             "Source should be excluded after set_by_id"
         );
     }
@@ -905,7 +905,7 @@ mod tests {
 
     #[test]
     fn test_set_by_path_nonexistent_file_fails() {
-        let db = make_test_db();
+        let mut db = make_test_db();
 
         let options = SetOptions {
             dry_run: false,
@@ -915,7 +915,7 @@ mod tests {
 
         // Path that definitely doesn't exist
         let result = set_by_path(
-            &db,
+            &mut db,
             Path::new("/nonexistent/path/to/file.jpg"),
             &options,
             "test",
@@ -934,7 +934,7 @@ mod tests {
 
     #[test]
     fn test_set_by_path_not_in_db_fails() {
-        let db = make_test_db();
+        let mut db = make_test_db();
 
         let options = SetOptions {
             dry_run: false,
@@ -945,7 +945,7 @@ mod tests {
         // Use a path that exists on disk but isn't in the database
         // /tmp should exist on most Unix systems
         let result = set_by_path(
-            &db,
+            &mut db,
             Path::new("/tmp"),
             &options,
             "test",

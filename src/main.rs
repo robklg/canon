@@ -1192,7 +1192,7 @@ fn main() -> Result<()> {
                 };
                 if let Some(source_id) = id {
                     exclude::set_by_id(
-                        &db,
+                        &mut db,
                         source_id,
                         &options,
                         &command_line,
@@ -1203,7 +1203,7 @@ fn main() -> Result<()> {
                 } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {
                     // Single file path with no filters: exclude exact file
                     exclude::set_by_path(
-                        &db,
+                        &mut db,
                         &paths[0],
                         &options,
                         &command_line,
@@ -1289,7 +1289,7 @@ fn main() -> Result<()> {
                 };
                 if let Some(h) = hash {
                     exclude::set_object_by_hash(
-                        &db,
+                        &mut db,
                         &h,
                         &options,
                         &command_line,
@@ -1300,7 +1300,7 @@ fn main() -> Result<()> {
                 } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {
                     // Single file path: exclude that file's object
                     exclude::set_object_by_file(
-                        &db,
+                        &mut db,
                         &paths[0],
                         &options,
                         &command_line,
@@ -1330,7 +1330,7 @@ fn main() -> Result<()> {
             ExcludeAction::ClearObject { hash, dry_run } => {
                 let options = exclude::ClearOptions { dry_run, yes: true };
                 exclude::clear_object(
-                    &db,
+                    &mut db,
                     &hash,
                     &options,
                     &command_line,

@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use crate::domain::config::LedgerConfig;
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
+use crate::domain::root::find_containing_root;
 use crate::ops::receipt::{
     compute_ledger_root_receipt_rel_path, compute_targeted_receipt_rel_path, finalize_receipt,
     write_receipt, ReceiptMeta, ReceiptPlacement, ReceiptRef,
@@ -32,6 +33,7 @@ impl DecisionParams {
     pub fn receipt_meta(
         &self,
         decision_id: i64,
+        status: DecisionStatus,
         summary: &str,
         manifest: Option<String>,
     ) -> ReceiptMeta {
@@ -43,6 +45,7 @@ impl DecisionParams {
             receipt_version: 1,
             decision_id,
             command: self.command.as_str().to_string(),
+            status: status.as_str().to_string(),
             timestamp,
             scope: self.scope.clone(),
             reason: self.reason.clone(),
@@ -150,15 +153,21 @@ impl DecisionRecorder {
             }
         };
 
+        // Populate the durable scope index (decision_scopes) from the resolved scope.
+        let mut warnings = populate_decision_scopes(conn, id, params);
+
         // Compute receipt path if receipts are enabled and context is provided.
-        let (receipt_ref, receipt_abs_path, warnings) = if params.receipt_enabled {
+        let (receipt_ref, receipt_abs_path) = if params.receipt_enabled {
             if let Some(placement) = placement {
-                compute_and_register_receipt(conn, id, params, placement)
+                let (rr, rap, mut receipt_warnings) =
+                    compute_and_register_receipt(conn, id, params, placement);
+                warnings.append(&mut receipt_warnings);
+                (rr, rap)
             } else {
-                (None, None, Vec::new())
+                (None, None)
             }
         } else {
-            (None, None, Vec::new())
+            (None, None)
         };
 
         DecisionRecorder {
@@ -169,12 +178,11 @@ impl DecisionRecorder {
         }
     }
 
-    /// Update the record with completion data. No-op if disabled or start failed.
-    /// Collects a warning if the UPDATE fails.
-    ///
-    /// If a receipt path is stored, renames the `.incomplete` file to `.toml`
-    /// as part of completion. Finalization failure collects a warning.
-    pub fn complete(
+    /// Update the DB record with completion data only — does NOT finalize the
+    /// receipt file. Use inside a transaction; write+finalize the receipt file
+    /// after commit via `write_receipt_file` + `finalize_receipt_file`. No-op if
+    /// disabled or start failed. Collects a warning if the UPDATE fails.
+    pub fn complete_db(
         &mut self,
         conn: &Connection,
         status: DecisionStatus,
@@ -198,14 +206,43 @@ impl DecisionRecorder {
             self.warnings
                 .push(format!("Warning: failed to update decision record: {e}"));
         }
+    }
 
-        // Finalize the receipt file: .incomplete → .toml
+    /// Write `receipt` to the `.incomplete` file (no DB, no finalize). A write
+    /// failure is collected as a warning. No-op if no receipt path was set up.
+    pub fn write_receipt_file<T: Serialize>(&mut self, receipt: &T, summary: &str) {
+        if let Some(path) = self.receipt_abs_path().map(|p| p.to_owned()) {
+            if let Err(e) = write_receipt(&path, receipt, summary) {
+                self.push_warning(format!("Receipt write failed: {e:#}"));
+            }
+        }
+    }
+
+    /// Finalize the receipt file: rename `.incomplete` → `.toml`. A failure is
+    /// collected as a warning. No-op if no receipt path was set up.
+    pub fn finalize_receipt_file(&mut self) {
         if let Some(ref path) = self.receipt_abs_path {
             if let Err(e) = finalize_receipt(path) {
                 self.warnings
                     .push(format!("Warning: failed to finalize receipt: {e}"));
             }
         }
+    }
+
+    /// Update the record with completion data. No-op if disabled or start failed.
+    /// Collects a warning if the UPDATE fails.
+    ///
+    /// If a receipt path is stored, renames the `.incomplete` file to `.toml`
+    /// as part of completion. Finalization failure collects a warning.
+    pub fn complete(
+        &mut self,
+        conn: &Connection,
+        status: DecisionStatus,
+        counts: DecisionCounts,
+        summary: &str,
+    ) {
+        self.complete_db(conn, status, counts, summary);
+        self.finalize_receipt_file();
     }
 
     /// Write `receipt` (when a receipt path was set up and `receipt` is `Some`),
@@ -221,42 +258,9 @@ impl DecisionRecorder {
         receipt: Option<&T>,
     ) {
         if let Some(receipt) = receipt {
-            if let Some(path) = self.receipt_abs_path().map(|p| p.to_owned()) {
-                if let Err(e) = write_receipt(&path, receipt, summary) {
-                    self.push_warning(format!("Receipt write failed: {e:#}"));
-                }
-            }
+            self.write_receipt_file(receipt, summary);
         }
         self.complete(conn, status, counts, summary);
-    }
-
-    /// Update to interrupted status. Best-effort.
-    pub fn interrupted(&mut self, conn: &Connection) {
-        let Some(id) = self.id else {
-            return;
-        };
-
-        if let Err(e) = repo::decision::update_completed(
-            conn,
-            id,
-            DecisionStatus::Interrupted.as_str(),
-            None,
-            None,
-            None,
-            None,
-            None,
-        ) {
-            self.warnings
-                .push(format!("Warning: failed to update decision record: {e}"));
-        }
-
-        // Finalize even on interrupt — partial receipt is better than .incomplete.
-        if let Some(ref path) = self.receipt_abs_path {
-            if let Err(e) = finalize_receipt(path) {
-                self.warnings
-                    .push(format!("Warning: failed to finalize receipt: {e}"));
-            }
-        }
     }
 
     /// Drain accumulated warnings. Returns an empty vec if no warnings.
@@ -332,6 +336,54 @@ fn compute_and_register_receipt(
     let receipt_ref = ReceiptRef { root_id, rel_path };
 
     (Some(receipt_ref), Some(abs_path), Vec::new())
+}
+
+/// Decompose the decision's scope into `(root_id, rel_prefix)` pairs and write them
+/// to the durable `decision_scopes` index. A `None`/empty scope (global op) writes
+/// nothing; scope paths not under a known root are skipped (e.g. a scan creating a
+/// new root — that root doesn't exist yet at `start()`). Failure is collected as a
+/// warning, never fatal.
+fn populate_decision_scopes(
+    conn: &Connection,
+    decision_id: i64,
+    params: &DecisionParams,
+) -> Vec<String> {
+    let Some(scope) = params.scope.as_ref() else {
+        return Vec::new();
+    };
+    if scope.is_empty() {
+        return Vec::new();
+    }
+
+    let roots = match repo::root::fetch_all(conn) {
+        Ok(r) => r,
+        Err(e) => {
+            return vec![format!(
+                "Warning: failed to read roots for decision scope index: {e}"
+            )]
+        }
+    };
+
+    let mut pairs: Vec<(i64, String)> = scope
+        .iter()
+        .filter_map(|path| {
+            find_containing_root(path, &roots)
+                .map(|(root_id, _root_path, _role, rel)| (root_id, rel))
+        })
+        .collect();
+    pairs.sort();
+    pairs.dedup();
+
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+
+    match repo::decision::insert_scopes(conn, decision_id, &pairs) {
+        Ok(()) => Vec::new(),
+        Err(e) => vec![format!(
+            "Warning: failed to write decision scope index: {e}"
+        )],
+    }
 }
 
 #[cfg(test)]
@@ -410,20 +462,6 @@ mod tests {
 
         assert!(recorder.id.is_none());
         assert_eq!(count_decisions(&conn), 0);
-    }
-
-    #[test]
-    fn recorder_interrupted_sets_status() {
-        let conn = setup_test_db();
-        let params = make_params(DecisionCommand::Apply, true);
-        let mut recorder = DecisionRecorder::start(&conn, &params, None);
-
-        recorder.interrupted(&conn);
-
-        let decision = repo::decision::fetch_by_id(&conn, recorder.id.unwrap())
-            .unwrap()
-            .unwrap();
-        assert_eq!(decision.status, "interrupted");
     }
 
     #[test]
@@ -729,33 +767,6 @@ mod tests {
             "unexpected warnings: {:?}",
             recorder.warnings
         );
-    }
-
-    #[test]
-    fn test_recorder_interrupted_finalizes_receipt() {
-        let conn = setup_test_db();
-        let dir = tempdir().unwrap();
-        let params = make_receipt_params();
-        let ctx = ReceiptPlacement::Targeted {
-            archive_root_id: 1,
-            archive_root_path: dir.path().to_str().unwrap().to_string(),
-            base_dir_rel: String::new(),
-        };
-
-        let mut recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
-
-        let receipt_path = recorder.receipt_abs_path().unwrap().to_path_buf();
-        let incomplete = receipt_path.with_extension("incomplete");
-        std::fs::create_dir_all(incomplete.parent().unwrap()).unwrap();
-        std::fs::write(&incomplete, b"partial receipt").unwrap();
-
-        recorder.interrupted(&conn);
-
-        assert!(
-            receipt_path.exists(),
-            ".toml should exist after interrupted()"
-        );
-        assert!(!incomplete.exists());
     }
 
     // =========================================================================

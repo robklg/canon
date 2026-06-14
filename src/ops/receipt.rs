@@ -44,6 +44,9 @@ pub struct ReceiptMeta {
     pub receipt_version: u32,
     pub decision_id: i64,
     pub command: String,
+    /// Terminal status: completed | partial | interrupted. Lets a disk-only
+    /// reader distinguish a complete receipt from an interrupted/partial one.
+    pub status: String,
     pub timestamp: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<Vec<String>>,
@@ -350,6 +353,7 @@ mod tests {
                 receipt_version: 1,
                 decision_id: 43,
                 command: "apply".to_string(),
+                status: "completed".to_string(),
                 timestamp: 1744300800,
                 scope: Some(vec!["/Volumes/old-laptop/Photos".to_string()]),
                 reason: Some("Italy 2016".to_string()),
@@ -378,7 +382,20 @@ mod tests {
         assert!(toml_str.contains("receipt_version = 1"));
         assert!(toml_str.contains("decision_id = 43"));
         assert!(toml_str.contains("command = \"apply\""));
+        assert!(toml_str.contains("status = \"completed\""));
         assert!(toml_str.contains("manifest = \"/Volumes/Archive/manifest.toml\""));
+    }
+
+    #[test]
+    fn test_meta_status_interrupted_serializes() {
+        // A partial/interrupted receipt self-describes its status on disk.
+        let mut receipt = make_apply_receipt();
+        receipt.meta.status = "interrupted".to_string();
+        let toml_str = toml::to_string_pretty(&receipt).unwrap();
+        assert!(
+            toml_str.contains("status = \"interrupted\""),
+            "status should serialize\n{toml_str}"
+        );
     }
 
     #[test]
@@ -401,6 +418,7 @@ mod tests {
                 receipt_version: 1,
                 decision_id: 1,
                 command: "apply".to_string(),
+                status: "completed".to_string(),
                 timestamp: 0,
                 scope: None,
                 reason: None,
@@ -433,6 +451,7 @@ mod tests {
                 receipt_version: 1,
                 decision_id: 1,
                 command: "apply".to_string(),
+                status: "completed".to_string(),
                 timestamp: 0,
                 scope: None,
                 reason: None,
@@ -612,6 +631,7 @@ mod tests {
             receipt_version: 1,
             decision_id: 42,
             command: command.to_string(),
+            status: "completed".to_string(),
             timestamp: 1700000000,
             scope: None,
             reason: None,
