@@ -222,13 +222,6 @@ pub struct ObjectPlanEntry {
 pub struct ObjectSourceInfo {
     pub path: String,
     pub is_archive: bool,
-    /// Source root path (absolute) — receipt field.
-    pub root: String,
-    pub rel_path: String,
-    pub size: i64,
-    pub mtime: i64,
-    /// The source's `decision_id` before this op — predecessor in the chain.
-    pub previous_decision_id: Option<i64>,
 }
 
 // ============================================================================
@@ -657,14 +650,31 @@ fn duplicate_receipt_groups(groups: &[DuplicateGroupData]) -> Vec<DuplicateGroup
         .collect()
 }
 
-fn object_source_receipt_entry(s: &ObjectSourceInfo) -> ObjectSourceReceiptEntry {
-    ObjectSourceReceiptEntry {
-        root: s.root.clone(),
-        rel_path: s.rel_path.clone(),
-        size: s.size,
-        mtime: s.mtime,
-        previous_decision_id: s.previous_decision_id,
-    }
+/// Map an object's stamp-set (from `fetch_object_sharers_for_receipt`) into
+/// receipt entries, sorted role DESC then root/rel_path — the same ordering as
+/// the ceremony display. The entries mirror exactly the set
+/// `set_decision_id_by_object` touches, including tombstone rows (marked
+/// `present = false`), so the stamp is reconstructable from disk.
+fn object_stamp_set_entries(
+    mut sharers: Vec<repo::source::ObjectReceiptSource>,
+) -> Vec<ObjectSourceReceiptEntry> {
+    sharers.sort_by(|a, b| {
+        b.root_role
+            .cmp(&a.root_role)
+            .then_with(|| a.root_path.cmp(&b.root_path))
+            .then_with(|| a.rel_path.cmp(&b.rel_path))
+    });
+    sharers
+        .into_iter()
+        .map(|s| ObjectSourceReceiptEntry {
+            root: s.root_path,
+            rel_path: s.rel_path,
+            size: s.size,
+            mtime: s.mtime,
+            present: s.present,
+            previous_decision_id: s.previous_decision_id,
+        })
+        .collect()
 }
 
 /// Build a single-object exclusion receipt (set-object / clear-object).
@@ -672,14 +682,14 @@ fn object_exclude_receipt(
     decision: &DecisionParams,
     decision_id: i64,
     hash: &str,
-    sources: &[ObjectSourceInfo],
+    sources: Vec<ObjectSourceReceiptEntry>,
     summary: &str,
 ) -> ObjectExcludeReceipt {
     ObjectExcludeReceipt {
         meta: decision.receipt_meta(decision_id, DecisionStatus::Completed, summary, None),
         objects: vec![ObjectExcludeEntry {
             hash: hash.to_string(),
-            sources: sources.iter().map(object_source_receipt_entry).collect(),
+            sources,
         }],
     }
 }
@@ -930,6 +940,16 @@ pub fn execute_set_objects(
         counts_all(count),
         &summary,
         |tx, decision_id| {
+            // Capture each object's stamp-set before stamping: the receipt must
+            // list exactly the sources the stamp touches, with pre-stamp
+            // `previous_decision_id`s.
+            let mut stamp_sets = match (decision, decision_id) {
+                (Some(_), Some(_)) => {
+                    let ids: Vec<i64> = plan.objects.iter().map(|o| o.object_id).collect();
+                    repo::source::fetch_object_sharers_for_receipt(tx, &ids)?
+                }
+                _ => HashMap::new(),
+            };
             for entry in &plan.objects {
                 repo::object::set_excluded(tx, entry.object_id, true)?;
                 repo::source::set_decision_id_by_object(tx, entry.object_id, decision_id)?;
@@ -942,7 +962,9 @@ pub fn execute_set_objects(
                         .iter()
                         .map(|o| ObjectExcludeEntry {
                             hash: o.hash.clone(),
-                            sources: o.sources.iter().map(object_source_receipt_entry).collect(),
+                            sources: object_stamp_set_entries(
+                                stamp_sets.remove(&o.object_id).unwrap_or_default(),
+                            ),
                         })
                         .collect(),
                 }),
@@ -997,7 +1019,6 @@ pub enum ObjectClearCheck {
         hash_prefix: String,
         /// Full content hash formatted as `sha256:{value}` (for the receipt).
         hash: String,
-        sources: Vec<ObjectSourceInfo>,
     },
     /// Object is not excluded.
     NotExcluded { hash_prefix: String },
@@ -1212,12 +1233,25 @@ pub fn execute_set_object(
         counts_all(1),
         &summary,
         |tx, decision_id| {
+            // Capture the stamp-set before stamping (pre-stamp provenance links).
+            let stamp_set = match (decision, decision_id) {
+                (Some(_), Some(_)) => {
+                    repo::source::fetch_object_sharers_for_receipt(tx, &[object_id])?
+                        .remove(&object_id)
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
             repo::object::set_excluded(tx, object_id, true)?;
             repo::source::set_decision_id_by_object(tx, object_id, decision_id)?;
             Ok(match (decision, decision_id) {
-                (Some(d), Some(did)) => {
-                    Some(object_exclude_receipt(d, did, hash, sources, &summary))
-                }
+                (Some(d), Some(did)) => Some(object_exclude_receipt(
+                    d,
+                    did,
+                    hash,
+                    object_stamp_set_entries(stamp_set),
+                    &summary,
+                )),
                 _ => None,
             })
         },
@@ -1246,12 +1280,10 @@ pub fn check_clear_object(conn: &Connection, hash: &str) -> Result<ObjectClearCh
         return Ok(ObjectClearCheck::NotExcluded { hash_prefix });
     }
 
-    let sources = fetch_object_sources(conn, object.id)?;
     Ok(ObjectClearCheck::Ready {
         object_id: object.id,
         hash_prefix,
         hash: format!("{}:{}", object.hash_type, object.hash_value),
-        sources,
     })
 }
 
@@ -1268,14 +1300,13 @@ pub struct ClearObjectResult {
 /// Clear exclusion from a single object, recording the decision_id on every
 /// source sharing it and writing a one-object receipt.
 ///
-/// The `hash_prefix`/`hash`/`sources` come from the preceding check
-/// (`check_clear_object`).
+/// The `hash_prefix`/`hash` come from the preceding check
+/// (`check_clear_object`); the receipt captures the stamp-set itself.
 pub fn execute_clear_object(
     conn: &mut Connection,
     object_id: i64,
     hash_prefix: &str,
     hash: &str,
-    sources: &[ObjectSourceInfo],
     placement: Option<&ReceiptPlacement>,
     decision: Option<&DecisionParams>,
 ) -> Result<ClearObjectResult> {
@@ -1289,12 +1320,25 @@ pub fn execute_clear_object(
         counts_all(1),
         &summary,
         |tx, decision_id| {
+            // Capture the stamp-set before stamping (pre-stamp provenance links).
+            let stamp_set = match (decision, decision_id) {
+                (Some(_), Some(_)) => {
+                    repo::source::fetch_object_sharers_for_receipt(tx, &[object_id])?
+                        .remove(&object_id)
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
             repo::object::set_excluded(tx, object_id, false)?;
             repo::source::set_decision_id_by_object(tx, object_id, decision_id)?;
             Ok(match (decision, decision_id) {
-                (Some(d), Some(did)) => {
-                    Some(object_exclude_receipt(d, did, hash, sources, &summary))
-                }
+                (Some(d), Some(did)) => Some(object_exclude_receipt(
+                    d,
+                    did,
+                    hash,
+                    object_stamp_set_entries(stamp_set),
+                    &summary,
+                )),
                 _ => None,
             })
         },
@@ -1308,16 +1352,11 @@ pub fn execute_clear_object(
     })
 }
 
-/// Map a fetched source to receipt-capable object-source display info.
+/// Map a fetched source to object-source display info.
 fn object_source_info(s: &Source) -> ObjectSourceInfo {
     ObjectSourceInfo {
         path: s.path(),
         is_archive: s.is_from_role("archive"),
-        root: s.root_path.clone(),
-        rel_path: s.rel_path.clone(),
-        size: s.size,
-        mtime: s.mtime,
-        previous_decision_id: s.decision_id,
     }
 }
 
@@ -2582,7 +2621,6 @@ mod tests {
                 object_id,
                 hash_prefix,
                 hash: _,
-                sources: _,
             } => {
                 assert_eq!(object_id, obj);
                 assert_eq!(hash_prefix, "clear_ready_hash");
@@ -2807,7 +2845,6 @@ mod tests {
             obj_id,
             "abcdef1234567890",
             "sha256:abcdef1234567890",
-            &[],
             None,
             None,
         )
@@ -3281,7 +3318,6 @@ mod tests {
             object_id,
             hash_prefix,
             hash,
-            sources,
         } = check_clear_object(&conn, "clear_obj_hash").unwrap()
         else {
             panic!("expected Ready");
@@ -3292,7 +3328,6 @@ mod tests {
             object_id,
             &hash_prefix,
             &hash,
-            &sources,
             Some(&placement),
             Some(&decision),
         )
@@ -3314,6 +3349,60 @@ mod tests {
         assert!(content.contains("[[objects]]"));
         assert!(content.contains("hash = \"sha256:clear_obj_hash\""));
         assert!(content.contains("rel_path = \"dup.bin\""));
+    }
+
+    #[test]
+    fn test_object_exclude_receipt_lists_stamp_set_including_tombstones() {
+        // stamp-set = receipt-set (presence-axis constraint): the object-level
+        // stamp touches every sharer, present or not, so the receipt must list
+        // the tombstones too — otherwise the stamp isn't reconstructable from
+        // disk and the chain walk dead-ends on a receipt item that doesn't exist.
+        let mut conn = setup_test_db();
+        let (_archive, dir, placement) = ledger_root(&conn);
+        let src_root = insert_root(&conn, "/source", "source", false);
+        let obj = insert_object(&conn, "tomb_obj_hash", false);
+        let present_id = insert_source(&conn, src_root, "still-here.bin", Some(obj));
+        // A tombstone sharer: deleted from disk earlier, provenance link intact.
+        let tomb_id = insert_source(&conn, src_root, "deleted.bin", Some(obj));
+        conn.execute(
+            "UPDATE sources SET present = 0, decision_id = 77 WHERE id = ?",
+            rusqlite::params![tomb_id],
+        )
+        .unwrap();
+
+        let decision = full_decision(DecisionCommand::ExcludeSetObject);
+        execute_set_object(
+            &mut conn,
+            obj,
+            "tomb_obj_hash",
+            "sha256:tomb_obj_hash",
+            &[],
+            Some(&placement),
+            Some(&decision),
+        )
+        .unwrap();
+
+        // The stamp touched both sharers...
+        assert_eq!(fetch_source_decision_id(&conn, present_id), Some(1));
+        assert_eq!(fetch_source_decision_id(&conn, tomb_id), Some(1));
+
+        // ...and the receipt lists the same set, tombstone marked and carrying
+        // its pre-stamp predecessor.
+        let content = std::fs::read_to_string(
+            dir.path()
+                .join(".canon-ledger/000001-exclude_set_object.toml"),
+        )
+        .unwrap();
+        assert!(
+            content.contains("rel_path = \"still-here.bin\""),
+            "{content}"
+        );
+        assert!(content.contains("rel_path = \"deleted.bin\""), "{content}");
+        assert!(content.contains("present = false"), "{content}");
+        assert!(content.contains("previous_decision_id = 77"), "{content}");
+        // The present sharer is unmarked — the field is serialized only for
+        // the exceptional tombstone case.
+        assert_eq!(content.matches("present = ").count(), 1, "{content}");
     }
 
     #[test]

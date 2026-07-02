@@ -11,6 +11,7 @@ use crate::domain::decision::DecisionStatus;
 use crate::domain::note::{ancestor_paths, LocationEntry, Note};
 use crate::domain::root::Root;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
+use crate::ops::receipt::{NoteClearReceipt, NoteClearReceiptItem, ReceiptPlacement};
 use crate::repo::{self, Connection};
 
 // ============================================================================
@@ -199,22 +200,64 @@ pub fn plan_clear_recursive(conn: &Connection, scope: &NoteScope) -> Result<Clea
 pub struct ClearRecursiveResult {
     pub deleted: usize,
     pub summary: String,
+    pub warnings: Vec<String>,
 }
 
-/// Execute a recursive clear — delete all notes in scope + descendants.
-pub fn execute_clear_recursive(
-    conn: &Connection,
+/// Shared clear execution: capture → delete → record → receipt.
+///
+/// The notes are captured *before* deletion — their texts are the user's own
+/// words, irreplaceable once the rows are gone, and the receipt is their only
+/// durable record. The receipt is placed at the scope's root (the locus of the
+/// effect: the root whose locations the notes annotated). A clear that touches
+/// nothing records nothing — no decision row, no receipt.
+///
+/// Per the write-path-atomicity ADR: the transaction covers the DB mutations;
+/// the receipt file is written after commit, and a receipt-write failure is a
+/// warning, never a rollback.
+fn run_clear(
+    conn: &mut Connection,
     scope: &NoteScope,
     decision: Option<&DecisionParams>,
-) -> Result<ClearRecursiveResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
+    fetch: fn(&Connection, i64, &str) -> Result<Vec<Note>>,
+    delete: fn(&Connection, i64, &str) -> Result<usize>,
+    compose_summary: impl FnOnce(usize) -> String,
+) -> Result<(usize, String, Vec<String>)> {
+    let tx = conn.transaction()?;
 
-    let deleted = repo::note::clear_subtree(conn, scope.root_id, &scope.rel_path)?;
-    let summary = format!("Cleared {} notes", deleted);
+    let notes = fetch(&tx, scope.root_id, &scope.rel_path)?;
 
-    if let Some(recorder) = recorder.as_mut() {
-        recorder.complete(
-            conn,
+    let placement = ReceiptPlacement::LedgerRoot {
+        root_id: scope.root_id,
+        root_path: scope.root_path.clone(),
+    };
+    let mut recorder = if notes.is_empty() {
+        None
+    } else {
+        decision.map(|d| DecisionRecorder::start(&tx, d, Some(&placement)))
+    };
+    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
+
+    let deleted = delete(&tx, scope.root_id, &scope.rel_path)?;
+    let summary = compose_summary(deleted);
+
+    let receipt = match (decision, decision_id) {
+        (Some(d), Some(did)) => Some(NoteClearReceipt {
+            meta: d.receipt_meta(did, DecisionStatus::Completed, &summary, None),
+            items: notes
+                .iter()
+                .map(|n| NoteClearReceiptItem {
+                    rel_path: n.rel_path.clone(),
+                    created_at: n.created_at,
+                    text: n.text.clone(),
+                })
+                .collect(),
+        }),
+        _ => None,
+    };
+
+    if let Some(r) = recorder.as_mut() {
+        r.complete_db(
+            &tx,
             DecisionStatus::Completed,
             DecisionCounts {
                 attempted: Some(deleted as i64),
@@ -225,8 +268,42 @@ pub fn execute_clear_recursive(
             &summary,
         );
     }
+    tx.commit()?;
 
-    Ok(ClearRecursiveResult { deleted, summary })
+    // Receipt file (durable artifact) is written after the DB is committed.
+    let warnings = match recorder {
+        Some(mut r) => {
+            if let Some(receipt) = receipt.as_ref() {
+                r.write_receipt_file(receipt, &summary);
+            }
+            r.finalize_receipt_file();
+            r.take_warnings()
+        }
+        None => Vec::new(),
+    };
+
+    Ok((deleted, summary, warnings))
+}
+
+/// Execute a recursive clear — delete all notes in scope + descendants.
+pub fn execute_clear_recursive(
+    conn: &mut Connection,
+    scope: &NoteScope,
+    decision: Option<&DecisionParams>,
+) -> Result<ClearRecursiveResult> {
+    let (deleted, summary, warnings) = run_clear(
+        conn,
+        scope,
+        decision,
+        repo::note::fetch_subtree,
+        repo::note::clear_subtree,
+        |deleted| format!("Cleared {} notes", deleted),
+    )?;
+    Ok(ClearRecursiveResult {
+        deleted,
+        summary,
+        warnings,
+    })
 }
 
 /// Result of clearing notes at an exact scope.
@@ -234,38 +311,35 @@ pub fn execute_clear_recursive(
 pub struct ClearExactResult {
     pub deleted: usize,
     pub summary: String,
+    pub warnings: Vec<String>,
 }
 
 /// Clear notes at an exact scope (not recursive).
 pub fn execute_clear_exact(
-    conn: &Connection,
+    conn: &mut Connection,
     scope: &NoteScope,
     decision: Option<&DecisionParams>,
 ) -> Result<ClearExactResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
-
-    let deleted = repo::note::clear_by_scope(conn, scope.root_id, &scope.rel_path)?;
-    let summary = if deleted == 0 {
-        format!("No notes at {}", scope.display())
-    } else {
-        format!("Cleared {} notes at {}", deleted, scope.display())
-    };
-
-    if let Some(recorder) = recorder.as_mut() {
-        recorder.complete(
-            conn,
-            DecisionStatus::Completed,
-            DecisionCounts {
-                attempted: Some(deleted as i64),
-                completed: Some(deleted as i64),
-                failed: None,
-                skipped: None,
-            },
-            &summary,
-        );
-    }
-
-    Ok(ClearExactResult { deleted, summary })
+    let display = scope.display();
+    let (deleted, summary, warnings) = run_clear(
+        conn,
+        scope,
+        decision,
+        repo::note::fetch_by_scope,
+        repo::note::clear_by_scope,
+        |deleted| {
+            if deleted == 0 {
+                format!("No notes at {display}")
+            } else {
+                format!("Cleared {deleted} notes at {display}")
+            }
+        },
+    )?;
+    Ok(ClearExactResult {
+        deleted,
+        summary,
+        warnings,
+    })
 }
 
 /// Fetch note context for survey display.
@@ -540,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_execute_clear_exact_returns_summary() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let root_id = insert_root(&conn, "/photos", "source", false);
         insert_note(&conn, root_id, "a", "note 1", 100);
         insert_note(&conn, root_id, "a", "note 2", 200);
@@ -551,7 +625,7 @@ mod tests {
             rel_path: "a".to_string(),
         };
 
-        let result = execute_clear_exact(&conn, &scope, None).unwrap();
+        let result = execute_clear_exact(&mut conn, &scope, None).unwrap();
         assert_eq!(result.deleted, 2);
         assert!(result.summary.contains("Cleared 2 notes"));
         assert!(result.summary.contains(" a")); // scope.display() returns rel_path
@@ -559,7 +633,7 @@ mod tests {
 
     #[test]
     fn test_execute_clear_exact_zero_deleted() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let root_id = insert_root(&conn, "/photos", "source", false);
 
         let scope = NoteScope {
@@ -568,8 +642,85 @@ mod tests {
             rel_path: "empty".to_string(),
         };
 
-        let result = execute_clear_exact(&conn, &scope, None).unwrap();
+        let result = execute_clear_exact(&mut conn, &scope, None).unwrap();
         assert_eq!(result.deleted, 0);
         assert!(result.summary.contains("No notes at"));
+    }
+
+    #[test]
+    fn test_clear_receipt_captures_note_texts() {
+        // Notes are irreplaceable user words (DB-only until this moment); the
+        // clear receipt is their durable record. Placed at the scope's root —
+        // the locus of the effect.
+        let mut conn = setup_test_db();
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().to_str().unwrap().to_string();
+        let root_id = insert_root(&conn, &root_path, "source", false);
+        insert_note(&conn, root_id, "a", "looks like school photos 2008", 100);
+        insert_note(&conn, root_id, "a/b", "come back for the Nikon set", 200);
+
+        let scope = NoteScope {
+            root_id,
+            root_path: root_path.clone(),
+            rel_path: "a".to_string(),
+        };
+        let decision = DecisionParams {
+            command: crate::domain::decision::DecisionCommand::NoteClear,
+            scope: Some(vec![scope.display()]),
+            command_line: "canon note a --clear -r".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: true,
+            ledger_config: crate::domain::config::LedgerConfig::default(),
+        };
+
+        let result = execute_clear_recursive(&mut conn, &scope, Some(&decision)).unwrap();
+        assert_eq!(result.deleted, 2);
+        assert!(
+            result.warnings.is_empty(),
+            "warnings: {:?}",
+            result.warnings
+        );
+
+        let content =
+            std::fs::read_to_string(dir.path().join(".canon-ledger/000001-note_clear.toml"))
+                .unwrap();
+        assert!(
+            content.contains("looks like school photos 2008"),
+            "{content}"
+        );
+        assert!(content.contains("come back for the Nikon set"), "{content}");
+        assert!(content.contains("rel_path = \"a/b\""), "{content}");
+        assert!(content.contains("created_at = 100"), "{content}");
+    }
+
+    #[test]
+    fn test_clear_zero_notes_records_nothing() {
+        // A clear that touches nothing must not leave a decision row or a
+        // dangling receipt.
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        let scope = NoteScope {
+            root_id,
+            root_path: "/photos".to_string(),
+            rel_path: "empty".to_string(),
+        };
+        let decision = DecisionParams {
+            command: crate::domain::decision::DecisionCommand::NoteClear,
+            scope: Some(vec![scope.display()]),
+            command_line: "canon note empty --clear".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: true,
+            ledger_config: crate::domain::config::LedgerConfig::default(),
+        };
+
+        let result = execute_clear_exact(&mut conn, &scope, Some(&decision)).unwrap();
+        assert_eq!(result.deleted, 0);
+        let decisions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(decisions, 0, "empty clear must not record a decision");
     }
 }

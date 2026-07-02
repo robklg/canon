@@ -731,7 +731,6 @@ pub fn clear_object(
             object_id,
             hash_prefix,
             hash,
-            sources,
         } => {
             if options.dry_run {
                 println!("Would clear exclusion from object: {hash_prefix}...");
@@ -751,7 +750,6 @@ pub fn clear_object(
                     object_id,
                     &hash_prefix,
                     &hash,
-                    &sources,
                     placement.as_ref(),
                     Some(&decision),
                 )?;

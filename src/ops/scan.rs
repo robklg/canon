@@ -53,6 +53,11 @@ pub struct ScanStats {
     pub skipped: u64,
     pub hashed: u64,
     pub unexpected_hash_changes: u64,
+    /// Number of walk roots where missing detection was skipped (mount guard).
+    /// Counted in the stats — and thus the durable decision summary — so a scan
+    /// that *couldn't verify* absence is distinguishable from one that verified
+    /// nothing was missing.
+    pub missing_detection_skipped: u64,
 }
 
 impl ScanStats {
@@ -62,6 +67,14 @@ impl ScanStats {
             "Scanned {} files: {} new, {} updated, {} moved, {} unchanged, {} missing",
             self.scanned, self.new, self.updated, self.moved, self.unchanged, self.missing
         );
+        if self.missing_detection_skipped == 1 {
+            summary.push_str(", missing detection skipped (mount unstable)");
+        } else if self.missing_detection_skipped > 1 {
+            summary.push_str(&format!(
+                ", missing detection skipped on {} roots (mount unstable)",
+                self.missing_detection_skipped
+            ));
+        }
         if self.skipped > 0 {
             summary.push_str(&format!(", {} skipped (read errors)", self.skipped));
         }
@@ -365,10 +378,20 @@ pub fn scan_root(
         for id in missing_ids {
             outcomes.push((id, SourceOutcome::Missing));
         }
-    } else if pre_walk_device != post_walk_device {
-        warnings.push(
-            "Mount changed during scan — skipping missing detection to avoid data loss".to_string(),
-        );
+    } else {
+        // The skip is counted in the stats — not just warned about — so the
+        // decision summary durably records that this scan could not verify
+        // absence (a scan that couldn't observe deletions must be
+        // distinguishable in the trail from one that observed none).
+        stats.missing_detection_skipped = 1;
+        let detail = if pre_walk_device != post_walk_device {
+            "Mount changed during scan"
+        } else {
+            "Mount device could not be verified"
+        };
+        warnings.push(format!(
+            "{detail} — skipping missing detection to avoid data loss"
+        ));
     }
 
     // Mark missing/disconnected files based on outcomes. Deletion receipt items
@@ -1013,6 +1036,33 @@ mod tests {
         fn on_file(&self, _path: &str, _action: &FileAction) {}
         fn on_walk_error(&self, _error: &str) {}
         fn on_process_error(&self, _path: &str, _error: &str) {}
+    }
+
+    #[test]
+    fn compose_summary_records_missing_detection_skip() {
+        // The skip must reach the durable decision summary — a scan that
+        // couldn't verify absence must not read like one that verified
+        // nothing was missing.
+        let stats = ScanStats {
+            scanned: 10,
+            missing_detection_skipped: 1,
+            ..Default::default()
+        };
+        assert!(stats
+            .compose_summary()
+            .contains("missing detection skipped (mount unstable)"));
+
+        let stats = ScanStats {
+            missing_detection_skipped: 2,
+            ..Default::default()
+        };
+        assert!(stats
+            .compose_summary()
+            .contains("missing detection skipped on 2 roots (mount unstable)"));
+
+        assert!(!ScanStats::default()
+            .compose_summary()
+            .contains("missing detection"));
     }
 
     /// Test result from process_file helper.

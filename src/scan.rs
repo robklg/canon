@@ -280,6 +280,7 @@ pub fn run(
         total_stats.missing += result.stats.missing;
         total_stats.disconnected += result.stats.disconnected;
         total_stats.skipped += result.stats.skipped;
+        total_stats.missing_detection_skipped += result.stats.missing_detection_skipped;
 
         // Collect files for hashing
         all_files_to_hash.extend(result.files_to_hash);

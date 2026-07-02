@@ -26,7 +26,7 @@ use crate::ops::scope::resolve_scope;
 use crate::repo::{self, Db};
 
 pub fn run(
-    db: &Db,
+    db: &mut Db,
     path: Option<&Path>,
     message: Option<&str>,
     recursive: bool,
@@ -39,7 +39,7 @@ pub fn run(
     config: &LedgerConfig,
     no_receipt: bool,
 ) -> Result<()> {
-    let conn = db.conn();
+    let conn = db.conn_mut();
 
     // --by-scope without --global or -r implies -r
     let recursive = recursive || (by_scope && !global);
@@ -86,6 +86,9 @@ pub fn run(
             };
             let result = ops::note::execute_clear_recursive(conn, &scope, Some(&decision))?;
             eprintln!("{}", result.summary);
+            for w in &result.warnings {
+                eprintln!("Warning: {w}");
+            }
         } else {
             // Clear exact scope
             let decision = DecisionParams {
@@ -99,6 +102,9 @@ pub fn run(
             };
             let result = ops::note::execute_clear_exact(conn, &scope, Some(&decision))?;
             eprintln!("{}", result.summary);
+            for w in &result.warnings {
+                eprintln!("Warning: {w}");
+            }
         }
         return Ok(());
     }

@@ -869,6 +869,78 @@ pub fn fetch_for_receipt(conn: &Connection, source_ids: &[i64]) -> Result<Vec<Re
     Ok(result)
 }
 
+/// A source sharing an object's content, captured for an object-exclusion
+/// receipt. Unlike [`ReceiptSource`] (and every [`Source`] fetch in this
+/// module), this includes non-present tombstone rows: the object-level stamp
+/// (`set_decision_id_by_object`) touches every sharer, present or not, and the
+/// receipt must list exactly that stamp-set so the stamp is reconstructable
+/// from disk (stamp-set = receipt-set).
+pub struct ObjectReceiptSource {
+    pub object_id: i64,
+    pub root_path: String,
+    /// Role of the root ("source"/"archive") — for receipt-entry ordering.
+    pub root_role: String,
+    pub rel_path: String,
+    pub size: i64,
+    pub mtime: i64,
+    /// `false` for a tombstone row (`present = 0`).
+    pub present: bool,
+    /// The source's current `decision_id` — the pre-stamp provenance link,
+    /// which becomes the receipt item's `previous_decision_id`.
+    pub previous_decision_id: Option<i64>,
+}
+
+/// Fetch receipt snapshots for every source sharing the given objects —
+/// present **and** tombstone rows, grouped by object. Call before
+/// `set_decision_id_by_object` in the same transaction, so
+/// `previous_decision_id` is the pre-stamp value.
+///
+/// Chunks the ID list to stay under the SQLite variable limit. Rows within a
+/// group are unordered; the caller sorts for a stable receipt.
+pub fn fetch_object_sharers_for_receipt(
+    conn: &Connection,
+    object_ids: &[i64],
+) -> Result<HashMap<i64, Vec<ObjectReceiptSource>>> {
+    if object_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut result: HashMap<i64, Vec<ObjectReceiptSource>> = HashMap::new();
+
+    for chunk in object_ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT s.object_id, r.path, r.role, s.rel_path, s.size, s.mtime, s.present, s.decision_id
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             WHERE s.object_id IN ({})",
+            placeholders.join(",")
+        );
+
+        let params: Vec<Value> = chunk.iter().map(|&id| Value::from(id)).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            Ok(ObjectReceiptSource {
+                object_id: row.get(0)?,
+                root_path: row.get(1)?,
+                root_role: row.get(2)?,
+                rel_path: row.get(3)?,
+                size: row.get(4)?,
+                mtime: row.get(5)?,
+                present: row.get(6)?,
+                previous_decision_id: row.get(7)?,
+            })
+        })?;
+
+        for row in rows {
+            let row = row?;
+            result.entry(row.object_id).or_default().push(row);
+        }
+    }
+
+    Ok(result)
+}
+
 /// Set the exclusion flag for a single source, recording the deciding decision.
 ///
 /// # Behavior

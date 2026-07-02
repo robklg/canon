@@ -1353,7 +1353,7 @@ fn main() -> Result<()> {
             limit,
         } => {
             note::run(
-                &db,
+                &mut db,
                 path.as_deref(),
                 message.as_deref(),
                 recursive,

@@ -151,7 +151,7 @@ pub struct DuplicateExcludedEntry {
 }
 
 /// Object-level exclusion receipt — `exclude set-object`/`clear-object`.
-/// Grouped by content hash; each object lists all present sources sharing it.
+/// Grouped by content hash; each object lists its full stamp-set.
 #[derive(Serialize)]
 pub struct ObjectExcludeReceipt {
     pub meta: ReceiptMeta,
@@ -159,7 +159,8 @@ pub struct ObjectExcludeReceipt {
 }
 
 /// One object in an object-exclusion receipt: the content hash and every
-/// present source sharing it.
+/// source the object-level `decision_id` stamp touched (the stamp-set) —
+/// including tombstone rows, so the stamp is reconstructable from disk.
 #[derive(Serialize)]
 pub struct ObjectExcludeEntry {
     pub hash: String,
@@ -173,8 +174,18 @@ pub struct ObjectSourceReceiptEntry {
     pub rel_path: String,
     pub size: i64,
     pub mtime: i64,
+    /// `false` for a tombstone row (`present = 0`) — the file was already gone
+    /// when the stamp touched it. Omitted for present sources.
+    #[serde(skip_serializing_if = "is_true")]
+    pub present: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_decision_id: Option<i64>,
+}
+
+/// Serde helper: skip a `bool` field when `true` (serialize only the
+/// exceptional `false` case).
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +218,29 @@ pub struct DeletionReceiptItem {
     /// revival resetting `sources.decision_id` cannot erase it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_decision_id: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// Note-clear receipts
+// ---------------------------------------------------------------------------
+
+/// Note-clear receipt — written when `canon note --clear` deletes location
+/// notes. The texts are the user's own words, irreplaceable once the rows are
+/// gone, so the receipt captures them at the moment of destruction. Lives at
+/// the ledger of the root whose locations the notes annotated (the locus of
+/// the effect).
+#[derive(Serialize)]
+pub struct NoteClearReceipt {
+    pub meta: ReceiptMeta,
+    pub items: Vec<NoteClearReceiptItem>,
+}
+
+/// One cleared note: where it was attached, when it was written, and its text.
+#[derive(Serialize)]
+pub struct NoteClearReceiptItem {
+    pub rel_path: String,
+    pub created_at: i64,
+    pub text: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -749,21 +783,36 @@ mod tests {
             meta: sample_meta("exclude_set_object"),
             objects: vec![ObjectExcludeEntry {
                 hash: "sha256:obj".to_string(),
-                sources: vec![ObjectSourceReceiptEntry {
-                    root: "/vol".to_string(),
-                    rel_path: "dup.bin".to_string(),
-                    size: 4,
-                    mtime: 7,
-                    previous_decision_id: None,
-                }],
+                sources: vec![
+                    ObjectSourceReceiptEntry {
+                        root: "/vol".to_string(),
+                        rel_path: "dup.bin".to_string(),
+                        size: 4,
+                        mtime: 7,
+                        present: true,
+                        previous_decision_id: None,
+                    },
+                    ObjectSourceReceiptEntry {
+                        root: "/vol".to_string(),
+                        rel_path: "gone.bin".to_string(),
+                        size: 4,
+                        mtime: 7,
+                        present: false,
+                        previous_decision_id: Some(3),
+                    },
+                ],
             }],
         };
         let out = toml::to_string_pretty(&receipt).unwrap();
         assert!(out.contains("[[objects]]"));
         assert!(out.contains("hash = \"sha256:obj\""));
         assert!(out.contains("[[objects.sources]]"));
-        // None previous_decision_id is omitted entirely.
-        assert!(!out.contains("previous_decision_id"));
+        // `present` is serialized only for the exceptional tombstone entry;
+        // the present entry's None previous_decision_id is omitted entirely.
+        assert_eq!(out.matches("present = ").count(), 1);
+        assert!(out.contains("present = false"));
+        assert_eq!(out.matches("previous_decision_id").count(), 1);
+        assert!(out.contains("previous_decision_id = 3"));
     }
 
     #[test]
