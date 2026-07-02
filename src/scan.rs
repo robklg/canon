@@ -8,6 +8,7 @@ use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::resolve_root_path_any;
 use crate::ops;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
+use crate::ops::receipt::DeletionReceiptItem;
 use crate::ops::scan::{FileToHash, ScanOptions, ScanStats};
 use crate::progress::Progress;
 use crate::repo::{self, Connection, Db};
@@ -173,6 +174,8 @@ pub fn run(
 
     let mut total_stats = ScanStats::default();
     let mut all_files_to_hash: Vec<FileToHash> = Vec::new();
+    // Deletions grouped by the root that lost them — one source-local receipt each.
+    let mut deleted_by_root: Vec<(i64, String, Vec<DeletionReceiptItem>)> = Vec::new();
 
     for path in &paths_to_scan {
         let canonical = match fs::canonicalize(path) {
@@ -271,6 +274,7 @@ pub fn run(
             &StderrProgress,
             now,
             recorder.decision_id(),
+            decision.receipt_enabled,
         )?;
 
         // Display warnings from ops layer
@@ -294,6 +298,15 @@ pub fn run(
 
         // Collect files for hashing
         all_files_to_hash.extend(result.files_to_hash);
+
+        // Group deletions by their root for source-local receipts.
+        if !result.deleted_items.is_empty() {
+            deleted_by_root.push((
+                root_id,
+                root_path.to_string_lossy().to_string(),
+                result.deleted_items,
+            ));
+        }
     }
 
     // Hash collected files via ops layer
@@ -307,6 +320,10 @@ pub fn run(
     // Print summary (composed by ops)
     let summary = total_stats.compose_summary();
     println!("{}", summary);
+
+    // Write source-local deletion receipts (one per root that lost sources) before
+    // finalizing the decision. Skipped when receipts are disabled or nothing was deleted.
+    ops::scan::write_deletion_receipts(&mut recorder, &decision, deleted_by_root, &summary);
 
     // Complete decision recording
     let total_processed =
@@ -669,6 +686,7 @@ mod tests {
             &NoopProgress,
             now,
             None,
+            false,
         )
         .unwrap()
     }

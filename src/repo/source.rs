@@ -801,6 +801,74 @@ pub fn fetch_source_ids_for_root(
     Ok(ids)
 }
 
+/// A source snapshot captured for a receipt, resolved while the source is still
+/// present. `fetch_for_receipt` returns these; the caller maps them into receipt
+/// items. The content hash is resolved from the linked object (`None` if unhashed).
+pub struct ReceiptSource {
+    pub rel_path: String,
+    /// Content hash formatted `{hash_type}:{hash_value}`; `None` if the source
+    /// has no linked object (never hashed).
+    pub hash: Option<String>,
+    pub size: i64,
+    pub mtime: i64,
+    /// The source's current `decision_id` — its provenance link at capture time,
+    /// which becomes the receipt item's `previous_decision_id`.
+    pub previous_decision_id: Option<i64>,
+}
+
+/// Fetch receipt snapshots for the given source IDs, still-present rows only.
+///
+/// Used for deletion receipts, which must capture each source's identity, content
+/// hash, and provenance link **before** the `present → absent` flip stamps a new
+/// `decision_id` — so the returned `previous_decision_id` is the pre-flip value.
+/// Restricting to `present = 1` keeps the receipt's set equal to the set the same
+/// transition stamps (stamp-set = receipt-set): already-absent rows are excluded.
+///
+/// Chunks the ID list to stay under the SQLite variable limit. Returns rows in no
+/// particular order; the caller sorts if a stable receipt is wanted.
+pub fn fetch_for_receipt(conn: &Connection, source_ids: &[i64]) -> Result<Vec<ReceiptSource>> {
+    if source_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut result = Vec::with_capacity(source_ids.len());
+
+    for chunk in source_ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT s.rel_path, o.hash_type, o.hash_value, s.size, s.mtime, s.decision_id
+             FROM sources s
+             LEFT JOIN objects o ON s.object_id = o.id
+             WHERE s.present = 1 AND s.id IN ({})",
+            placeholders.join(",")
+        );
+
+        let params: Vec<Value> = chunk.iter().map(|&id| Value::from(id)).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            let hash_type: Option<String> = row.get(1)?;
+            let hash_value: Option<String> = row.get(2)?;
+            let hash = match (hash_type, hash_value) {
+                (Some(t), Some(v)) => Some(format!("{t}:{v}")),
+                _ => None,
+            };
+            Ok(ReceiptSource {
+                rel_path: row.get(0)?,
+                hash,
+                size: row.get(3)?,
+                mtime: row.get(4)?,
+                previous_decision_id: row.get(5)?,
+            })
+        })?;
+
+        for row in rows {
+            result.push(row?);
+        }
+    }
+
+    Ok(result)
+}
+
 /// Set the exclusion flag for a single source, recording the deciding decision.
 ///
 /// # Behavior
@@ -2616,6 +2684,72 @@ mod tests {
             .unwrap();
         assert_eq!(present, 0);
         assert_eq!(decision_id, Some(9));
+    }
+
+    // =========================================================================
+    // fetch_for_receipt tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_for_receipt_resolves_hash_and_provenance() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "abc123", false);
+        let id1 = insert_source(&conn, root_id, "vacation/img.jpg", Some(obj), true, false);
+        // Seed the pre-flip provenance link the receipt must capture.
+        conn.execute(
+            "UPDATE sources SET decision_id = 42 WHERE id = ?",
+            rusqlite::params![id1],
+        )
+        .unwrap();
+
+        let rows = fetch_for_receipt(&conn, &[id1]).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.rel_path, "vacation/img.jpg");
+        assert_eq!(r.hash.as_deref(), Some("sha256:abc123"));
+        assert_eq!(r.size, 1000);
+        assert_eq!(r.mtime, 1704067200);
+        assert_eq!(r.previous_decision_id, Some(42));
+    }
+
+    #[test]
+    fn fetch_for_receipt_unhashed_source_has_no_hash() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let id1 = insert_source(&conn, root_id, "raw.dat", None, true, false);
+
+        let rows = fetch_for_receipt(&conn, &[id1]).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].hash.is_none());
+        assert!(rows[0].previous_decision_id.is_none());
+    }
+
+    #[test]
+    fn fetch_for_receipt_returns_present_only() {
+        // Protects stamp-set = receipt-set: already-absent rows are never listed,
+        // so the receipt matches exactly the sources this transition stamps.
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let present = insert_source(&conn, root_id, "here.jpg", None, true, false);
+        let absent = insert_source(&conn, root_id, "gone.jpg", None, false, false);
+
+        let rows = fetch_for_receipt(&conn, &[present, absent]).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].rel_path, "here.jpg");
+    }
+
+    #[test]
+    fn fetch_for_receipt_empty_ids() {
+        let conn = setup_test_db();
+        let rows = fetch_for_receipt(&conn, &[]).unwrap();
+        assert!(rows.is_empty());
     }
 
     // =========================================================================

@@ -218,6 +218,64 @@ impl DecisionRecorder {
         }
     }
 
+    /// Write a receipt to disk immediately (write `.incomplete`, then finalize to
+    /// `.toml`), independent of the `start()`-time receipt slot.
+    ///
+    /// Scan uses this: a deletion receipt's placement (which root lost files) and
+    /// existence (only if sources went missing) are known only after the walk, not
+    /// at `start()`. The path is computed from `placement` and `command`; the file
+    /// is written and finalized in one call (fix-forward — the deletion was already
+    /// observed on disk).
+    ///
+    /// Returns the written receipt's `(root_id, rel_path)` for the caller to index,
+    /// or `None` if recording is disabled or a filesystem step failed (a warning is
+    /// collected). Only `LedgerRoot` placement is supported — source-local receipts
+    /// land flat in that root's `.canon-ledger/`.
+    pub fn write_placed_receipt<T: Serialize>(
+        &mut self,
+        placement: &ReceiptPlacement,
+        command: &str,
+        receipt: &T,
+        summary: &str,
+    ) -> Option<ReceiptRef> {
+        let decision_id = self.id?;
+
+        let (root_id, root_path) = match placement {
+            ReceiptPlacement::LedgerRoot { root_id, root_path } => (*root_id, root_path.clone()),
+            ReceiptPlacement::Targeted { .. } => {
+                self.warnings.push(
+                    "Warning: source-local receipt requires ledger-root placement".to_string(),
+                );
+                return None;
+            }
+        };
+
+        let rel_path = compute_ledger_root_receipt_rel_path(decision_id, command);
+        let abs_path = PathBuf::from(&root_path).join(&rel_path);
+
+        if let Some(parent) = abs_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                self.warnings.push(format!(
+                    "Warning: could not create receipt directory {}: {e}",
+                    parent.display()
+                ));
+                return None;
+            }
+        }
+
+        if let Err(e) = write_receipt(&abs_path, receipt, summary) {
+            self.warnings.push(format!("Receipt write failed: {e:#}"));
+            return None;
+        }
+        if let Err(e) = finalize_receipt(&abs_path) {
+            self.warnings
+                .push(format!("Warning: failed to finalize receipt: {e}"));
+            return None;
+        }
+
+        Some(ReceiptRef { root_id, rel_path })
+    }
+
     /// Finalize the receipt file: rename `.incomplete` → `.toml`. A failure is
     /// collected as a warning. No-op if no receipt path was set up.
     pub fn finalize_receipt_file(&mut self) {

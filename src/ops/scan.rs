@@ -14,8 +14,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use rusqlite::{Transaction, TransactionBehavior};
 
+use crate::domain::decision::DecisionStatus;
 use crate::domain::scan::{find_missing, reconcile, FileObservation, Reconciliation};
+use crate::ops::decision::{DecisionParams, DecisionRecorder};
 use crate::ops::fs::compute_partial_hash;
+use crate::ops::receipt::{DeletionReceipt, DeletionReceiptItem, ReceiptPlacement};
 use crate::repo::{self, Connection};
 
 // ============================================================================
@@ -84,6 +87,10 @@ pub struct FileToHash {
 pub struct ScanRootResult {
     pub stats: ScanStats,
     pub files_to_hash: Vec<FileToHash>,
+    /// Sources that went missing during this scan, captured before the
+    /// `present → absent` flip for the deletion receipt. Empty when receipt
+    /// capture is off (`capture_deletions = false`) or nothing was deleted.
+    pub deleted_items: Vec<DeletionReceiptItem>,
     /// Warnings collected during scan (disconnected storage, errors).
     pub warnings: Vec<String>,
 }
@@ -134,6 +141,7 @@ pub fn scan_root(
     progress: &dyn ScanProgress,
     now: i64,
     decision_id: Option<i64>,
+    capture_deletions: bool,
 ) -> Result<ScanRootResult> {
     let root_path = Path::new(root_path);
     let mut stats = ScanStats::default();
@@ -349,9 +357,18 @@ pub fn scan_root(
         );
     }
 
-    // Mark missing/disconnected files based on outcomes
-    let (missing_count, disconnected_count, missing_warnings) =
-        mark_missing_sources(conn, &outcomes, now, options.ignore_device_id, decision_id)?;
+    // Mark missing/disconnected files based on outcomes. Deletion receipt items
+    // are captured before the flip (when capturing), so they carry each source's
+    // pre-flip provenance link.
+    let (missing_count, disconnected_count, deleted_items, missing_warnings) =
+        mark_missing_sources(
+            conn,
+            &outcomes,
+            now,
+            options.ignore_device_id,
+            decision_id,
+            capture_deletions,
+        )?;
     warnings.extend(missing_warnings);
     stats.missing = missing_count;
     stats.disconnected = disconnected_count;
@@ -359,6 +376,7 @@ pub fn scan_root(
     Ok(ScanRootResult {
         stats,
         files_to_hash,
+        deleted_items,
         warnings,
     })
 }
@@ -444,14 +462,20 @@ fn flush_unchanged(conn: &Connection, batch: &[(i64, i64, i64)], now: i64) -> Re
 const UNCHANGED_BATCH_SIZE: usize = 500;
 
 /// Translate source outcomes to DB mutations.
-/// Returns (missing_count, disconnected_count, warnings).
+///
+/// When `capture_deletions` is set, the sources about to be marked missing are
+/// snapshotted **before** the flip (so their captured `previous_decision_id` is the
+/// pre-flip value) and returned as receipt items; otherwise the returned Vec is empty.
+///
+/// Returns (missing_count, disconnected_count, deleted_items, warnings).
 fn mark_missing_sources(
     conn: &Connection,
     outcomes: &[(i64, SourceOutcome)],
     now: i64,
     ignore_device_id: bool,
     decision_id: Option<i64>,
-) -> Result<(u64, u64, Vec<String>)> {
+    capture_deletions: bool,
+) -> Result<(u64, u64, Vec<DeletionReceiptItem>, Vec<String>)> {
     let mut missing_ids: Vec<i64> = Vec::new();
     let mut disconnected_count = 0u64;
 
@@ -471,6 +495,14 @@ fn mark_missing_sources(
         }
     }
 
+    // Capture receipt items before the flip; mark_missing then stamps decision_id
+    // on exactly these sources (stamp-set = receipt-set).
+    let deleted_items = if capture_deletions {
+        capture_deletion_items(conn, &missing_ids)?
+    } else {
+        Vec::new()
+    };
+
     let missing_count = repo::source::mark_missing(conn, &missing_ids, now, decision_id)?;
 
     let mut warnings = Vec::new();
@@ -484,7 +516,67 @@ fn mark_missing_sources(
         );
     }
 
-    Ok((missing_count, disconnected_count, warnings))
+    Ok((missing_count, disconnected_count, deleted_items, warnings))
+}
+
+/// Snapshot sources about to be marked missing into deletion-receipt items.
+/// Must be called before `mark_missing` flips them so each item's
+/// `previous_decision_id` is the pre-flip provenance link. Items are sorted by
+/// rel_path for a stable, readable receipt.
+fn capture_deletion_items(
+    conn: &Connection,
+    missing_ids: &[i64],
+) -> Result<Vec<DeletionReceiptItem>> {
+    if missing_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut items: Vec<DeletionReceiptItem> = repo::source::fetch_for_receipt(conn, missing_ids)?
+        .into_iter()
+        .map(|s| DeletionReceiptItem {
+            rel_path: s.rel_path,
+            hash: s.hash,
+            size: s.size,
+            mtime: s.mtime,
+            previous_decision_id: s.previous_decision_id,
+        })
+        .collect();
+    items.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(items)
+}
+
+/// Write source-local deletion receipts — one per root that lost sources — under
+/// the single scan decision.
+///
+/// Placement and existence are known only after the walk, so this runs at
+/// completion. Gated on `params.receipt_enabled` and a live decision id; a root
+/// with no deleted items is skipped, so a scan that deletes nothing writes no
+/// receipt. Each receipt lands at its own root's `.canon-ledger/` — the loss
+/// travels with that drive. Write failures are collected as recorder warnings.
+pub fn write_deletion_receipts(
+    recorder: &mut DecisionRecorder,
+    params: &DecisionParams,
+    per_root: Vec<(i64, String, Vec<DeletionReceiptItem>)>,
+    summary: &str,
+) {
+    if !params.receipt_enabled {
+        return;
+    }
+    let Some(decision_id) = recorder.decision_id() else {
+        return;
+    };
+    let command = params.command.as_str();
+
+    for (root_id, root_path, items) in per_root {
+        if items.is_empty() {
+            continue;
+        }
+        let receipt = DeletionReceipt {
+            meta: params.receipt_meta(decision_id, DecisionStatus::Completed, summary, None),
+            items,
+        };
+        let placement = ReceiptPlacement::LedgerRoot { root_id, root_path };
+        recorder.write_placed_receipt(&placement, command, &receipt, summary);
+    }
 }
 
 // ============================================================================
@@ -1253,8 +1345,8 @@ mod tests {
         ];
 
         let now = current_timestamp();
-        let (missing_count, disconnected_count, warnings) =
-            mark_missing_sources(&conn, &outcomes, now, false, None).unwrap();
+        let (missing_count, disconnected_count, _items, warnings) =
+            mark_missing_sources(&conn, &outcomes, now, false, None, false).unwrap();
 
         assert_eq!(missing_count, 1);
         assert_eq!(disconnected_count, 1);
@@ -1290,8 +1382,8 @@ mod tests {
         let outcomes = vec![(id1, SourceOutcome::Disconnected)];
 
         let now = current_timestamp();
-        let (missing_count, disconnected_count, warnings) =
-            mark_missing_sources(&conn, &outcomes, now, true, None).unwrap();
+        let (missing_count, disconnected_count, _items, warnings) =
+            mark_missing_sources(&conn, &outcomes, now, true, None, false).unwrap();
 
         assert_eq!(missing_count, 1);
         assert_eq!(disconnected_count, 0);
@@ -1310,8 +1402,8 @@ mod tests {
         let outcomes = vec![(id1, SourceOutcome::Missing)];
 
         let now = current_timestamp();
-        let (missing_count, _, _) =
-            mark_missing_sources(&conn, &outcomes, now, false, Some(123)).unwrap();
+        let (missing_count, _, _items, _) =
+            mark_missing_sources(&conn, &outcomes, now, false, Some(123), false).unwrap();
         assert_eq!(missing_count, 1);
 
         let decision_id: Option<i64> = conn
@@ -1320,5 +1412,261 @@ mod tests {
             })
             .unwrap();
         assert_eq!(decision_id, Some(123));
+    }
+
+    // =========================================================================
+    // Deletion receipt capture + writing
+    // =========================================================================
+
+    use crate::domain::config::{LedgerConfig, RecordingMode};
+    use crate::domain::decision::DecisionCommand;
+    use crate::ops::decision::DecisionCounts;
+    use walkdir::WalkDir;
+
+    /// Build a `.canon-ledger`-filtered walker over `root`, like the interface does.
+    fn walk(root: &Path) -> impl Iterator<Item = Result<walkdir::DirEntry, walkdir::Error>> {
+        WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !(e.file_type().is_dir() && e.file_name() == ".canon-ledger"))
+    }
+
+    fn no_hash_options() -> ScanOptions {
+        ScanOptions {
+            hash: false,
+            hash_all: false,
+            ignore_device_id: false,
+        }
+    }
+
+    #[test]
+    fn scan_root_captures_deletion_before_flip() {
+        // A source whose file is gone is captured for the receipt with its pre-scan
+        // decision_id, then stamped with the scan's — stamp-set = receipt-set.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_path = temp.path().to_str().unwrap();
+        let root_id = repo::insert_test_root(&conn, root_path, "source", false);
+
+        // "gone.txt" is expected (present in DB) but absent on disk → missing.
+        let gone = repo::insert_test_source(&conn, root_id, "gone.txt", 1, 1, 100, 1000);
+        conn.execute("UPDATE sources SET decision_id = 42 WHERE id = ?", [gone])
+            .unwrap();
+        // A real file keeps the walk non-empty (New, seen).
+        std::fs::write(temp.path().join("here.txt"), "data").unwrap();
+
+        let now = current_timestamp();
+        let result = scan_root(
+            &conn,
+            root_id,
+            root_path,
+            None,
+            walk(temp.path()),
+            &no_hash_options(),
+            &NoopProgress,
+            now,
+            Some(99),
+            true,
+        )
+        .unwrap();
+
+        // Receipt-set: exactly the deleted source, with its pre-flip provenance link.
+        assert_eq!(result.deleted_items.len(), 1);
+        let item = &result.deleted_items[0];
+        assert_eq!(item.rel_path, "gone.txt");
+        assert_eq!(item.previous_decision_id, Some(42));
+        assert!(item.hash.is_none());
+
+        // Stamp-set: the same source is now absent and stamped with the scan decision.
+        let (present, did): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT present, decision_id FROM sources WHERE id = ?",
+                [gone],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(present, 0);
+        assert_eq!(did, Some(99));
+    }
+
+    #[test]
+    fn scan_root_no_capture_when_disabled() {
+        // Records mode (receipts off): the source is still marked missing and
+        // stamped, but no items are captured for a receipt.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_path = temp.path().to_str().unwrap();
+        let root_id = repo::insert_test_root(&conn, root_path, "source", false);
+        let gone = repo::insert_test_source(&conn, root_id, "gone.txt", 1, 1, 100, 1000);
+        // A real file keeps the root non-empty so "gone.txt" is inferred missing
+        // (not routed through empty-dir device classification).
+        std::fs::write(temp.path().join("here.txt"), "data").unwrap();
+
+        let now = current_timestamp();
+        let result = scan_root(
+            &conn,
+            root_id,
+            root_path,
+            None,
+            walk(temp.path()),
+            &no_hash_options(),
+            &NoopProgress,
+            now,
+            Some(7),
+            false,
+        )
+        .unwrap();
+
+        assert!(result.deleted_items.is_empty());
+        let (present, did): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT present, decision_id FROM sources WHERE id = ?",
+                [gone],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(present, 0);
+        assert_eq!(did, Some(7));
+    }
+
+    #[test]
+    fn scan_root_unstable_mount_records_no_deletion() {
+        // When the walk root's device is unavailable (an unstable mount), missing
+        // detection is skipped, so a pre-inserted source is neither marked missing
+        // nor captured — the guard prevents false deletion records.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let missing_root = temp.path().join("not-there");
+        let root_path = missing_root.to_str().unwrap();
+        let root_id = repo::insert_test_root(&conn, root_path, "source", false);
+        let gone = repo::insert_test_source(&conn, root_id, "gone.txt", 1, 1, 100, 1000);
+
+        let now = current_timestamp();
+        let result = scan_root(
+            &conn,
+            root_id,
+            root_path,
+            None,
+            walk(&missing_root),
+            &no_hash_options(),
+            &NoopProgress,
+            now,
+            Some(5),
+            true,
+        )
+        .unwrap();
+
+        assert!(result.deleted_items.is_empty());
+        assert_eq!(result.stats.missing, 0);
+        let present: i64 = conn
+            .query_row("SELECT present FROM sources WHERE id = ?", [gone], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            present, 1,
+            "source must not be marked missing on unstable mount"
+        );
+    }
+
+    fn scan_params(recording: RecordingMode, no_receipt: bool) -> DecisionParams {
+        DecisionParams {
+            command: DecisionCommand::Scan,
+            scope: None,
+            command_line: "canon scan".to_string(),
+            reason: None,
+            record_enabled: recording != RecordingMode::Off,
+            receipt_enabled: recording == RecordingMode::Full && !no_receipt,
+            ledger_config: LedgerConfig {
+                recording,
+                ..LedgerConfig::default()
+            },
+        }
+    }
+
+    fn sample_items() -> Vec<DeletionReceiptItem> {
+        vec![DeletionReceiptItem {
+            rel_path: "gone.txt".to_string(),
+            hash: None,
+            size: 100,
+            mtime: 1000,
+            previous_decision_id: Some(3),
+        }]
+    }
+
+    #[test]
+    fn write_deletion_receipts_writes_source_local_file() {
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_path = temp.path().to_str().unwrap().to_string();
+        let params = scan_params(RecordingMode::Full, false);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+        let id = recorder.decision_id().unwrap();
+
+        write_deletion_receipts(
+            &mut recorder,
+            &params,
+            vec![(1, root_path.clone(), sample_items())],
+            "Scanned 0 files: 0 new, 0 updated, 0 moved, 0 unchanged, 1 missing",
+        );
+
+        let receipt = temp
+            .path()
+            .join(".canon-ledger")
+            .join(format!("{id:06}-scan.toml"));
+        assert!(receipt.exists(), "receipt should land on the drive");
+        let body = std::fs::read_to_string(&receipt).unwrap();
+        assert!(body.contains("command = \"scan\""));
+        assert!(body.contains("rel_path = \"gone.txt\""));
+        assert!(recorder.take_warnings().is_empty());
+    }
+
+    #[test]
+    fn write_deletion_receipts_skipped_when_receipts_disabled() {
+        // Records mode: DB row yes, receipt file no.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_path = temp.path().to_str().unwrap().to_string();
+        let params = scan_params(RecordingMode::Records, false);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+
+        write_deletion_receipts(
+            &mut recorder,
+            &params,
+            vec![(1, root_path, sample_items())],
+            "summary",
+        );
+
+        assert!(!temp.path().join(".canon-ledger").exists());
+    }
+
+    #[test]
+    fn write_deletion_receipts_zero_deletions_no_file_but_decision_row_exists() {
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let params = scan_params(RecordingMode::Full, false);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+        let id = recorder.decision_id().unwrap();
+
+        // No deletions this scan.
+        write_deletion_receipts(&mut recorder, &params, Vec::new(), "summary");
+        recorder.complete(
+            &conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(0),
+                completed: Some(0),
+                failed: None,
+                skipped: Some(0),
+            },
+            "summary",
+        );
+
+        assert!(
+            !temp.path().join(".canon-ledger").exists(),
+            "no receipt for a scan that deleted nothing"
+        );
+        let d = repo::decision::fetch_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(d.status, "completed");
     }
 }

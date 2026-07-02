@@ -21,11 +21,16 @@ pub struct ReceiptRef {
 
 /// Where a receipt file should be written.
 ///
-/// `Targeted` is for decisions that write to a specific archive location (apply):
-/// the receipt mirrors the destination path under the archive's `.canon-ledger/`,
-/// per the `layout` setting. `LedgerRoot` is for non-targeted decisions
-/// (exclusions, and future scan/roots-rm): the receipt lands flat in the ledger
-/// root's `.canon-ledger/`, independent of layout.
+/// **Placement principle:** a receipt lives at the *locus of the action's effect*.
+/// An apply writes content to an archive, so its receipt goes to that destination
+/// archive (`Targeted`). A deletion loses a file from the root it lived on, so its
+/// receipt goes to that source root; an exclusion asserts a source↔archive coverage
+/// relationship, so its receipt goes to the archive ledger root (both `LedgerRoot`,
+/// differing only in which root the caller selects).
+///
+/// `Targeted` mirrors the destination path under the archive's `.canon-ledger/`, per
+/// the `layout` setting. `LedgerRoot` lands flat in the given root's `.canon-ledger/`,
+/// independent of layout — the receipt travels with that drive.
 pub enum ReceiptPlacement {
     Targeted {
         archive_root_id: i64,
@@ -168,6 +173,38 @@ pub struct ObjectSourceReceiptEntry {
     pub rel_path: String,
     pub size: i64,
     pub mtime: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_decision_id: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// Deletion receipts
+// ---------------------------------------------------------------------------
+
+/// Deletion receipt — written when `canon scan` observes sources gone from disk
+/// (`present → absent`). Source-root-local: it lists exactly the sources deleted
+/// from one root and lives at that root's `.canon-ledger/`, because the loss is
+/// part of that drive's story. A single scan may emit several — one per affected
+/// root.
+#[derive(Serialize)]
+pub struct DeletionReceipt {
+    pub meta: ReceiptMeta,
+    pub items: Vec<DeletionReceiptItem>,
+}
+
+/// One item in a deletion receipt — a single source that went missing. The root
+/// is shared across the receipt (placement is per-root), so only the rel_path is
+/// recorded per item.
+#[derive(Serialize)]
+pub struct DeletionReceiptItem {
+    pub rel_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    pub size: i64,
+    pub mtime: i64,
+    /// The source's `decision_id` before the deletion — the predecessor in the
+    /// provenance chain. Captured before the `present → absent` flip so a later
+    /// revival resetting `sources.decision_id` cannot erase it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_decision_id: Option<i64>,
 }
@@ -727,5 +764,37 @@ mod tests {
         assert!(out.contains("[[objects.sources]]"));
         // None previous_decision_id is omitted entirely.
         assert!(!out.contains("previous_decision_id"));
+    }
+
+    #[test]
+    fn test_deletion_receipt_serializes() {
+        let receipt = DeletionReceipt {
+            meta: sample_meta("scan"),
+            items: vec![
+                DeletionReceiptItem {
+                    rel_path: "vacation/IMG_001.jpg".to_string(),
+                    hash: Some("sha256:gone".to_string()),
+                    size: 2048,
+                    mtime: 1700000000,
+                    previous_decision_id: Some(7),
+                },
+                DeletionReceiptItem {
+                    rel_path: "notes.txt".to_string(),
+                    hash: None,
+                    size: 12,
+                    mtime: 1700000100,
+                    previous_decision_id: None,
+                },
+            ],
+        };
+        let out = toml::to_string_pretty(&receipt).unwrap();
+        assert!(out.contains("[[items]]"));
+        assert!(out.contains("rel_path = \"vacation/IMG_001.jpg\""));
+        // Unhashed item omits hash; only the Some item carries it.
+        assert_eq!(out.matches("hash =").count(), 1);
+        assert!(out.contains("hash = \"sha256:gone\""));
+        // Only the item with a prior decision carries previous_decision_id.
+        assert_eq!(out.matches("previous_decision_id").count(), 1);
+        assert!(out.contains("previous_decision_id = 7"));
     }
 }
