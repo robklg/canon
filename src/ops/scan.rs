@@ -11,7 +11,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::{Transaction, TransactionBehavior};
 
 use crate::domain::decision::DecisionStatus;
@@ -93,6 +93,20 @@ pub struct ScanRootResult {
     pub deleted_items: Vec<DeletionReceiptItem>,
     /// Warnings collected during scan (disconnected storage, errors).
     pub warnings: Vec<String>,
+}
+
+/// Result of marking a path's sources deleted via `--missing`.
+#[derive(Debug)]
+pub struct MarkMissingPathResult {
+    /// The root that contained the deleted sources.
+    pub root_id: i64,
+    /// Absolute path of that root (for source-local receipt placement).
+    pub root_path: String,
+    /// How many present sources were flipped to absent.
+    pub missing_count: u64,
+    /// Deletion-receipt items captured before the flip. Empty when receipt
+    /// capture is off (`capture_deletions = false`) or nothing was present.
+    pub deleted_items: Vec<DeletionReceiptItem>,
 }
 
 /// Parameters controlling scan behavior.
@@ -544,6 +558,93 @@ fn capture_deletion_items(
     Ok(items)
 }
 
+/// Mark every present source under `path` as deleted, for `--missing` on a
+/// folder that no longer exists on disk (so it can't be walked).
+///
+/// This is the second deletion-detection path; it receives the same treatment as
+/// the sweep: the flip is stamped with `decision_id`, and — when `capture_deletions`
+/// is set — the sources are snapshotted **before** the flip into receipt items
+/// carrying their pre-flip provenance link. The caller writes the source-local
+/// receipt via [`write_deletion_receipts`].
+///
+/// `path` must resolve to a known root (relative paths are cleaned against `cwd`);
+/// otherwise this errors. A path that matches a root but has no present sources
+/// returns `missing_count = 0` and no items — the caller decides how to report it.
+pub fn mark_missing_path(
+    conn: &Connection,
+    path: &Path,
+    roots: &[crate::domain::root::Root],
+    cwd: &Path,
+    now: i64,
+    decision_id: Option<i64>,
+    capture_deletions: bool,
+) -> Result<MarkMissingPathResult> {
+    let cleaned = crate::domain::path::clean_path(path, cwd);
+    let cleaned_str = cleaned.to_string_lossy();
+
+    let (root_id, root_path, rel_prefix) =
+        match crate::domain::root::find_containing_root(&cleaned_str, roots) {
+            Some((id, root_path, _role, rel)) => (id, root_path, rel),
+            None => bail!(
+                "Cannot mark missing: {} is not under any known root",
+                path.display()
+            ),
+        };
+
+    let prefix_arg = if rel_prefix.is_empty() {
+        None
+    } else {
+        Some(rel_prefix.as_str())
+    };
+    let source_ids = repo::source::fetch_source_ids_for_root(conn, root_id, prefix_arg)?;
+
+    // Capture receipt items before the flip so each item's previous_decision_id
+    // is the pre-flip value (stamp-set = receipt-set).
+    let deleted_items = if capture_deletions {
+        capture_deletion_items(conn, &source_ids)?
+    } else {
+        Vec::new()
+    };
+
+    let missing_count = repo::source::mark_missing(conn, &source_ids, now, decision_id)?;
+
+    Ok(MarkMissingPathResult {
+        root_id,
+        root_path,
+        missing_count,
+        deleted_items,
+    })
+}
+
+/// Merge deletion entries that share a root so each root yields one receipt.
+/// Items are concatenated in the order roots were first seen and re-sorted by
+/// rel_path for a stable receipt. Sources can't appear twice across a root's
+/// entries: each is captured only while present, and each capture flips it, so a
+/// later capture for the same root never re-sees it.
+fn coalesce_by_root(
+    per_root: Vec<(i64, String, Vec<DeletionReceiptItem>)>,
+) -> Vec<(i64, String, Vec<DeletionReceiptItem>)> {
+    let mut order: Vec<i64> = Vec::new();
+    let mut by_root: HashMap<i64, (String, Vec<DeletionReceiptItem>)> = HashMap::new();
+    for (root_id, root_path, items) in per_root {
+        match by_root.entry(root_id) {
+            std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().1.extend(items),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                order.push(root_id);
+                e.insert((root_path, items));
+            }
+        }
+    }
+    order
+        .into_iter()
+        .map(|root_id| {
+            let (root_path, mut items) = by_root.remove(&root_id).expect("root_id was recorded");
+            items.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+            (root_id, root_path, items)
+        })
+        .collect()
+}
+
 /// Write source-local deletion receipts — one per root that lost sources — under
 /// the single scan decision.
 ///
@@ -556,6 +657,11 @@ fn capture_deletion_items(
 /// the decision and its receipt — the many-receipts-per-decision case the single
 /// `decisions.receipt_*` columns can't hold. Write and index failures are
 /// collected as recorder warnings, never halting the scan.
+///
+/// Entries that share a root are coalesced into one receipt: a single scan can
+/// lose files in one root through both the sweep and a `--missing` path, and
+/// multiple `--missing` paths can name subtrees of the same root. Each root still
+/// gets exactly one receipt listing everything it lost.
 pub fn write_deletion_receipts(
     conn: &Connection,
     recorder: &mut DecisionRecorder,
@@ -571,7 +677,7 @@ pub fn write_deletion_receipts(
     };
     let command = params.command.as_str();
 
-    for (root_id, root_path, items) in per_root {
+    for (root_id, root_path, items) in coalesce_by_root(per_root) {
         if items.is_empty() {
             continue;
         }
@@ -1739,5 +1845,319 @@ mod tests {
             assert_eq!(receipt, rel_path);
         }
         assert!(recorder.take_warnings().is_empty());
+    }
+
+    #[test]
+    fn write_deletion_receipts_coalesces_same_root() {
+        // Two entries for the same root (a sweep plus a --missing subtree, say)
+        // merge into one receipt listing all of that root's lost sources.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_path = temp.path().to_str().unwrap().to_string();
+        let params = scan_params(RecordingMode::Full, false);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+        let id = recorder.decision_id().unwrap();
+
+        let item = |rel: &str| DeletionReceiptItem {
+            rel_path: rel.to_string(),
+            hash: None,
+            size: 1,
+            mtime: 1,
+            previous_decision_id: None,
+        };
+
+        write_deletion_receipts(
+            &conn,
+            &mut recorder,
+            &params,
+            vec![
+                (7, root_path.clone(), vec![item("work/a.txt")]),
+                (7, root_path, vec![item("vacation/b.txt")]),
+            ],
+            "summary",
+        );
+
+        // One receipt file for the root, listing both items sorted by rel_path.
+        let receipt = temp
+            .path()
+            .join(".canon-ledger")
+            .join(format!("{id:06}-scan.toml"));
+        let body = std::fs::read_to_string(&receipt).unwrap();
+        let vac = body.find("vacation/b.txt").expect("vacation item present");
+        let work = body.find("work/a.txt").expect("work item present");
+        assert!(vac < work, "merged items should be sorted by rel_path");
+
+        // Only one scope row is indexed for the root — a single receipt.
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM decision_scopes
+                 WHERE root_id = 7 AND receipt_rel_path IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1);
+        assert!(recorder.take_warnings().is_empty());
+    }
+
+    // =========================================================================
+    // mark_missing_path (the --missing deleted-folder path)
+    // =========================================================================
+
+    /// Fetch roots as domain objects, the way the interface passes them in.
+    /// Test paths are absolute, so the cwd handed to `mark_missing_path` is a
+    /// placeholder (`/`).
+    fn all_roots(conn: &Connection) -> Vec<crate::domain::root::Root> {
+        repo::root::fetch_all(conn).unwrap()
+    }
+
+    #[test]
+    fn mark_missing_path_marks_sources() {
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        for i in 0..5 {
+            repo::insert_test_source(
+                &conn,
+                root_id,
+                &format!("vacation/img{i}.jpg"),
+                1,
+                100 + i,
+                1000,
+                1000,
+            );
+        }
+
+        let result = mark_missing_path(
+            &conn,
+            Path::new("/photos/vacation"),
+            &all_roots(&conn),
+            Path::new("/"),
+            9999,
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.missing_count, 5);
+        assert_eq!(result.root_id, root_id);
+        let present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE root_id = ? AND present = 1",
+                [root_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(present, 0);
+    }
+
+    #[test]
+    fn mark_missing_path_not_under_any_root() {
+        let conn = repo::open_in_memory_for_test();
+        repo::insert_test_root(&conn, "/photos", "source", false);
+
+        let result = mark_missing_path(
+            &conn,
+            Path::new("/nonexistent/path"),
+            &all_roots(&conn),
+            Path::new("/"),
+            9999,
+            None,
+            false,
+        );
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not under any known root"));
+    }
+
+    #[test]
+    fn mark_missing_path_prefix_matches_subset() {
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        for i in 0..3 {
+            repo::insert_test_source(
+                &conn,
+                root_id,
+                &format!("vacation/img{i}.jpg"),
+                1,
+                200 + i,
+                1000,
+                1000,
+            );
+        }
+        for i in 0..2 {
+            repo::insert_test_source(
+                &conn,
+                root_id,
+                &format!("work/doc{i}.pdf"),
+                1,
+                300 + i,
+                1000,
+                1000,
+            );
+        }
+
+        let result = mark_missing_path(
+            &conn,
+            Path::new("/photos/vacation"),
+            &all_roots(&conn),
+            Path::new("/"),
+            9999,
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.missing_count, 3);
+        let work_present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path LIKE 'work/%' AND present = 1",
+                [root_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(work_present, 2);
+    }
+
+    #[test]
+    fn mark_missing_path_already_not_present() {
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        let sid = repo::insert_test_source(&conn, root_id, "vacation/img.jpg", 1, 400, 1000, 1000);
+        conn.execute("UPDATE sources SET present = 0 WHERE id = ?", [sid])
+            .unwrap();
+
+        let result = mark_missing_path(
+            &conn,
+            Path::new("/photos/vacation"),
+            &all_roots(&conn),
+            Path::new("/"),
+            9999,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // mark_missing only flips present=1 rows, so nothing is marked here.
+        assert_eq!(result.missing_count, 0);
+    }
+
+    #[test]
+    fn mark_missing_path_empty_prefix_marks_all() {
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        for i in 0..4 {
+            repo::insert_test_source(
+                &conn,
+                root_id,
+                &format!("img{i}.jpg"),
+                1,
+                500 + i,
+                1000,
+                1000,
+            );
+        }
+
+        let result = mark_missing_path(
+            &conn,
+            Path::new("/photos"),
+            &all_roots(&conn),
+            Path::new("/"),
+            9999,
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.missing_count, 4);
+    }
+
+    #[test]
+    fn mark_missing_path_no_sources_found() {
+        let conn = repo::open_in_memory_for_test();
+        repo::insert_test_root(&conn, "/photos", "source", false);
+
+        let result = mark_missing_path(
+            &conn,
+            Path::new("/photos/empty"),
+            &all_roots(&conn),
+            Path::new("/"),
+            9999,
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.missing_count, 0);
+        assert!(result.deleted_items.is_empty());
+    }
+
+    #[test]
+    fn mark_missing_path_stamps_decision_id() {
+        // --missing threads the scan decision_id into the deletion transition,
+        // exactly as the sweep does.
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        let sid = repo::insert_test_source(&conn, root_id, "gone.jpg", 1, 1, 100, 1000);
+
+        let result = mark_missing_path(
+            &conn,
+            Path::new("/photos"),
+            &all_roots(&conn),
+            Path::new("/"),
+            9999,
+            Some(555),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.missing_count, 1);
+        let did: Option<i64> = conn
+            .query_row("SELECT decision_id FROM sources WHERE id = ?", [sid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(did, Some(555));
+    }
+
+    #[test]
+    fn mark_missing_path_captures_items_before_flip() {
+        // With capture on, --missing snapshots sources before the flip — the same
+        // treatment the sweep gives — so each item carries its pre-flip
+        // decision_id, and the source ends up absent and stamped with the scan.
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        let sid = repo::insert_test_source(&conn, root_id, "vacation/gone.jpg", 1, 1, 100, 1000);
+        conn.execute("UPDATE sources SET decision_id = 42 WHERE id = ?", [sid])
+            .unwrap();
+
+        let result = mark_missing_path(
+            &conn,
+            Path::new("/photos/vacation"),
+            &all_roots(&conn),
+            Path::new("/"),
+            9999,
+            Some(99),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(result.missing_count, 1);
+        assert_eq!(result.deleted_items.len(), 1);
+        let captured = &result.deleted_items[0];
+        assert_eq!(captured.rel_path, "vacation/gone.jpg");
+        assert_eq!(captured.previous_decision_id, Some(42));
+
+        let (present, did): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT present, decision_id FROM sources WHERE id = ?",
+                [sid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(present, 0);
+        assert_eq!(did, Some(99));
     }
 }

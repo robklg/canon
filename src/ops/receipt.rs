@@ -195,7 +195,7 @@ pub struct DeletionReceipt {
 /// One item in a deletion receipt — a single source that went missing. The root
 /// is shared across the receipt (placement is per-root), so only the rel_path is
 /// recorded per item.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct DeletionReceiptItem {
     pub rel_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
