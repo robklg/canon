@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 pub use rusqlite::Connection;
+use rusqlite_migration::{Migrations, M};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
@@ -105,6 +106,10 @@ impl Db {
     }
 }
 
+/// Baseline schema — migration 1 in [`migrations`]. Frozen at the point schema
+/// migrations were adopted; do not edit to change the schema. Add changes as new
+/// `M::up` entries in [`migrations`] instead. `IF NOT EXISTS` throughout keeps it
+/// a safe no-op on databases created before migrations tracked `user_version`.
 const SCHEMA: &str = r#"
 -- Roots: scanned folder roots
 CREATE TABLE IF NOT EXISTS roots (
@@ -286,10 +291,31 @@ pub fn open_with_options(path: &Path, options: DbOptions) -> Result<Db> {
         );
     }
 
-    conn.execute_batch(SCHEMA)
-        .context("Failed to initialize database schema")?;
+    migrations()
+        .to_latest(&mut conn)
+        .context("Failed to apply database schema migrations")?;
 
     Ok(Db { conn })
+}
+
+/// Ordered schema migrations, applied by `PRAGMA user_version` (rusqlite_migration).
+///
+/// Migration 1 is the baseline schema ([`SCHEMA`]); each later entry is a delta,
+/// e.g. a column added to an existing table. **Append only — never reorder or edit
+/// an already-released migration.** Progress is tracked solely by `user_version`,
+/// so rewriting history would desync existing databases. Because the baseline uses
+/// `IF NOT EXISTS`, databases created before adoption (which have `user_version = 0`
+/// but the tables already present) upgrade cleanly: migration 1 no-ops, later
+/// deltas apply.
+fn migrations() -> Migrations<'static> {
+    Migrations::new(vec![
+        // 1: baseline schema.
+        M::up(SCHEMA),
+        // 2: per-root receipt index — one decision can emit several source-local
+        //    receipts (a scan deleting across roots), which the single
+        //    decisions.receipt_* columns can't hold.
+        M::up("ALTER TABLE decision_scopes ADD COLUMN receipt_rel_path TEXT;"),
+    ])
 }
 
 /// Populate temp_sources table with source IDs using a transaction for efficiency
@@ -459,9 +485,10 @@ fn normalize_sql(sql: &str) -> String {
 /// the real schema rather than a potentially stale copy.
 #[cfg(test)]
 pub fn open_in_memory_for_test() -> Connection {
-    let conn = Connection::open_in_memory().expect("Failed to open in-memory database");
-    conn.execute_batch(SCHEMA)
-        .expect("Failed to initialize test database schema");
+    let mut conn = Connection::open_in_memory().expect("Failed to open in-memory database");
+    migrations()
+        .to_latest(&mut conn)
+        .expect("Failed to apply migrations to test database");
     conn
 }
 
@@ -515,5 +542,61 @@ mod tests {
             .pragma_query_value(None, "journal_mode", |row| row.get(0))
             .unwrap();
         assert_eq!(mode, "wal");
+    }
+
+    fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        names.iter().any(|n| n == column)
+    }
+
+    #[test]
+    fn migrations_are_valid() {
+        // rusqlite_migration applies the set to a scratch DB and checks it is
+        // internally coherent — catches a reordered or malformed migration.
+        migrations().validate().unwrap();
+    }
+
+    #[test]
+    fn fresh_db_has_decision_scopes_receipt_column() {
+        let conn = open_in_memory_for_test();
+        assert!(has_column(&conn, "decision_scopes", "receipt_rel_path"));
+    }
+
+    #[test]
+    fn migrating_legacy_db_adds_receipt_column() {
+        // Simulate a database created before migrations tracked user_version:
+        // baseline decision_scopes present, no receipt column, user_version 0.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE decision_scopes (
+                 decision_id INTEGER NOT NULL,
+                 root_id INTEGER NOT NULL,
+                 rel_prefix TEXT NOT NULL DEFAULT ''
+             )",
+        )
+        .unwrap();
+        assert!(!has_column(&conn, "decision_scopes", "receipt_rel_path"));
+
+        migrations().to_latest(&mut conn).unwrap();
+
+        // Migration 1's IF NOT EXISTS no-ops the existing table; migration 2 adds
+        // the column.
+        assert!(has_column(&conn, "decision_scopes", "receipt_rel_path"));
+    }
+
+    #[test]
+    fn to_latest_is_idempotent() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_latest(&mut conn).unwrap();
+        // Re-running with user_version already current is a no-op, never an error.
+        migrations().to_latest(&mut conn).unwrap();
+        assert!(has_column(&conn, "decision_scopes", "receipt_rel_path"));
     }
 }

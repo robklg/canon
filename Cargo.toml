@@ -34,6 +34,10 @@ strum = { version = "0.26", features = ["derive"] }
 toml = "0.8"
 signal-hook = "0.3"
 walkdir = "2"
+# Pinned to the 1.3.x line: it targets rusqlite 0.32 (our version). 2.x needs
+# rusqlite >=0.34, which would link a second libsqlite3-sys (links = "sqlite3"
+# conflict). Bump together with rusqlite.
+rusqlite_migration = "1.3.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

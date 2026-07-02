@@ -551,8 +551,13 @@ fn capture_deletion_items(
 /// completion. Gated on `params.receipt_enabled` and a live decision id; a root
 /// with no deleted items is skipped, so a scan that deletes nothing writes no
 /// receipt. Each receipt lands at its own root's `.canon-ledger/` — the loss
-/// travels with that drive. Write failures are collected as recorder warnings.
+/// travels with that drive. Every written receipt is linked to its root in the
+/// scope index (`decision_scopes.receipt_rel_path`) so a by-root query recovers
+/// the decision and its receipt — the many-receipts-per-decision case the single
+/// `decisions.receipt_*` columns can't hold. Write and index failures are
+/// collected as recorder warnings, never halting the scan.
 pub fn write_deletion_receipts(
+    conn: &Connection,
     recorder: &mut DecisionRecorder,
     params: &DecisionParams,
     per_root: Vec<(i64, String, Vec<DeletionReceiptItem>)>,
@@ -575,7 +580,21 @@ pub fn write_deletion_receipts(
             items,
         };
         let placement = ReceiptPlacement::LedgerRoot { root_id, root_path };
-        recorder.write_placed_receipt(&placement, command, &receipt, summary);
+        if let Some(receipt_ref) =
+            recorder.write_placed_receipt(&placement, command, &receipt, summary)
+        {
+            if let Err(e) = repo::decision::set_scope_receipt(
+                conn,
+                decision_id,
+                receipt_ref.root_id,
+                &receipt_ref.rel_path,
+            ) {
+                recorder.push_warning(format!(
+                    "Warning: failed to index deletion receipt for root {}: {e}",
+                    receipt_ref.root_id
+                ));
+            }
+        }
     }
 }
 
@@ -1604,6 +1623,7 @@ mod tests {
         let id = recorder.decision_id().unwrap();
 
         write_deletion_receipts(
+            &conn,
             &mut recorder,
             &params,
             vec![(1, root_path.clone(), sample_items())],
@@ -1631,6 +1651,7 @@ mod tests {
         let mut recorder = DecisionRecorder::start(&conn, &params, None);
 
         write_deletion_receipts(
+            &conn,
             &mut recorder,
             &params,
             vec![(1, root_path, sample_items())],
@@ -1649,7 +1670,7 @@ mod tests {
         let id = recorder.decision_id().unwrap();
 
         // No deletions this scan.
-        write_deletion_receipts(&mut recorder, &params, Vec::new(), "summary");
+        write_deletion_receipts(&conn, &mut recorder, &params, Vec::new(), "summary");
         recorder.complete(
             &conn,
             DecisionStatus::Completed,
@@ -1668,5 +1689,55 @@ mod tests {
         );
         let d = repo::decision::fetch_by_id(&conn, id).unwrap().unwrap();
         assert_eq!(d.status, "completed");
+    }
+
+    #[test]
+    fn write_deletion_receipts_multi_root_writes_and_indexes_each() {
+        // One scan decision, deletions in two roots → one source-local receipt per
+        // root, each indexed in decision_scopes for a by-root lookup.
+        let conn = repo::open_in_memory_for_test();
+        let temp_a = TempDir::new().unwrap();
+        let temp_b = TempDir::new().unwrap();
+        let root_a = temp_a.path().to_str().unwrap().to_string();
+        let root_b = temp_b.path().to_str().unwrap().to_string();
+        let params = scan_params(RecordingMode::Full, false);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+        let id = recorder.decision_id().unwrap();
+
+        write_deletion_receipts(
+            &conn,
+            &mut recorder,
+            &params,
+            vec![
+                (11, root_a.clone(), sample_items()),
+                (22, root_b.clone(), sample_items()),
+            ],
+            "summary",
+        );
+
+        // Each receipt lands on its own drive.
+        let name = format!("{id:06}-scan.toml");
+        assert!(temp_a.path().join(".canon-ledger").join(&name).exists());
+        assert!(temp_b.path().join(".canon-ledger").join(&name).exists());
+
+        // The indexed rel_path is relative to the root (includes .canon-ledger/),
+        // matching decisions.receipt_rel_path semantics.
+        let rel_path = format!(".canon-ledger/{name}");
+
+        // Both roots are indexed; the retirement query (WHERE root_id = ?) recovers
+        // the decision and its receipt for each.
+        for root_id in [11_i64, 22] {
+            let (did, receipt): (i64, String) = conn
+                .query_row(
+                    "SELECT decision_id, receipt_rel_path FROM decision_scopes
+                     WHERE root_id = ? AND receipt_rel_path IS NOT NULL",
+                    [root_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(did, id);
+            assert_eq!(receipt, rel_path);
+        }
+        assert!(recorder.take_warnings().is_empty());
     }
 }

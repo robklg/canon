@@ -323,7 +323,7 @@ pub fn run(
 
     // Write source-local deletion receipts (one per root that lost sources) before
     // finalizing the decision. Skipped when receipts are disabled or nothing was deleted.
-    ops::scan::write_deletion_receipts(&mut recorder, &decision, deleted_by_root, &summary);
+    ops::scan::write_deletion_receipts(conn, &mut recorder, &decision, deleted_by_root, &summary);
 
     // Complete decision recording
     let total_processed =

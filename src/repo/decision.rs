@@ -90,6 +90,35 @@ pub fn insert_scopes(conn: &Connection, decision_id: i64, pairs: &[(i64, String)
     Ok(())
 }
 
+/// Record the per-root receipt a decision emitted, in the scope index.
+///
+/// A single decision can write several source-local receipts (one per root that
+/// lost files in a scan). Each is linked to its root here so a by-root query
+/// finds the decision and its receipt. Upserts: sets `receipt_rel_path` on the
+/// existing `(decision_id, root_id)` scope row(s), or inserts a fresh
+/// whole-root row when the decision recorded no scope for that root (e.g. a
+/// global scan carries no scope entry until this point).
+pub fn set_scope_receipt(
+    conn: &Connection,
+    decision_id: i64,
+    root_id: i64,
+    rel_path: &str,
+) -> Result<()> {
+    let updated = conn.execute(
+        "UPDATE decision_scopes SET receipt_rel_path = ?3
+         WHERE decision_id = ?1 AND root_id = ?2",
+        rusqlite::params![decision_id, root_id, rel_path],
+    )?;
+    if updated == 0 {
+        conn.execute(
+            "INSERT INTO decision_scopes (decision_id, root_id, rel_prefix, receipt_rel_path)
+             VALUES (?1, ?2, '', ?3)",
+            rusqlite::params![decision_id, root_id, rel_path],
+        )?;
+    }
+    Ok(())
+}
+
 /// Fetch a decision by ID. For testing.
 #[cfg(test)]
 pub fn fetch_by_id(
@@ -273,6 +302,137 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn set_scope_receipt_updates_existing_scope_row() {
+        let conn = setup_test_db();
+        let decision_id = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan /photos",
+            None,
+            "0.4.0",
+            None,
+            None,
+        )
+        .unwrap();
+        insert_scopes(&conn, decision_id, &[(7, "photos".to_string())]).unwrap();
+
+        set_scope_receipt(&conn, decision_id, 7, "000042-scan.toml").unwrap();
+
+        let (prefix, receipt): (String, Option<String>) = conn
+            .query_row(
+                "SELECT rel_prefix, receipt_rel_path FROM decision_scopes
+                 WHERE decision_id = ? AND root_id = ?",
+                rusqlite::params![decision_id, 7],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        // Existing scope row is reused (prefix preserved), receipt attached.
+        assert_eq!(prefix, "photos");
+        assert_eq!(receipt, Some("000042-scan.toml".to_string()));
+    }
+
+    #[test]
+    fn set_scope_receipt_inserts_when_no_scope_row() {
+        // Global scans carry no decision_scopes row for the root until now.
+        let conn = setup_test_db();
+        let decision_id = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan --all",
+            None,
+            "0.4.0",
+            None,
+            None,
+        )
+        .unwrap();
+
+        set_scope_receipt(&conn, decision_id, 3, "000009-scan.toml").unwrap();
+
+        let (prefix, receipt): (String, Option<String>) = conn
+            .query_row(
+                "SELECT rel_prefix, receipt_rel_path FROM decision_scopes
+                 WHERE decision_id = ? AND root_id = ?",
+                rusqlite::params![decision_id, 3],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(prefix, "");
+        assert_eq!(receipt, Some("000009-scan.toml".to_string()));
+    }
+
+    #[test]
+    fn set_scope_receipt_is_idempotent() {
+        let conn = setup_test_db();
+        let decision_id = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan --all",
+            None,
+            "0.4.0",
+            None,
+            None,
+        )
+        .unwrap();
+
+        set_scope_receipt(&conn, decision_id, 5, "000001-scan.toml").unwrap();
+        set_scope_receipt(&conn, decision_id, 5, "000001-scan.toml").unwrap();
+
+        // Second call updates the row inserted by the first — no duplicate.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM decision_scopes WHERE decision_id = ? AND root_id = ?",
+                rusqlite::params![decision_id, 5],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn set_scope_receipt_by_root_query_finds_decision() {
+        // The retirement-shaped query: given a root, find deletion decisions and receipts.
+        let conn = setup_test_db();
+        let d1 = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan --all",
+            None,
+            "0.4.0",
+            None,
+            None,
+        )
+        .unwrap();
+        let d2 = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan --all",
+            None,
+            "0.4.0",
+            None,
+            None,
+        )
+        .unwrap();
+        set_scope_receipt(&conn, d1, 2, "000001-scan.toml").unwrap();
+        set_scope_receipt(&conn, d2, 9, "000002-scan.toml").unwrap();
+
+        let (did, receipt): (i64, String) = conn
+            .query_row(
+                "SELECT decision_id, receipt_rel_path FROM decision_scopes
+                 WHERE root_id = ? AND receipt_rel_path IS NOT NULL",
+                [2],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(did, d1);
+        assert_eq!(receipt, "000001-scan.toml");
     }
 
     #[test]
