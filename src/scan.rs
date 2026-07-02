@@ -131,6 +131,9 @@ pub fn run(
     let mut all_files_to_hash: Vec<FileToHash> = Vec::new();
     // Deletions grouped by the root that lost them — one source-local receipt each.
     let mut deleted_by_root: Vec<(i64, String, Vec<DeletionReceiptItem>)> = Vec::new();
+    // Resolved scope of each walked path, recorded at completion so a --add scan's
+    // freshly created root lands in the durable scope index (it didn't exist at start()).
+    let mut scope_pairs: Vec<(i64, String)> = Vec::new();
 
     for path in &paths_to_scan {
         let canonical = match fs::canonicalize(path) {
@@ -224,6 +227,10 @@ pub fn run(
             }
         };
 
+        // Record this path's resolved scope (root + subtree). Captures roots just
+        // created above, which weren't present for the start()-time decomposition.
+        scope_pairs.push((root_id, scan_prefix.clone().unwrap_or_default()));
+
         // Determine if we should hash this root
         // Default: hash new/changed files; --no-hash to skip; --verify to rehash all
         let scan_options = ScanOptions {
@@ -298,6 +305,12 @@ pub fn run(
     // Print summary (composed by ops)
     let summary = total_stats.compose_summary();
     println!("{}", summary);
+
+    // Record the scope index for every walked root (including any created this run)
+    // before linking receipts to those roots. Idempotent with the start()-time write.
+    scope_pairs.sort();
+    scope_pairs.dedup();
+    recorder.record_scopes(conn, &scope_pairs);
 
     // Write source-local deletion receipts (one per root that lost sources) before
     // finalizing the decision. Skipped when receipts are disabled or nothing was deleted.

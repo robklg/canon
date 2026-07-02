@@ -287,6 +287,32 @@ impl DecisionRecorder {
         }
     }
 
+    /// Idempotently record additional `(root_id, rel_prefix)` scope-index rows
+    /// discovered after `start()`.
+    ///
+    /// The `start()`-time scope decomposition can only match roots that already
+    /// exist. A `canon scan --add` creates its root inside the scan loop, so at
+    /// `start()` the scope path matched no root and no `decision_scopes` row was
+    /// written. The loop resolves each path to an exact `(root_id, rel_prefix)` —
+    /// including roots it just created — so passing those resolved pairs here
+    /// records any still missing, without re-deriving them from the raw (possibly
+    /// non-canonical) scope strings. Pairs already written at `start()` are left
+    /// untouched. No-op if recording is disabled or `start()` failed; a write
+    /// failure is collected as a warning, never fatal.
+    pub fn record_scopes(&mut self, conn: &Connection, pairs: &[(i64, String)]) {
+        let Some(id) = self.id else {
+            return;
+        };
+        if pairs.is_empty() {
+            return;
+        }
+        if let Err(e) = repo::decision::insert_scopes(conn, id, pairs) {
+            self.warnings.push(format!(
+                "Warning: failed to update decision scope index: {e}"
+            ));
+        }
+    }
+
     /// Update the record with completion data. No-op if disabled or start failed.
     /// Collects a warning if the UPDATE fails.
     ///
@@ -1011,5 +1037,84 @@ mod tests {
         );
 
         assert!(!path.exists(), "no receipt file should be written for None");
+    }
+
+    // =========================================================================
+    // record_scopes — new-root scope capture at completion
+    // =========================================================================
+
+    fn scope_row_count(conn: &Connection, decision_id: i64, root_id: i64) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM decision_scopes WHERE decision_id = ? AND root_id = ?",
+            rusqlite::params![decision_id, root_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn record_scopes_writes_row_for_newly_created_root() {
+        // A scan --add creates its root inside the loop: at start() the scope path
+        // matched no root, so no scope row was written. record_scopes captures it.
+        let conn = setup_test_db();
+        let params = DecisionParams {
+            command: DecisionCommand::Scan,
+            scope: Some(vec!["/newdrive/photos".to_string()]),
+            command_line: "canon scan --add /newdrive/photos --role source".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: false,
+            ledger_config: LedgerConfig::default(),
+        };
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+        let decision_id = recorder.decision_id().unwrap();
+
+        // No root existed at start() → nothing populated for it.
+        let root_id = repo::insert_test_root(&conn, "/newdrive/photos", "source", false);
+        assert_eq!(scope_row_count(&conn, decision_id, root_id), 0);
+
+        recorder.record_scopes(&conn, &[(root_id, String::new())]);
+
+        assert_eq!(scope_row_count(&conn, decision_id, root_id), 1);
+        assert!(recorder.take_warnings().is_empty());
+    }
+
+    #[test]
+    fn record_scopes_does_not_duplicate_start_time_rows() {
+        // An existing-root scan: start() already wrote the scope row; recording the
+        // same resolved pair at completion must not double-insert.
+        let conn = setup_test_db();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        let params = DecisionParams {
+            command: DecisionCommand::Scan,
+            scope: Some(vec!["/photos".to_string()]),
+            command_line: "canon scan /photos".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: false,
+            ledger_config: LedgerConfig::default(),
+        };
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+        let decision_id = recorder.decision_id().unwrap();
+        assert_eq!(scope_row_count(&conn, decision_id, root_id), 1);
+
+        recorder.record_scopes(&conn, &[(root_id, String::new())]);
+
+        assert_eq!(scope_row_count(&conn, decision_id, root_id), 1);
+    }
+
+    #[test]
+    fn record_scopes_is_noop_when_recording_disabled() {
+        let conn = setup_test_db();
+        let params = make_params(DecisionCommand::Scan, false);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+        assert!(recorder.decision_id().is_none());
+
+        recorder.record_scopes(&conn, &[(1, String::new())]);
+
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM decision_scopes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 0);
     }
 }

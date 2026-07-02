@@ -75,15 +75,25 @@ pub fn update_receipt_path(
     Ok(())
 }
 
-/// Insert durable scope-index rows for a decision — one row per `(root_id, rel_prefix)`.
+/// Ensure durable scope-index rows exist for a decision — one row per `(root_id, rel_prefix)`.
 ///
 /// Powers future subtree-scoped queries ("what decisions touched this path?"). The
 /// pairs come from decomposing the decision's resolved scope. Pair count is small
 /// (one per scoped root/prefix), so no chunking is needed.
+///
+/// Idempotent: a `(decision_id, root_id, rel_prefix)` row that already exists is
+/// left untouched (its `receipt_rel_path`, if any, is preserved). This lets scan
+/// record newly-created roots at completion without duplicating the rows written
+/// at `start()`.
 pub fn insert_scopes(conn: &Connection, decision_id: i64, pairs: &[(i64, String)]) -> Result<()> {
     for (root_id, rel_prefix) in pairs {
         conn.execute(
-            "INSERT INTO decision_scopes (decision_id, root_id, rel_prefix) VALUES (?1, ?2, ?3)",
+            "INSERT INTO decision_scopes (decision_id, root_id, rel_prefix)
+             SELECT ?1, ?2, ?3
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM decision_scopes
+                 WHERE decision_id = ?1 AND root_id = ?2 AND rel_prefix = ?3
+             )",
             rusqlite::params![decision_id, root_id, rel_prefix],
         )?;
     }
@@ -302,6 +312,68 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn insert_scopes_is_idempotent() {
+        // Re-inserting the same pair (e.g. scan re-recording a root's scope at
+        // completion that was already written at start) does not duplicate the row.
+        let conn = setup_test_db();
+        let decision_id = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan --all",
+            None,
+            "0.4.0",
+            None,
+            None,
+        )
+        .unwrap();
+
+        insert_scopes(&conn, decision_id, &[(3, String::new())]).unwrap();
+        insert_scopes(&conn, decision_id, &[(3, String::new())]).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM decision_scopes WHERE decision_id = ? AND root_id = ?",
+                rusqlite::params![decision_id, 3],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn insert_scopes_preserves_existing_receipt_link() {
+        // A scope row that already carries a receipt link (set by set_scope_receipt
+        // before completion) must survive a later idempotent re-insert of the same pair.
+        let conn = setup_test_db();
+        let decision_id = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan --all",
+            None,
+            "0.4.0",
+            None,
+            None,
+        )
+        .unwrap();
+
+        set_scope_receipt(&conn, decision_id, 4, ".canon-ledger/000001-scan.toml").unwrap();
+        insert_scopes(&conn, decision_id, &[(4, String::new())]).unwrap();
+
+        let (count, receipt): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(receipt_rel_path) FROM decision_scopes
+                 WHERE decision_id = ? AND root_id = ?",
+                rusqlite::params![decision_id, 4],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(receipt, Some(".canon-ledger/000001-scan.toml".to_string()));
     }
 
     #[test]
