@@ -86,6 +86,15 @@ canon scan --missing /Volumes/share/Backup
 
 The sources are marked as not present but remain in the database with their hashes and metadata intact. If the path reappears later (e.g., storage remounted), a normal scan will reconcile them back. Cannot be combined with `--all` or `--add`.
 
+**Deletions are recorded.** Whether Canon infers a deletion by re-scanning a parent (files that were present but weren't seen this time) or you mark one directly with `--missing`, the disappearance is captured as [decision provenance](../../concepts/decisions.md): each vanished source is linked to the scan decision, and a **source-local receipt** listing exactly what was lost is written to `.canon-ledger/` on the affected drive. Add `--reason` to say *why* — it travels into both the record and the receipt:
+
+```bash
+canon scan --missing /Volumes/share/Backup/old-phone \
+  --reason "Phone backed up to archive, originals confirmed"
+```
+
+This makes deletion a first-class fate alongside archiving and exclusion: you can later reconstruct what a drive held, what you kept, released, or discarded — and why — even from the files alone. A deletion is recorded even when no archive root exists, so culling a drive before archiving still leaves a trail. To suppress the receipt for one run use `--no-receipt`; to disable recording entirely set `recording = "Off"` (see [Decision Provenance](../../concepts/decisions.md)).
+
 Output shows what was found:
 ```
 Scanned 1234 files: 100 new, 5 updated, 2 moved, 1127 unchanged, 0 missing

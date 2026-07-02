@@ -8,7 +8,7 @@ Every command that changes state writes a decision record:
 
 | Command | What it records |
 |---------|----------------|
-| `scan` | Directory indexing |
+| `scan` | Directory indexing; files gone missing (deletion) |
 | `apply` | File archiving |
 | `exclude set/clear/duplicates` | Source triage |
 | `exclude set-object/clear-object` | Object-level triage |
@@ -49,23 +49,27 @@ If Canon is interrupted (Ctrl+C, crash, power loss), the "started" record surviv
 A decision has two artifacts:
 
 - The **record** — a row in Canon's database (everything above). It answers *what happened, when, and why*, and it's queryable.
-- The **receipt** — a durable TOML file written next to your archive, capturing the *per-item detail* the record only summarizes: every file the decision touched, with its content hash, size, and modification time.
+- The **receipt** — a durable TOML file written to a `.canon-ledger/` directory on disk, capturing the *per-item detail* the record only summarizes: every file the decision touched, with its content hash, size, and modification time.
 
-The record is the index; the receipt is the evidence. Together they mean an archived or excluded file can always be traced back to the decision that put it in that state — even years later, even from the files alone.
+The record is the index; the receipt is the evidence. Together they mean a file that reached one of its three terminal fates — **archived**, **excluded**, or **deleted** — can always be traced back to the decision that put it in that state — even years later, even from the files alone.
 
 ## Receipts
 
-Receipts live in a `.canon-ledger/` directory under an archive root. Each is named for the decision that produced it, so the id in the filename links it straight back to the record:
+Receipts live in a `.canon-ledger/` directory under a root. Each is named for the decision that produced it, so the id in the filename links it straight back to the record:
 
 ```
 .canon-ledger/000042-exclude_set.toml
 .canon-ledger/Media/2016/000041-apply.toml
+.canon-ledger/000043-scan.toml
 ```
 
-- **Apply receipts** are *targeted*: they mirror the destination path under `.canon-ledger/`, sitting alongside the content they describe.
-- **Exclusion receipts** are *flat*: they land directly in the ledger root's `.canon-ledger/`, since an exclusion isn't tied to any one destination.
+A receipt sits at the **locus of the action's effect**:
 
-Each receipt records, per item: the source root and relative path, content hash, size, and modification time. Variants carry the shape of their decision — `exclude duplicates` groups items by content hash, recording which copy was **kept** versus **excluded**; object-level exclusions list every source sharing the content.
+- **Apply receipts** are *targeted*: they mirror the destination path under the archive root's `.canon-ledger/`, sitting alongside the content they describe.
+- **Exclusion receipts** are *flat*: they land directly in the archive ledger root's `.canon-ledger/`, since an exclusion isn't tied to any one destination.
+- **Deletion receipts** are *source-local*: they land in the `.canon-ledger/` of the **source root where the files were lost** — physically on that drive, so the record of what a drive lost travels with the drive. A single scan that detects deletions across several roots writes one receipt per affected root, all under the one decision.
+
+Each receipt records, per item: the source root and relative path, content hash, size, and modification time. Variants carry the shape of their decision — `exclude duplicates` groups items by content hash, recording which copy was **kept** versus **excluded**; object-level exclusions list every source sharing the content; a deletion receipt lists exactly the sources that went missing.
 
 ### The provenance chain
 
@@ -81,7 +85,7 @@ What Canon writes is controlled by `ledger.recording` in `$CANON_HOME/config.tom
 | `Records` | ✓ | — |
 | `Off` | — | — |
 
-`ledger.layout` controls where *targeted* (apply) receipts sit: `Central` (default) collects them under the archive root's `.canon-ledger/`; `Alongside` places them in a `.canon-ledger/` beside each destination directory. Layout does not affect exclusion receipts — those are always flat at the ledger root.
+`ledger.layout` controls where *targeted* (apply) receipts sit: `Central` (default) collects them under the archive root's `.canon-ledger/`; `Alongside` places them in a `.canon-ledger/` beside each destination directory. Layout does not affect exclusion or deletion receipts — those are always flat at their own `.canon-ledger/` root (the archive ledger root for exclusions, the source root for deletions).
 
 ```toml
 [ledger]
@@ -89,7 +93,7 @@ recording = "Full"   # Full | Records | Off
 layout = "Central"   # Central | Alongside
 ```
 
-If no archive root is configured, exclusion decisions are still recorded, but no receipt can be written — Canon warns you so the gap is visible rather than silent.
+If no archive root is configured, exclusion decisions are still recorded, but no receipt can be written — Canon warns you so the gap is visible rather than silent. Deletion receipts have no such dependency: they live on the source root, which always exists, so culling files from a drive that was never archived is still recorded in full.
 
 ## Annotating Decisions with `--reason`
 
