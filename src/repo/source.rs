@@ -680,6 +680,12 @@ pub fn apply_reconciliation(
 ///
 /// - `source_ids`: IDs of sources to mark as missing
 /// - `now`: Timestamp to record as last_seen_at
+/// - `decision_id`: The decision behind this `present → absent` (deletion) transition.
+///   `Some` **sets** the column (the deletion is decision-linked); `None` **omits** the
+///   column, preserving the existing value — mirroring the scan set/preserve rule
+///   (`apply_reconciliation`). Callers that can't attribute the transition to a decision
+///   (recording disabled, or a manual marking) pass `None` so an existing provenance link
+///   is never clobbered to NULL.
 ///
 /// # Returns
 ///
@@ -689,7 +695,12 @@ pub fn apply_reconciliation(
 ///
 /// Sources already marked as not present (present=0) are not counted in the return value.
 /// This function handles empty input gracefully (returns 0).
-pub fn mark_missing(conn: &Connection, source_ids: &[i64], now: i64) -> Result<u64> {
+pub fn mark_missing(
+    conn: &Connection,
+    source_ids: &[i64],
+    now: i64,
+    decision_id: Option<i64>,
+) -> Result<u64> {
     if source_ids.is_empty() {
         return Ok(0);
     }
@@ -698,14 +709,27 @@ pub fn mark_missing(conn: &Connection, source_ids: &[i64], now: i64) -> Result<u
 
     for chunk in source_ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        let sql = format!(
-            "UPDATE sources SET present = 0, last_seen_at = ? WHERE present = 1 AND id IN ({})",
-            placeholders.join(",")
-        );
+        // Set decision_id only when Some; omit the column when None to preserve the
+        // existing value (set/preserve, per the decision_id set/preserve rule).
+        let sql = match decision_id {
+            Some(_) => format!(
+                "UPDATE sources SET present = 0, last_seen_at = ?, decision_id = ? \
+                 WHERE present = 1 AND id IN ({})",
+                placeholders.join(",")
+            ),
+            None => format!(
+                "UPDATE sources SET present = 0, last_seen_at = ? \
+                 WHERE present = 1 AND id IN ({})",
+                placeholders.join(",")
+            ),
+        };
 
-        // Build params: now first, then all the IDs
-        let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() + 1);
+        // Build params: now (and decision_id when set) first, then all the IDs.
+        let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() + 2);
         params.push(rusqlite::types::Value::from(now));
+        if let Some(id) = decision_id {
+            params.push(rusqlite::types::Value::from(id));
+        }
         for &id in chunk {
             params.push(rusqlite::types::Value::from(id));
         }
@@ -2455,7 +2479,7 @@ mod tests {
         let _id3 = insert_source(&conn, root_id, "present.jpg", None, true, false);
 
         let now = 1700000001;
-        let count = mark_missing(&conn, &[id1, id2], now).unwrap();
+        let count = mark_missing(&conn, &[id1, id2], now, None).unwrap();
 
         assert_eq!(count, 2);
 
@@ -2483,7 +2507,7 @@ mod tests {
     #[test]
     fn mark_missing_empty_list() {
         let conn = setup_test_db();
-        let count = mark_missing(&conn, &[], 1700000001).unwrap();
+        let count = mark_missing(&conn, &[], 1700000001, None).unwrap();
         assert_eq!(count, 0);
     }
 
@@ -2496,7 +2520,7 @@ mod tests {
         let id2 = insert_source(&conn, root_id, "file2.jpg", None, false, false); // already not present
 
         // Only id1 should be updated (id2 is already present=0)
-        let count = mark_missing(&conn, &[id1, id2], 1700000001).unwrap();
+        let count = mark_missing(&conn, &[id1, id2], 1700000001, None).unwrap();
         assert_eq!(count, 1);
     }
 
@@ -2508,7 +2532,7 @@ mod tests {
         let id1 = insert_source(&conn, root_id, "file.jpg", None, true, false);
 
         let now = 1700000001;
-        mark_missing(&conn, &[id1], now).unwrap();
+        mark_missing(&conn, &[id1], now, None).unwrap();
 
         let last_seen: i64 = conn
             .query_row(
@@ -2518,6 +2542,80 @@ mod tests {
             )
             .unwrap();
         assert_eq!(last_seen, now);
+    }
+
+    #[test]
+    fn mark_missing_sets_decision_id_when_some() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let id1 = insert_source(&conn, root_id, "gone.jpg", None, true, false);
+
+        // A decision row must exist (decision_id has no FK, but keep the test realistic).
+        let count = mark_missing(&conn, &[id1], 1700000001, Some(77)).unwrap();
+        assert_eq!(count, 1);
+
+        let decision_id: Option<i64> = conn
+            .query_row(
+                "SELECT decision_id FROM sources WHERE id = ?",
+                rusqlite::params![id1],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(decision_id, Some(77));
+    }
+
+    #[test]
+    fn mark_missing_preserves_decision_id_when_none() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let id1 = insert_source(&conn, root_id, "gone.jpg", None, true, false);
+
+        // Seed an existing provenance link (e.g. a prior apply/exclude decision).
+        conn.execute(
+            "UPDATE sources SET decision_id = 42 WHERE id = ?",
+            rusqlite::params![id1],
+        )
+        .unwrap();
+
+        // None must OMIT the column, preserving the existing value (set/preserve rule).
+        let count = mark_missing(&conn, &[id1], 1700000001, None).unwrap();
+        assert_eq!(count, 1);
+
+        let decision_id: Option<i64> = conn
+            .query_row(
+                "SELECT decision_id FROM sources WHERE id = ?",
+                rusqlite::params![id1],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(decision_id, Some(42));
+    }
+
+    #[test]
+    fn mark_missing_batches_beyond_variable_limit() {
+        // Exercise the chunking path: more IDs than the SQLite variable limit (~32k).
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let ids: Vec<i64> = (0..35_000)
+            .map(|i| insert_source(&conn, root_id, &format!("f{i}.jpg"), None, true, false))
+            .collect();
+
+        let count = mark_missing(&conn, &ids, 1700000001, Some(9)).unwrap();
+        assert_eq!(count, 35_000);
+
+        // Spot-check a source in a later chunk got both present=0 and the decision_id.
+        let (present, decision_id): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT present, decision_id FROM sources WHERE id = ?",
+                rusqlite::params![ids[34_999]],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(present, 0);
+        assert_eq!(decision_id, Some(9));
     }
 
     // =========================================================================

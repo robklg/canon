@@ -49,7 +49,9 @@ fn mark_missing_path(
         return Ok(());
     }
 
-    let marked = repo::source::mark_missing(conn, &source_ids, now)?;
+    // `None`: this manual marking isn't attributed to a decision, so preserve any
+    // existing decision_id rather than clobbering it to NULL.
+    let marked = repo::source::mark_missing(conn, &source_ids, now, None)?;
     stats.missing += marked;
 
     Ok(())

@@ -351,7 +351,7 @@ pub fn scan_root(
 
     // Mark missing/disconnected files based on outcomes
     let (missing_count, disconnected_count, missing_warnings) =
-        mark_missing_sources(conn, &outcomes, now, options.ignore_device_id)?;
+        mark_missing_sources(conn, &outcomes, now, options.ignore_device_id, decision_id)?;
     warnings.extend(missing_warnings);
     stats.missing = missing_count;
     stats.disconnected = disconnected_count;
@@ -450,6 +450,7 @@ fn mark_missing_sources(
     outcomes: &[(i64, SourceOutcome)],
     now: i64,
     ignore_device_id: bool,
+    decision_id: Option<i64>,
 ) -> Result<(u64, u64, Vec<String>)> {
     let mut missing_ids: Vec<i64> = Vec::new();
     let mut disconnected_count = 0u64;
@@ -470,7 +471,7 @@ fn mark_missing_sources(
         }
     }
 
-    let missing_count = repo::source::mark_missing(conn, &missing_ids, now)?;
+    let missing_count = repo::source::mark_missing(conn, &missing_ids, now, decision_id)?;
 
     let mut warnings = Vec::new();
     if disconnected_count > 0 {
@@ -1253,7 +1254,7 @@ mod tests {
 
         let now = current_timestamp();
         let (missing_count, disconnected_count, warnings) =
-            mark_missing_sources(&conn, &outcomes, now, false).unwrap();
+            mark_missing_sources(&conn, &outcomes, now, false, None).unwrap();
 
         assert_eq!(missing_count, 1);
         assert_eq!(disconnected_count, 1);
@@ -1290,10 +1291,34 @@ mod tests {
 
         let now = current_timestamp();
         let (missing_count, disconnected_count, warnings) =
-            mark_missing_sources(&conn, &outcomes, now, true).unwrap();
+            mark_missing_sources(&conn, &outcomes, now, true, None).unwrap();
 
         assert_eq!(missing_count, 1);
         assert_eq!(disconnected_count, 0);
         assert!(warnings.is_empty()); // No warnings when ignore_device_id=true
+    }
+
+    #[test]
+    fn mark_missing_sources_stamps_decision_id() {
+        // The sweep threads the scan decision_id into the deletion transition.
+        let conn = repo::open_in_memory_for_test();
+        let temp_dir = TempDir::new().unwrap();
+        let root_id =
+            repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
+
+        let id1 = repo::insert_test_source(&conn, root_id, "gone.txt", 1, 1, 100, 1000);
+        let outcomes = vec![(id1, SourceOutcome::Missing)];
+
+        let now = current_timestamp();
+        let (missing_count, _, _) =
+            mark_missing_sources(&conn, &outcomes, now, false, Some(123)).unwrap();
+        assert_eq!(missing_count, 1);
+
+        let decision_id: Option<i64> = conn
+            .query_row("SELECT decision_id FROM sources WHERE id = ?", [id1], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(decision_id, Some(123));
     }
 }

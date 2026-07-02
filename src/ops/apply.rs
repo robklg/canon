@@ -1119,7 +1119,7 @@ fn execute_single_transfer(
                 Ok((TransferOutcome::Renamed, prev_decision_id))
             }
             MoveOutcome::CopiedAndDeleted => {
-                mark_source_not_present(conn, transfer.source_id)?;
+                mark_source_not_present(conn, transfer.source_id, decision_id)?;
                 let new_source = build_new_source(
                     &dest_path,
                     archive_root_id,
@@ -1282,12 +1282,19 @@ fn relocate_source(
 }
 
 /// Mark a source as no longer present (for cross-device move after deletion).
-fn mark_source_not_present(conn: &Connection, source_id: i64) -> Result<()> {
+///
+/// Apply *caused* the source to vanish (copy-then-delete move), so this transition is
+/// decision-linked to apply's own decision — passed through to `mark_missing`.
+fn mark_source_not_present(
+    conn: &Connection,
+    source_id: i64,
+    decision_id: Option<i64>,
+) -> Result<()> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs() as i64;
-    repo::source::mark_missing(conn, &[source_id], now)?;
+    repo::source::mark_missing(conn, &[source_id], now, decision_id)?;
     Ok(())
 }
 
