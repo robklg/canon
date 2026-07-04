@@ -221,29 +221,6 @@ pub struct DeletionReceiptItem {
 }
 
 // ---------------------------------------------------------------------------
-// Note-clear receipts
-// ---------------------------------------------------------------------------
-
-/// Note-clear receipt — written when `canon note --clear` deletes location
-/// notes. The texts are the user's own words, irreplaceable once the rows are
-/// gone, so the receipt captures them at the moment of destruction. Lives at
-/// the ledger of the root whose locations the notes annotated (the locus of
-/// the effect).
-#[derive(Serialize)]
-pub struct NoteClearReceipt {
-    pub meta: ReceiptMeta,
-    pub items: Vec<NoteClearReceiptItem>,
-}
-
-/// One cleared note: where it was attached, when it was written, and its text.
-#[derive(Serialize)]
-pub struct NoteClearReceiptItem {
-    pub rel_path: String,
-    pub created_at: i64,
-    pub text: String,
-}
-
-// ---------------------------------------------------------------------------
 // Path computation (pure functions, no I/O)
 // ---------------------------------------------------------------------------
 

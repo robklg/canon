@@ -11,7 +11,6 @@ use crate::domain::decision::DecisionStatus;
 use crate::domain::note::{ancestor_paths, LocationEntry, Note};
 use crate::domain::root::Root;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
-use crate::ops::receipt::{NoteClearReceipt, NoteClearReceiptItem, ReceiptPlacement};
 use crate::repo::{self, Connection};
 
 // ============================================================================
@@ -203,58 +202,33 @@ pub struct ClearRecursiveResult {
     pub warnings: Vec<String>,
 }
 
-/// Shared clear execution: capture → delete → record → receipt.
+/// Shared clear execution: delete → record, atomically.
 ///
-/// The notes are captured *before* deletion — their texts are the user's own
-/// words, irreplaceable once the rows are gone, and the receipt is their only
-/// durable record. The receipt is placed at the scope's root (the locus of the
-/// effect: the root whose locations the notes annotated). A clear that touches
-/// nothing records nothing — no decision row, no receipt.
+/// Decision row only, never a receipt: receipts record *content fates* (the
+/// receipt gate is the per-item source state transition), and notes are the
+/// user's own annotations, not assets — clearing them is housekeeping of the
+/// scaffolding. The decision row keeps the disappearance non-mute. A clear
+/// that touches nothing records nothing (0-item convention).
 ///
-/// Per the write-path-atomicity ADR: the transaction covers the DB mutations;
-/// the receipt file is written after commit, and a receipt-write failure is a
-/// warning, never a rollback.
+/// Pure-DB op: the transaction covers the deletion and the decision record
+/// together (write-path-atomicity ADR — pure-DB ops are atomic).
 fn run_clear(
     conn: &mut Connection,
     scope: &NoteScope,
     decision: Option<&DecisionParams>,
-    fetch: fn(&Connection, i64, &str) -> Result<Vec<Note>>,
     delete: fn(&Connection, i64, &str) -> Result<usize>,
     compose_summary: impl FnOnce(usize) -> String,
 ) -> Result<(usize, String, Vec<String>)> {
     let tx = conn.transaction()?;
 
-    let notes = fetch(&tx, scope.root_id, &scope.rel_path)?;
-
-    let placement = ReceiptPlacement::LedgerRoot {
-        root_id: scope.root_id,
-        root_path: scope.root_path.clone(),
-    };
-    let mut recorder = if notes.is_empty() {
-        None
-    } else {
-        decision.map(|d| DecisionRecorder::start(&tx, d, Some(&placement)))
-    };
-    let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
-
     let deleted = delete(&tx, scope.root_id, &scope.rel_path)?;
     let summary = compose_summary(deleted);
 
-    let receipt = match (decision, decision_id) {
-        (Some(d), Some(did)) => Some(NoteClearReceipt {
-            meta: d.receipt_meta(did, DecisionStatus::Completed, &summary, None),
-            items: notes
-                .iter()
-                .map(|n| NoteClearReceiptItem {
-                    rel_path: n.rel_path.clone(),
-                    created_at: n.created_at,
-                    text: n.text.clone(),
-                })
-                .collect(),
-        }),
-        _ => None,
+    let mut recorder = if deleted > 0 {
+        decision.map(|d| DecisionRecorder::start(&tx, d, None))
+    } else {
+        None
     };
-
     if let Some(r) = recorder.as_mut() {
         r.complete_db(
             &tx,
@@ -270,17 +244,7 @@ fn run_clear(
     }
     tx.commit()?;
 
-    // Receipt file (durable artifact) is written after the DB is committed.
-    let warnings = match recorder {
-        Some(mut r) => {
-            if let Some(receipt) = receipt.as_ref() {
-                r.write_receipt_file(receipt, &summary);
-            }
-            r.finalize_receipt_file();
-            r.take_warnings()
-        }
-        None => Vec::new(),
-    };
+    let warnings = recorder.map(|mut r| r.take_warnings()).unwrap_or_default();
 
     Ok((deleted, summary, warnings))
 }
@@ -295,7 +259,6 @@ pub fn execute_clear_recursive(
         conn,
         scope,
         decision,
-        repo::note::fetch_subtree,
         repo::note::clear_subtree,
         |deleted| format!("Cleared {} notes", deleted),
     )?;
@@ -325,7 +288,6 @@ pub fn execute_clear_exact(
         conn,
         scope,
         decision,
-        repo::note::fetch_by_scope,
         repo::note::clear_by_scope,
         |deleted| {
             if deleted == 0 {
@@ -648,10 +610,10 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_receipt_captures_note_texts() {
-        // Notes are irreplaceable user words (DB-only until this moment); the
-        // clear receipt is their durable record. Placed at the scope's root —
-        // the locus of the effect.
+    fn test_clear_records_decision_row_without_receipt() {
+        // Notes are annotations, not assets: clearing them is a decision-row
+        // event only — receipts record content fates (per-item source state
+        // transitions), and note clear is neither.
         let mut conn = setup_test_db();
         let dir = tempfile::tempdir().unwrap();
         let root_path = dir.path().to_str().unwrap().to_string();
@@ -682,16 +644,27 @@ mod tests {
             result.warnings
         );
 
-        let content =
-            std::fs::read_to_string(dir.path().join(".canon-ledger/000001-note_clear.toml"))
-                .unwrap();
-        assert!(
-            content.contains("looks like school photos 2008"),
-            "{content}"
-        );
-        assert!(content.contains("come back for the Nikon set"), "{content}");
-        assert!(content.contains("rel_path = \"a/b\""), "{content}");
-        assert!(content.contains("created_at = 100"), "{content}");
+        // The disappearance is non-mute: a completed decision row with counts.
+        let (command, status, completed, receipt_rel_path) = conn
+            .query_row(
+                "SELECT command, status, count_completed, receipt_rel_path FROM decisions",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(command, "note_clear");
+        assert_eq!(status, "completed");
+        assert_eq!(completed, 2);
+        // ...but no receipt: neither a DB pointer nor a ledger file.
+        assert_eq!(receipt_rel_path, None);
+        assert!(!dir.path().join(".canon-ledger").exists());
     }
 
     #[test]
