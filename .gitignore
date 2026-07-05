@@ -6,4 +6,5 @@ docs/book/
 # ADRs, reviews). Loaded from disk regardless of git tracking. Kept local on purpose.
 /CLAUDE.md
 /.claude/specs/
+/.claude/local/
 /.claude/settings.local.json
