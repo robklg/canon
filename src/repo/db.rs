@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 pub use rusqlite::Connection;
-use rusqlite_migration::{Migrations, M};
+use rusqlite_migration::{HookResult, Migrations, M};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
@@ -315,6 +315,33 @@ fn migrations() -> Migrations<'static> {
         //    receipts (a scan deleting across roots), which the single
         //    decisions.receipt_* columns can't hold.
         M::up("ALTER TABLE decision_scopes ADD COLUMN receipt_rel_path TEXT;"),
+        // 3: backfill columns added in a0353f4 (after v0.4.1) that were folded
+        //    into the migration-1 baseline before the migration system existed.
+        //    Databases created before a0353f4 have sources/decisions tables
+        //    already present but missing these columns; migration-1's
+        //    CREATE TABLE IF NOT EXISTS no-ops on them. The hook checks existence
+        //    before each ALTER so it is safe on fresh databases where migration-1
+        //    already created the columns.
+        M::up_with_hook("SELECT 1", |tx: &rusqlite::Transaction| -> HookResult {
+            for (table, col, def) in [
+                ("sources", "decision_id", "INTEGER"),
+                ("decisions", "receipt_root_id", "INTEGER"),
+                ("decisions", "receipt_rel_path", "TEXT"),
+            ] {
+                let has_col: bool = {
+                    let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+                    let cols: Vec<String> = stmt
+                        .query_map([], |row| row.get::<_, String>(1))?
+                        .filter_map(|r| r.ok())
+                        .collect();
+                    cols.iter().any(|name| name == col)
+                };
+                if !has_col {
+                    tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {col} {def}"))?;
+                }
+            }
+            Ok(())
+        }),
     ])
 }
 
@@ -598,5 +625,87 @@ mod tests {
         // Re-running with user_version already current is a no-op, never an error.
         migrations().to_latest(&mut conn).unwrap();
         assert!(has_column(&conn, "decision_scopes", "receipt_rel_path"));
+    }
+
+    /// Simulate a v0.4.1 database: sources and decisions tables exist but without
+    /// the columns added in a0353f4 (decision_id, receipt_root_id, receipt_rel_path).
+    /// decision_scopes did not yet exist. Upgrading to latest must add all three columns.
+    #[test]
+    fn migrating_v041_db_adds_missing_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE roots (
+                 id INTEGER PRIMARY KEY,
+                 path TEXT NOT NULL UNIQUE,
+                 role TEXT NOT NULL DEFAULT 'source',
+                 comment TEXT,
+                 last_scanned_at INTEGER,
+                 suspended INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE objects (
+                 id INTEGER PRIMARY KEY,
+                 hash_type TEXT NOT NULL,
+                 hash_value TEXT NOT NULL,
+                 excluded INTEGER NOT NULL DEFAULT 0,
+                 UNIQUE(hash_type, hash_value)
+             );
+             CREATE TABLE sources (
+                 id INTEGER PRIMARY KEY,
+                 root_id INTEGER NOT NULL REFERENCES roots(id),
+                 rel_path TEXT NOT NULL,
+                 device INTEGER,
+                 inode INTEGER,
+                 size INTEGER NOT NULL,
+                 mtime INTEGER NOT NULL,
+                 partial_hash TEXT NOT NULL,
+                 basis_rev INTEGER NOT NULL DEFAULT 0,
+                 scanned_at INTEGER NOT NULL,
+                 last_seen_at INTEGER NOT NULL,
+                 present INTEGER NOT NULL DEFAULT 1,
+                 object_id INTEGER REFERENCES objects(id),
+                 excluded INTEGER NOT NULL DEFAULT 0,
+                 UNIQUE(root_id, rel_path)
+             );
+             CREATE TABLE decisions (
+                 id INTEGER PRIMARY KEY,
+                 command TEXT NOT NULL,
+                 scope TEXT,
+                 command_line TEXT NOT NULL,
+                 reason TEXT,
+                 status TEXT NOT NULL DEFAULT 'started',
+                 count_attempted INTEGER,
+                 count_completed INTEGER,
+                 count_failed INTEGER,
+                 count_skipped INTEGER,
+                 summary TEXT,
+                 canon_version TEXT NOT NULL,
+                 created_at INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+
+        assert!(!has_column(&conn, "sources", "decision_id"));
+        assert!(!has_column(&conn, "decisions", "receipt_root_id"));
+        assert!(!has_column(&conn, "decisions", "receipt_rel_path"));
+
+        migrations().to_latest(&mut conn).unwrap();
+
+        assert!(has_column(&conn, "sources", "decision_id"));
+        assert!(has_column(&conn, "decisions", "receipt_root_id"));
+        assert!(has_column(&conn, "decisions", "receipt_rel_path"));
+        // decision_scopes was absent in v0.4.1 — migration 1 creates it.
+        assert!(has_column(&conn, "decision_scopes", "receipt_rel_path"));
+    }
+
+    /// Migration 3 must be a no-op on a fresh database where migration 1 already
+    /// created the columns. Verifies IF NOT EXISTS prevents a duplicate-column error.
+    #[test]
+    fn migration3_is_safe_on_fresh_db() {
+        let conn = open_in_memory_for_test();
+        // If migration 3 had failed on the already-present columns, open_in_memory_for_test
+        // above would have panicked. Verify the columns are present and correct.
+        assert!(has_column(&conn, "sources", "decision_id"));
+        assert!(has_column(&conn, "decisions", "receipt_root_id"));
+        assert!(has_column(&conn, "decisions", "receipt_rel_path"));
     }
 }
