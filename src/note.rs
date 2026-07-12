@@ -17,7 +17,7 @@ use chrono::{TimeZone, Utc};
 use crate::ceremony;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
-use crate::domain::note::LocationEntry;
+use crate::domain::note::{note_display_path, LocationEntry};
 use crate::domain::root::Root;
 use crate::ops;
 use crate::ops::decision::DecisionParams;
@@ -244,30 +244,6 @@ fn print_view(result: &NoteViewResult) {
             println!();
         }
         println!("{}", parts.join(" \u{00b7} "));
-    }
-}
-
-/// Display path for a note in temporal listing.
-fn note_display_path(
-    note: &crate::domain::note::Note,
-    roots: &std::collections::HashMap<i64, Root>,
-    use_full_path: bool,
-) -> String {
-    if use_full_path {
-        match roots.get(&note.root_id) {
-            Some(root) => {
-                if note.rel_path.is_empty() {
-                    root.path.clone()
-                } else {
-                    format!("{}/{}", root.path, note.rel_path)
-                }
-            }
-            None => note.rel_path.clone(),
-        }
-    } else if note.rel_path.is_empty() {
-        "(root)".to_string()
-    } else {
-        note.rel_path.clone()
     }
 }
 

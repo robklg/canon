@@ -67,6 +67,31 @@ pub fn relative_to_scope(note_rel_path: &str, scope_rel_path: &str) -> String {
     format!("{}/", first_segment)
 }
 
+/// Display path for a note in a timeline listing. Shared by `note list` and
+/// the trail's mixed timeline — one note-identity rendering, two hosts.
+pub fn note_display_path(
+    note: &Note,
+    roots: &std::collections::HashMap<i64, super::root::Root>,
+    use_full_path: bool,
+) -> String {
+    if use_full_path {
+        match roots.get(&note.root_id) {
+            Some(root) => {
+                if note.rel_path.is_empty() {
+                    root.path.clone()
+                } else {
+                    format!("{}/{}", root.path, note.rel_path)
+                }
+            }
+            None => note.rel_path.clone(),
+        }
+    } else if note.rel_path.is_empty() {
+        "(root)".to_string()
+    } else {
+        note.rel_path.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

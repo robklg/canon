@@ -69,6 +69,7 @@ mod note;
 mod roots;
 mod scan;
 mod survey;
+mod trail;
 mod worklist;
 
 #[derive(Parser)]
@@ -357,7 +358,8 @@ enum Commands {
         #[command(subcommand)]
         action: ExcludeAction,
     },
-    /// Annotate locations with notes
+    /// Annotate locations with notes — your thoughts ("what am I thinking?");
+    /// for what happened, see 'trail'
     Note {
         /// Path to annotate, view, or scope
         path: Option<PathBuf>,
@@ -382,6 +384,38 @@ enum Commands {
         /// Maximum number of entries to display (default: 10, 0 = unlimited)
         #[arg(long)]
         limit: Option<usize>,
+    },
+    /// Read the decision trail — what happened here, or the day's story;
+    /// for your thoughts, see 'note'
+    Trail {
+        #[command(subcommand)]
+        action: Option<TrailAction>,
+        /// Directory paths to scope the timeline (resolved to realpath)
+        paths: Vec<PathBuf>,
+        /// Show the trail across all roots, ignoring current directory scope
+        #[arg(long)]
+        global: bool,
+        /// Today's story (sugar for --since today)
+        #[arg(long, conflicts_with_all = ["since", "on"])]
+        today: bool,
+        /// Story from a day onward: today, yesterday, a weekday, or YYYY-MM-DD
+        #[arg(long, conflicts_with = "on")]
+        since: Option<String>,
+        /// One day's story: today, yesterday, a weekday, or YYYY-MM-DD
+        #[arg(long)]
+        on: Option<String>,
+        /// Maximum decisions to show (default: 20)
+        #[arg(long, conflicts_with = "all")]
+        limit: Option<usize>,
+        /// Show all decisions (no cap)
+        #[arg(long)]
+        all: bool,
+        /// Hide notes from the timeline
+        #[arg(long)]
+        no_notes: bool,
+        /// Emit timeline events as JSONL (machine output)
+        #[arg(long)]
+        jsonl: bool,
     },
     /// Prune orphaned or stale data from the database
     Prune {
@@ -498,6 +532,15 @@ enum ExcludeAction {
     },
     /// List excluded objects
     ListObjects,
+}
+
+#[derive(Subcommand)]
+enum TrailAction {
+    /// Show one decision in full, with its receipt locations
+    Show {
+        /// Decision id (as shown in the timeline)
+        id: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1367,6 +1410,34 @@ fn main() -> Result<()> {
                 cli.no_receipt,
             )?;
         }
+        Commands::Trail {
+            action,
+            paths,
+            global,
+            today,
+            since,
+            on,
+            limit,
+            all,
+            no_notes,
+            jsonl,
+        } => match action {
+            Some(TrailAction::Show { id }) => trail::run_show(&mut db, id)?,
+            None => trail::run(
+                &mut db,
+                trail::TrailArgs {
+                    paths,
+                    global,
+                    today,
+                    since,
+                    on,
+                    limit,
+                    all,
+                    no_notes,
+                    jsonl,
+                },
+            )?,
+        },
         Commands::Roots {
             action,
             path,
