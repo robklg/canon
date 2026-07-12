@@ -32,7 +32,8 @@ pub struct TrailParams {
 }
 
 pub enum TrailView {
-    /// Scope lens: events newest-first.
+    /// Scope lens: chronological (oldest→newest); the cap keeps the most
+    /// recent N, so the window ends at now.
     Recent(Vec<TimelineEvent>),
     /// Time lens: days oldest→newest, chronological within each day.
     Days(Vec<DayGroup>),
@@ -152,8 +153,6 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
             .collect();
         TrailView::Days(group_by_day(dated, &stamps))
     } else {
-        let mut events = events;
-        events.reverse();
         TrailView::Recent(events)
     };
 
@@ -381,10 +380,10 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert_eq!(result.earlier_decisions, 1);
         assert_eq!(result.total_decisions, 3);
-        // Recent view is newest-first.
+        // A timeline reads forward: oldest of the kept window first.
         match &result.view {
             TrailView::Recent(events) => {
-                assert!(events[0].created_at() > events[1].created_at());
+                assert!(events[0].created_at() < events[1].created_at());
             }
             TrailView::Days(_) => panic!("scope lens must be Recent"),
         }
@@ -402,8 +401,9 @@ mod tests {
         match &with_notes.view {
             TrailView::Recent(events) => {
                 assert_eq!(events.len(), 2);
-                // Newest first: the note (150) precedes the decision (100).
-                assert!(matches!(events[0], TimelineEvent::Note(_)));
+                // Chronological: the decision (100) precedes the note (150).
+                assert!(matches!(events[0], TimelineEvent::Decision(_)));
+                assert!(matches!(events[1], TimelineEvent::Note(_)));
             }
             TrailView::Days(_) => panic!(),
         }

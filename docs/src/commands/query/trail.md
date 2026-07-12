@@ -4,7 +4,7 @@ Read the decision trail. Canon records every effectful action ([decision provena
 
 One command, two lenses:
 
-- **The scope lens** — standing in a folder: *what did I do here?* Decisions touching this place, newest first.
+- **The scope lens** — standing in a folder: *what did I do here?* Decisions touching this place, as a timeline ending at now.
 - **The time lens** (`--today`, `--since`, `--on`) — *what did I do today?* The day's decisions as a story, with a rollup of what was removed, archived, and excluded.
 
 ```bash
@@ -31,15 +31,15 @@ canon trail show 61
 
 ## The scope lens
 
-With no time flags, `trail` lists the decisions that touched the current scope, newest first:
+With no time flags, `trail` lists the decisions that touched the current scope — a timeline reading oldest to newest, ending at the most recent:
 
 ```
 Decision trail: /mnt/old-drive/photos
 
-      2026-07-11 16:50  ~ italy: unsure about the RAW files — revisit
-#61   2026-07-11 16:42  Excluded 210 duplicates (kept 105) · "redundant backup"
-#57   2026-07-11 15:10  Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
 #42   2026-05-12 14:03  Applied italy-2016: 47 copied, 0 errors
+#57   2026-07-11 15:10  Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
+#61   2026-07-11 16:42  Excluded 210 duplicates (kept 105) · "redundant backup"
+      2026-07-11 16:50  ~ italy: unsure about the RAW files — revisit
 
 12 earlier decisions not shown (--limit N or --all; showing 20).
 2 global decisions not shown (--global).
