@@ -77,7 +77,7 @@ pub fn run(
             }
             let decision = DecisionParams {
                 command: DecisionCommand::NoteClear,
-                scope: Some(vec![scope.display()]),
+                scope: Some(vec![scope.absolute_path()]),
                 command_line: command_line.to_string(),
                 reason: None,
                 record_enabled: config.recording != RecordingMode::Off,
@@ -93,7 +93,7 @@ pub fn run(
             // Clear exact scope
             let decision = DecisionParams {
                 command: DecisionCommand::NoteClear,
-                scope: Some(vec![scope.display()]),
+                scope: Some(vec![scope.absolute_path()]),
                 command_line: command_line.to_string(),
                 reason: None,
                 record_enabled: config.recording != RecordingMode::Off,

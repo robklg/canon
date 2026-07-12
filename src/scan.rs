@@ -110,9 +110,17 @@ pub fn run(
         paths.to_vec()
     };
 
+    // The durable scope must be canonical: a recorded "." is unattributable
+    // later and can't join the decision_scopes index. Same hard resolution
+    // the walk itself uses; unresolvable paths fall back to the typed form
+    // (the scan will surface the problem itself).
     let scan_scope: Vec<String> = paths_to_scan
         .iter()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| {
+            std::fs::canonicalize(p)
+                .map(|c| c.to_string_lossy().to_string())
+                .unwrap_or_else(|_| p.to_string_lossy().to_string())
+        })
         .collect();
     let decision = DecisionParams {
         command: DecisionCommand::Scan,

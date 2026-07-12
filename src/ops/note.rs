@@ -34,6 +34,17 @@ impl NoteScope {
             self.rel_path.clone()
         }
     }
+
+    /// Absolute path of this scope. Durable records (decision scope) must use
+    /// this, not `display()` — a bare rel path can't be attributed to a root
+    /// when read back later.
+    pub fn absolute_path(&self) -> String {
+        if self.rel_path.is_empty() {
+            self.root_path.clone()
+        } else {
+            format!("{}/{}", self.root_path, self.rel_path)
+        }
+    }
 }
 
 /// Result of viewing notes at a scope.
@@ -695,5 +706,23 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(decisions, 0, "empty clear must not record a decision");
+    }
+
+    #[test]
+    fn note_scope_absolute_path() {
+        let root = NoteScope {
+            root_id: 1,
+            root_path: "/photos".to_string(),
+            rel_path: String::new(),
+        };
+        assert_eq!(root.absolute_path(), "/photos");
+        let sub = NoteScope {
+            root_id: 1,
+            root_path: "/photos".to_string(),
+            rel_path: "italy/2016".to_string(),
+        };
+        assert_eq!(sub.absolute_path(), "/photos/italy/2016");
+        // display() stays the short form; only durable records use absolute.
+        assert_eq!(sub.display(), "italy/2016");
     }
 }
