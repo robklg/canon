@@ -3247,7 +3247,7 @@ mod tests {
         use crate::domain::config::{LedgerConfig, ReceiptLayout, RecordingMode};
         DecisionParams {
             command: crate::domain::decision::DecisionCommand::Apply,
-            scope: None,
+            scope: Vec::new(),
             command_line: "canon apply test.toml".to_string(),
             reason: None,
             record_enabled: true,
@@ -3675,7 +3675,7 @@ mod tests {
 
         let decision = DecisionParams {
             command: crate::domain::decision::DecisionCommand::Apply,
-            scope: None,
+            scope: Vec::new(),
             command_line: "canon apply test.toml".to_string(),
             reason: None,
             record_enabled: true,

@@ -78,6 +78,18 @@ pub fn update_receipt_path(
     Ok(())
 }
 
+/// Overwrite the `decisions.scope` display column (JSON array of canonical
+/// paths). Used to backfill scopes discovered after `start()` — a `scan --add`
+/// root that did not exist when the row was inserted.
+pub fn update_scope_display(conn: &Connection, id: i64, scope: &[String]) -> Result<()> {
+    let scope_json = serde_json::to_string(scope)?;
+    conn.execute(
+        "UPDATE decisions SET scope = ?1 WHERE id = ?2",
+        rusqlite::params![scope_json, id],
+    )?;
+    Ok(())
+}
+
 /// Ensure durable scope-index rows exist for a decision — one row per `(root_id, rel_prefix)`.
 ///
 /// Powers future subtree-scoped queries ("what decisions touched this path?"). The

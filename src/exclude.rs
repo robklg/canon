@@ -6,7 +6,7 @@ use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
 use crate::domain::path::{resolve_path, validate_paths_in_roots};
 use crate::domain::root::find_containing_root;
-use crate::domain::scope::ScopeMatch;
+use crate::domain::scope::{DecisionScope, ScopeMatch};
 use crate::expr::filter::Filter;
 use crate::ops::decision::DecisionParams;
 use crate::ops::exclude::{
@@ -20,18 +20,24 @@ use crate::ops::exclude::{
 use crate::ops::receipt::{resolve_ledger_root, ReceiptPlacement};
 use crate::repo::{self, Connection, Db};
 
+/// Build the decision params, decomposing the given canonical scope prefixes to
+/// their roots (the one funnel). Pass an empty slice for a global decision. A
+/// prefix under no known root is dropped — a stray non-canonical scope is
+/// unrecordable by construction.
 fn make_decision(
+    conn: &Connection,
     command: DecisionCommand,
-    scope: Option<Vec<String>>,
+    scope_prefixes: &[String],
     command_line: &str,
     config: &LedgerConfig,
     no_receipt: bool,
     reason: Option<&str>,
     dry_run: bool,
-) -> DecisionParams {
-    DecisionParams {
+) -> Result<DecisionParams> {
+    let roots = repo::root::fetch_all(conn)?;
+    Ok(DecisionParams {
         command,
-        scope,
+        scope: DecisionScope::decompose(scope_prefixes, &roots),
         command_line: command_line.to_string(),
         reason: reason
             .map(|r| r.to_string())
@@ -39,7 +45,7 @@ fn make_decision(
         record_enabled: config.recording != RecordingMode::Off && !dry_run,
         receipt_enabled: config.recording == RecordingMode::Full && !no_receipt && !dry_run,
         ledger_config: config.clone(),
-    }
+    })
 }
 
 /// Resolve where exclusion receipts land (flat at the ledger root). Warns when a
@@ -132,14 +138,15 @@ pub fn set(
     }
 
     let decision = make_decision(
+        conn,
         DecisionCommand::ExcludeSet,
-        Some(scope_prefixes.to_vec()),
+        &scope_prefixes,
         command_line,
         config,
         no_receipt,
         reason,
         options.dry_run,
-    );
+    )?;
     let placement = resolve_placement(conn, config, &decision)?;
     let result = execute_set(conn, &plan, placement.as_ref(), Some(&decision))?;
     println!("{}", result.summary);
@@ -204,14 +211,15 @@ pub fn clear(
     }
 
     let decision = make_decision(
+        conn,
         DecisionCommand::ExcludeClear,
-        Some(scope_prefixes.to_vec()),
+        &scope_prefixes,
         command_line,
         config,
         no_receipt,
         reason,
         options.dry_run,
-    );
+    )?;
     let placement = resolve_placement(conn, config, &decision)?;
     let result = execute_clear(conn, &plan, placement.as_ref(), Some(&decision))?;
     println!("{}", result.summary);
@@ -241,14 +249,15 @@ pub fn set_by_id(
                 println!("  {}", item.path());
             } else {
                 let decision = make_decision(
+                    conn,
                     DecisionCommand::ExcludeSet,
-                    Some(vec![item.path()]),
+                    &[item.path()],
                     command_line,
                     config,
                     no_receipt,
                     reason,
                     options.dry_run,
-                );
+                )?;
                 let placement = resolve_placement(conn, config, &decision)?;
                 let result = execute_set_source(conn, &item, placement.as_ref(), Some(&decision))?;
                 println!("{}", result.summary);
@@ -293,14 +302,15 @@ pub fn set_by_path(
                 println!("  {}", item.path());
             } else {
                 let decision = make_decision(
+                    conn,
                     DecisionCommand::ExcludeSet,
-                    Some(vec![item.path()]),
+                    &[item.path()],
                     command_line,
                     config,
                     no_receipt,
                     reason,
                     options.dry_run,
-                );
+                )?;
                 let placement = resolve_placement(conn, config, &decision)?;
                 let result = execute_set_source(conn, &item, placement.as_ref(), Some(&decision))?;
                 println!("{}", result.summary);
@@ -433,14 +443,15 @@ pub fn exclude_duplicates(
 
     // Execute
     let decision = make_decision(
+        conn,
         DecisionCommand::ExcludeDuplicates,
-        Some(scope_prefixes.clone()),
+        &scope_prefixes,
         command_line,
         config,
         no_receipt,
         reason,
         dry_run,
-    );
+    )?;
     let placement = resolve_placement(conn, config, &decision)?;
     let result = execute_duplicates(conn, &plan, placement.as_ref(), Some(&decision))?;
     println!("{}", result.summary);
@@ -484,14 +495,15 @@ pub fn set_object_by_hash(
                 println!("\nUse --yes to execute.");
             } else {
                 let decision = make_decision(
+                    conn,
                     DecisionCommand::ExcludeSetObject,
-                    None,
+                    &[],
                     command_line,
                     config,
                     no_receipt,
                     reason,
                     options.dry_run,
-                );
+                )?;
                 let placement = resolve_placement(conn, config, &decision)?;
                 let result = execute_set_object(
                     conn,
@@ -554,14 +566,15 @@ pub fn set_object_by_file(
                 println!("\nUse --yes to execute.");
             } else {
                 let decision = make_decision(
+                    conn,
                     DecisionCommand::ExcludeSetObject,
-                    Some(vec![path_str]),
+                    &[path_str],
                     command_line,
                     config,
                     no_receipt,
                     reason,
                     options.dry_run,
-                );
+                )?;
                 let placement = resolve_placement(conn, config, &decision)?;
                 let result = execute_set_object(
                     conn,
@@ -668,14 +681,15 @@ pub fn set_objects_by_filter(
 
     // Execute
     let decision = make_decision(
+        conn,
         DecisionCommand::ExcludeSetObject,
-        Some(scope_prefixes.to_vec()),
+        &scope_prefixes,
         command_line,
         config,
         no_receipt,
         reason,
         options.dry_run,
-    );
+    )?;
     let placement = resolve_placement(conn, config, &decision)?;
     let result = execute_set_objects(conn, &plan, placement.as_ref(), Some(&decision))?;
     println!("{}", result.summary);
@@ -736,14 +750,15 @@ pub fn clear_object(
                 println!("Would clear exclusion from object: {hash_prefix}...");
             } else {
                 let decision = make_decision(
+                    conn,
                     DecisionCommand::ExcludeClearObject,
-                    None,
+                    &[],
                     command_line,
                     config,
                     no_receipt,
                     None,
                     options.dry_run,
-                );
+                )?;
                 let placement = resolve_placement(conn, config, &decision)?;
                 let result = execute_clear_object(
                     conn,

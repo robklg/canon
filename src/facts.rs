@@ -3,7 +3,7 @@ use anyhow::{bail, Result};
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
 use crate::domain::format_count;
-use crate::domain::scope::ScopeMatch;
+use crate::domain::scope::{DecisionScope, ScopeMatch};
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::expr::{BuiltinKey, BuiltinKeyCategory, ParsedFactKey};
@@ -515,9 +515,10 @@ pub fn delete_facts(
         );
     } else {
         // Execute
+        let roots = crate::repo::root::fetch_all(conn)?;
         let decision = DecisionParams {
             command: DecisionCommand::FactsDelete,
-            scope: Some(scope_prefixes.to_vec()),
+            scope: DecisionScope::decompose(scope_prefixes, &roots),
             command_line: command_line.to_string(),
             reason: None,
             record_enabled: config.recording != RecordingMode::Off && !options.dry_run,
@@ -569,7 +570,7 @@ pub fn prune_stale(
     } else {
         let decision = DecisionParams {
             command: DecisionCommand::Prune,
-            scope: None,
+            scope: Vec::new(),
             command_line: command_line.to_string(),
             reason: None,
             record_enabled: config.recording != RecordingMode::Off && !dry_run,
@@ -620,7 +621,7 @@ pub fn prune_orphaned_objects(
     } else {
         let decision = DecisionParams {
             command: DecisionCommand::Prune,
-            scope: None,
+            scope: Vec::new(),
             command_line: command_line.to_string(),
             reason: None,
             record_enabled: config.recording != RecordingMode::Off && !dry_run,
@@ -687,7 +688,7 @@ pub fn prune_excluded_facts(
     } else {
         let decision = DecisionParams {
             command: DecisionCommand::Prune,
-            scope: None,
+            scope: Vec::new(),
             command_line: command_line.to_string(),
             reason: None,
             record_enabled: config.recording != RecordingMode::Off && !dry_run,

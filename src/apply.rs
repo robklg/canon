@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::ceremony;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
+use crate::domain::scope::DecisionScope;
 use crate::expr;
 use crate::ops;
 use crate::ops::apply::TransferMode;
@@ -500,7 +501,11 @@ pub fn run(
             .meta
             .scope
             .as_ref()
-            .map(|s| s.split(", ").map(|p| p.to_string()).collect()),
+            .map(|s| {
+                let prefixes: Vec<String> = s.split(", ").map(|p| p.to_string()).collect();
+                DecisionScope::decompose(&prefixes, &roots)
+            })
+            .unwrap_or_default(),
         command_line: command_line.to_string(),
         reason: effective_reason,
         record_enabled: ledger.recording != RecordingMode::Off && !options.dry_run,

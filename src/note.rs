@@ -19,6 +19,7 @@ use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
 use crate::domain::note::{note_display_path, LocationEntry};
 use crate::domain::root::Root;
+use crate::domain::scope::DecisionScope;
 use crate::ops;
 use crate::ops::decision::DecisionParams;
 use crate::ops::note::{NoteListResult, NoteScope, NoteSpatialResult, NoteViewResult};
@@ -77,7 +78,11 @@ pub fn run(
             }
             let decision = DecisionParams {
                 command: DecisionCommand::NoteClear,
-                scope: Some(vec![scope.absolute_path()]),
+                scope: vec![DecisionScope::new(
+                    scope.root_id,
+                    scope.root_path.clone(),
+                    scope.rel_path.clone(),
+                )],
                 command_line: command_line.to_string(),
                 reason: None,
                 record_enabled: config.recording != RecordingMode::Off,
@@ -93,7 +98,11 @@ pub fn run(
             // Clear exact scope
             let decision = DecisionParams {
                 command: DecisionCommand::NoteClear,
-                scope: Some(vec![scope.absolute_path()]),
+                scope: vec![DecisionScope::new(
+                    scope.root_id,
+                    scope.root_path.clone(),
+                    scope.rel_path.clone(),
+                )],
                 command_line: command_line.to_string(),
                 reason: None,
                 record_enabled: config.recording != RecordingMode::Off,

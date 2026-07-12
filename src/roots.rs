@@ -7,6 +7,7 @@ use crate::ceremony;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
 use crate::domain::path::resolve_path;
+use crate::domain::scope::DecisionScope;
 use crate::domain::{parse_root_spec, parse_root_spec_any, Root};
 use crate::ops;
 use crate::ops::decision::DecisionParams;
@@ -161,7 +162,11 @@ pub fn remove(
 
     let decision = DecisionParams {
         command: DecisionCommand::RootsRm,
-        scope: Some(vec![plan.root_path.clone()]),
+        scope: vec![DecisionScope::new(
+            plan.root_id,
+            plan.root_path.clone(),
+            String::new(),
+        )],
         command_line: command_line.to_string(),
         reason: reason
             .map(|r| r.to_string())
@@ -216,7 +221,9 @@ pub fn suspend(
         .map(|r| r.path.clone());
     let decision = DecisionParams {
         command: DecisionCommand::RootsSuspend,
-        scope: root_path.map(|p| vec![p]),
+        scope: root_path
+            .map(|p| vec![DecisionScope::new(root_id, p, String::new())])
+            .unwrap_or_default(),
         command_line: command_line.to_string(),
         reason: None,
         record_enabled: config.recording != RecordingMode::Off,
@@ -260,7 +267,9 @@ pub fn unsuspend(
         .map(|r| r.path.clone());
     let decision = DecisionParams {
         command: DecisionCommand::RootsUnsuspend,
-        scope: root_path.map(|p| vec![p]),
+        scope: root_path
+            .map(|p| vec![DecisionScope::new(root_id, p, String::new())])
+            .unwrap_or_default(),
         command_line: command_line.to_string(),
         reason: None,
         record_enabled: config.recording != RecordingMode::Off,

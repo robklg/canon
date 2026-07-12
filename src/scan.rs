@@ -6,6 +6,7 @@ use walkdir::WalkDir;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::resolve_root_path_any;
+use crate::domain::scope::DecisionScope;
 use crate::ops;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::receipt::DeletionReceiptItem;
@@ -110,21 +111,19 @@ pub fn run(
         paths.to_vec()
     };
 
-    // The durable scope must be canonical: a recorded "." is unattributable
-    // later and can't join the decision_scopes index. Same hard resolution
-    // the walk itself uses; unresolvable paths fall back to the typed form
-    // (the scan will surface the problem itself).
+    // Canonicalize the scan paths so they can be matched to their roots. A path
+    // that won't canonicalize, or that isn't under a known root yet (a `--add`
+    // root doesn't exist at start()), simply produces no DecisionScope — the
+    // type makes a stray "." unrecordable, and record_scopes() captures the new
+    // root at completion.
     let scan_scope: Vec<String> = paths_to_scan
         .iter()
-        .map(|p| {
-            std::fs::canonicalize(p)
-                .map(|c| c.to_string_lossy().to_string())
-                .unwrap_or_else(|_| p.to_string_lossy().to_string())
-        })
+        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .map(|c| c.to_string_lossy().to_string())
         .collect();
     let decision = DecisionParams {
         command: DecisionCommand::Scan,
-        scope: Some(scan_scope),
+        scope: DecisionScope::decompose(&scan_scope, &roots),
         command_line: command_line.to_string(),
         reason: reason
             .map(|r| r.to_string())
@@ -141,7 +140,7 @@ pub fn run(
     let mut deleted_by_root: Vec<(i64, String, Vec<DeletionReceiptItem>)> = Vec::new();
     // Resolved scope of each walked path, recorded at completion so a --add scan's
     // freshly created root lands in the durable scope index (it didn't exist at start()).
-    let mut scope_pairs: Vec<(i64, String)> = Vec::new();
+    let mut scope_pairs: Vec<DecisionScope> = Vec::new();
 
     for path in &paths_to_scan {
         let canonical = match fs::canonicalize(path) {
@@ -237,7 +236,11 @@ pub fn run(
 
         // Record this path's resolved scope (root + subtree). Captures roots just
         // created above, which weren't present for the start()-time decomposition.
-        scope_pairs.push((root_id, scan_prefix.clone().unwrap_or_default()));
+        scope_pairs.push(DecisionScope::new(
+            root_id,
+            root_path.to_string_lossy().to_string(),
+            scan_prefix.clone().unwrap_or_default(),
+        ));
 
         // Determine if we should hash this root
         // Default: hash new/changed files; --no-hash to skip; --verify to rehash all

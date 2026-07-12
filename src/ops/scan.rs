@@ -1747,7 +1747,7 @@ mod tests {
     fn scan_params(recording: RecordingMode, no_receipt: bool) -> DecisionParams {
         DecisionParams {
             command: DecisionCommand::Scan,
-            scope: None,
+            scope: Vec::new(),
             command_line: "canon scan".to_string(),
             reason: None,
             record_enabled: recording != RecordingMode::Off,

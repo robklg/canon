@@ -3,10 +3,11 @@ use std::io::{self, BufRead};
 
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
+use crate::domain::scope::DecisionScope;
 use crate::ops;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::import_facts::ImportRecord;
-use crate::repo::Db;
+use crate::repo::{self, Db};
 
 pub fn run(
     db: &mut Db,
@@ -21,7 +22,7 @@ pub fn run(
 
     let decision = DecisionParams {
         command: DecisionCommand::ImportFacts,
-        scope: None,
+        scope: Vec::new(),
         command_line: command_line.to_string(),
         reason: None,
         record_enabled: config.recording != RecordingMode::Off,
@@ -88,10 +89,16 @@ pub fn run(
     // The command reads stdin, so no scope exists at start(); record the
     // durable scope index from the roots actually acted on (whole-root
     // entries), so scoped trail views surface this import.
-    let scope_pairs: Vec<(i64, String)> = state
+    let roots = repo::root::fetch_all(conn)?;
+    let scope_pairs: Vec<DecisionScope> = state
         .touched_roots
         .iter()
-        .map(|root_id| (*root_id, String::new()))
+        .filter_map(|root_id| {
+            roots
+                .iter()
+                .find(|r| r.id == *root_id)
+                .map(|r| DecisionScope::new(r.id, r.path.clone(), String::new()))
+        })
         .collect();
     if !scope_pairs.is_empty() {
         recorder.record_scopes(conn, &scope_pairs);

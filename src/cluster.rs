@@ -6,7 +6,7 @@ use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::format_count;
 use crate::domain::root::resolve_archive_path;
-use crate::domain::scope::ScopeMatch;
+use crate::domain::scope::{DecisionScope, ScopeMatch};
 use crate::expr::filter::Filter;
 use crate::ops;
 use crate::ops::cluster::{
@@ -96,7 +96,7 @@ pub fn generate(
 
     let decision = DecisionParams {
         command: DecisionCommand::ClusterGenerate,
-        scope: Some(scope_prefixes.to_vec()),
+        scope: DecisionScope::decompose(scope_prefixes, &all_roots),
         command_line: command_line.to_string(),
         reason: None,
         record_enabled: ledger.recording != RecordingMode::Off,
@@ -229,12 +229,8 @@ pub fn refresh(
     };
     display_plan_warnings(&plan, &display_options);
 
-    // Extract scope for decision recording before config is moved
-    let refresh_scope: Option<Vec<String>> = config
-        .meta
-        .scope
-        .as_ref()
-        .map(|s| s.split(", ").map(|p| p.to_string()).collect());
+    // Decompose the manifest's scope to known roots for the decision record.
+    let refresh_roots = repo::root::fetch_all(conn)?;
 
     // Execute
     let lock_path = config_path.with_extension("lock");
@@ -246,7 +242,7 @@ pub fn refresh(
     };
     let decision = DecisionParams {
         command: DecisionCommand::ClusterRefresh,
-        scope: refresh_scope,
+        scope: DecisionScope::decompose(&scope_prefixes, &refresh_roots),
         command_line: command_line.to_string(),
         reason: None,
         record_enabled: ledger.recording != RecordingMode::Off,

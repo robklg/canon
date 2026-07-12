@@ -34,17 +34,6 @@ impl NoteScope {
             self.rel_path.clone()
         }
     }
-
-    /// Absolute path of this scope. Durable records (decision scope) must use
-    /// this, not `display()` — a bare rel path can't be attributed to a root
-    /// when read back later.
-    pub fn absolute_path(&self) -> String {
-        if self.rel_path.is_empty() {
-            self.root_path.clone()
-        } else {
-            format!("{}/{}", self.root_path, self.rel_path)
-        }
-    }
 }
 
 /// Result of viewing notes at a scope.
@@ -639,7 +628,11 @@ mod tests {
         };
         let decision = DecisionParams {
             command: crate::domain::decision::DecisionCommand::NoteClear,
-            scope: Some(vec![scope.display()]),
+            scope: vec![crate::domain::scope::DecisionScope::new(
+                scope.root_id,
+                scope.root_path.clone(),
+                scope.rel_path.clone(),
+            )],
             command_line: "canon note a --clear -r".to_string(),
             reason: None,
             record_enabled: true,
@@ -692,7 +685,11 @@ mod tests {
         };
         let decision = DecisionParams {
             command: crate::domain::decision::DecisionCommand::NoteClear,
-            scope: Some(vec![scope.display()]),
+            scope: vec![crate::domain::scope::DecisionScope::new(
+                scope.root_id,
+                scope.root_path.clone(),
+                scope.rel_path.clone(),
+            )],
             command_line: "canon note empty --clear".to_string(),
             reason: None,
             record_enabled: true,
@@ -709,20 +706,20 @@ mod tests {
     }
 
     #[test]
-    fn note_scope_absolute_path() {
+    fn note_scope_display() {
         let root = NoteScope {
             root_id: 1,
             root_path: "/photos".to_string(),
             rel_path: String::new(),
         };
-        assert_eq!(root.absolute_path(), "/photos");
+        // Whole-root scope displays as the root path.
+        assert_eq!(root.display(), "/photos");
         let sub = NoteScope {
             root_id: 1,
             root_path: "/photos".to_string(),
             rel_path: "italy/2016".to_string(),
         };
-        assert_eq!(sub.absolute_path(), "/photos/italy/2016");
-        // display() stays the short form; only durable records use absolute.
+        // A sub-scope displays as the short rel path.
         assert_eq!(sub.display(), "italy/2016");
     }
 }

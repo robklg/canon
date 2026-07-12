@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::domain::config::LedgerConfig;
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
-use crate::domain::root::find_containing_root;
+use crate::domain::scope::DecisionScope;
 use crate::ops::receipt::{
     compute_ledger_root_receipt_rel_path, compute_targeted_receipt_rel_path, finalize_receipt,
     write_receipt, ReceiptMeta, ReceiptPlacement, ReceiptRef,
@@ -15,7 +15,11 @@ use crate::repo::{self, Connection};
 /// Parameters for starting a decision record.
 pub struct DecisionParams {
     pub command: DecisionCommand,
-    pub scope: Option<Vec<String>>,
+    /// The decision's scope, decomposed to known roots (empty = global). The
+    /// recorder derives both the `decisions.scope` display column and the
+    /// `decision_scopes` index rows from this — callers never supply raw
+    /// strings, so a non-canonical or rootless scope is unrepresentable.
+    pub scope: Vec<DecisionScope>,
     pub command_line: String,
     pub reason: Option<String>,
     /// Whether to write a DB decision record. False for recording=off or dry-run.
@@ -47,7 +51,7 @@ impl DecisionParams {
             command: self.command.as_str().to_string(),
             status: status.as_str().to_string(),
             timestamp,
-            scope: self.scope.clone(),
+            scope: scope_display(&self.scope),
             reason: self.reason.clone(),
             summary: summary.to_string(),
             canon_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -79,7 +83,22 @@ pub struct DecisionRecorder {
     receipt_ref: Option<ReceiptRef>,
     /// Absolute path to the final `.toml` file, used for write and finalize.
     receipt_abs_path: Option<PathBuf>,
+    /// Canonical display paths already written to the `decisions.scope` column.
+    /// Held so `record_scopes` can backfill scopes discovered after `start()`
+    /// (a `scan --add` root) without re-reading the row.
+    scope_display: Vec<String>,
     warnings: Vec<String>,
+}
+
+/// The `decisions.scope` / `meta.scope` display strings for a typed scope:
+/// each scope's canonical path, or `None` when the decision is global (so the
+/// column stays SQL `NULL`, matching how global decisions were always stored).
+fn scope_display(scope: &[DecisionScope]) -> Option<Vec<String>> {
+    if scope.is_empty() {
+        None
+    } else {
+        Some(scope.iter().map(DecisionScope::display_path).collect())
+    }
 }
 
 impl DecisionRecorder {
@@ -126,16 +145,18 @@ impl DecisionRecorder {
                 id: None,
                 receipt_ref: None,
                 receipt_abs_path: None,
+                scope_display: Vec::new(),
                 warnings: Vec::new(),
             };
         }
 
         let canon_version = env!("CARGO_PKG_VERSION");
+        let scope_display = scope_display(&params.scope).unwrap_or_default();
 
         let id = match repo::decision::insert_started(
             conn,
             params.command.as_str(),
-            params.scope.as_deref(),
+            (!scope_display.is_empty()).then_some(scope_display.as_slice()),
             &params.command_line,
             params.reason.as_deref(),
             canon_version,
@@ -148,6 +169,7 @@ impl DecisionRecorder {
                     id: None,
                     receipt_ref: None,
                     receipt_abs_path: None,
+                    scope_display: Vec::new(),
                     warnings: vec![format!("Warning: failed to record decision: {e}")],
                 };
             }
@@ -174,6 +196,7 @@ impl DecisionRecorder {
             id: Some(id),
             receipt_ref,
             receipt_abs_path,
+            scope_display,
             warnings,
         }
     }
@@ -287,29 +310,47 @@ impl DecisionRecorder {
         }
     }
 
-    /// Idempotently record additional `(root_id, rel_prefix)` scope-index rows
-    /// discovered after `start()`.
+    /// Idempotently record additional typed scopes discovered after `start()`.
     ///
     /// The `start()`-time scope decomposition can only match roots that already
     /// exist. A `canon scan --add` creates its root inside the scan loop, so at
-    /// `start()` the scope path matched no root and no `decision_scopes` row was
-    /// written. The loop resolves each path to an exact `(root_id, rel_prefix)` —
-    /// including roots it just created — so passing those resolved pairs here
-    /// records any still missing, without re-deriving them from the raw (possibly
-    /// non-canonical) scope strings. Pairs already written at `start()` are left
-    /// untouched. No-op if recording is disabled or `start()` failed; a write
-    /// failure is collected as a warning, never fatal.
-    pub fn record_scopes(&mut self, conn: &Connection, pairs: &[(i64, String)]) {
+    /// `start()` the scope path matched no root and neither a `decision_scopes`
+    /// row nor a `decisions.scope` display entry was written. The loop resolves
+    /// each path to a typed `DecisionScope` — including roots it just created —
+    /// so passing those here records the index rows *and* backfills the display
+    /// column for the new roots. Scopes already written at `start()` are left
+    /// untouched (the index insert is `NOT EXISTS`-guarded; display is deduped).
+    /// No-op if recording is disabled or `start()` failed; a write failure is
+    /// collected as a warning, never fatal.
+    pub fn record_scopes(&mut self, conn: &Connection, scopes: &[DecisionScope]) {
         let Some(id) = self.id else {
             return;
         };
-        if pairs.is_empty() {
+        if scopes.is_empty() {
             return;
         }
-        if let Err(e) = repo::decision::insert_scopes(conn, id, pairs) {
+        let pairs: Vec<(i64, String)> = scopes.iter().map(DecisionScope::index_pair).collect();
+        if let Err(e) = repo::decision::insert_scopes(conn, id, &pairs) {
             self.warnings.push(format!(
                 "Warning: failed to update decision scope index: {e}"
             ));
+            return;
+        }
+
+        // Backfill the display column with the newly-recorded roots' paths.
+        let mut changed = false;
+        for scope in scopes {
+            let display = scope.display_path();
+            if !self.scope_display.contains(&display) {
+                self.scope_display.push(display);
+                changed = true;
+            }
+        }
+        if changed {
+            if let Err(e) = repo::decision::update_scope_display(conn, id, &self.scope_display) {
+                self.warnings
+                    .push(format!("Warning: failed to update decision scope: {e}"));
+            }
         }
     }
 
@@ -422,45 +463,21 @@ fn compute_and_register_receipt(
     (Some(receipt_ref), Some(abs_path), Vec::new())
 }
 
-/// Decompose the decision's scope into `(root_id, rel_prefix)` pairs and write them
-/// to the durable `decision_scopes` index. A `None`/empty scope (global op) writes
-/// nothing; scope paths not under a known root are skipped (e.g. a scan creating a
-/// new root — that root doesn't exist yet at `start()`). Failure is collected as a
-/// warning, never fatal.
+/// Write the decision's typed scope to the durable `decision_scopes` index, one
+/// row per `(root_id, rel_prefix)`. An empty scope (global op) writes nothing.
+/// The scope is already decomposed to known roots by the caller, so this is a
+/// straight projection — no re-derivation, no roots fetch. Failure is collected
+/// as a warning, never fatal.
 fn populate_decision_scopes(
     conn: &Connection,
     decision_id: i64,
     params: &DecisionParams,
 ) -> Vec<String> {
-    let Some(scope) = params.scope.as_ref() else {
-        return Vec::new();
-    };
-    if scope.is_empty() {
+    if params.scope.is_empty() {
         return Vec::new();
     }
 
-    let roots = match repo::root::fetch_all(conn) {
-        Ok(r) => r,
-        Err(e) => {
-            return vec![format!(
-                "Warning: failed to read roots for decision scope index: {e}"
-            )]
-        }
-    };
-
-    let mut pairs: Vec<(i64, String)> = scope
-        .iter()
-        .filter_map(|path| {
-            find_containing_root(path, &roots)
-                .map(|(root_id, _root_path, _role, rel)| (root_id, rel))
-        })
-        .collect();
-    pairs.sort();
-    pairs.dedup();
-
-    if pairs.is_empty() {
-        return Vec::new();
-    }
+    let pairs: Vec<(i64, String)> = params.scope.iter().map(DecisionScope::index_pair).collect();
 
     match repo::decision::insert_scopes(conn, decision_id, &pairs) {
         Ok(()) => Vec::new(),
@@ -489,7 +506,7 @@ mod tests {
     fn make_params(command: DecisionCommand, record_enabled: bool) -> DecisionParams {
         DecisionParams {
             command,
-            scope: None,
+            scope: Vec::new(),
             command_line: "canon test".to_string(),
             reason: None,
             record_enabled,
@@ -575,7 +592,7 @@ mod tests {
         let conn = setup_test_db();
         let params = DecisionParams {
             command: DecisionCommand::ExcludeSet,
-            scope: Some(vec!["/photos".to_string()]),
+            scope: vec![DecisionScope::new(1, "/photos".to_string(), String::new())],
             command_line: "canon exclude set --reason 'OS files'".to_string(),
             reason: Some("OS files".to_string()),
             record_enabled: true,
@@ -629,7 +646,7 @@ mod tests {
         let conn = setup_test_db();
         let params = DecisionParams {
             command: DecisionCommand::Apply,
-            scope: None,
+            scope: Vec::new(),
             command_line: "canon apply m.lock".to_string(),
             reason: None,
             record_enabled: true,
@@ -721,7 +738,7 @@ mod tests {
     fn make_receipt_params() -> DecisionParams {
         DecisionParams {
             command: DecisionCommand::Apply,
-            scope: None,
+            scope: Vec::new(),
             command_line: "canon apply manifest.toml".to_string(),
             reason: None,
             record_enabled: true,
@@ -793,7 +810,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let params = DecisionParams {
             command: DecisionCommand::Apply,
-            scope: None,
+            scope: Vec::new(),
             command_line: "canon apply m.lock".to_string(),
             reason: None,
             record_enabled: true,
@@ -864,7 +881,7 @@ mod tests {
     ) -> DecisionParams {
         DecisionParams {
             command,
-            scope: None,
+            scope: Vec::new(),
             command_line: "canon test".to_string(),
             reason: None,
             record_enabled: config.recording != RecordingMode::Off,
@@ -924,7 +941,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let params = DecisionParams {
             command: DecisionCommand::ExcludeSet,
-            scope: None,
+            scope: Vec::new(),
             command_line: "canon exclude set".to_string(),
             reason: None,
             record_enabled: true,
@@ -1059,7 +1076,8 @@ mod tests {
         let conn = setup_test_db();
         let params = DecisionParams {
             command: DecisionCommand::Scan,
-            scope: Some(vec!["/newdrive/photos".to_string()]),
+            // The --add root doesn't exist at start(), so it decomposes to nothing.
+            scope: Vec::new(),
             command_line: "canon scan --add /newdrive/photos --role source".to_string(),
             reason: None,
             record_enabled: true,
@@ -1073,9 +1091,22 @@ mod tests {
         let root_id = repo::insert_test_root(&conn, "/newdrive/photos", "source", false);
         assert_eq!(scope_row_count(&conn, decision_id, root_id), 0);
 
-        recorder.record_scopes(&conn, &[(root_id, String::new())]);
+        recorder.record_scopes(
+            &conn,
+            &[DecisionScope::new(
+                root_id,
+                "/newdrive/photos".to_string(),
+                String::new(),
+            )],
+        );
 
         assert_eq!(scope_row_count(&conn, decision_id, root_id), 1);
+        // The display column is backfilled with the newly-recorded root's path,
+        // so a --add scan's decisions.scope is not left NULL.
+        let d = repo::decision::fetch_by_id(&conn, decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.scope, Some(vec!["/newdrive/photos".to_string()]));
         assert!(recorder.take_warnings().is_empty());
     }
 
@@ -1087,7 +1118,11 @@ mod tests {
         let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
         let params = DecisionParams {
             command: DecisionCommand::Scan,
-            scope: Some(vec!["/photos".to_string()]),
+            scope: vec![DecisionScope::new(
+                root_id,
+                "/photos".to_string(),
+                String::new(),
+            )],
             command_line: "canon scan /photos".to_string(),
             reason: None,
             record_enabled: true,
@@ -1098,9 +1133,59 @@ mod tests {
         let decision_id = recorder.decision_id().unwrap();
         assert_eq!(scope_row_count(&conn, decision_id, root_id), 1);
 
-        recorder.record_scopes(&conn, &[(root_id, String::new())]);
+        recorder.record_scopes(
+            &conn,
+            &[DecisionScope::new(
+                root_id,
+                "/photos".to_string(),
+                String::new(),
+            )],
+        );
 
         assert_eq!(scope_row_count(&conn, decision_id, root_id), 1);
+    }
+
+    #[test]
+    fn recorded_scope_is_always_canonical_never_relative() {
+        // Regression: the original bug recorded a raw "." as a decision scope,
+        // unattributable later. The typed contract makes that unrepresentable —
+        // decompose drops a rootless "." and keeps only the root-anchored path,
+        // and the recorder stores exactly that canonical string in both the
+        // decisions.scope column and meta.scope.
+        let conn = setup_test_db();
+        let roots = vec![crate::domain::root::Root {
+            id: 1,
+            path: "/vol/photos".to_string(),
+            role: "source".to_string(),
+            comment: None,
+            last_scanned_at: None,
+            suspended: false,
+        }];
+        let scope =
+            DecisionScope::decompose(&[".".to_string(), "/vol/photos/2016".to_string()], &roots);
+        let params = DecisionParams {
+            command: DecisionCommand::Scan,
+            scope,
+            command_line: "canon scan .".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: false,
+            ledger_config: LedgerConfig::default(),
+        };
+
+        let recorder = DecisionRecorder::start(&conn, &params, None);
+        let d = repo::decision::fetch_by_id(&conn, recorder.decision_id().unwrap())
+            .unwrap()
+            .unwrap();
+
+        // Only the canonical, root-anchored path survived; "." was never recorded.
+        assert_eq!(d.scope, Some(vec!["/vol/photos/2016".to_string()]));
+        // meta.scope tells the same canonical story, and nothing relative leaks.
+        let meta = params.receipt_meta(1, DecisionStatus::Completed, "s", None);
+        assert_eq!(meta.scope, Some(vec!["/vol/photos/2016".to_string()]));
+        for path in meta.scope.unwrap() {
+            assert!(path.starts_with('/'), "scope {path:?} is not absolute");
+        }
     }
 
     #[test]
@@ -1110,7 +1195,10 @@ mod tests {
         let mut recorder = DecisionRecorder::start(&conn, &params, None);
         assert!(recorder.decision_id().is_none());
 
-        recorder.record_scopes(&conn, &[(1, String::new())]);
+        recorder.record_scopes(
+            &conn,
+            &[DecisionScope::new(1, "/x".to_string(), String::new())],
+        );
 
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM decision_scopes", [], |row| row.get(0))

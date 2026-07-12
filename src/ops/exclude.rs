@@ -2873,7 +2873,7 @@ mod tests {
     fn full_decision(command: DecisionCommand) -> DecisionParams {
         DecisionParams {
             command,
-            scope: None,
+            scope: Vec::new(),
             command_line: "canon test".to_string(),
             reason: None,
             record_enabled: true,
@@ -2914,7 +2914,7 @@ mod tests {
 
         let decision = DecisionParams {
             command: DecisionCommand::ExcludeSet,
-            scope: None,
+            scope: Vec::new(),
             command_line: "canon test".to_string(),
             reason: None,
             record_enabled: true,
@@ -2959,7 +2959,11 @@ mod tests {
         };
         let decision = DecisionParams {
             command: DecisionCommand::ExcludeSet,
-            scope: Some(vec!["/photos".to_string()]),
+            scope: vec![crate::domain::scope::DecisionScope::new(
+                1,
+                "/photos".to_string(),
+                String::new(),
+            )],
             command_line: "canon exclude set /photos".to_string(),
             reason: None,
             record_enabled: true,
@@ -2991,7 +2995,7 @@ mod tests {
         // scope: None → global → no scope-index rows.
         let decision = DecisionParams {
             command: DecisionCommand::ExcludeSet,
-            scope: None,
+            scope: Vec::new(),
             command_line: "canon exclude set --global".to_string(),
             reason: None,
             record_enabled: true,
