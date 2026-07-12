@@ -1,7 +1,10 @@
 use anyhow::Result;
+use rusqlite::OptionalExtension;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::db::Connection;
+use super::source::BATCH_SIZE;
+use crate::domain::decision::Decision;
 
 /// Insert the initial "started" decision record. Returns the row ID.
 pub fn insert_started(
@@ -129,49 +132,175 @@ pub fn set_scope_receipt(
     Ok(())
 }
 
-/// Fetch a decision by ID. For testing.
-#[cfg(test)]
-pub fn fetch_by_id(
-    conn: &Connection,
-    id: i64,
-) -> Result<Option<crate::domain::decision::Decision>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, command, scope, command_line, reason, status,
+// ============================================================================
+// Read layer (trail consumption)
+// ============================================================================
+
+const DECISION_COLUMNS: &str = "id, command, scope, command_line, reason, status,
                 count_attempted, count_completed, count_failed, count_skipped,
                 summary, canon_version, created_at,
-                receipt_root_id, receipt_rel_path
-         FROM decisions WHERE id = ?",
-    )?;
+                receipt_root_id, receipt_rel_path";
 
-    let result = stmt
-        .query_row([id], |row| {
-            let scope_json: Option<String> = row.get(2)?;
-            let scope = scope_json.map(|s| serde_json::from_str(&s).unwrap());
-            Ok(crate::domain::decision::Decision {
-                id: row.get(0)?,
-                command: row.get(1)?,
-                scope,
-                command_line: row.get(3)?,
-                reason: row.get(4)?,
-                status: row.get(5)?,
-                count_attempted: row.get(6)?,
-                count_completed: row.get(7)?,
-                count_failed: row.get(8)?,
-                count_skipped: row.get(9)?,
-                summary: row.get(10)?,
-                canon_version: row.get(11)?,
-                created_at: row.get(12)?,
-                receipt_root_id: row.get(13)?,
-                receipt_rel_path: row.get(14)?,
-            })
-        })
-        .optional()?;
+fn decision_from_row(row: &rusqlite::Row) -> rusqlite::Result<Decision> {
+    let scope_json: Option<String> = row.get(2)?;
+    let scope = scope_json.map(|s| serde_json::from_str(&s).unwrap());
+    Ok(Decision {
+        id: row.get(0)?,
+        command: row.get(1)?,
+        scope,
+        command_line: row.get(3)?,
+        reason: row.get(4)?,
+        status: row.get(5)?,
+        count_attempted: row.get(6)?,
+        count_completed: row.get(7)?,
+        count_failed: row.get(8)?,
+        count_skipped: row.get(9)?,
+        summary: row.get(10)?,
+        canon_version: row.get(11)?,
+        created_at: row.get(12)?,
+        receipt_root_id: row.get(13)?,
+        receipt_rel_path: row.get(14)?,
+    })
+}
 
+/// Fetch a decision by ID.
+pub fn fetch_by_id(conn: &Connection, id: i64) -> Result<Option<Decision>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {DECISION_COLUMNS} FROM decisions WHERE id = ?"
+    ))?;
+    let result = stmt.query_row([id], decision_from_row).optional()?;
     Ok(result)
 }
 
-#[cfg(test)]
-use rusqlite::OptionalExtension;
+/// Fetch decisions by IDs (chunked). Order is not guaranteed.
+pub fn fetch_by_ids(conn: &Connection, ids: &[i64]) -> Result<Vec<Decision>> {
+    let mut decisions = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT {DECISION_COLUMNS} FROM decisions WHERE id IN ({})",
+            placeholders.join(",")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), decision_from_row)?;
+        for row in rows {
+            decisions.push(row?);
+        }
+    }
+    Ok(decisions)
+}
+
+/// Fetch the most recent decisions, newest first. `limit: None` fetches all.
+pub fn fetch_recent(conn: &Connection, limit: Option<usize>) -> Result<Vec<Decision>> {
+    let sql = match limit {
+        Some(n) => format!(
+            "SELECT {DECISION_COLUMNS} FROM decisions
+             ORDER BY created_at DESC, id DESC LIMIT {n}"
+        ),
+        None => {
+            format!("SELECT {DECISION_COLUMNS} FROM decisions ORDER BY created_at DESC, id DESC")
+        }
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], decision_from_row)?;
+    let mut decisions = Vec::new();
+    for row in rows {
+        decisions.push(row?);
+    }
+    Ok(decisions)
+}
+
+/// Fetch decisions with `start <= created_at < end`, oldest first.
+pub fn fetch_in_range(conn: &Connection, start: i64, end: i64) -> Result<Vec<Decision>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {DECISION_COLUMNS} FROM decisions
+         WHERE created_at >= ? AND created_at < ?
+         ORDER BY created_at ASC, id ASC"
+    ))?;
+    let rows = stmt.query_map([start, end], decision_from_row)?;
+    let mut decisions = Vec::new();
+    for row in rows {
+        decisions.push(row?);
+    }
+    Ok(decisions)
+}
+
+/// One row of the durable scope index.
+#[derive(Debug, Clone)]
+pub struct DecisionScopeRow {
+    pub decision_id: i64,
+    pub root_id: i64,
+    pub rel_prefix: String,
+    pub receipt_rel_path: Option<String>,
+}
+
+fn scope_row_from_row(row: &rusqlite::Row) -> rusqlite::Result<DecisionScopeRow> {
+    Ok(DecisionScopeRow {
+        decision_id: row.get(0)?,
+        root_id: row.get(1)?,
+        rel_prefix: row.get(2)?,
+        receipt_rel_path: row.get(3)?,
+    })
+}
+
+/// Fetch all scope-index rows for the given roots (chunked). Prefix matching
+/// against a viewed scope is domain logic — SQL never compares paths.
+pub fn fetch_scope_rows_by_roots(
+    conn: &Connection,
+    root_ids: &[i64],
+) -> Result<Vec<DecisionScopeRow>> {
+    let mut rows_out = Vec::new();
+    for chunk in root_ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT decision_id, root_id, rel_prefix, receipt_rel_path
+             FROM decision_scopes WHERE root_id IN ({})",
+            placeholders.join(",")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), scope_row_from_row)?;
+        for row in rows {
+            rows_out.push(row?);
+        }
+    }
+    Ok(rows_out)
+}
+
+/// Fetch the scope-index rows of one decision (per-root receipt pointers).
+pub fn fetch_scope_rows(conn: &Connection, decision_id: i64) -> Result<Vec<DecisionScopeRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT decision_id, root_id, rel_prefix, receipt_rel_path
+         FROM decision_scopes WHERE decision_id = ? ORDER BY root_id, rel_prefix",
+    )?;
+    let rows = stmt.query_map([decision_id], scope_row_from_row)?;
+    let mut rows_out = Vec::new();
+    for row in rows {
+        rows_out.push(row?);
+    }
+    Ok(rows_out)
+}
+
+/// Count all decisions.
+pub fn count_all(conn: &Connection) -> Result<i64> {
+    let count = conn.query_row("SELECT COUNT(*) FROM decisions", [], |row| row.get(0))?;
+    Ok(count)
+}
+
+/// Count decisions with no scope-index rows (global operations), optionally
+/// restricted to `start <= created_at < end`.
+pub fn count_unscoped(conn: &Connection, range: Option<(i64, i64)>) -> Result<i64> {
+    let base = "SELECT COUNT(*) FROM decisions d
+                WHERE NOT EXISTS (SELECT 1 FROM decision_scopes s WHERE s.decision_id = d.id)";
+    let count = match range {
+        Some((start, end)) => conn.query_row(
+            &format!("{base} AND d.created_at >= ? AND d.created_at < ?"),
+            [start, end],
+            |row| row.get(0),
+        )?,
+        None => conn.query_row(base, [], |row| row.get(0))?,
+    };
+    Ok(count)
+}
 
 #[cfg(test)]
 mod tests {
@@ -730,5 +859,99 @@ mod tests {
 
         let decision = fetch_by_id(&conn, id).unwrap().unwrap();
         assert_eq!(decision.status, "partial");
+    }
+
+    // ------------------------------------------------------------------
+    // Read layer
+    // ------------------------------------------------------------------
+
+    /// Insert a decision row with a controlled timestamp (read-layer tests
+    /// need deterministic created_at; insert_started stamps now()).
+    fn insert_decision_at(conn: &Connection, command: &str, created_at: i64) -> i64 {
+        conn.execute(
+            "INSERT INTO decisions (command, scope, command_line, status, canon_version, created_at)
+             VALUES (?1, NULL, ?2, 'completed', 'test', ?3)",
+            rusqlite::params![command, format!("canon {command}"), created_at],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn fetch_recent_orders_and_limits() {
+        let conn = setup_test_db();
+        let a = insert_decision_at(&conn, "scan", 100);
+        let b = insert_decision_at(&conn, "apply", 300);
+        let c = insert_decision_at(&conn, "scan", 200);
+
+        let all = fetch_recent(&conn, None).unwrap();
+        assert_eq!(all.iter().map(|d| d.id).collect::<Vec<_>>(), vec![b, c, a]);
+
+        let top = fetch_recent(&conn, Some(2)).unwrap();
+        assert_eq!(top.iter().map(|d| d.id).collect::<Vec<_>>(), vec![b, c]);
+    }
+
+    #[test]
+    fn fetch_in_range_boundaries() {
+        let conn = setup_test_db();
+        insert_decision_at(&conn, "scan", 99);
+        let b = insert_decision_at(&conn, "scan", 100);
+        let c = insert_decision_at(&conn, "scan", 150);
+        insert_decision_at(&conn, "scan", 200); // end is exclusive
+
+        let hits = fetch_in_range(&conn, 100, 200).unwrap();
+        assert_eq!(hits.iter().map(|d| d.id).collect::<Vec<_>>(), vec![b, c]);
+    }
+
+    #[test]
+    fn fetch_by_ids_chunks_over_batch_size() {
+        let conn = setup_test_db();
+        let ids: Vec<i64> = (0..1100)
+            .map(|i| insert_decision_at(&conn, "scan", i))
+            .collect();
+        let fetched = fetch_by_ids(&conn, &ids).unwrap();
+        assert_eq!(fetched.len(), 1100);
+    }
+
+    #[test]
+    fn fetch_by_ids_empty() {
+        let conn = setup_test_db();
+        assert!(fetch_by_ids(&conn, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn count_unscoped_ignores_scoped_decisions() {
+        let conn = setup_test_db();
+        let scoped = insert_decision_at(&conn, "scan", 100);
+        insert_scopes(&conn, scoped, &[(1, String::new())]).unwrap();
+        insert_decision_at(&conn, "import_facts", 150);
+        insert_decision_at(&conn, "import_facts", 250);
+
+        assert_eq!(count_unscoped(&conn, None).unwrap(), 2);
+        assert_eq!(count_unscoped(&conn, Some((100, 200))).unwrap(), 1);
+        assert_eq!(count_all(&conn).unwrap(), 3);
+    }
+
+    #[test]
+    fn scope_rows_round_trip_with_receipt_path() {
+        let conn = setup_test_db();
+        let d = insert_decision_at(&conn, "scan", 100);
+        insert_scopes(&conn, d, &[(1, "a/b".to_string()), (2, String::new())]).unwrap();
+        set_scope_receipt(&conn, d, 2, ".canon-ledger/000001-scan.toml").unwrap();
+
+        let by_root = fetch_scope_rows_by_roots(&conn, &[2]).unwrap();
+        assert_eq!(by_root.len(), 1);
+        assert_eq!(by_root[0].decision_id, d);
+        assert_eq!(by_root[0].rel_prefix, "");
+        assert_eq!(
+            by_root[0].receipt_rel_path.as_deref(),
+            Some(".canon-ledger/000001-scan.toml")
+        );
+
+        let for_decision = fetch_scope_rows(&conn, d).unwrap();
+        assert_eq!(for_decision.len(), 2);
+        assert_eq!(for_decision[0].root_id, 1);
+        assert_eq!(for_decision[0].rel_prefix, "a/b");
+        assert!(for_decision[0].receipt_rel_path.is_none());
     }
 }

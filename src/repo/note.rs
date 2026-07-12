@@ -117,6 +117,25 @@ pub fn fetch_subtree_chronological(
     Ok(notes)
 }
 
+/// Fetch all notes on the given roots (chunked). Prefix filtering against a
+/// viewed scope is domain logic — SQL never compares paths.
+pub fn fetch_by_roots(conn: &Connection, root_ids: &[i64]) -> Result<Vec<Note>> {
+    let mut notes = Vec::new();
+    for chunk in root_ids.chunks(super::source::BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT {NOTE_COLUMNS} FROM notes WHERE root_id IN ({})",
+            placeholders.join(",")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), note_from_row)?;
+        for row in rows {
+            notes.push(row?);
+        }
+    }
+    Ok(notes)
+}
+
 /// Fetch all notes across all roots, ordered by root_id, rel_path, created_at.
 #[allow(dead_code)]
 pub fn fetch_all(conn: &Connection) -> Result<Vec<Note>> {
@@ -1100,5 +1119,23 @@ mod tests {
         for loc in &locations {
             assert!(loc.rel_path == "a" || loc.rel_path.starts_with("a/"));
         }
+    }
+
+    #[test]
+    fn fetch_by_roots_filters_roots() {
+        let conn = setup_test_db();
+        let r1 = insert_root(&conn, "/a", "source", false);
+        let r2 = insert_root(&conn, "/b", "source", false);
+        insert_note(&conn, r1, "x", "one", 100);
+        insert_note(&conn, r1, "y", "two", 200);
+        insert_note(&conn, r2, "z", "other root", 300);
+
+        let notes = fetch_by_roots(&conn, &[r1]).unwrap();
+        assert_eq!(notes.len(), 2);
+        assert!(notes.iter().all(|n| n.root_id == r1));
+
+        let both = fetch_by_roots(&conn, &[r1, r2]).unwrap();
+        assert_eq!(both.len(), 3);
+        assert!(fetch_by_roots(&conn, &[]).unwrap().is_empty());
     }
 }
