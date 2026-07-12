@@ -127,3 +127,7 @@ canon exclude set --where 'source.ext=dll' --no-receipt
 - **Declined confirmation**: User said "n" at the prompt
 - **Validation failure**: Command failed before any work began
 - **`recording = "Off"`**: Recording disabled in `config.toml`
+
+## Reading the Trail
+
+[`canon trail`](../commands/query/trail.md) reads the record back: what happened at a place (`canon trail`), the day's story (`canon trail --today`), and any single decision in full with its receipt locations (`canon trail show <id>`). Notes interleave as the thinking between the actions.

@@ -184,6 +184,10 @@ Both temporal and spatial modes work with either `--global` or `-r`. Temporal (b
 
 Notes surface automatically in [`survey`](../query/survey.md) output, appearing after the scope header. Survey shows notes from the scope and its descendants (the subtree), capped at 5 most recent entries. See the [survey documentation](../query/survey.md#notes) for details.
 
+## Notes and the decision trail
+
+Notes and the [decision trail](../query/trail.md) split one story between them: **notes hold thoughts** — note-to-self, questions, hunches ("what did I think about this?") — while **the trail holds actions** — what was scanned, excluded, archived, deleted ("what did I do?"). Don't write notes to record actions; effectful commands record themselves, and `--reason` attaches your why. [`canon trail`](../query/trail.md) shows both voices as one timeline, with notes visually distinct.
+
 ## Distinction from other annotations
 
 Canon has several annotation mechanisms, each serving a different purpose:

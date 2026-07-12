@@ -1,0 +1,119 @@
+# canon trail
+
+Read the decision trail. Canon records every effectful action ([decision provenance](../../concepts/decisions.md)); `trail` is how you read that record back — as a timeline of what happened, with your notes interleaved as the thinking between the actions.
+
+One command, two lenses:
+
+- **The scope lens** — standing in a folder: *what did I do here?* Decisions touching this place, newest first.
+- **The time lens** (`--today`, `--since`, `--on`) — *what did I do today?* The day's decisions as a story, with a rollup of what was removed, archived, and excluded.
+
+```bash
+# What happened here?
+canon trail
+
+# What happened in a specific folder?
+canon trail /mnt/old-drive/photos
+
+# Today's story, across all roots
+canon trail --today --global
+
+# Everything since Saturday
+canon trail --since saturday
+
+# One specific day
+canon trail --on 2026-05-12
+
+# One decision in full
+canon trail show 61
+```
+
+`trail` is a pure query command — it never changes anything.
+
+## The scope lens
+
+With no time flags, `trail` lists the decisions that touched the current scope, newest first:
+
+```
+Decision trail: /mnt/old-drive/photos
+
+      2026-07-11 16:50  ~ italy: unsure about the RAW files — revisit
+#61   2026-07-11 16:42  Excluded 210 duplicates (kept 105) · "redundant backup"
+#57   2026-07-11 15:10  Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
+#42   2026-05-12 14:03  Applied italy-2016: 47 copied, 0 errors
+
+12 earlier decisions not shown (--limit N or --all; showing 20).
+2 global decisions not shown (--global).
+```
+
+A decision *touches* the scope in either direction: a decision on a parent folder happened to this folder too, and a decision on a subfolder is activity here. Sibling folders' decisions don't appear.
+
+Each line carries the decision id, timestamp, the completion summary, and your `--reason` (quoted). Decisions that did not complete cleanly are marked (`[partial]`, `[interrupted]`, `[started]`).
+
+The listing is capped at the 20 most recent decisions; the footer tells you what's beyond the cap (`--limit N` or `--all` to widen). Decisions recorded without a scope — global operations — can't be attributed to any folder, so scoped views count them in a footer instead of silently hiding them.
+
+## The time lens
+
+`--today`, `--since <when>`, or `--on <when>` switch to the day-grouped story view — chronological, so it reads forward:
+
+```
+Decision trail: all roots — today
+
+Saturday 2026-07-12 — removed 1,350 files (35.0 GB), archived 47 files (3.9 GB), excluded 210 files — and 2 other actions
+
+09:14  #63   Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
+09:40         ~ old-disk/photos: unsure about the RAW files — revisit
+11:02  #64   Applied italy-2016: 47 copied, 0 errors
+11:30  #65   Excluded 210 duplicates (kept 105) · "redundant backup"
+```
+
+`<when>` accepts `today`, `yesterday`, a weekday name (the most recent one, today included), or a date (`YYYY-MM-DD`). Days follow your local timezone.
+
+Each day opens with a rollup by fate: **removed** (deletions a scan observed), **archived** (apply), **excluded**, plus a count of other actions (scans that deleted nothing, manifest generation, imports, and so on). Sizes are computed from the index and shown when reliable — for older decisions whose files have since been touched by newer decisions, the size is omitted rather than guessed.
+
+Scope still applies: `canon trail --today` inside a root shows that folder's day; add `--global` for the whole story.
+
+## Notes in the timeline
+
+Notes ([`canon note`](../manage/note.md)) interleave with decisions by default, marked with `~` and carrying no id, counts, or status — a thought never reads as an action. The two commands split one story: **the trail holds actions** ("what did I do?"), **notes hold thoughts** ("what did I think?"). Use `--no-notes` for decisions only.
+
+## Inspecting one decision: `trail show`
+
+The id on every line drills down:
+
+```
+$ canon trail show 61
+Decision #61 — exclude_duplicates
+  when:     2026-07-11 16:42
+  status:   completed
+  counts:   attempted 315, completed 210, failed 0, skipped 105
+  reason:   "redundant backup"
+  command:  canon exclude duplicates /mnt/old-drive/photos --prefer /archive ...
+  scope:    /mnt/old-drive/photos
+  version:  0.5.2
+  summary:  Excluded 210 duplicates (kept 105)
+  receipts:
+    /archive/.canon-ledger/000061-exclude_duplicates.toml
+```
+
+`show` lists where the decision's [receipts](../../concepts/decisions.md) live on disk — including one receipt per source root for deletions. It does not print receipt contents; open the file to see the per-item record. When there is no receipt, the reason is stated (`no receipt (--no-receipt)` or `no receipt recorded`) — absence is never silent.
+
+## Machine output
+
+`--jsonl` emits one JSON object per timeline event, with a `type` field (`"decision"` or `"note"`), the raw command identifier, timestamps, counts, reason, scope, summary, and receipt location. The scope header moves to stderr so stdout stays clean:
+
+```bash
+canon trail --today --global --jsonl | jq -r 'select(.type=="decision") | .summary'
+```
+
+## Flags
+
+| Flag | Meaning |
+|------|---------|
+| `--global` | All roots, ignoring current-directory scope |
+| `--today` | Time lens: today (sugar for `--since today`) |
+| `--since <when>` | Time lens: from a day onward |
+| `--on <when>` | Time lens: one day |
+| `--limit N` | Show at most N decisions (default 20) |
+| `--all` | No cap |
+| `--no-notes` | Decisions only |
+| `--jsonl` | Machine output (JSONL on stdout) |
