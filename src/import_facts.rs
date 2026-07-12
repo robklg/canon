@@ -85,6 +85,18 @@ pub fn run(
 
     let summary = state.stats.compose_summary();
 
+    // The command reads stdin, so no scope exists at start(); record the
+    // durable scope index from the roots actually acted on (whole-root
+    // entries), so scoped trail views surface this import.
+    let scope_pairs: Vec<(i64, String)> = state
+        .touched_roots
+        .iter()
+        .map(|root_id| (*root_id, String::new()))
+        .collect();
+    if !scope_pairs.is_empty() {
+        recorder.record_scopes(conn, &scope_pairs);
+    }
+
     recorder.complete(
         conn,
         DecisionStatus::Completed,

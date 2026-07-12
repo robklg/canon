@@ -7,7 +7,7 @@
 //!
 //! No stdout/stderr/stdin — the interface reads stdin and displays outcomes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -47,6 +47,9 @@ pub struct ImportState {
     pub fact_type_map: HashMap<String, FactValueType>,
     pub type_mismatch_keys: HashMap<String, (FactValueType, FactValueType)>,
     pub stats: ImportStats,
+    /// Roots whose sources this import acted on — the decision's durable
+    /// scope (one whole-root entry per root, recorded at completion).
+    pub touched_roots: BTreeSet<i64>,
 }
 
 /// Counters for the import summary.
@@ -99,6 +102,7 @@ pub fn init_state(conn: &Connection) -> Result<ImportState> {
         fact_type_map,
         type_mismatch_keys: HashMap::new(),
         stats: ImportStats::default(),
+        touched_roots: BTreeSet::new(),
     })
 }
 
@@ -144,6 +148,9 @@ pub fn process_record(
         state.stats.skipped_stale += 1;
         return Ok(outcome);
     }
+
+    // Past the gates — this record will act on the source's root.
+    state.touched_roots.insert(source.root_id);
 
     // Normalize all fact keys first, collecting valid ones
     let mut normalized_facts: Vec<(String, &Value)> = Vec::new();
@@ -744,6 +751,40 @@ mod tests {
 
         assert!(outcome.warnings[0].contains("basis_rev"));
         assert_eq!(state.stats.skipped_stale, 1);
+        // A gated record touches no root — no scope entry for it.
+        assert!(state.touched_roots.is_empty());
+    }
+
+    #[test]
+    fn test_touched_roots_collects_acted_on_roots() {
+        let mut conn = setup_test_db();
+        let root_a = insert_root(&conn, "/a", "source", false);
+        let root_b = insert_root(&conn, "/b", "source", false);
+        let s1 = insert_source(&conn, root_a, "1.jpg", None);
+        let s2 = insert_source(&conn, root_b, "2.jpg", None);
+        let mut state = init_state(&conn).unwrap();
+
+        for id in [s1, s2] {
+            let record = make_record(
+                id,
+                0,
+                HashMap::from([("Make".to_string(), Value::String("Canon".to_string()))]),
+            );
+            process_record(&mut conn, &record, &mut state, false).unwrap();
+        }
+        // Missing source: gated, must not touch.
+        process_record(
+            &mut conn,
+            &make_record(999, 0, HashMap::new()),
+            &mut state,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.touched_roots.iter().copied().collect::<Vec<_>>(),
+            vec![root_a, root_b]
+        );
     }
 
     #[test]
