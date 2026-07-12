@@ -11,6 +11,23 @@ pub fn format_count(n: impl std::fmt::Display) -> String {
     result.chars().rev().collect()
 }
 
+/// Format a byte count as a human-readable size (decimal units, one decimal
+/// place above bytes: 4_080_218_931 → "4.1 GB").
+pub fn format_size(bytes: i64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    value /= 1000.0;
+    while value >= 1000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,5 +59,28 @@ mod tests {
     fn format_count_i64() {
         assert_eq!(format_count(42_i64), "42");
         assert_eq!(format_count(1_000_i64), "1,000");
+    }
+
+    #[test]
+    fn format_size_bytes() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(1), "1 B");
+        assert_eq!(format_size(999), "999 B");
+    }
+
+    #[test]
+    fn format_size_unit_boundaries() {
+        assert_eq!(format_size(1_000), "1.0 KB");
+        assert_eq!(format_size(999_949), "999.9 KB");
+        assert_eq!(format_size(1_000_000), "1.0 MB");
+        assert_eq!(format_size(3_900_000_000), "3.9 GB");
+        assert_eq!(format_size(35_000_000_000), "35.0 GB");
+    }
+
+    #[test]
+    fn format_size_large() {
+        assert_eq!(format_size(2_500_000_000_000), "2.5 TB");
+        // TB is the ceiling — no overflow past the last unit.
+        assert_eq!(format_size(9_000_000_000_000_000), "9000.0 TB");
     }
 }
