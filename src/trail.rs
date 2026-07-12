@@ -16,8 +16,7 @@ use chrono::{Local, TimeZone};
 use serde::Serialize;
 
 use crate::domain::decision::Decision;
-use crate::domain::format::{format_count, format_size};
-use crate::domain::note::note_display_path;
+use crate::domain::format::{cap_path, format_count, format_size};
 use crate::domain::root::Root;
 use crate::domain::trail::{parse_when, DayRollup, FateLine, TimelineEvent, WhenValue};
 use crate::ops;
@@ -132,7 +131,16 @@ fn print_human(
         None => println!("Decision trail: {scope_part}"),
     }
 
-    let use_full_path = resolved.is_global();
+    // Scope column: one width across the whole listing, capped so long
+    // paths can't push the narration off-screen.
+    let width = |events: &[&TimelineEvent]| -> usize {
+        events
+            .iter()
+            .map(|e| scope_cell(e, resolved, roots).chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(SCOPE_CELL_MAX)
+    };
     match &result.view {
         TrailView::Recent(events) => {
             if result.total_decisions == 0 {
@@ -145,8 +153,10 @@ fn print_human(
             }
             if !events.is_empty() {
                 println!();
+                let refs: Vec<&TimelineEvent> = events.iter().collect();
+                let w = width(&refs);
                 for event in events {
-                    print_event(event, true, roots, use_full_path);
+                    print_event(event, true, resolved, roots, w);
                 }
             }
         }
@@ -155,6 +165,8 @@ fn print_human(
                 println!();
                 println!("No decisions {}.", time_label.unwrap_or("in range"));
             }
+            let refs: Vec<&TimelineEvent> = days.iter().flat_map(|d| &d.events).collect();
+            let w = width(&refs);
             for day in days {
                 println!();
                 let weekday = day.date.format("%A %Y-%m-%d");
@@ -165,7 +177,7 @@ fn print_human(
                 }
                 println!();
                 for event in &day.events {
-                    print_event(event, false, roots, use_full_path);
+                    print_event(event, false, resolved, roots, w);
                 }
             }
         }
@@ -189,15 +201,20 @@ fn print_human(
     }
 }
 
-/// One timeline line. Decisions carry id, counts, and reason; notes carry the
-/// `~` voice marker and never an id, counts, or status — a thought must not
-/// be mistakable for an action.
+/// Maximum width of the scope column (the coverage compact-label precedent).
+const SCOPE_CELL_MAX: usize = 35;
+
+/// One timeline line: id, time, scope column, narration. Decisions carry
+/// counts and reason; notes carry the `~` voice marker and never an id,
+/// counts, or status — a thought must not be mistakable for an action.
 fn print_event(
     event: &TimelineEvent,
     with_date: bool,
+    resolved: &ResolvedScope,
     roots: &HashMap<i64, Root>,
-    use_full_path: bool,
+    width: usize,
 ) {
+    let cell = cap_path(&scope_cell(event, resolved, roots), SCOPE_CELL_MAX);
     match event {
         TimelineEvent::Decision(d) => {
             let time = if with_date {
@@ -205,7 +222,7 @@ fn print_event(
             } else {
                 format_time(d.created_at)
             };
-            let mut line = format!("#{:<4} {time}  {}", d.id, headline(d));
+            let mut line = format!("#{:<4} {time}  {cell:<width$}  {}", d.id, headline(d));
             if let Some(reason) = &d.reason {
                 line.push_str(&format!(" \u{00b7} \"{reason}\""));
             }
@@ -220,10 +237,58 @@ fn print_event(
             } else {
                 format_time(n.created_at)
             };
-            let path = note_display_path(n, roots, use_full_path);
-            println!("      {time}  ~ {path}: {}", n.text);
+            println!("      {time}  {cell:<width$}  ~ {}", n.text);
         }
     }
+}
+
+/// The location an event happened at, rendered for the scope column: relative
+/// to the viewed prefix when the view has one (the CWD case), otherwise the
+/// absolute path. Decisions with no recorded scope render as "global";
+/// multi-path scopes show the first plus a count.
+fn scope_cell(
+    event: &TimelineEvent,
+    resolved: &ResolvedScope,
+    roots: &HashMap<i64, Root>,
+) -> String {
+    let location = match event {
+        TimelineEvent::Decision(d) => match &d.scope {
+            Some(paths) if !paths.is_empty() => {
+                let first = relativize(&paths[0], resolved);
+                if paths.len() > 1 {
+                    format!("{first} +{}", paths.len() - 1)
+                } else {
+                    first
+                }
+            }
+            _ => "global".to_string(),
+        },
+        TimelineEvent::Note(n) => {
+            let absolute = match roots.get(&n.root_id) {
+                Some(root) if n.rel_path.is_empty() => root.path.clone(),
+                Some(root) => format!("{}/{}", root.path, n.rel_path),
+                None => n.rel_path.clone(),
+            };
+            relativize(&absolute, resolved)
+        }
+    };
+    location
+}
+
+/// Render a location relative to a single-prefix view ("." for the prefix
+/// itself); fall back to the path as recorded (global views, multi-prefix
+/// views, ancestor scopes, historical relative records).
+fn relativize(path: &str, resolved: &ResolvedScope) -> String {
+    if resolved.prefixes.len() == 1 {
+        let prefix = &resolved.prefixes[0];
+        if path == prefix {
+            return ".".to_string();
+        }
+        if let Some(rel) = crate::domain::path_strip_prefix(path, prefix) {
+            return rel.to_string();
+        }
+    }
+    path.to_string()
 }
 
 /// The per-line narration is the stored summary — composed once at execution
@@ -439,6 +504,27 @@ mod tests {
             format_rollup(&rollup),
             "removed 1,350 files (35.0 GB), archived 47 files (3.9 GB), excluded 210 files — and 2 other actions"
         );
+    }
+
+    #[test]
+    fn relativize_against_single_prefix() {
+        let scoped = ResolvedScope {
+            prefixes: vec!["/photos".to_string()],
+            from_cwd: true,
+            auto_include_archived: false,
+        };
+        assert_eq!(relativize("/photos", &scoped), ".");
+        assert_eq!(relativize("/photos/italy", &scoped), "italy");
+        // Ancestor of the view and unrelated paths stay absolute.
+        assert_eq!(relativize("/", &scoped), "/");
+        assert_eq!(relativize("/other", &scoped), "/other");
+
+        let global = ResolvedScope {
+            prefixes: Vec::new(),
+            from_cwd: false,
+            auto_include_archived: false,
+        };
+        assert_eq!(relativize("/photos/italy", &global), "/photos/italy");
     }
 
     #[test]

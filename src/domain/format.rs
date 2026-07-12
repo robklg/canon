@@ -28,6 +28,19 @@ pub fn format_size(bytes: i64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
+/// Cap a path to `max` chars, keeping the tail (the significant end):
+/// "/very/long/path/to/italy" → "...path/to/italy". Char-boundary safe.
+/// Shared by every place that fits a path into a column (coverage, facts,
+/// trail).
+pub fn cap_path(path: &str, max: usize) -> String {
+    let count = path.chars().count();
+    if count <= max {
+        return path.to_string();
+    }
+    let tail: String = path.chars().skip(count - max + 3).collect();
+    format!("...{tail}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +95,24 @@ mod tests {
         assert_eq!(format_size(2_500_000_000_000), "2.5 TB");
         // TB is the ceiling — no overflow past the last unit.
         assert_eq!(format_size(9_000_000_000_000_000), "9000.0 TB");
+    }
+
+    #[test]
+    fn cap_path_keeps_tail() {
+        assert_eq!(cap_path("short", 35), "short");
+        let long = "/Volumes/backup-2019/photos/vacations/italy/2016";
+        let capped = cap_path(long, 20);
+        assert_eq!(capped.chars().count(), 20);
+        assert!(capped.starts_with("..."));
+        assert!(capped.ends_with("italy/2016"));
+    }
+
+    #[test]
+    fn cap_path_char_boundary_safe() {
+        // Non-ASCII paths must not panic (the old per-site byte slicing did).
+        let unicode = "/Vólùmes/фото/2016/Италия/поездка";
+        let capped = cap_path(unicode, 12);
+        assert_eq!(capped.chars().count(), 12);
+        assert!(capped.starts_with("..."));
     }
 }

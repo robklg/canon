@@ -328,12 +328,10 @@ fn format_root_display_adaptive(root_id: i64, root_path: &str, max_total: usize)
     } else {
         10 // minimum
     };
-    if root_path.len() <= max_path {
-        format!("{id_prefix} {root_path}")
-    } else {
-        let truncated = &root_path[root_path.len() - max_path + 3..];
-        format!("{id_prefix} ...{truncated}")
-    }
+    format!(
+        "{id_prefix} {}",
+        crate::domain::format::cap_path(root_path, max_path)
+    )
 }
 
 fn display_grouped_distribution(

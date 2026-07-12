@@ -131,14 +131,10 @@ fn display_compact_per_root(
 fn format_compact_label(id: &str, path: &str) -> String {
     const MAX_PATH_LEN: usize = 35;
     let id_prefix = format!("id:{id:<2}");
-
-    if path.len() <= MAX_PATH_LEN {
-        format!("{id_prefix} {path}")
-    } else {
-        // Show ...last_n_chars
-        let truncated = &path[path.len() - MAX_PATH_LEN + 3..];
-        format!("{id_prefix} ...{truncated}")
-    }
+    format!(
+        "{id_prefix} {}",
+        crate::domain::format::cap_path(path, MAX_PATH_LEN)
+    )
 }
 
 fn print_compact_line(label: &str, stats: &CoverageStats, show_legend: bool) {

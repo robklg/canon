@@ -36,10 +36,10 @@ With no time flags, `trail` lists the decisions that touched the current scope �
 ```
 Decision trail: /mnt/old-drive/photos
 
-#42   2026-05-12 14:03  Applied italy-2016: 47 copied, 0 errors
-#57   2026-07-11 15:10  Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
-#61   2026-07-11 16:42  Excluded 210 duplicates (kept 105) · "redundant backup"
-      2026-07-11 16:50  ~ italy: unsure about the RAW files — revisit
+#42   2026-05-12 14:03  .       Applied italy-2016: 47 copied, 0 errors
+#57   2026-07-11 15:10  .       Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
+#61   2026-07-11 16:42  misc    Excluded 210 duplicates (kept 105) · "redundant backup"
+      2026-07-11 16:50  italy   ~ unsure about the RAW files — revisit
 
 12 earlier decisions not shown (--limit N or --all; showing 20).
 2 global decisions not shown (--global).
@@ -47,7 +47,7 @@ Decision trail: /mnt/old-drive/photos
 
 A decision *touches* the scope in either direction: a decision on a parent folder happened to this folder too, and a decision on a subfolder is activity here. Sibling folders' decisions don't appear.
 
-Each line carries the decision id, timestamp, the completion summary, and your `--reason` (quoted). Decisions that did not complete cleanly are marked (`[partial]`, `[interrupted]`, `[started]`).
+Each line carries the decision id, timestamp, the scope it acted on, the completion summary, and your `--reason` (quoted). The scope column is relative to what you're viewing (`.` is the viewed folder itself); in global views it shows the path, capped from the left. Decisions recorded without a scope show `global`. Decisions that did not complete cleanly are marked (`[partial]`, `[interrupted]`, `[started]`).
 
 The listing is capped at the 20 most recent decisions; the footer tells you what's beyond the cap (`--limit N` or `--all` to widen). Decisions recorded without a scope — global operations — can't be attributed to any folder, so scoped views count them in a footer instead of silently hiding them.
 
@@ -60,10 +60,10 @@ Decision trail: all roots — today
 
 Saturday 2026-07-12 — removed 1,350 files (35.0 GB), archived 47 files (3.9 GB), excluded 210 files — and 2 other actions
 
-09:14  #63   Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
-09:40         ~ old-disk/photos: unsure about the RAW files — revisit
-11:02  #64   Applied italy-2016: 47 copied, 0 errors
-11:30  #65   Excluded 210 duplicates (kept 105) · "redundant backup"
+#63   09:14  /mnt/old-disk             Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
+      09:40  /mnt/old-disk/photos      ~ unsure about the RAW files — revisit
+#64   11:02  ...ive/photos/italy   Applied italy-2016: 47 copied, 0 errors
+#65   11:30  /mnt/old-disk/misc        Excluded 210 duplicates (kept 105) · "redundant backup"
 ```
 
 `<when>` accepts `today`, `yesterday`, a weekday name (the most recent one, today included), or a date (`YYYY-MM-DD`). Days follow your local timezone.
