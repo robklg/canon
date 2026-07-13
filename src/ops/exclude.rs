@@ -23,7 +23,7 @@ use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::receipt::{
     DuplicateExcludedEntry, DuplicateGroup, DuplicateKeptEntry, DuplicatesReceipt, ExcludeReceipt,
     ExcludeReceiptItem, ObjectExcludeEntry, ObjectExcludeReceipt, ObjectSourceReceiptEntry,
-    ReceiptPlacement,
+    ReceiptKind, ReceiptPlacement,
 };
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Connection};
@@ -677,16 +677,27 @@ fn object_stamp_set_entries(
         .collect()
 }
 
-/// Build a single-object exclusion receipt (set-object / clear-object).
+/// Build a single-object exclusion receipt (set-object / clear-object). `kind`
+/// distinguishes the two (`ExcludeObject` vs `RestoreObject`); `locus` is the
+/// receipt's anchoring root, from its placement.
 fn object_exclude_receipt(
     decision: &DecisionParams,
     decision_id: i64,
+    locus: (i64, &str),
+    kind: ReceiptKind,
     hash: &str,
     sources: Vec<ObjectSourceReceiptEntry>,
     summary: &str,
 ) -> ObjectExcludeReceipt {
     ObjectExcludeReceipt {
-        meta: decision.receipt_meta(decision_id, DecisionStatus::Completed, summary, None),
+        meta: decision.receipt_meta(
+            decision_id,
+            DecisionStatus::Completed,
+            summary,
+            locus,
+            kind,
+            None,
+        ),
         objects: vec![ObjectExcludeEntry {
             hash: hash.to_string(),
             sources,
@@ -793,9 +804,16 @@ pub fn execute_set(
         &summary,
         |tx, decision_id| {
             repo::source::batch_set_excluded(tx, &source_ids, true, decision_id)?;
-            Ok(match (decision, decision_id) {
-                (Some(d), Some(did)) if has_items => Some(ExcludeReceipt {
-                    meta: d.receipt_meta(did, DecisionStatus::Completed, &summary, None),
+            Ok(match (decision, decision_id, placement) {
+                (Some(d), Some(did), Some(p)) if has_items => Some(ExcludeReceipt {
+                    meta: d.receipt_meta(
+                        did,
+                        DecisionStatus::Completed,
+                        &summary,
+                        p.locus_root(),
+                        ReceiptKind::ExcludeSet,
+                        None,
+                    ),
                     items: exclude_receipt_items(&plan.items),
                 }),
                 _ => None,
@@ -841,9 +859,16 @@ pub fn execute_clear(
         &summary,
         |tx, decision_id| {
             repo::source::batch_set_excluded(tx, &source_ids, false, decision_id)?;
-            Ok(match (decision, decision_id) {
-                (Some(d), Some(did)) if has_items => Some(ExcludeReceipt {
-                    meta: d.receipt_meta(did, DecisionStatus::Completed, &summary, None),
+            Ok(match (decision, decision_id, placement) {
+                (Some(d), Some(did), Some(p)) if has_items => Some(ExcludeReceipt {
+                    meta: d.receipt_meta(
+                        did,
+                        DecisionStatus::Completed,
+                        &summary,
+                        p.locus_root(),
+                        ReceiptKind::Restore,
+                        None,
+                    ),
                     items: exclude_receipt_items(&plan.items),
                 }),
                 _ => None,
@@ -889,9 +914,16 @@ pub fn execute_duplicates(
         &summary,
         |tx, decision_id| {
             repo::source::batch_set_excluded(tx, &source_ids, true, decision_id)?;
-            Ok(match (decision, decision_id) {
-                (Some(d), Some(did)) if has_items => Some(DuplicatesReceipt {
-                    meta: d.receipt_meta(did, DecisionStatus::Completed, &summary, None),
+            Ok(match (decision, decision_id, placement) {
+                (Some(d), Some(did), Some(p)) if has_items => Some(DuplicatesReceipt {
+                    meta: d.receipt_meta(
+                        did,
+                        DecisionStatus::Completed,
+                        &summary,
+                        p.locus_root(),
+                        ReceiptKind::ExcludeDuplicates,
+                        None,
+                    ),
                     groups: duplicate_receipt_groups(&plan.groups),
                 }),
                 _ => None,
@@ -954,9 +986,16 @@ pub fn execute_set_objects(
                 repo::object::set_excluded(tx, entry.object_id, true)?;
                 repo::source::set_decision_id_by_object(tx, entry.object_id, decision_id)?;
             }
-            Ok(match (decision, decision_id) {
-                (Some(d), Some(did)) if has_items => Some(ObjectExcludeReceipt {
-                    meta: d.receipt_meta(did, DecisionStatus::Completed, &summary, None),
+            Ok(match (decision, decision_id, placement) {
+                (Some(d), Some(did), Some(p)) if has_items => Some(ObjectExcludeReceipt {
+                    meta: d.receipt_meta(
+                        did,
+                        DecisionStatus::Completed,
+                        &summary,
+                        p.locus_root(),
+                        ReceiptKind::ExcludeObject,
+                        None,
+                    ),
                     objects: plan
                         .objects
                         .iter()
@@ -1104,9 +1143,16 @@ pub fn execute_set_source(
         &summary,
         |tx, decision_id| {
             repo::source::set_excluded(tx, item.source_id, true, decision_id)?;
-            Ok(match (decision, decision_id) {
-                (Some(d), Some(did)) => Some(ExcludeReceipt {
-                    meta: d.receipt_meta(did, DecisionStatus::Completed, &summary, None),
+            Ok(match (decision, decision_id, placement) {
+                (Some(d), Some(did), Some(p)) => Some(ExcludeReceipt {
+                    meta: d.receipt_meta(
+                        did,
+                        DecisionStatus::Completed,
+                        &summary,
+                        p.locus_root(),
+                        ReceiptKind::ExcludeSet,
+                        None,
+                    ),
                     items: exclude_receipt_items(std::slice::from_ref(item)),
                 }),
                 _ => None,
@@ -1244,10 +1290,12 @@ pub fn execute_set_object(
             };
             repo::object::set_excluded(tx, object_id, true)?;
             repo::source::set_decision_id_by_object(tx, object_id, decision_id)?;
-            Ok(match (decision, decision_id) {
-                (Some(d), Some(did)) => Some(object_exclude_receipt(
+            Ok(match (decision, decision_id, placement) {
+                (Some(d), Some(did), Some(p)) => Some(object_exclude_receipt(
                     d,
                     did,
+                    p.locus_root(),
+                    ReceiptKind::ExcludeObject,
                     hash,
                     object_stamp_set_entries(stamp_set),
                     &summary,
@@ -1331,10 +1379,12 @@ pub fn execute_clear_object(
             };
             repo::object::set_excluded(tx, object_id, false)?;
             repo::source::set_decision_id_by_object(tx, object_id, decision_id)?;
-            Ok(match (decision, decision_id) {
-                (Some(d), Some(did)) => Some(object_exclude_receipt(
+            Ok(match (decision, decision_id, placement) {
+                (Some(d), Some(did), Some(p)) => Some(object_exclude_receipt(
                     d,
                     did,
+                    p.locus_root(),
+                    ReceiptKind::RestoreObject,
                     hash,
                     object_stamp_set_entries(stamp_set),
                     &summary,

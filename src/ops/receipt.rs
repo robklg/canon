@@ -11,6 +11,8 @@ use serde::Serialize;
 
 use crate::domain::config::{LedgerConfig, ReceiptLayout};
 use crate::domain::root::Root;
+use crate::domain::trail::{DecisionFamily, FateAspect};
+use crate::ops::apply::TransferMode;
 use crate::ops::fs::{finalize_file, write_file_incomplete};
 
 /// Reference to a receipt file on disk, stored in the decision record.
@@ -42,6 +44,87 @@ pub enum ReceiptPlacement {
     LedgerRoot { root_id: i64, root_path: String },
 }
 
+impl ReceiptPlacement {
+    /// The identity of the root this receipt is anchored to — placement made
+    /// data. `Targeted` resolves to the destination archive root; `LedgerRoot`
+    /// to the root the caller selected. Returns `(root_id, root_path)`.
+    ///
+    /// This is the receipt's *where*: the locus of the action's effect (the
+    /// Receipt Placement Principle), read straight off the placement rather than
+    /// from the decision's scope.
+    pub fn locus_root(&self) -> (i64, &str) {
+        match self {
+            ReceiptPlacement::Targeted {
+                archive_root_id,
+                archive_root_path,
+                ..
+            } => (*archive_root_id, archive_root_path),
+            ReceiptPlacement::LedgerRoot { root_id, root_path } => (*root_id, root_path),
+        }
+    }
+}
+
+/// What a receipt records — the single authority mapping a writer to the inputs
+/// of the shared what-derivation. Each variant maps to a `(DecisionFamily,
+/// FateAspect)` pair (fed to `fate_transition`/`fate_posture`) and, for apply,
+/// to an origin disposition. No writer emits a transition/posture/origin literal:
+/// they name their `ReceiptKind` and the recorder derives the words.
+///
+/// The variant→family mapping must agree with `decision_family(command)` for the
+/// corresponding command; the integrity test enforces that agreement.
+pub enum ReceiptKind {
+    Apply(TransferMode),
+    ExcludeSet,
+    ExcludeDuplicates,
+    ExcludeObject,
+    Restore,
+    RestoreObject,
+    Deletion,
+}
+
+impl ReceiptKind {
+    /// The `(family, aspect)` the shared derivation keys on. Wider than the
+    /// command: a scan's deletion receipt is `(Observe, Absent)`, the discriminant
+    /// the command identifier alone can't supply.
+    pub fn family_aspect(&self) -> (DecisionFamily, FateAspect) {
+        use DecisionFamily::*;
+        use FateAspect::*;
+        match self {
+            ReceiptKind::Apply(_) => (Archive, Present),
+            ReceiptKind::ExcludeSet
+            | ReceiptKind::ExcludeDuplicates
+            | ReceiptKind::ExcludeObject => (Exclude, Present),
+            ReceiptKind::Restore | ReceiptKind::RestoreObject => (Restore, Present),
+            ReceiptKind::Deletion => (Observe, Absent),
+        }
+    }
+
+    /// The origin's disposition — apply only. `retained` (Copy — content now in
+    /// two places) or `relocated` (Move|Rename — the origin no longer holds it).
+    /// Sourced from the executed `TransferMode`, never re-parsed from a command
+    /// line. `None` for every non-apply receipt.
+    pub fn origin_disposition(&self) -> Option<&'static str> {
+        match self {
+            ReceiptKind::Apply(TransferMode::Copy) => Some("retained"),
+            ReceiptKind::Apply(_) => Some("relocated"),
+            _ => None,
+        }
+    }
+}
+
+/// The root a receipt is anchored to — placement made data. Serializes as the
+/// nested `[meta.locus]` table.
+///
+/// `path` is the roots-table canonical path captured at write time —
+/// authoritative for a human and for a rebuild-from-disk reader, and stable
+/// evidence even after a root is re-pathed or the DB is reset. `id` is the join
+/// key for a live DB. Both are always present.
+#[derive(Serialize)]
+pub struct ReceiptLocus {
+    pub path: String,
+    pub id: i64,
+}
+
 /// Shared meta section for all receipt types.
 /// Serializes as the `[meta]` TOML table.
 #[derive(Serialize)]
@@ -49,6 +132,14 @@ pub struct ReceiptMeta {
     pub receipt_version: u32,
     pub decision_id: i64,
     pub command: String,
+    /// The what, in registered transition vocabulary (`archived` | `excluded` |
+    /// `restored` | `deleted`), derived once — never a per-writer literal. A
+    /// reader without Canon learns what happened without inferring it from body
+    /// shape or a churning command name.
+    pub transition: String,
+    /// The posture accompanying the transition: `performed` (Canon acted) or
+    /// `observed` (Canon witnessed a change the world made — a scan deletion).
+    pub posture: String,
     /// Terminal status: completed | partial | interrupted. Lets a disk-only
     /// reader distinguish a complete receipt from an interrupted/partial one.
     pub status: String,
@@ -63,6 +154,14 @@ pub struct ReceiptMeta {
     /// Manifest path — apply receipts only. Omitted for other receipt types.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest: Option<String>,
+    /// Origin disposition — apply only: `retained` (Copy) or `relocated`
+    /// (Move|Rename). Omitted for every other receipt type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_disposition: Option<String>,
+    /// The root this receipt is anchored to (the `[meta.locus]` table). MUST be
+    /// the last field: a TOML sub-table has to follow all scalar keys of its
+    /// parent table, so any scalar placed after this would fail to serialize.
+    pub locus: ReceiptLocus,
 }
 
 /// Apply-specific receipt.
@@ -401,6 +500,8 @@ mod tests {
                 receipt_version: 1,
                 decision_id: 43,
                 command: "apply".to_string(),
+                transition: "archived".to_string(),
+                posture: "performed".to_string(),
                 status: "completed".to_string(),
                 timestamp: 1744300800,
                 scope: Some(vec!["/Volumes/old-laptop/Photos".to_string()]),
@@ -409,6 +510,11 @@ mod tests {
                 canon_version: "0.4.1".to_string(),
                 command_line: "canon apply manifest.toml".to_string(),
                 manifest: Some("/Volumes/Archive/manifest.toml".to_string()),
+                origin_disposition: Some("retained".to_string()),
+                locus: ReceiptLocus {
+                    path: "/Volumes/Archive".to_string(),
+                    id: 7,
+                },
             },
             items: vec![ApplyReceiptItem {
                 source_root: "/Volumes/old-laptop".to_string(),
@@ -466,6 +572,8 @@ mod tests {
                 receipt_version: 1,
                 decision_id: 1,
                 command: "apply".to_string(),
+                transition: "archived".to_string(),
+                posture: "performed".to_string(),
                 status: "completed".to_string(),
                 timestamp: 0,
                 scope: None,
@@ -474,6 +582,11 @@ mod tests {
                 canon_version: "0.4.1".to_string(),
                 command_line: "canon apply m.lock".to_string(),
                 manifest: None,
+                origin_disposition: None,
+                locus: ReceiptLocus {
+                    path: "/archive".to_string(),
+                    id: 1,
+                },
             },
             items: vec![],
         };
@@ -499,6 +612,8 @@ mod tests {
                 receipt_version: 1,
                 decision_id: 1,
                 command: "apply".to_string(),
+                transition: "archived".to_string(),
+                posture: "performed".to_string(),
                 status: "completed".to_string(),
                 timestamp: 0,
                 scope: None,
@@ -507,6 +622,11 @@ mod tests {
                 canon_version: "0.4.1".to_string(),
                 command_line: "canon apply m.lock".to_string(),
                 manifest: None,
+                origin_disposition: None,
+                locus: ReceiptLocus {
+                    path: "/archive".to_string(),
+                    id: 1,
+                },
             },
             items: vec![ApplyReceiptItem {
                 source_root: "/src".to_string(),
@@ -679,6 +799,8 @@ mod tests {
             receipt_version: 1,
             decision_id: 42,
             command: command.to_string(),
+            transition: "excluded".to_string(),
+            posture: "performed".to_string(),
             status: "completed".to_string(),
             timestamp: 1700000000,
             scope: None,
@@ -687,6 +809,11 @@ mod tests {
             canon_version: "0.0.0".to_string(),
             command_line: "canon test".to_string(),
             manifest: None,
+            origin_disposition: None,
+            locus: ReceiptLocus {
+                path: "/vol".to_string(),
+                id: 42,
+            },
         }
     }
 

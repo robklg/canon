@@ -18,7 +18,7 @@ use crate::domain::decision::DecisionStatus;
 use crate::domain::scan::{find_missing, reconcile, FileObservation, Reconciliation};
 use crate::ops::decision::{DecisionParams, DecisionRecorder};
 use crate::ops::fs::compute_partial_hash;
-use crate::ops::receipt::{DeletionReceipt, DeletionReceiptItem, ReceiptPlacement};
+use crate::ops::receipt::{DeletionReceipt, DeletionReceiptItem, ReceiptKind, ReceiptPlacement};
 use crate::repo::{self, Connection};
 
 // ============================================================================
@@ -705,7 +705,14 @@ pub fn write_deletion_receipts(
             continue;
         }
         let receipt = DeletionReceipt {
-            meta: params.receipt_meta(decision_id, DecisionStatus::Completed, summary, None),
+            meta: params.receipt_meta(
+                decision_id,
+                DecisionStatus::Completed,
+                summary,
+                (root_id, root_path.as_str()),
+                ReceiptKind::Deletion,
+                None,
+            ),
             items,
         };
         let placement = ReceiptPlacement::LedgerRoot { root_id, root_path };

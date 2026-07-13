@@ -23,7 +23,7 @@ use crate::domain::path::path_strip_prefix;
 use crate::domain::source::NewSource;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
-use crate::ops::receipt::{ApplyReceipt, ApplyReceiptItem, ReceiptPlacement};
+use crate::ops::receipt::{ApplyReceipt, ApplyReceiptItem, ReceiptKind, ReceiptPlacement};
 use crate::repo::{self, Connection};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -992,17 +992,28 @@ pub fn execute_apply(
             DecisionStatus::Completed
         };
 
-        // Build the receipt only when there's something to record and a live decision id exists.
-        let receipt = match (decision, recorder.decision_id()) {
-            (Some(d), Some(did)) if !receipt_items.is_empty() => Some(ApplyReceipt {
-                meta: d.receipt_meta(
-                    did,
-                    status,
-                    &result.summary,
-                    Some(params.manifest_display.clone()),
-                ),
-                items: receipt_items,
-            }),
+        // Build the receipt only when there's something to record, a live decision
+        // id exists, and a placement is known (the placement is the receipt's
+        // locus). A placement-less receipt was never written to disk anyway, so
+        // gating here is behavior-identical and lets the locus be non-optional.
+        let receipt = match (
+            decision,
+            recorder.decision_id(),
+            params.receipt_ctx.as_ref(),
+        ) {
+            (Some(d), Some(did), Some(placement)) if !receipt_items.is_empty() => {
+                Some(ApplyReceipt {
+                    meta: d.receipt_meta(
+                        did,
+                        status,
+                        &result.summary,
+                        placement.locus_root(),
+                        ReceiptKind::Apply(params.transfer_mode),
+                        Some(params.manifest_display.clone()),
+                    ),
+                    items: receipt_items,
+                })
+            }
             _ => None,
         };
 

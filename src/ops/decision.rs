@@ -6,9 +6,10 @@ use serde::Serialize;
 use crate::domain::config::LedgerConfig;
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::scope::DecisionScope;
+use crate::domain::trail::{fate_posture, fate_transition};
 use crate::ops::receipt::{
     compute_ledger_root_receipt_rel_path, compute_targeted_receipt_rel_path, finalize_receipt,
-    write_receipt, ReceiptMeta, ReceiptPlacement, ReceiptRef,
+    write_receipt, ReceiptKind, ReceiptLocus, ReceiptMeta, ReceiptPlacement, ReceiptRef,
 };
 use crate::repo::{self, Connection};
 
@@ -33,22 +34,37 @@ pub struct DecisionParams {
 impl DecisionParams {
     /// Build the shared receipt `[meta]` block from these params.
     ///
-    /// `manifest` is `Some` only for apply receipts; other commands pass `None`.
+    /// The what (`transition`), its `posture`, and the apply-only
+    /// `origin_disposition` are all *derived* here from `kind` via the shared
+    /// `fate_transition`/`fate_posture` functions — the single derivation site,
+    /// so no writer emits a vocabulary literal. `locus` is the receipt's where,
+    /// taken from its placement (`(root_id, root_path)`). `manifest` is `Some`
+    /// only for apply receipts; other commands pass `None`.
     pub fn receipt_meta(
         &self,
         decision_id: i64,
         status: DecisionStatus,
         summary: &str,
+        locus: (i64, &str),
+        kind: ReceiptKind,
         manifest: Option<String>,
     ) -> ReceiptMeta {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
+        let (family, aspect) = kind.family_aspect();
+        let transition = fate_transition(family, aspect)
+            .expect("every receipt kind maps to a transition")
+            .as_str()
+            .to_string();
+        let posture = fate_posture(family, aspect).as_str().to_string();
         ReceiptMeta {
             receipt_version: 1,
             decision_id,
             command: self.command.as_str().to_string(),
+            transition,
+            posture,
             status: status.as_str().to_string(),
             timestamp,
             scope: scope_display(&self.scope),
@@ -57,6 +73,11 @@ impl DecisionParams {
             canon_version: env!("CARGO_PKG_VERSION").to_string(),
             command_line: self.command_line.clone(),
             manifest,
+            origin_disposition: kind.origin_disposition().map(str::to_string),
+            locus: ReceiptLocus {
+                path: locus.1.to_string(),
+                id: locus.0,
+            },
         }
     }
 }
@@ -1181,7 +1202,14 @@ mod tests {
         // Only the canonical, root-anchored path survived; "." was never recorded.
         assert_eq!(d.scope, Some(vec!["/vol/photos/2016".to_string()]));
         // meta.scope tells the same canonical story, and nothing relative leaks.
-        let meta = params.receipt_meta(1, DecisionStatus::Completed, "s", None);
+        let meta = params.receipt_meta(
+            1,
+            DecisionStatus::Completed,
+            "s",
+            (1, "/vol/photos"),
+            ReceiptKind::Deletion,
+            None,
+        );
         assert_eq!(meta.scope, Some(vec!["/vol/photos/2016".to_string()]));
         for path in meta.scope.unwrap() {
             assert!(path.starts_with('/'), "scope {path:?} is not absolute");
