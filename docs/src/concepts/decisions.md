@@ -71,6 +71,34 @@ A receipt sits at the **locus of the action's effect**:
 
 Each receipt records, per item: the source root and relative path, content hash, size, and modification time. Variants carry the shape of their decision — `exclude duplicates` groups items by content hash, recording which copy was **kept** versus **excluded**; object-level exclusions list every source sharing the content; a deletion receipt lists exactly the sources that went missing.
 
+### Anatomy of a receipt
+
+Every receipt's `[meta]` block states, in its own text, *what happened, to what, and where* — so a reader without Canon (future‑you, an heir opening a drive from a drawer, an external tool, an older binary) never has to infer semantics from the receipt's body shape or from a command name that may have been renamed since:
+
+```toml
+[meta]
+receipt_version = 1
+decision_id = 142
+command = "scan"
+transition = "deleted"
+posture = "observed"
+status = "completed"
+# ...summary, canon_version, command_line...
+
+[meta.locus]
+path = "/mnt/old-drive/photos"
+id = 3
+```
+
+- **`transition`** — the *what*, in fixed vocabulary: `archived`, `excluded`, `restored` (an exclusion undone), or `deleted`. This is the same word `canon trail` uses for the same action — the trail and the receipt tell one story in one vocabulary.
+- **`posture`** — whether Canon **performed** the change or merely **observed** one the world made. A scan‑detected deletion is `observed`: Canon witnessed a loss, it did not cause one. Every other receipt today is `performed`.
+- **`[meta.locus]`** — the identity of the root the receipt is anchored to, making its placement into data. **`path`** is the root's canonical path captured at write time — authoritative for a human and for rebuilding an index from disk, and still meaningful after a drive is remounted elsewhere or a receipt is copied off its root. **`id`** is the join key against a live database. Both are always present.
+- **`origin_disposition`** — apply receipts only: `retained` (a copy — the content now lives in two places) or `relocated` (a move — the origin no longer holds the file).
+
+**The granularity rule.** Subjects that can span roots always carry their own per‑item root identity — apply items keep their `source_root`, exclusion and object entries keep their `root`. The **locus** root is always meta‑level. Receipt‑level‑only identity (no per‑item root, as in a deletion receipt) is valid exactly where single‑root‑ness is guaranteed by construction — a deletion receipt is coalesced to one root, so its items inherit the meta locus.
+
+These fields are additive: receipts written before they existed remain valid, and every reader tolerates their absence.
+
 ### The provenance chain
 
 Every source carries a `decision_id` — the decision that last changed its state. When a decision changes a file a previous decision already touched, the receipt records that predecessor as `previous_decision_id`. Because the predecessor's id is also its receipt's filename, you can walk the chain backwards from the files on disk alone — no database required.
