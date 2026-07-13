@@ -18,7 +18,10 @@ use serde::Serialize;
 use crate::domain::decision::Decision;
 use crate::domain::format::{cap_path, format_count, format_size};
 use crate::domain::root::Root;
-use crate::domain::trail::{parse_when, DayRollup, FateLine, TimelineEvent, WhenValue};
+use crate::domain::trail::{
+    fate_transition, parse_when, DayRollup, DecisionFamily, FateAspect, FateLine, TimelineEvent,
+    WhenValue,
+};
 use crate::ops;
 use crate::ops::scope::ResolvedScope;
 use crate::ops::trail::{TrailParams, TrailResult, TrailView, DEFAULT_LIMIT};
@@ -303,14 +306,23 @@ fn headline(d: &Decision) -> String {
 
 fn format_rollup(rollup: &DayRollup) -> String {
     let mut parts = Vec::new();
-    if rollup.removed.files > 0 {
-        parts.push(fate_part("removed", &rollup.removed));
+    if rollup.deleted.files > 0 {
+        parts.push(fate_part(
+            fate_word(DecisionFamily::Observe, FateAspect::Absent),
+            &rollup.deleted,
+        ));
     }
     if rollup.archived.files > 0 {
-        parts.push(fate_part("archived", &rollup.archived));
+        parts.push(fate_part(
+            fate_word(DecisionFamily::Archive, FateAspect::Present),
+            &rollup.archived,
+        ));
     }
     if rollup.excluded.files > 0 {
-        parts.push(fate_part("excluded", &rollup.excluded));
+        parts.push(fate_part(
+            fate_word(DecisionFamily::Exclude, FateAspect::Present),
+            &rollup.excluded,
+        ));
     }
     let mut line = parts.join(", ");
     if rollup.other_actions > 0 {
@@ -323,6 +335,15 @@ fn format_rollup(rollup: &DayRollup) -> String {
         }
     }
     line
+}
+
+/// The registered word for a rollup fate line. Each of the three lines maps to
+/// a fixed (family, aspect) that `fate_transition` is proven to resolve (its
+/// totality test); `expect` documents that invariant rather than guessing.
+fn fate_word(family: DecisionFamily, aspect: FateAspect) -> &'static str {
+    fate_transition(family, aspect)
+        .expect("rollup fate line must map to a transition")
+        .as_str()
 }
 
 fn fate_part(verb: &str, fate: &FateLine) -> String {
@@ -486,7 +507,7 @@ mod tests {
     #[test]
     fn rollup_line_composition() {
         let rollup = DayRollup {
-            removed: FateLine {
+            deleted: FateLine {
                 files: 1350,
                 bytes: Some(35_000_000_000),
             },
@@ -502,7 +523,7 @@ mod tests {
         };
         assert_eq!(
             format_rollup(&rollup),
-            "removed 1,350 files (35.0 GB), archived 47 files (3.9 GB), excluded 210 files — and 2 other actions"
+            "deleted 1,350 files (35.0 GB), archived 47 files (3.9 GB), excluded 210 files — and 2 other actions"
         );
     }
 
@@ -530,7 +551,7 @@ mod tests {
     #[test]
     fn rollup_line_only_other_actions() {
         let rollup = DayRollup {
-            removed: FateLine {
+            deleted: FateLine {
                 files: 0,
                 bytes: None,
             },

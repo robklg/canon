@@ -469,8 +469,8 @@ mod tests {
             TrailView::Days(days) => {
                 assert_eq!(days.len(), 2);
                 assert_eq!(days[0].date, day1); // oldest first
-                assert_eq!(days[0].rollup.removed.files, 2);
-                assert_eq!(days[0].rollup.removed.bytes, Some(300));
+                assert_eq!(days[0].rollup.deleted.files, 2);
+                assert_eq!(days[0].rollup.deleted.bytes, Some(300));
                 assert_eq!(days[1].date, day2);
             }
             TrailView::Recent(_) => panic!("time lens must be Days"),

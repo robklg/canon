@@ -54,6 +54,89 @@ pub fn decision_family(command: &str) -> DecisionFamily {
     }
 }
 
+/// The *what* a decision records — a content transition in registered
+/// vocabulary. The trail rollup renders the terminal fates; receipts stamp the
+/// terminal subset plus `restored`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transition {
+    Archived,
+    Excluded,
+    Restored,
+    Deleted,
+}
+
+impl Transition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Archived => "archived",
+            Self::Excluded => "excluded",
+            Self::Restored => "restored",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
+/// The presence axis of a decision's stamp: whether the stamped sources are
+/// present (indexed / archived) or absent (deleted / tombstoned). The
+/// discriminant command identity alone cannot supply — one scan stamps both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FateAspect {
+    Present,
+    Absent,
+}
+
+/// The single what-derivation, keyed on `(family, aspect)` rather than command
+/// so the trail (which has the presence axis) and receipts (which supply the
+/// aspect by receipt kind) share one source of truth. Wider than the command:
+/// `scan` (Observe) yields `Deleted` only on its `Absent` bucket; its `Present`
+/// bucket is indexing, which no receipt stamps (`None`).
+pub fn fate_transition(family: DecisionFamily, aspect: FateAspect) -> Option<Transition> {
+    use DecisionFamily::*;
+    use FateAspect::*;
+    match (family, aspect) {
+        (Archive, Present) => Some(Transition::Archived),
+        (Exclude, _) => Some(Transition::Excluded),
+        (Restore, _) => Some(Transition::Restored),
+        (Observe, Absent) => Some(Transition::Deleted),
+        _ => None,
+    }
+}
+
+/// The posture of a transition: Canon performing a change vs. observing one the
+/// world made (registered vocabulary, orthogonal to the transition word).
+///
+/// The rollup renders only the transition word; posture is the derivation's
+/// other half, stamped wherever a receipt records a transition. It lives here
+/// beside `fate_transition` so the what-vocabulary has one home — no caller
+/// renders it yet, so it is allowed to sit unused until the receipt writer.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Posture {
+    Performed,
+    Observed,
+}
+
+#[allow(dead_code)]
+impl Posture {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Performed => "performed",
+            Self::Observed => "observed",
+        }
+    }
+}
+
+/// The posture accompanying a transition. `Observed` exactly when Canon
+/// witnessed the change rather than performing it — a scan-observed deletion;
+/// every other receipt-stamped transition is `Performed`.
+#[allow(dead_code)]
+pub fn fate_posture(family: DecisionFamily, aspect: FateAspect) -> Posture {
+    match (family, aspect) {
+        (DecisionFamily::Observe, FateAspect::Absent) => Posture::Observed,
+        _ => Posture::Performed,
+    }
+}
+
 /// One event on the mixed timeline: an action (decision) or a thought (note).
 pub enum TimelineEvent {
     Decision(Decision),
@@ -159,7 +242,7 @@ pub struct FateLine {
 /// Aggregation of one day's decisions by fate.
 #[derive(Debug, Clone, Copy)]
 pub struct DayRollup {
-    pub removed: FateLine,
+    pub deleted: FateLine,
     pub archived: FateLine,
     pub excluded: FateLine,
     /// Decisions that contributed to no fate line (intent, knowledge, fleet,
@@ -169,7 +252,7 @@ pub struct DayRollup {
 
 impl DayRollup {
     pub fn is_empty(&self) -> bool {
-        self.removed.files == 0
+        self.deleted.files == 0
             && self.archived.files == 0
             && self.excluded.files == 0
             && self.other_actions == 0
@@ -178,13 +261,13 @@ impl DayRollup {
 
 /// Compute a rollup over decisions using the presence-split stamp aggregates.
 ///
-/// removed  = absent bucket of Observe-family decisions (a scan's deletions;
-///            tombstone stamps from object exclusions stay out of "removed")
+/// deleted  = absent bucket of Observe-family decisions (a scan's deletions;
+///            tombstone stamps from object exclusions stay out of "deleted")
 /// archived = present bucket of Archive-family decisions
 /// excluded = structured completed count (stamp count as fallback); bytes only
 ///            when the stamp supports them
 pub fn compute_rollup(decisions: &[&Decision], stamps: &HashMap<i64, StampAgg>) -> DayRollup {
-    let mut removed = FateLine {
+    let mut deleted = FateLine {
         files: 0,
         bytes: None,
     };
@@ -203,8 +286,8 @@ pub fn compute_rollup(decisions: &[&Decision], stamps: &HashMap<i64, StampAgg>) 
         let agg = stamps.get(&d.id).copied().unwrap_or_default();
         let contributed = match decision_family(&d.command) {
             DecisionFamily::Observe => {
-                removed.files += agg.absent_count;
-                removed.bytes = add_bytes(removed.bytes, agg.absent_count, agg.absent_bytes);
+                deleted.files += agg.absent_count;
+                deleted.bytes = add_bytes(deleted.bytes, agg.absent_count, agg.absent_bytes);
                 agg.absent_count > 0
             }
             DecisionFamily::Archive => {
@@ -237,7 +320,7 @@ pub fn compute_rollup(decisions: &[&Decision], stamps: &HashMap<i64, StampAgg>) 
     }
 
     DayRollup {
-        removed,
+        deleted,
         archived,
         excluded,
         other_actions,
@@ -367,6 +450,74 @@ mod tests {
         assert_eq!(decision_family(""), DecisionFamily::Unrecognized);
     }
 
+    // fate_transition / fate_posture — the shared what-derivation
+
+    #[test]
+    fn fate_transition_covers_family_aspect_matrix() {
+        use DecisionFamily::*;
+        use FateAspect::*;
+        use Transition::*;
+        let expected = [
+            ((Archive, Present), Some(Archived)),
+            ((Archive, Absent), None), // apply never stamps absent
+            ((Exclude, Present), Some(Excluded)),
+            ((Exclude, Absent), Some(Excluded)), // object-exclusion tombstones
+            ((Restore, Present), Some(Restored)),
+            ((Restore, Absent), Some(Restored)),
+            ((Observe, Present), None),         // indexing — no fate
+            ((Observe, Absent), Some(Deleted)), // scan-observed deletion
+            ((Other, Present), None),
+            ((Other, Absent), None),
+            ((Unrecognized, Present), None),
+            ((Unrecognized, Absent), None),
+        ];
+        for ((family, aspect), want) in expected {
+            assert_eq!(
+                fate_transition(family, aspect),
+                want,
+                "{family:?} / {aspect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn transition_as_str_registered_words() {
+        assert_eq!(Transition::Archived.as_str(), "archived");
+        assert_eq!(Transition::Excluded.as_str(), "excluded");
+        assert_eq!(Transition::Restored.as_str(), "restored");
+        assert_eq!(Transition::Deleted.as_str(), "deleted");
+    }
+
+    #[test]
+    fn fate_posture_observed_only_for_scan_deletion() {
+        use DecisionFamily::*;
+        use FateAspect::*;
+        // The one observed transition: a scan witnessing a loss.
+        assert_eq!(fate_posture(Observe, Absent), Posture::Observed);
+        // Everything else Canon performs.
+        for (family, aspect) in [
+            (Observe, Present),
+            (Archive, Present),
+            (Exclude, Present),
+            (Exclude, Absent),
+            (Restore, Present),
+            (Other, Absent),
+            (Unrecognized, Present),
+        ] {
+            assert_eq!(
+                fate_posture(family, aspect),
+                Posture::Performed,
+                "{family:?} / {aspect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn posture_as_str_registered_words() {
+        assert_eq!(Posture::Performed.as_str(), "performed");
+        assert_eq!(Posture::Observed.as_str(), "observed");
+    }
+
     // parse_when
 
     #[test]
@@ -455,28 +606,28 @@ mod tests {
     }
 
     #[test]
-    fn rollup_scan_mixed_stamp_counts_only_absent_as_removed() {
+    fn rollup_scan_mixed_stamp_counts_only_absent_as_deleted() {
         // A scan that indexed 12 new files AND deleted 1,350: only the absent
-        // side is "removed" — fresh files must never count as deletions.
+        // side is "deleted" — fresh files must never count as deletions.
         let d = mk_decision(1, "scan", 100);
         let stamps = HashMap::from([(1, agg(12, 999, 1350, 35_000))]);
         let r = compute_rollup(&[&d], &stamps);
-        assert_eq!(r.removed.files, 1350);
-        assert_eq!(r.removed.bytes, Some(35_000));
+        assert_eq!(r.deleted.files, 1350);
+        assert_eq!(r.deleted.bytes, Some(35_000));
         assert_eq!(r.archived.files, 0);
         assert_eq!(r.other_actions, 0);
     }
 
     #[test]
-    fn rollup_object_exclusion_tombstones_not_removed() {
+    fn rollup_object_exclusion_tombstones_not_deleted() {
         // Object-level exclusion stamps tombstones (absent) — they are not
-        // deletions and must not surface in "removed".
+        // deletions and must not surface in "deleted".
         let d = mk_decision(1, "exclude_set_object", 100);
         let mut d = d;
         d.count_completed = Some(5);
         let stamps = HashMap::from([(1, agg(3, 300, 2, 200))]);
         let r = compute_rollup(&[&d], &stamps);
-        assert_eq!(r.removed.files, 0);
+        assert_eq!(r.deleted.files, 0);
         assert_eq!(r.excluded.files, 5);
         assert_eq!(r.excluded.bytes, Some(300)); // present bytes only
     }
@@ -522,7 +673,7 @@ mod tests {
         let d4 = mk_decision(4, "scan", 103); // scan that deleted nothing
         let r = compute_rollup(&[&d1, &d2, &d3, &d4], &HashMap::new());
         assert_eq!(r.other_actions, 4);
-        assert!(r.removed.files == 0 && r.archived.files == 0 && r.excluded.files == 0);
+        assert!(r.deleted.files == 0 && r.archived.files == 0 && r.excluded.files == 0);
     }
 
     // group_by_day
@@ -543,7 +694,7 @@ mod tests {
         assert_eq!(groups[0].date, date("2026-07-11"));
         assert_eq!(groups[0].events.len(), 2);
         assert_eq!(groups[0].rollup.archived.files, 5);
-        assert_eq!(groups[1].rollup.removed.files, 3);
+        assert_eq!(groups[1].rollup.deleted.files, 3);
     }
 
     #[test]

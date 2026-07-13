@@ -5,7 +5,7 @@ Read the decision trail. Canon records every effectful action ([decision provena
 One command, two lenses:
 
 - **The scope lens** — standing in a folder: *what did I do here?* Decisions touching this place, as a timeline ending at now.
-- **The time lens** (`--today`, `--since`, `--on`) — *what did I do today?* The day's decisions as a story, with a rollup of what was removed, archived, and excluded.
+- **The time lens** (`--today`, `--since`, `--on`) — *what did I do today?* The day's decisions as a story, with a rollup of what was deleted, archived, and excluded.
 
 ```bash
 # What happened here?
@@ -58,7 +58,7 @@ The listing is capped at the 20 most recent decisions; the footer tells you what
 ```
 Decision trail: all roots — today
 
-Saturday 2026-07-12 — removed 1,350 files (35.0 GB), archived 47 files (3.9 GB), excluded 210 files — and 2 other actions
+Saturday 2026-07-12 — deleted 1,350 files (35.0 GB), archived 47 files (3.9 GB), excluded 210 files — and 2 other actions
 
 #63   09:14  /mnt/old-disk             Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
       09:40  /mnt/old-disk/photos      ~ unsure about the RAW files — revisit
@@ -68,7 +68,7 @@ Saturday 2026-07-12 — removed 1,350 files (35.0 GB), archived 47 files (3.9 GB
 
 `<when>` accepts `today`, `yesterday`, a weekday name (the most recent one, today included), or a date (`YYYY-MM-DD`). Days follow your local timezone.
 
-Each day opens with a rollup by fate: **removed** (deletions a scan observed), **archived** (apply), **excluded**, plus a count of other actions (scans that deleted nothing, manifest generation, imports, and so on). Sizes are computed from the index and shown when reliable — for older decisions whose files have since been touched by newer decisions, the size is omitted rather than guessed.
+Each day opens with a rollup by fate: **deleted** (deletions a scan observed), **archived** (apply), **excluded**, plus a count of other actions (scans that deleted nothing, manifest generation, imports, and so on). Sizes are computed from the index and shown when reliable — for older decisions whose files have since been touched by newer decisions, the size is omitted rather than guessed.
 
 Scope still applies: `canon trail --today` inside a root shows that folder's day; add `--global` for the whole story.
 
