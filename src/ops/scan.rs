@@ -1801,6 +1801,13 @@ mod tests {
         let body = std::fs::read_to_string(&receipt).unwrap();
         assert!(body.contains("command = \"scan\""));
         assert!(body.contains("rel_path = \"gone.txt\""));
+        // The what + posture: a scan witnessed a loss, it did not perform one.
+        assert!(body.contains("transition = \"deleted\""));
+        assert!(body.contains("posture = \"observed\""));
+        // The where: this drive's root identity, from placement.
+        let locus = &body[body.find("[meta.locus]").expect("locus table present")..];
+        assert!(locus.contains(&format!("path = \"{root_path}\"")));
+        assert!(locus.contains("id = 1"));
         assert!(recorder.take_warnings().is_empty());
     }
 
@@ -1882,6 +1889,20 @@ mod tests {
         let name = format!("{id:06}-scan.toml");
         assert!(temp_a.path().join(".canon-ledger").join(&name).exists());
         assert!(temp_b.path().join(".canon-ledger").join(&name).exists());
+
+        // Each per-root receipt carries *its own* locus identity — the whole
+        // point for a receipt read after its drive is gone. A shared meta.scope
+        // could not disambiguate the two.
+        let body_a =
+            std::fs::read_to_string(temp_a.path().join(".canon-ledger").join(&name)).unwrap();
+        let locus_a = &body_a[body_a.find("[meta.locus]").unwrap()..];
+        assert!(locus_a.contains(&format!("path = \"{root_a}\"")));
+        assert!(locus_a.contains("id = 11"));
+        let body_b =
+            std::fs::read_to_string(temp_b.path().join(".canon-ledger").join(&name)).unwrap();
+        let locus_b = &body_b[body_b.find("[meta.locus]").unwrap()..];
+        assert!(locus_b.contains(&format!("path = \"{root_b}\"")));
+        assert!(locus_b.contains("id = 22"));
 
         // The indexed rel_path is relative to the root (includes .canon-ledger/),
         // matching decisions.receipt_rel_path semantics.

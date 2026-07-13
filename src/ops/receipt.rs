@@ -950,4 +950,132 @@ mod tests {
         assert_eq!(out.matches("previous_decision_id").count(), 1);
         assert!(out.contains("previous_decision_id = 7"));
     }
+
+    // =========================================================================
+    // The what: transition/posture derivation (the integrity law)
+    // =========================================================================
+
+    /// The integrity law of the epic: a receipt's derived what/posture equals
+    /// the trail's, command for command. `ReceiptKind → (family, aspect) →
+    /// fate_transition` is the *same* function the trail rollup labels through,
+    /// so the two stories can never diverge. The match is exhaustive — a new
+    /// `ReceiptKind` must declare its expected trail command and words here, or
+    /// this fails to compile.
+    #[test]
+    fn receipt_kind_transition_and_posture_match_the_trail_derivation() {
+        use crate::domain::trail::{decision_family, fate_posture, fate_transition};
+
+        let all = [
+            ReceiptKind::Apply(TransferMode::Copy),
+            ReceiptKind::ExcludeSet,
+            ReceiptKind::ExcludeDuplicates,
+            ReceiptKind::ExcludeObject,
+            ReceiptKind::Restore,
+            ReceiptKind::RestoreObject,
+            ReceiptKind::Deletion,
+        ];
+        for kind in &all {
+            // (trail command identifier, expected transition, expected posture)
+            let (command, transition, posture) = match kind {
+                ReceiptKind::Apply(_) => ("apply", "archived", "performed"),
+                ReceiptKind::ExcludeSet => ("exclude_set", "excluded", "performed"),
+                ReceiptKind::ExcludeDuplicates => ("exclude_duplicates", "excluded", "performed"),
+                ReceiptKind::ExcludeObject => ("exclude_set_object", "excluded", "performed"),
+                ReceiptKind::Restore => ("exclude_clear", "restored", "performed"),
+                ReceiptKind::RestoreObject => ("exclude_clear_object", "restored", "performed"),
+                ReceiptKind::Deletion => ("scan", "deleted", "observed"),
+            };
+            let (family, aspect) = kind.family_aspect();
+            // The receipt's family agrees with the trail's command→family map.
+            assert_eq!(
+                family,
+                decision_family(command),
+                "family disagrees with trail for {command}"
+            );
+            // The stamped what == the trail-derived transition word.
+            assert_eq!(
+                fate_transition(family, aspect).map(|t| t.as_str()),
+                Some(transition),
+                "transition disagrees for {command}"
+            );
+            // The stamped posture.
+            assert_eq!(
+                fate_posture(family, aspect).as_str(),
+                posture,
+                "posture disagrees for {command}"
+            );
+        }
+    }
+
+    /// Origin disposition is the executed `TransferMode` made data — Move and
+    /// Rename collapse to `relocated`; only apply carries it at all.
+    #[test]
+    fn origin_disposition_collapses_move_and_rename() {
+        assert_eq!(
+            ReceiptKind::Apply(TransferMode::Copy).origin_disposition(),
+            Some("retained")
+        );
+        assert_eq!(
+            ReceiptKind::Apply(TransferMode::Move).origin_disposition(),
+            Some("relocated")
+        );
+        assert_eq!(
+            ReceiptKind::Apply(TransferMode::Rename).origin_disposition(),
+            Some("relocated")
+        );
+        assert_eq!(ReceiptKind::ExcludeSet.origin_disposition(), None);
+        assert_eq!(ReceiptKind::Deletion.origin_disposition(), None);
+    }
+
+    // =========================================================================
+    // The where: nested [meta.locus] presence + ordering
+    // =========================================================================
+
+    /// Apply's meta states what/where, and the nested `[meta.locus]` table
+    /// renders after all flat `[meta]` scalars and before `[[items]]` — the
+    /// serialization invariant that forces `locus` to be the last struct field.
+    #[test]
+    fn apply_meta_serializes_what_where_and_orders_locus_last() {
+        let out = toml::to_string_pretty(&make_apply_receipt()).unwrap();
+        assert!(out.contains("transition = \"archived\""));
+        assert!(out.contains("posture = \"performed\""));
+        assert!(out.contains("origin_disposition = \"retained\""));
+        assert!(out.contains("[meta.locus]"));
+        let locus = &out[out.find("[meta.locus]").unwrap()..];
+        assert!(locus.contains("path = \"/Volumes/Archive\""));
+        assert!(locus.contains("id = 7"));
+
+        // Ordering: a flat scalar precedes the sub-table, which precedes the
+        // items array. A scalar emitted after a sub-table would fail to
+        // serialize outright — this documents the intent the type enforces.
+        let command_at = out.find("command =").unwrap();
+        let locus_at = out.find("[meta.locus]").unwrap();
+        let items_at = out.find("[[items]]").unwrap();
+        assert!(
+            command_at < locus_at,
+            "flat scalars precede the locus table"
+        );
+        assert!(locus_at < items_at, "the locus table precedes the items");
+    }
+
+    /// Every non-apply receipt omits `origin_disposition` (it is apply's alone)
+    /// and still carries its locus.
+    #[test]
+    fn non_apply_receipt_omits_origin_disposition_but_carries_locus() {
+        let receipt = ExcludeReceipt {
+            meta: sample_meta("exclude_set"),
+            items: vec![ExcludeReceiptItem {
+                root: "/vol".to_string(),
+                rel_path: "a.dll".to_string(),
+                hash: None,
+                size: 1,
+                mtime: 1,
+                previous_decision_id: None,
+            }],
+        };
+        let out = toml::to_string_pretty(&receipt).unwrap();
+        assert!(!out.contains("origin_disposition"));
+        assert!(out.contains("transition = \"excluded\""));
+        assert!(out.contains("[meta.locus]"));
+    }
 }
