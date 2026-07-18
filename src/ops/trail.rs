@@ -518,7 +518,6 @@ mod tests {
         let decision_id = insert_decision_at(&conn, "apply", 100);
         repo::decision::upsert_extractions(
             &conn,
-            decision_id,
             &[extraction_row(
                 decision_id,
                 root_a,
@@ -553,7 +552,6 @@ mod tests {
         scope(&conn, decision_id, root, "");
         repo::decision::upsert_extractions(
             &conn,
-            decision_id,
             &[extraction_row(
                 decision_id,
                 root,
@@ -581,7 +579,6 @@ mod tests {
         let d2 = insert_decision_at(&conn, "apply", 200);
         repo::decision::upsert_extractions(
             &conn,
-            d1,
             &[extraction_row(
                 d1,
                 root,
@@ -595,7 +592,6 @@ mod tests {
         .unwrap();
         repo::decision::upsert_extractions(
             &conn,
-            d2,
             &[extraction_row(
                 d2,
                 root,
@@ -634,7 +630,6 @@ mod tests {
         let d2 = insert_decision_at(&conn, "apply", 200);
         repo::decision::upsert_extractions(
             &conn,
-            d1,
             &[extraction_row(
                 d1,
                 root,
@@ -648,7 +643,6 @@ mod tests {
         .unwrap();
         repo::decision::upsert_extractions(
             &conn,
-            d2,
             &[extraction_row(d2, root, "/a", "", 20, None, "/archive/y")],
         )
         .unwrap();
@@ -666,7 +660,6 @@ mod tests {
         let d = insert_decision_at(&conn, "apply", 100);
         repo::decision::upsert_extractions(
             &conn,
-            d,
             &[extraction_row(d, root, "/a", "", 1, Some(10), "/archive")],
         )
         .unwrap();
@@ -684,7 +677,6 @@ mod tests {
         scope(&conn, d, root, "");
         repo::decision::upsert_extractions(
             &conn,
-            d,
             &[extraction_row(d, root, "/a", "", 1, Some(10), "/archive")],
         )
         .unwrap();
@@ -704,7 +696,6 @@ mod tests {
         let d = insert_decision_at(&conn, "apply", 100);
         repo::decision::upsert_extractions(
             &conn,
-            d,
             &[extraction_row(d, root, "/a", "", 1, Some(10), "/archive")],
         )
         .unwrap();
@@ -883,7 +874,6 @@ mod tests {
         let d = insert_decision_at(&conn, "apply", 100);
         repo::decision::upsert_extractions(
             &conn,
-            d,
             &[
                 extraction_row(
                     d,
@@ -944,7 +934,6 @@ mod tests {
         let apply = insert_decision_at(&conn, "apply", ts1);
         repo::decision::upsert_extractions(
             &conn,
-            apply,
             &[extraction_row(
                 apply,
                 root,
@@ -993,7 +982,6 @@ mod tests {
         scope(&conn, apply, root, "");
         repo::decision::upsert_extractions(
             &conn,
-            apply,
             &[extraction_row(
                 apply,
                 root,
@@ -1046,7 +1034,6 @@ mod tests {
         let apply = insert_decision_at(&conn, "apply", ts1);
         repo::decision::upsert_extractions(
             &conn,
-            apply,
             &[extraction_row(
                 apply,
                 root,

@@ -964,45 +964,16 @@ pub fn execute_apply(
     // independent of receipt file writing — apply is non-transactional
     // fix-forward by ADR, so a crash before this point is healed by a later
     // `ledger reindex`.
+    //
+    // Every failure here is best-effort: the transfers are already done and
+    // persisted, so bookkeeping must never turn a completed apply into a
+    // failed one. Each gap warns rather than propagating — `ledger reindex`
+    // heals it from the receipt later, and the warning says so meanwhile.
     if let Some(decision_id) = decision_id {
         if !receipt_items.is_empty() {
-            let roots = repo::root::fetch_all(conn)?;
-            if let Some(archive_root) = roots.iter().find(|r| r.id == params.archive_root_id) {
-                let items: Vec<ExtractionItem> = receipt_items
-                    .iter()
-                    .map(|item| ExtractionItem {
-                        source_root: &item.source_root,
-                        source_rel_path: &item.source_rel_path,
-                        destination_rel_path: &item.destination_rel_path,
-                        size: item.size,
-                    })
-                    .collect();
-                let disposition = match params.transfer_mode {
-                    TransferMode::Copy => OriginDisposition::Retained,
-                    TransferMode::Move | TransferMode::Rename => OriginDisposition::Relocated,
-                };
-                let (rows, unknown_roots) = build_extraction_rows(
-                    &items,
-                    &roots,
-                    (Some(params.archive_root_id), &archive_root.path),
-                    Some(disposition),
-                    decision_id,
-                );
-                if let Err(e) = repo::decision::upsert_extractions(conn, decision_id, &rows) {
-                    if let Some(recorder) = recorder.as_mut() {
-                        recorder.push_warning(format!(
-                            "Warning: failed to record extraction ledger: {e}"
-                        ));
-                    }
-                }
-                if !unknown_roots.is_empty() {
-                    if let Some(recorder) = recorder.as_mut() {
-                        recorder.push_warning(format!(
-                            "Warning: {} source root(s) not recognized for the extraction ledger: {}",
-                            unknown_roots.len(),
-                            unknown_roots.join(", ")
-                        ));
-                    }
+            for warning in record_extractions(conn, &receipt_items, params, decision_id) {
+                if let Some(recorder) = recorder.as_mut() {
+                    recorder.push_warning(warning);
                 }
             }
         }
@@ -1086,6 +1057,75 @@ pub fn execute_apply(
     }
 
     Ok(result)
+}
+
+/// Record what this apply drew from each source root into the extraction
+/// ledger, returning any warnings rather than failing the run.
+///
+/// Best-effort by design: the transfers this summarizes are already on disk
+/// and in the DB, so no bookkeeping failure here may propagate — an
+/// unrecorded row is a gap `ledger reindex` heals from the receipt, while a
+/// returned `Err` would report a completed apply as a failed one. Every gap
+/// warns; none is silent.
+fn record_extractions(
+    conn: &Connection,
+    receipt_items: &[ApplyReceiptItem],
+    params: &ApplyExecuteParams,
+    decision_id: i64,
+) -> Vec<String> {
+    let roots = match repo::root::fetch_all(conn) {
+        Ok(roots) => roots,
+        Err(e) => {
+            return vec![format!(
+                "Warning: could not read roots to record the extraction ledger: {e} \
+                 (run `canon ledger reindex` to backfill)"
+            )]
+        }
+    };
+    let Some(archive_root) = roots.iter().find(|r| r.id == params.archive_root_id) else {
+        return vec![format!(
+            "Warning: archive root #{} not found when recording the extraction ledger \
+             (run `canon ledger reindex` to backfill)",
+            params.archive_root_id
+        )];
+    };
+
+    let items: Vec<ExtractionItem> = receipt_items
+        .iter()
+        .map(|item| ExtractionItem {
+            source_root: &item.source_root,
+            source_rel_path: &item.source_rel_path,
+            destination_rel_path: &item.destination_rel_path,
+            size: item.size,
+        })
+        .collect();
+    let disposition = match params.transfer_mode {
+        TransferMode::Copy => OriginDisposition::Retained,
+        TransferMode::Move | TransferMode::Rename => OriginDisposition::Relocated,
+    };
+    let (rows, unknown_roots) = build_extraction_rows(
+        &items,
+        &roots,
+        (Some(params.archive_root_id), &archive_root.path),
+        Some(disposition),
+        decision_id,
+    );
+
+    let mut warnings = Vec::new();
+    if let Err(e) = repo::decision::upsert_extractions(conn, &rows) {
+        warnings.push(format!(
+            "Warning: failed to record extraction ledger: {e} \
+             (run `canon ledger reindex` to backfill)"
+        ));
+    }
+    if !unknown_roots.is_empty() {
+        warnings.push(format!(
+            "Warning: {} source root(s) not recognized for the extraction ledger: {}",
+            unknown_roots.len(),
+            unknown_roots.join(", ")
+        ));
+    }
+    warnings
 }
 
 /// Build a NewSource from lock entry data for DB registration.

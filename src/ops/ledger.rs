@@ -14,6 +14,7 @@
 //! here, not there, because they must tolerate absent fields the writer
 //! types must never gain.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::Result;
@@ -28,9 +29,10 @@ pub struct ReindexParams {
 }
 
 /// Coverage report for one `ledger reindex` run. Every decision examined
-/// lands in exactly one of `no_receipt`/`unreachable`/`malformed`, or
-/// contributes rows and lands in `indexed`/`already_current` — absence is
-/// never silent.
+/// lands in exactly one of `no_receipt`/`unreachable`/`malformed`/
+/// `no_rows_built`, or contributes rows and lands in `indexed`/
+/// `already_current` — absence is never silent, and a bucket never claims
+/// work it didn't do.
 #[derive(Default)]
 pub struct ReindexResult {
     /// Apply decisions examined.
@@ -50,8 +52,15 @@ pub struct ReindexResult {
     pub unreachable: Vec<(i64, String)>,
     /// The receipt read but failed integrity checks — reason string. Skipped.
     pub malformed: Vec<(i64, String)>,
-    /// Drawn source-root paths that matched no known root — partial index,
-    /// reported rather than silently dropped. (decision_id, root path)
+    /// The receipt parsed but yielded no rows at all — every source root it
+    /// names is unknown, so there was nothing to index. Its own bucket
+    /// rather than `indexed`: a decision that produced no row was not
+    /// indexed, and must not count as work done for the exit code.
+    pub no_rows_built: Vec<(i64, String)>,
+    /// Drawn source-root paths that matched no known root — reported rather
+    /// than silently dropped. A decision with *some* matched roots still
+    /// indexes (partial is honest and reported); one with none lands in
+    /// `no_rows_built` above. (decision_id, root path)
     pub unknown_source_roots: Vec<(i64, String)>,
 }
 
@@ -94,9 +103,18 @@ struct ApplyItemDoc {
 /// whole-history — no scope args (this is maintenance, not exploration).
 /// Writes only index rows: index maintenance is not a content decision, so
 /// no decision row is recorded — this report is its record.
-pub fn reindex_extractions(conn: &mut Connection, params: &ReindexParams) -> Result<ReindexResult> {
+pub fn reindex_extractions(conn: &Connection, params: &ReindexParams) -> Result<ReindexResult> {
     let decisions = repo::decision::fetch_by_command(conn, DecisionCommand::Apply.as_str())?;
     let roots = repo::root::fetch_all(conn)?;
+
+    // Which decisions already carry rows, in one query rather than one per
+    // decision — this drives the indexed/already_current split below.
+    let decision_ids: Vec<i64> = decisions.iter().map(|d| d.id).collect();
+    let had_rows_before: HashSet<i64> =
+        repo::decision::fetch_extractions_by_decisions(conn, &decision_ids)?
+            .into_iter()
+            .map(|row| row.decision_id)
+            .collect();
 
     let mut result = ReindexResult {
         scanned: decisions.len(),
@@ -207,15 +225,24 @@ pub fn reindex_extractions(conn: &mut Connection, params: &ReindexParams) -> Res
             result.unknown_source_roots.push((decision.id, unknown));
         }
 
-        let existed_before =
-            !repo::decision::fetch_extractions_by_decisions(conn, &[decision.id])?.is_empty();
+        // A receipt whose every source root is unknown yields nothing to
+        // write. Reporting that as "indexed (0 rows)" would overstate the
+        // run and mask a universe where no work was possible, so it gets
+        // its own bucket.
+        if rows.is_empty() {
+            result.no_rows_built.push((
+                decision.id,
+                "no drawn source root matched a known root".to_string(),
+            ));
+            continue;
+        }
 
         if !params.dry_run {
-            repo::decision::upsert_extractions(conn, decision.id, &rows)?;
+            repo::decision::upsert_extractions(conn, &rows)?;
             result.rows_written += rows.len();
         }
 
-        if existed_before {
+        if had_rows_before.contains(&decision.id) {
             result.already_current.push(decision.id);
         } else {
             result.indexed.push(decision.id);
@@ -387,7 +414,7 @@ mod tests {
 
     #[test]
     fn round_trip_law_backfill_matches_forward_recording() {
-        let (mut conn, decision_id, _archive_dir, _src_dir) = run_real_apply(TransferMode::Copy);
+        let (conn, decision_id, _archive_dir, _src_dir) = run_real_apply(TransferMode::Copy);
 
         let forward_rows = fetch_rows(&conn, decision_id);
         assert_eq!(forward_rows.len(), 1);
@@ -395,7 +422,7 @@ mod tests {
         wipe_extractions(&conn);
         assert!(fetch_rows(&conn, decision_id).is_empty());
 
-        let result = reindex_extractions(&mut conn, &ReindexParams { dry_run: false }).unwrap();
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
         assert_eq!(result.indexed, vec![decision_id]);
         assert!(result.already_current.is_empty());
         assert_eq!(result.rows_written, 1);
@@ -406,7 +433,7 @@ mod tests {
 
     #[test]
     fn round_trip_law_move_mode_relocated() {
-        let (mut conn, decision_id, _archive_dir, _src_dir) = run_real_apply(TransferMode::Move);
+        let (conn, decision_id, _archive_dir, _src_dir) = run_real_apply(TransferMode::Move);
 
         let forward_rows = fetch_rows(&conn, decision_id);
         assert_eq!(
@@ -415,14 +442,14 @@ mod tests {
         );
 
         wipe_extractions(&conn);
-        reindex_extractions(&mut conn, &ReindexParams { dry_run: false }).unwrap();
+        reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
         let backfilled_rows = fetch_rows(&conn, decision_id);
         assert_eq!(backfilled_rows, forward_rows);
     }
 
     #[test]
     fn old_receipt_without_self_describing_fields_parses_with_neutral_disposition() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         let archive_dir = tempfile::tempdir().unwrap();
         let archive_root = insert_root(
             &conn,
@@ -467,7 +494,7 @@ mtime = 0
         );
         std::fs::write(ledger_dir.join("000001-apply.toml"), receipt_toml).unwrap();
 
-        let result = reindex_extractions(&mut conn, &ReindexParams { dry_run: false }).unwrap();
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
         assert_eq!(result.indexed, vec![decision_id]);
         assert!(result.malformed.is_empty());
 
@@ -479,7 +506,7 @@ mtime = 0
 
     #[test]
     fn no_receipt_columns_categorized_as_no_receipt() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         conn.execute(
             "INSERT INTO decisions (command, command_line, status, canon_version, created_at)
              VALUES ('apply', 'canon apply --no-receipt m.lock', 'completed', '0.1.0', 0)",
@@ -488,7 +515,7 @@ mtime = 0
         .unwrap();
         let decision_id = latest_decision_id(&conn);
 
-        let result = reindex_extractions(&mut conn, &ReindexParams { dry_run: false }).unwrap();
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
         assert_eq!(result.scanned, 1);
         assert_eq!(result.no_receipt.len(), 1);
         assert_eq!(result.no_receipt[0].0, decision_id);
@@ -498,7 +525,7 @@ mtime = 0
 
     #[test]
     fn no_receipt_reason_when_recording_mode_had_receipts_off() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         conn.execute(
             "INSERT INTO decisions (command, command_line, status, canon_version, created_at)
              VALUES ('apply', 'canon apply m.lock', 'completed', '0.1.0', 0)",
@@ -506,13 +533,13 @@ mtime = 0
         )
         .unwrap();
 
-        let result = reindex_extractions(&mut conn, &ReindexParams { dry_run: false }).unwrap();
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
         assert_eq!(result.no_receipt[0].1, "recording mode had receipts off");
     }
 
     #[test]
     fn unknown_receipt_root_categorized_unreachable() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         conn.execute(
             "INSERT INTO decisions (command, command_line, status, canon_version, created_at, receipt_root_id, receipt_rel_path)
              VALUES ('apply', 'canon apply m.lock', 'completed', '0.1.0', 0, 999, '.canon-ledger/000001-apply.toml')",
@@ -521,7 +548,7 @@ mtime = 0
         .unwrap();
         let decision_id = latest_decision_id(&conn);
 
-        let result = reindex_extractions(&mut conn, &ReindexParams { dry_run: false }).unwrap();
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
         assert_eq!(result.unreachable.len(), 1);
         assert_eq!(result.unreachable[0].0, decision_id);
         assert!(result.unreachable[0]
@@ -531,7 +558,7 @@ mtime = 0
 
     #[test]
     fn root_path_offline_categorized_unreachable() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         let root_id = insert_root(&conn, "/no/such/path/on/disk", "archive", false);
         conn.execute(
             "INSERT INTO decisions (command, command_line, status, canon_version, created_at, receipt_root_id, receipt_rel_path)
@@ -541,7 +568,7 @@ mtime = 0
         .unwrap();
         let decision_id = latest_decision_id(&conn);
 
-        let result = reindex_extractions(&mut conn, &ReindexParams { dry_run: false }).unwrap();
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
         assert_eq!(result.unreachable.len(), 1);
         assert_eq!(result.unreachable[0].0, decision_id);
         assert!(result.unreachable[0].1.contains("not present (offline?)"));
@@ -549,7 +576,7 @@ mtime = 0
 
     #[test]
     fn root_present_but_receipt_file_missing_categorized_unreachable() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         let archive_dir = tempfile::tempdir().unwrap();
         let root_id = insert_root(
             &conn,
@@ -565,7 +592,7 @@ mtime = 0
         .unwrap();
         let decision_id = latest_decision_id(&conn);
 
-        let result = reindex_extractions(&mut conn, &ReindexParams { dry_run: false }).unwrap();
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
         assert_eq!(result.unreachable.len(), 1);
         assert_eq!(result.unreachable[0].0, decision_id);
         assert!(result.unreachable[0].1.contains("receipt file missing"));
@@ -573,8 +600,7 @@ mtime = 0
 
     #[test]
     fn malformed_toml_skipped_and_reported_rest_processed() {
-        let (mut conn, good_decision_id, archive_dir, _src_dir) =
-            run_real_apply(TransferMode::Copy);
+        let (conn, good_decision_id, archive_dir, _src_dir) = run_real_apply(TransferMode::Copy);
 
         // A second apply decision whose receipt file is garbage TOML.
         let bad_root = archive_dir.path().to_str().unwrap();
@@ -597,7 +623,7 @@ mtime = 0
         .unwrap();
 
         wipe_extractions(&conn);
-        let result = reindex_extractions(&mut conn, &ReindexParams { dry_run: false }).unwrap();
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
         assert_eq!(result.scanned, 2);
         assert_eq!(result.malformed.len(), 1);
         assert_eq!(result.malformed[0].0, bad_decision_id);
@@ -605,14 +631,74 @@ mtime = 0
     }
 
     #[test]
+    fn receipt_whose_source_roots_are_all_unknown_builds_nothing() {
+        let conn = setup_test_db();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+        // Note: no source root is registered, so the receipt's source_root
+        // matches nothing.
+        let decision_id: i64 = conn
+            .query_row(
+                "INSERT INTO decisions (command, command_line, status, canon_version, created_at, receipt_root_id, receipt_rel_path)
+                 VALUES ('apply', 'canon apply old.lock', 'completed', '0.1.0', 0, ?1, '.canon-ledger/000001-apply.toml')
+                 RETURNING id",
+                [archive_root],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let ledger_dir = archive_dir.path().join(".canon-ledger");
+        std::fs::create_dir_all(&ledger_dir).unwrap();
+        std::fs::write(
+            ledger_dir.join("000001-apply.toml"),
+            format!(
+                r#"[meta]
+receipt_version = 1
+decision_id = {decision_id}
+command = "apply"
+status = "completed"
+timestamp = 0
+summary = "receipt from a root canon no longer knows"
+canon_version = "0.1.0"
+command_line = "canon apply old.lock"
+
+[[items]]
+source_root = "/vol/long-gone"
+source_rel_path = "a.jpg"
+destination_rel_path = "a.jpg"
+size = 5
+mtime = 0
+"#
+            ),
+        )
+        .unwrap();
+
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
+        // Not "indexed (0 rows)" — nothing was built, and the report says so.
+        assert!(result.indexed.is_empty());
+        assert!(result.already_current.is_empty());
+        assert_eq!(result.no_rows_built.len(), 1);
+        assert_eq!(result.no_rows_built[0].0, decision_id);
+        assert_eq!(result.unknown_source_roots.len(), 1);
+        assert_eq!(result.unknown_source_roots[0].1, "/vol/long-gone");
+        assert_eq!(result.rows_written, 0);
+        assert!(fetch_rows(&conn, decision_id).is_empty());
+    }
+
+    #[test]
     fn idempotent_reindex_twice_identical() {
-        let (mut conn, decision_id, _archive_dir, _src_dir) = run_real_apply(TransferMode::Copy);
+        let (conn, decision_id, _archive_dir, _src_dir) = run_real_apply(TransferMode::Copy);
         wipe_extractions(&conn);
 
-        reindex_extractions(&mut conn, &ReindexParams { dry_run: false }).unwrap();
+        reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
         let first = fetch_rows(&conn, decision_id);
 
-        let result = reindex_extractions(&mut conn, &ReindexParams { dry_run: false }).unwrap();
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
         let second = fetch_rows(&conn, decision_id);
 
         assert_eq!(first, second);
@@ -622,11 +708,11 @@ mtime = 0
 
     #[test]
     fn reindex_after_forward_recording_no_duplicates() {
-        let (mut conn, decision_id, _archive_dir, _src_dir) = run_real_apply(TransferMode::Copy);
+        let (conn, decision_id, _archive_dir, _src_dir) = run_real_apply(TransferMode::Copy);
 
         // Rows already exist from the forward path — reindex should converge,
         // not duplicate.
-        let result = reindex_extractions(&mut conn, &ReindexParams { dry_run: false }).unwrap();
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
         assert_eq!(result.already_current, vec![decision_id]);
         let rows = fetch_rows(&conn, decision_id);
         assert_eq!(rows.len(), 1);
@@ -634,10 +720,10 @@ mtime = 0
 
     #[test]
     fn dry_run_produces_report_without_writing() {
-        let (mut conn, decision_id, _archive_dir, _src_dir) = run_real_apply(TransferMode::Copy);
+        let (conn, decision_id, _archive_dir, _src_dir) = run_real_apply(TransferMode::Copy);
         wipe_extractions(&conn);
 
-        let result = reindex_extractions(&mut conn, &ReindexParams { dry_run: true }).unwrap();
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: true }).unwrap();
         assert_eq!(result.indexed, vec![decision_id]);
         assert_eq!(result.rows_written, 0);
         assert!(fetch_rows(&conn, decision_id).is_empty());

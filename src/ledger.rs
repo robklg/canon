@@ -11,7 +11,7 @@ use crate::ops::ledger::{reindex_extractions, ReindexParams, ReindexResult};
 use crate::repo::Db;
 
 pub fn run_reindex(db: &mut Db, dry_run: bool) -> Result<()> {
-    let result = reindex_extractions(db.conn_mut(), &ReindexParams { dry_run })?;
+    let result = reindex_extractions(db.conn(), &ReindexParams { dry_run })?;
     print!("{}", format_report(&result, dry_run));
 
     // Nonzero only when nothing at all could be processed — every scanned
@@ -52,6 +52,9 @@ fn format_report(result: &ReindexResult, dry_run: bool) -> String {
     push_category(&mut out, "no receipt", &result.no_receipt);
     push_category(&mut out, "unreachable", &result.unreachable);
     push_category(&mut out, "malformed", &result.malformed);
+    if !result.no_rows_built.is_empty() {
+        push_category(&mut out, "nothing to index", &result.no_rows_built);
+    }
     if !result.unknown_source_roots.is_empty() {
         push_category(
             &mut out,
@@ -95,6 +98,7 @@ mod tests {
             no_receipt: vec![],
             unreachable: vec![],
             malformed: vec![],
+            no_rows_built: vec![],
             unknown_source_roots: vec![],
         }
     }

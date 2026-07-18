@@ -5,6 +5,8 @@
 //! within the root, to where in the destination, and how (copied vs moved).
 //! Aggregate only — per-item detail stays in the apply receipt on disk.
 
+use std::collections::HashMap;
+
 use super::path::common_dir_prefix;
 use super::root::Root;
 
@@ -58,6 +60,17 @@ pub struct DecisionExtraction {
     pub disposition: Option<OriginDisposition>,
 }
 
+impl DecisionExtraction {
+    /// The location this row was drawn from: the source root's path plus its
+    /// common rel prefix (an empty prefix means the root itself). The one
+    /// derivation of an extraction's "here" — the trail's scope cell and
+    /// `trail show`'s `drew from:` section both render it, and neither
+    /// re-joins the parts itself.
+    pub fn drawn_from(&self) -> String {
+        join_prefix(&self.root_path, &self.rel_prefix)
+    }
+}
+
 /// One completed transfer, item-shaped for [`build_extraction_rows`] — the
 /// shape both the forward (apply) and backfill (`ledger reindex`) recording
 /// paths share, so a backfilled row is structurally indistinguishable from a
@@ -92,34 +105,32 @@ pub fn build_extraction_rows<'a>(
     let dest_prefix = common_dir_prefix(items.iter().map(|i| i.destination_rel_path));
     let destination_path = join_prefix(destination_root.1, &dest_prefix);
 
-    let mut source_roots: Vec<&str> = items.iter().map(|i| i.source_root).collect();
+    // Group in one pass, then sort by root path so the row order is a
+    // function of the input rather than of hashing — forward recording and
+    // backfill must produce identical row sequences for the round-trip law.
+    let mut groups: HashMap<&str, Vec<&ExtractionItem>> = HashMap::new();
+    for item in items {
+        groups.entry(item.source_root).or_default().push(item);
+    }
+    let mut source_roots: Vec<&str> = groups.keys().copied().collect();
     source_roots.sort_unstable();
-    source_roots.dedup();
 
     let mut rows = Vec::new();
     let mut unknown_roots = Vec::new();
     for source_root in source_roots {
-        let group: Vec<&ExtractionItem> = items
-            .iter()
-            .filter(|i| i.source_root == source_root)
-            .collect();
+        let group = &groups[source_root];
         match known_roots.iter().find(|r| r.path == source_root) {
-            Some(root) => {
-                let files = group.len() as i64;
-                let bytes: i64 = group.iter().map(|i| i.size).sum();
-                let rel_prefix = common_dir_prefix(group.iter().map(|i| i.source_rel_path));
-                rows.push(DecisionExtraction {
-                    decision_id,
-                    root_id: root.id,
-                    root_path: root.path.clone(),
-                    rel_prefix,
-                    files,
-                    bytes: Some(bytes),
-                    destination_root_id: destination_root.0,
-                    destination_path: destination_path.clone(),
-                    disposition,
-                });
-            }
+            Some(root) => rows.push(DecisionExtraction {
+                decision_id,
+                root_id: root.id,
+                root_path: root.path.clone(),
+                rel_prefix: common_dir_prefix(group.iter().map(|i| i.source_rel_path)),
+                files: group.len() as i64,
+                bytes: Some(group.iter().map(|i| i.size).sum()),
+                destination_root_id: destination_root.0,
+                destination_path: destination_path.clone(),
+                disposition,
+            }),
             None => unknown_roots.push(source_root.to_string()),
         }
     }
@@ -163,6 +174,54 @@ mod tests {
             Some(OriginDisposition::Relocated)
         );
         assert_eq!(OriginDisposition::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn drawn_from_joins_prefix_and_bare_root() {
+        let mut row = DecisionExtraction {
+            decision_id: 1,
+            root_id: 1,
+            root_path: "/vol/photos".to_string(),
+            rel_prefix: "2016/italy".to_string(),
+            files: 1,
+            bytes: None,
+            destination_root_id: None,
+            destination_path: "/archive".to_string(),
+            disposition: None,
+        };
+        assert_eq!(row.drawn_from(), "/vol/photos/2016/italy");
+        row.rel_prefix = String::new();
+        assert_eq!(row.drawn_from(), "/vol/photos");
+    }
+
+    #[test]
+    fn build_extraction_rows_orders_rows_by_source_root() {
+        // Row order must be a function of the input, not of hash iteration —
+        // the round-trip law compares forward and backfilled rows in order.
+        let items = vec![
+            ExtractionItem {
+                source_root: "/vol/c",
+                source_rel_path: "1.jpg",
+                destination_rel_path: "1.jpg",
+                size: 1,
+            },
+            ExtractionItem {
+                source_root: "/vol/a",
+                source_rel_path: "2.jpg",
+                destination_rel_path: "2.jpg",
+                size: 1,
+            },
+            ExtractionItem {
+                source_root: "/vol/b",
+                source_rel_path: "3.jpg",
+                destination_rel_path: "3.jpg",
+                size: 1,
+            },
+        ];
+        let roots = vec![root(1, "/vol/a"), root(2, "/vol/b"), root(3, "/vol/c")];
+        let (rows, _) = build_extraction_rows(&items, &roots, (Some(1), "/archive"), None, 1);
+        let paths: Vec<&str> = rows.iter().map(|r| r.root_path.as_str()).collect();
+        assert_eq!(paths, vec!["/vol/a", "/vol/b", "/vol/c"]);
     }
 
     #[test]

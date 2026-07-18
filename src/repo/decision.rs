@@ -351,14 +351,12 @@ fn extraction_from_row(row: &rusqlite::Row) -> rusqlite::Result<DecisionExtracti
     })
 }
 
-/// Upsert extraction rows for a decision. `(decision_id, root_id)` is the
-/// natural key — a re-run (forward re-recording or `ledger reindex`)
-/// converges to the same row set rather than duplicating.
-pub fn upsert_extractions(
-    conn: &Connection,
-    decision_id: i64,
-    rows: &[DecisionExtraction],
-) -> Result<()> {
+/// Upsert extraction rows. `(decision_id, root_id)` is the natural key — a
+/// re-run (forward re-recording or `ledger reindex`) converges to the same
+/// row set rather than duplicating. Each row carries its own `decision_id`,
+/// so a batch spanning decisions is representable and no caller-supplied id
+/// can silently disagree with the rows it writes.
+pub fn upsert_extractions(conn: &Connection, rows: &[DecisionExtraction]) -> Result<()> {
     for row in rows {
         conn.execute(
             "INSERT INTO decision_extractions
@@ -374,7 +372,7 @@ pub fn upsert_extractions(
                 destination_path = excluded.destination_path,
                 disposition = excluded.disposition",
             rusqlite::params![
-                decision_id,
+                row.decision_id,
                 row.root_id,
                 row.root_path,
                 row.rel_prefix,
@@ -392,6 +390,9 @@ pub fn upsert_extractions(
 /// Fetch all extraction rows drawn from the given roots (chunked). Prefix
 /// matching against a viewed scope is domain logic — this returns every row
 /// for the roots; the caller filters by `scopes_touch`.
+///
+/// Ordered by `(decision_id, root_id)` so a multi-root decision's extraction
+/// lines render in a stable order run to run.
 pub fn fetch_extractions_by_roots(
     conn: &Connection,
     root_ids: &[i64],
@@ -400,7 +401,8 @@ pub fn fetch_extractions_by_roots(
     for chunk in root_ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
         let sql = format!(
-            "SELECT {EXTRACTION_COLUMNS} FROM decision_extractions WHERE root_id IN ({})",
+            "SELECT {EXTRACTION_COLUMNS} FROM decision_extractions WHERE root_id IN ({})
+             ORDER BY decision_id, root_id",
             placeholders.join(",")
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -426,7 +428,8 @@ pub fn fetch_extractions_by_decisions(
     for chunk in ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
         let sql = format!(
-            "SELECT {EXTRACTION_COLUMNS} FROM decision_extractions WHERE decision_id IN ({})",
+            "SELECT {EXTRACTION_COLUMNS} FROM decision_extractions WHERE decision_id IN ({})
+             ORDER BY decision_id, root_id",
             placeholders.join(",")
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -1157,11 +1160,11 @@ mod tests {
     fn upsert_extractions_converges_on_repeat() {
         let conn = setup_test_db();
         let d = insert_decision_at(&conn, "apply", 100);
-        upsert_extractions(&conn, d, &[mk_extraction(d, 1)]).unwrap();
+        upsert_extractions(&conn, &[mk_extraction(d, 1)]).unwrap();
         // Re-run (e.g. reindex) with a slightly different aggregate.
         let mut updated = mk_extraction(d, 1);
         updated.files = 50;
-        upsert_extractions(&conn, d, &[updated]).unwrap();
+        upsert_extractions(&conn, &[updated]).unwrap();
 
         let rows = fetch_extractions_by_decisions(&conn, &[d]).unwrap();
         assert_eq!(rows.len(), 1);
@@ -1173,8 +1176,8 @@ mod tests {
         let conn = setup_test_db();
         let d1 = insert_decision_at(&conn, "apply", 100);
         let d2 = insert_decision_at(&conn, "apply", 200);
-        upsert_extractions(&conn, d1, &[mk_extraction(d1, 1), mk_extraction(d1, 2)]).unwrap();
-        upsert_extractions(&conn, d2, &[mk_extraction(d2, 1)]).unwrap();
+        upsert_extractions(&conn, &[mk_extraction(d1, 1), mk_extraction(d1, 2)]).unwrap();
+        upsert_extractions(&conn, &[mk_extraction(d2, 1)]).unwrap();
 
         let by_root = fetch_extractions_by_roots(&conn, &[1]).unwrap();
         assert_eq!(by_root.len(), 2);
@@ -1199,7 +1202,7 @@ mod tests {
         let rows: Vec<DecisionExtraction> = (1..=1100)
             .map(|root_id| mk_extraction(d, root_id))
             .collect();
-        upsert_extractions(&conn, d, &rows).unwrap();
+        upsert_extractions(&conn, &rows).unwrap();
 
         let root_ids: Vec<i64> = (1..=1100).collect();
         assert_eq!(
@@ -1230,7 +1233,7 @@ mod tests {
         let mut row = mk_extraction(d, 1);
         row.disposition = None;
         row.bytes = None;
-        upsert_extractions(&conn, d, &[row]).unwrap();
+        upsert_extractions(&conn, &[row]).unwrap();
 
         let fetched = fetch_extractions_by_decisions(&conn, &[d]).unwrap();
         assert_eq!(fetched[0].disposition, None);
