@@ -64,6 +64,7 @@ mod coverage;
 mod exclude;
 mod facts;
 mod import_facts;
+mod ledger;
 mod ls;
 mod note;
 mod roots;
@@ -431,6 +432,22 @@ enum Commands {
         /// Execute deletion (default is dry-run)
         #[arg(long)]
         yes: bool,
+    },
+    // -- Maintain --
+    /// Maintain the extraction ledger index
+    Ledger {
+        #[command(subcommand)]
+        command: LedgerCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum LedgerCommands {
+    /// Rebuild the extraction index from apply receipts on disk
+    Reindex {
+        /// Show what would be indexed without writing anything
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -1021,6 +1038,11 @@ fn main() -> Result<()> {
                 )?;
             }
         }
+        Commands::Ledger { command } => match command {
+            LedgerCommands::Reindex { dry_run } => {
+                ledger::run_reindex(&mut db, dry_run)?;
+            }
+        },
         Commands::Coverage {
             paths,
             filters,

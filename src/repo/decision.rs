@@ -223,6 +223,20 @@ pub fn fetch_recent(conn: &Connection, limit: Option<usize>) -> Result<Vec<Decis
     Ok(decisions)
 }
 
+/// Fetch every decision with the given command identifier, oldest first.
+/// Used by `ledger reindex` to walk all `apply` decisions for backfill.
+pub fn fetch_by_command(conn: &Connection, command: &str) -> Result<Vec<Decision>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {DECISION_COLUMNS} FROM decisions WHERE command = ? ORDER BY id ASC"
+    ))?;
+    let rows = stmt.query_map([command], decision_from_row)?;
+    let mut decisions = Vec::new();
+    for row in rows {
+        decisions.push(row?);
+    }
+    Ok(decisions)
+}
+
 /// Fetch decisions with `start <= created_at < end`, oldest first.
 pub fn fetch_in_range(conn: &Connection, start: i64, end: i64) -> Result<Vec<Decision>> {
     let mut stmt = conn.prepare(&format!(
@@ -1037,6 +1051,24 @@ mod tests {
 
         let top = fetch_recent(&conn, Some(2)).unwrap();
         assert_eq!(top.iter().map(|d| d.id).collect::<Vec<_>>(), vec![b, c]);
+    }
+
+    #[test]
+    fn fetch_by_command_filters_and_orders() {
+        let conn = setup_test_db();
+        let a = insert_decision_at(&conn, "apply", 100);
+        insert_decision_at(&conn, "scan", 150);
+        let b = insert_decision_at(&conn, "apply", 200);
+
+        let hits = fetch_by_command(&conn, "apply").unwrap();
+        assert_eq!(hits.iter().map(|d| d.id).collect::<Vec<_>>(), vec![a, b]);
+    }
+
+    #[test]
+    fn fetch_by_command_no_matches_is_empty() {
+        let conn = setup_test_db();
+        insert_decision_at(&conn, "scan", 100);
+        assert!(fetch_by_command(&conn, "apply").unwrap().is_empty());
     }
 
     #[test]

@@ -51,6 +51,24 @@ Each line carries the decision id, timestamp, the scope it acted on, the complet
 
 The listing is capped at the 20 most recent decisions; the footer tells you what's beyond the cap (`--limit N` or `--all` to widen). Decisions recorded without a scope — global operations — can't be attributed to any folder, so scoped views count them in a footer instead of silently hiding them.
 
+## The outbound direction: what left from here
+
+Standing at a source location, an `apply` that drew content out of this scope shows up too — even though the apply's own selection scope may have been global or elsewhere. It renders in the *extraction aspect*, replacing the usual summary line:
+
+```
+#42   2026-05-12 14:02  2016/italy   → 47 files (3.9 GB) to /Archive/Media/2016/Italy (copied; originals remain) · "italy assembly"
+```
+
+The scope cell is the drawn-from location, not the destination; the disposition tells you whether the originals remain (`copied`) or are gone from here (`moved`). A decision appears once per view — never both a selection line and an extraction line.
+
+Scoped scope-lens views end with a whole-history rollup, independent of the `--limit` cap — it answers "where am I with this drive?", not "what happened recently":
+
+```
+Archived from here: 1,251 files (22.1 GB) → 2 destinations.
+```
+
+Omitted when nothing has ever been drawn from here. Sizes are omitted (not guessed) if any contributing decision's bytes can't be determined. Global views carry no single "here" to roll up, so neither the rollup nor extraction lines appear there — an apply still counts toward the "not shown" footer at any view it doesn't touch.
+
 ## The time lens
 
 `--today`, `--since <when>`, or `--on <when>` switch to the day-grouped story view — chronological, so it reads forward:
@@ -95,11 +113,21 @@ Decision #61 — exclude_duplicates
     /archive/.canon-ledger/000061-exclude_duplicates.toml
 ```
 
+For an `apply` decision, a `drew from:` section lists what it took from each source root — path (or `root #N (removed)` if the root is gone since), files, and size:
+
+```
+  drew from:
+    /Volumes/old-laptop/photos/2016/italy — 47 files (3.9 GB)
+    /Volumes/nikon-sd/dcim — 12 files (401 MB)
+```
+
+No section when the decision drew from nowhere (every other decision kind).
+
 `show` lists where the decision's [receipts](../../concepts/decisions.md) live on disk — including one receipt per source root for deletions. It does not print receipt contents; open the file to see the per-item record. When there is no receipt, the reason is stated (`no receipt (--no-receipt)` or `no receipt recorded`) — absence is never silent.
 
 ## Machine output
 
-`--jsonl` emits one JSON object per timeline event, with a `type` field (`"decision"` or `"note"`), the raw command identifier, timestamps, counts, reason, scope, summary, and receipt location. The scope header moves to stderr so stdout stays clean:
+`--jsonl` emits one JSON object per timeline event, with a `type` field (`"decision"` or `"note"`), the raw command identifier, timestamps, counts, reason, scope, summary, and receipt location. An `apply` event additionally carries `extractions` — one entry per drawn-from root (`root`, `rel_prefix`, `files`, `bytes`, `destination`, `disposition`) — populated regardless of view, including `--global`, so machine consumers never have to re-derive it from a scoped run. The field is absent (not `[]`) for decisions that drew from nothing. The scope header moves to stderr so stdout stays clean:
 
 ```bash
 canon trail --today --global --jsonl | jq -r 'select(.type=="decision") | .summary'

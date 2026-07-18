@@ -159,3 +159,21 @@ canon exclude set --where 'source.ext=dll' --no-receipt
 ## Reading the Trail
 
 [`canon trail`](../commands/query/trail.md) reads the record back: what happened at a place (`canon trail`), the day's story (`canon trail --today`), and any single decision in full with its receipt locations (`canon trail show <id>`). Notes interleave as the thinking between the actions.
+
+## The Extraction Ledger — the Trail's Outbound Direction
+
+Standing at a source location, the decisions above tell only half the story: deletions and exclusions, not what was *archived out of* the place. The **extraction ledger** is the outbound half — an aggregate index, `decision_extractions`, of what each `apply` drew from each source root: how many files, how many bytes, where they went, and whether the originals remain (copied) or are gone from here (moved).
+
+It is deliberately **aggregate-only** — one row per (decision, source root), never a per-item copy. Per-item detail already lives in the apply receipt on disk; the ledger row exists so `canon trail` can answer "what left from here?" without re-reading every receipt on every scoped view.
+
+### Disk is truth, the database is a rebuildable index
+
+This is the same principle that governs the rest of provenance: the database is a projection over receipts, not a second source of truth. If `decision_extractions` is ever lost — a fresh database, a restored backup missing recent rows, a manual mistake — it can be rebuilt from the receipts still sitting on disk:
+
+```bash
+canon ledger reindex
+```
+
+See [`ledger reindex`](../commands/maintain/ledger-reindex.md) for the full command. It walks every `apply` decision, reads its receipt (tolerating older receipts that predate today's self-describing fields), and rebuilds the same aggregate rows the forward `apply` path writes — a backfilled row is indistinguishable from a forward-recorded one, by construction (both go through the same aggregation).
+
+Gaps are reported, never inferred: a decision with no receipt on disk (recording was off, or `--no-receipt` was used) is not something `reindex` can recover, and it says so rather than guessing.
