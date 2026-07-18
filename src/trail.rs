@@ -16,6 +16,7 @@ use chrono::{Local, TimeZone};
 use serde::Serialize;
 
 use crate::domain::decision::Decision;
+use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::domain::format::{cap_path, format_count, format_size};
 use crate::domain::root::Root;
 use crate::domain::trail::{
@@ -24,7 +25,7 @@ use crate::domain::trail::{
 };
 use crate::ops;
 use crate::ops::scope::ResolvedScope;
-use crate::ops::trail::{TrailParams, TrailResult, TrailView, DEFAULT_LIMIT};
+use crate::ops::trail::{ExtractionRollup, TrailParams, TrailResult, TrailView, DEFAULT_LIMIT};
 use crate::repo::{self, Db};
 
 pub struct TrailArgs {
@@ -159,7 +160,7 @@ fn print_human(
                 let refs: Vec<&TimelineEvent> = events.iter().collect();
                 let w = width(&refs);
                 for event in events {
-                    print_event(event, true, resolved, roots, w);
+                    print_event(event, true, resolved, roots, w, &result.extractions);
                 }
             }
         }
@@ -180,14 +181,24 @@ fn print_human(
                 }
                 println!();
                 for event in &day.events {
-                    print_event(event, false, resolved, roots, w);
+                    print_event(event, false, resolved, roots, w, &result.extractions);
                 }
             }
         }
     }
 
-    if result.earlier_decisions > 0 || result.unscoped_decisions > 0 {
+    // The extraction rollup is a scope-lens-only footer ("Archived from
+    // here") — it never appears alongside the day-grouped time lens.
+    let rollup_line = match (&result.view, &result.extraction_rollup) {
+        (TrailView::Recent(_), Some(rollup)) => Some(format_extraction_rollup(rollup)),
+        _ => None,
+    };
+
+    if rollup_line.is_some() || result.earlier_decisions > 0 || result.unscoped_decisions > 0 {
         println!();
+    }
+    if let Some(line) = rollup_line {
+        println!("{line}");
     }
     if result.earlier_decisions > 0 {
         let cap = limit.unwrap_or(DEFAULT_LIMIT);
@@ -210,14 +221,19 @@ const SCOPE_CELL_MAX: usize = 35;
 /// One timeline line: id, time, scope column, narration. Decisions carry
 /// counts and reason; notes carry the `~` voice marker and never an id,
 /// counts, or status — a thought must not be mistakable for an action.
+///
+/// Dedup rule: a decision with touching extraction rows renders the
+/// *extraction aspect* instead of its summary line — one line per touching
+/// row (the common case is one; a multi-root draw into a multi-prefix view
+/// repeats the id) — never both a selection line and an extraction line.
 fn print_event(
     event: &TimelineEvent,
     with_date: bool,
     resolved: &ResolvedScope,
     roots: &HashMap<i64, Root>,
     width: usize,
+    extractions: &HashMap<i64, Vec<DecisionExtraction>>,
 ) {
-    let cell = cap_path(&scope_cell(event, resolved, roots), SCOPE_CELL_MAX);
     match event {
         TimelineEvent::Decision(d) => {
             let time = if with_date {
@@ -225,16 +241,37 @@ fn print_event(
             } else {
                 format_time(d.created_at)
             };
+            let suffix = |line: &mut String| {
+                if let Some(reason) = &d.reason {
+                    line.push_str(&format!(" \u{00b7} \"{reason}\""));
+                }
+                if d.status != "completed" {
+                    line.push_str(&format!("  [{}]", d.status));
+                }
+            };
+            if let Some(rows) = extractions.get(&d.id) {
+                for row in rows {
+                    let cell = cap_path(
+                        &relativize(&extraction_location(row), resolved),
+                        SCOPE_CELL_MAX,
+                    );
+                    let mut line = format!(
+                        "#{:<4} {time}  {cell:<width$}  {}",
+                        d.id,
+                        extraction_narration(row)
+                    );
+                    suffix(&mut line);
+                    println!("{line}");
+                }
+                return;
+            }
+            let cell = cap_path(&scope_cell(event, resolved, roots), SCOPE_CELL_MAX);
             let mut line = format!("#{:<4} {time}  {cell:<width$}  {}", d.id, headline(d));
-            if let Some(reason) = &d.reason {
-                line.push_str(&format!(" \u{00b7} \"{reason}\""));
-            }
-            if d.status != "completed" {
-                line.push_str(&format!("  [{}]", d.status));
-            }
+            suffix(&mut line);
             println!("{line}");
         }
         TimelineEvent::Note(n) => {
+            let cell = cap_path(&scope_cell(event, resolved, roots), SCOPE_CELL_MAX);
             let time = if with_date {
                 format_datetime(n.created_at)
             } else {
@@ -242,6 +279,63 @@ fn print_event(
             };
             println!("      {time}  {cell:<width$}  ~ {}", n.text);
         }
+    }
+}
+
+/// The drawn-from location of an extraction row: the source root's path plus
+/// its common rel prefix (empty prefix = the root itself).
+fn extraction_location(row: &DecisionExtraction) -> String {
+    if row.rel_prefix.is_empty() {
+        row.root_path.clone()
+    } else {
+        format!("{}/{}", row.root_path, row.rel_prefix)
+    }
+}
+
+/// The extraction aspect's narration: `→ N files (size) to DEST (wording)`.
+/// Disposition wording goes through `OriginDisposition`, never a free
+/// literal; `None` (pre-vocabulary backfilled rows) omits the parenthetical.
+fn extraction_narration(row: &DecisionExtraction) -> String {
+    let files = format_count(row.files);
+    let unit = if row.files == 1 { "file" } else { "files" };
+    let mut line = match row.bytes {
+        Some(bytes) => format!(
+            "\u{2192} {files} {unit} ({}) to {}",
+            format_size(bytes),
+            row.destination_path
+        ),
+        None => format!("\u{2192} {files} {unit} to {}", row.destination_path),
+    };
+    if let Some(disposition) = row.disposition {
+        let wording = match disposition {
+            OriginDisposition::Retained => "copied; originals remain",
+            OriginDisposition::Relocated => "moved",
+        };
+        line.push_str(&format!(" ({wording})"));
+    }
+    line
+}
+
+/// The scope-lens-only "Archived from here" footer: whole-history rollup of
+/// this view's extraction-touching rows.
+fn format_extraction_rollup(rollup: &ExtractionRollup) -> String {
+    let files = format_count(rollup.files);
+    let unit = if rollup.files == 1 { "file" } else { "files" };
+    let dest_unit = if rollup.destinations == 1 {
+        "destination"
+    } else {
+        "destinations"
+    };
+    match rollup.bytes {
+        Some(bytes) => format!(
+            "Archived from here: {files} {unit} ({}) \u{2192} {} {dest_unit}.",
+            format_size(bytes),
+            rollup.destinations
+        ),
+        None => format!(
+            "Archived from here: {files} {unit} \u{2192} {} {dest_unit}.",
+            rollup.destinations
+        ),
     }
 }
 
@@ -400,6 +494,24 @@ struct JsonDecisionEvent<'a> {
     summary: Option<&'a str>,
     receipt_root_id: Option<i64>,
     receipt_rel_path: Option<&'a str>,
+    /// Additive; absent (not `[]`) for a decision with no extraction rows.
+    /// Always the *full* row set for the decision, independent of which
+    /// view/lens surfaced it (JSONL is a machine-output completeness
+    /// contract, not a scoped-touching one).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extractions: Option<Vec<JsonExtraction<'a>>>,
+}
+
+#[derive(Serialize)]
+struct JsonExtraction<'a> {
+    root: &'a str,
+    rel_prefix: &'a str,
+    files: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes: Option<i64>,
+    destination: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disposition: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -409,6 +521,21 @@ struct JsonNoteEvent<'a> {
     root_id: i64,
     rel_path: &'a str,
     text: &'a str,
+}
+
+fn json_extractions(rows: Option<&[DecisionExtraction]>) -> Option<Vec<JsonExtraction<'_>>> {
+    rows.map(|rows| {
+        rows.iter()
+            .map(|r| JsonExtraction {
+                root: &r.root_path,
+                rel_prefix: &r.rel_prefix,
+                files: r.files,
+                bytes: r.bytes,
+                destination: &r.destination_path,
+                disposition: r.disposition.map(|d| d.as_str()),
+            })
+            .collect()
+    })
 }
 
 fn print_jsonl(result: &TrailResult) -> Result<()> {
@@ -435,6 +562,7 @@ fn print_jsonl(result: &TrailResult) -> Result<()> {
                 summary: d.summary.as_deref(),
                 receipt_root_id: d.receipt_root_id,
                 receipt_rel_path: d.receipt_rel_path.as_deref(),
+                extractions: json_extractions(result.extractions_all.get(&d.id).map(Vec::as_slice)),
             })?,
             TimelineEvent::Note(n) => serde_json::to_string(&JsonNoteEvent {
                 r#type: "note",
@@ -498,10 +626,51 @@ mod tests {
             summary: Some("Excluded 210 duplicates"),
             receipt_root_id: Some(3),
             receipt_rel_path: Some(".canon-ledger/000061-exclude_duplicates.toml"),
+            extractions: None,
         })
         .unwrap();
         assert!(json.starts_with(r#"{"type":"decision","id":61,"command":"exclude_duplicates""#));
         assert!(json.contains(r#""reason":"redundant backup""#));
+        assert!(!json.contains("extractions"));
+    }
+
+    #[test]
+    fn jsonl_decision_event_extractions_present_when_some() {
+        let row = crate::domain::extraction::DecisionExtraction {
+            decision_id: 61,
+            root_id: 1,
+            root_path: "/vol/photos".to_string(),
+            rel_prefix: "2016/italy".to_string(),
+            files: 47,
+            bytes: Some(3_900_000),
+            destination_root_id: Some(9),
+            destination_path: "/archive/2016/Italy".to_string(),
+            disposition: Some(OriginDisposition::Retained),
+        };
+        let json = serde_json::to_string(&JsonDecisionEvent {
+            r#type: "decision",
+            id: 61,
+            command: "apply",
+            created_at: 1000,
+            status: "completed",
+            count_attempted: None,
+            count_completed: None,
+            count_failed: None,
+            count_skipped: None,
+            reason: None,
+            scope: None,
+            summary: None,
+            receipt_root_id: None,
+            receipt_rel_path: None,
+            extractions: json_extractions(Some(&[row])),
+        })
+        .unwrap();
+        assert!(json.contains(r#""extractions":[{"root":"/vol/photos""#));
+        assert!(json.contains(r#""rel_prefix":"2016/italy""#));
+        assert!(json.contains(r#""files":47"#));
+        assert!(json.contains(r#""bytes":3900000"#));
+        assert!(json.contains(r#""destination":"/archive/2016/Italy""#));
+        assert!(json.contains(r#""disposition":"retained""#));
     }
 
     #[test]
@@ -566,5 +735,111 @@ mod tests {
             other_actions: 1,
         };
         assert_eq!(format_rollup(&rollup), "1 other action");
+    }
+
+    // ------------------------------------------------------------------
+    // Extraction aspect line + rollup footer composition
+    // ------------------------------------------------------------------
+
+    fn mk_extraction_row(
+        bytes: Option<i64>,
+        disposition: Option<OriginDisposition>,
+    ) -> DecisionExtraction {
+        DecisionExtraction {
+            decision_id: 42,
+            root_id: 1,
+            root_path: "/Volumes/old-laptop".to_string(),
+            rel_prefix: "photos/2016/italy".to_string(),
+            files: 47,
+            bytes,
+            destination_root_id: Some(9),
+            destination_path: "/Archive/Media/2016/Italy".to_string(),
+            disposition,
+        }
+    }
+
+    #[test]
+    fn extraction_narration_retained_wording() {
+        let row = mk_extraction_row(Some(3_900_000_000), Some(OriginDisposition::Retained));
+        assert_eq!(
+            extraction_narration(&row),
+            "\u{2192} 47 files (3.9 GB) to /Archive/Media/2016/Italy (copied; originals remain)"
+        );
+    }
+
+    #[test]
+    fn extraction_narration_relocated_wording() {
+        let row = mk_extraction_row(Some(1_000), Some(OriginDisposition::Relocated));
+        assert_eq!(
+            extraction_narration(&row),
+            "\u{2192} 47 files (1.0 KB) to /Archive/Media/2016/Italy (moved)"
+        );
+    }
+
+    #[test]
+    fn extraction_narration_bytes_none_omits_size() {
+        let row = mk_extraction_row(None, Some(OriginDisposition::Retained));
+        assert_eq!(
+            extraction_narration(&row),
+            "\u{2192} 47 files to /Archive/Media/2016/Italy (copied; originals remain)"
+        );
+    }
+
+    #[test]
+    fn extraction_narration_disposition_none_omits_parenthetical() {
+        // Pre-vocabulary backfilled rows: rendered neutrally, never guessed.
+        let row = mk_extraction_row(Some(100), None);
+        assert_eq!(
+            extraction_narration(&row),
+            "\u{2192} 47 files (100 B) to /Archive/Media/2016/Italy"
+        );
+    }
+
+    #[test]
+    fn extraction_narration_singular_file() {
+        let mut row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
+        row.files = 1;
+        assert_eq!(
+            extraction_narration(&row),
+            "\u{2192} 1 file (10 B) to /Archive/Media/2016/Italy (copied; originals remain)"
+        );
+    }
+
+    #[test]
+    fn extraction_location_joins_prefix() {
+        let row = mk_extraction_row(None, None);
+        assert_eq!(
+            extraction_location(&row),
+            "/Volumes/old-laptop/photos/2016/italy"
+        );
+        let mut root_only = mk_extraction_row(None, None);
+        root_only.rel_prefix = String::new();
+        assert_eq!(extraction_location(&root_only), "/Volumes/old-laptop");
+    }
+
+    #[test]
+    fn extraction_rollup_footer_composition() {
+        let rollup = ExtractionRollup {
+            files: 1_251,
+            bytes: Some(22_100_000_000),
+            destinations: 2,
+        };
+        assert_eq!(
+            format_extraction_rollup(&rollup),
+            "Archived from here: 1,251 files (22.1 GB) \u{2192} 2 destinations."
+        );
+    }
+
+    #[test]
+    fn extraction_rollup_footer_singular_destination_and_omitted_bytes() {
+        let rollup = ExtractionRollup {
+            files: 1,
+            bytes: None,
+            destinations: 1,
+        };
+        assert_eq!(
+            format_extraction_rollup(&rollup),
+            "Archived from here: 1 file \u{2192} 1 destination."
+        );
     }
 }

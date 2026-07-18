@@ -7,10 +7,13 @@
 //!
 //! Read operations: no transactions, no stdio.
 
+use std::collections::{HashMap, HashSet};
+
 use anyhow::Result;
 use chrono::{Duration, Local, NaiveDate, TimeZone};
 
 use crate::domain::decision::Decision;
+use crate::domain::extraction::DecisionExtraction;
 use crate::domain::root::find_containing_root;
 use crate::domain::trail::{
     group_by_day, merge_events, scopes_touch, DayGroup, TimelineEvent, WhenValue,
@@ -39,6 +42,16 @@ pub enum TrailView {
     Days(Vec<DayGroup>),
 }
 
+/// Whole-history rollup over a scoped view's extraction-touching rows, before
+/// the decision-window cap — "Archived from here" answers "where am I with
+/// this drive?", not "what did the last N decisions do?".
+pub struct ExtractionRollup {
+    pub files: i64,
+    /// `None` if any contributing row lacks a size — never a partial sum.
+    pub bytes: Option<i64>,
+    pub destinations: usize,
+}
+
 pub struct TrailResult {
     pub view: TrailView,
     /// Decisions beyond the cap (older than the shown window).
@@ -47,68 +60,117 @@ pub struct TrailResult {
     pub unscoped_decisions: i64,
     /// Matching decisions before capping.
     pub total_decisions: usize,
+    /// Extraction rows touching this view, by decision id — content this
+    /// scope's roots drew content into an archive from. Powers the
+    /// extraction-aspect line and the rollup below. Empty for the global
+    /// view (nothing "touches" a scope that doesn't exist).
+    pub extractions: HashMap<i64, Vec<DecisionExtraction>>,
+    /// `None` when there are no touching rows, or the view is global or a
+    /// time-lens view (the rollup is a scope-lens-only footer).
+    pub extraction_rollup: Option<ExtractionRollup>,
+    /// The *full* (not touching-filtered) extraction rows for every decision
+    /// in the final listed view, across every lens and scope — a decision's
+    /// JSONL extraction data must read the same regardless of which view
+    /// surfaced it.
+    pub extractions_all: HashMap<i64, Vec<DecisionExtraction>>,
 }
 
 pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailResult> {
     let range = params.timeframe.map(when_range);
 
-    let (mut decisions, unscoped, notes) = if params.prefixes.is_empty() {
-        let decisions = match range {
-            Some((start, end)) => repo::decision::fetch_in_range(conn, start, end)?,
-            None => repo::decision::fetch_recent(conn, None)?,
-        };
-        let notes = if params.include_notes {
-            repo::note::fetch_all(conn)?
+    let (mut decisions, unscoped, notes, extractions, extraction_rollup) =
+        if params.prefixes.is_empty() {
+            let decisions = match range {
+                Some((start, end)) => repo::decision::fetch_in_range(conn, start, end)?,
+                None => repo::decision::fetch_recent(conn, None)?,
+            };
+            let notes = if params.include_notes {
+                repo::note::fetch_all(conn)?
+            } else {
+                Vec::new()
+            };
+            (decisions, 0, notes, HashMap::new(), None)
         } else {
-            Vec::new()
-        };
-        (decisions, 0, notes)
-    } else {
-        let roots = repo::root::fetch_all(conn)?;
-        // The same decomposition the recorder used to populate the index.
-        let pairs: Vec<(i64, String)> = params
-            .prefixes
-            .iter()
-            .filter_map(|p| {
-                find_containing_root(p, &roots).map(|(root_id, _, _, rel)| (root_id, rel))
-            })
-            .collect();
-        let mut root_ids: Vec<i64> = pairs.iter().map(|(id, _)| *id).collect();
-        root_ids.sort_unstable();
-        root_ids.dedup();
+            let roots = repo::root::fetch_all(conn)?;
+            // The same decomposition the recorder used to populate the index.
+            let pairs: Vec<(i64, String)> = params
+                .prefixes
+                .iter()
+                .filter_map(|p| {
+                    find_containing_root(p, &roots).map(|(root_id, _, _, rel)| (root_id, rel))
+                })
+                .collect();
+            let mut root_ids: Vec<i64> = pairs.iter().map(|(id, _)| *id).collect();
+            root_ids.sort_unstable();
+            root_ids.dedup();
 
-        let rows = repo::decision::fetch_scope_rows_by_roots(conn, &root_ids)?;
-        let mut ids: Vec<i64> = rows
-            .iter()
-            .filter(|row| {
+            let touches = |root_id: i64, rel_prefix: &str| {
                 pairs
                     .iter()
-                    .any(|(rid, rel)| *rid == row.root_id && scopes_touch(rel, &row.rel_prefix))
-            })
-            .map(|row| row.decision_id)
-            .collect();
-        ids.sort_unstable();
-        ids.dedup();
+                    .any(|(rid, rel)| *rid == root_id && scopes_touch(rel, rel_prefix))
+            };
 
-        let mut decisions = repo::decision::fetch_by_ids(conn, &ids)?;
-        if let Some((start, end)) = range {
-            decisions.retain(|d| d.created_at >= start && d.created_at < end);
-        }
-        let unscoped = repo::decision::count_unscoped(conn, range)?;
-        let notes = if params.include_notes {
-            repo::note::fetch_by_roots(conn, &root_ids)?
-                .into_iter()
-                .filter(|n| {
-                    pairs
-                        .iter()
-                        .any(|(rid, rel)| *rid == n.root_id && scopes_touch(rel, &n.rel_path))
-                })
-                .collect()
-        } else {
-            Vec::new()
+            let rows = repo::decision::fetch_scope_rows_by_roots(conn, &root_ids)?;
+            let mut ids: Vec<i64> = rows
+                .iter()
+                .filter(|row| touches(row.root_id, &row.rel_prefix))
+                .map(|row| row.decision_id)
+                .collect();
+
+            // Extraction rows touching this view: apply decisions that drew
+            // content from here into an archive, even when the decision's
+            // *selection* scope was global or elsewhere entirely.
+            let ext_rows = repo::decision::fetch_extractions_by_roots(conn, &root_ids)?;
+            let mut extractions: HashMap<i64, Vec<DecisionExtraction>> = HashMap::new();
+            for row in ext_rows {
+                if touches(row.root_id, &row.rel_prefix) {
+                    extractions.entry(row.decision_id).or_default().push(row);
+                }
+            }
+            ids.extend(extractions.keys().copied());
+            ids.sort_unstable();
+            ids.dedup();
+
+            let mut decisions = repo::decision::fetch_by_ids(conn, &ids)?;
+            if let Some((start, end)) = range {
+                decisions.retain(|d| d.created_at >= start && d.created_at < end);
+            }
+
+            let unscoped_raw = repo::decision::count_unscoped(conn, range)?;
+            // Footer honesty: a decision surfaced here only via an extraction
+            // row (no decision_scopes row of its own) must not also be counted
+            // as "not shown" — restricted to ids that actually survived the
+            // time-range filter above, since an extraction-touching id outside
+            // --since/--on was never part of unscoped_raw's count either.
+            let shown_ids: HashSet<i64> = decisions.iter().map(|d| d.id).collect();
+            let shown_extraction_ids: Vec<i64> = extractions
+                .keys()
+                .filter(|id| shown_ids.contains(id))
+                .copied()
+                .collect();
+            let unscoped_adjustment =
+                repo::decision::filter_unscoped_ids(conn, &shown_extraction_ids)?.len() as i64;
+            let unscoped = unscoped_raw - unscoped_adjustment;
+
+            let notes = if params.include_notes {
+                repo::note::fetch_by_roots(conn, &root_ids)?
+                    .into_iter()
+                    .filter(|n| touches(n.root_id, &n.rel_path))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // Whole-history rollup: every touching row, never capped by the
+            // decision-window limit. Scope-lens only — never a time-lens view.
+            let extraction_rollup = if range.is_none() {
+                build_rollup(extractions.values().flatten())
+            } else {
+                None
+            };
+
+            (decisions, unscoped, notes, extractions, extraction_rollup)
         };
-        (decisions, unscoped, notes)
-    };
 
     let total_decisions = decisions.len();
 
@@ -136,6 +198,14 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
         notes.retain(|n| n.created_at < end);
     }
 
+    // JSONL completeness: the full extraction rows (not touching-filtered)
+    // for every decision that ends up listed, across every lens and scope —
+    // all views, global included — so machine output never varies by view.
+    let listed_ids: Vec<i64> = decisions.iter().map(|d| d.id).collect();
+    let extractions_all = group_extractions_by_decision(
+        repo::decision::fetch_extractions_by_decisions(conn, &listed_ids)?,
+    );
+
     let events = merge_events(decisions, notes); // ascending, stable tie-break
 
     let view = if params.timeframe.is_some() {
@@ -161,6 +231,46 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
         earlier_decisions,
         unscoped_decisions: unscoped,
         total_decisions,
+        extractions,
+        extraction_rollup,
+        extractions_all,
+    })
+}
+
+fn group_extractions_by_decision(
+    rows: Vec<DecisionExtraction>,
+) -> HashMap<i64, Vec<DecisionExtraction>> {
+    let mut map: HashMap<i64, Vec<DecisionExtraction>> = HashMap::new();
+    for row in rows {
+        map.entry(row.decision_id).or_default().push(row);
+    }
+    map
+}
+
+/// Sum files/bytes and count distinct destinations over a set of extraction
+/// rows. `None` if the set is empty; bytes `None` if any row lacks a size.
+fn build_rollup<'a>(
+    rows: impl Iterator<Item = &'a DecisionExtraction>,
+) -> Option<ExtractionRollup> {
+    let rows: Vec<&DecisionExtraction> = rows.collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let files: i64 = rows.iter().map(|r| r.files).sum();
+    let bytes = if rows.iter().all(|r| r.bytes.is_some()) {
+        Some(rows.iter().filter_map(|r| r.bytes).sum())
+    } else {
+        None
+    };
+    let destinations: usize = rows
+        .iter()
+        .map(|r| r.destination_path.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    Some(ExtractionRollup {
+        files,
+        bytes,
+        destinations,
     })
 }
 
@@ -365,6 +475,240 @@ mod tests {
         let global = compute_trail(&conn, &params(Vec::new())).unwrap();
         assert_eq!(decision_ids(&global.view).len(), 2);
         assert_eq!(global.unscoped_decisions, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Extraction ledger visibility (Story 1/2)
+    // ------------------------------------------------------------------
+
+    fn extraction_row(
+        decision_id: i64,
+        root_id: i64,
+        root_path: &str,
+        rel_prefix: &str,
+        files: i64,
+        bytes: Option<i64>,
+        destination_path: &str,
+    ) -> crate::domain::extraction::DecisionExtraction {
+        crate::domain::extraction::DecisionExtraction {
+            decision_id,
+            root_id,
+            root_path: root_path.to_string(),
+            rel_prefix: rel_prefix.to_string(),
+            files,
+            bytes,
+            destination_root_id: Some(999),
+            destination_path: destination_path.to_string(),
+            disposition: Some(crate::domain::extraction::OriginDisposition::Retained),
+        }
+    }
+
+    #[test]
+    fn extraction_row_surfaces_scoped_view_despite_global_selection_scope() {
+        let conn = open_in_memory_for_test();
+        let root_a = insert_test_root(&conn, "/a", "source", false);
+        insert_test_root(&conn, "/b", "source", false);
+        // The apply's own selection scope is global (no decision_scopes row).
+        let decision_id = insert_decision_at(&conn, "apply", 100);
+        repo::decision::upsert_extractions(
+            &conn,
+            decision_id,
+            &[extraction_row(
+                decision_id,
+                root_a,
+                "/a",
+                "",
+                47,
+                Some(3_900_000),
+                "/archive/x",
+            )],
+        )
+        .unwrap();
+
+        // Surfaces in a view of the drawn-from root...
+        let view_a = compute_trail(&conn, &params(vec!["/a".to_string()])).unwrap();
+        assert_eq!(decision_ids(&view_a.view), vec![decision_id]);
+        assert!(view_a.extractions.contains_key(&decision_id));
+        // ...and being shown here means it must not double as "not shown".
+        assert_eq!(view_a.unscoped_decisions, 0);
+
+        // A sibling root never touched by the extraction doesn't see it...
+        let view_b = compute_trail(&conn, &params(vec!["/b".to_string()])).unwrap();
+        assert!(decision_ids(&view_b.view).is_empty());
+        // ...and its footer still counts the untouched global decision.
+        assert_eq!(view_b.unscoped_decisions, 1);
+    }
+
+    #[test]
+    fn decision_with_scope_row_and_extraction_row_appears_exactly_once() {
+        let conn = open_in_memory_for_test();
+        let root = insert_test_root(&conn, "/a", "source", false);
+        let decision_id = insert_decision_at(&conn, "apply", 100);
+        scope(&conn, decision_id, root, "");
+        repo::decision::upsert_extractions(
+            &conn,
+            decision_id,
+            &[extraction_row(
+                decision_id,
+                root,
+                "/a",
+                "",
+                5,
+                Some(500),
+                "/archive",
+            )],
+        )
+        .unwrap();
+
+        let result = compute_trail(&conn, &params(vec!["/a".to_string()])).unwrap();
+        // Union+dedup: one id, not two — never both a selection line and an
+        // extraction line (the id-set union collapses to one appearance).
+        assert_eq!(decision_ids(&result.view), vec![decision_id]);
+        assert!(result.extractions.contains_key(&decision_id));
+    }
+
+    #[test]
+    fn extraction_rollup_reports_whole_history_even_when_capped() {
+        let conn = open_in_memory_for_test();
+        let root = insert_test_root(&conn, "/a", "source", false);
+        let d1 = insert_decision_at(&conn, "apply", 100);
+        let d2 = insert_decision_at(&conn, "apply", 200);
+        repo::decision::upsert_extractions(
+            &conn,
+            d1,
+            &[extraction_row(
+                d1,
+                root,
+                "/a",
+                "",
+                10,
+                Some(1_000),
+                "/archive/x",
+            )],
+        )
+        .unwrap();
+        repo::decision::upsert_extractions(
+            &conn,
+            d2,
+            &[extraction_row(
+                d2,
+                root,
+                "/a",
+                "",
+                20,
+                Some(2_000),
+                "/archive/y",
+            )],
+        )
+        .unwrap();
+
+        let mut p = params(vec!["/a".to_string()]);
+        p.limit = Some(1);
+        let result = compute_trail(&conn, &p).unwrap();
+        assert_eq!(result.earlier_decisions, 1); // the window is capped...
+        let rollup = result.extraction_rollup.unwrap();
+        assert_eq!(rollup.files, 30); // ...but the rollup is whole-history
+        assert_eq!(rollup.bytes, Some(3_000));
+        assert_eq!(rollup.destinations, 2);
+    }
+
+    #[test]
+    fn extraction_rollup_none_when_no_touching_rows() {
+        let conn = open_in_memory_for_test();
+        insert_test_root(&conn, "/a", "source", false);
+        let result = compute_trail(&conn, &params(vec!["/a".to_string()])).unwrap();
+        assert!(result.extraction_rollup.is_none());
+    }
+
+    #[test]
+    fn extraction_rollup_bytes_omitted_when_any_row_lacks_them() {
+        let conn = open_in_memory_for_test();
+        let root = insert_test_root(&conn, "/a", "source", false);
+        let d1 = insert_decision_at(&conn, "apply", 100);
+        let d2 = insert_decision_at(&conn, "apply", 200);
+        repo::decision::upsert_extractions(
+            &conn,
+            d1,
+            &[extraction_row(
+                d1,
+                root,
+                "/a",
+                "",
+                10,
+                Some(1_000),
+                "/archive/x",
+            )],
+        )
+        .unwrap();
+        repo::decision::upsert_extractions(
+            &conn,
+            d2,
+            &[extraction_row(d2, root, "/a", "", 20, None, "/archive/y")],
+        )
+        .unwrap();
+
+        let result = compute_trail(&conn, &params(vec!["/a".to_string()])).unwrap();
+        let rollup = result.extraction_rollup.unwrap();
+        assert_eq!(rollup.files, 30);
+        assert_eq!(rollup.bytes, None);
+    }
+
+    #[test]
+    fn extraction_rollup_none_for_global_view() {
+        let conn = open_in_memory_for_test();
+        let root = insert_test_root(&conn, "/a", "source", false);
+        let d = insert_decision_at(&conn, "apply", 100);
+        repo::decision::upsert_extractions(
+            &conn,
+            d,
+            &[extraction_row(d, root, "/a", "", 1, Some(10), "/archive")],
+        )
+        .unwrap();
+
+        let result = compute_trail(&conn, &params(Vec::new())).unwrap();
+        assert!(result.extraction_rollup.is_none());
+        assert!(result.extractions.is_empty());
+    }
+
+    #[test]
+    fn extraction_rollup_none_for_time_lens_view() {
+        let conn = open_in_memory_for_test();
+        let root = insert_test_root(&conn, "/a", "source", false);
+        let d = insert_decision_at(&conn, "apply", 100);
+        scope(&conn, d, root, "");
+        repo::decision::upsert_extractions(
+            &conn,
+            d,
+            &[extraction_row(d, root, "/a", "", 1, Some(10), "/archive")],
+        )
+        .unwrap();
+
+        let mut p = params(vec!["/a".to_string()]);
+        p.timeframe = Some(WhenValue::Since(
+            NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+        ));
+        let result = compute_trail(&conn, &p).unwrap();
+        assert!(result.extraction_rollup.is_none());
+    }
+
+    #[test]
+    fn extractions_all_populated_for_global_view_jsonl_completeness() {
+        let conn = open_in_memory_for_test();
+        let root = insert_test_root(&conn, "/a", "source", false);
+        let d = insert_decision_at(&conn, "apply", 100);
+        repo::decision::upsert_extractions(
+            &conn,
+            d,
+            &[extraction_row(d, root, "/a", "", 1, Some(10), "/archive")],
+        )
+        .unwrap();
+
+        let result = compute_trail(&conn, &params(Vec::new())).unwrap();
+        // The touching map is empty at global scope (nothing to touch)...
+        assert!(result.extractions.is_empty());
+        // ...but the full-per-decision map used for JSONL still has it.
+        assert!(result.extractions_all.contains_key(&d));
+        assert_eq!(result.extractions_all[&d].len(), 1);
     }
 
     #[test]
