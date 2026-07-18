@@ -342,6 +342,27 @@ fn migrations() -> Migrations<'static> {
             }
             Ok(())
         }),
+        // 4: extraction ledger — the trail's outbound direction. One row per
+        //    (decision, drawn source root); aggregate only, never per-item
+        //    (per-item detail stays in the apply receipt on disk). The PK
+        //    doubles as the upsert key for both forward recording and
+        //    `ledger reindex` backfill.
+        M::up(
+            "CREATE TABLE IF NOT EXISTS decision_extractions (
+                decision_id INTEGER NOT NULL,
+                root_id INTEGER NOT NULL,
+                root_path TEXT NOT NULL,
+                rel_prefix TEXT NOT NULL DEFAULT '',
+                files INTEGER NOT NULL,
+                bytes INTEGER,
+                destination_root_id INTEGER,
+                destination_path TEXT NOT NULL,
+                disposition TEXT,
+                PRIMARY KEY (decision_id, root_id)
+             );
+             CREATE INDEX IF NOT EXISTS decision_extractions_root_id
+                 ON decision_extractions(root_id);",
+        ),
     ])
 }
 
@@ -707,5 +728,31 @@ mod tests {
         assert!(has_column(&conn, "sources", "decision_id"));
         assert!(has_column(&conn, "decisions", "receipt_root_id"));
         assert!(has_column(&conn, "decisions", "receipt_rel_path"));
+    }
+
+    #[test]
+    fn fresh_db_has_decision_extractions_table() {
+        let conn = open_in_memory_for_test();
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(decision_extractions)")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for expected in [
+            "decision_id",
+            "root_id",
+            "root_path",
+            "rel_prefix",
+            "files",
+            "bytes",
+            "destination_root_id",
+            "destination_path",
+            "disposition",
+        ] {
+            assert!(cols.iter().any(|c| c == expected), "missing {expected}");
+        }
     }
 }

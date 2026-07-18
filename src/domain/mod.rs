@@ -12,6 +12,7 @@
 pub mod config;
 pub mod decision;
 pub mod exclusion;
+pub mod extraction;
 pub mod fact;
 pub mod format;
 pub mod include;

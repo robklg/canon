@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::db::Connection;
 use super::source::BATCH_SIZE;
 use crate::domain::decision::Decision;
+use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
 
 /// Insert the initial "started" decision record. Returns the row ID.
 pub fn insert_started(
@@ -312,6 +313,141 @@ pub fn count_unscoped(conn: &Connection, range: Option<(i64, i64)>) -> Result<i6
         None => conn.query_row(base, [], |row| row.get(0))?,
     };
     Ok(count)
+}
+
+// ============================================================================
+// Extraction ledger (the trail's outbound direction)
+// ============================================================================
+
+const EXTRACTION_COLUMNS: &str = "decision_id, root_id, root_path, rel_prefix, files, bytes,
+                destination_root_id, destination_path, disposition";
+
+fn extraction_from_row(row: &rusqlite::Row) -> rusqlite::Result<DecisionExtraction> {
+    let disposition: Option<String> = row.get(8)?;
+    Ok(DecisionExtraction {
+        decision_id: row.get(0)?,
+        root_id: row.get(1)?,
+        root_path: row.get(2)?,
+        rel_prefix: row.get(3)?,
+        files: row.get(4)?,
+        bytes: row.get(5)?,
+        destination_root_id: row.get(6)?,
+        destination_path: row.get(7)?,
+        disposition: disposition.and_then(|s| OriginDisposition::from_str(&s)),
+    })
+}
+
+/// Upsert extraction rows for a decision. `(decision_id, root_id)` is the
+/// natural key — a re-run (forward re-recording or `ledger reindex`)
+/// converges to the same row set rather than duplicating.
+pub fn upsert_extractions(
+    conn: &Connection,
+    decision_id: i64,
+    rows: &[DecisionExtraction],
+) -> Result<()> {
+    for row in rows {
+        conn.execute(
+            "INSERT INTO decision_extractions
+                (decision_id, root_id, root_path, rel_prefix, files, bytes,
+                 destination_root_id, destination_path, disposition)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(decision_id, root_id) DO UPDATE SET
+                root_path = excluded.root_path,
+                rel_prefix = excluded.rel_prefix,
+                files = excluded.files,
+                bytes = excluded.bytes,
+                destination_root_id = excluded.destination_root_id,
+                destination_path = excluded.destination_path,
+                disposition = excluded.disposition",
+            rusqlite::params![
+                decision_id,
+                row.root_id,
+                row.root_path,
+                row.rel_prefix,
+                row.files,
+                row.bytes,
+                row.destination_root_id,
+                row.destination_path,
+                row.disposition.map(|d| d.as_str()),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Fetch all extraction rows drawn from the given roots (chunked). Prefix
+/// matching against a viewed scope is domain logic — this returns every row
+/// for the roots; the caller filters by `scopes_touch`.
+pub fn fetch_extractions_by_roots(
+    conn: &Connection,
+    root_ids: &[i64],
+) -> Result<Vec<DecisionExtraction>> {
+    let mut rows_out = Vec::new();
+    for chunk in root_ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT {EXTRACTION_COLUMNS} FROM decision_extractions WHERE root_id IN ({})",
+            placeholders.join(",")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(chunk.iter()),
+            extraction_from_row,
+        )?;
+        for row in rows {
+            rows_out.push(row?);
+        }
+    }
+    Ok(rows_out)
+}
+
+/// Fetch all extraction rows for the given decisions (chunked). Used to make
+/// JSONL output view-independent (extraction fields present regardless of
+/// which lens surfaced the decision).
+pub fn fetch_extractions_by_decisions(
+    conn: &Connection,
+    ids: &[i64],
+) -> Result<Vec<DecisionExtraction>> {
+    let mut rows_out = Vec::new();
+    for chunk in ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT {EXTRACTION_COLUMNS} FROM decision_extractions WHERE decision_id IN ({})",
+            placeholders.join(",")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(chunk.iter()),
+            extraction_from_row,
+        )?;
+        for row in rows {
+            rows_out.push(row?);
+        }
+    }
+    Ok(rows_out)
+}
+
+/// Of the given decision ids, return those with no `decision_scopes` row
+/// (chunked). Serves the scoped-trail footer adjustment: decisions surfaced
+/// via an extraction row must not also be double-counted as "not shown".
+pub fn filter_unscoped_ids(conn: &Connection, ids: &[i64]) -> Result<Vec<i64>> {
+    let mut out = Vec::new();
+    for chunk in ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT id FROM decisions WHERE id IN ({}) AND NOT EXISTS
+             (SELECT 1 FROM decision_scopes s WHERE s.decision_id = decisions.id)",
+            placeholders.join(",")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+            row.get::<_, i64>(0)
+        })?;
+        for row in rows {
+            out.push(row?);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -965,5 +1101,107 @@ mod tests {
         assert_eq!(for_decision[0].root_id, 1);
         assert_eq!(for_decision[0].rel_prefix, "a/b");
         assert!(for_decision[0].receipt_rel_path.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Extraction ledger
+    // ------------------------------------------------------------------
+
+    fn mk_extraction(decision_id: i64, root_id: i64) -> DecisionExtraction {
+        DecisionExtraction {
+            decision_id,
+            root_id,
+            root_path: format!("/root{root_id}"),
+            rel_prefix: "2016/italy".to_string(),
+            files: 47,
+            bytes: Some(3_900_000),
+            destination_root_id: Some(9),
+            destination_path: "/archive/2016/Italy".to_string(),
+            disposition: Some(OriginDisposition::Retained),
+        }
+    }
+
+    #[test]
+    fn upsert_extractions_converges_on_repeat() {
+        let conn = setup_test_db();
+        let d = insert_decision_at(&conn, "apply", 100);
+        upsert_extractions(&conn, d, &[mk_extraction(d, 1)]).unwrap();
+        // Re-run (e.g. reindex) with a slightly different aggregate.
+        let mut updated = mk_extraction(d, 1);
+        updated.files = 50;
+        upsert_extractions(&conn, d, &[updated]).unwrap();
+
+        let rows = fetch_extractions_by_decisions(&conn, &[d]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].files, 50);
+    }
+
+    #[test]
+    fn fetch_extractions_by_roots_and_decisions_round_trip() {
+        let conn = setup_test_db();
+        let d1 = insert_decision_at(&conn, "apply", 100);
+        let d2 = insert_decision_at(&conn, "apply", 200);
+        upsert_extractions(&conn, d1, &[mk_extraction(d1, 1), mk_extraction(d1, 2)]).unwrap();
+        upsert_extractions(&conn, d2, &[mk_extraction(d2, 1)]).unwrap();
+
+        let by_root = fetch_extractions_by_roots(&conn, &[1]).unwrap();
+        assert_eq!(by_root.len(), 2);
+
+        let by_decision = fetch_extractions_by_decisions(&conn, &[d1]).unwrap();
+        assert_eq!(by_decision.len(), 2);
+        assert!(by_decision.iter().all(|r| r.decision_id == d1));
+
+        let row = &by_decision[0];
+        assert_eq!(row.rel_prefix, "2016/italy");
+        assert_eq!(row.files, 47);
+        assert_eq!(row.bytes, Some(3_900_000));
+        assert_eq!(row.destination_root_id, Some(9));
+        assert_eq!(row.destination_path, "/archive/2016/Italy");
+        assert_eq!(row.disposition, Some(OriginDisposition::Retained));
+    }
+
+    #[test]
+    fn fetch_extractions_chunks_over_batch_size() {
+        let conn = setup_test_db();
+        let d = insert_decision_at(&conn, "apply", 100);
+        let rows: Vec<DecisionExtraction> = (1..=1100)
+            .map(|root_id| mk_extraction(d, root_id))
+            .collect();
+        upsert_extractions(&conn, d, &rows).unwrap();
+
+        let root_ids: Vec<i64> = (1..=1100).collect();
+        assert_eq!(
+            fetch_extractions_by_roots(&conn, &root_ids).unwrap().len(),
+            1100
+        );
+        assert_eq!(
+            fetch_extractions_by_decisions(&conn, &[d]).unwrap().len(),
+            1100
+        );
+    }
+
+    #[test]
+    fn filter_unscoped_ids_against_mixed_decisions() {
+        let conn = setup_test_db();
+        let scoped = insert_decision_at(&conn, "exclude_set", 100);
+        insert_scopes(&conn, scoped, &[(1, String::new())]).unwrap();
+        let unscoped = insert_decision_at(&conn, "apply", 200);
+
+        let result = filter_unscoped_ids(&conn, &[scoped, unscoped]).unwrap();
+        assert_eq!(result, vec![unscoped]);
+    }
+
+    #[test]
+    fn extraction_disposition_none_round_trips() {
+        let conn = setup_test_db();
+        let d = insert_decision_at(&conn, "apply", 100);
+        let mut row = mk_extraction(d, 1);
+        row.disposition = None;
+        row.bytes = None;
+        upsert_extractions(&conn, d, &[row]).unwrap();
+
+        let fetched = fetch_extractions_by_decisions(&conn, &[d]).unwrap();
+        assert_eq!(fetched[0].disposition, None);
+        assert_eq!(fetched[0].bytes, None);
     }
 }
