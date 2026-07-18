@@ -113,7 +113,7 @@ Decision #61 — exclude_duplicates
     /archive/.canon-ledger/000061-exclude_duplicates.toml
 ```
 
-For an `apply` decision, a `drew from:` section lists what it took from each source root — path, files, and size. The path is a snapshot recorded at apply time, so it renders even after the root is gone; a root Canon no longer indexes (removed since) is marked, because a bare path must not read as a live, visitable location:
+For an `apply` decision, a `drew from:` section lists what it took from each source root — path, files, and size. The path is a snapshot recorded at apply time, so it renders forever — even after the root itself is gone from Canon. A root Canon no longer indexes ends its line with `(root removed)`: the path stays primary (it is the answer to "where did this come from?"), and the marker keeps it honest — that path is history, not a place you can visit. For a copy, the originals may well still sit on the old drive, but they are no longer part of Canon's universe:
 
 ```
   drew from:
@@ -121,9 +121,11 @@ For an `apply` decision, a `drew from:` section lists what it took from each sou
     /Volumes/nikon-sd/dcim — 12 files (401 MB) (root removed)
 ```
 
+The marker follows the recorded root, not the path. If you remove a root and later re-add the same path, old extractions still show `(root removed)` — they belong to the root that was removed; the re-added one is a new root that happens to share its path.
+
 No section when the decision drew from nowhere (every other decision kind).
 
-`show` lists where the decision's [receipts](../../concepts/decisions.md) live on disk — including one receipt per source root for deletions. It does not print receipt contents; open the file to see the per-item record. When there is no receipt, the reason is stated (`no receipt (--no-receipt)` or `no receipt recorded`) — absence is never silent.
+`show` lists where the decision's [receipts](../../concepts/decisions.md) live on disk — including one receipt per source root for deletions. It does not print receipt contents; open the file to see the per-item record. When there is no receipt, the reason is stated (`no receipt (--no-receipt)` or `no receipt recorded`) — absence is never silent. A receipt pointer whose root has since been removed renders as `root #N (removed)/…` — the same honesty as the `drew from:` marker: the receipt was written, but the file now lives on a drive Canon no longer indexes.
 
 ## Machine output
 

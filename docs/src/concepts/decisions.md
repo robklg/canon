@@ -166,6 +166,8 @@ Standing at a source location, the decisions above tell only half the story: del
 
 It is deliberately **aggregate-only** — one row per (decision, source root), never a per-item copy. Per-item detail already lives in the apply receipt on disk; the ledger row exists so `canon trail` can answer "what left from here?" without re-reading every receipt on every scoped view.
 
+The recorded paths are write-time snapshots, not live lookups — a row keeps telling its story after the source root has been removed from Canon. `canon trail show` marks such roots `(root removed)`, so a snapshot path never silently reads as a live, visitable location.
+
 ### Disk is truth, the database is a rebuildable index
 
 This is the same principle that governs the rest of provenance: the database is a projection over receipts, not a second source of truth. If `decision_extractions` is ever lost — a fresh database, a restored backup missing recent rows, a manual mistake — it can be rebuilt from the receipts still sitting on disk:

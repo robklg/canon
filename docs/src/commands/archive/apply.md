@@ -142,3 +142,9 @@ canon scan <source-paths>
 canon cluster refresh manifest.toml
 canon apply manifest.toml
 ```
+
+## Provenance
+
+Every apply is recorded as a [decision](../../concepts/decisions.md), and a **receipt** — every file transferred, with its source root and path, content hash, size, and modification time — is written under the archive root's `.canon-ledger/`, mirroring the destination path so the record sits alongside the content it describes. Add `--reason` to say *why*; when you don't, the manifest's `# === Notes ===` section becomes the reason automatically — the thinking you wrote while assembling travels into the durable record. The global `--no-receipt` flag skips the receipt file for one invocation.
+
+An apply is also indexed by what it *drew out of* each source root — the [extraction ledger](../../concepts/decisions.md#the-extraction-ledger--the-trails-outbound-direction). Standing at a source location afterwards, [`canon trail`](../query/trail.md) shows what was archived out of that place and whether the originals remain; `canon trail show <id>` gives the full per-root breakdown and the receipt's location on disk.
