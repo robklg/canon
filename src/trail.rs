@@ -100,7 +100,7 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
     if !show.extractions.is_empty() {
         println!("  drew from:");
         for row in &show.extractions {
-            let location = extraction_location(row);
+            let location = row.drawn_from();
             let files = format_count(row.files);
             let unit = if row.files == 1 { "file" } else { "files" };
             match row.bytes {
@@ -148,11 +148,14 @@ fn print_human(
     }
 
     // Scope column: one width across the whole listing, capped so long
-    // paths can't push the narration off-screen.
+    // paths can't push the narration off-screen. Measured over the cells
+    // that will actually be printed — extraction lines render the drawn-from
+    // location, not the selection scope.
     let width = |events: &[&TimelineEvent]| -> usize {
         events
             .iter()
-            .map(|e| scope_cell(e, resolved, roots).chars().count())
+            .flat_map(|e| event_cells(e, resolved, roots, &result.extractions))
+            .map(|cell| cell.chars().count())
             .max()
             .unwrap_or(0)
             .min(SCOPE_CELL_MAX)
@@ -261,12 +264,9 @@ fn print_event(
                     line.push_str(&format!("  [{}]", d.status));
                 }
             };
+            let cells = event_cells(event, resolved, roots, extractions);
             if let Some(rows) = extractions.get(&d.id) {
-                for row in rows {
-                    let cell = cap_path(
-                        &relativize(&extraction_location(row), resolved),
-                        SCOPE_CELL_MAX,
-                    );
+                for (row, cell) in rows.iter().zip(&cells) {
                     let mut line = format!(
                         "#{:<4} {time}  {cell:<width$}  {}",
                         d.id,
@@ -277,7 +277,7 @@ fn print_event(
                 }
                 return;
             }
-            let cell = cap_path(&scope_cell(event, resolved, roots), SCOPE_CELL_MAX);
+            let cell = &cells[0];
             let mut line = format!("#{:<4} {time}  {cell:<width$}  {}", d.id, headline(d));
             suffix(&mut line);
             println!("{line}");
@@ -294,14 +294,31 @@ fn print_event(
     }
 }
 
-/// The drawn-from location of an extraction row: the source root's path plus
-/// its common rel prefix (empty prefix = the root itself).
-fn extraction_location(row: &DecisionExtraction) -> String {
-    if row.rel_prefix.is_empty() {
-        row.root_path.clone()
-    } else {
-        format!("{}/{}", row.root_path, row.rel_prefix)
+/// Every scope cell an event will actually render — one per extraction line
+/// for a decision shown in the extraction aspect, otherwise exactly one.
+///
+/// The column width and the printed lines both derive from this, because an
+/// extraction cell (the drawn-from location) is a different string from the
+/// selection-scope cell: width computed from one and lines printed with the
+/// other pushes the wider narration out of alignment.
+fn event_cells(
+    event: &TimelineEvent,
+    resolved: &ResolvedScope,
+    roots: &HashMap<i64, Root>,
+    extractions: &HashMap<i64, Vec<DecisionExtraction>>,
+) -> Vec<String> {
+    if let TimelineEvent::Decision(d) = event {
+        if let Some(rows) = extractions.get(&d.id) {
+            return rows
+                .iter()
+                .map(|row| cap_path(&relativize(&row.drawn_from(), resolved), SCOPE_CELL_MAX))
+                .collect();
+        }
     }
+    vec![cap_path(
+        &scope_cell(event, resolved, roots),
+        SCOPE_CELL_MAX,
+    )]
 }
 
 /// The extraction aspect's narration: `→ N files (size) to DEST (wording)`.
@@ -770,6 +787,26 @@ mod tests {
         }
     }
 
+    fn mk_decision(id: i64, scope: Option<Vec<String>>) -> Decision {
+        Decision {
+            id,
+            command: "apply".to_string(),
+            scope,
+            command_line: "canon apply m.lock".to_string(),
+            reason: None,
+            status: "completed".to_string(),
+            count_attempted: None,
+            count_completed: None,
+            count_failed: None,
+            count_skipped: None,
+            summary: Some("Archived 47 files".to_string()),
+            canon_version: "0.1.0".to_string(),
+            created_at: 0,
+            receipt_root_id: None,
+            receipt_rel_path: None,
+        }
+    }
+
     #[test]
     fn extraction_narration_retained_wording() {
         let row = mk_extraction_row(Some(3_900_000_000), Some(OriginDisposition::Retained));
@@ -818,15 +855,51 @@ mod tests {
     }
 
     #[test]
-    fn extraction_location_joins_prefix() {
-        let row = mk_extraction_row(None, None);
+    fn event_cells_measures_the_drawn_from_location_for_extraction_lines() {
+        // The column width is measured over these cells, so an extraction
+        // line's drawn-from location — not the decision's selection scope —
+        // must be what comes back, or the narration falls out of alignment.
+        let global = ResolvedScope {
+            prefixes: Vec::new(),
+            from_cwd: false,
+            auto_include_archived: false,
+        };
+        let event = TimelineEvent::Decision(mk_decision(1, Some(vec!["/short".to_string()])));
+
+        let mut extractions = HashMap::new();
+        extractions.insert(1, vec![mk_extraction_row(None, None)]);
+        // Capped at SCOPE_CELL_MAX like every other cell.
+        let cells = event_cells(&event, &global, &HashMap::new(), &extractions);
+        assert_eq!(cells, vec!["...mes/old-laptop/photos/2016/italy"]);
+        assert!(cells[0].chars().count() <= SCOPE_CELL_MAX);
+
+        // With no extraction rows the selection scope is the cell, as before.
+        let cells = event_cells(&event, &global, &HashMap::new(), &HashMap::new());
+        assert_eq!(cells, vec!["/short"]);
+    }
+
+    #[test]
+    fn event_cells_returns_one_cell_per_extraction_row() {
+        let global = ResolvedScope {
+            prefixes: Vec::new(),
+            from_cwd: false,
+            auto_include_archived: false,
+        };
+        let event = TimelineEvent::Decision(mk_decision(1, None));
+        let mut second = mk_extraction_row(None, None);
+        second.root_path = "/Volumes/nikon-sd".to_string();
+        second.rel_prefix = "dcim".to_string();
+        let mut extractions = HashMap::new();
+        extractions.insert(1, vec![mk_extraction_row(None, None), second]);
+
+        let cells = event_cells(&event, &global, &HashMap::new(), &extractions);
         assert_eq!(
-            extraction_location(&row),
-            "/Volumes/old-laptop/photos/2016/italy"
+            cells,
+            vec![
+                "...mes/old-laptop/photos/2016/italy",
+                "/Volumes/nikon-sd/dcim"
+            ]
         );
-        let mut root_only = mk_extraction_row(None, None);
-        root_only.rel_prefix = String::new();
-        assert_eq!(extraction_location(&root_only), "/Volumes/old-laptop");
     }
 
     #[test]
