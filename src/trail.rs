@@ -99,13 +99,24 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
     }
     if !show.extractions.is_empty() {
         println!("  drew from:");
-        for row in &show.extractions {
+        for extraction in &show.extractions {
+            let row = &extraction.row;
             let location = row.drawn_from();
             let files = format_count(row.files);
             let unit = if row.files == 1 { "file" } else { "files" };
+            // The snapshot path stays primary; a root the index no longer
+            // knows must not read as a live, visitable location.
+            let marker = if extraction.root_removed {
+                " (root removed)"
+            } else {
+                ""
+            };
             match row.bytes {
-                Some(bytes) => println!("    {location} — {files} {unit} ({})", format_size(bytes)),
-                None => println!("    {location} — {files} {unit}"),
+                Some(bytes) => println!(
+                    "    {location} — {files} {unit} ({}){marker}",
+                    format_size(bytes)
+                ),
+                None => println!("    {location} — {files} {unit}{marker}"),
             }
         }
     }

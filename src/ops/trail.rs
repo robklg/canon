@@ -280,6 +280,15 @@ pub struct ReceiptPointer {
     pub rel_path: String,
 }
 
+/// One `drew from:` line: the extraction row plus whether its source root is
+/// still known to the index. Liveness is derived at read time from the live
+/// roots list — never stored in the row (the snapshot records what happened;
+/// the marker says what the index knows now).
+pub struct ShowExtraction {
+    pub row: DecisionExtraction,
+    pub root_removed: bool,
+}
+
 pub struct ShowResult {
     pub decision: Decision,
     pub receipts: Vec<ReceiptPointer>,
@@ -287,7 +296,7 @@ pub struct ShowResult {
     pub receipt_absence: Option<String>,
     /// What this decision drew from each source root, if any (the extraction
     /// ledger's per-decision view — the source side of an apply).
-    pub extractions: Vec<DecisionExtraction>,
+    pub extractions: Vec<ShowExtraction>,
 }
 
 pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
@@ -337,7 +346,13 @@ pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
         None
     };
 
-    let extractions = repo::decision::fetch_extractions_by_decisions(conn, &[id])?;
+    let extractions = repo::decision::fetch_extractions_by_decisions(conn, &[id])?
+        .into_iter()
+        .map(|row| ShowExtraction {
+            root_removed: !roots.iter().any(|r| r.id == row.root_id),
+            row,
+        })
+        .collect();
 
     Ok(Some(ShowResult {
         decision,
@@ -901,11 +916,21 @@ mod tests {
 
         let show = compute_show(&conn, d).unwrap().unwrap();
         assert_eq!(show.extractions.len(), 2);
-        let a = show.extractions.iter().find(|r| r.root_id == root).unwrap();
-        assert_eq!(a.root_path, "/a");
-        assert_eq!(a.rel_prefix, "photos/2016/italy");
-        let gone = show.extractions.iter().find(|r| r.root_id == 999).unwrap();
-        assert_eq!(gone.root_path, "/Volumes/gone");
+        let a = show
+            .extractions
+            .iter()
+            .find(|e| e.row.root_id == root)
+            .unwrap();
+        assert_eq!(a.row.root_path, "/a");
+        assert_eq!(a.row.rel_prefix, "photos/2016/italy");
+        assert!(!a.root_removed);
+        let gone = show
+            .extractions
+            .iter()
+            .find(|e| e.row.root_id == 999)
+            .unwrap();
+        assert_eq!(gone.row.root_path, "/Volumes/gone");
+        assert!(gone.root_removed);
     }
 
     #[test]

@@ -113,12 +113,12 @@ Decision #61 — exclude_duplicates
     /archive/.canon-ledger/000061-exclude_duplicates.toml
 ```
 
-For an `apply` decision, a `drew from:` section lists what it took from each source root — path (or `root #N (removed)` if the root is gone since), files, and size:
+For an `apply` decision, a `drew from:` section lists what it took from each source root — path, files, and size. The path is a snapshot recorded at apply time, so it renders even after the root is gone; a root Canon no longer indexes (removed since) is marked, because a bare path must not read as a live, visitable location:
 
 ```
   drew from:
     /Volumes/old-laptop/photos/2016/italy — 47 files (3.9 GB)
-    /Volumes/nikon-sd/dcim — 12 files (401 MB)
+    /Volumes/nikon-sd/dcim — 12 files (401 MB) (root removed)
 ```
 
 No section when the decision drew from nowhere (every other decision kind).
