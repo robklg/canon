@@ -285,6 +285,9 @@ pub struct ShowResult {
     pub receipts: Vec<ReceiptPointer>,
     /// Why there is no receipt, when there is none — absence is never mute.
     pub receipt_absence: Option<String>,
+    /// What this decision drew from each source root, if any (the extraction
+    /// ledger's per-decision view — the source side of an apply).
+    pub extractions: Vec<DecisionExtraction>,
 }
 
 pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
@@ -334,10 +337,13 @@ pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
         None
     };
 
+    let extractions = repo::decision::fetch_extractions_by_decisions(conn, &[id])?;
+
     Ok(Some(ShowResult {
         decision,
         receipts,
         receipt_absence,
+        extractions,
     }))
 }
 
@@ -868,6 +874,199 @@ mod tests {
     fn show_unknown_id_is_none() {
         let conn = open_in_memory_for_test();
         assert!(compute_show(&conn, 12345).unwrap().is_none());
+    }
+
+    #[test]
+    fn show_lists_extractions_including_removed_root_snapshot() {
+        let conn = open_in_memory_for_test();
+        let root = insert_test_root(&conn, "/a", "source", false);
+        let d = insert_decision_at(&conn, "apply", 100);
+        repo::decision::upsert_extractions(
+            &conn,
+            d,
+            &[
+                extraction_row(
+                    d,
+                    root,
+                    "/a",
+                    "photos/2016/italy",
+                    47,
+                    Some(3_900_000),
+                    "/archive/x",
+                ),
+                // A second root already removed from the DB — the row's
+                // root_path snapshot must still render.
+                extraction_row(
+                    d,
+                    999,
+                    "/Volumes/gone",
+                    "dcim",
+                    12,
+                    Some(401_000),
+                    "/archive/y",
+                ),
+            ],
+        )
+        .unwrap();
+
+        let show = compute_show(&conn, d).unwrap().unwrap();
+        assert_eq!(show.extractions.len(), 2);
+        let a = show.extractions.iter().find(|r| r.root_id == root).unwrap();
+        assert_eq!(a.root_path, "/a");
+        assert_eq!(a.rel_prefix, "photos/2016/italy");
+        let gone = show.extractions.iter().find(|r| r.root_id == 999).unwrap();
+        assert_eq!(gone.root_path, "/Volumes/gone");
+    }
+
+    #[test]
+    fn show_no_extractions_is_empty_not_absent() {
+        let conn = open_in_memory_for_test();
+        let d = insert_decision_at(&conn, "scan", 100);
+        let show = compute_show(&conn, d).unwrap().unwrap();
+        assert!(show.extractions.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Time lens pinning (Story 4): extraction-touching decisions join
+    // --since/--on views through the same shared scoped id-union as the
+    // scope lens; day rollups need no new mechanics.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn time_lens_includes_extraction_touching_decision_in_right_day() {
+        let conn = open_in_memory_for_test();
+        let root = insert_test_root(&conn, "/a", "source", false);
+        let day1 = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
+        let ts1 = local_midnight(day1) + 3600;
+
+        // Global selection scope (no decision_scopes row) — only the
+        // extraction row ties it to this view.
+        let apply = insert_decision_at(&conn, "apply", ts1);
+        repo::decision::upsert_extractions(
+            &conn,
+            apply,
+            &[extraction_row(
+                apply,
+                root,
+                "/a",
+                "",
+                5,
+                Some(500),
+                "/archive",
+            )],
+        )
+        .unwrap();
+
+        let mut p = params(vec!["/a".to_string()]);
+        p.timeframe = Some(WhenValue::Since(day1));
+        let result = compute_trail(&conn, &p).unwrap();
+        match &result.view {
+            TrailView::Days(days) => {
+                assert_eq!(days.len(), 1);
+                assert_eq!(days[0].date, day1);
+                let ids: Vec<i64> = days[0]
+                    .events
+                    .iter()
+                    .filter_map(|e| match e {
+                        TimelineEvent::Decision(d) => Some(d.id),
+                        TimelineEvent::Note(_) => None,
+                    })
+                    .collect();
+                assert_eq!(ids, vec![apply]);
+            }
+            TrailView::Recent(_) => panic!("time lens must be Days"),
+        }
+    }
+
+    #[test]
+    fn time_lens_day_archived_rollup_reflects_apply_stamps_regardless_of_extraction_rows() {
+        // Day rollups already aggregate apply's destination-row stamps
+        // (present bucket => archived); extraction rows are a separate
+        // projection and need no new rollup mechanics.
+        let conn = open_in_memory_for_test();
+        let root = insert_test_root(&conn, "/a", "source", false);
+        let archive_root = insert_test_root(&conn, "/archive", "archive", false);
+        let day1 = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
+        let ts1 = local_midnight(day1) + 3600;
+
+        let apply = insert_decision_at(&conn, "apply", ts1);
+        scope(&conn, apply, root, "");
+        repo::decision::upsert_extractions(
+            &conn,
+            apply,
+            &[extraction_row(
+                apply,
+                root,
+                "/a",
+                "",
+                3,
+                Some(300),
+                "/archive",
+            )],
+        )
+        .unwrap();
+        // Three destination sources stamped by this decision — the rollup's
+        // "archived" line comes from *these* DB stamps, an independent
+        // mechanism from the extraction row's own `files` count above (which
+        // happens to agree here, but is not where the rollup reads from).
+        for (i, name) in ["a.jpg", "b.jpg", "c.jpg"].iter().enumerate() {
+            let dest = crate::repo::source::insert_test_source(
+                &conn,
+                archive_root,
+                name,
+                1,
+                i as i64 + 1,
+                100,
+                0,
+            );
+            conn.execute(
+                "UPDATE sources SET decision_id = ?, present = 1 WHERE id = ?",
+                rusqlite::params![apply, dest],
+            )
+            .unwrap();
+        }
+
+        let mut p = params(vec!["/a".to_string()]);
+        p.timeframe = Some(WhenValue::Since(day1));
+        let result = compute_trail(&conn, &p).unwrap();
+        match &result.view {
+            TrailView::Days(days) => {
+                assert_eq!(days[0].rollup.archived.files, 3);
+            }
+            TrailView::Recent(_) => panic!("time lens must be Days"),
+        }
+    }
+
+    #[test]
+    fn time_lens_global_view_unchanged_by_extraction_rows() {
+        let conn = open_in_memory_for_test();
+        let root = insert_test_root(&conn, "/a", "source", false);
+        let day1 = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
+        let ts1 = local_midnight(day1) + 3600;
+        let apply = insert_decision_at(&conn, "apply", ts1);
+        repo::decision::upsert_extractions(
+            &conn,
+            apply,
+            &[extraction_row(
+                apply,
+                root,
+                "/a",
+                "",
+                5,
+                Some(500),
+                "/archive",
+            )],
+        )
+        .unwrap();
+
+        let mut p = params(Vec::new());
+        p.timeframe = Some(WhenValue::Since(day1));
+        let result = compute_trail(&conn, &p).unwrap();
+        assert_eq!(result.unscoped_decisions, 0); // global view: never counted
+        match &result.view {
+            TrailView::Days(days) => assert_eq!(days.len(), 1),
+            TrailView::Recent(_) => panic!("time lens must be Days"),
+        }
     }
 
     #[test]

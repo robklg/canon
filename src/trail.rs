@@ -97,6 +97,18 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
         Some(scope) if !scope.is_empty() => println!("  scope:    {}", scope.join(", ")),
         _ => println!("  scope:    global"),
     }
+    if !show.extractions.is_empty() {
+        println!("  drew from:");
+        for row in &show.extractions {
+            let location = extraction_location(row);
+            let files = format_count(row.files);
+            let unit = if row.files == 1 { "file" } else { "files" };
+            match row.bytes {
+                Some(bytes) => println!("    {location} — {files} {unit} ({})", format_size(bytes)),
+                None => println!("    {location} — {files} {unit}"),
+            }
+        }
+    }
     println!("  version:  {}", d.canon_version);
     if let Some(summary) = &d.summary {
         println!("  summary:  {summary}");
