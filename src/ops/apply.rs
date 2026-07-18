@@ -18,6 +18,7 @@ use super::fs::{
     compute_partial_hash, copy_file, ensure_parent_dir, move_file, rename_file, MoveOutcome,
 };
 use crate::domain::decision::DecisionStatus;
+use crate::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
 use crate::domain::fact::FactEntry;
 use crate::domain::path::path_strip_prefix;
 use crate::domain::source::NewSource;
@@ -951,6 +952,58 @@ pub fn execute_apply(
                     path: transfer.source_path.clone(),
                     error: format!("Failed to register in DB: {e}"),
                 });
+            }
+        }
+    }
+
+    // --- Extraction ledger: record what this run drew from each source root ---
+    //
+    // Gated on a live decision id (which implies record_enabled — Records mode
+    // gets a live ledger too, receipts or not) and a non-empty completed set
+    // (the 0-item convention). Written after the DB mutations above and
+    // independent of receipt file writing — apply is non-transactional
+    // fix-forward by ADR, so a crash before this point is healed by a later
+    // `ledger reindex`.
+    if let Some(decision_id) = decision_id {
+        if !receipt_items.is_empty() {
+            let roots = repo::root::fetch_all(conn)?;
+            if let Some(archive_root) = roots.iter().find(|r| r.id == params.archive_root_id) {
+                let items: Vec<ExtractionItem> = receipt_items
+                    .iter()
+                    .map(|item| ExtractionItem {
+                        source_root: &item.source_root,
+                        source_rel_path: &item.source_rel_path,
+                        destination_rel_path: &item.destination_rel_path,
+                        size: item.size,
+                    })
+                    .collect();
+                let disposition = match params.transfer_mode {
+                    TransferMode::Copy => OriginDisposition::Retained,
+                    TransferMode::Move | TransferMode::Rename => OriginDisposition::Relocated,
+                };
+                let (rows, unknown_roots) = build_extraction_rows(
+                    &items,
+                    &roots,
+                    (Some(params.archive_root_id), &archive_root.path),
+                    Some(disposition),
+                    decision_id,
+                );
+                if let Err(e) = repo::decision::upsert_extractions(conn, decision_id, &rows) {
+                    if let Some(recorder) = recorder.as_mut() {
+                        recorder.push_warning(format!(
+                            "Warning: failed to record extraction ledger: {e}"
+                        ));
+                    }
+                }
+                if !unknown_roots.is_empty() {
+                    if let Some(recorder) = recorder.as_mut() {
+                        recorder.push_warning(format!(
+                            "Warning: {} source root(s) not recognized for the extraction ledger: {}",
+                            unknown_roots.len(),
+                            unknown_roots.join(", ")
+                        ));
+                    }
+                }
             }
         }
     }
@@ -3362,6 +3415,338 @@ mod tests {
         assert!(receipt_content.contains("source_rel_path = \"photo.jpg\""));
         assert!(receipt_content.contains("destination_rel_path = \"photo.jpg\""));
         assert!(receipt_content.contains("manifest = \"test.toml\""));
+    }
+
+    // =========================================================================
+    // Extraction ledger recording
+    // =========================================================================
+
+    fn latest_decision_id(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT id FROM decisions ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Build a single-transfer plan for one source root → one archive root,
+    /// with real file bytes on disk (extraction rows need real sizes).
+    fn single_transfer_plan(
+        src_dir: &Path,
+        rel_path: &str,
+        archive_rel_path: &str,
+        contents: &[u8],
+    ) -> (ApplyPlan, i64, i64) {
+        use std::io::Write;
+        let src_file = src_dir.join(rel_path);
+        if let Some(parent) = src_file.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(contents)
+            .unwrap();
+        let meta = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
+        #[cfg(not(unix))]
+        let (size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&src_file, size as u64).unwrap();
+
+        let plan = ApplyPlan {
+            transfers: vec![ApplyTransfer {
+                source_id: 1,
+                source_path: src_file.display().to_string(),
+                source_root_path: src_dir.display().to_string(),
+                source_rel_path: rel_path.to_string(),
+                dest_rel_path: archive_rel_path.to_string(),
+                archive_rel_path: archive_rel_path.to_string(),
+                object_id: None,
+                partial_hash: hash,
+                size,
+                mtime,
+                hash: None,
+            }],
+            violations: ApplyViolations::default(),
+            stale_sources: vec![],
+            already_archived_count: 0,
+            resume_already_there: vec![],
+            resume_already_there_source_present: 0,
+            resume_source_lost: vec![],
+            resume_size_mismatches: vec![],
+        };
+        (plan, size, mtime)
+    }
+
+    #[test]
+    fn test_execute_apply_records_extraction_row_copy_mode() {
+        let conn = setup_test_db();
+        let src_dir = tempfile::tempdir().unwrap();
+        let source_root = insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+
+        let (plan, size, _mtime) = single_transfer_plan(
+            src_dir.path(),
+            "2016/italy/a.jpg",
+            "2016/Italy/a.jpg",
+            b"hi",
+        );
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: None,
+        };
+        let decision = make_decision_params(false);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        assert_eq!(result.copied, 1);
+
+        let decision_id = latest_decision_id(&conn);
+        let rows = repo::decision::fetch_extractions_by_decisions(&conn, &[decision_id]).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.root_id, source_root);
+        assert_eq!(row.root_path, src_dir.path().display().to_string());
+        assert_eq!(row.rel_prefix, "2016/italy");
+        assert_eq!(row.files, 1);
+        assert_eq!(row.bytes, Some(size));
+        assert_eq!(row.destination_root_id, Some(archive_root));
+        assert_eq!(
+            row.destination_path,
+            format!("{}/2016/Italy", archive_dir.path().display())
+        );
+        assert_eq!(row.disposition, Some(OriginDisposition::Retained));
+    }
+
+    #[test]
+    fn test_execute_apply_records_extraction_row_move_mode_relocated() {
+        let conn = setup_test_db();
+        let src_dir = tempfile::tempdir().unwrap();
+        insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+
+        let (plan, _size, _mtime) =
+            single_transfer_plan(src_dir.path(), "a.jpg", "a.jpg", b"hello");
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Move,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: None,
+        };
+        let decision = make_decision_params(false);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        assert!(result.moved == 1 || result.renamed == 1);
+
+        let decision_id = latest_decision_id(&conn);
+        let rows = repo::decision::fetch_extractions_by_decisions(&conn, &[decision_id]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].disposition, Some(OriginDisposition::Relocated));
+    }
+
+    #[test]
+    fn test_execute_apply_records_extraction_row_per_source_root() {
+        let conn = setup_test_db();
+        let src_dir_a = tempfile::tempdir().unwrap();
+        let root_a = insert_root(&conn, src_dir_a.path().to_str().unwrap(), "source", false);
+        let src_dir_b = tempfile::tempdir().unwrap();
+        let root_b = insert_root(&conn, src_dir_b.path().to_str().unwrap(), "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+
+        let (plan_a, _, _) = single_transfer_plan(src_dir_a.path(), "x/1.jpg", "out/1.jpg", b"a");
+        let (plan_b, _, _) = single_transfer_plan(src_dir_b.path(), "y/2.jpg", "out/2.jpg", b"bb");
+        let plan = ApplyPlan {
+            transfers: plan_a
+                .transfers
+                .into_iter()
+                .chain(plan_b.transfers)
+                .collect(),
+            violations: ApplyViolations::default(),
+            stale_sources: vec![],
+            already_archived_count: 0,
+            resume_already_there: vec![],
+            resume_already_there_source_present: 0,
+            resume_source_lost: vec![],
+            resume_size_mismatches: vec![],
+        };
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: None,
+        };
+        let decision = make_decision_params(false);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        assert_eq!(result.copied, 2);
+
+        let decision_id = latest_decision_id(&conn);
+        let rows = repo::decision::fetch_extractions_by_decisions(&conn, &[decision_id]).unwrap();
+        assert_eq!(rows.len(), 2);
+        let a = rows.iter().find(|r| r.root_id == root_a).unwrap();
+        let b = rows.iter().find(|r| r.root_id == root_b).unwrap();
+        assert_eq!(a.rel_prefix, "x");
+        assert_eq!(a.files, 1);
+        assert_eq!(b.rel_prefix, "y");
+        assert_eq!(b.files, 1);
+        // destination_path is decision-wide, shared across both rows.
+        assert_eq!(a.destination_path, b.destination_path);
+    }
+
+    #[test]
+    fn test_execute_apply_zero_completed_transfers_records_no_extraction_rows() {
+        let conn = setup_test_db();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+
+        // No transfers at all: the 0-item convention — nothing completed,
+        // so no extraction row, even though recording is enabled.
+        let plan = ApplyPlan {
+            transfers: vec![],
+            violations: ApplyViolations::default(),
+            stale_sources: vec![],
+            already_archived_count: 0,
+            resume_already_there: vec![],
+            resume_already_there_source_present: 0,
+            resume_source_lost: vec![],
+            resume_size_mismatches: vec![],
+        };
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: None,
+        };
+        let decision = make_decision_params(false);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        assert_eq!(result.copied, 0);
+
+        let decision_id = latest_decision_id(&conn);
+        let rows = repo::decision::fetch_extractions_by_decisions(&conn, &[decision_id]).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn test_execute_apply_records_mode_still_writes_extraction_rows() {
+        // Records mode: receipts off, DB recording on — the extraction ledger
+        // is gated on record_enabled, not receipt_enabled, so it still writes.
+        let conn = setup_test_db();
+        let src_dir = tempfile::tempdir().unwrap();
+        insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+
+        let (plan, _, _) = single_transfer_plan(src_dir.path(), "a.jpg", "a.jpg", b"records");
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: None, // Records mode never builds a receipt_ctx
+        };
+        let decision = make_decision_params(false); // receipt_enabled = false
+        assert!(!decision.receipt_enabled);
+        assert!(decision.record_enabled);
+        execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+
+        let decision_id = latest_decision_id(&conn);
+        let rows = repo::decision::fetch_extractions_by_decisions(&conn, &[decision_id]).unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "Records mode should still record extraction rows"
+        );
+    }
+
+    #[test]
+    fn test_execute_apply_no_decision_records_no_extraction_rows() {
+        // No DecisionParams at all (the dry-run / disabled-recording shape at
+        // this layer): no decision id exists to attribute rows to.
+        let conn = setup_test_db();
+        let src_dir = tempfile::tempdir().unwrap();
+        insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+
+        let (plan, _, _) = single_transfer_plan(src_dir.path(), "a.jpg", "a.jpg", b"dryrun");
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: None,
+        };
+        execute_apply(&conn, &plan, &params, &NoopProgress, None).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM decision_extractions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]
