@@ -538,7 +538,7 @@ pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
     let extractions = repo::decision::fetch_extractions_by_decisions(conn, &[id])?
         .into_iter()
         .map(|row| ShowExtraction {
-            root_removed: !roots.iter().any(|r| r.id == row.root_id),
+            root_removed: row.origin_root_removed(roots.iter().map(|r| r.path.as_str())),
             row,
         })
         .collect();
@@ -1737,6 +1737,27 @@ mod tests {
             .unwrap();
         assert_eq!(gone.row.root_path, "/Volumes/gone");
         assert!(gone.root_removed);
+    }
+
+    #[test]
+    fn show_does_not_mark_a_re_added_root_as_removed() {
+        // The row's snapshot id is stale because the root was removed and
+        // re-added, but the location is registered and visitable — matching
+        // on the path is what keeps `drew from:` honest.
+        let conn = open_in_memory_for_test();
+        let re_added = insert_test_root(&conn, "/a", "source", false);
+        let d = insert_decision_at(&conn, "apply", 100);
+        let mut row = extraction_row(d, re_added, "/a", "photos", 3, Some(30), "/archive/x");
+        row.root_id = 999; // the id the root carried before it was re-added
+        repo::decision::upsert_extractions(&conn, &[row]).unwrap();
+
+        let show = compute_show(&conn, d).unwrap().unwrap();
+        assert_eq!(show.extractions.len(), 1);
+        assert_ne!(show.extractions[0].row.root_id, re_added);
+        assert!(
+            !show.extractions[0].root_removed,
+            "a live location must not read as removed"
+        );
     }
 
     #[test]

@@ -69,6 +69,27 @@ impl DecisionExtraction {
     pub fn drawn_from(&self) -> String {
         join_prefix(&self.root_path, &self.rel_prefix)
     }
+
+    /// Whether this row's origin root is gone from the live index — the one
+    /// derivation behind every `(root removed)` marker.
+    ///
+    /// Matched on the **snapshot path, not `root_id`**, for the same reason
+    /// arrival matching is: a root that was removed and re-added carries a
+    /// new id, so an id comparison would call a perfectly visitable location
+    /// removed. A root that exists today is visitable today, whatever a stale
+    /// snapshot id says.
+    ///
+    /// Takes live paths rather than a prepared set so each caller can pass
+    /// what it already holds; the root count is small and this runs per
+    /// rendered row.
+    pub fn origin_root_removed<'a>(
+        &self,
+        live_root_paths: impl IntoIterator<Item = &'a str>,
+    ) -> bool {
+        !live_root_paths
+            .into_iter()
+            .any(|path| path == self.root_path)
+    }
 }
 
 /// One completed transfer, item-shaped for [`build_extraction_rows`] — the
@@ -192,6 +213,30 @@ mod tests {
         assert_eq!(row.drawn_from(), "/vol/photos/2016/italy");
         row.rel_prefix = String::new();
         assert_eq!(row.drawn_from(), "/vol/photos");
+    }
+
+    #[test]
+    fn origin_root_removed_reads_paths_not_ids() {
+        let row = DecisionExtraction {
+            decision_id: 1,
+            // A stale id: this root was removed and re-added, so the live
+            // index knows the same location under a different id now.
+            root_id: 7,
+            root_path: "/vol/photos".to_string(),
+            rel_prefix: String::new(),
+            files: 1,
+            bytes: None,
+            destination_root_id: None,
+            destination_path: "/archive".to_string(),
+            disposition: None,
+        };
+        // Live at the same path under id 99 — visitable today, so not removed.
+        assert!(!row.origin_root_removed(["/vol/photos"]));
+        // Gone entirely.
+        assert!(row.origin_root_removed(["/archive", "/vol/other"]));
+        assert!(row.origin_root_removed([]));
+        // Segment boundary: /vol/photos-old is a different location.
+        assert!(row.origin_root_removed(["/vol/photos-old"]));
     }
 
     #[test]

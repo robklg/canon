@@ -161,8 +161,13 @@ pub fn card_applies(view: ViewShape) -> bool {
     !view.machine_output && !view.global && !view.time_lens
 }
 
+/// Accumulator for one merged origin-root line.
+///
+/// Deliberately holds neither `root_removed` nor anything else derivable from
+/// the group key: the key *is* the root path, so both live-ness and
+/// within-ness are properties of the group, decided once after merging rather
+/// than by whichever row happened to arrive first.
 struct FromRootAcc {
-    root_removed: bool,
     from_within: bool,
     files: i64,
     bytes: i64,
@@ -199,7 +204,7 @@ pub fn build_card(
     groups: &HashMap<Option<i64>, BucketCount>,
     decisions: &HashMap<i64, Decision>,
     extractions_by_decision: &HashMap<i64, Vec<DecisionExtraction>>,
-    live_root_ids: &HashSet<i64>,
+    live_root_paths: &HashSet<String>,
     prefixes: &[String],
 ) -> CompositionCard {
     let mut files = 0i64;
@@ -286,7 +291,6 @@ pub fn build_card(
                                 let entry =
                                     from_roots.entry(row.root_path.clone()).or_insert_with(|| {
                                         FromRootAcc {
-                                            root_removed: !live_root_ids.contains(&row.root_id),
                                             from_within: contains_view(&row.root_path, prefixes),
                                             files: 0,
                                             bytes: 0,
@@ -336,9 +340,12 @@ pub fn build_card(
     for (root_path, acc) in from_roots {
         let mut decision_ids = acc.decision_ids;
         decision_ids.sort_unstable();
+        // Decided from the group key, so a root removed and re-added can't be
+        // called removed on the strength of whichever stale row merged first.
+        let root_removed = !live_root_paths.iter().any(|p| p == &root_path);
         origins.push(OriginLine::FromRoot {
             root_path,
-            root_removed: acc.root_removed,
+            root_removed,
             from_within: acc.from_within,
             files: acc.files,
             bytes: acc.bytes,
@@ -416,6 +423,22 @@ mod tests {
         vec!["/archive".to_string()]
     }
 
+    /// The live roots, by path — `build_card` decides removed-ness by
+    /// location, not by id.
+    fn live(paths: &[&str]) -> HashSet<String> {
+        paths.iter().map(|p| p.to_string()).collect()
+    }
+
+    /// An origin line's bytes. A test helper rather than a public accessor
+    /// beside `files()`: only the sum-invariant tests need it, and the domain
+    /// API shouldn't grow a method production never calls.
+    fn origin_bytes(line: &OriginLine) -> i64 {
+        match line {
+            OriginLine::FromRoot { bytes, .. } => *bytes,
+            OriginLine::MultiOrigin { bytes, .. } => *bytes,
+        }
+    }
+
     #[test]
     fn single_origin_applies_from_one_root_merge_across_decisions() {
         let d1 = mk_decision(1, "apply", 100);
@@ -426,7 +449,7 @@ mod tests {
             (1, vec![mk_extraction(1, 7, "/vol/a")]),
             (2, vec![mk_extraction(2, 7, "/vol/a")]),
         ]);
-        let live = HashSet::from([7]);
+        let live = live(&["/vol/a"]);
 
         let card = build_card(&groups, &decisions, &extractions, &live, &view());
         assert_eq!(card.origins.len(), 1);
@@ -463,7 +486,7 @@ mod tests {
             1,
             vec![mk_extraction(1, 7, "/vol/a"), mk_extraction(1, 8, "/vol/b")],
         )]);
-        let live = HashSet::from([7, 8]);
+        let live = live(&["/vol/a", "/vol/b", "/vol/small", "/vol/big"]);
 
         let card = build_card(&groups, &decisions, &extractions, &live, &view());
         assert_eq!(card.origins.len(), 1);
@@ -591,7 +614,7 @@ mod tests {
             &groups,
             &decisions,
             &extractions,
-            &HashSet::from([7]),
+            &live(&["/archive", "/vol/a", "/Volumes/sd"]),
             &view(),
         );
         assert!(card.origins.is_empty(), "a place is not its own origin");
@@ -626,7 +649,7 @@ mod tests {
             &groups,
             &decisions,
             &extractions,
-            &HashSet::from([7]),
+            &live(&["/archive", "/vol/a", "/Volumes/sd"]),
             &["/archive/2020".to_string()],
         );
         assert!(card.transitioned.is_empty());
@@ -651,7 +674,7 @@ mod tests {
             &groups,
             &decisions,
             &extractions,
-            &HashSet::from([7]),
+            &live(&["/archive", "/vol/a", "/Volumes/sd"]),
             &["/archive/2020".to_string()],
         );
         match &card.origins[0] {
@@ -679,7 +702,7 @@ mod tests {
             &groups,
             &decisions,
             &extractions,
-            &HashSet::from([7]),
+            &live(&["/archive", "/vol/a", "/Volumes/sd"]),
             &["/archive/2020".to_string()],
         );
         match &card.origins[0] {
@@ -727,7 +750,7 @@ mod tests {
             &groups,
             &decisions,
             &extractions,
-            &HashSet::from([7, 8]),
+            &live(&["/vol/a", "/vol/b", "/Volumes/sd", "/archive"]),
             &view(),
         );
         assert!(card.transitioned.is_empty(), "not a rearrangement");
@@ -762,7 +785,7 @@ mod tests {
             &groups,
             &decisions,
             &extractions,
-            &HashSet::from([7, 8]),
+            &live(&["/vol/a", "/vol/b", "/Volumes/sd", "/archive"]),
             &view(),
         );
         assert_eq!(card.files, 82);
@@ -772,14 +795,7 @@ mod tests {
             + card.transitioned.iter().map(|t| t.files).sum::<i64>()
             + card.indexed_here.map(|b| b.files).unwrap_or(0)
             + card.untracked.map(|b| b.files).unwrap_or(0);
-        let sum_bytes: i64 = card
-            .origins
-            .iter()
-            .map(|o| match o {
-                OriginLine::FromRoot { bytes, .. } => *bytes,
-                OriginLine::MultiOrigin { bytes, .. } => *bytes,
-            })
-            .sum::<i64>()
+        let sum_bytes: i64 = card.origins.iter().map(origin_bytes).sum::<i64>()
             + card.transitioned.iter().map(|t| t.bytes).sum::<i64>()
             + card.indexed_here.map(|b| b.bytes).unwrap_or(0)
             + card.untracked.map(|b| b.bytes).unwrap_or(0);
@@ -801,7 +817,7 @@ mod tests {
             &groups,
             &decisions,
             &extractions,
-            &HashSet::from([7]),
+            &live(&["/archive", "/vol/a", "/Volumes/sd"]),
             &view(),
         );
         assert!(card.origins.is_empty());
@@ -894,7 +910,7 @@ mod tests {
         ]);
         let decisions = HashMap::from([(1, apply), (2, scan), (3, exclude)]);
         let extractions = HashMap::from([(1, vec![mk_extraction(1, 7, "/vol/a")])]);
-        let live = HashSet::from([7]);
+        let live = live(&["/vol/a"]);
 
         let card = build_card(&groups, &decisions, &extractions, &live, &view());
         assert_eq!(card.files, 100);
@@ -905,6 +921,14 @@ mod tests {
             + card.indexed_here.map(|b| b.files).unwrap_or(0)
             + card.untracked.map(|b| b.files).unwrap_or(0);
         assert_eq!(bucket_sum_files, card.files);
+
+        // Bytes too: a card whose files add up but whose sizes don't would
+        // still be misreporting what stands here.
+        let bucket_sum_bytes: i64 = card.origins.iter().map(origin_bytes).sum::<i64>()
+            + card.transitioned.iter().map(|t| t.bytes).sum::<i64>()
+            + card.indexed_here.map(|b| b.bytes).unwrap_or(0)
+            + card.untracked.map(|b| b.bytes).unwrap_or(0);
+        assert_eq!(bucket_sum_bytes, card.bytes);
     }
 
     #[test]
@@ -965,7 +989,7 @@ mod tests {
             (1, vec![mk_extraction(1, 7, "/vol/small")]),
             (2, vec![mk_extraction(2, 8, "/vol/big")]),
         ]);
-        let live = HashSet::from([7, 8]);
+        let live = live(&["/vol/a", "/vol/b", "/vol/small", "/vol/big"]);
 
         let card = build_card(&groups, &decisions, &extractions, &live, &view());
         assert_eq!(card.origins.len(), 2);
@@ -979,11 +1003,70 @@ mod tests {
         let groups = HashMap::from([(Some(1), bucket(1, 1))]);
         let decisions = HashMap::from([(1, d)]);
         let extractions = HashMap::from([(1, vec![mk_extraction(1, 7, "/vol/gone")])]);
-        // root_id 7 is absent from the live set.
+        // No live root at that path.
         let card = build_card(&groups, &decisions, &extractions, &HashSet::new(), &view());
 
         match &card.origins[0] {
             OriginLine::FromRoot { root_removed, .. } => assert!(root_removed),
+            OriginLine::MultiOrigin { .. } => panic!("expected FromRoot"),
+        }
+    }
+
+    #[test]
+    fn re_added_origin_root_is_not_marked_removed() {
+        // Removed and re-added, so the live index knows this location under a
+        // new id while the snapshot row still carries the old one. The drive
+        // is on the desk; saying "(root removed)" would be a lie.
+        let d = mk_decision(1, "apply", 100);
+        let groups = HashMap::from([(Some(1), bucket(1, 1))]);
+        let decisions = HashMap::from([(1, d)]);
+        let extractions = HashMap::from([(1, vec![mk_extraction(1, 7, "/vol/a")])]);
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &live(&["/vol/a"]), // live under some other id now
+            &view(),
+        );
+
+        match &card.origins[0] {
+            OriginLine::FromRoot { root_removed, .. } => assert!(!root_removed),
+            OriginLine::MultiOrigin { .. } => panic!("expected FromRoot"),
+        }
+    }
+
+    #[test]
+    fn merged_origin_liveness_is_decided_by_the_group_not_the_first_row() {
+        // Two applies from the same location, recorded under different ids
+        // because the root was removed and re-added between them. Merging
+        // keys on the path, so both rows are one line — and its liveness must
+        // come from the path, not from whichever row merged first.
+        let d1 = mk_decision(1, "apply", 100);
+        let d2 = mk_decision(2, "apply", 200);
+        let groups = HashMap::from([(Some(1), bucket(10, 1_000)), (Some(2), bucket(5, 500))]);
+        let decisions = HashMap::from([(1, d1), (2, d2)]);
+        let extractions = HashMap::from([
+            (1, vec![mk_extraction(1, 7, "/vol/a")]),  // stale id
+            (2, vec![mk_extraction(2, 42, "/vol/a")]), // current id
+        ]);
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &live(&["/vol/a"]),
+            &view(),
+        );
+
+        assert_eq!(card.origins.len(), 1, "one location, one line");
+        match &card.origins[0] {
+            OriginLine::FromRoot {
+                root_removed,
+                files,
+                ..
+            } => {
+                assert!(!root_removed);
+                assert_eq!(*files, 15);
+            }
             OriginLine::MultiOrigin { .. } => panic!("expected FromRoot"),
         }
     }

@@ -409,7 +409,8 @@ fn format_origin_line(line: &OriginLine) -> String {
             at,
         } => {
             format!(
-                "via apply #{decision_id} from {origin_count} origins: {} \u{00b7} {}",
+                "via apply #{decision_id} from {} origins: {} \u{00b7} {}",
+                format_count(*origin_count),
                 format_bucket(*files, *bytes),
                 format_date_only(*at)
             )
@@ -493,6 +494,12 @@ fn print_event(
             if !rows.is_empty() {
                 for ((row, aspect), cell) in rows.iter().zip(&cells) {
                     let narration = match aspect {
+                        // Relativized per row even though `destination_path`
+                        // is decision-wide today: reading it from the row
+                        // each time costs one string op and cannot go stale
+                        // if that ever stops holding, whereas hoisting would
+                        // silently render every row with the first row's
+                        // destination.
                         RowAspect::Rearrangement => extraction_narration_with_destination(
                             row,
                             &relativize(&row.destination_path, resolved),
@@ -630,10 +637,15 @@ fn arrival_narration(row: &DecisionExtraction, roots: &HashMap<i64, Root>) -> St
 const ROOT_REMOVED_MARKER: &str = " (root removed)";
 
 /// An arrival row's drawn-from location, with the removed-root marker
-/// appended when the origin's source root is absent from the live roots map.
+/// appended when the origin's source root is gone from the live index.
+///
+/// Live-ness is decided by `DecisionExtraction::origin_root_removed` — the
+/// same rule `trail show` and the composition card use, matched on the
+/// snapshot path rather than `root_id` so a removed-and-re-added root doesn't
+/// draw a spurious marker.
 fn origin_location(row: &DecisionExtraction, roots: &HashMap<i64, Root>) -> String {
     let mut location = row.drawn_from();
-    if !roots.contains_key(&row.root_id) {
+    if row.origin_root_removed(roots.values().map(|r| r.path.as_str())) {
         location.push_str(ROOT_REMOVED_MARKER);
     }
     location
@@ -644,6 +656,7 @@ fn origin_location(row: &DecisionExtraction, roots: &HashMap<i64, Root>) -> Stri
 fn format_extraction_rollup(rollup: &ExtractionRollup) -> String {
     let files = format_count(rollup.files);
     let unit = if rollup.files == 1 { "file" } else { "files" };
+    let destinations = format_count(rollup.destinations);
     let dest_unit = if rollup.destinations == 1 {
         "destination"
     } else {
@@ -651,14 +664,10 @@ fn format_extraction_rollup(rollup: &ExtractionRollup) -> String {
     };
     match rollup.bytes {
         Some(bytes) => format!(
-            "Archived from here: {files} {unit} ({}) \u{2192} {} {dest_unit}.",
-            format_size(bytes),
-            rollup.destinations
+            "Archived from here: {files} {unit} ({}) \u{2192} {destinations} {dest_unit}.",
+            format_size(bytes)
         ),
-        None => format!(
-            "Archived from here: {files} {unit} \u{2192} {} {dest_unit}.",
-            rollup.destinations
-        ),
+        None => format!("Archived from here: {files} {unit} \u{2192} {destinations} {dest_unit}."),
     }
 }
 
@@ -668,6 +677,7 @@ fn format_extraction_rollup(rollup: &ExtractionRollup) -> String {
 fn format_arrival_rollup(rollup: &ArrivalRollup) -> String {
     let files = format_count(rollup.files);
     let unit = if rollup.files == 1 { "file" } else { "files" };
+    let origins = format_count(rollup.origins);
     let origin_unit = if rollup.origins == 1 {
         "origin"
     } else {
@@ -675,14 +685,10 @@ fn format_arrival_rollup(rollup: &ArrivalRollup) -> String {
     };
     match rollup.bytes {
         Some(bytes) => format!(
-            "Arrived here: {files} {unit} ({}) from {} {origin_unit}.",
-            format_size(bytes),
-            rollup.origins
+            "Arrived here: {files} {unit} ({}) from {origins} {origin_unit}.",
+            format_size(bytes)
         ),
-        None => format!(
-            "Arrived here: {files} {unit} from {} {origin_unit}.",
-            rollup.origins
-        ),
+        None => format!("Arrived here: {files} {unit} from {origins} {origin_unit}."),
     }
 }
 
@@ -1325,6 +1331,17 @@ mod tests {
     }
 
     #[test]
+    fn arrival_narration_no_marker_when_origin_root_was_re_added() {
+        // The row's snapshot id predates a remove-and-re-add, so the live
+        // map holds the same location under a different id. Matching on ids
+        // would call a drive that's plugged in "removed".
+        let row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
+        assert_eq!(row.root_id, 1);
+        let roots = HashMap::from([(77, mk_root(77, "/Volumes/old-laptop"))]);
+        assert!(!arrival_narration(&row, &roots).contains(ROOT_REMOVED_MARKER));
+    }
+
+    #[test]
     fn event_cells_measures_the_drawn_from_location_for_extraction_lines() {
         // The column width is measured over these cells, so an extraction
         // line's drawn-from location — not the decision's selection scope —
@@ -1480,6 +1497,32 @@ mod tests {
             format_extraction_rollup(&rollup),
             "Archived from here: 1,251 files (22.1 GB) \u{2192} 2 destinations."
         );
+    }
+
+    #[test]
+    fn rollup_counterparty_counts_carry_thousands_separators() {
+        // Every other count in the trail goes through format_count; a fleet
+        // of drives shouldn't be the one place that prints "1251".
+        assert!(format_extraction_rollup(&ExtractionRollup {
+            files: 5,
+            bytes: Some(10),
+            destinations: 1_251,
+        })
+        .contains("1,251 destinations"));
+        assert!(format_arrival_rollup(&ArrivalRollup {
+            files: 5,
+            bytes: Some(10),
+            origins: 2_400,
+        })
+        .contains("2,400 origins"));
+        assert!(format_origin_line(&OriginLine::MultiOrigin {
+            decision_id: 1,
+            origin_count: 1_050,
+            files: 5,
+            bytes: 10,
+            at: local_ts_on("2026-05-12"),
+        })
+        .contains("from 1,050 origins"));
     }
 
     #[test]

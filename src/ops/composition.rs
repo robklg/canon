@@ -79,13 +79,15 @@ pub fn compute_composition(
             .push(row);
     }
 
-    let live_root_ids: HashSet<i64> = roots.iter().map(|r| r.id).collect();
+    // Keyed by path, not id: a root removed and re-added carries a new id but
+    // the same location, and a location that exists today is visitable today.
+    let live_root_paths: HashSet<String> = roots.iter().map(|r| r.path.clone()).collect();
 
     let card = build_card(
         &groups,
         &decisions,
         &extractions_by_decision,
-        &live_root_ids,
+        &live_root_paths,
         prefixes,
     );
     if !card.has_origin_story() {
