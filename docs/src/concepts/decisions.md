@@ -164,7 +164,9 @@ canon exclude set --where 'source.ext=dll' --no-receipt
 
 Standing at a source location, the decisions above tell only half the story: deletions and exclusions, not what was *archived out of* the place. The **extraction ledger** is the outbound half — an aggregate index, `decision_extractions`, of what each `apply` drew from each source root: how many files, how many bytes, where they went, and whether the originals remain (copied) or are gone from here (moved).
 
-It is deliberately **aggregate-only** — one row per (decision, source root), never a per-item copy. Per-item detail already lives in the apply receipt on disk; the ledger row exists so `canon trail` can answer "what left from here?" without re-reading every receipt on every scoped view.
+It is deliberately **aggregate-only** — one row per (decision, source root, origin directory, destination directory), never a per-item copy. Per-item detail already lives in the apply receipt on disk; the ledger rows exist so `canon trail` can answer "what left from here?" without re-reading every receipt on every scoped view.
+
+Every row makes one uniform claim: *all its files lie under its recorded origin location, and were placed under its recorded destination location.* That claim is exactly what the trail matches — a row surfaces at the views that contain its locations and nowhere else, and wherever it surfaces, its counts are exact. This is deliberately a different rule from a decision's acted-on *scope*, which matches in both directions (acting on a parent folder acts on its children too): a scope declares "I acted on this subtree", while a placement records where files demonstrably are — a location *above* your view implies the first, never the second. Rows recorded before Canon kept directory precision hold coarse common prefixes; they make the same claim less tightly, so they match conservatively — at their recorded prefix and above, silent below it — until reindexed.
 
 The recorded paths are write-time snapshots, not live lookups — a row keeps telling its story after the source root has been removed from Canon. `canon trail show` marks such roots `(root removed)`, so a snapshot path never silently reads as a live, visitable location.
 
@@ -176,7 +178,7 @@ This is the same principle that governs the rest of provenance: the database is 
 canon ledger reindex
 ```
 
-See [`ledger reindex`](../commands/maintain/ledger-reindex.md) for the full command. It walks every `apply` decision, reads its receipt (tolerating older receipts that predate today's self-describing fields), and rebuilds the same aggregate rows the forward `apply` path writes — a backfilled row is indistinguishable from a forward-recorded one, by construction (both go through the same aggregation).
+See [`ledger reindex`](../commands/maintain/ledger-reindex.md) for the full command. It walks every `apply` decision, reads its receipt (tolerating older receipts that predate today's self-describing fields), and rebuilds the same aggregate rows the forward `apply` path writes — a backfilled row is indistinguishable from a forward-recorded one, by construction (both go through the same aggregation). The same run upgrades pre-precision rows to directory precision: the receipt holds the per-item paths, so a rebuilt row is as tight as a forward-recorded one, and a coarse row is replaced, never left standing beside its precise successors.
 
 Gaps are reported, never inferred: a decision with no receipt on disk (recording was off, or `--no-receipt` was used) is not something `reindex` can recover, and it says so rather than guessing.
 

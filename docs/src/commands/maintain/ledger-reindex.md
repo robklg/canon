@@ -12,6 +12,7 @@ canon ledger reindex
 
 ## When to run it
 
+- **After upgrading to a Canon that records placements at directory precision**: applies indexed by an older Canon are known only to a coarse common prefix — visible at that prefix and above, silent in deeper views. One reindex rebuilds them at full precision from their receipts.
 - **After restoring a database** from an older backup: recent `apply` decisions may be missing their extraction rows even though their receipts survived on disk.
 - **After manually clearing or losing rows** in `decision_extractions`.
 - **As a periodic check** — it's idempotent and safe to run anytime; decisions already indexed converge to the same rows rather than duplicating.

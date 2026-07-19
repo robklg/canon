@@ -45,7 +45,7 @@ Decision trail: /mnt/old-drive/photos
 2 global decisions not shown (--global).
 ```
 
-A decision *touches* the scope in either direction: a decision on a parent folder happened to this folder too, and a decision on a subfolder is activity here. Sibling folders' decisions don't appear.
+A decision *touches* the scope in either direction: a decision on a parent folder happened to this folder too, and a decision on a subfolder is activity here. Sibling folders' decisions don't appear. That rule applies to a decision's *acted-on scope* — a claim about a whole subtree. The extraction and arrival lines below follow recorded *placements* instead, which match by their own, stricter rule: a placement appears only in views that contain it.
 
 Each line carries the decision id, timestamp, the scope it acted on, the completion summary, and your `--reason` (quoted). The scope column is relative to what you're viewing (`.` is the viewed folder itself); in global views it shows the path, capped from the left. Decisions recorded without a scope show `global`. Decisions that did not complete cleanly are marked (`[partial]`, `[interrupted]`, `[started]`).
 
@@ -61,6 +61,8 @@ Standing at a source location, an `apply` that drew content out of this scope sh
 
 The scope cell is the drawn-from location, not the destination; the disposition tells you whether the originals remain (`copied`) or are gone from here (`moved`). A decision appears once per view — never both a selection line and an extraction line.
 
+The ledger records an apply per directory it drew from, so a view shows only what actually left *it*: an apply that drew from two sibling folders never surfaces at a third, and standing inside one of them you see that folder's share of the draw, not the apply-wide total.
+
 Scoped scope-lens views end with a whole-history rollup, independent of the `--limit` cap — it answers "where am I with this drive?", not "what happened recently":
 
 ```
@@ -71,7 +73,7 @@ Omitted when nothing has ever been drawn from here. Sizes are omitted (not guess
 
 ## The inbound direction: what arrived here
 
-Standing at a destination, the same apply shows up too — its recorded destination touching this scope is enough, regardless of where its source root sits. It renders in the *arrival aspect*:
+Standing at a destination, the same apply shows up too — files it placed inside this scope are enough, regardless of where its source root sits. It renders in the *arrival aspect*:
 
 ```
 #42   2026-05-12 14:03  .   ← 47 files (3.9 GB) from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain) · "italy assembly"
@@ -80,6 +82,8 @@ Standing at a destination, the same apply shows up too — its recorded destinat
 The scope cell is the destination this time, view-relative (`.` for the viewed folder itself); the wording mirrors the outbound direction (`copied in; originals remain` / `moved in`). A source root the live index no longer knows renders with `(root removed)` appended, the same honesty as `trail show`'s `drew from:` lines.
 
 When a decision's origin *and* destination both sit inside the view — content rearranged entirely within one scope — it renders once, not twice: the extraction-aspect line, with the destination shown view-relative instead of absolute. Both endpoints stay visible in that one line.
+
+**A placement matches only where the view contains it, at its recorded precision.** Deliveries are recorded per destination directory, so an apply that delivered to `2016/01` and `2016/02` never appears at `2016/03` — and an arrival line's counts are what landed inside the view you're standing in, never the apply-wide total. Applies recorded before Canon kept directory precision are known only to a coarse common prefix of where their files landed: they surface at that prefix and above, and stay silent below it rather than guessing. [`canon ledger reindex`](../maintain/ledger-reindex.md) rebuilds directory precision from the receipts on disk and closes that gap wherever a receipt exists.
 
 The matching whole-history rollup:
 
@@ -193,6 +197,15 @@ For an `apply` decision, a `drew from:` section lists what it took from each sou
     /Volumes/nikon-sd/dcim — 12 files (401 MB) (root removed)
 ```
 
+When one root's draw fanned out across directories, they are listed beneath its summary line with their own shares — capped at five, with an explicit `… and N more directories` remainder, never a silent truncation:
+
+```
+  drew from:
+    /Volumes/nikon-sd/dcim — 245 files (2.4 GB)
+      dcim/100nikon — 105 files (1.0 GB)
+      dcim/101nikon — 140 files (1.4 GB)
+```
+
 The marker follows the recorded root, not the path. If you remove a root and later re-add the same path, old extractions still show `(root removed)` — they belong to the root that was removed; the re-added one is a new root that happens to share its path.
 
 No section when the decision drew from nowhere (every other decision kind).
@@ -201,7 +214,7 @@ No section when the decision drew from nowhere (every other decision kind).
 
 ## Machine output
 
-`--jsonl` emits one JSON object per timeline event, with a `type` field (`"decision"` or `"note"`), the raw command identifier, timestamps, counts, reason, scope, summary, and receipt location. An `apply` event additionally carries `extractions` — one entry per drawn-from root (`root`, `rel_prefix`, `files`, `bytes`, `destination`, `disposition`) — populated regardless of view, including `--global`, so machine consumers never have to re-derive it from a scoped run. The field is absent (not `[]`) for decisions that drew from nothing. The scope header moves to stderr so stdout stays clean:
+`--jsonl` emits one JSON object per timeline event, with a `type` field (`"decision"` or `"note"`), the raw command identifier, timestamps, counts, reason, scope, summary, and receipt location. An `apply` event additionally carries `extractions` — one entry per recorded placement, a source root's origin directory paired with the destination directory it fed (`root`, `rel_prefix`, `files`, `bytes`, `destination`, `disposition`) — populated regardless of view, including `--global`, so machine consumers never have to re-derive it from a scoped run. (Rows recorded before directory precision are one per source root, with common-prefix locations — the same fields, coarser values.) The field is absent (not `[]`) for decisions that drew from nothing. The scope header moves to stderr so stdout stays clean:
 
 ```bash
 canon trail --today --global --jsonl | jq -r 'select(.type=="decision") | .summary'
