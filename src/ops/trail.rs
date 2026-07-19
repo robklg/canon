@@ -893,29 +893,69 @@ mod tests {
     }
 
     #[test]
-    fn arrival_surfaces_via_absolute_path_even_when_destination_root_unknown() {
-        // No root registered at the destination path at all — as if the
-        // archive root that received this apply was later removed. Arrival
-        // matching runs on the row's snapshot path, not a live root lookup,
-        // so it must still surface.
+    fn arrival_surfaces_when_the_destination_root_was_removed() {
+        // The archive root that received this apply is gone; the folder is
+        // still viewable because a surviving ancestor root covers it. The
+        // extraction row's `destination_root_id` now points at nothing, so
+        // only snapshot-path matching can still surface the arrival.
         let conn = open_in_memory_for_test();
         let source_root = insert_test_root(&conn, "/a", "source", false);
+        insert_test_root(&conn, "/archive", "archive", false);
+        let removed_root = insert_test_root(&conn, "/archive/media", "archive", false);
         let decision_id = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
-            &conn,
-            &[extraction_row(
-                decision_id,
-                source_root,
-                "/a",
-                "",
-                5,
-                Some(500),
-                "/archive/gone",
-            )],
-        )
-        .unwrap();
+        let mut row = extraction_row(
+            decision_id,
+            source_root,
+            "/a",
+            "",
+            5,
+            Some(500),
+            "/archive/media",
+        );
+        row.destination_root_id = Some(removed_root);
+        repo::decision::upsert_extractions(&conn, &[row]).unwrap();
 
-        let result = compute_trail(&conn, &params(vec!["/archive/gone".to_string()])).unwrap();
+        conn.execute("DELETE FROM roots WHERE id = ?", [removed_root])
+            .unwrap();
+
+        let result = compute_trail(&conn, &params(vec!["/archive/media".to_string()])).unwrap();
+        assert!(result.arrivals.contains_key(&decision_id));
+        // Shown here means it must not also count as "not shown".
+        assert_eq!(result.unscoped_decisions, 0);
+    }
+
+    #[test]
+    fn arrival_surfaces_when_the_destination_root_was_removed_and_re_added() {
+        // The harder half: the destination path is registered again, but as a
+        // *new* root with a new id. The recorded `destination_root_id` is
+        // stale, so a root-id-keyed join would silently lose this arrival
+        // while the snapshot path still matches exactly.
+        let conn = open_in_memory_for_test();
+        let old_destination = insert_test_root(&conn, "/archive/media", "archive", false);
+        // Inserted after, so re-adding below can't reuse the freed rowid.
+        let source_root = insert_test_root(&conn, "/a", "source", false);
+        let decision_id = insert_decision_at(&conn, "apply", 100);
+        let mut row = extraction_row(
+            decision_id,
+            source_root,
+            "/a",
+            "",
+            5,
+            Some(500),
+            "/archive/media",
+        );
+        row.destination_root_id = Some(old_destination);
+        repo::decision::upsert_extractions(&conn, &[row]).unwrap();
+
+        conn.execute("DELETE FROM roots WHERE id = ?", [old_destination])
+            .unwrap();
+        let re_added = insert_test_root(&conn, "/archive/media", "archive", false);
+        assert_ne!(
+            re_added, old_destination,
+            "the point of this test is a changed id"
+        );
+
+        let result = compute_trail(&conn, &params(vec!["/archive/media".to_string()])).unwrap();
         assert!(result.arrivals.contains_key(&decision_id));
         assert_eq!(result.unscoped_decisions, 0);
     }
