@@ -15,7 +15,9 @@ use anyhow::{anyhow, Result};
 use chrono::{Local, TimeZone};
 use serde::Serialize;
 
-use crate::domain::composition::{CompositionCard, OriginLine, TransitionedLine};
+use crate::domain::composition::{
+    card_applies, CompositionCard, OriginLine, TransitionedLine, ViewShape,
+};
 use crate::domain::decision::Decision;
 use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::domain::format::{cap_path, format_count, format_size};
@@ -74,11 +76,14 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<()> {
     };
     let result = ops::trail::compute_trail(db.conn(), &params)?;
 
-    // The composition card is a scope-lens, scoped-view-only feature (never
-    // global, never the time lens, never JSONL) — computed here rather than
-    // unconditionally so a global/time-lens/--jsonl run does the DB work of
-    // the trail query only, not the card's as well.
-    let card = if !args.jsonl && !resolved.is_global() && params.timeframe.is_none() {
+    // Gated before computing, not after: a global/time-lens/--jsonl run then
+    // does the DB work of the trail query only, not the card's as well. The
+    // rule itself is `domain::composition::card_applies`.
+    let card = if card_applies(ViewShape {
+        machine_output: args.jsonl,
+        global: resolved.is_global(),
+        time_lens: params.timeframe.is_some(),
+    }) {
         ops::composition::compute_composition(db.conn(), &params.prefixes)?
     } else {
         None
@@ -1029,6 +1034,45 @@ mod tests {
         assert!(json.contains(r#""bytes":3900000"#));
         assert!(json.contains(r#""destination":"/archive/2016/Italy""#));
         assert!(json.contains(r#""disposition":"retained""#));
+    }
+
+    #[test]
+    fn jsonl_decision_event_carries_no_view_dependent_card_or_rollup_data() {
+        // JSONL is a completeness contract, not a scoped-touching one: the
+        // same decision must serialize identically wherever it was surfaced
+        // from. The card and the three rollups are all view-dependent, so
+        // none of their vocabulary may appear in a machine-output event.
+        let json = serde_json::to_string(&JsonDecisionEvent {
+            r#type: "decision",
+            id: 61,
+            command: "apply",
+            created_at: 1000,
+            status: "completed",
+            count_attempted: None,
+            count_completed: None,
+            count_failed: None,
+            count_skipped: None,
+            reason: None,
+            scope: None,
+            summary: None,
+            receipt_root_id: None,
+            receipt_rel_path: None,
+            extractions: None,
+        })
+        .unwrap();
+        for leaked in [
+            "standing",
+            "Standing",
+            "rearranged",
+            "Rearranged",
+            "origins",
+            "arrived",
+            "Arrived",
+            "indexed_here",
+            "untracked",
+        ] {
+            assert!(!json.contains(leaked), "{leaked} leaked into JSONL: {json}");
+        }
     }
 
     #[test]

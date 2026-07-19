@@ -128,6 +128,39 @@ impl CompositionCard {
     }
 }
 
+/// The shape of a view, as far as the composition card is concerned.
+///
+/// Named fields rather than three positional bools: the three conditions are
+/// interchangeable at a call site and a swapped pair would silently invert a
+/// gate that no output makes obvious.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewShape {
+    /// `--jsonl` — machine output.
+    pub machine_output: bool,
+    /// No scope prefixes: every root at once.
+    pub global: bool,
+    /// `--today` / `--since` / `--on` — the day-grouped story view.
+    pub time_lens: bool,
+}
+
+/// Whether a view carries a composition card at all.
+///
+/// The card is a **scoped, present-tense** reading, so all three exclusions
+/// follow from what it is rather than from display taste:
+/// - **global** — no single "here" whose composition could be stated;
+/// - **time lens** — a day-grouped event story; a state statement has no day
+///   to belong to;
+/// - **`--jsonl`** — machine output, whose provenance surface is the
+///   view-independent `extractions` field; a view-dependent card would make
+///   scripted output vary by where it was run.
+///
+/// Lives beside [`CompositionCard::has_origin_story`] so both omission rules
+/// have one home: this one decides whether to *ask*, that one whether there
+/// is anything to *say*.
+pub fn card_applies(view: ViewShape) -> bool {
+    !view.machine_output && !view.global && !view.time_lens
+}
+
 struct FromRootAcc {
     root_removed: bool,
     from_within: bool,
@@ -472,6 +505,72 @@ mod tests {
         assert_eq!(card.transitioned[0].label, "archived (origin unknown)");
         assert_eq!(card.transitioned[0].files, 3);
         assert_eq!(card.files, 3);
+    }
+
+    // card_applies — the gate on whether a view asks for a card at all
+
+    /// A scoped, human, scope-lens view: the one shape that carries a card.
+    fn scoped_human_view() -> ViewShape {
+        ViewShape {
+            machine_output: false,
+            global: false,
+            time_lens: false,
+        }
+    }
+
+    #[test]
+    fn card_applies_only_to_a_scoped_human_scope_lens_view() {
+        assert!(card_applies(scoped_human_view()));
+    }
+
+    #[test]
+    fn each_condition_alone_suppresses_the_card() {
+        // Each exclusion must stand on its own — a gate that only fires when
+        // two conditions coincide would let the card leak into, say, a global
+        // human view.
+        for (name, view) in [
+            (
+                "--jsonl",
+                ViewShape {
+                    machine_output: true,
+                    ..scoped_human_view()
+                },
+            ),
+            (
+                "global",
+                ViewShape {
+                    global: true,
+                    ..scoped_human_view()
+                },
+            ),
+            (
+                "time lens",
+                ViewShape {
+                    time_lens: true,
+                    ..scoped_human_view()
+                },
+            ),
+        ] {
+            assert!(!card_applies(view), "{name} must suppress the card");
+        }
+    }
+
+    #[test]
+    fn conditions_combine_without_cancelling() {
+        // No pair or triple of exclusions may re-enable the card.
+        for machine_output in [false, true] {
+            for global in [false, true] {
+                for time_lens in [false, true] {
+                    let view = ViewShape {
+                        machine_output,
+                        global,
+                        time_lens,
+                    };
+                    let any_excluded = machine_output || global || time_lens;
+                    assert_eq!(card_applies(view), !any_excluded, "{view:?}");
+                }
+            }
+        }
     }
 
     #[test]
