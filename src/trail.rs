@@ -128,8 +128,6 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
         for extraction in &show.extractions {
             let row = &extraction.row;
             let location = row.drawn_from();
-            let files = format_count(row.files);
-            let unit = if row.files == 1 { "file" } else { "files" };
             // The snapshot path stays primary; a root the index no longer
             // knows must not read as a live, visitable location.
             let marker = if extraction.root_removed {
@@ -137,13 +135,10 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
             } else {
                 ""
             };
-            match row.bytes {
-                Some(bytes) => println!(
-                    "    {location} — {files} {unit} ({}){marker}",
-                    format_size(bytes)
-                ),
-                None => println!("    {location} — {files} {unit}{marker}"),
-            }
+            println!(
+                "    {location} — {}{marker}",
+                files_with_size(row.files, row.bytes)
+            );
         }
     }
     println!("  version:  {}", d.canon_version);
@@ -333,10 +328,10 @@ fn composition_card_lines(card: &CompositionCard) -> Vec<String> {
     }
     if card.origins.len() > CARD_ORIGIN_CAP {
         let more = card.origins.len() - CARD_ORIGIN_CAP;
-        let unit = if more == 1 { "origin" } else { "origins" };
         lines.push(format!(
-            "\u{2026} and {} more {unit}.",
-            format_count(more as i64)
+            "\u{2026} and {} more {}.",
+            format_count(more as i64),
+            plural(more as i64, "origin")
         ));
     }
     for line in &card.transitioned {
@@ -357,9 +352,57 @@ fn composition_card_lines(card: &CompositionCard) -> Vec<String> {
     lines
 }
 
+/// `thing` / `things` — the one place the trail pluralizes a noun. Separate
+/// from [`count_of`] because not every sentence puts the two adjacent (the
+/// card's remainder line reads "and 2 more origins").
+fn plural(n: i64, singular: &str) -> String {
+    if n == 1 {
+        singular.to_string()
+    } else {
+        format!("{singular}s")
+    }
+}
+
+/// `N thing` / `N things`, thousands-separated.
+fn count_of(n: i64, singular: &str) -> String {
+    format!("{} {}", format_count(n), plural(n, singular))
+}
+
+/// `N files (size)`, or `N files` when the size isn't known.
+///
+/// The trail's recurring shape: every count that can carry a size — timeline
+/// narrations, all three rollups, day-rollup fate parts, `trail show`'s
+/// `drew from:` lines — renders through this, so "never guess a size" is
+/// enforced by one signature rather than by repeated `match row.bytes`.
+fn files_with_size(files: i64, bytes: Option<i64>) -> String {
+    match bytes {
+        Some(bytes) => format!("{} ({})", count_of(files, "file"), format_size(bytes)),
+        None => count_of(files, "file"),
+    }
+}
+
+/// [`files_with_size`] where the size is always known (the card's buckets).
 fn format_bucket(files: i64, bytes: i64) -> String {
-    let unit = if files == 1 { "file" } else { "files" };
-    format!("{} {unit} ({})", format_count(files), format_size(bytes))
+    files_with_size(files, Some(bytes))
+}
+
+/// The disposition parenthetical, or nothing when the row can't say.
+///
+/// The wording differs by direction (outbound `moved` vs inbound `moved in`)
+/// and is registered vocabulary, so each caller passes its own pair rather
+/// than the words being derived here — but the "append in parens, or omit
+/// entirely" mechanics are shared.
+fn disposition_suffix(
+    disposition: Option<OriginDisposition>,
+    retained: &str,
+    relocated: &str,
+) -> String {
+    match disposition {
+        Some(OriginDisposition::Retained) => format!(" ({retained})"),
+        Some(OriginDisposition::Relocated) => format!(" ({relocated})"),
+        // Pre-vocabulary backfilled rows: omit rather than guess.
+        None => String::new(),
+    }
 }
 
 /// One origin line: `from <root>` (single-origin, possibly several merged
@@ -586,23 +629,11 @@ fn extraction_narration(row: &DecisionExtraction) -> String {
 /// intra-view relocation case renders the same shape with a view-relative
 /// destination instead of the row's absolute snapshot path.
 fn extraction_narration_with_destination(row: &DecisionExtraction, destination: &str) -> String {
-    let files = format_count(row.files);
-    let unit = if row.files == 1 { "file" } else { "files" };
-    let mut line = match row.bytes {
-        Some(bytes) => format!(
-            "\u{2192} {files} {unit} ({}) to {destination}",
-            format_size(bytes)
-        ),
-        None => format!("\u{2192} {files} {unit} to {destination}"),
-    };
-    if let Some(disposition) = row.disposition {
-        let wording = match disposition {
-            OriginDisposition::Retained => "copied; originals remain",
-            OriginDisposition::Relocated => "moved",
-        };
-        line.push_str(&format!(" ({wording})"));
-    }
-    line
+    format!(
+        "\u{2192} {} to {destination}{}",
+        files_with_size(row.files, row.bytes),
+        disposition_suffix(row.disposition, "copied; originals remain", "moved")
+    )
 }
 
 /// The arrival aspect's narration: `← N files (size) from ORIGIN (wording)`.
@@ -611,24 +642,12 @@ fn extraction_narration_with_destination(row: &DecisionExtraction, destination: 
 /// outbound's, and the origin carries the removed-root marker when its
 /// source root is no longer known to the live index.
 fn arrival_narration(row: &DecisionExtraction, roots: &HashMap<i64, Root>) -> String {
-    let files = format_count(row.files);
-    let unit = if row.files == 1 { "file" } else { "files" };
-    let origin = origin_location(row, roots);
-    let mut line = match row.bytes {
-        Some(bytes) => format!(
-            "\u{2190} {files} {unit} ({}) from {origin}",
-            format_size(bytes)
-        ),
-        None => format!("\u{2190} {files} {unit} from {origin}"),
-    };
-    if let Some(disposition) = row.disposition {
-        let wording = match disposition {
-            OriginDisposition::Retained => "copied in; originals remain",
-            OriginDisposition::Relocated => "moved in",
-        };
-        line.push_str(&format!(" ({wording})"));
-    }
-    line
+    format!(
+        "\u{2190} {} from {}{}",
+        files_with_size(row.files, row.bytes),
+        origin_location(row, roots),
+        disposition_suffix(row.disposition, "copied in; originals remain", "moved in")
+    )
 }
 
 /// The established removed-root marker (`trail show`'s `drew from:` lines
@@ -654,42 +673,22 @@ fn origin_location(row: &DecisionExtraction, roots: &HashMap<i64, Root>) -> Stri
 /// The scope-lens-only "Archived from here" footer: whole-history rollup of
 /// this view's extraction-touching rows.
 fn format_extraction_rollup(rollup: &ExtractionRollup) -> String {
-    let files = format_count(rollup.files);
-    let unit = if rollup.files == 1 { "file" } else { "files" };
-    let destinations = format_count(rollup.destinations);
-    let dest_unit = if rollup.destinations == 1 {
-        "destination"
-    } else {
-        "destinations"
-    };
-    match rollup.bytes {
-        Some(bytes) => format!(
-            "Archived from here: {files} {unit} ({}) \u{2192} {destinations} {dest_unit}.",
-            format_size(bytes)
-        ),
-        None => format!("Archived from here: {files} {unit} \u{2192} {destinations} {dest_unit}."),
-    }
+    format!(
+        "Archived from here: {} \u{2192} {}.",
+        files_with_size(rollup.files, rollup.bytes),
+        count_of(rollup.destinations as i64, "destination")
+    )
 }
 
 /// The scope-lens-only "Arrived here" footer: whole-history rollup of this
 /// view's arrival-touching rows — the mirror of `format_extraction_rollup`
 /// for the inbound direction.
 fn format_arrival_rollup(rollup: &ArrivalRollup) -> String {
-    let files = format_count(rollup.files);
-    let unit = if rollup.files == 1 { "file" } else { "files" };
-    let origins = format_count(rollup.origins);
-    let origin_unit = if rollup.origins == 1 {
-        "origin"
-    } else {
-        "origins"
-    };
-    match rollup.bytes {
-        Some(bytes) => format!(
-            "Arrived here: {files} {unit} ({}) from {origins} {origin_unit}.",
-            format_size(bytes)
-        ),
-        None => format!("Arrived here: {files} {unit} from {origins} {origin_unit}."),
-    }
+    format!(
+        "Arrived here: {} from {}.",
+        files_with_size(rollup.files, rollup.bytes),
+        count_of(rollup.origins as i64, "origin")
+    )
 }
 
 /// The scope-lens-only "Rearranged here" footer: whole-history rollup of the
@@ -700,12 +699,10 @@ fn format_arrival_rollup(rollup: &ArrivalRollup) -> String {
 /// that was rearranged stayed here, and naming this place as its own
 /// counterparty would say nothing.
 fn format_rearrangement_rollup(rollup: &RearrangementRollup) -> String {
-    let files = format_count(rollup.files);
-    let unit = if rollup.files == 1 { "file" } else { "files" };
-    match rollup.bytes {
-        Some(bytes) => format!("Rearranged here: {files} {unit} ({}).", format_size(bytes)),
-        None => format!("Rearranged here: {files} {unit}."),
-    }
+    format!(
+        "Rearranged here: {}.",
+        files_with_size(rollup.files, rollup.bytes)
+    )
 }
 
 /// The location an event happened at, rendered for the scope column: relative
@@ -810,12 +807,7 @@ fn fate_word(family: DecisionFamily, aspect: FateAspect) -> &'static str {
 }
 
 fn fate_part(verb: &str, fate: &FateLine) -> String {
-    let files = format_count(fate.files);
-    let unit = if fate.files == 1 { "file" } else { "files" };
-    match fate.bytes {
-        Some(bytes) => format!("{verb} {files} {unit} ({})", format_size(bytes)),
-        None => format!("{verb} {files} {unit}"),
-    }
+    format!("{verb} {}", files_with_size(fate.files, fate.bytes))
 }
 
 fn format_counts(d: &Decision) -> String {
@@ -1665,6 +1657,42 @@ mod tests {
             .single()
             .unwrap()
             .timestamp()
+    }
+
+    #[test]
+    fn plural_and_count_of_agree() {
+        assert_eq!(plural(1, "origin"), "origin");
+        assert_eq!(plural(0, "origin"), "origins");
+        assert_eq!(plural(2, "origin"), "origins");
+        assert_eq!(count_of(1, "destination"), "1 destination");
+        assert_eq!(count_of(1_251, "destination"), "1,251 destinations");
+    }
+
+    #[test]
+    fn files_with_size_omits_an_unknown_size() {
+        // The "never guess a size" rule, now enforced in one place for every
+        // count the trail renders.
+        assert_eq!(files_with_size(1, Some(10)), "1 file (10 B)");
+        assert_eq!(
+            files_with_size(1_251, Some(22_100_000_000)),
+            "1,251 files (22.1 GB)"
+        );
+        assert_eq!(files_with_size(1, None), "1 file");
+        assert_eq!(files_with_size(47, None), "47 files");
+    }
+
+    #[test]
+    fn disposition_suffix_omits_when_the_row_cannot_say() {
+        assert_eq!(
+            disposition_suffix(Some(OriginDisposition::Retained), "kept", "gone"),
+            " (kept)"
+        );
+        assert_eq!(
+            disposition_suffix(Some(OriginDisposition::Relocated), "kept", "gone"),
+            " (gone)"
+        );
+        // Pre-vocabulary backfilled rows add nothing at all — not "()".
+        assert_eq!(disposition_suffix(None, "kept", "gone"), "");
     }
 
     #[test]
