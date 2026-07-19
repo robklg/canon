@@ -15,6 +15,7 @@ use chrono::{Datelike, Duration, NaiveDate, Weekday};
 use super::decision::Decision;
 use super::extraction::DecisionExtraction;
 use super::note::Note;
+use super::path::common_path_prefix;
 
 /// Rollup family of a decision command — the minimal *what* classification the
 /// time lens needs. Deliberately small: the full operation taxonomy belongs to
@@ -252,6 +253,68 @@ pub fn classify_row(row: &DecisionExtraction, prefixes: &[String]) -> RowAspect 
                 .any(|prefix| placement_in_view(prefix, path))
     };
     row_aspect(within(&row.drawn_from()), within(&row.destination_path))
+}
+
+/// One rendered timeline line: the display aggregate of a decision's
+/// same-aspect placement rows within one origin root.
+///
+/// `row` is a synthetic display row — files summed, bytes all-or-omitted,
+/// each location collapsed to the common prefix of the member rows'
+/// locations — so it keeps the row invariant ("all counted files lie under
+/// these locations") and every narration helper renders it like any stored
+/// row. A one-row group aggregates to that row unchanged.
+pub struct PlacementLine {
+    pub row: DecisionExtraction,
+    pub aspect: RowAspect,
+}
+
+/// Collapse a decision's view-matched rows into its rendered lines: one per
+/// (origin root, aspect), in first-seen row order (rows arrive in stable
+/// `(decision_id, root_id)` fetch order, so repeated runs render
+/// identically).
+///
+/// Because only rows the view matched are aggregated, a line's counts are
+/// the view's counts and its locations are common prefixes of in-view
+/// placements — the line can never name a location outside the view, nor
+/// one the decision didn't place into.
+pub fn aggregate_placement_lines(rows: &[(DecisionExtraction, RowAspect)]) -> Vec<PlacementLine> {
+    let mut groups: Vec<(&str, RowAspect, Vec<&DecisionExtraction>)> = Vec::new();
+    for (row, aspect) in rows {
+        match groups
+            .iter_mut()
+            .find(|(root, a, _)| *root == row.root_path && a == aspect)
+        {
+            Some((_, _, members)) => members.push(row),
+            None => groups.push((&row.root_path, *aspect, vec![row])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(_, aspect, members)| {
+            let first = members[0];
+            PlacementLine {
+                row: DecisionExtraction {
+                    decision_id: first.decision_id,
+                    root_id: first.root_id,
+                    root_path: first.root_path.clone(),
+                    rel_prefix: common_path_prefix(members.iter().map(|r| r.rel_prefix.as_str())),
+                    files: members.iter().map(|r| r.files).sum(),
+                    bytes: if members.iter().all(|r| r.bytes.is_some()) {
+                        Some(members.iter().filter_map(|r| r.bytes).sum())
+                    } else {
+                        None
+                    },
+                    destination_root_id: first.destination_root_id,
+                    destination_path: common_path_prefix(
+                        members.iter().map(|r| r.destination_path.as_str()),
+                    ),
+                    // Decision-wide by construction: one apply, one mode.
+                    disposition: first.disposition,
+                },
+                aspect,
+            }
+        })
+        .collect()
 }
 
 /// A parsed time-lens value: `--since` (from date onward) or `--on` (one day).
@@ -713,6 +776,128 @@ mod tests {
             destination_path: destination.to_string(),
             disposition: None,
         }
+    }
+
+    // aggregate_placement_lines
+
+    fn placement(
+        root_path: &str,
+        rel_prefix: &str,
+        destination: &str,
+        files: i64,
+        bytes: Option<i64>,
+    ) -> DecisionExtraction {
+        let mut row = mk_extraction(root_path, rel_prefix, destination);
+        row.files = files;
+        row.bytes = bytes;
+        row
+    }
+
+    #[test]
+    fn aggregate_merges_same_root_same_aspect_rows_into_one_line() {
+        let rows = vec![
+            (
+                placement("/src", "m/01", "/arch/m/01", 105, Some(1_050)),
+                RowAspect::Extraction,
+            ),
+            (
+                placement("/src", "m/02", "/arch/m/02", 140, Some(1_400)),
+                RowAspect::Extraction,
+            ),
+        ];
+        let lines = aggregate_placement_lines(&rows);
+        assert_eq!(lines.len(), 1);
+        let line = &lines[0];
+        assert_eq!(line.aspect, RowAspect::Extraction);
+        assert_eq!(line.row.files, 245);
+        assert_eq!(line.row.bytes, Some(2_450));
+        // Locations collapse to the members' common prefix — of the matched
+        // rows only, so a line never names a place the group didn't touch.
+        assert_eq!(line.row.rel_prefix, "m");
+        assert_eq!(line.row.drawn_from(), "/src/m");
+        assert_eq!(line.row.destination_path, "/arch/m");
+    }
+
+    #[test]
+    fn aggregate_keeps_aspects_apart_within_one_root() {
+        // One decision can draw a row out of the view and rearrange another
+        // within it, both from the same root — two lines, first-seen order.
+        let rows = vec![
+            (
+                placement("/arch", "2016", "/arch/2020", 3, Some(30)),
+                RowAspect::Rearrangement,
+            ),
+            (
+                placement("/arch", "raw", "/elsewhere", 5, Some(50)),
+                RowAspect::Extraction,
+            ),
+        ];
+        let lines = aggregate_placement_lines(&rows);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].aspect, RowAspect::Rearrangement);
+        assert_eq!(lines[0].row.files, 3);
+        assert_eq!(lines[1].aspect, RowAspect::Extraction);
+        assert_eq!(lines[1].row.files, 5);
+    }
+
+    #[test]
+    fn aggregate_bytes_are_all_or_omitted_per_line() {
+        let rows = vec![
+            (
+                placement("/src", "m/01", "/arch/m", 1, Some(10)),
+                RowAspect::Extraction,
+            ),
+            (
+                placement("/src", "m/02", "/arch/m", 2, None),
+                RowAspect::Extraction,
+            ),
+            (
+                placement("/other", "x", "/arch/m", 4, Some(40)),
+                RowAspect::Extraction,
+            ),
+        ];
+        let lines = aggregate_placement_lines(&rows);
+        assert_eq!(lines.len(), 2);
+        // One unknown-size member omits the line's size, never a partial sum —
+        // and never suppresses a sibling line's fully known total.
+        assert_eq!(lines[0].row.bytes, None);
+        assert_eq!(lines[1].row.bytes, Some(40));
+    }
+
+    #[test]
+    fn aggregate_one_row_group_is_the_row_unchanged() {
+        let row = placement("/src", "m/03", "/arch/m/03", 1_005, Some(10_050));
+        let rows = vec![(row.clone(), RowAspect::Arrival)];
+        let lines = aggregate_placement_lines(&rows);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].row.rel_prefix, row.rel_prefix);
+        assert_eq!(lines[0].row.destination_path, row.destination_path);
+        assert_eq!(lines[0].row.files, row.files);
+        assert_eq!(lines[0].row.bytes, row.bytes);
+    }
+
+    #[test]
+    fn aggregate_groups_by_root_in_first_seen_order() {
+        let rows = vec![
+            (
+                placement("/a", "x", "/arch", 1, Some(1)),
+                RowAspect::Extraction,
+            ),
+            (
+                placement("/b", "y", "/arch", 2, Some(2)),
+                RowAspect::Extraction,
+            ),
+            (
+                placement("/a", "z", "/arch", 4, Some(4)),
+                RowAspect::Extraction,
+            ),
+        ];
+        let lines = aggregate_placement_lines(&rows);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].row.root_path, "/a");
+        assert_eq!(lines[0].row.files, 5);
+        assert_eq!(lines[1].row.root_path, "/b");
+        assert_eq!(lines[1].row.files, 2);
     }
 
     #[test]

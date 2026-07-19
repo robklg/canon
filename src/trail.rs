@@ -23,8 +23,8 @@ use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::domain::format::{cap_path, format_count, format_size};
 use crate::domain::root::Root;
 use crate::domain::trail::{
-    fate_transition, parse_when, DayRollup, DecisionFamily, FateAspect, FateLine, RowAspect,
-    TimelineEvent, WhenValue,
+    aggregate_placement_lines, fate_transition, parse_when, DayRollup, DecisionFamily, FateAspect,
+    FateLine, RowAspect, TimelineEvent, WhenValue,
 };
 use crate::ops;
 use crate::ops::scope::ResolvedScope;
@@ -515,26 +515,24 @@ fn print_event(
                 }
             };
             let cells = event_cells(event, resolved, roots, placements);
-            let rows = placements.get(&d.id).map(Vec::as_slice).unwrap_or_default();
-            if !rows.is_empty() {
-                for ((row, aspect), cell) in rows.iter().zip(&cells) {
-                    let narration = match aspect {
-                        // Relativized per row even though `destination_path`
-                        // is decision-wide today: reading it from the row
-                        // each time costs one string op and cannot go stale
-                        // if that ever stops holding, whereas hoisting would
-                        // silently render every row with the first row's
-                        // destination.
+            let lines = placements
+                .get(&d.id)
+                .map(|rows| aggregate_placement_lines(rows))
+                .unwrap_or_default();
+            if !lines.is_empty() {
+                for (placement, cell) in lines.iter().zip(&cells) {
+                    let row = &placement.row;
+                    let narration = match placement.aspect {
                         RowAspect::Rearrangement => extraction_narration_with_destination(
                             row,
                             &relativize(&row.destination_path, resolved),
                         ),
                         RowAspect::Arrival => arrival_narration(row, roots),
-                        // `Outside` cannot reach here — a row absent from both
-                        // maps was never fetched. Rendering it as a plain
-                        // extraction with its absolute destination degrades
-                        // gracefully rather than panicking on a row the
-                        // interface has no way to repair.
+                        // `Outside` cannot reach here — such rows were dropped
+                        // at classification. Rendering it as a plain extraction
+                        // with its absolute destination degrades gracefully
+                        // rather than panicking on a line the interface has no
+                        // way to repair.
                         RowAspect::Extraction | RowAspect::Outside => extraction_narration(row),
                     };
                     let mut line = format!("#{:<4} {time}  {cell:<width$}  {}", d.id, narration);
@@ -577,20 +575,22 @@ fn event_cells(
     placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>,
 ) -> Vec<String> {
     if let TimelineEvent::Decision(d) = event {
-        let rows = placements.get(&d.id).map(Vec::as_slice).unwrap_or_default();
-        if !rows.is_empty() {
-            return rows
-                .iter()
-                .map(|(row, aspect)| {
-                    let location = match aspect {
-                        RowAspect::Arrival => row.destination_path.clone(),
-                        RowAspect::Extraction | RowAspect::Rearrangement | RowAspect::Outside => {
-                            row.drawn_from()
-                        }
-                    };
-                    cap_path(&relativize(&location, resolved), SCOPE_CELL_MAX)
-                })
-                .collect();
+        if let Some(rows) = placements.get(&d.id) {
+            let lines = aggregate_placement_lines(rows);
+            if !lines.is_empty() {
+                return lines
+                    .iter()
+                    .map(|placement| {
+                        let location = match placement.aspect {
+                            RowAspect::Arrival => placement.row.destination_path.clone(),
+                            RowAspect::Extraction
+                            | RowAspect::Rearrangement
+                            | RowAspect::Outside => placement.row.drawn_from(),
+                        };
+                        cap_path(&relativize(&location, resolved), SCOPE_CELL_MAX)
+                    })
+                    .collect();
+            }
         }
     }
     vec![cap_path(
@@ -1422,6 +1422,34 @@ mod tests {
 
         let cells = event_cells(&event, &scoped, &HashMap::new(), &placements);
         assert_eq!(cells, vec!["photos/2016/italy"]);
+    }
+
+    #[test]
+    fn event_cells_renders_one_cell_for_same_root_same_aspect_rows() {
+        // Two matched rows from one root with one aspect are one rendered
+        // line — the cell shows their common prefix, not two entries. (On
+        // today's one-row-per-root data this is invisible; it is the
+        // precision-readiness step for finer rows.)
+        let global = ResolvedScope {
+            prefixes: Vec::new(),
+            from_cwd: false,
+            auto_include_archived: false,
+        };
+        let event = TimelineEvent::Decision(mk_decision(1, None));
+        let mut first = mk_extraction_row(None, None);
+        first.rel_prefix = "photos/2016/01".to_string();
+        let mut second = mk_extraction_row(None, None);
+        second.rel_prefix = "photos/2016/02".to_string();
+        let placements = HashMap::from([(
+            1,
+            vec![
+                (first, RowAspect::Extraction),
+                (second, RowAspect::Extraction),
+            ],
+        )]);
+
+        let cells = event_cells(&event, &global, &HashMap::new(), &placements);
+        assert_eq!(cells, vec!["/Volumes/old-laptop/photos/2016"]);
     }
 
     #[test]

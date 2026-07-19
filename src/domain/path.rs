@@ -172,6 +172,28 @@ pub fn common_dir_prefix<'a>(rel_paths: impl Iterator<Item = &'a str>) -> String
     common.unwrap_or_default().join("/")
 }
 
+/// Component-wise common prefix of a set of paths taken whole — unlike
+/// [`common_dir_prefix`], no trailing component is dropped, because the
+/// inputs are already directory locations rather than item paths. The
+/// display collapse for a group of placement locations: one location
+/// returns itself, divergent tops return `""`. Pure, no I/O.
+pub fn common_path_prefix<'a>(paths: impl Iterator<Item = &'a str>) -> String {
+    let mut common: Option<Vec<&str>> = None;
+    for path in paths {
+        let components: Vec<&str> = path.split('/').collect();
+        common = Some(match common {
+            None => components,
+            Some(prev) => prev
+                .into_iter()
+                .zip(components)
+                .take_while(|(a, b)| a == b)
+                .map(|(a, _)| a)
+                .collect(),
+        });
+    }
+    common.unwrap_or_default().join("/")
+}
+
 /// Verify that all resolved paths are under a known root.
 /// Returns error on the first path not under any root.
 /// Uses find_containing_root() which checks all roots (including suspended),
@@ -504,5 +526,32 @@ mod tests {
     #[test]
     fn common_dir_prefix_empty_input() {
         assert_eq!(common_dir_prefix(std::iter::empty()), "");
+    }
+
+    // common_path_prefix tests
+
+    #[test]
+    fn common_path_prefix_single_path_returns_itself() {
+        // No trailing component is dropped — the input is already a
+        // directory location, not an item path.
+        assert_eq!(common_path_prefix(["m/03"].into_iter()), "m/03");
+        assert_eq!(common_path_prefix(["/arch/m/03"].into_iter()), "/arch/m/03");
+    }
+
+    #[test]
+    fn common_path_prefix_collapses_to_shared_ancestor() {
+        assert_eq!(common_path_prefix(["m/01", "m/02"].into_iter()), "m");
+        assert_eq!(
+            common_path_prefix(["/arch/m/01", "/arch/m/02"].into_iter()),
+            "/arch/m"
+        );
+        assert_eq!(common_path_prefix(["m", "m/01"].into_iter()), "m");
+    }
+
+    #[test]
+    fn common_path_prefix_root_level_and_divergent() {
+        assert_eq!(common_path_prefix(["", "m/01"].into_iter()), "");
+        assert_eq!(common_path_prefix(["a/x", "b/y"].into_iter()), "");
+        assert_eq!(common_path_prefix(std::iter::empty()), "");
     }
 }
