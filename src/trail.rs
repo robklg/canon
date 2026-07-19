@@ -125,20 +125,8 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
     }
     if !show.extractions.is_empty() {
         println!("  drew from:");
-        for extraction in &show.extractions {
-            let row = &extraction.row;
-            let location = row.drawn_from();
-            // The snapshot path stays primary; a root the index no longer
-            // knows must not read as a live, visitable location.
-            let marker = if extraction.root_removed {
-                ROOT_REMOVED_MARKER
-            } else {
-                ""
-            };
-            println!(
-                "    {location} — {}{marker}",
-                files_with_size(row.files, row.bytes)
-            );
+        for line in drew_from_lines(&show.extractions) {
+            println!("{line}");
         }
     }
     println!("  version:  {}", d.canon_version);
@@ -291,6 +279,53 @@ fn print_human(
 /// a location's history (many source drives feeding one archive folder over
 /// years); transitioned/indexed-here/untracked stay small in practice.
 const CARD_ORIGIN_CAP: usize = 10;
+
+/// Maximum origin directories a `drew from:` group lists before an explicit
+/// remainder line — a manifest pattern can fan one apply across many
+/// folders, and the per-root summary line already carries the totals.
+const DREW_FROM_DIR_CAP: usize = 5;
+
+/// The `drew from:` block's lines, indentation included: one summary line
+/// per origin root, then that root's origin directories when the draw
+/// fanned out — capped with an explicit remainder, never a silent
+/// truncation. Pure data — testable without capturing stdout.
+fn drew_from_lines(extractions: &[ops::trail::ShowExtraction]) -> Vec<String> {
+    let mut out = Vec::new();
+    for group in extractions {
+        // The snapshot path stays primary; a root the index no longer knows
+        // must not read as a live, visitable location.
+        let marker = if group.root_removed {
+            ROOT_REMOVED_MARKER
+        } else {
+            ""
+        };
+        out.push(format!(
+            "    {} — {}{marker}",
+            group.location,
+            files_with_size(group.files, group.bytes)
+        ));
+        for dir in group.directories.iter().take(DREW_FROM_DIR_CAP) {
+            let shown = if dir.dir.is_empty() { "." } else { &dir.dir };
+            out.push(format!(
+                "      {shown} — {}",
+                files_with_size(dir.files, dir.bytes)
+            ));
+        }
+        let more = group.directories.len().saturating_sub(DREW_FROM_DIR_CAP);
+        if more > 0 {
+            let noun = if more == 1 {
+                "directory"
+            } else {
+                "directories"
+            };
+            out.push(format!(
+                "      \u{2026} and {} more {noun}",
+                format_count(more)
+            ));
+        }
+    }
+    out
+}
 
 fn print_composition_card(card: &CompositionCard) {
     println!();
@@ -1672,6 +1707,86 @@ mod tests {
         assert_eq!(plural(2, "origin"), "origins");
         assert_eq!(count_of(1, "destination"), "1 destination");
         assert_eq!(count_of(1_251, "destination"), "1,251 destinations");
+    }
+
+    // drew_from_lines
+
+    fn show_group(
+        location: &str,
+        files: i64,
+        bytes: Option<i64>,
+        root_removed: bool,
+        dirs: &[(&str, i64)],
+    ) -> ops::trail::ShowExtraction {
+        ops::trail::ShowExtraction {
+            location: location.to_string(),
+            root_removed,
+            files,
+            bytes,
+            directories: dirs
+                .iter()
+                .map(|(dir, files)| ops::trail::ShowDrewDir {
+                    dir: dir.to_string(),
+                    files: *files,
+                    bytes: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn drew_from_single_directory_group_is_one_line() {
+        let lines = drew_from_lines(&[show_group(
+            "/a/photos/2016/italy",
+            47,
+            Some(3_900_000),
+            false,
+            &[],
+        )]);
+        assert_eq!(lines, vec!["    /a/photos/2016/italy — 47 files (3.9 MB)"]);
+    }
+
+    #[test]
+    fn drew_from_marks_removed_roots_on_the_summary_line() {
+        let lines = drew_from_lines(&[show_group("/Volumes/gone/dcim", 12, None, true, &[])]);
+        assert_eq!(
+            lines,
+            vec![format!(
+                "    /Volumes/gone/dcim — 12 files{ROOT_REMOVED_MARKER}"
+            )]
+        );
+    }
+
+    #[test]
+    fn drew_from_lists_directories_under_the_summary() {
+        let lines = drew_from_lines(&[show_group(
+            "/a/m",
+            245,
+            None,
+            false,
+            &[("m/01", 105), ("m/02", 140)],
+        )]);
+        assert_eq!(
+            lines,
+            vec![
+                "    /a/m — 245 files",
+                "      m/01 — 105 files",
+                "      m/02 — 140 files",
+            ]
+        );
+    }
+
+    #[test]
+    fn drew_from_caps_directories_with_an_explicit_remainder() {
+        let dirs: Vec<(String, i64)> = (1..=7).map(|i| (format!("m/{i:02}"), i)).collect();
+        let dir_refs: Vec<(&str, i64)> = dirs.iter().map(|(d, f)| (d.as_str(), *f)).collect();
+        let lines = drew_from_lines(&[show_group("/a/m", 28, None, false, &dir_refs)]);
+        // Summary + 5 listed + remainder — never a silent truncation.
+        assert_eq!(lines.len(), 7);
+        assert_eq!(lines[6], "      \u{2026} and 2 more directories");
+        // A root-level directory renders as ".", not an empty cell.
+        let dot = drew_from_lines(&[show_group("/a", 3, None, false, &[("", 1), ("x", 2)])]);
+        assert_eq!(dot[1], "      . — 1 file");
     }
 
     #[test]

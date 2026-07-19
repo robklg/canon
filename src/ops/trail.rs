@@ -16,8 +16,8 @@ use crate::domain::decision::Decision;
 use crate::domain::extraction::DecisionExtraction;
 use crate::domain::root::find_containing_root;
 use crate::domain::trail::{
-    group_by_day, merge_events, placement_in_view, row_aspect, scopes_touch, DayGroup, RowAspect,
-    TimelineEvent, WhenValue,
+    aggregate_placement_lines, group_by_day, merge_events, placement_in_view, row_aspect,
+    scopes_touch, DayGroup, RowAspect, TimelineEvent, WhenValue,
 };
 use crate::repo::{self, Connection};
 
@@ -428,13 +428,30 @@ pub struct ReceiptPointer {
     pub rel_path: String,
 }
 
-/// One `drew from:` line: the extraction row plus whether its source root is
-/// still known to the index. Liveness is derived at read time from the live
-/// roots list — never stored in the row (the snapshot records what happened;
-/// the marker says what the index knows now).
+/// One `drew from:` line: an origin root's aggregate over the decision's
+/// placement rows, with the distinct origin directories carried alongside
+/// when the draw fanned out. Liveness is derived at read time from the live
+/// roots list — never stored (the snapshot records what happened; the
+/// marker says what the index knows now).
 pub struct ShowExtraction {
-    pub row: DecisionExtraction,
+    /// The collapsed drawn-from location: root path + the common prefix of
+    /// the group's origin directories.
+    pub location: String,
     pub root_removed: bool,
+    pub files: i64,
+    /// `None` if any member row lacks a size — never a partial sum.
+    pub bytes: Option<i64>,
+    /// Distinct origin directories (root-relative; `""` is the root
+    /// itself), each with its own counts, in recorded order. Empty when the
+    /// group drew from a single directory — the location already says it.
+    pub directories: Vec<ShowDrewDir>,
+}
+
+/// One origin directory's share of a `drew from:` group.
+pub struct ShowDrewDir {
+    pub dir: String,
+    pub files: i64,
+    pub bytes: Option<i64>,
 }
 
 pub struct ShowResult {
@@ -494,11 +511,44 @@ pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
         None
     };
 
-    let extractions = repo::decision::fetch_extractions_by_decisions(conn, &[id])?
+    // Group the decision's placement rows per origin root through the one
+    // aggregation helper (a constant aspect — `show` is view-independent, so
+    // every row reads the same way), then fold the per-directory shares.
+    let raw = repo::decision::fetch_extractions_by_decisions(conn, &[id])?;
+    let tagged: Vec<(DecisionExtraction, RowAspect)> = raw
+        .iter()
+        .cloned()
+        .map(|row| (row, RowAspect::Extraction))
+        .collect();
+    let extractions = aggregate_placement_lines(&tagged)
         .into_iter()
-        .map(|row| ShowExtraction {
-            root_removed: row.origin_root_removed(roots.iter().map(|r| r.path.as_str())),
-            row,
+        .map(|line| {
+            let mut dirs: Vec<ShowDrewDir> = Vec::new();
+            for row in raw.iter().filter(|r| r.root_path == line.row.root_path) {
+                match dirs.iter_mut().find(|d| d.dir == row.rel_prefix) {
+                    Some(d) => {
+                        d.files += row.files;
+                        d.bytes = match (d.bytes, row.bytes) {
+                            (Some(a), Some(b)) => Some(a + b),
+                            _ => None,
+                        };
+                    }
+                    None => dirs.push(ShowDrewDir {
+                        dir: row.rel_prefix.clone(),
+                        files: row.files,
+                        bytes: row.bytes,
+                    }),
+                }
+            }
+            ShowExtraction {
+                root_removed: line
+                    .row
+                    .origin_root_removed(roots.iter().map(|r| r.path.as_str())),
+                location: line.row.drawn_from(),
+                files: line.row.files,
+                bytes: line.row.bytes,
+                directories: if dirs.len() > 1 { dirs } else { Vec::new() },
+            }
         })
         .collect();
 
@@ -1905,18 +1955,53 @@ mod tests {
         let a = show
             .extractions
             .iter()
-            .find(|e| e.row.root_id == root)
+            .find(|e| e.location == "/a/photos/2016/italy")
             .unwrap();
-        assert_eq!(a.row.root_path, "/a");
-        assert_eq!(a.row.rel_prefix, "photos/2016/italy");
+        assert_eq!(a.files, 47);
         assert!(!a.root_removed);
+        // Single-directory draws carry no directory listing — the location
+        // already says it.
+        assert!(a.directories.is_empty());
         let gone = show
             .extractions
             .iter()
-            .find(|e| e.row.root_id == 999)
+            .find(|e| e.location == "/Volumes/gone/dcim")
             .unwrap();
-        assert_eq!(gone.row.root_path, "/Volumes/gone");
         assert!(gone.root_removed);
+    }
+
+    #[test]
+    fn show_folds_placement_rows_into_per_root_lines_with_directories() {
+        // Directory-precision rows: one root drawing from two directories is
+        // one `drew from:` line at the collapsed location, with each
+        // directory's own share carried for the capped listing.
+        let conn = open_in_memory_for_test();
+        let root = insert_test_root(&conn, "/a", "source", false);
+        let d = insert_decision_at(&conn, "apply", 100);
+        repo::decision::replace_extractions(
+            &conn,
+            &[
+                extraction_row(d, root, "/a", "m/01", 105, Some(1_050), "/archive/x"),
+                extraction_row(d, root, "/a", "m/02", 100, Some(1_000), "/archive/x"),
+                extraction_row(d, root, "/a", "m/02", 40, Some(400), "/archive/y"),
+            ],
+        )
+        .unwrap();
+
+        let show = compute_show(&conn, d).unwrap().unwrap();
+        assert_eq!(show.extractions.len(), 1);
+        let line = &show.extractions[0];
+        assert_eq!(line.location, "/a/m");
+        assert_eq!(line.files, 245);
+        assert_eq!(line.bytes, Some(2_450));
+        // Two distinct directories: m/02's two placement rows fold into one
+        // directory share.
+        assert_eq!(line.directories.len(), 2);
+        assert_eq!(line.directories[0].dir, "m/01");
+        assert_eq!(line.directories[0].files, 105);
+        assert_eq!(line.directories[1].dir, "m/02");
+        assert_eq!(line.directories[1].files, 140);
+        assert_eq!(line.directories[1].bytes, Some(1_400));
     }
 
     #[test]
@@ -1933,7 +2018,6 @@ mod tests {
 
         let show = compute_show(&conn, d).unwrap().unwrap();
         assert_eq!(show.extractions.len(), 1);
-        assert_ne!(show.extractions[0].row.root_id, re_added);
         assert!(
             !show.extractions[0].root_removed,
             "a live location must not read as removed"

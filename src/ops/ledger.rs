@@ -696,6 +696,96 @@ mtime = 0
     }
 
     #[test]
+    fn reindex_upgrades_a_legacy_coarse_row_to_precision() {
+        // A pre-precision Canon recorded one coarse row per source root; its
+        // receipt holds the per-item paths. Reindex must replace the coarse
+        // row with the precise placement rows — never leave it standing
+        // beside them (a double count), and never touch it on --dry-run.
+        let conn = setup_test_db();
+        let src_root = insert_root(&conn, "/vol/sd", "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+        let decision_id: i64 = conn
+            .query_row(
+                "INSERT INTO decisions (command, command_line, status, canon_version, created_at, receipt_root_id, receipt_rel_path)
+                 VALUES ('apply', 'canon apply old.lock', 'completed', '0.1.0', 0, ?1, '.canon-ledger/000001-apply.toml')
+                 RETURNING id",
+                [archive_root],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let ledger_dir = archive_dir.path().join(".canon-ledger");
+        std::fs::create_dir_all(&ledger_dir).unwrap();
+        std::fs::write(
+            ledger_dir.join("000001-apply.toml"),
+            format!(
+                r#"[meta]
+receipt_version = 1
+decision_id = {decision_id}
+command = "apply"
+status = "completed"
+timestamp = 0
+summary = "pre-precision apply"
+canon_version = "0.1.0"
+command_line = "canon apply old.lock"
+
+[[items]]
+source_root = "/vol/sd"
+source_rel_path = "dcim/a.jpg"
+destination_rel_path = "m/01/a.jpg"
+size = 105
+mtime = 0
+
+[[items]]
+source_root = "/vol/sd"
+source_rel_path = "dcim/c.jpg"
+destination_rel_path = "m/02/c.jpg"
+size = 140
+mtime = 0
+"#
+            ),
+        )
+        .unwrap();
+
+        // The legacy coarse row, as the old collapse would have written it.
+        let coarse = crate::domain::extraction::DecisionExtraction {
+            decision_id,
+            root_id: src_root,
+            root_path: "/vol/sd".to_string(),
+            rel_prefix: "dcim".to_string(),
+            files: 2,
+            bytes: Some(245),
+            destination_root_id: Some(archive_root),
+            destination_path: format!("{}/m", archive_dir.path().display()),
+            disposition: Some(OriginDisposition::Retained),
+        };
+        repo::decision::replace_extractions(&conn, std::slice::from_ref(&coarse)).unwrap();
+
+        // Dry run reports but writes nothing — the coarse row survives.
+        reindex_extractions(&conn, &ReindexParams { dry_run: true }).unwrap();
+        assert_eq!(fetch_rows(&conn, decision_id), vec![coarse.clone()]);
+
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
+        assert_eq!(result.already_current, vec![decision_id]);
+        let rows = fetch_rows(&conn, decision_id);
+        assert_eq!(rows.len(), 2, "two precise rows, coarse row gone");
+        assert_eq!(rows.iter().map(|r| r.files).sum::<i64>(), 2);
+        assert!(rows.iter().all(
+            |r| r.destination_path.ends_with("/m/01") || r.destination_path.ends_with("/m/02")
+        ));
+
+        // Converges: a second run reproduces the same precise set.
+        reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
+        assert_eq!(fetch_rows(&conn, decision_id), rows);
+    }
+
+    #[test]
     fn idempotent_reindex_twice_identical() {
         let (conn, decision_id, _archive_dir, _src_dir) = run_real_apply(TransferMode::Copy);
         wipe_extractions(&conn);
