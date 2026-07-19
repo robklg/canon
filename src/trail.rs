@@ -255,14 +255,16 @@ fn print_human(
     if result.earlier_decisions > 0 {
         let cap = limit.unwrap_or(DEFAULT_LIMIT);
         println!(
-            "{} earlier decisions not shown (--limit N or --all; showing {cap}).",
-            format_count(result.earlier_decisions)
+            "{} earlier {} not shown (--limit N or --all; showing {cap}).",
+            format_count(result.earlier_decisions),
+            plural(result.earlier_decisions as i64, "decision")
         );
     }
     if result.unscoped_decisions > 0 {
         println!(
-            "{} global decisions not shown (--global).",
-            format_count(result.unscoped_decisions)
+            "{} global {} not shown (--global).",
+            format_count(result.unscoped_decisions),
+            plural(result.unscoped_decisions, "decision")
         );
     }
 
