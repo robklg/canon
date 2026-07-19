@@ -179,3 +179,11 @@ canon ledger reindex
 See [`ledger reindex`](../commands/maintain/ledger-reindex.md) for the full command. It walks every `apply` decision, reads its receipt (tolerating older receipts that predate today's self-describing fields), and rebuilds the same aggregate rows the forward `apply` path writes — a backfilled row is indistinguishable from a forward-recorded one, by construction (both go through the same aggregation).
 
 Gaps are reported, never inferred: a decision with no receipt on disk (recording was off, or `--no-receipt` was used) is not something `reindex` can recover, and it says so rather than guessing.
+
+## The Composition Card — State, Not Events
+
+Everything above answers "what happened?" — the trail is an event log. The composition card, shown at the bottom of a scoped `canon trail` view (see [Reading the Trail](../commands/query/trail.md#the-composition-card-whats-standing-here)), answers a different question: "what is this place made of, right now?" It is a present-tense read of the surviving sources' own stamps, not a replay of the events that produced them.
+
+The distinction matters because the two can honestly disagree. A location's "Arrived here" total (an event count) never shrinks — a decision that happened stays happened. Its "Standing here" total (a state count) can be smaller, when some of what arrived was later deleted or moved elsewhere. Origin, here, means where content entered Canon's custody from — the source root an `apply` drew it from — attributed at the same decision-level granularity as the extraction ledger above, since that ledger is the card's only source of origin data. It is not, and cannot be, a full per-item lineage; that is a distinct, still-undesigned surface.
+
+The card is computed by its own operation (`ops::composition::compute_composition`), independent of trail rendering, so it can be reused wherever a present-tense "what's here?" reading is useful — the trail command is its first consumer, not its only intended one.

@@ -69,6 +69,41 @@ Archived from here: 1,251 files (22.1 GB) → 2 destinations.
 
 Omitted when nothing has ever been drawn from here. Sizes are omitted (not guessed) if any contributing decision's bytes can't be determined. Global views carry no single "here" to roll up, so neither the rollup nor extraction lines appear there — an apply still counts toward the "not shown" footer at any view it doesn't touch.
 
+## The inbound direction: what arrived here
+
+Standing at a destination, the same apply shows up too — its recorded destination touching this scope is enough, regardless of where its source root sits. It renders in the *arrival aspect*:
+
+```
+#42   2026-05-12 14:03  .   ← 47 files (3.9 GB) from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain) · "italy assembly"
+```
+
+The scope cell is the destination this time, view-relative (`.` for the viewed folder itself); the wording mirrors the outbound direction (`copied in; originals remain` / `moved in`). A source root the live index no longer knows renders with `(root removed)` appended, the same honesty as `trail show`'s `drew from:` lines.
+
+When a decision's origin *and* destination both sit inside the view — a relocation entirely within one scope — it renders once, not twice: the extraction-aspect line, with the destination shown view-relative instead of absolute. Both endpoints stay visible in that one line.
+
+The matching whole-history rollup:
+
+```
+Arrived here: 2 files (14 B) from 1 origin.
+```
+
+Both rollups can appear together — a location can draw content out, receive content in, both, or neither, entirely independently.
+
+## The composition card: what's standing here
+
+Below the rollups, a scoped scope-lens view ends with a present-tense statement of what the location is made of *right now*, read from its surviving sources' stamps — not from the trail's events:
+
+```
+Standing here: 3 files (21 B)
+  from /Volumes/old-laptop/photos/2016/italy: 3 files (21 B) · #42 · 2026-05-12
+```
+
+This is deliberately a different question from everything above it. "Arrived here" is an event total — it never shrinks, because a decision that happened stays happened. "Standing here" is a state total — it can be *less* than what arrived, honestly, when some of what arrived was later deleted or moved elsewhere. Seeing `Arrived here: 5 files` next to `Standing here: 3 files` is not a bug; it is the difference between what came in and what remains.
+
+Origin lines come first, busiest first: a single-origin root that fed this location across one or more applies merges into one `from <root>` line (listing every contributing decision id and the date range, if more than one); an apply that drew from several roots in a single decision gets its own `via apply #N from M origins` line, since its content isn't merge-worthy with anything else. After origins: other transitions that touched present content here (`excluded here (#30)`, etc.), a `first indexed here` bucket for content this location saw first via a scan, and an `untracked (predates recording)` bucket for content whose stamp predates recording entirely. A long list of origins is capped, with an explicit remainder line (`… and 2 more origins.`) — never a silent truncation.
+
+Exclusion doesn't remove standing — an excluded-but-present source still counts; renaming a file later doesn't erase its origin either, since attribution follows the decision that stamped it, not the file's current name. The card only appears when it has something to say: a location whose content is entirely first-indexed-here or untracked renders no card at all. It never appears in global views, the time lens, or `--jsonl` output — it is a scoped, present-tense reading, and JSONL's `extractions` field already covers the machine-readable side of provenance.
+
 ## The time lens
 
 `--today`, `--since <when>`, or `--on <when>` switch to the day-grouped story view — chronological, so it reads forward:

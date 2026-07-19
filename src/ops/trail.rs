@@ -798,7 +798,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Arrival ledger visibility (destination-provenance-card Story 1)
+    // Arrival ledger visibility — the extraction ledger's inbound direction
     // ------------------------------------------------------------------
 
     #[test]
@@ -924,7 +924,8 @@ mod tests {
     fn decision_with_extraction_and_arrival_row_touching_same_view_appears_once() {
         // Intra-view relocation: a decision whose source and destination are
         // both inside the viewed scope. It must list once, with both maps
-        // populated (Phase 2 collapses this to one rendered line).
+        // populated — rendering is responsible for collapsing that into one
+        // line rather than two.
         let conn = open_in_memory_for_test();
         let root = insert_test_root(&conn, "/a", "source", false);
         let decision_id = insert_decision_at(&conn, "apply", 100);

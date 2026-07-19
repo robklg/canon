@@ -15,6 +15,7 @@ use anyhow::{anyhow, Result};
 use chrono::{Local, TimeZone};
 use serde::Serialize;
 
+use crate::domain::composition::{CompositionCard, OriginLine, TransitionedLine};
 use crate::domain::decision::Decision;
 use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::domain::format::{cap_path, format_count, format_size};
@@ -72,12 +73,29 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<()> {
     };
     let result = ops::trail::compute_trail(db.conn(), &params)?;
 
+    // The composition card is a scope-lens, scoped-view-only feature (never
+    // global, never the time lens, never JSONL) — computed here rather than
+    // unconditionally so a global/time-lens/--jsonl run does the DB work of
+    // the trail query only, not the card's as well.
+    let card = if !args.jsonl && !resolved.is_global() && params.timeframe.is_none() {
+        ops::composition::compute_composition(db.conn(), &params.prefixes)?
+    } else {
+        None
+    };
+
     let roots_map: HashMap<i64, Root> = all_roots.into_iter().map(|r| (r.id, r)).collect();
     if args.jsonl {
         crate::scope::print_list_scope(&resolved);
         print_jsonl(&result)?;
     } else {
-        print_human(&result, &resolved, time_label.as_deref(), &roots_map, limit);
+        print_human(
+            &result,
+            &resolved,
+            time_label.as_deref(),
+            &roots_map,
+            limit,
+            card.as_ref(),
+        );
     }
     Ok(())
 }
@@ -149,6 +167,7 @@ fn print_human(
     time_label: Option<&str>,
     roots: &HashMap<i64, Root>,
     limit: Option<usize>,
+    card: Option<&CompositionCard>,
 ) {
     let scope_part = if resolved.is_global() {
         "all roots".to_string()
@@ -269,6 +288,144 @@ fn print_human(
             "{} global decisions not shown (--global).",
             format_count(result.unscoped_decisions)
         );
+    }
+
+    // The composition card: state, not events — "Arrived here" and "Standing
+    // here" can honestly diverge (content arrived, then some of it was later
+    // deleted or moved on). Scope-lens only, same as both rollups above.
+    if let (TrailView::Recent(_), Some(card)) = (&result.view, card) {
+        print_composition_card(card);
+    }
+}
+
+/// Maximum number of origin lines the composition card shows before an
+/// explicit remainder line — the origins section is the one that scales with
+/// a location's history (many source drives feeding one archive folder over
+/// years); transitioned/indexed-here/untracked stay small in practice.
+const CARD_ORIGIN_CAP: usize = 10;
+
+fn print_composition_card(card: &CompositionCard) {
+    println!();
+    println!("Standing here: {}", format_bucket(card.files, card.bytes));
+    for line in composition_card_lines(card) {
+        println!("  {line}");
+    }
+}
+
+/// The card's body lines below the "Standing here" header: origins
+/// (files desc, capped with an explicit remainder), transitioned,
+/// indexed-here, untracked. Pure data — kept separate from
+/// `print_composition_card` so the cap and ordering are testable without
+/// capturing stdout.
+fn composition_card_lines(card: &CompositionCard) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line in card.origins.iter().take(CARD_ORIGIN_CAP) {
+        lines.push(format_origin_line(line));
+    }
+    if card.origins.len() > CARD_ORIGIN_CAP {
+        let more = card.origins.len() - CARD_ORIGIN_CAP;
+        let unit = if more == 1 { "origin" } else { "origins" };
+        lines.push(format!(
+            "\u{2026} and {} more {unit}.",
+            format_count(more as i64)
+        ));
+    }
+    for line in &card.transitioned {
+        lines.push(format_transitioned_line(line));
+    }
+    if let Some(bucket) = &card.indexed_here {
+        lines.push(format!(
+            "first indexed here: {}",
+            format_bucket(bucket.files, bucket.bytes)
+        ));
+    }
+    if let Some(bucket) = &card.untracked {
+        lines.push(format!(
+            "untracked (predates recording): {}",
+            format_bucket(bucket.files, bucket.bytes)
+        ));
+    }
+    lines
+}
+
+fn format_bucket(files: i64, bytes: i64) -> String {
+    let unit = if files == 1 { "file" } else { "files" };
+    format!("{} {unit} ({})", format_count(files), format_size(bytes))
+}
+
+/// One origin line: `from <root>` (single-origin, possibly several merged
+/// decisions) or `via apply #N from M origins` (one multi-origin decision) —
+/// the registered wording, never a free literal.
+fn format_origin_line(line: &OriginLine) -> String {
+    match line {
+        OriginLine::FromRoot {
+            root_path,
+            root_removed,
+            files,
+            bytes,
+            decision_ids,
+            first_at,
+            last_at,
+        } => {
+            let marker = if *root_removed {
+                ROOT_REMOVED_MARKER
+            } else {
+                ""
+            };
+            let ids: Vec<String> = decision_ids.iter().map(|id| format!("#{id}")).collect();
+            format!(
+                "from {root_path}{marker}: {} \u{00b7} {} \u{00b7} {}",
+                format_bucket(*files, *bytes),
+                ids.join(", "),
+                format_date_range(*first_at, *last_at)
+            )
+        }
+        OriginLine::MultiOrigin {
+            decision_id,
+            origin_count,
+            files,
+            bytes,
+            at,
+        } => {
+            format!(
+                "via apply #{decision_id} from {origin_count} origins: {} \u{00b7} {}",
+                format_bucket(*files, *bytes),
+                format_date_only(*at)
+            )
+        }
+    }
+}
+
+/// A transitioned line: `<label> here (#N)` — `label` is the registered
+/// transition word when one applies, else the raw command (self-explaining,
+/// never guessed).
+fn format_transitioned_line(line: &TransitionedLine) -> String {
+    format!(
+        "{} here (#{}): {}",
+        line.label,
+        line.decision_id,
+        format_bucket(line.files, line.bytes)
+    )
+}
+
+/// A single date, or a `first – last` range when the two differ (several
+/// contributing decisions).
+fn format_date_range(first_at: i64, last_at: i64) -> String {
+    if first_at == last_at {
+        format_date_only(first_at)
+    } else {
+        format!(
+            "{} \u{2013} {}",
+            format_date_only(first_at),
+            format_date_only(last_at)
+        )
+    }
+}
+
+fn format_date_only(ts: i64) -> String {
+    match Local.timestamp_opt(ts, 0) {
+        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
+        _ => "????-??-??".to_string(),
     }
 }
 
@@ -1266,5 +1423,198 @@ mod tests {
             format_arrival_rollup(&rollup),
             "Arrived here: 1 file from 1 origin."
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Composition card rendering
+    // ------------------------------------------------------------------
+
+    fn mk_from_root(
+        root_path: &str,
+        root_removed: bool,
+        files: i64,
+        decision_ids: Vec<i64>,
+        first_at: i64,
+        last_at: i64,
+    ) -> OriginLine {
+        OriginLine::FromRoot {
+            root_path: root_path.to_string(),
+            root_removed,
+            files,
+            bytes: files * 100,
+            decision_ids,
+            first_at,
+            last_at,
+        }
+    }
+
+    /// A timestamp that maps back to `date_str` under the local timezone
+    /// used by `format_date_only` — noon avoids DST-transition edge cases.
+    /// Timezone-independent by construction: the date is chosen first, the
+    /// timestamp derived from it, never the reverse.
+    fn local_ts_on(date_str: &str) -> i64 {
+        let date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").unwrap();
+        let naive = date.and_hms_opt(12, 0, 0).unwrap();
+        Local
+            .from_local_datetime(&naive)
+            .single()
+            .unwrap()
+            .timestamp()
+    }
+
+    #[test]
+    fn format_bucket_singular_and_plural() {
+        assert_eq!(format_bucket(1, 10), "1 file (10 B)");
+        assert_eq!(format_bucket(2, 2_000), "2 files (2.0 KB)");
+    }
+
+    #[test]
+    fn format_origin_line_from_root_single_decision_single_date() {
+        let ts = local_ts_on("2024-01-05");
+        let line = mk_from_root("/Volumes/old-laptop", false, 47, vec![12], ts, ts);
+        assert_eq!(
+            format_origin_line(&line),
+            "from /Volumes/old-laptop: 47 files (4.7 KB) \u{b7} #12 \u{b7} 2024-01-05"
+        );
+    }
+
+    #[test]
+    fn format_origin_line_from_root_merged_decisions_show_date_range_and_all_ids() {
+        let first = local_ts_on("2024-01-05");
+        let last = local_ts_on("2024-02-04");
+        let line = mk_from_root("/Volumes/old-laptop", false, 15, vec![1, 2], first, last);
+        let text = format_origin_line(&line);
+        assert!(text.contains("#1, #2"));
+        assert!(text.contains("2024-01-05 \u{2013} 2024-02-04"));
+    }
+
+    #[test]
+    fn format_origin_line_from_root_marks_removed_root() {
+        let ts = local_ts_on("2024-01-05");
+        let line = mk_from_root("/Volumes/gone", true, 1, vec![1], ts, ts);
+        assert!(format_origin_line(&line).starts_with("from /Volumes/gone (root removed):"));
+    }
+
+    #[test]
+    fn format_origin_line_multi_origin_wording() {
+        let line = OriginLine::MultiOrigin {
+            decision_id: 42,
+            origin_count: 3,
+            files: 12,
+            bytes: 1_200,
+            at: local_ts_on("2024-01-05"),
+        };
+        assert_eq!(
+            format_origin_line(&line),
+            "via apply #42 from 3 origins: 12 files (1.2 KB) \u{b7} 2024-01-05"
+        );
+    }
+
+    #[test]
+    fn format_transitioned_line_composition() {
+        let line = TransitionedLine {
+            decision_id: 30,
+            label: "excluded".to_string(),
+            files: 4,
+            bytes: 400,
+        };
+        assert_eq!(
+            format_transitioned_line(&line),
+            "excluded here (#30): 4 files (400 B)"
+        );
+    }
+
+    fn mk_card(
+        origins: Vec<OriginLine>,
+        transitioned: Vec<TransitionedLine>,
+        indexed_here: Option<crate::domain::composition::BucketCount>,
+        untracked: Option<crate::domain::composition::BucketCount>,
+    ) -> CompositionCard {
+        let files = origins.iter().map(|o| o.files()).sum::<i64>()
+            + transitioned.iter().map(|t| t.files).sum::<i64>()
+            + indexed_here.map(|b| b.files).unwrap_or(0)
+            + untracked.map(|b| b.files).unwrap_or(0);
+        CompositionCard {
+            files,
+            bytes: files * 100,
+            origins,
+            transitioned,
+            indexed_here,
+            untracked,
+        }
+    }
+
+    #[test]
+    fn composition_card_lines_order_origins_transitioned_indexed_untracked() {
+        let card = mk_card(
+            vec![mk_from_root("/a", false, 5, vec![1], 0, 0)],
+            vec![TransitionedLine {
+                decision_id: 2,
+                label: "excluded".to_string(),
+                files: 1,
+                bytes: 100,
+            }],
+            Some(crate::domain::composition::BucketCount {
+                files: 1,
+                bytes: 100,
+            }),
+            Some(crate::domain::composition::BucketCount {
+                files: 1,
+                bytes: 100,
+            }),
+        );
+        let lines = composition_card_lines(&card);
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].starts_with("from /a"));
+        assert!(lines[1].starts_with("excluded here"));
+        assert!(lines[2].starts_with("first indexed here"));
+        assert!(lines[3].starts_with("untracked (predates recording)"));
+    }
+
+    #[test]
+    fn composition_card_lines_caps_origins_with_explicit_remainder() {
+        let origins: Vec<OriginLine> = (0..12)
+            .map(|i| mk_from_root(&format!("/vol{i}"), false, 1, vec![i], 0, 0))
+            .collect();
+        let card = mk_card(origins, Vec::new(), None, None);
+        let lines = composition_card_lines(&card);
+        // 10 origin lines + one remainder line.
+        assert_eq!(lines.len(), 11);
+        assert_eq!(lines[10], "\u{2026} and 2 more origins.");
+    }
+
+    #[test]
+    fn composition_card_lines_no_remainder_when_under_cap() {
+        let origins: Vec<OriginLine> = (0..3)
+            .map(|i| mk_from_root(&format!("/vol{i}"), false, 1, vec![i], 0, 0))
+            .collect();
+        let card = mk_card(origins, Vec::new(), None, None);
+        let lines = composition_card_lines(&card);
+        assert_eq!(lines.len(), 3);
+        assert!(!lines.iter().any(|l| l.contains("more")));
+    }
+
+    #[test]
+    fn arrived_and_standing_rollups_render_independently_when_they_diverge() {
+        // Event-vs-state divergence: content arrived (5) but some was later
+        // deleted, leaving fewer standing (3) — both numbers must render
+        // distinctly, never collapse into one.
+        let arrival_rollup = ArrivalRollup {
+            files: 5,
+            bytes: Some(500),
+            origins: 1,
+        };
+        let card = mk_card(
+            vec![mk_from_root("/vol/a", false, 3, vec![7], 0, 0)],
+            Vec::new(),
+            None,
+            None,
+        );
+
+        let arrived_line = format_arrival_rollup(&arrival_rollup);
+        let standing_line = format!("Standing here: {}", format_bucket(card.files, card.bytes));
+        assert!(arrived_line.contains("5 files"));
+        assert!(standing_line.contains("3 files"));
+        assert_ne!(arrived_line, standing_line);
     }
 }
