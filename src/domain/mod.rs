@@ -9,6 +9,7 @@
 // Re-exports are intentional for public API convenience
 #![allow(unused_imports)]
 
+pub mod composition;
 pub mod config;
 pub mod decision;
 pub mod exclusion;
