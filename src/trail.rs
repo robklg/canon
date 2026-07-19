@@ -360,11 +360,18 @@ fn format_bucket(files: i64, bytes: i64) -> String {
 /// One origin line: `from <root>` (single-origin, possibly several merged
 /// decisions) or `via apply #N from M origins` (one multi-origin decision) —
 /// the registered wording, never a free literal.
+///
+/// An origin root that *contains* the view reads `from elsewhere in <root>`:
+/// the content genuinely arrived (its origin sits outside the viewed scope),
+/// but a bare `from /archive` while standing in `/archive/2020` would read as
+/// naming the place you're already in. The root is still named rather than
+/// left implicit ("in this root"), because a view can span several roots.
 fn format_origin_line(line: &OriginLine) -> String {
     match line {
         OriginLine::FromRoot {
             root_path,
             root_removed,
+            from_within,
             files,
             bytes,
             decision_ids,
@@ -376,9 +383,14 @@ fn format_origin_line(line: &OriginLine) -> String {
             } else {
                 ""
             };
+            let source = if *from_within {
+                format!("from elsewhere in {root_path}{marker}")
+            } else {
+                format!("from {root_path}{marker}")
+            };
             let ids: Vec<String> = decision_ids.iter().map(|id| format!("#{id}")).collect();
             format!(
-                "from {root_path}{marker}: {} \u{00b7} {} \u{00b7} {}",
+                "{source}: {} \u{00b7} {} \u{00b7} {}",
                 format_bucket(*files, *bytes),
                 ids.join(", "),
                 format_date_range(*first_at, *last_at)
@@ -1545,6 +1557,7 @@ mod tests {
         OriginLine::FromRoot {
             root_path: root_path.to_string(),
             root_removed,
+            from_within: false,
             files,
             bytes: files * 100,
             decision_ids,
@@ -1581,6 +1594,45 @@ mod tests {
             format_origin_line(&line),
             "from /Volumes/old-laptop: 47 files (4.7 KB) \u{b7} #12 \u{b7} 2024-01-05"
         );
+    }
+
+    #[test]
+    fn format_origin_line_from_within_says_elsewhere_in_the_root() {
+        let ts = local_ts_on("2026-05-12");
+        let line = OriginLine::FromRoot {
+            root_path: "/archive".to_string(),
+            root_removed: false,
+            from_within: true,
+            files: 47,
+            bytes: 3_900_000_000,
+            decision_ids: vec![42],
+            first_at: ts,
+            last_at: ts,
+        };
+        assert_eq!(
+            format_origin_line(&line),
+            "from elsewhere in /archive: 47 files (3.9 GB) \u{b7} #42 \u{b7} 2026-05-12"
+        );
+    }
+
+    #[test]
+    fn format_origin_line_from_within_keeps_the_removed_root_marker() {
+        // Both annotations are about the same root and must compose, not
+        // displace each other.
+        let ts = local_ts_on("2026-05-12");
+        let line = OriginLine::FromRoot {
+            root_path: "/archive".to_string(),
+            root_removed: true,
+            from_within: true,
+            files: 1,
+            bytes: 100,
+            decision_ids: vec![42],
+            first_at: ts,
+            last_at: ts,
+        };
+        let text = format_origin_line(&line);
+        assert!(text.starts_with("from elsewhere in /archive"), "{text}");
+        assert!(text.contains(ROOT_REMOVED_MARKER), "{text}");
     }
 
     #[test]

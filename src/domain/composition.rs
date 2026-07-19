@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::decision::Decision;
 use super::extraction::DecisionExtraction;
+use super::path_is_under;
 use super::trail::{
     classify_row, decision_family, fate_transition, DecisionFamily, FateAspect, RowAspect,
 };
@@ -36,6 +37,15 @@ pub enum OriginLine {
         root_path: String,
         /// Whether the origin root is still known to the live index.
         root_removed: bool,
+        /// Whether the origin root *contains the viewed scope* — the content
+        /// came from elsewhere within this same root, not in from outside.
+        ///
+        /// A real crossing (the origin sits outside the view, so it is not a
+        /// rearrangement *here*), but naming the root alone would read as
+        /// "from the place I'm already standing in". Constant across a merge
+        /// group: the group's key is the root path, and roots cannot nest, so
+        /// at most one root can contain any view.
+        from_within: bool,
         files: i64,
         bytes: i64,
         /// Every contributing decision, ascending.
@@ -120,11 +130,23 @@ impl CompositionCard {
 
 struct FromRootAcc {
     root_removed: bool,
+    from_within: bool,
     files: i64,
     bytes: i64,
     decision_ids: Vec<i64>,
     first_at: i64,
     last_at: i64,
+}
+
+/// Whether an origin root contains the viewed scope — i.e. the content came
+/// from elsewhere *within this same root* rather than in from outside it.
+///
+/// Distinct from the rearrangement guard: this row's origin sits outside the
+/// view (or the guard would have caught it), so content really did arrive.
+/// Only the display is at stake — `from /archive` while standing in
+/// `/archive/2020` reads as "from the place I'm already in".
+fn contains_view(root_path: &str, prefixes: &[String]) -> bool {
+    prefixes.iter().any(|p| path_is_under(p, root_path))
 }
 
 /// Build a composition card from present-source groups, keyed by the
@@ -232,6 +254,7 @@ pub fn build_card(
                                     from_roots.entry(row.root_path.clone()).or_insert_with(|| {
                                         FromRootAcc {
                                             root_removed: !live_root_ids.contains(&row.root_id),
+                                            from_within: contains_view(&row.root_path, prefixes),
                                             files: 0,
                                             bytes: 0,
                                             decision_ids: Vec::new(),
@@ -283,6 +306,7 @@ pub fn build_card(
         origins.push(OriginLine::FromRoot {
             root_path,
             root_removed: acc.root_removed,
+            from_within: acc.from_within,
             files: acc.files,
             bytes: acc.bytes,
             decision_ids,
@@ -377,6 +401,7 @@ mod tests {
             OriginLine::FromRoot {
                 root_path,
                 root_removed,
+                from_within,
                 files,
                 bytes,
                 decision_ids,
@@ -385,6 +410,7 @@ mod tests {
             } => {
                 assert_eq!(root_path, "/vol/a");
                 assert!(!root_removed);
+                assert!(!from_within, "/vol/a does not contain /archive");
                 assert_eq!(*files, 15);
                 assert_eq!(*bytes, 1_500);
                 assert_eq!(decision_ids, &vec![1, 2]);
@@ -506,6 +532,79 @@ mod tests {
         );
         assert!(card.transitioned.is_empty());
         assert_eq!(card.origins.len(), 1);
+    }
+
+    #[test]
+    fn origin_root_containing_the_view_is_marked_from_within() {
+        // Standing at /archive/2020, content drawn from /archive/2016 really
+        // did arrive (its origin is outside this view) — but the origin line
+        // is anchored on the *root*, so a bare "from /archive" would name the
+        // place the reader is already standing in.
+        let d = mk_decision(42, "apply", 100);
+        let groups = HashMap::from([(Some(42), bucket(47, 3_900))]);
+        let decisions = HashMap::from([(42, d)]);
+        let mut row = mk_extraction(42, 7, "/archive");
+        row.rel_prefix = "2016".to_string();
+        row.destination_path = "/archive/2020".to_string();
+        let extractions = HashMap::from([(42, vec![row])]);
+
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &HashSet::from([7]),
+            &["/archive/2020".to_string()],
+        );
+        match &card.origins[0] {
+            OriginLine::FromRoot {
+                root_path,
+                from_within,
+                ..
+            } => {
+                assert_eq!(root_path, "/archive");
+                assert!(from_within);
+            }
+            OriginLine::MultiOrigin { .. } => panic!("expected FromRoot"),
+        }
+    }
+
+    #[test]
+    fn origin_root_outside_the_view_is_not_from_within() {
+        // The ordinary case: a source drive is not an ancestor of the view.
+        let d = mk_decision(42, "apply", 100);
+        let groups = HashMap::from([(Some(42), bucket(47, 3_900))]);
+        let decisions = HashMap::from([(42, d)]);
+        let extractions = HashMap::from([(42, vec![mk_extraction(42, 7, "/Volumes/sd")])]);
+
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &HashSet::from([7]),
+            &["/archive/2020".to_string()],
+        );
+        match &card.origins[0] {
+            OriginLine::FromRoot { from_within, .. } => assert!(!from_within),
+            OriginLine::MultiOrigin { .. } => panic!("expected FromRoot"),
+        }
+    }
+
+    #[test]
+    fn contains_view_respects_segment_boundaries() {
+        // /archive-old does not contain /archive/2020, however similar the
+        // strings look — the same segment rule the rest of the trail obeys.
+        assert!(contains_view("/archive", &["/archive/2020".to_string()]));
+        assert!(contains_view("/archive", &["/archive".to_string()]));
+        assert!(!contains_view(
+            "/archive-old",
+            &["/archive/2020".to_string()]
+        ));
+        assert!(!contains_view("/archive/2020", &["/archive".to_string()]));
+        // Multi-prefix view: within-ness holds if any prefix is under it.
+        assert!(contains_view(
+            "/archive",
+            &["/Volumes/sd".to_string(), "/archive/2020".to_string()]
+        ));
     }
 
     #[test]
