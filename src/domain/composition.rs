@@ -128,10 +128,13 @@ struct FromRootAcc {
 /// Build a composition card from present-source groups, keyed by the
 /// decision that stamped each group (`None` = untracked).
 ///
-/// Pure — `decisions` and `extractions_by_decision` must already carry every
-/// id referenced by `groups` (the ops layer fetches them); a `Some(id)` group
-/// with no matching entry in `decisions` is a caller precondition violation,
-/// not a runtime possibility to guess around.
+/// Pure — the ops layer fetches `decisions` and `extractions_by_decision` for
+/// every id referenced by `groups`. A `Some(id)` group with no matching entry
+/// in `decisions` is nonetheless representable: `sources.decision_id` carries
+/// no foreign key, and the DB is a rebuildable index whose decision rows may
+/// not have survived. Such a stamp becomes its own transitioned line rather
+/// than a panic or a silent fold into another bucket — a gap must read as a
+/// gap.
 pub fn build_card(
     groups: &HashMap<Option<i64>, BucketCount>,
     decisions: &HashMap<i64, Decision>,
@@ -156,9 +159,18 @@ pub fn build_card(
                 entry.bytes += bucket.bytes;
             }
             Some(id) => {
-                let decision = decisions
-                    .get(id)
-                    .expect("composition card: decision must be fetched for every stamped id");
+                let Some(decision) = decisions.get(id) else {
+                    // The stamp names a decision the index no longer holds.
+                    // Say so on its own line: the content's standing is real,
+                    // only the story behind it was lost.
+                    transitioned.push(TransitionedLine {
+                        decision_id: *id,
+                        label: "transition unrecorded".to_string(),
+                        files: bucket.files,
+                        bytes: bucket.bytes,
+                    });
+                    continue;
+                };
                 match decision_family(&decision.command) {
                     DecisionFamily::Archive => {
                         let rows = extractions_by_decision
@@ -458,6 +470,30 @@ mod tests {
             + card.indexed_here.map(|b| b.files).unwrap_or(0)
             + card.untracked.map(|b| b.files).unwrap_or(0);
         assert_eq!(bucket_sum_files, card.files);
+    }
+
+    #[test]
+    fn stamp_naming_a_missing_decision_becomes_its_own_line() {
+        // `sources.decision_id` has no foreign key and the DB is a
+        // rebuildable index, so a stamp can outlive its decision row. The
+        // card must survive that, keep the files standing, and say the story
+        // is missing — never panic, never quietly bucket it as untracked
+        // (which means "no stamp at all", a different fact).
+        let groups = HashMap::from([(Some(404), bucket(6, 600)), (None, bucket(1, 100))]);
+        let card = build_card(&groups, &HashMap::new(), &HashMap::new(), &HashSet::new());
+
+        assert_eq!(
+            card.transitioned,
+            vec![TransitionedLine {
+                decision_id: 404,
+                label: "transition unrecorded".to_string(),
+                files: 6,
+                bytes: 600,
+            }]
+        );
+        assert_eq!(card.untracked, Some(bucket(1, 100)));
+        assert_eq!(card.files, 7);
+        assert_eq!(card.bytes, 700);
     }
 
     #[test]
