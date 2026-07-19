@@ -16,7 +16,8 @@ use crate::domain::decision::Decision;
 use crate::domain::extraction::DecisionExtraction;
 use crate::domain::root::find_containing_root;
 use crate::domain::trail::{
-    group_by_day, merge_events, scopes_touch, DayGroup, TimelineEvent, WhenValue,
+    group_by_day, merge_events, row_aspect, scopes_touch, DayGroup, RowAspect, TimelineEvent,
+    WhenValue,
 };
 use crate::repo::{self, Connection};
 
@@ -311,6 +312,43 @@ fn group_extractions_by_decision(
         map.entry(row.decision_id).or_default().push(row);
     }
     map
+}
+
+/// Every extraction row a decision renders in this view, each tagged with the
+/// direction it reads from here.
+///
+/// Classification is **per row, not per decision**: one apply can draw from a
+/// root inside the view and from another outside it in the same breath, so a
+/// decision appearing in both maps is not necessarily a pure rearrangement —
+/// classifying it as one would drop the outside-origin rows entirely.
+///
+/// This lives in ops because ops owns the two maps and the membership they
+/// encode: a row in `extractions` was fetched by root id, so its origin is in
+/// the view by construction, and likewise a row in `arrivals` for its
+/// destination. Rows are matched between the maps by `root_id` (the extraction
+/// ledger's `(decision_id, root_id)` key); the rule itself is
+/// [`domain::trail::row_aspect`]. `Outside` is unreachable here — a row absent
+/// from both maps was never fetched.
+pub fn classify_decision_rows<'a>(
+    id: i64,
+    extractions: &'a HashMap<i64, Vec<DecisionExtraction>>,
+    arrivals: &'a HashMap<i64, Vec<DecisionExtraction>>,
+) -> Vec<(&'a DecisionExtraction, RowAspect)> {
+    let outbound = extractions.get(&id).map(Vec::as_slice).unwrap_or_default();
+    let inbound = arrivals.get(&id).map(Vec::as_slice).unwrap_or_default();
+    let arrived_here: HashSet<i64> = inbound.iter().map(|row| row.root_id).collect();
+    let drawn_from_here: HashSet<i64> = outbound.iter().map(|row| row.root_id).collect();
+
+    outbound
+        .iter()
+        .map(|row| (row, row_aspect(true, arrived_here.contains(&row.root_id))))
+        .chain(
+            inbound
+                .iter()
+                .filter(|row| !drawn_from_here.contains(&row.root_id))
+                .map(|row| (row, row_aspect(false, true))),
+        )
+        .collect()
 }
 
 /// Sum files/bytes and count distinct destinations over a set of extraction
@@ -615,6 +653,52 @@ mod tests {
             destination_path: destination_path.to_string(),
             disposition: Some(crate::domain::extraction::OriginDisposition::Retained),
         }
+    }
+
+    #[test]
+    fn classify_decision_rows_judges_each_row_by_its_own_endpoints() {
+        // Per row, not per decision. One apply reaches three ways at once, and
+        // each row is judged by its own two endpoints:
+        //   - `inside`  drawn from the view, landing in it  -> rearrangement
+        //   - `left`    drawn from the view, landing outside -> extraction
+        //   - `outside` drawn from elsewhere, landing here   -> arrival
+        // Any classification that asks "is this decision in both maps?"
+        // instead of asking it of each row gets `left` wrong and drops
+        // `outside` entirely.
+        let inside = extraction_row(42, 1, "/archive", "2016", 47, Some(10), "/archive/2020");
+        let left = extraction_row(42, 3, "/archive", "raw", 5, Some(1), "/elsewhere");
+        let outside = extraction_row(42, 2, "/Volumes/sd", "dcim", 8, Some(2), "/archive/2020");
+
+        let extractions = HashMap::from([(42, vec![inside.clone(), left.clone()])]);
+        let arrivals = HashMap::from([(42, vec![inside.clone(), outside.clone()])]);
+
+        assert_eq!(
+            classify_decision_rows(42, &extractions, &arrivals),
+            vec![
+                (&inside, RowAspect::Rearrangement),
+                (&left, RowAspect::Extraction),
+                (&outside, RowAspect::Arrival)
+            ]
+        );
+    }
+
+    #[test]
+    fn classify_decision_rows_classifies_one_directional_decisions() {
+        let row = extraction_row(42, 1, "/src", "photos", 3, Some(9), "/archive/2020");
+        let only_out = HashMap::from([(42, vec![row.clone()])]);
+        let only_in = HashMap::from([(42, vec![row.clone()])]);
+
+        assert_eq!(
+            classify_decision_rows(42, &only_out, &HashMap::new()),
+            vec![(&row, RowAspect::Extraction)]
+        );
+        assert_eq!(
+            classify_decision_rows(42, &HashMap::new(), &only_in),
+            vec![(&row, RowAspect::Arrival)]
+        );
+        // A decision touching neither map contributes no row at all — the
+        // caller falls back to the selection-scope headline.
+        assert!(classify_decision_rows(42, &HashMap::new(), &HashMap::new()).is_empty());
     }
 
     #[test]

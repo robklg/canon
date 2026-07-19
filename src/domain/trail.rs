@@ -13,6 +13,7 @@ use std::path::Path;
 use chrono::{Datelike, Duration, NaiveDate, Weekday};
 
 use super::decision::Decision;
+use super::extraction::DecisionExtraction;
 use super::note::Note;
 
 /// Rollup family of a decision command — the minimal *what* classification the
@@ -179,6 +180,55 @@ pub fn merge_events(decisions: Vec<Decision>, notes: Vec<Note>) -> Vec<TimelineE
 pub fn scopes_touch(view_prefix: &str, other_prefix: &str) -> bool {
     Path::new(view_prefix).starts_with(other_prefix)
         || Path::new(other_prefix).starts_with(view_prefix)
+}
+
+/// Which direction a single extraction row reads from inside a view.
+///
+/// A rollup counts boundary crossings, and the view defines the boundary: the
+/// same decision is an arrival seen from a narrow scope and a rearrangement
+/// seen from the root that contains both its endpoints. That is the rule
+/// working, not an inconsistency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowAspect {
+    /// Origin inside, destination outside — content left here.
+    Extraction,
+    /// Both endpoints inside — content moved within, crossing nothing.
+    Rearrangement,
+    /// Destination inside, origin outside — content entered here.
+    Arrival,
+    /// Neither endpoint touches the view.
+    Outside,
+}
+
+/// The one derivation of what a row means relative to a boundary.
+///
+/// Consumers supply membership evidence in whatever form they already hold —
+/// the rollups establish origin membership by root id and destination
+/// membership by snapshot path, the card has only prefixes. Centralizing the
+/// *rule* keeps them in agreement; centralizing the *evidence* would silently
+/// change how each one matches.
+pub fn row_aspect(origin_in_view: bool, destination_in_view: bool) -> RowAspect {
+    match (origin_in_view, destination_in_view) {
+        (true, true) => RowAspect::Rearrangement,
+        (true, false) => RowAspect::Extraction,
+        (false, true) => RowAspect::Arrival,
+        (false, false) => RowAspect::Outside,
+    }
+}
+
+/// [`row_aspect`] with membership established from absolute path prefixes —
+/// for consumers holding no membership maps. An empty prefix list is a global
+/// view, which has no boundary to cross: every row reads as a rearrangement.
+///
+/// Sits beside `row_aspect` so the rule and its two evidence forms have one
+/// home; the composition card is its consumer, so it is allowed to be unused
+/// until that card learns to ask.
+#[allow(dead_code)]
+pub fn classify_row(row: &DecisionExtraction, prefixes: &[String]) -> RowAspect {
+    let touches = |path: &str| {
+        prefixes.is_empty() || prefixes.iter().any(|prefix| scopes_touch(prefix, path))
+    };
+    row_aspect(touches(&row.drawn_from()), touches(&row.destination_path))
 }
 
 /// A parsed time-lens value: `--since` (from date onward) or `--on` (one day).
@@ -579,6 +629,104 @@ mod tests {
         assert!(!scopes_touch("/archive/x", "/archive/y")); // sibling
         assert!(!scopes_touch("/archive/x", "/archive/xc")); // segment boundary
         assert!(!scopes_touch("/archive/xc", "/archive/x"));
+    }
+
+    // row_aspect / classify_row — the boundary-crossing rule
+
+    fn mk_extraction(root_path: &str, rel_prefix: &str, destination: &str) -> DecisionExtraction {
+        DecisionExtraction {
+            decision_id: 42,
+            root_id: 1,
+            root_path: root_path.to_string(),
+            rel_prefix: rel_prefix.to_string(),
+            files: 47,
+            bytes: Some(3_900),
+            destination_root_id: Some(2),
+            destination_path: destination.to_string(),
+            disposition: None,
+        }
+    }
+
+    #[test]
+    fn row_aspect_covers_the_boundary_matrix() {
+        use RowAspect::*;
+        let expected = [
+            ((true, true), Rearrangement), // crossed nothing
+            ((true, false), Extraction),   // left here
+            ((false, true), Arrival),      // entered here
+            ((false, false), Outside),     // neither endpoint is ours
+        ];
+        for ((origin, destination), want) in expected {
+            assert_eq!(
+                row_aspect(origin, destination),
+                want,
+                "origin_in_view={origin} destination_in_view={destination}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_row_reads_the_boundary_from_prefixes() {
+        let view = vec!["/archive".to_string()];
+        // Both endpoints under the view — a curation pass within the archive.
+        assert_eq!(
+            classify_row(&mk_extraction("/archive", "2016", "/archive/2020"), &view),
+            RowAspect::Rearrangement
+        );
+        // Origin only: content left this place.
+        assert_eq!(
+            classify_row(&mk_extraction("/archive", "2016", "/elsewhere"), &view),
+            RowAspect::Extraction
+        );
+        // Destination only: content entered it.
+        assert_eq!(
+            classify_row(
+                &mk_extraction("/Volumes/sd", "dcim", "/archive/2020"),
+                &view
+            ),
+            RowAspect::Arrival
+        );
+        // Neither — the card sees rows fetched without a view filter.
+        assert_eq!(
+            classify_row(&mk_extraction("/Volumes/sd", "dcim", "/elsewhere"), &view),
+            RowAspect::Outside
+        );
+    }
+
+    #[test]
+    fn classify_row_respects_segment_boundaries() {
+        // "/archive/2016b" is not under "/archive/2016" — the same segment
+        // rule scopes_touch enforces, reached through the row's joined path.
+        let view = vec!["/archive/2016".to_string()];
+        assert_eq!(
+            classify_row(&mk_extraction("/archive", "2016b", "/elsewhere"), &view),
+            RowAspect::Outside
+        );
+        assert_eq!(
+            classify_row(&mk_extraction("/archive", "2016", "/elsewhere"), &view),
+            RowAspect::Extraction
+        );
+    }
+
+    #[test]
+    fn classify_row_global_view_has_no_boundary() {
+        // No prefixes means no boundary to cross: everything is inside.
+        assert_eq!(
+            classify_row(&mk_extraction("/Volumes/sd", "dcim", "/archive"), &[]),
+            RowAspect::Rearrangement
+        );
+    }
+
+    #[test]
+    fn classify_row_matches_any_of_several_prefixes() {
+        let view = vec!["/archive".to_string(), "/Volumes/sd".to_string()];
+        assert_eq!(
+            classify_row(
+                &mk_extraction("/Volumes/sd", "dcim", "/archive/2020"),
+                &view
+            ),
+            RowAspect::Rearrangement
+        );
     }
 
     // merge_events
