@@ -25,7 +25,9 @@ use crate::domain::trail::{
 };
 use crate::ops;
 use crate::ops::scope::ResolvedScope;
-use crate::ops::trail::{ExtractionRollup, TrailParams, TrailResult, TrailView, DEFAULT_LIMIT};
+use crate::ops::trail::{
+    ArrivalRollup, ExtractionRollup, TrailParams, TrailResult, TrailView, DEFAULT_LIMIT,
+};
 use crate::repo::{self, Db};
 
 pub struct TrailArgs {
@@ -107,7 +109,7 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
             // The snapshot path stays primary; a root the index no longer
             // knows must not read as a live, visitable location.
             let marker = if extraction.root_removed {
-                " (root removed)"
+                ROOT_REMOVED_MARKER
             } else {
                 ""
             };
@@ -161,11 +163,11 @@ fn print_human(
     // Scope column: one width across the whole listing, capped so long
     // paths can't push the narration off-screen. Measured over the cells
     // that will actually be printed — extraction lines render the drawn-from
-    // location, not the selection scope.
+    // location, arrival lines the destination, neither the selection scope.
     let width = |events: &[&TimelineEvent]| -> usize {
         events
             .iter()
-            .flat_map(|e| event_cells(e, resolved, roots, &result.extractions))
+            .flat_map(|e| event_cells(e, resolved, roots, &result.extractions, &result.arrivals))
             .map(|cell| cell.chars().count())
             .max()
             .unwrap_or(0)
@@ -186,7 +188,15 @@ fn print_human(
                 let refs: Vec<&TimelineEvent> = events.iter().collect();
                 let w = width(&refs);
                 for event in events {
-                    print_event(event, true, resolved, roots, w, &result.extractions);
+                    print_event(
+                        event,
+                        true,
+                        resolved,
+                        roots,
+                        w,
+                        &result.extractions,
+                        &result.arrivals,
+                    );
                 }
             }
         }
@@ -207,23 +217,44 @@ fn print_human(
                 }
                 println!();
                 for event in &day.events {
-                    print_event(event, false, resolved, roots, w, &result.extractions);
+                    print_event(
+                        event,
+                        false,
+                        resolved,
+                        roots,
+                        w,
+                        &result.extractions,
+                        &result.arrivals,
+                    );
                 }
             }
         }
     }
 
-    // The extraction rollup is a scope-lens-only footer ("Archived from
-    // here") — it never appears alongside the day-grouped time lens.
-    let rollup_line = match (&result.view, &result.extraction_rollup) {
+    // Both rollups are scope-lens-only footers ("Archived from here" /
+    // "Arrived here") — neither appears alongside the day-grouped time lens.
+    // Independent of each other: a view can draw content out, receive
+    // content in, both, or neither.
+    let extraction_rollup_line = match (&result.view, &result.extraction_rollup) {
         (TrailView::Recent(_), Some(rollup)) => Some(format_extraction_rollup(rollup)),
         _ => None,
     };
+    let arrival_rollup_line = match (&result.view, &result.arrival_rollup) {
+        (TrailView::Recent(_), Some(rollup)) => Some(format_arrival_rollup(rollup)),
+        _ => None,
+    };
 
-    if rollup_line.is_some() || result.earlier_decisions > 0 || result.unscoped_decisions > 0 {
+    if extraction_rollup_line.is_some()
+        || arrival_rollup_line.is_some()
+        || result.earlier_decisions > 0
+        || result.unscoped_decisions > 0
+    {
         println!();
     }
-    if let Some(line) = rollup_line {
+    if let Some(line) = extraction_rollup_line {
+        println!("{line}");
+    }
+    if let Some(line) = arrival_rollup_line {
         println!("{line}");
     }
     if result.earlier_decisions > 0 {
@@ -248,10 +279,13 @@ const SCOPE_CELL_MAX: usize = 35;
 /// counts and reason; notes carry the `~` voice marker and never an id,
 /// counts, or status — a thought must not be mistakable for an action.
 ///
-/// Dedup rule: a decision with touching extraction rows renders the
-/// *extraction aspect* instead of its summary line — one line per touching
-/// row (the common case is one; a multi-root draw into a multi-prefix view
-/// repeats the id) — never both a selection line and an extraction line.
+/// Three-way aspect selection, one tested rule: a decision touching only
+/// `extractions` renders the *extraction aspect* (outbound, unchanged); one
+/// touching only `arrivals` renders the *arrival aspect* (inbound, `←`); one
+/// touching both is an *intra-view relocation* — both endpoints sit inside
+/// the view, so it renders once as the extraction-aspect line with its
+/// destination shown view-relative rather than absolute. Never both a
+/// selection line and an extraction/arrival line for the same decision.
 fn print_event(
     event: &TimelineEvent,
     with_date: bool,
@@ -259,6 +293,7 @@ fn print_event(
     roots: &HashMap<i64, Root>,
     width: usize,
     extractions: &HashMap<i64, Vec<DecisionExtraction>>,
+    arrivals: &HashMap<i64, Vec<DecisionExtraction>>,
 ) {
     match event {
         TimelineEvent::Decision(d) => {
@@ -275,13 +310,32 @@ fn print_event(
                     line.push_str(&format!("  [{}]", d.status));
                 }
             };
-            let cells = event_cells(event, resolved, roots, extractions);
+            let cells = event_cells(event, resolved, roots, extractions, arrivals);
             if let Some(rows) = extractions.get(&d.id) {
+                // Intra-view relocation when this id also has arrival rows:
+                // same line shape, destination rendered view-relative.
+                let relocation = arrivals.contains_key(&d.id);
+                for (row, cell) in rows.iter().zip(&cells) {
+                    let narration = if relocation {
+                        extraction_narration_with_destination(
+                            row,
+                            &relativize(&row.destination_path, resolved),
+                        )
+                    } else {
+                        extraction_narration(row)
+                    };
+                    let mut line = format!("#{:<4} {time}  {cell:<width$}  {}", d.id, narration);
+                    suffix(&mut line);
+                    println!("{line}");
+                }
+                return;
+            }
+            if let Some(rows) = arrivals.get(&d.id) {
                 for (row, cell) in rows.iter().zip(&cells) {
                     let mut line = format!(
                         "#{:<4} {time}  {cell:<width$}  {}",
                         d.id,
-                        extraction_narration(row)
+                        arrival_narration(row, roots)
                     );
                     suffix(&mut line);
                     println!("{line}");
@@ -305,24 +359,35 @@ fn print_event(
     }
 }
 
-/// Every scope cell an event will actually render — one per extraction line
-/// for a decision shown in the extraction aspect, otherwise exactly one.
+/// Every scope cell an event will actually render — one per touching
+/// extraction or arrival row, otherwise exactly one.
 ///
 /// The column width and the printed lines both derive from this, because an
-/// extraction cell (the drawn-from location) is a different string from the
-/// selection-scope cell: width computed from one and lines printed with the
-/// other pushes the wider narration out of alignment.
+/// extraction cell (the drawn-from location) or an arrival cell (the
+/// destination) is a different string from the selection-scope cell: width
+/// computed from one and lines printed with the other pushes the wider
+/// narration out of alignment. A decision touching both maps (intra-view
+/// relocation) uses the extraction branch — the drawn-from cell, same as the
+/// plain extraction aspect — since `print_event` renders it as one
+/// extraction-shaped line with a view-relative destination in the narration.
 fn event_cells(
     event: &TimelineEvent,
     resolved: &ResolvedScope,
     roots: &HashMap<i64, Root>,
     extractions: &HashMap<i64, Vec<DecisionExtraction>>,
+    arrivals: &HashMap<i64, Vec<DecisionExtraction>>,
 ) -> Vec<String> {
     if let TimelineEvent::Decision(d) = event {
         if let Some(rows) = extractions.get(&d.id) {
             return rows
                 .iter()
                 .map(|row| cap_path(&relativize(&row.drawn_from(), resolved), SCOPE_CELL_MAX))
+                .collect();
+        }
+        if let Some(rows) = arrivals.get(&d.id) {
+            return rows
+                .iter()
+                .map(|row| cap_path(&relativize(&row.destination_path, resolved), SCOPE_CELL_MAX))
                 .collect();
         }
     }
@@ -336,15 +401,21 @@ fn event_cells(
 /// Disposition wording goes through `OriginDisposition`, never a free
 /// literal; `None` (pre-vocabulary backfilled rows) omits the parenthetical.
 fn extraction_narration(row: &DecisionExtraction) -> String {
+    extraction_narration_with_destination(row, &row.destination_path)
+}
+
+/// `extraction_narration` with an overridden destination display — the
+/// intra-view relocation case renders the same shape with a view-relative
+/// destination instead of the row's absolute snapshot path.
+fn extraction_narration_with_destination(row: &DecisionExtraction, destination: &str) -> String {
     let files = format_count(row.files);
     let unit = if row.files == 1 { "file" } else { "files" };
     let mut line = match row.bytes {
         Some(bytes) => format!(
-            "\u{2192} {files} {unit} ({}) to {}",
-            format_size(bytes),
-            row.destination_path
+            "\u{2192} {files} {unit} ({}) to {destination}",
+            format_size(bytes)
         ),
-        None => format!("\u{2192} {files} {unit} to {}", row.destination_path),
+        None => format!("\u{2192} {files} {unit} to {destination}"),
     };
     if let Some(disposition) = row.disposition {
         let wording = match disposition {
@@ -354,6 +425,47 @@ fn extraction_narration(row: &DecisionExtraction) -> String {
         line.push_str(&format!(" ({wording})"));
     }
     line
+}
+
+/// The arrival aspect's narration: `← N files (size) from ORIGIN (wording)`.
+/// The mirror of `extraction_narration` for the inbound direction — "in"
+/// wording (`moved in` / `copied in; originals remain`) rather than the
+/// outbound's, and the origin carries the removed-root marker when its
+/// source root is no longer known to the live index.
+fn arrival_narration(row: &DecisionExtraction, roots: &HashMap<i64, Root>) -> String {
+    let files = format_count(row.files);
+    let unit = if row.files == 1 { "file" } else { "files" };
+    let origin = origin_location(row, roots);
+    let mut line = match row.bytes {
+        Some(bytes) => format!(
+            "\u{2190} {files} {unit} ({}) from {origin}",
+            format_size(bytes)
+        ),
+        None => format!("\u{2190} {files} {unit} from {origin}"),
+    };
+    if let Some(disposition) = row.disposition {
+        let wording = match disposition {
+            OriginDisposition::Retained => "copied in; originals remain",
+            OriginDisposition::Relocated => "moved in",
+        };
+        line.push_str(&format!(" ({wording})"));
+    }
+    line
+}
+
+/// The established removed-root marker (`trail show`'s `drew from:` lines
+/// use the same text) — a root the live index no longer knows must not read
+/// as a visitable location.
+const ROOT_REMOVED_MARKER: &str = " (root removed)";
+
+/// An arrival row's drawn-from location, with the removed-root marker
+/// appended when the origin's source root is absent from the live roots map.
+fn origin_location(row: &DecisionExtraction, roots: &HashMap<i64, Root>) -> String {
+    let mut location = row.drawn_from();
+    if !roots.contains_key(&row.root_id) {
+        location.push_str(ROOT_REMOVED_MARKER);
+    }
+    location
 }
 
 /// The scope-lens-only "Archived from here" footer: whole-history rollup of
@@ -375,6 +487,30 @@ fn format_extraction_rollup(rollup: &ExtractionRollup) -> String {
         None => format!(
             "Archived from here: {files} {unit} \u{2192} {} {dest_unit}.",
             rollup.destinations
+        ),
+    }
+}
+
+/// The scope-lens-only "Arrived here" footer: whole-history rollup of this
+/// view's arrival-touching rows — the mirror of `format_extraction_rollup`
+/// for the inbound direction.
+fn format_arrival_rollup(rollup: &ArrivalRollup) -> String {
+    let files = format_count(rollup.files);
+    let unit = if rollup.files == 1 { "file" } else { "files" };
+    let origin_unit = if rollup.origins == 1 {
+        "origin"
+    } else {
+        "origins"
+    };
+    match rollup.bytes {
+        Some(bytes) => format!(
+            "Arrived here: {files} {unit} ({}) from {} {origin_unit}.",
+            format_size(bytes),
+            rollup.origins
+        ),
+        None => format!(
+            "Arrived here: {files} {unit} from {} {origin_unit}.",
+            rollup.origins
         ),
     }
 }
@@ -866,6 +1002,103 @@ mod tests {
     }
 
     #[test]
+    fn extraction_narration_with_destination_overrides_display_only() {
+        // Intra-view relocation: same shape as extraction_narration, but the
+        // destination text is whatever the caller passes (a view-relative
+        // path), not the row's absolute snapshot.
+        let row = mk_extraction_row(Some(1_000), Some(OriginDisposition::Retained));
+        assert_eq!(
+            extraction_narration_with_destination(&row, "."),
+            "\u{2192} 47 files (1.0 KB) to . (copied; originals remain)"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Arrival aspect narration + removed-root marker
+    // ------------------------------------------------------------------
+
+    fn mk_root(id: i64, path: &str) -> Root {
+        Root {
+            id,
+            path: path.to_string(),
+            role: "archive".to_string(),
+            comment: None,
+            last_scanned_at: None,
+            suspended: false,
+        }
+    }
+
+    #[test]
+    fn arrival_narration_copied_in_wording() {
+        let row = mk_extraction_row(Some(3_900_000_000), Some(OriginDisposition::Retained));
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
+        assert_eq!(
+            arrival_narration(&row, &roots),
+            "\u{2190} 47 files (3.9 GB) from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain)"
+        );
+    }
+
+    #[test]
+    fn arrival_narration_moved_in_wording() {
+        let row = mk_extraction_row(Some(1_000), Some(OriginDisposition::Relocated));
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
+        assert_eq!(
+            arrival_narration(&row, &roots),
+            "\u{2190} 47 files (1.0 KB) from /Volumes/old-laptop/photos/2016/italy (moved in)"
+        );
+    }
+
+    #[test]
+    fn arrival_narration_bytes_none_omits_size() {
+        let row = mk_extraction_row(None, Some(OriginDisposition::Retained));
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
+        assert_eq!(
+            arrival_narration(&row, &roots),
+            "\u{2190} 47 files from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain)"
+        );
+    }
+
+    #[test]
+    fn arrival_narration_disposition_none_omits_parenthetical() {
+        // Pre-vocabulary backfilled rows: rendered neutrally, never guessed.
+        let row = mk_extraction_row(Some(100), None);
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
+        assert_eq!(
+            arrival_narration(&row, &roots),
+            "\u{2190} 47 files (100 B) from /Volumes/old-laptop/photos/2016/italy"
+        );
+    }
+
+    #[test]
+    fn arrival_narration_singular_file() {
+        let mut row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
+        row.files = 1;
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
+        assert_eq!(
+            arrival_narration(&row, &roots),
+            "\u{2190} 1 file (10 B) from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain)"
+        );
+    }
+
+    #[test]
+    fn arrival_narration_marks_removed_origin_root() {
+        let row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
+        // The origin's source root is absent from the live roots map.
+        let roots: HashMap<i64, Root> = HashMap::new();
+        assert_eq!(
+            arrival_narration(&row, &roots),
+            "\u{2190} 47 files (10 B) from /Volumes/old-laptop/photos/2016/italy (root removed) (copied in; originals remain)"
+        );
+    }
+
+    #[test]
+    fn arrival_narration_no_marker_when_origin_root_present() {
+        let row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
+        assert!(!arrival_narration(&row, &roots).contains(ROOT_REMOVED_MARKER));
+    }
+
+    #[test]
     fn event_cells_measures_the_drawn_from_location_for_extraction_lines() {
         // The column width is measured over these cells, so an extraction
         // line's drawn-from location — not the decision's selection scope —
@@ -880,12 +1113,24 @@ mod tests {
         let mut extractions = HashMap::new();
         extractions.insert(1, vec![mk_extraction_row(None, None)]);
         // Capped at SCOPE_CELL_MAX like every other cell.
-        let cells = event_cells(&event, &global, &HashMap::new(), &extractions);
+        let cells = event_cells(
+            &event,
+            &global,
+            &HashMap::new(),
+            &extractions,
+            &HashMap::new(),
+        );
         assert_eq!(cells, vec!["...mes/old-laptop/photos/2016/italy"]);
         assert!(cells[0].chars().count() <= SCOPE_CELL_MAX);
 
         // With no extraction rows the selection scope is the cell, as before.
-        let cells = event_cells(&event, &global, &HashMap::new(), &HashMap::new());
+        let cells = event_cells(
+            &event,
+            &global,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(cells, vec!["/short"]);
     }
 
@@ -903,7 +1148,13 @@ mod tests {
         let mut extractions = HashMap::new();
         extractions.insert(1, vec![mk_extraction_row(None, None), second]);
 
-        let cells = event_cells(&event, &global, &HashMap::new(), &extractions);
+        let cells = event_cells(
+            &event,
+            &global,
+            &HashMap::new(),
+            &extractions,
+            &HashMap::new(),
+        );
         assert_eq!(
             cells,
             vec![
@@ -911,6 +1162,58 @@ mod tests {
                 "/Volumes/nikon-sd/dcim"
             ]
         );
+    }
+
+    #[test]
+    fn event_cells_returns_view_relative_destination_for_arrival_only_row() {
+        // Arrival-only: the cell is the destination, not the drawn-from
+        // location — the mirror of the extraction-aspect cell.
+        let scoped = ResolvedScope {
+            prefixes: vec!["/Archive/Media".to_string()],
+            from_cwd: true,
+            auto_include_archived: false,
+        };
+        let event = TimelineEvent::Decision(mk_decision(1, None));
+        let mut arrivals = HashMap::new();
+        arrivals.insert(1, vec![mk_extraction_row(None, None)]);
+
+        let cells = event_cells(&event, &scoped, &HashMap::new(), &HashMap::new(), &arrivals);
+        assert_eq!(cells, vec!["2016/Italy"]);
+    }
+
+    #[test]
+    fn event_cells_arrival_at_the_viewed_prefix_itself_renders_dot() {
+        let scoped = ResolvedScope {
+            prefixes: vec!["/Archive/Media/2016/Italy".to_string()],
+            from_cwd: true,
+            auto_include_archived: false,
+        };
+        let event = TimelineEvent::Decision(mk_decision(1, None));
+        let mut arrivals = HashMap::new();
+        arrivals.insert(1, vec![mk_extraction_row(None, None)]);
+
+        let cells = event_cells(&event, &scoped, &HashMap::new(), &HashMap::new(), &arrivals);
+        assert_eq!(cells, vec!["."]);
+    }
+
+    #[test]
+    fn event_cells_intra_view_relocation_uses_drawn_from_cell_not_destination() {
+        // A decision present in both maps (intra-view relocation) still
+        // renders the extraction-aspect cell — the drawn-from location —
+        // never the arrival cell.
+        let scoped = ResolvedScope {
+            prefixes: vec!["/Volumes/old-laptop".to_string()],
+            from_cwd: true,
+            auto_include_archived: false,
+        };
+        let event = TimelineEvent::Decision(mk_decision(1, None));
+        let mut extractions = HashMap::new();
+        extractions.insert(1, vec![mk_extraction_row(None, None)]);
+        let mut arrivals = HashMap::new();
+        arrivals.insert(1, vec![mk_extraction_row(None, None)]);
+
+        let cells = event_cells(&event, &scoped, &HashMap::new(), &extractions, &arrivals);
+        assert_eq!(cells, vec!["photos/2016/italy"]);
     }
 
     #[test]
@@ -936,6 +1239,32 @@ mod tests {
         assert_eq!(
             format_extraction_rollup(&rollup),
             "Archived from here: 1 file \u{2192} 1 destination."
+        );
+    }
+
+    #[test]
+    fn arrival_rollup_footer_composition() {
+        let rollup = ArrivalRollup {
+            files: 1_251,
+            bytes: Some(22_100_000_000),
+            origins: 2,
+        };
+        assert_eq!(
+            format_arrival_rollup(&rollup),
+            "Arrived here: 1,251 files (22.1 GB) from 2 origins."
+        );
+    }
+
+    #[test]
+    fn arrival_rollup_footer_singular_origin_and_omitted_bytes() {
+        let rollup = ArrivalRollup {
+            files: 1,
+            bytes: None,
+            origins: 1,
+        };
+        assert_eq!(
+            format_arrival_rollup(&rollup),
+            "Arrived here: 1 file from 1 origin."
         );
     }
 }
