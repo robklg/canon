@@ -86,6 +86,7 @@ pub fn compute_composition(
         &decisions,
         &extractions_by_decision,
         &live_root_ids,
+        prefixes,
     );
     if !card.has_origin_story() {
         return Ok(None);
@@ -278,6 +279,48 @@ mod tests {
             OriginLine::FromRoot { root_path, .. } => assert_eq!(root_path, "/a"),
             OriginLine::MultiOrigin { .. } => panic!("expected FromRoot"),
         }
+    }
+
+    #[test]
+    fn intra_archive_curation_pass_reads_as_rearranged_at_the_archive_root() {
+        // End to end: an apply drawing from /archive/2016 into /archive/2020.
+        // Standing at the archive root, the card must not answer "from
+        // /archive" — this place is not its own origin.
+        let conn = open_in_memory_for_test();
+        let archive_root = insert_test_root(&conn, "/archive", "archive", false);
+        let apply = insert_decision_at(&conn, "apply", 100);
+        repo::decision::upsert_extractions(
+            &conn,
+            &[crate::domain::extraction::DecisionExtraction {
+                decision_id: apply,
+                root_id: archive_root,
+                root_path: "/archive".to_string(),
+                rel_prefix: "2016".to_string(),
+                files: 1,
+                bytes: Some(10),
+                destination_root_id: Some(archive_root),
+                destination_path: "/archive/2020".to_string(),
+                disposition: None,
+            }],
+        )
+        .unwrap();
+        let s1 = insert_test_source(&conn, archive_root, "2020/x.jpg", 1, 1, 10, 0);
+        stamp(&conn, s1, apply, true);
+
+        let card = compute_composition(&conn, &["/archive".to_string()])
+            .unwrap()
+            .unwrap();
+        assert!(card.origins.is_empty());
+        assert_eq!(card.transitioned.len(), 1);
+        assert_eq!(card.transitioned[0].label, "rearranged");
+        assert_eq!(card.files, 1);
+
+        // The narrower view sees the same content arrive from outside it.
+        let narrower = compute_composition(&conn, &["/archive/2020".to_string()])
+            .unwrap()
+            .unwrap();
+        assert!(narrower.transitioned.is_empty());
+        assert_eq!(narrower.origins.len(), 1);
     }
 
     #[test]

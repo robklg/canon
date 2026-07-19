@@ -13,7 +13,9 @@ use std::collections::{HashMap, HashSet};
 
 use super::decision::Decision;
 use super::extraction::DecisionExtraction;
-use super::trail::{decision_family, fate_transition, DecisionFamily, FateAspect};
+use super::trail::{
+    classify_row, decision_family, fate_transition, DecisionFamily, FateAspect, RowAspect,
+};
 
 /// Files/bytes for one bucket of the card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -135,11 +137,15 @@ struct FromRootAcc {
 /// not have survived. Such a stamp becomes its own transitioned line rather
 /// than a panic or a silent fold into another bucket — a gap must read as a
 /// gap.
+///
+/// `prefixes` is the viewed scope, used only to tell a real origin from this
+/// place itself (see the rearrangement guard below).
 pub fn build_card(
     groups: &HashMap<Option<i64>, BucketCount>,
     decisions: &HashMap<i64, Decision>,
     extractions_by_decision: &HashMap<i64, Vec<DecisionExtraction>>,
     live_root_ids: &HashSet<i64>,
+    prefixes: &[String],
 ) -> CompositionCard {
     let mut files = 0i64;
     let mut bytes = 0i64;
@@ -177,6 +183,36 @@ pub fn build_card(
                             .get(id)
                             .map(Vec::as_slice)
                             .unwrap_or(&[]);
+                        // A place is not its own origin. When every row of
+                        // this apply was drawn from inside the view, nothing
+                        // arrived — content was rearranged here, and an
+                        // origin line naming this very place would occupy the
+                        // line that should hold the answer.
+                        //
+                        // The card classifies **per decision** (`all` rows)
+                        // while the trail's rollups classify per row. That
+                        // asymmetry is forced, not an oversight: a source's
+                        // stamp names a *decision*, not a row, so for an apply
+                        // that drew from several roots the card cannot know
+                        // which surviving files came from which side. Any row
+                        // from outside means real content arrived, so the
+                        // origin line stays rather than claiming a
+                        // rearrangement it can't substantiate. Do not "fix"
+                        // this into per-row — it would fake attribution the
+                        // index cannot support.
+                        if !rows.is_empty()
+                            && rows
+                                .iter()
+                                .all(|row| classify_row(row, prefixes) == RowAspect::Rearrangement)
+                        {
+                            transitioned.push(TransitionedLine {
+                                decision_id: *id,
+                                label: "rearranged".to_string(),
+                                files: bucket.files,
+                                bytes: bucket.bytes,
+                            });
+                            continue;
+                        }
                         match rows.len() {
                             0 => {
                                 // The stamp says "archived", but no extraction
@@ -317,6 +353,12 @@ mod tests {
         BucketCount { files, bytes }
     }
 
+    /// Standing at the archive that `mk_extraction`'s rows land in — every
+    /// origin below is a real crossing unless a test says otherwise.
+    fn view() -> Vec<String> {
+        vec!["/archive".to_string()]
+    }
+
     #[test]
     fn single_origin_applies_from_one_root_merge_across_decisions() {
         let d1 = mk_decision(1, "apply", 100);
@@ -329,7 +371,7 @@ mod tests {
         ]);
         let live = HashSet::from([7]);
 
-        let card = build_card(&groups, &decisions, &extractions, &live);
+        let card = build_card(&groups, &decisions, &extractions, &live, &view());
         assert_eq!(card.origins.len(), 1);
         match &card.origins[0] {
             OriginLine::FromRoot {
@@ -364,7 +406,7 @@ mod tests {
         )]);
         let live = HashSet::from([7, 8]);
 
-        let card = build_card(&groups, &decisions, &extractions, &live);
+        let card = build_card(&groups, &decisions, &extractions, &live, &view());
         assert_eq!(card.origins.len(), 1);
         match &card.origins[0] {
             OriginLine::MultiOrigin {
@@ -391,7 +433,13 @@ mod tests {
         let d = mk_decision(1, "apply", 100);
         let groups = HashMap::from([(Some(1), bucket(3, 300))]);
         let decisions = HashMap::from([(1, d)]);
-        let card = build_card(&groups, &decisions, &HashMap::new(), &HashSet::new());
+        let card = build_card(
+            &groups,
+            &decisions,
+            &HashMap::new(),
+            &HashSet::new(),
+            &view(),
+        );
 
         assert!(card.origins.is_empty());
         assert_eq!(card.transitioned.len(), 1);
@@ -401,11 +449,182 @@ mod tests {
     }
 
     #[test]
+    fn origin_inside_the_view_is_rearranged_not_an_origin_line() {
+        // The pathology: standing at /archive after a curation pass that
+        // moved content from /archive/2016 to /archive/2020, the card used to
+        // answer "from /archive" — this place naming itself, a non-answer in
+        // the line that should hold the answer.
+        let d = mk_decision(42, "apply", 100);
+        let groups = HashMap::from([(Some(42), bucket(47, 3_900))]);
+        let decisions = HashMap::from([(42, d)]);
+        let mut row = mk_extraction(42, 7, "/archive");
+        row.rel_prefix = "2016".to_string();
+        row.destination_path = "/archive/2020".to_string();
+        let extractions = HashMap::from([(42, vec![row])]);
+
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &HashSet::from([7]),
+            &view(),
+        );
+        assert!(card.origins.is_empty(), "a place is not its own origin");
+        assert_eq!(
+            card.transitioned,
+            vec![TransitionedLine {
+                decision_id: 42,
+                label: "rearranged".to_string(),
+                files: 47,
+                bytes: 3_900,
+            }]
+        );
+        // Rearranged content still stands here.
+        assert_eq!(card.files, 47);
+        assert!(card.has_origin_story());
+    }
+
+    #[test]
+    fn narrower_view_keeps_the_origin_line_for_the_same_decision() {
+        // Viewed from /archive/2020 the origin /archive/2016 is outside, so
+        // content genuinely arrived — the same scope-dependence the rollups
+        // have, from the same rule.
+        let d = mk_decision(42, "apply", 100);
+        let groups = HashMap::from([(Some(42), bucket(47, 3_900))]);
+        let decisions = HashMap::from([(42, d)]);
+        let mut row = mk_extraction(42, 7, "/archive");
+        row.rel_prefix = "2016".to_string();
+        row.destination_path = "/archive/2020".to_string();
+        let extractions = HashMap::from([(42, vec![row])]);
+
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &HashSet::from([7]),
+            &["/archive/2020".to_string()],
+        );
+        assert!(card.transitioned.is_empty());
+        assert_eq!(card.origins.len(), 1);
+    }
+
+    #[test]
+    fn any_row_from_outside_keeps_the_origin_line() {
+        // The per-decision ceiling, stated as a test: this apply drew from
+        // inside *and* outside the view, and the stamp names the decision,
+        // not the row — the card cannot know which surviving files came from
+        // which side, so it keeps the origin line rather than claiming a
+        // rearrangement it can't substantiate.
+        let d = mk_decision(42, "apply", 100);
+        let groups = HashMap::from([(Some(42), bucket(55, 4_700))]);
+        let decisions = HashMap::from([(42, d)]);
+        let mut inside = mk_extraction(42, 7, "/archive");
+        inside.rel_prefix = "2016".to_string();
+        inside.destination_path = "/archive/2020".to_string();
+        let mut outside = mk_extraction(42, 8, "/Volumes/sd");
+        outside.destination_path = "/archive/2020".to_string();
+        let extractions = HashMap::from([(42, vec![inside, outside])]);
+
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &HashSet::from([7, 8]),
+            &view(),
+        );
+        assert!(card.transitioned.is_empty(), "not a rearrangement");
+        assert_eq!(card.origins.len(), 1);
+        match &card.origins[0] {
+            OriginLine::MultiOrigin { origin_count, .. } => assert_eq!(*origin_count, 2),
+            OriginLine::FromRoot { .. } => panic!("expected MultiOrigin"),
+        }
+    }
+
+    #[test]
+    fn sum_invariant_holds_with_a_rearranged_bucket() {
+        let apply = mk_decision(1, "apply", 100);
+        let curation = mk_decision(2, "apply", 200);
+        let scan = mk_decision(3, "scan", 300);
+        let groups = HashMap::from([
+            (Some(1), bucket(10, 1_000)),
+            (Some(2), bucket(47, 3_900)),
+            (Some(3), bucket(20, 2_000)),
+            (None, bucket(5, 500)),
+        ]);
+        let decisions = HashMap::from([(1, apply), (2, curation), (3, scan)]);
+        let mut rearranged = mk_extraction(2, 7, "/archive");
+        rearranged.rel_prefix = "2016".to_string();
+        rearranged.destination_path = "/archive/2020".to_string();
+        let extractions = HashMap::from([
+            (1, vec![mk_extraction(1, 8, "/vol/a")]),
+            (2, vec![rearranged]),
+        ]);
+
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &HashSet::from([7, 8]),
+            &view(),
+        );
+        assert_eq!(card.files, 82);
+        assert_eq!(card.bytes, 7_400);
+
+        let sum_files: i64 = card.origins.iter().map(|o| o.files()).sum::<i64>()
+            + card.transitioned.iter().map(|t| t.files).sum::<i64>()
+            + card.indexed_here.map(|b| b.files).unwrap_or(0)
+            + card.untracked.map(|b| b.files).unwrap_or(0);
+        let sum_bytes: i64 = card
+            .origins
+            .iter()
+            .map(|o| match o {
+                OriginLine::FromRoot { bytes, .. } => *bytes,
+                OriginLine::MultiOrigin { bytes, .. } => *bytes,
+            })
+            .sum::<i64>()
+            + card.transitioned.iter().map(|t| t.bytes).sum::<i64>()
+            + card.indexed_here.map(|b| b.bytes).unwrap_or(0)
+            + card.untracked.map(|b| b.bytes).unwrap_or(0);
+        assert_eq!(sum_files, card.files);
+        assert_eq!(sum_bytes, card.bytes);
+    }
+
+    #[test]
+    fn a_card_whose_only_story_is_rearrangement_still_renders() {
+        let d = mk_decision(42, "apply", 100);
+        let groups = HashMap::from([(Some(42), bucket(47, 3_900)), (None, bucket(3, 300))]);
+        let decisions = HashMap::from([(42, d)]);
+        let mut row = mk_extraction(42, 7, "/archive");
+        row.rel_prefix = "2016".to_string();
+        row.destination_path = "/archive/2020".to_string();
+        let extractions = HashMap::from([(42, vec![row])]);
+
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &HashSet::from([7]),
+            &view(),
+        );
+        assert!(card.origins.is_empty());
+        assert!(
+            card.has_origin_story(),
+            "a rearrangement is a story worth showing"
+        );
+    }
+
+    #[test]
     fn scan_stamp_is_indexed_here() {
         let d = mk_decision(1, "scan", 100);
         let groups = HashMap::from([(Some(1), bucket(20, 2_000))]);
         let decisions = HashMap::from([(1, d)]);
-        let card = build_card(&groups, &decisions, &HashMap::new(), &HashSet::new());
+        let card = build_card(
+            &groups,
+            &decisions,
+            &HashMap::new(),
+            &HashSet::new(),
+            &view(),
+        );
 
         assert_eq!(card.indexed_here, Some(bucket(20, 2_000)));
         assert!(card.origins.is_empty());
@@ -417,7 +636,13 @@ mod tests {
         let d = mk_decision(1, "exclude_set", 100);
         let groups = HashMap::from([(Some(1), bucket(4, 400))]);
         let decisions = HashMap::from([(1, d)]);
-        let card = build_card(&groups, &decisions, &HashMap::new(), &HashSet::new());
+        let card = build_card(
+            &groups,
+            &decisions,
+            &HashMap::new(),
+            &HashSet::new(),
+            &view(),
+        );
 
         assert_eq!(card.transitioned.len(), 1);
         assert_eq!(card.transitioned[0].label, "excluded");
@@ -432,7 +657,13 @@ mod tests {
         let d = mk_decision(1, "roots_rm", 100);
         let groups = HashMap::from([(Some(1), bucket(1, 1))]);
         let decisions = HashMap::from([(1, d)]);
-        let card = build_card(&groups, &decisions, &HashMap::new(), &HashSet::new());
+        let card = build_card(
+            &groups,
+            &decisions,
+            &HashMap::new(),
+            &HashSet::new(),
+            &view(),
+        );
 
         assert_eq!(card.transitioned[0].label, "roots_rm");
     }
@@ -440,7 +671,13 @@ mod tests {
     #[test]
     fn null_stamp_is_untracked() {
         let groups = HashMap::from([(None, bucket(7, 700))]);
-        let card = build_card(&groups, &HashMap::new(), &HashMap::new(), &HashSet::new());
+        let card = build_card(
+            &groups,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashSet::new(),
+            &view(),
+        );
 
         assert_eq!(card.untracked, Some(bucket(7, 700)));
         assert!(!card.has_origin_story());
@@ -461,7 +698,7 @@ mod tests {
         let extractions = HashMap::from([(1, vec![mk_extraction(1, 7, "/vol/a")])]);
         let live = HashSet::from([7]);
 
-        let card = build_card(&groups, &decisions, &extractions, &live);
+        let card = build_card(&groups, &decisions, &extractions, &live, &view());
         assert_eq!(card.files, 100);
         assert_eq!(card.bytes, 10_000);
 
@@ -480,7 +717,13 @@ mod tests {
         // is missing — never panic, never quietly bucket it as untracked
         // (which means "no stamp at all", a different fact).
         let groups = HashMap::from([(Some(404), bucket(6, 600)), (None, bucket(1, 100))]);
-        let card = build_card(&groups, &HashMap::new(), &HashMap::new(), &HashSet::new());
+        let card = build_card(
+            &groups,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashSet::new(),
+            &view(),
+        );
 
         assert_eq!(
             card.transitioned,
@@ -501,7 +744,13 @@ mod tests {
         let scan = mk_decision(1, "scan", 100);
         let groups = HashMap::from([(Some(1), bucket(5, 500)), (None, bucket(2, 200))]);
         let decisions = HashMap::from([(1, scan)]);
-        let card = build_card(&groups, &decisions, &HashMap::new(), &HashSet::new());
+        let card = build_card(
+            &groups,
+            &decisions,
+            &HashMap::new(),
+            &HashSet::new(),
+            &view(),
+        );
 
         assert!(card.indexed_here.is_some());
         assert!(card.untracked.is_some());
@@ -520,7 +769,7 @@ mod tests {
         ]);
         let live = HashSet::from([7, 8]);
 
-        let card = build_card(&groups, &decisions, &extractions, &live);
+        let card = build_card(&groups, &decisions, &extractions, &live, &view());
         assert_eq!(card.origins.len(), 2);
         assert_eq!(card.origins[0].files(), 50);
         assert_eq!(card.origins[1].files(), 5);
@@ -533,7 +782,7 @@ mod tests {
         let decisions = HashMap::from([(1, d)]);
         let extractions = HashMap::from([(1, vec![mk_extraction(1, 7, "/vol/gone")])]);
         // root_id 7 is absent from the live set.
-        let card = build_card(&groups, &decisions, &extractions, &HashSet::new());
+        let card = build_card(&groups, &decisions, &extractions, &HashSet::new(), &view());
 
         match &card.origins[0] {
             OriginLine::FromRoot { root_removed, .. } => assert!(root_removed),

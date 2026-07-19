@@ -219,11 +219,7 @@ pub fn row_aspect(origin_in_view: bool, destination_in_view: bool) -> RowAspect 
 /// [`row_aspect`] with membership established from absolute path prefixes —
 /// for consumers holding no membership maps. An empty prefix list is a global
 /// view, which has no boundary to cross: every row reads as a rearrangement.
-///
-/// Sits beside `row_aspect` so the rule and its two evidence forms have one
-/// home; the composition card is its consumer, so it is allowed to be unused
-/// until that card learns to ask.
-#[allow(dead_code)]
+/// The composition card is its consumer.
 pub fn classify_row(row: &DecisionExtraction, prefixes: &[String]) -> RowAspect {
     let touches = |path: &str| {
         prefixes.is_empty() || prefixes.iter().any(|prefix| scopes_touch(prefix, path))
