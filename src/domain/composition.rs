@@ -273,7 +273,17 @@ pub fn build_card(
                             });
                             continue;
                         }
-                        match rows.len() {
+                        // Origin multiplicity is counted over distinct origin
+                        // *roots*, never raw rows: directory-precision
+                        // recording gives one apply several rows per origin
+                        // root (one per placement pair), and a single-drive
+                        // delivery must not read as "from N origins" just
+                        // because it fanned out into N folders.
+                        let mut origin_roots: Vec<&str> =
+                            rows.iter().map(|r| r.root_path.as_str()).collect();
+                        origin_roots.sort_unstable();
+                        origin_roots.dedup();
+                        match origin_roots.len() {
                             0 => {
                                 // The stamp says "archived", but no extraction
                                 // row exists to say from where — a gap must
@@ -287,11 +297,11 @@ pub fn build_card(
                                 });
                             }
                             1 => {
-                                let row = &rows[0];
+                                let root_path = origin_roots[0];
                                 let entry =
-                                    from_roots.entry(row.root_path.clone()).or_insert_with(|| {
+                                    from_roots.entry(root_path.to_string()).or_insert_with(|| {
                                         FromRootAcc {
-                                            from_within: contains_view(&row.root_path, prefixes),
+                                            from_within: contains_view(root_path, prefixes),
                                             files: 0,
                                             bytes: 0,
                                             decision_ids: Vec::new(),
@@ -436,6 +446,42 @@ mod tests {
         match line {
             OriginLine::FromRoot { bytes, .. } => *bytes,
             OriginLine::MultiOrigin { bytes, .. } => *bytes,
+        }
+    }
+
+    #[test]
+    fn several_placement_rows_from_one_root_are_still_a_single_origin() {
+        // Directory-precision recording gives one apply a row per placement
+        // pair. Two rows, one origin root: a single-drive delivery that
+        // fanned out into two folders — a `from <root>` line, never
+        // "via apply #N from 2 origins".
+        let d = mk_decision(7, "apply", 100);
+        let groups = HashMap::from([(Some(7), bucket(2, 12))]);
+        let decisions = HashMap::from([(7, d)]);
+        let mut to_a = mk_extraction(7, 3, "/Volumes/sd");
+        to_a.destination_path = "/archive/n/dir-d".to_string();
+        let mut to_b = mk_extraction(7, 3, "/Volumes/sd");
+        to_b.destination_path = "/archive/n/dir-e".to_string();
+        let extractions = HashMap::from([(7, vec![to_a, to_b])]);
+
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &live(&["/Volumes/sd", "/archive"]),
+            &view(),
+        );
+        assert_eq!(card.origins.len(), 1);
+        match &card.origins[0] {
+            OriginLine::FromRoot {
+                root_path, files, ..
+            } => {
+                assert_eq!(root_path, "/Volumes/sd");
+                assert_eq!(*files, 2);
+            }
+            OriginLine::MultiOrigin { .. } => {
+                panic!("one origin root fanned across folders is not multi-origin")
+            }
         }
     }
 

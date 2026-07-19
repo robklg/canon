@@ -1112,7 +1112,16 @@ fn record_extractions(
     );
 
     let mut warnings = Vec::new();
-    if let Err(e) = repo::decision::upsert_extractions(conn, &rows) {
+    // Delete-then-insert as one atomic pair: a concurrent `canon trail` must
+    // never read a half-replaced decision. The apply flow itself stays
+    // non-transactional (fix-forward); this brackets only the index write.
+    let write = || -> anyhow::Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        repo::decision::replace_extractions(&tx, &rows)?;
+        tx.commit()?;
+        Ok(())
+    };
+    if let Err(e) = write() {
         warnings.push(format!(
             "Warning: failed to record extraction ledger: {e} \
              (run `canon ledger reindex` to backfill)"

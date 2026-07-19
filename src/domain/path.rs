@@ -147,36 +147,11 @@ pub fn format_path(full_path: &str, cwd: Option<&str>) -> String {
     }
 }
 
-/// Component-wise common prefix of the *parent directories* of a set of
-/// relative paths (the trailing filename is never included). A file at root
-/// level (no directory component) contributes an empty prefix, which pulls
-/// the overall common prefix to `""`. Pure, no I/O.
-///
-/// Used to summarize the drawn/destination location of an extraction-ledger
-/// row from its item paths, without keeping the per-item list around.
-pub fn common_dir_prefix<'a>(rel_paths: impl Iterator<Item = &'a str>) -> String {
-    let mut common: Option<Vec<&str>> = None;
-    for path in rel_paths {
-        let mut components: Vec<&str> = path.split('/').collect();
-        components.pop(); // drop the filename
-        common = Some(match common {
-            None => components,
-            Some(prev) => prev
-                .into_iter()
-                .zip(components)
-                .take_while(|(a, b)| a == b)
-                .map(|(a, _)| a)
-                .collect(),
-        });
-    }
-    common.unwrap_or_default().join("/")
-}
-
-/// Component-wise common prefix of a set of paths taken whole — unlike
-/// [`common_dir_prefix`], no trailing component is dropped, because the
-/// inputs are already directory locations rather than item paths. The
-/// display collapse for a group of placement locations: one location
-/// returns itself, divergent tops return `""`. Pure, no I/O.
+/// Component-wise common prefix of a set of paths taken whole — no trailing
+/// component is dropped, because the inputs are already directory locations
+/// rather than item paths. The display collapse for a group of placement
+/// locations: one location returns itself, divergent tops return `""`.
+/// Pure, no I/O.
 pub fn common_path_prefix<'a>(paths: impl Iterator<Item = &'a str>) -> String {
     let mut common: Option<Vec<&str>> = None;
     for path in paths {
@@ -479,55 +454,6 @@ mod tests {
         assert!(validate_paths_in_roots(&[], &roots).is_ok());
     }
 
-    // ========================================================================
-    // common_dir_prefix tests
-    // ========================================================================
-
-    #[test]
-    fn common_dir_prefix_single_file_at_root() {
-        assert_eq!(common_dir_prefix(["file.jpg"].into_iter()), "");
-    }
-
-    #[test]
-    fn common_dir_prefix_one_nested_file() {
-        assert_eq!(common_dir_prefix(["a/b/file.jpg"].into_iter()), "a/b");
-    }
-
-    #[test]
-    fn common_dir_prefix_divergent_tops() {
-        assert_eq!(common_dir_prefix(["a/x.jpg", "b/y.jpg"].into_iter()), "");
-    }
-
-    #[test]
-    fn common_dir_prefix_shared_deep_prefix() {
-        assert_eq!(
-            common_dir_prefix(["a/b/c/x.jpg", "a/b/d/y.jpg"].into_iter()),
-            "a/b"
-        );
-    }
-
-    #[test]
-    fn common_dir_prefix_unicode_components() {
-        assert_eq!(
-            common_dir_prefix(["фото/2016/x.jpg", "фото/2016/y.jpg"].into_iter()),
-            "фото/2016"
-        );
-    }
-
-    #[test]
-    fn common_dir_prefix_trailing_filename_never_included() {
-        // Even a single item's own filename must not leak into the prefix.
-        assert_eq!(
-            common_dir_prefix(["a/b/c.jpg", "a/b/c.jpg"].into_iter()),
-            "a/b"
-        );
-    }
-
-    #[test]
-    fn common_dir_prefix_empty_input() {
-        assert_eq!(common_dir_prefix(std::iter::empty()), "");
-    }
-
     // common_path_prefix tests
 
     #[test]
@@ -546,6 +472,10 @@ mod tests {
             "/arch/m"
         );
         assert_eq!(common_path_prefix(["m", "m/01"].into_iter()), "m");
+        assert_eq!(
+            common_path_prefix(["фото/2016", "фото/2017"].into_iter()),
+            "фото"
+        );
     }
 
     #[test]

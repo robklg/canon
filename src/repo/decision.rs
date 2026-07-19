@@ -351,26 +351,30 @@ fn extraction_from_row(row: &rusqlite::Row) -> rusqlite::Result<DecisionExtracti
     })
 }
 
-/// Upsert extraction rows. `(decision_id, root_id)` is the natural key — a
-/// re-run (forward re-recording or `ledger reindex`) converges to the same
-/// row set rather than duplicating. Each row carries its own `decision_id`,
-/// so a batch spanning decisions is representable and no caller-supplied id
-/// can silently disagree with the rows it writes.
-pub fn upsert_extractions(conn: &Connection, rows: &[DecisionExtraction]) -> Result<()> {
+/// Replace the extraction rows of every decision the batch covers:
+/// delete-then-insert, converging on the batch regardless of the prior row
+/// shape. Row-level upsert on the PK would leave a legacy coarse row
+/// standing beside freshly precise rows — a silent double count. Each row
+/// carries its own `decision_id`, so a batch spanning decisions is
+/// representable and no caller-supplied id can disagree with the rows it
+/// writes. No transaction here (repo convention) — callers wrap the pair so
+/// a concurrent reader never sees a half-replaced decision.
+pub fn replace_extractions(conn: &Connection, rows: &[DecisionExtraction]) -> Result<()> {
+    let mut ids: Vec<i64> = rows.iter().map(|r| r.decision_id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    for id in ids {
+        conn.execute(
+            "DELETE FROM decision_extractions WHERE decision_id = ?1",
+            [id],
+        )?;
+    }
     for row in rows {
         conn.execute(
             "INSERT INTO decision_extractions
                 (decision_id, root_id, root_path, rel_prefix, files, bytes,
                  destination_root_id, destination_path, disposition)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(decision_id, root_id) DO UPDATE SET
-                root_path = excluded.root_path,
-                rel_prefix = excluded.rel_prefix,
-                files = excluded.files,
-                bytes = excluded.bytes,
-                destination_root_id = excluded.destination_root_id,
-                destination_path = excluded.destination_path,
-                disposition = excluded.disposition",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 row.decision_id,
                 row.root_id,
@@ -1146,14 +1150,14 @@ mod tests {
     }
 
     #[test]
-    fn upsert_extractions_converges_on_repeat() {
+    fn replace_extractions_converges_on_repeat() {
         let conn = setup_test_db();
         let d = insert_decision_at(&conn, "apply", 100);
-        upsert_extractions(&conn, &[mk_extraction(d, 1)]).unwrap();
+        replace_extractions(&conn, &[mk_extraction(d, 1)]).unwrap();
         // Re-run (e.g. reindex) with a slightly different aggregate.
         let mut updated = mk_extraction(d, 1);
         updated.files = 50;
-        upsert_extractions(&conn, &[updated]).unwrap();
+        replace_extractions(&conn, &[updated]).unwrap();
 
         let rows = fetch_extractions_by_decisions(&conn, &[d]).unwrap();
         assert_eq!(rows.len(), 1);
@@ -1161,12 +1165,66 @@ mod tests {
     }
 
     #[test]
+    fn replace_extractions_removes_rows_the_new_set_does_not_carry() {
+        // The precision-upgrade guard: a legacy coarse row replaced by
+        // precise rows with *different* PK values must not survive beside
+        // them — row-level upsert would keep it and double-count the
+        // decision.
+        let conn = setup_test_db();
+        let d = insert_decision_at(&conn, "apply", 100);
+        replace_extractions(&conn, &[mk_extraction(d, 1)]).unwrap();
+
+        let mut p1 = mk_extraction(d, 1);
+        p1.rel_prefix = "2016/italy/01".to_string();
+        p1.files = 1;
+        let mut p2 = mk_extraction(d, 1);
+        p2.rel_prefix = "2016/italy/02".to_string();
+        p2.files = 2;
+        replace_extractions(&conn, &[p1, p2]).unwrap();
+
+        let rows = fetch_extractions_by_decisions(&conn, &[d]).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.iter().map(|r| r.files).sum::<i64>(), 3);
+        assert!(
+            rows.iter().all(|r| r.rel_prefix.starts_with("2016/italy/")),
+            "the coarse 2016/italy row must be gone"
+        );
+        // Another decision's rows are untouched by the replacement.
+        let other = insert_decision_at(&conn, "apply", 200);
+        replace_extractions(&conn, &[mk_extraction(other, 1)]).unwrap();
+        assert_eq!(
+            fetch_extractions_by_decisions(&conn, &[d]).unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn extraction_pk_permits_multiple_rows_per_decision_and_root() {
+        // Directory precision means several rows for one (decision, source
+        // root), keyed apart by their placement pair — every fetch path
+        // must round-trip them all.
+        let conn = setup_test_db();
+        let d = insert_decision_at(&conn, "apply", 100);
+        let mut a = mk_extraction(d, 1);
+        a.destination_path = "/archive/m/01".to_string();
+        let mut b = mk_extraction(d, 1);
+        b.destination_path = "/archive/m/02".to_string();
+        replace_extractions(&conn, &[a, b]).unwrap();
+
+        assert_eq!(
+            fetch_extractions_by_decisions(&conn, &[d]).unwrap().len(),
+            2
+        );
+        assert_eq!(fetch_all_extractions(&conn).unwrap().len(), 2);
+    }
+
+    #[test]
     fn fetch_extractions_by_decisions_round_trip() {
         let conn = setup_test_db();
         let d1 = insert_decision_at(&conn, "apply", 100);
         let d2 = insert_decision_at(&conn, "apply", 200);
-        upsert_extractions(&conn, &[mk_extraction(d1, 1), mk_extraction(d1, 2)]).unwrap();
-        upsert_extractions(&conn, &[mk_extraction(d2, 1)]).unwrap();
+        replace_extractions(&conn, &[mk_extraction(d1, 1), mk_extraction(d1, 2)]).unwrap();
+        replace_extractions(&conn, &[mk_extraction(d2, 1)]).unwrap();
 
         let by_decision = fetch_extractions_by_decisions(&conn, &[d1]).unwrap();
         assert_eq!(by_decision.len(), 2);
@@ -1188,7 +1246,7 @@ mod tests {
         let rows: Vec<DecisionExtraction> = (1..=1100)
             .map(|root_id| mk_extraction(d, root_id))
             .collect();
-        upsert_extractions(&conn, &rows).unwrap();
+        replace_extractions(&conn, &rows).unwrap();
 
         assert_eq!(
             fetch_extractions_by_decisions(&conn, &[d]).unwrap().len(),
@@ -1201,8 +1259,8 @@ mod tests {
         let conn = setup_test_db();
         let d1 = insert_decision_at(&conn, "apply", 100);
         let d2 = insert_decision_at(&conn, "apply", 200);
-        upsert_extractions(&conn, &[mk_extraction(d1, 2), mk_extraction(d1, 1)]).unwrap();
-        upsert_extractions(&conn, &[mk_extraction(d2, 1)]).unwrap();
+        replace_extractions(&conn, &[mk_extraction(d1, 2), mk_extraction(d1, 1)]).unwrap();
+        replace_extractions(&conn, &[mk_extraction(d2, 1)]).unwrap();
 
         let rows = fetch_all_extractions(&conn).unwrap();
         let pairs: Vec<(i64, i64)> = rows.iter().map(|r| (r.decision_id, r.root_id)).collect();
@@ -1233,7 +1291,7 @@ mod tests {
         let mut row = mk_extraction(d, 1);
         row.disposition = None;
         row.bytes = None;
-        upsert_extractions(&conn, &[row]).unwrap();
+        replace_extractions(&conn, &[row]).unwrap();
 
         let fetched = fetch_extractions_by_decisions(&conn, &[d]).unwrap();
         assert_eq!(fetched[0].disposition, None);

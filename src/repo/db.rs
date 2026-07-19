@@ -363,6 +363,34 @@ fn migrations() -> Migrations<'static> {
              CREATE INDEX IF NOT EXISTS decision_extractions_root_id
                  ON decision_extractions(root_id);",
         ),
+        // 5: extraction rows at directory precision — one row per (decision,
+        //    source root, origin dir, destination dir), so the PK widens.
+        //    Same columns, same meaning per row (all counted files lie under
+        //    the recorded locations); existing rows carry over unchanged as
+        //    coarse rows and `ledger reindex` upgrades them where receipts
+        //    exist. SQLite can't alter a PK in place, so: rebuild + rename.
+        M::up(
+            "CREATE TABLE decision_extractions_precise (
+                decision_id INTEGER NOT NULL,
+                root_id INTEGER NOT NULL,
+                root_path TEXT NOT NULL,
+                rel_prefix TEXT NOT NULL DEFAULT '',
+                files INTEGER NOT NULL,
+                bytes INTEGER,
+                destination_root_id INTEGER,
+                destination_path TEXT NOT NULL,
+                disposition TEXT,
+                PRIMARY KEY (decision_id, root_id, rel_prefix, destination_path)
+             );
+             INSERT INTO decision_extractions_precise
+                 SELECT decision_id, root_id, root_path, rel_prefix, files, bytes,
+                        destination_root_id, destination_path, disposition
+                 FROM decision_extractions;
+             DROP TABLE decision_extractions;
+             ALTER TABLE decision_extractions_precise RENAME TO decision_extractions;
+             CREATE INDEX decision_extractions_root_id
+                 ON decision_extractions(root_id);",
+        ),
     ])
 }
 
@@ -754,5 +782,59 @@ mod tests {
         ] {
             assert!(cols.iter().any(|c| c == expected), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn decision_extractions_pk_is_placement_precise() {
+        // Migration 5 widens the PK to the placement pair — one row per
+        // (decision, source root, origin dir, destination dir).
+        let conn = open_in_memory_for_test();
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(decision_extractions)")
+            .unwrap();
+        let mut pk_cols: Vec<(i64, String)> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(5)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .filter(|(pk, _)| *pk > 0)
+            .collect();
+        pk_cols.sort();
+        let names: Vec<&str> = pk_cols.iter().map(|(_, n)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["decision_id", "root_id", "rel_prefix", "destination_path"]
+        );
+    }
+
+    #[test]
+    fn migration5_preserves_existing_extraction_rows() {
+        // A coarse pre-precision row carries over unchanged through the
+        // table rebuild — it stays a valid (if slack) placement claim.
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 4).unwrap();
+        conn.execute(
+            "INSERT INTO decision_extractions
+                (decision_id, root_id, root_path, rel_prefix, files, bytes,
+                 destination_root_id, destination_path, disposition)
+             VALUES (1, 1, '/src', 'm', 245, 2450, 9, '/arch/m', 'retained')",
+            [],
+        )
+        .unwrap();
+
+        migrations().to_latest(&mut conn).unwrap();
+
+        let (files, dest, disposition): (i64, String, String) = conn
+            .query_row(
+                "SELECT files, destination_path, disposition
+                 FROM decision_extractions WHERE decision_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(files, 245);
+        assert_eq!(dest, "/arch/m");
+        assert_eq!(disposition, "retained");
     }
 }

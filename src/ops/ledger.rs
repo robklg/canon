@@ -238,7 +238,12 @@ pub fn reindex_extractions(conn: &Connection, params: &ReindexParams) -> Result<
         }
 
         if !params.dry_run {
-            repo::decision::upsert_extractions(conn, &rows)?;
+            // Atomic per decision: replacing a legacy coarse row with precise
+            // rows is delete-then-insert, and a concurrent `canon trail` must
+            // never read the gap between the two.
+            let tx = conn.unchecked_transaction()?;
+            repo::decision::replace_extractions(&tx, &rows)?;
+            tx.commit()?;
             result.rows_written += rows.len();
         }
 

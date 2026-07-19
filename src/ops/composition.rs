@@ -128,7 +128,7 @@ mod tests {
         let source_root = insert_test_root(&conn, "/a", "source", false);
         let archive_root = insert_test_root(&conn, "/archive", "archive", false);
         let apply = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[crate::domain::extraction::DecisionExtraction {
                 decision_id: apply,
@@ -172,7 +172,7 @@ mod tests {
         let source_root = insert_test_root(&conn, "/a", "source", false);
         let archive_root = insert_test_root(&conn, "/archive", "archive", false);
         let apply = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[crate::domain::extraction::DecisionExtraction {
                 decision_id: apply,
@@ -253,7 +253,7 @@ mod tests {
         let source_root = insert_test_root(&conn, "/a", "source", false);
         let archive_root = insert_test_root(&conn, "/archive", "archive", false);
         let apply = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[crate::domain::extraction::DecisionExtraction {
                 decision_id: apply,
@@ -291,7 +291,7 @@ mod tests {
         let conn = open_in_memory_for_test();
         let archive_root = insert_test_root(&conn, "/archive", "archive", false);
         let apply = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[crate::domain::extraction::DecisionExtraction {
                 decision_id: apply,
@@ -351,7 +351,7 @@ mod tests {
         let apply = insert_decision_at(&conn, "apply", 100);
         // The source root that drew this content is never registered here —
         // as if it was removed after the apply completed.
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[crate::domain::extraction::DecisionExtraction {
                 decision_id: apply,

@@ -782,7 +782,7 @@ mod tests {
         insert_test_root(&conn, "/b", "source", false);
         // The apply's own selection scope is global (no decision_scopes row).
         let decision_id = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 decision_id,
@@ -819,7 +819,7 @@ mod tests {
         let root = insert_test_root(&conn, "/a", "source", false);
         let decision_id = insert_decision_at(&conn, "apply", 100);
         scope(&conn, decision_id, root, "");
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 decision_id,
@@ -846,7 +846,7 @@ mod tests {
         let root = insert_test_root(&conn, "/a", "source", false);
         let d1 = insert_decision_at(&conn, "apply", 100);
         let d2 = insert_decision_at(&conn, "apply", 200);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 d1,
@@ -859,7 +859,7 @@ mod tests {
             )],
         )
         .unwrap();
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 d2,
@@ -897,7 +897,7 @@ mod tests {
         let root = insert_test_root(&conn, "/a", "source", false);
         let d1 = insert_decision_at(&conn, "apply", 100);
         let d2 = insert_decision_at(&conn, "apply", 200);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 d1,
@@ -910,7 +910,7 @@ mod tests {
             )],
         )
         .unwrap();
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(d2, root, "/a", "", 20, None, "/archive/y")],
         )
@@ -927,7 +927,7 @@ mod tests {
         let conn = open_in_memory_for_test();
         let root = insert_test_root(&conn, "/a", "source", false);
         let d = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(d, root, "/a", "", 1, Some(10), "/archive")],
         )
@@ -944,7 +944,7 @@ mod tests {
         let root = insert_test_root(&conn, "/a", "source", false);
         let d = insert_decision_at(&conn, "apply", 100);
         scope(&conn, d, root, "");
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(d, root, "/a", "", 1, Some(10), "/archive")],
         )
@@ -969,7 +969,7 @@ mod tests {
         insert_test_root(&conn, "/archive", "archive", false);
         // The apply's own selection scope is global (no decision_scopes row).
         let decision_id = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 decision_id,
@@ -1013,7 +1013,7 @@ mod tests {
         let source_root = insert_test_root(&conn, "/a", "source", false);
         insert_test_root(&conn, "/archive", "archive", false);
         let deeper = insert_decision_at(&conn, "apply", 100); // destination deeper than the view
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 deeper,
@@ -1027,7 +1027,7 @@ mod tests {
         )
         .unwrap();
         let shallower = insert_decision_at(&conn, "apply", 200); // destination is an ancestor of the view
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 shallower,
@@ -1041,7 +1041,7 @@ mod tests {
         )
         .unwrap();
         let sibling = insert_decision_at(&conn, "apply", 300); // similar prefix, not a real ancestor/descendant
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 sibling,
@@ -1080,7 +1080,7 @@ mod tests {
         let source_root = insert_test_root(&conn, "/a", "source", false);
         insert_test_root(&conn, "/archive", "archive", false);
         let elsewhere = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 elsewhere,
@@ -1094,7 +1094,7 @@ mod tests {
         )
         .unwrap();
         let here = insert_decision_at(&conn, "apply", 200);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 here,
@@ -1129,6 +1129,51 @@ mod tests {
     }
 
     #[test]
+    fn partial_view_counts_only_files_placed_within_it() {
+        // With directory-precision rows, one apply fanning out to two
+        // folders reads exactly at each: standing at m/01 the rollup says
+        // 105, not the apply-wide 245 — and at the ancestor it says 245.
+        let conn = open_in_memory_for_test();
+        let source_root = insert_test_root(&conn, "/a", "source", false);
+        insert_test_root(&conn, "/archive", "archive", false);
+        let apply = insert_decision_at(&conn, "apply", 100);
+        let mut to_01 = extraction_row(
+            apply,
+            source_root,
+            "/a",
+            "dcim",
+            105,
+            Some(1_050),
+            "/archive/m/01",
+        );
+        to_01.destination_root_id = Some(2);
+        let mut to_02 = extraction_row(
+            apply,
+            source_root,
+            "/a",
+            "dcim",
+            140,
+            Some(1_400),
+            "/archive/m/02",
+        );
+        to_02.destination_root_id = Some(2);
+        repo::decision::replace_extractions(&conn, &[to_01, to_02]).unwrap();
+
+        let one = compute_trail(&conn, &params(vec!["/archive/m/01".to_string()])).unwrap();
+        assert_eq!(aspects_of(&one.placements, apply), vec![RowAspect::Arrival]);
+        let rollup = one.arrival_rollup.expect("m/01 received content");
+        assert_eq!(rollup.files, 105);
+        assert_eq!(rollup.bytes, Some(1_050));
+
+        let both = compute_trail(&conn, &params(vec!["/archive/m".to_string()])).unwrap();
+        assert_eq!(
+            aspects_of(&both.placements, apply),
+            vec![RowAspect::Arrival, RowAspect::Arrival]
+        );
+        assert_eq!(both.arrival_rollup.expect("m received content").files, 245);
+    }
+
+    #[test]
     fn time_lens_applies_the_same_placement_law() {
         // Arrivals join --since/--on views through the same id extension, so
         // a placement above the view must stay invisible there too.
@@ -1137,7 +1182,7 @@ mod tests {
         insert_test_root(&conn, "/archive", "archive", false);
         let day = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
         let apply = insert_decision_at(&conn, "apply", local_midnight(day) + 3_600);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 apply,
@@ -1183,7 +1228,7 @@ mod tests {
             "/archive/media",
         );
         row.destination_root_id = Some(removed_root);
-        repo::decision::upsert_extractions(&conn, &[row]).unwrap();
+        repo::decision::replace_extractions(&conn, &[row]).unwrap();
 
         conn.execute("DELETE FROM roots WHERE id = ?", [removed_root])
             .unwrap();
@@ -1218,7 +1263,7 @@ mod tests {
             "/archive/media",
         );
         row.destination_root_id = Some(old_destination);
-        repo::decision::upsert_extractions(&conn, &[row]).unwrap();
+        repo::decision::replace_extractions(&conn, &[row]).unwrap();
 
         conn.execute("DELETE FROM roots WHERE id = ?", [old_destination])
             .unwrap();
@@ -1244,7 +1289,7 @@ mod tests {
         let conn = open_in_memory_for_test();
         let root = insert_test_root(&conn, "/a", "source", false);
         let decision_id = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 decision_id,
@@ -1273,7 +1318,7 @@ mod tests {
         insert_test_root(&conn, "/archive", "archive", false);
         let d1 = insert_decision_at(&conn, "apply", 100);
         let d2 = insert_decision_at(&conn, "apply", 200);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 d1,
@@ -1286,7 +1331,7 @@ mod tests {
             )],
         )
         .unwrap();
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 d2,
@@ -1325,7 +1370,7 @@ mod tests {
         insert_test_root(&conn, "/archive", "archive", false);
         let d1 = insert_decision_at(&conn, "apply", 100);
         let d2 = insert_decision_at(&conn, "apply", 200);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 d1,
@@ -1338,7 +1383,7 @@ mod tests {
             )],
         )
         .unwrap();
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 d2,
@@ -1365,7 +1410,7 @@ mod tests {
         let root_b = insert_test_root(&conn, "/b", "source", false);
         insert_test_root(&conn, "/archive", "archive", false);
         let d = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[
                 extraction_row(d, root_a, "/a", "", 1, Some(10), "/archive/x"),
@@ -1386,7 +1431,7 @@ mod tests {
         let source_root = insert_test_root(&conn, "/a", "source", false);
         insert_test_root(&conn, "/archive", "archive", false);
         let d = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 d,
@@ -1413,7 +1458,7 @@ mod tests {
         let day1 = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
         let ts1 = local_midnight(day1) + 3600;
         let apply = insert_decision_at(&conn, "apply", ts1);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 apply,
@@ -1465,7 +1510,7 @@ mod tests {
         let d = insert_decision_at(&conn, "apply", 100);
         // Drawn from /archive/2016, landing in /archive/2020: viewed at the
         // archive root, both endpoints are inside, so nothing crossed.
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 d,
@@ -1497,7 +1542,7 @@ mod tests {
         let conn = open_in_memory_for_test();
         let archive = insert_test_root(&conn, "/archive", "archive", false);
         let d = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 d,
@@ -1527,7 +1572,7 @@ mod tests {
         let archive = insert_test_root(&conn, "/archive", "archive", false);
         let sd = insert_test_root(&conn, "/Volumes/sd", "source", false);
         let d = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[
                 extraction_row(
@@ -1563,7 +1608,7 @@ mod tests {
         let archive = insert_test_root(&conn, "/archive", "archive", false);
         let sd = insert_test_root(&conn, "/Volumes/sd", "source", false);
         let d = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[
                 extraction_row(
@@ -1592,7 +1637,7 @@ mod tests {
         let d1 = insert_decision_at(&conn, "apply", 100);
         let d2 = insert_decision_at(&conn, "apply", 200);
         for (d, files, bytes) in [(d1, 10, 1_000), (d2, 20, 2_000)] {
-            repo::decision::upsert_extractions(
+            repo::decision::replace_extractions(
                 &conn,
                 &[extraction_row(
                     d,
@@ -1622,7 +1667,7 @@ mod tests {
         let archive = insert_test_root(&conn, "/archive", "archive", false);
         let day = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
         let d = insert_decision_at(&conn, "apply", local_midnight(day) + 3600);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 d,
@@ -1650,7 +1695,7 @@ mod tests {
         let conn = open_in_memory_for_test();
         let root = insert_test_root(&conn, "/a", "source", false);
         let d = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(d, root, "/a", "", 1, Some(10), "/archive")],
         )
@@ -1828,7 +1873,7 @@ mod tests {
         let conn = open_in_memory_for_test();
         let root = insert_test_root(&conn, "/a", "source", false);
         let d = insert_decision_at(&conn, "apply", 100);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[
                 extraction_row(
@@ -1884,7 +1929,7 @@ mod tests {
         let d = insert_decision_at(&conn, "apply", 100);
         let mut row = extraction_row(d, re_added, "/a", "photos", 3, Some(30), "/archive/x");
         row.root_id = 999; // the id the root carried before it was re-added
-        repo::decision::upsert_extractions(&conn, &[row]).unwrap();
+        repo::decision::replace_extractions(&conn, &[row]).unwrap();
 
         let show = compute_show(&conn, d).unwrap().unwrap();
         assert_eq!(show.extractions.len(), 1);
@@ -1919,7 +1964,7 @@ mod tests {
         // Global selection scope (no decision_scopes row) — only the
         // extraction row ties it to this view.
         let apply = insert_decision_at(&conn, "apply", ts1);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 apply,
@@ -1967,7 +2012,7 @@ mod tests {
 
         let apply = insert_decision_at(&conn, "apply", ts1);
         scope(&conn, apply, root, "");
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 apply,
@@ -2019,7 +2064,7 @@ mod tests {
         let day1 = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
         let ts1 = local_midnight(day1) + 3600;
         let apply = insert_decision_at(&conn, "apply", ts1);
-        repo::decision::upsert_extractions(
+        repo::decision::replace_extractions(
             &conn,
             &[extraction_row(
                 apply,
