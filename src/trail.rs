@@ -7,7 +7,7 @@
 //!
 //! Interface layer only: parse args, call ops::trail, format output.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -436,13 +436,13 @@ const SCOPE_CELL_MAX: usize = 35;
 /// counts and reason; notes carry the `~` voice marker and never an id,
 /// counts, or status — a thought must not be mistakable for an action.
 ///
-/// Three-way aspect selection, one tested rule: a decision touching only
-/// `extractions` renders the *extraction aspect* (outbound, unchanged); one
-/// touching only `arrivals` renders the *arrival aspect* (inbound, `←`); one
-/// touching both is an *intra-view relocation* — both endpoints sit inside
-/// the view, so it renders once as the extraction-aspect line with its
-/// destination shown view-relative rather than absolute. Never both a
-/// selection line and an extraction/arrival line for the same decision.
+/// Three-way aspect selection, one tested rule, applied per row (see
+/// `decision_rows`): outbound rows render the *extraction aspect*, inbound
+/// rows the *arrival aspect* (`←`), and a row whose two endpoints both sit
+/// inside the view renders once as an *intra-view relocation* — the
+/// extraction-aspect line with its destination shown view-relative rather
+/// than absolute. Never both a selection line and an extraction/arrival line
+/// for the same decision.
 fn print_event(
     event: &TimelineEvent,
     with_date: bool,
@@ -468,32 +468,18 @@ fn print_event(
                 }
             };
             let cells = event_cells(event, resolved, roots, extractions, arrivals);
-            if let Some(rows) = extractions.get(&d.id) {
-                // Intra-view relocation when this id also has arrival rows:
-                // same line shape, destination rendered view-relative.
-                let relocation = arrivals.contains_key(&d.id);
-                for (row, cell) in rows.iter().zip(&cells) {
-                    let narration = if relocation {
-                        extraction_narration_with_destination(
+            let rows = decision_rows(d.id, extractions, arrivals);
+            if !rows.is_empty() {
+                for ((row, aspect), cell) in rows.iter().zip(&cells) {
+                    let narration = match aspect {
+                        RowAspect::Extraction => extraction_narration(row),
+                        RowAspect::Relocation => extraction_narration_with_destination(
                             row,
                             &relativize(&row.destination_path, resolved),
-                        )
-                    } else {
-                        extraction_narration(row)
+                        ),
+                        RowAspect::Arrival => arrival_narration(row, roots),
                     };
                     let mut line = format!("#{:<4} {time}  {cell:<width$}  {}", d.id, narration);
-                    suffix(&mut line);
-                    println!("{line}");
-                }
-                return;
-            }
-            if let Some(rows) = arrivals.get(&d.id) {
-                for (row, cell) in rows.iter().zip(&cells) {
-                    let mut line = format!(
-                        "#{:<4} {time}  {cell:<width$}  {}",
-                        d.id,
-                        arrival_narration(row, roots)
-                    );
                     suffix(&mut line);
                     println!("{line}");
                 }
@@ -516,6 +502,57 @@ fn print_event(
     }
 }
 
+/// Which direction a single extraction row reads from inside this view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowAspect {
+    /// Origin inside the view, destination outside — content left here.
+    Extraction,
+    /// Both endpoints inside the view — an intra-view relocation.
+    Relocation,
+    /// Destination inside the view, origin outside — content arrived here.
+    Arrival,
+}
+
+/// Every extraction row a decision renders in this view, each tagged with the
+/// direction it reads from here.
+///
+/// Aspect selection is **per row, not per decision**: one apply can draw from
+/// a root inside the view and from another outside it in the same breath, so
+/// a decision appearing in both maps is not necessarily a pure relocation —
+/// classifying it as one would drop the outside-origin rows entirely. Rows
+/// are matched between the maps by `root_id` (the extraction ledger's
+/// `(decision_id, root_id)` key), so each row is judged by its own two
+/// endpoints: in both maps → relocation, outbound only → extraction, inbound
+/// only → arrival.
+fn decision_rows<'a>(
+    id: i64,
+    extractions: &'a HashMap<i64, Vec<DecisionExtraction>>,
+    arrivals: &'a HashMap<i64, Vec<DecisionExtraction>>,
+) -> Vec<(&'a DecisionExtraction, RowAspect)> {
+    let outbound = extractions.get(&id).map(Vec::as_slice).unwrap_or_default();
+    let inbound = arrivals.get(&id).map(Vec::as_slice).unwrap_or_default();
+    let arrived_here: HashSet<i64> = inbound.iter().map(|row| row.root_id).collect();
+    let drawn_from_here: HashSet<i64> = outbound.iter().map(|row| row.root_id).collect();
+
+    outbound
+        .iter()
+        .map(|row| {
+            let aspect = if arrived_here.contains(&row.root_id) {
+                RowAspect::Relocation
+            } else {
+                RowAspect::Extraction
+            };
+            (row, aspect)
+        })
+        .chain(
+            inbound
+                .iter()
+                .filter(|row| !drawn_from_here.contains(&row.root_id))
+                .map(|row| (row, RowAspect::Arrival)),
+        )
+        .collect()
+}
+
 /// Every scope cell an event will actually render — one per touching
 /// extraction or arrival row, otherwise exactly one.
 ///
@@ -523,10 +560,9 @@ fn print_event(
 /// extraction cell (the drawn-from location) or an arrival cell (the
 /// destination) is a different string from the selection-scope cell: width
 /// computed from one and lines printed with the other pushes the wider
-/// narration out of alignment. A decision touching both maps (intra-view
-/// relocation) uses the extraction branch — the drawn-from cell, same as the
-/// plain extraction aspect — since `print_event` renders it as one
-/// extraction-shaped line with a view-relative destination in the narration.
+/// narration out of alignment. Both passes classify through `decision_rows`,
+/// so the measured cells and the printed lines cannot diverge in count or
+/// order.
 fn event_cells(
     event: &TimelineEvent,
     resolved: &ResolvedScope,
@@ -535,16 +571,17 @@ fn event_cells(
     arrivals: &HashMap<i64, Vec<DecisionExtraction>>,
 ) -> Vec<String> {
     if let TimelineEvent::Decision(d) = event {
-        if let Some(rows) = extractions.get(&d.id) {
+        let rows = decision_rows(d.id, extractions, arrivals);
+        if !rows.is_empty() {
             return rows
                 .iter()
-                .map(|row| cap_path(&relativize(&row.drawn_from(), resolved), SCOPE_CELL_MAX))
-                .collect();
-        }
-        if let Some(rows) = arrivals.get(&d.id) {
-            return rows
-                .iter()
-                .map(|row| cap_path(&relativize(&row.destination_path, resolved), SCOPE_CELL_MAX))
+                .map(|(row, aspect)| {
+                    let location = match aspect {
+                        RowAspect::Arrival => row.destination_path.clone(),
+                        RowAspect::Extraction | RowAspect::Relocation => row.drawn_from(),
+                    };
+                    cap_path(&relativize(&location, resolved), SCOPE_CELL_MAX)
+                })
                 .collect();
         }
     }
@@ -1371,6 +1408,78 @@ mod tests {
 
         let cells = event_cells(&event, &scoped, &HashMap::new(), &extractions, &arrivals);
         assert_eq!(cells, vec!["photos/2016/italy"]);
+    }
+
+    #[test]
+    fn decision_rows_selects_the_aspect_of_each_row_separately() {
+        // The three-way rule is per row, not per decision. One apply can draw
+        // from a root inside the view and one outside it: the in-view row is
+        // a relocation, the outside row still arrived here. Classifying the
+        // decision as a whole would render only the first and silently drop
+        // the files that came from outside.
+        let inside = mk_extraction_row(None, None);
+        let mut outside = mk_extraction_row(None, None);
+        outside.root_id = 2;
+        outside.root_path = "/Volumes/nikon-sd".to_string();
+        outside.rel_prefix = "dcim".to_string();
+
+        let extractions = HashMap::from([(42, vec![inside.clone()])]);
+        let arrivals = HashMap::from([(42, vec![inside.clone(), outside.clone()])]);
+
+        let rows = decision_rows(42, &extractions, &arrivals);
+        assert_eq!(
+            rows,
+            vec![
+                (&inside, RowAspect::Relocation),
+                (&outside, RowAspect::Arrival)
+            ]
+        );
+    }
+
+    #[test]
+    fn decision_rows_classifies_one_directional_decisions() {
+        let row = mk_extraction_row(None, None);
+        let only_out = HashMap::from([(42, vec![row.clone()])]);
+        let only_in = HashMap::from([(42, vec![row.clone()])]);
+
+        assert_eq!(
+            decision_rows(42, &only_out, &HashMap::new()),
+            vec![(&row, RowAspect::Extraction)]
+        );
+        assert_eq!(
+            decision_rows(42, &HashMap::new(), &only_in),
+            vec![(&row, RowAspect::Arrival)]
+        );
+        // A decision touching neither map renders no extraction-shaped line
+        // at all — the caller falls back to the selection-scope headline.
+        assert!(decision_rows(42, &HashMap::new(), &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn event_cells_measures_every_row_of_a_mixed_origin_decision() {
+        // The width pass and the print pass classify through the same
+        // function, so a mixed-origin decision measures both cells: the
+        // relocation's drawn-from location and the arrival's destination.
+        let scoped = ResolvedScope {
+            prefixes: vec!["/Volumes/old-laptop".to_string()],
+            from_cwd: true,
+            auto_include_archived: false,
+        };
+        let event = TimelineEvent::Decision(mk_decision(42, None));
+        let inside = mk_extraction_row(None, None);
+        let mut outside = mk_extraction_row(None, None);
+        outside.root_id = 2;
+        outside.root_path = "/Volumes/nikon-sd".to_string();
+        outside.rel_prefix = "dcim".to_string();
+
+        let extractions = HashMap::from([(42, vec![inside.clone()])]);
+        let arrivals = HashMap::from([(42, vec![inside, outside])]);
+
+        let cells = event_cells(&event, &scoped, &HashMap::new(), &extractions, &arrivals);
+        assert_eq!(
+            cells,
+            vec!["photos/2016/italy", "/Archive/Media/2016/Italy"]
+        );
     }
 
     #[test]
