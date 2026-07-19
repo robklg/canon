@@ -187,3 +187,23 @@ Everything above answers "what happened?" — the trail is an event log. The com
 The distinction matters because the two can honestly disagree. A location's "Arrived here" total (an event count) never shrinks — a decision that happened stays happened. Its "Standing here" total (a state count) can be smaller, when some of what arrived was later deleted or moved elsewhere. Origin, here, means where content entered Canon's custody from — the source root an `apply` drew it from — attributed at the same decision-level granularity as the extraction ledger above, since that ledger is the card's only source of origin data. It is not, and cannot be, a full per-item lineage; that is a distinct, still-undesigned surface.
 
 The card is computed by its own operation (`ops::composition::compute_composition`), independent of trail rendering, so it can be reused wherever a present-tense "what's here?" reading is useful — the trail command is its first consumer, not its only intended one.
+
+## Crossing In, Crossing Out, Staying Put
+
+State versus events is one axis. There is a second, cutting across both the trail's rollups and the card: **whether content crossed the boundary of the place you are asking about.**
+
+A decision has two endpoints — where content was drawn from, and where it landed. The scope you are viewing draws a boundary between them, or fails to:
+
+| Origin | Destination | From this view |
+|---|---|---|
+| inside | outside | **left** — content was archived out of here |
+| outside | inside | **arrived** — content came in |
+| inside | inside | **rearranged** — content moved, but crossed nothing |
+
+The third row is a real category, not an accounting artifact. Because roots cannot nest, a decision with both endpoints inside one view is always an `apply` **within a single archive root** — a curation pass re-placing content that was already in custody. It is not a filesystem rename; those are observed by `scan` and never write an extraction row at all.
+
+Counting such a decision as both a departure and an arrival would read as double the activity, with both counterparty counts naming the very place you are standing. Silently dropping it would be worse — Canon's rule is that gaps explain themselves, and a user who has just done real curation work should see it accounted for. So it gets its own line, and its own word.
+
+**The boundary moves when you move.** Standing at an archive root, a curation pass reads as a rearrangement; standing in the destination folder, the same pass reads as an arrival, because from there the origin genuinely is elsewhere. Neither reading is more true — they answer different questions. What is guaranteed is that within any one view, the categories are disjoint: no file is counted twice.
+
+The word *rearranged* is chosen to state an observable fact about two paths and one boundary, without committing to what a curation pass *is*. It deliberately avoids `relocated`, which already means something narrower in Canon — whether an apply's originals moved or were copied (see `origin_disposition` above). An intra-archive apply can be either.

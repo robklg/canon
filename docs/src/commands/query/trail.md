@@ -79,7 +79,7 @@ Standing at a destination, the same apply shows up too — its recorded destinat
 
 The scope cell is the destination this time, view-relative (`.` for the viewed folder itself); the wording mirrors the outbound direction (`copied in; originals remain` / `moved in`). A source root the live index no longer knows renders with `(root removed)` appended, the same honesty as `trail show`'s `drew from:` lines.
 
-When a decision's origin *and* destination both sit inside the view — a relocation entirely within one scope — it renders once, not twice: the extraction-aspect line, with the destination shown view-relative instead of absolute. Both endpoints stay visible in that one line.
+When a decision's origin *and* destination both sit inside the view — content rearranged entirely within one scope — it renders once, not twice: the extraction-aspect line, with the destination shown view-relative instead of absolute. Both endpoints stay visible in that one line.
 
 The matching whole-history rollup:
 
@@ -87,7 +87,28 @@ The matching whole-history rollup:
 Arrived here: 2 files (14 B) from 1 origin.
 ```
 
-Both rollups can appear together — a location can draw content out, receive content in, both, or neither, entirely independently.
+## What a rollup counts
+
+**A rollup counts boundary crossings, and the view defines the boundary.** "Archived from here" is content that *left* this place; "Arrived here" is content that *entered* it. Content that moved *within* the view crossed nothing, so it belongs to neither — it gets a third line:
+
+```
+Archived from here: 1,251 files (22.1 GB) → 2 destinations.
+Arrived here: 340 files (8.2 GB) from 3 origins.
+Rearranged here: 47 files (3.9 GB).
+```
+
+Crossings are stated first, then what stayed inside. Any combination of the three can appear — a location can draw content out, receive content in, rearrange content within itself, all of these, or none.
+
+`Rearranged here` carries no counterparty clause, unlike its two siblings. Content that left went *somewhere* and content that arrived came *from* somewhere, but content that was rearranged stayed here — naming this place as its own counterparty would say nothing.
+
+**The same decision reads differently from different scopes, and that is the rule working, not an inconsistency.** An `apply` that moved content from `/archive/2016` to `/archive/2020`:
+
+- Viewed at `/archive`, both endpoints are inside. Nothing crossed → **Rearranged here**.
+- Viewed at `/archive/2020`, the origin is outside. Content crossed in → **Arrived here**.
+
+You are asking a different question from each place, and getting the true answer to the question you asked. Classification is per *row*, not per decision, so a single apply that drew from inside the view *and* from outside it contributes to `Rearranged here` and `Arrived here` at once.
+
+Sizes are all-or-omitted per rollup, computed over that rollup's own rows: an unknown-size crossing never suppresses a fully known rearrangement total.
 
 ## The composition card: what's standing here
 
@@ -101,6 +122,22 @@ Standing here: 3 files (21 B)
 This is deliberately a different question from everything above it. "Arrived here" is an event total — it never shrinks, because a decision that happened stays happened. "Standing here" is a state total — it can be *less* than what arrived, honestly, when some of what arrived was later deleted or moved elsewhere. Seeing `Arrived here: 5 files` next to `Standing here: 3 files` is not a bug; it is the difference between what came in and what remains.
 
 Origin lines come first, busiest first: a single-origin root that fed this location across one or more applies merges into one `from <root>` line (listing every contributing decision id and the date range, if more than one); an apply that drew from several roots in a single decision gets its own `via apply #N from M origins` line, since its content isn't merge-worthy with anything else. After origins: other transitions that touched present content here (`excluded here (#30)`, etc.), a `first indexed here` bucket for content this location saw first via a scan, and an `untracked (predates recording)` bucket for content whose stamp predates recording entirely. A long list of origins is capped, with an explicit remainder line (`… and 2 more origins.`) — never a silent truncation.
+
+An origin line names a place *other than this one*. Two cases follow from that, both mirroring the boundary rule above:
+
+```
+Standing here: 500 files (12.9 GB)
+  from /Volumes/old-laptop: 300 files (7.1 GB) · #12, #18 · 2026-03-02 – 2026-05-01
+  from elsewhere in /archive: 47 files (3.9 GB) · #42 · 2026-05-12
+  rearranged here (#51): 12 files (800.0 MB)
+  first indexed here: 141 files (1.1 GB)
+```
+
+`from elsewhere in <root>` means the content genuinely arrived — its origin sits outside the viewed scope — but the origin root *contains* where you're standing. Origin lines are anchored on the root, so a bare `from /archive` while standing in `/archive/2020` would name the place you are already in. The root is still named rather than left implicit, because a view can span several roots.
+
+`rearranged here (#N)` means the content didn't arrive at all: every row of that apply was drawn from inside this view, so there is no elsewhere to name. Unlike the rollups, the card classifies per *decision* rather than per row — a source's stamp records which decision last touched it, not which row of that decision, so for an apply spanning several origins the card cannot tell which surviving files came from which side. Any row from outside keeps the origin line, rather than claiming a rearrangement the index can't substantiate.
+
+Origin attribution is root-level throughout: `from /Volumes/old-laptop`, not the subfolder within it. That is deliberate — the drawn-from subfolder is a property of one particular apply, while the card merges applies across time, so the root is the stable unit (and the one you registered). For the exact subfolder of any one decision, `canon trail show <id>` lists it under `drew from:`.
 
 Exclusion doesn't remove standing — an excluded-but-present source still counts; renaming a file later doesn't erase its origin either, since attribution follows the decision that stamped it, not the file's current name. The card only appears when it has something to say: a location whose content is entirely first-indexed-here or untracked renders no card at all. It never appears in global views, the time lens, or `--jsonl` output — it is a scoped, present-tense reading, and JSONL's `extractions` field already covers the machine-readable side of provenance.
 
