@@ -417,6 +417,24 @@ pub fn fetch_extractions_by_roots(
     Ok(rows_out)
 }
 
+/// Fetch every extraction row. The table is aggregate-only (one row per apply
+/// x source root) — tiny by construction, so a full scan keeps path
+/// comparison out of SQL (the path-handling law): the caller matches
+/// destination paths in domain code (arrival matching against a viewed
+/// scope). Ordered by `(decision_id, root_id)` like its siblings.
+pub fn fetch_all_extractions(conn: &Connection) -> Result<Vec<DecisionExtraction>> {
+    let sql = format!(
+        "SELECT {EXTRACTION_COLUMNS} FROM decision_extractions ORDER BY decision_id, root_id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], extraction_from_row)?;
+    let mut rows_out = Vec::new();
+    for row in rows {
+        rows_out.push(row?);
+    }
+    Ok(rows_out)
+}
+
 /// Fetch all extraction rows for the given decisions (chunked). Used to make
 /// JSONL output view-independent (extraction fields present regardless of
 /// which lens surfaced the decision).
@@ -1213,6 +1231,25 @@ mod tests {
             fetch_extractions_by_decisions(&conn, &[d]).unwrap().len(),
             1100
         );
+    }
+
+    #[test]
+    fn fetch_all_extractions_returns_every_row_ordered() {
+        let conn = setup_test_db();
+        let d1 = insert_decision_at(&conn, "apply", 100);
+        let d2 = insert_decision_at(&conn, "apply", 200);
+        upsert_extractions(&conn, &[mk_extraction(d1, 2), mk_extraction(d1, 1)]).unwrap();
+        upsert_extractions(&conn, &[mk_extraction(d2, 1)]).unwrap();
+
+        let rows = fetch_all_extractions(&conn).unwrap();
+        let pairs: Vec<(i64, i64)> = rows.iter().map(|r| (r.decision_id, r.root_id)).collect();
+        assert_eq!(pairs, vec![(d1, 1), (d1, 2), (d2, 1)]);
+    }
+
+    #[test]
+    fn fetch_all_extractions_empty_table() {
+        let conn = setup_test_db();
+        assert!(fetch_all_extractions(&conn).unwrap().is_empty());
     }
 
     #[test]

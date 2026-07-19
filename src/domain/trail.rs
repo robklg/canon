@@ -568,6 +568,19 @@ mod tests {
         assert!(!scopes_touch("a/b", "a/bc"));
     }
 
+    #[test]
+    fn scopes_touch_absolute_paths() {
+        // Arrival matching runs on absolute snapshot paths (view prefix vs. a
+        // decision's recorded destination_path), not rel-prefixes within one
+        // root — the same predicate must hold there too.
+        assert!(scopes_touch("/archive/x", "/archive/x")); // equal
+        assert!(scopes_touch("/archive/x/y", "/archive/x")); // view deeper than destination
+        assert!(scopes_touch("/archive/x", "/archive/x/y")); // destination deeper than view
+        assert!(!scopes_touch("/archive/x", "/archive/y")); // sibling
+        assert!(!scopes_touch("/archive/x", "/archive/xc")); // segment boundary
+        assert!(!scopes_touch("/archive/xc", "/archive/x"));
+    }
+
     // merge_events
 
     #[test]
