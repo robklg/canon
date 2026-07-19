@@ -66,7 +66,7 @@ Receipts live in a `.canon-ledger/` directory under a root. Each is named for th
 A receipt sits at the **locus of the action's effect**:
 
 - **Apply receipts** are *targeted*: they mirror the destination path under the archive root's `.canon-ledger/`, sitting alongside the content they describe.
-- **Exclusion receipts** are *flat*: they land directly in the archive ledger root's `.canon-ledger/`, since an exclusion isn't tied to any one destination.
+- **Exclusion receipts** are *flat*: they land directly in the archive ledger root's `.canon-ledger/`. Excluding doesn't touch the file — it's letting go: a conscious judgment that this content doesn't need archiving (or is redundant beside what already is), made safe by destroying nothing. That judgment must outlive the source drive it helps clear, so its receipt lives on the archive side — the medium that endures. And with no destination path to mirror, it sits flat.
 - **Deletion receipts** are *source-local*: they land in the `.canon-ledger/` of the **source root where the files were lost** — physically on that drive, so the record of what a drive lost travels with the drive. A single scan that detects deletions across several roots writes one receipt per affected root, all under the one decision.
 
 Each receipt records, per item: the source root and relative path, content hash, size, and modification time. Variants carry the shape of their decision — `exclude duplicates` groups items by content hash, recording which copy was **kept** versus **excluded**; object-level exclusions list every source sharing the content; a deletion receipt lists exactly the sources that went missing.
