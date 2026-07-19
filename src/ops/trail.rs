@@ -64,6 +64,20 @@ pub struct ArrivalRollup {
     pub origins: usize,
 }
 
+/// Whole-history rollup over rows that crossed no boundary — content this
+/// view's own roots moved within it, an intra-archive curation pass.
+///
+/// Deliberately has no counterparty count: "Archived from here" names where
+/// content went and "Arrived here" where it came from, but a rearrangement's
+/// counterparty *is* this place, so counting it would say nothing.
+pub struct RearrangementRollup {
+    pub files: i64,
+    /// `None` if any contributing row lacks a size — never a partial sum.
+    /// Evaluated over this rollup's own rows: an unknown-size crossing must
+    /// not suppress a fully known rearrangement total.
+    pub bytes: Option<i64>,
+}
+
 pub struct TrailResult {
     pub view: TrailView,
     /// Decisions beyond the cap (older than the shown window).
@@ -89,6 +103,9 @@ pub struct TrailResult {
     /// `None` when there are no touching rows, or the view is global or a
     /// time-lens view (the rollup is a scope-lens-only footer).
     pub arrival_rollup: Option<ArrivalRollup>,
+    /// `None` when no row has both endpoints inside this view, or the view is
+    /// global or a time-lens view.
+    pub rearrangement_rollup: Option<RearrangementRollup>,
     /// The *full* (not touching-filtered) extraction rows for every decision
     /// in the final listed view, across every lens and scope — a decision's
     /// JSONL extraction data must read the same regardless of which view
@@ -99,7 +116,7 @@ pub struct TrailResult {
 pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailResult> {
     let range = params.timeframe.map(when_range);
 
-    let (mut decisions, unscoped, notes, extractions, extraction_rollup, arrivals, arrival_rollup) =
+    let (mut decisions, unscoped, notes, extractions, arrivals, rollups) =
         if params.prefixes.is_empty() {
             let decisions = match range {
                 Some((start, end)) => repo::decision::fetch_in_range(conn, start, end)?,
@@ -115,9 +132,8 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
                 0,
                 notes,
                 HashMap::new(),
-                None,
                 HashMap::new(),
-                None,
+                Rollups::default(),
             )
         } else {
             let roots = repo::root::fetch_all(conn)?;
@@ -215,26 +231,13 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
 
             // Whole-history rollups: every touching row, never capped by the
             // decision-window limit. Scope-lens only — never a time-lens view.
-            let extraction_rollup = if range.is_none() {
-                build_rollup(extractions.values().flatten())
+            let rollups = if range.is_none() {
+                build_rollups(&extractions, &arrivals)
             } else {
-                None
-            };
-            let arrival_rollup = if range.is_none() {
-                build_arrival_rollup(arrivals.values().flatten())
-            } else {
-                None
+                Rollups::default()
             };
 
-            (
-                decisions,
-                unscoped,
-                notes,
-                extractions,
-                extraction_rollup,
-                arrivals,
-                arrival_rollup,
-            )
+            (decisions, unscoped, notes, extractions, arrivals, rollups)
         };
 
     let total_decisions = decisions.len();
@@ -297,9 +300,10 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
         unscoped_decisions: unscoped,
         total_decisions,
         extractions,
-        extraction_rollup,
+        extraction_rollup: rollups.extraction,
         arrivals,
-        arrival_rollup,
+        arrival_rollup: rollups.arrival,
+        rearrangement_rollup: rollups.rearrangement,
         extractions_all,
     })
 }
@@ -351,11 +355,17 @@ pub fn classify_decision_rows<'a>(
         .collect()
 }
 
-/// Sum files/bytes and count distinct destinations over a set of extraction
-/// rows. `None` if the set is empty; bytes `None` if any row lacks a size.
-fn build_rollup<'a>(
+/// Sum files/bytes and count distinct counterparties over a set of rows.
+/// `None` if the set is empty; bytes `None` if any row lacks a size.
+///
+/// One builder for all three rollups: the all-or-omitted bytes rule is the
+/// same rule in each, and three copies of it would be three places to fix.
+/// They differ only in which end of the row is the counterparty — and the
+/// rearrangement rollup, whose counterparty is this place, discards it.
+fn rollup_parts<'a>(
     rows: impl Iterator<Item = &'a DecisionExtraction>,
-) -> Option<ExtractionRollup> {
+    counterparty: fn(&DecisionExtraction) -> &str,
+) -> Option<(i64, Option<i64>, usize)> {
     let rows: Vec<&DecisionExtraction> = rows.collect();
     if rows.is_empty() {
         return None;
@@ -366,43 +376,91 @@ fn build_rollup<'a>(
     } else {
         None
     };
-    let destinations: usize = rows
+    let counterparties = rows
         .iter()
-        .map(|r| r.destination_path.as_str())
+        .map(|r| counterparty(r))
         .collect::<HashSet<_>>()
         .len();
-    Some(ExtractionRollup {
-        files,
-        bytes,
-        destinations,
+    Some((files, bytes, counterparties))
+}
+
+/// "Archived from here": content that left, by where it went.
+fn build_extraction_rollup<'a>(
+    rows: impl Iterator<Item = &'a DecisionExtraction>,
+) -> Option<ExtractionRollup> {
+    rollup_parts(rows, |r| &r.destination_path).map(|(files, bytes, destinations)| {
+        ExtractionRollup {
+            files,
+            bytes,
+            destinations,
+        }
     })
 }
 
-/// Sum files/bytes and count distinct origins over a set of arrival rows.
-/// `None` if the set is empty; bytes `None` if any row lacks a size.
+/// "Arrived here": content that entered, by where it came from.
 fn build_arrival_rollup<'a>(
     rows: impl Iterator<Item = &'a DecisionExtraction>,
 ) -> Option<ArrivalRollup> {
-    let rows: Vec<&DecisionExtraction> = rows.collect();
-    if rows.is_empty() {
-        return None;
-    }
-    let files: i64 = rows.iter().map(|r| r.files).sum();
-    let bytes = if rows.iter().all(|r| r.bytes.is_some()) {
-        Some(rows.iter().filter_map(|r| r.bytes).sum())
-    } else {
-        None
-    };
-    let origins: usize = rows
-        .iter()
-        .map(|r| r.root_path.as_str())
-        .collect::<HashSet<_>>()
-        .len();
-    Some(ArrivalRollup {
+    rollup_parts(rows, |r| &r.root_path).map(|(files, bytes, origins)| ArrivalRollup {
         files,
         bytes,
         origins,
     })
+}
+
+/// "Rearranged here": content that crossed nothing. The counterparty count is
+/// computed and dropped — the counterparty is this place, so counting it would
+/// be self-referential.
+fn build_rearrangement_rollup<'a>(
+    rows: impl Iterator<Item = &'a DecisionExtraction>,
+) -> Option<RearrangementRollup> {
+    rollup_parts(rows, |r| &r.destination_path)
+        .map(|(files, bytes, _)| RearrangementRollup { files, bytes })
+}
+
+/// The three whole-history rollups of a scoped scope-lens view, over three
+/// disjoint row sets. Every field is `None` for a global or time-lens view.
+#[derive(Default)]
+struct Rollups {
+    extraction: Option<ExtractionRollup>,
+    arrival: Option<ArrivalRollup>,
+    rearrangement: Option<RearrangementRollup>,
+}
+
+/// Partition every row the view can see by which boundary it crossed, then
+/// build each rollup from its own set.
+///
+/// Partitioning is **per row**: one apply drawing from inside the view and
+/// from outside it contributes to the arrival rollup *and* the rearrangement
+/// rollup at once. The sets are disjoint, so no row is counted twice — which
+/// is the whole point, since a rearrangement used to be claimed by both
+/// crossing rollups and read as double the activity.
+fn build_rollups(
+    extractions: &HashMap<i64, Vec<DecisionExtraction>>,
+    arrivals: &HashMap<i64, Vec<DecisionExtraction>>,
+) -> Rollups {
+    let mut ids: Vec<i64> = extractions.keys().chain(arrivals.keys()).copied().collect();
+    ids.sort_unstable();
+    ids.dedup();
+
+    let (mut left, mut entered, mut stayed) = (Vec::new(), Vec::new(), Vec::new());
+    for id in ids {
+        for (row, aspect) in classify_decision_rows(id, extractions, arrivals) {
+            match aspect {
+                RowAspect::Extraction => left.push(row),
+                RowAspect::Arrival => entered.push(row),
+                RowAspect::Rearrangement => stayed.push(row),
+                // Unreachable: every row here came from one of the two maps.
+                RowAspect::Outside => {}
+            }
+        }
+    }
+
+    Rollups {
+        extraction: build_extraction_rollup(left.into_iter()),
+        arrival: build_arrival_rollup(entered.into_iter()),
+        rearrangement: build_rearrangement_rollup(stayed.into_iter()),
+    }
 }
 
 /// A receipt's on-disk location, as a pointer (contents are never read here).
@@ -1253,6 +1311,203 @@ mod tests {
             }
             TrailView::Recent(_) => panic!("time lens must be Days"),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Rearrangement: rows that crossed no boundary
+    //
+    // An intra-archive apply cannot currently be produced through the CLI
+    // (`apply` aborts with "files already in destination archive" whatever
+    // --allow is given) — that is the one-way-relocation machinery the vision
+    // open question names. These fixtures write the extraction rows such an
+    // apply *would* record, which is what the read layer sees either way.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn rearrangement_row_leaves_both_crossing_rollups() {
+        let conn = open_in_memory_for_test();
+        let archive = insert_test_root(&conn, "/archive", "archive", false);
+        let d = insert_decision_at(&conn, "apply", 100);
+        // Drawn from /archive/2016, landing in /archive/2020: viewed at the
+        // archive root, both endpoints are inside, so nothing crossed.
+        repo::decision::upsert_extractions(
+            &conn,
+            &[extraction_row(
+                d,
+                archive,
+                "/archive",
+                "2016",
+                47,
+                Some(3_900),
+                "/archive/2020",
+            )],
+        )
+        .unwrap();
+
+        let result = compute_trail(&conn, &params(vec!["/archive".to_string()])).unwrap();
+        assert!(
+            result.extraction_rollup.is_none(),
+            "nothing left this place"
+        );
+        assert!(result.arrival_rollup.is_none(), "nothing entered it");
+        let rollup = result.rearrangement_rollup.unwrap();
+        assert_eq!(rollup.files, 47);
+        assert_eq!(rollup.bytes, Some(3_900));
+    }
+
+    #[test]
+    fn narrower_view_reads_the_same_decision_as_an_arrival() {
+        // The scope-dependence is the rule working: the boundary moved, so
+        // the same row now crosses it.
+        let conn = open_in_memory_for_test();
+        let archive = insert_test_root(&conn, "/archive", "archive", false);
+        let d = insert_decision_at(&conn, "apply", 100);
+        repo::decision::upsert_extractions(
+            &conn,
+            &[extraction_row(
+                d,
+                archive,
+                "/archive",
+                "2016",
+                47,
+                Some(3_900),
+                "/archive/2020",
+            )],
+        )
+        .unwrap();
+
+        let result = compute_trail(&conn, &params(vec!["/archive/2020".to_string()])).unwrap();
+        assert!(result.rearrangement_rollup.is_none());
+        let rollup = result.arrival_rollup.unwrap();
+        assert_eq!(rollup.files, 47);
+    }
+
+    #[test]
+    fn one_decision_can_feed_two_rollups_at_once() {
+        // The footer-level form of the mixed-origin bug: an apply drawing
+        // from inside the view and from outside it rearranged some content
+        // and received the rest. Filtering decisions rather than rows would
+        // put all 55 files in one rollup.
+        let conn = open_in_memory_for_test();
+        let archive = insert_test_root(&conn, "/archive", "archive", false);
+        let sd = insert_test_root(&conn, "/Volumes/sd", "source", false);
+        let d = insert_decision_at(&conn, "apply", 100);
+        repo::decision::upsert_extractions(
+            &conn,
+            &[
+                extraction_row(
+                    d,
+                    archive,
+                    "/archive",
+                    "2016",
+                    47,
+                    Some(3_900),
+                    "/archive/2020",
+                ),
+                extraction_row(d, sd, "/Volumes/sd", "dcim", 8, Some(800), "/archive/2020"),
+            ],
+        )
+        .unwrap();
+
+        let result = compute_trail(&conn, &params(vec!["/archive".to_string()])).unwrap();
+        let rearranged = result.rearrangement_rollup.unwrap();
+        assert_eq!(rearranged.files, 47);
+        assert_eq!(rearranged.bytes, Some(3_900));
+        let arrived = result.arrival_rollup.unwrap();
+        assert_eq!(arrived.files, 8);
+        assert_eq!(arrived.bytes, Some(800));
+        assert_eq!(arrived.origins, 1, "only the outside root is an origin");
+        assert!(result.extraction_rollup.is_none());
+    }
+
+    #[test]
+    fn bytes_are_all_or_omitted_per_rollup_not_across_them() {
+        // An unknown-size crossing must not suppress a fully known
+        // rearrangement total — each rollup judges its own rows.
+        let conn = open_in_memory_for_test();
+        let archive = insert_test_root(&conn, "/archive", "archive", false);
+        let sd = insert_test_root(&conn, "/Volumes/sd", "source", false);
+        let d = insert_decision_at(&conn, "apply", 100);
+        repo::decision::upsert_extractions(
+            &conn,
+            &[
+                extraction_row(
+                    d,
+                    archive,
+                    "/archive",
+                    "2016",
+                    47,
+                    Some(3_900),
+                    "/archive/2020",
+                ),
+                extraction_row(d, sd, "/Volumes/sd", "dcim", 8, None, "/archive/2020"),
+            ],
+        )
+        .unwrap();
+
+        let result = compute_trail(&conn, &params(vec!["/archive".to_string()])).unwrap();
+        assert_eq!(result.arrival_rollup.unwrap().bytes, None);
+        assert_eq!(result.rearrangement_rollup.unwrap().bytes, Some(3_900));
+    }
+
+    #[test]
+    fn rearrangement_rollup_is_whole_history_despite_the_cap() {
+        let conn = open_in_memory_for_test();
+        let archive = insert_test_root(&conn, "/archive", "archive", false);
+        let d1 = insert_decision_at(&conn, "apply", 100);
+        let d2 = insert_decision_at(&conn, "apply", 200);
+        for (d, files, bytes) in [(d1, 10, 1_000), (d2, 20, 2_000)] {
+            repo::decision::upsert_extractions(
+                &conn,
+                &[extraction_row(
+                    d,
+                    archive,
+                    "/archive",
+                    "2016",
+                    files,
+                    Some(bytes),
+                    "/archive/2020",
+                )],
+            )
+            .unwrap();
+        }
+
+        let mut p = params(vec!["/archive".to_string()]);
+        p.limit = Some(1);
+        let result = compute_trail(&conn, &p).unwrap();
+        assert_eq!(result.earlier_decisions, 1);
+        let rollup = result.rearrangement_rollup.unwrap();
+        assert_eq!(rollup.files, 30);
+        assert_eq!(rollup.bytes, Some(3_000));
+    }
+
+    #[test]
+    fn rearrangement_rollup_none_for_global_and_time_lens_views() {
+        let conn = open_in_memory_for_test();
+        let archive = insert_test_root(&conn, "/archive", "archive", false);
+        let day = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
+        let d = insert_decision_at(&conn, "apply", local_midnight(day) + 3600);
+        repo::decision::upsert_extractions(
+            &conn,
+            &[extraction_row(
+                d,
+                archive,
+                "/archive",
+                "2016",
+                47,
+                Some(3_900),
+                "/archive/2020",
+            )],
+        )
+        .unwrap();
+
+        let global = compute_trail(&conn, &params(Vec::new())).unwrap();
+        assert!(global.rearrangement_rollup.is_none());
+
+        let mut p = params(vec!["/archive".to_string()]);
+        p.timeframe = Some(WhenValue::Since(day));
+        let timed = compute_trail(&conn, &p).unwrap();
+        assert!(timed.rearrangement_rollup.is_none());
     }
 
     #[test]

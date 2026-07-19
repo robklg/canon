@@ -27,8 +27,8 @@ use crate::domain::trail::{
 use crate::ops;
 use crate::ops::scope::ResolvedScope;
 use crate::ops::trail::{
-    classify_decision_rows, ArrivalRollup, ExtractionRollup, TrailParams, TrailResult, TrailView,
-    DEFAULT_LIMIT,
+    classify_decision_rows, ArrivalRollup, ExtractionRollup, RearrangementRollup, TrailParams,
+    TrailResult, TrailView, DEFAULT_LIMIT,
 };
 use crate::repo::{self, Db};
 
@@ -251,30 +251,33 @@ fn print_human(
         }
     }
 
-    // Both rollups are scope-lens-only footers ("Archived from here" /
-    // "Arrived here") — neither appears alongside the day-grouped time lens.
-    // Independent of each other: a view can draw content out, receive
-    // content in, both, or neither.
-    let extraction_rollup_line = match (&result.view, &result.extraction_rollup) {
-        (TrailView::Recent(_), Some(rollup)) => Some(format_extraction_rollup(rollup)),
-        _ => None,
-    };
-    let arrival_rollup_line = match (&result.view, &result.arrival_rollup) {
-        (TrailView::Recent(_), Some(rollup)) => Some(format_arrival_rollup(rollup)),
-        _ => None,
+    // All three rollups are scope-lens-only footers — none appears alongside
+    // the day-grouped time lens. Independent of each other: a view can draw
+    // content out, receive content in, rearrange content within itself, any
+    // combination, or none. Crossings are stated first (what this place traded
+    // with the rest of the universe), then what merely moved inside it.
+    let rollup_lines: Vec<String> = match &result.view {
+        TrailView::Recent(_) => [
+            result
+                .extraction_rollup
+                .as_ref()
+                .map(format_extraction_rollup),
+            result.arrival_rollup.as_ref().map(format_arrival_rollup),
+            result
+                .rearrangement_rollup
+                .as_ref()
+                .map(format_rearrangement_rollup),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        TrailView::Days(_) => Vec::new(),
     };
 
-    if extraction_rollup_line.is_some()
-        || arrival_rollup_line.is_some()
-        || result.earlier_decisions > 0
-        || result.unscoped_decisions > 0
-    {
+    if !rollup_lines.is_empty() || result.earlier_decisions > 0 || result.unscoped_decisions > 0 {
         println!();
     }
-    if let Some(line) = extraction_rollup_line {
-        println!("{line}");
-    }
-    if let Some(line) = arrival_rollup_line {
+    for line in rollup_lines {
         println!("{line}");
     }
     if result.earlier_decisions > 0 {
@@ -663,6 +666,22 @@ fn format_arrival_rollup(rollup: &ArrivalRollup) -> String {
             "Arrived here: {files} {unit} from {} {origin_unit}.",
             rollup.origins
         ),
+    }
+}
+
+/// The scope-lens-only "Rearranged here" footer: whole-history rollup of the
+/// rows that crossed no boundary — both endpoints inside this view.
+///
+/// No counterparty clause, unlike its two siblings: content that left went
+/// *somewhere* and content that arrived came *from* somewhere, but content
+/// that was rearranged stayed here, and naming this place as its own
+/// counterparty would say nothing.
+fn format_rearrangement_rollup(rollup: &RearrangementRollup) -> String {
+    let files = format_count(rollup.files);
+    let unit = if rollup.files == 1 { "file" } else { "files" };
+    match rollup.bytes {
+        Some(bytes) => format!("Rearranged here: {files} {unit} ({}).", format_size(bytes)),
+        None => format!("Rearranged here: {files} {unit}."),
     }
 }
 
@@ -1443,6 +1462,71 @@ mod tests {
         assert_eq!(
             format_arrival_rollup(&rollup),
             "Arrived here: 1 file from 1 origin."
+        );
+    }
+
+    #[test]
+    fn rearrangement_rollup_footer_composition() {
+        let rollup = RearrangementRollup {
+            files: 47,
+            bytes: Some(3_900_000_000),
+        };
+        assert_eq!(
+            format_rearrangement_rollup(&rollup),
+            "Rearranged here: 47 files (3.9 GB)."
+        );
+    }
+
+    #[test]
+    fn rearrangement_rollup_footer_singular_and_omitted_bytes() {
+        let rollup = RearrangementRollup {
+            files: 1,
+            bytes: None,
+        };
+        assert_eq!(
+            format_rearrangement_rollup(&rollup),
+            "Rearranged here: 1 file."
+        );
+    }
+
+    #[test]
+    fn rearrangement_rollup_footer_never_names_a_counterparty() {
+        // Its two siblings end in "→ N destinations." / "from N origins."
+        // This one must not, whatever the numbers: the counterparty is here.
+        let line = format_rearrangement_rollup(&RearrangementRollup {
+            files: 47,
+            bytes: Some(3_900),
+        });
+        assert!(!line.contains("destination"), "{line}");
+        assert!(!line.contains("origin"), "{line}");
+        assert!(line.ends_with('.'), "{line}");
+    }
+
+    #[test]
+    fn all_three_rollup_footers_coexist() {
+        // A view can trade in both directions and rearrange internally at
+        // once; the footer states crossings first, then what stayed.
+        let lines = [
+            format_extraction_rollup(&ExtractionRollup {
+                files: 1_251,
+                bytes: Some(22_100_000_000),
+                destinations: 2,
+            }),
+            format_arrival_rollup(&ArrivalRollup {
+                files: 340,
+                bytes: Some(8_200_000_000),
+                origins: 3,
+            }),
+            format_rearrangement_rollup(&RearrangementRollup {
+                files: 47,
+                bytes: Some(3_900_000_000),
+            }),
+        ];
+        assert_eq!(
+            lines.join("\n"),
+            "Archived from here: 1,251 files (22.1 GB) \u{2192} 2 destinations.\n\
+             Arrived here: 340 files (8.2 GB) from 3 origins.\n\
+             Rearranged here: 47 files (3.9 GB)."
         );
     }
 
