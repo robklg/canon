@@ -177,9 +177,30 @@ pub fn merge_events(decisions: Vec<Decision>, notes: Vec<Note>) -> Vec<TimelineE
 /// touches the viewed scope if its prefix is under the view *or* an ancestor
 /// of it. "" is the root itself and touches everything. Segment-aware:
 /// "a/bc" does not touch "a/b".
+///
+/// This matches **declared scopes** — `decision_scopes` rows and note paths,
+/// where the recorded value means "I acted on this subtree", so acting on an
+/// ancestor genuinely touches the view. An extraction row's locations are a
+/// different kind of claim; match those with [`placement_in_view`], never
+/// with this.
 pub fn scopes_touch(view_prefix: &str, other_prefix: &str) -> bool {
     Path::new(view_prefix).starts_with(other_prefix)
         || Path::new(other_prefix).starts_with(view_prefix)
+}
+
+/// Whether an **observed placement** lies within the viewed scope:
+/// descendant-or-equal only, segment-aware, never bidirectional.
+///
+/// A placement is where files demonstrably are — an extraction row's origin
+/// or destination location. The row's claim is "all my files lie under this
+/// location", so it surfaces in every view that contains the location and in
+/// no other; wherever it surfaces, its count is exact. An *ancestor* of the
+/// view implies nothing about the view (a common prefix of `2016/01` and
+/// `2016/02` says nothing about `2016/03`) — matching that direction is how
+/// the trail once manufactured history. Declared scopes ("I acted on this
+/// subtree") are the other kind of claim and keep [`scopes_touch`].
+pub fn placement_in_view(view_prefix: &str, placement: &str) -> bool {
+    Path::new(placement).starts_with(view_prefix)
 }
 
 /// Which direction a single extraction row reads from inside a view.
@@ -220,11 +241,17 @@ pub fn row_aspect(origin_in_view: bool, destination_in_view: bool) -> RowAspect 
 /// for consumers holding no membership maps. An empty prefix list is a global
 /// view, which has no boundary to cross: every row reads as a rearrangement.
 /// The composition card is its consumer.
+///
+/// Membership is [`placement_in_view`] — the row's locations are observed
+/// placements, so only a location the view contains is inside it.
 pub fn classify_row(row: &DecisionExtraction, prefixes: &[String]) -> RowAspect {
-    let touches = |path: &str| {
-        prefixes.is_empty() || prefixes.iter().any(|prefix| scopes_touch(prefix, path))
+    let within = |path: &str| {
+        prefixes.is_empty()
+            || prefixes
+                .iter()
+                .any(|prefix| placement_in_view(prefix, path))
     };
-    row_aspect(touches(&row.drawn_from()), touches(&row.destination_path))
+    row_aspect(within(&row.drawn_from()), within(&row.destination_path))
 }
 
 /// A parsed time-lens value: `--since` (from date onward) or `--on` (one day).
@@ -625,6 +652,51 @@ mod tests {
         assert!(!scopes_touch("/archive/x", "/archive/y")); // sibling
         assert!(!scopes_touch("/archive/x", "/archive/xc")); // segment boundary
         assert!(!scopes_touch("/archive/xc", "/archive/x"));
+    }
+
+    // placement_in_view
+
+    #[test]
+    fn placement_in_view_is_descendant_or_equal_only() {
+        // The two-claims law: unlike a declared scope, an observed placement
+        // matches only views that contain it. The ancestor direction — where
+        // scopes_touch says yes — is exactly the manufactured-history case.
+        assert!(placement_in_view("/archive/x", "/archive/x")); // equal
+        assert!(placement_in_view("/archive/x", "/archive/x/y")); // placement deeper: contained
+        assert!(!placement_in_view("/archive/x/y", "/archive/x")); // placement above: claims nothing
+        assert!(!placement_in_view("/archive/x", "/archive/y")); // sibling
+        assert!(!placement_in_view("/archive/x", "/archive/xc")); // segment boundary
+        assert!(!placement_in_view("/archive/xc", "/archive/x"));
+    }
+
+    #[test]
+    fn placement_in_view_handles_rel_prefixes_and_the_root_itself() {
+        // Rel-prefix form within one root: "" is the root itself.
+        assert!(placement_in_view("", "m/01")); // root view contains every placement
+        assert!(placement_in_view("m", "m/01"));
+        assert!(!placement_in_view("m/03", "m")); // a common prefix of 01+02 says nothing about 03
+        assert!(!placement_in_view("m/01", "")); // a root-level placement is not inside a subfolder
+        assert!(placement_in_view("", "")); // root placement, root view
+    }
+
+    #[test]
+    fn classify_row_never_reads_an_ancestor_location_as_inside() {
+        // Both directions of the law, through the card's consumer. A row
+        // whose recorded locations sit *above* the view is Outside — under
+        // the old bidirectional rule both of these read as inside.
+        let view = vec!["/archive/2016/03".to_string()];
+        assert_eq!(
+            classify_row(
+                &mk_extraction("/Volumes/sd", "dcim", "/archive/2016"),
+                &view
+            ),
+            RowAspect::Outside
+        );
+        assert_eq!(
+            // Origin prefix above the view within the same tree.
+            classify_row(&mk_extraction("/archive", "2016", "/elsewhere"), &view),
+            RowAspect::Outside
+        );
     }
 
     // row_aspect / classify_row — the boundary-crossing rule

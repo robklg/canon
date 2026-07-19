@@ -387,41 +387,12 @@ pub fn upsert_extractions(conn: &Connection, rows: &[DecisionExtraction]) -> Res
     Ok(())
 }
 
-/// Fetch all extraction rows drawn from the given roots (chunked). Prefix
-/// matching against a viewed scope is domain logic — this returns every row
-/// for the roots; the caller filters by `scopes_touch`.
-///
-/// Ordered by `(decision_id, root_id)` so a multi-root decision's extraction
-/// lines render in a stable order run to run.
-pub fn fetch_extractions_by_roots(
-    conn: &Connection,
-    root_ids: &[i64],
-) -> Result<Vec<DecisionExtraction>> {
-    let mut rows_out = Vec::new();
-    for chunk in root_ids.chunks(BATCH_SIZE) {
-        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        let sql = format!(
-            "SELECT {EXTRACTION_COLUMNS} FROM decision_extractions WHERE root_id IN ({})
-             ORDER BY decision_id, root_id",
-            placeholders.join(",")
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            rusqlite::params_from_iter(chunk.iter()),
-            extraction_from_row,
-        )?;
-        for row in rows {
-            rows_out.push(row?);
-        }
-    }
-    Ok(rows_out)
-}
-
 /// Fetch every extraction row. The table is aggregate-only (one row per apply
 /// x source root) — tiny by construction, so a full scan keeps path
-/// comparison out of SQL (the path-handling law): the caller matches
-/// destination paths in domain code (arrival matching against a viewed
-/// scope). Ordered by `(decision_id, root_id)` like its siblings.
+/// comparison out of SQL (the path-handling law): the caller classifies each
+/// row's recorded locations against the viewed scope in domain code. Ordered
+/// by `(decision_id, root_id)` so a multi-root decision's lines render in a
+/// stable order run to run.
 pub fn fetch_all_extractions(conn: &Connection) -> Result<Vec<DecisionExtraction>> {
     let sql = format!(
         "SELECT {EXTRACTION_COLUMNS} FROM decision_extractions ORDER BY decision_id, root_id"
@@ -1190,15 +1161,12 @@ mod tests {
     }
 
     #[test]
-    fn fetch_extractions_by_roots_and_decisions_round_trip() {
+    fn fetch_extractions_by_decisions_round_trip() {
         let conn = setup_test_db();
         let d1 = insert_decision_at(&conn, "apply", 100);
         let d2 = insert_decision_at(&conn, "apply", 200);
         upsert_extractions(&conn, &[mk_extraction(d1, 1), mk_extraction(d1, 2)]).unwrap();
         upsert_extractions(&conn, &[mk_extraction(d2, 1)]).unwrap();
-
-        let by_root = fetch_extractions_by_roots(&conn, &[1]).unwrap();
-        assert_eq!(by_root.len(), 2);
 
         let by_decision = fetch_extractions_by_decisions(&conn, &[d1]).unwrap();
         assert_eq!(by_decision.len(), 2);
@@ -1222,11 +1190,6 @@ mod tests {
             .collect();
         upsert_extractions(&conn, &rows).unwrap();
 
-        let root_ids: Vec<i64> = (1..=1100).collect();
-        assert_eq!(
-            fetch_extractions_by_roots(&conn, &root_ids).unwrap().len(),
-            1100
-        );
         assert_eq!(
             fetch_extractions_by_decisions(&conn, &[d]).unwrap().len(),
             1100

@@ -16,8 +16,8 @@ use crate::domain::decision::Decision;
 use crate::domain::extraction::DecisionExtraction;
 use crate::domain::root::find_containing_root;
 use crate::domain::trail::{
-    group_by_day, merge_events, row_aspect, scopes_touch, DayGroup, RowAspect, TimelineEvent,
-    WhenValue,
+    group_by_day, merge_events, placement_in_view, row_aspect, scopes_touch, DayGroup, RowAspect,
+    TimelineEvent, WhenValue,
 };
 use crate::repo::{self, Connection};
 
@@ -86,20 +86,19 @@ pub struct TrailResult {
     pub unscoped_decisions: i64,
     /// Matching decisions before capping.
     pub total_decisions: usize,
-    /// Extraction rows touching this view, by decision id — content this
-    /// scope's roots drew content into an archive from. Powers the
-    /// extraction-aspect line and the rollup below. Empty for the global
-    /// view (nothing "touches" a scope that doesn't exist).
-    pub extractions: HashMap<i64, Vec<DecisionExtraction>>,
+    /// Extraction rows this view reads, by decision id, each tagged with the
+    /// direction it reads from here — drawn out of the view (`Extraction`),
+    /// delivered into it (`Arrival`), or moved within it (`Rearrangement`).
+    /// Membership is per row and per placement: a row is inside the view only
+    /// where the view *contains* its recorded location (`placement_in_view`,
+    /// never the bidirectional scope rule). Origin membership is root-id-
+    /// keyed; destination membership runs on absolute snapshot paths, so a
+    /// removed or re-added destination root doesn't break the link. Powers
+    /// the timeline lines and the rollups below. Empty for the global view.
+    pub placements: HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>,
     /// `None` when there are no touching rows, or the view is global or a
     /// time-lens view (the rollup is a scope-lens-only footer).
     pub extraction_rollup: Option<ExtractionRollup>,
-    /// Extraction rows whose recorded *destination* touches this view, by
-    /// decision id — content this scope's roots received from an apply, even
-    /// when the apply's own selection scope was elsewhere. Matched on
-    /// absolute snapshot paths, not root ids, so a removed or re-added
-    /// destination root doesn't break the link. Empty for the global view.
-    pub arrivals: HashMap<i64, Vec<DecisionExtraction>>,
     /// `None` when there are no touching rows, or the view is global or a
     /// time-lens view (the rollup is a scope-lens-only footer).
     pub arrival_rollup: Option<ArrivalRollup>,
@@ -116,129 +115,97 @@ pub struct TrailResult {
 pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailResult> {
     let range = params.timeframe.map(when_range);
 
-    let (mut decisions, unscoped, notes, extractions, arrivals, rollups) =
-        if params.prefixes.is_empty() {
-            let decisions = match range {
-                Some((start, end)) => repo::decision::fetch_in_range(conn, start, end)?,
-                None => repo::decision::fetch_recent(conn, None)?,
-            };
-            let notes = if params.include_notes {
-                repo::note::fetch_all(conn)?
-            } else {
-                Vec::new()
-            };
-            (
-                decisions,
-                0,
-                notes,
-                HashMap::new(),
-                HashMap::new(),
-                Rollups::default(),
-            )
-        } else {
-            let roots = repo::root::fetch_all(conn)?;
-            // The same decomposition the recorder used to populate the index.
-            let pairs: Vec<(i64, String)> = params
-                .prefixes
-                .iter()
-                .filter_map(|p| {
-                    find_containing_root(p, &roots).map(|(root_id, _, _, rel)| (root_id, rel))
-                })
-                .collect();
-            let mut root_ids: Vec<i64> = pairs.iter().map(|(id, _)| *id).collect();
-            root_ids.sort_unstable();
-            root_ids.dedup();
-
-            let touches = |root_id: i64, rel_prefix: &str| {
-                pairs
-                    .iter()
-                    .any(|(rid, rel)| *rid == root_id && scopes_touch(rel, rel_prefix))
-            };
-
-            let rows = repo::decision::fetch_scope_rows_by_roots(conn, &root_ids)?;
-            let mut ids: Vec<i64> = rows
-                .iter()
-                .filter(|row| touches(row.root_id, &row.rel_prefix))
-                .map(|row| row.decision_id)
-                .collect();
-
-            // Extraction rows touching this view: apply decisions that drew
-            // content from here into an archive, even when the decision's
-            // *selection* scope was global or elsewhere entirely.
-            let ext_rows = repo::decision::fetch_extractions_by_roots(conn, &root_ids)?;
-            let mut extractions: HashMap<i64, Vec<DecisionExtraction>> = HashMap::new();
-            for row in ext_rows {
-                if touches(row.root_id, &row.rel_prefix) {
-                    extractions.entry(row.decision_id).or_default().push(row);
-                }
-            }
-
-            // Arrival rows touching this view: apply decisions whose recorded
-            // *destination* lands here, even when the decision's source root
-            // is unrelated to this scope's roots. Matched on absolute
-            // snapshot paths (params.prefixes are already absolute), not root
-            // ids — a removed or re-added destination root can't break this.
-            let all_ext_rows = repo::decision::fetch_all_extractions(conn)?;
-            let mut arrivals: HashMap<i64, Vec<DecisionExtraction>> = HashMap::new();
-            for row in all_ext_rows {
-                if params
-                    .prefixes
-                    .iter()
-                    .any(|prefix| scopes_touch(prefix, &row.destination_path))
-                {
-                    arrivals.entry(row.decision_id).or_default().push(row);
-                }
-            }
-
-            ids.extend(extractions.keys().copied());
-            ids.extend(arrivals.keys().copied());
-            ids.sort_unstable();
-            ids.dedup();
-
-            let mut decisions = repo::decision::fetch_by_ids(conn, &ids)?;
-            if let Some((start, end)) = range {
-                decisions.retain(|d| d.created_at >= start && d.created_at < end);
-            }
-
-            let unscoped_raw = repo::decision::count_unscoped(conn, range)?;
-            // Footer honesty: a decision surfaced here only via an extraction
-            // or arrival row (no decision_scopes row of its own) must not
-            // also be counted as "not shown" — restricted to ids that
-            // actually survived the time-range filter above, since a
-            // touching id outside --since/--on was never part of
-            // unscoped_raw's count either.
-            let shown_ids: HashSet<i64> = decisions.iter().map(|d| d.id).collect();
-            let shown_extraction_ids: Vec<i64> = extractions
-                .keys()
-                .chain(arrivals.keys())
-                .filter(|id| shown_ids.contains(id))
-                .copied()
-                .collect::<HashSet<i64>>()
-                .into_iter()
-                .collect();
-            let unscoped_adjustment =
-                repo::decision::filter_unscoped_ids(conn, &shown_extraction_ids)?.len() as i64;
-            let unscoped = unscoped_raw - unscoped_adjustment;
-
-            let notes = if params.include_notes {
-                repo::note::fetch_by_roots(conn, &root_ids)?
-                    .into_iter()
-                    .filter(|n| touches(n.root_id, &n.rel_path))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-
-            // Whole-history rollups: every touching row, never capped by the
-            // decision-window limit. Scope-lens only — never a time-lens view.
-            let rollups = if range.is_none() {
-                build_rollups(&extractions, &arrivals)
-            } else {
-                Rollups::default()
-            };
-
-            (decisions, unscoped, notes, extractions, arrivals, rollups)
+    let (mut decisions, unscoped, notes, placements, rollups) = if params.prefixes.is_empty() {
+        let decisions = match range {
+            Some((start, end)) => repo::decision::fetch_in_range(conn, start, end)?,
+            None => repo::decision::fetch_recent(conn, None)?,
         };
+        let notes = if params.include_notes {
+            repo::note::fetch_all(conn)?
+        } else {
+            Vec::new()
+        };
+        (decisions, 0, notes, HashMap::new(), Rollups::default())
+    } else {
+        let roots = repo::root::fetch_all(conn)?;
+        // The same decomposition the recorder used to populate the index.
+        let pairs: Vec<(i64, String)> = params
+            .prefixes
+            .iter()
+            .filter_map(|p| {
+                find_containing_root(p, &roots).map(|(root_id, _, _, rel)| (root_id, rel))
+            })
+            .collect();
+        let mut root_ids: Vec<i64> = pairs.iter().map(|(id, _)| *id).collect();
+        root_ids.sort_unstable();
+        root_ids.dedup();
+
+        let touches = |root_id: i64, rel_prefix: &str| {
+            pairs
+                .iter()
+                .any(|(rid, rel)| *rid == root_id && scopes_touch(rel, rel_prefix))
+        };
+
+        let rows = repo::decision::fetch_scope_rows_by_roots(conn, &root_ids)?;
+        let mut ids: Vec<i64> = rows
+            .iter()
+            .filter(|row| touches(row.root_id, &row.rel_prefix))
+            .map(|row| row.decision_id)
+            .collect();
+
+        // Extraction rows this view reads — apply decisions that drew content
+        // out of here, delivered content into here, or moved content within
+        // here, even when the decision's *selection* scope was global or
+        // elsewhere entirely. Each row is classified by its own two recorded
+        // locations against the view boundary.
+        let all_ext_rows = repo::decision::fetch_all_extractions(conn)?;
+        let placements = classify_extraction_rows(all_ext_rows, &pairs, &params.prefixes);
+
+        ids.extend(placements.keys().copied());
+        ids.sort_unstable();
+        ids.dedup();
+
+        let mut decisions = repo::decision::fetch_by_ids(conn, &ids)?;
+        if let Some((start, end)) = range {
+            decisions.retain(|d| d.created_at >= start && d.created_at < end);
+        }
+
+        let unscoped_raw = repo::decision::count_unscoped(conn, range)?;
+        // Footer honesty: a decision surfaced here only via an extraction
+        // or arrival row (no decision_scopes row of its own) must not
+        // also be counted as "not shown" — restricted to ids that
+        // actually survived the time-range filter above, since a
+        // touching id outside --since/--on was never part of
+        // unscoped_raw's count either.
+        let shown_ids: HashSet<i64> = decisions.iter().map(|d| d.id).collect();
+        let shown_extraction_ids: Vec<i64> = placements
+            .keys()
+            .filter(|id| shown_ids.contains(id))
+            .copied()
+            .collect();
+        let unscoped_adjustment =
+            repo::decision::filter_unscoped_ids(conn, &shown_extraction_ids)?.len() as i64;
+        let unscoped = unscoped_raw - unscoped_adjustment;
+
+        let notes = if params.include_notes {
+            repo::note::fetch_by_roots(conn, &root_ids)?
+                .into_iter()
+                .filter(|n| touches(n.root_id, &n.rel_path))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Whole-history rollups: every touching row, never capped by the
+        // decision-window limit. Scope-lens only — never a time-lens view.
+        let rollups = if range.is_none() {
+            build_rollups(&placements)
+        } else {
+            Rollups::default()
+        };
+
+        (decisions, unscoped, notes, placements, rollups)
+    };
 
     let total_decisions = decisions.len();
 
@@ -299,9 +266,8 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
         earlier_decisions,
         unscoped_decisions: unscoped,
         total_decisions,
-        extractions,
+        placements,
         extraction_rollup: rollups.extraction,
-        arrivals,
         arrival_rollup: rollups.arrival,
         rearrangement_rollup: rollups.rearrangement,
         extractions_all,
@@ -322,37 +288,39 @@ fn group_extractions_by_decision(
 /// direction it reads from here.
 ///
 /// Classification is **per row, not per decision**: one apply can draw from a
-/// root inside the view and from another outside it in the same breath, so a
-/// decision appearing in both maps is not necessarily a pure rearrangement —
-/// classifying it as one would drop the outside-origin rows entirely.
+/// root inside the view and from another outside it in the same breath, so
+/// each row is judged by its own two endpoints — classifying per decision
+/// would drop the outside-origin rows entirely.
 ///
-/// This lives in ops because ops owns the two maps and the membership they
-/// encode: a row in `extractions` was fetched by root id, so its origin is in
-/// the view by construction, and likewise a row in `arrivals` for its
-/// destination. Rows are matched between the maps by `root_id` (the extraction
-/// ledger's `(decision_id, root_id)` key); the rule itself is
-/// [`domain::trail::row_aspect`]. `Outside` is unreachable here — a row absent
-/// from both maps was never fetched.
-pub fn classify_decision_rows<'a>(
-    id: i64,
-    extractions: &'a HashMap<i64, Vec<DecisionExtraction>>,
-    arrivals: &'a HashMap<i64, Vec<DecisionExtraction>>,
-) -> Vec<(&'a DecisionExtraction, RowAspect)> {
-    let outbound = extractions.get(&id).map(Vec::as_slice).unwrap_or_default();
-    let inbound = arrivals.get(&id).map(Vec::as_slice).unwrap_or_default();
-    let arrived_here: HashSet<i64> = inbound.iter().map(|row| row.root_id).collect();
-    let drawn_from_here: HashSet<i64> = outbound.iter().map(|row| row.root_id).collect();
-
-    outbound
-        .iter()
-        .map(|row| (row, row_aspect(true, arrived_here.contains(&row.root_id))))
-        .chain(
-            inbound
-                .iter()
-                .filter(|row| !drawn_from_here.contains(&row.root_id))
-                .map(|row| (row, row_aspect(false, true))),
-        )
-        .collect()
+/// Membership is per placement, never bidirectional
+/// ([`domain::trail::placement_in_view`]): origin membership is root-id-keyed
+/// over the view's own decomposed roots (`pairs`), destination membership
+/// runs on absolute snapshot paths (`prefixes`) so a removed or re-added
+/// destination root can't break the link. The rule itself is
+/// [`domain::trail::row_aspect`]; `Outside` rows are dropped here, so the
+/// tagged map holds exactly what the view renders.
+fn classify_extraction_rows(
+    rows: Vec<DecisionExtraction>,
+    pairs: &[(i64, String)],
+    prefixes: &[String],
+) -> HashMap<i64, Vec<(DecisionExtraction, RowAspect)>> {
+    let mut placements: HashMap<i64, Vec<(DecisionExtraction, RowAspect)>> = HashMap::new();
+    for row in rows {
+        let origin_in_view = pairs
+            .iter()
+            .any(|(rid, rel)| *rid == row.root_id && placement_in_view(rel, &row.rel_prefix));
+        let destination_in_view = prefixes
+            .iter()
+            .any(|prefix| placement_in_view(prefix, &row.destination_path));
+        let aspect = row_aspect(origin_in_view, destination_in_view);
+        if aspect != RowAspect::Outside {
+            placements
+                .entry(row.decision_id)
+                .or_default()
+                .push((row, aspect));
+        }
+    }
+    placements
 }
 
 /// Sum files/bytes and count distinct counterparties over a set of rows.
@@ -435,24 +403,15 @@ struct Rollups {
 /// rollup at once. The sets are disjoint, so no row is counted twice — which
 /// is the whole point, since a rearrangement used to be claimed by both
 /// crossing rollups and read as double the activity.
-fn build_rollups(
-    extractions: &HashMap<i64, Vec<DecisionExtraction>>,
-    arrivals: &HashMap<i64, Vec<DecisionExtraction>>,
-) -> Rollups {
-    let mut ids: Vec<i64> = extractions.keys().chain(arrivals.keys()).copied().collect();
-    ids.sort_unstable();
-    ids.dedup();
-
+fn build_rollups(placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>) -> Rollups {
     let (mut left, mut entered, mut stayed) = (Vec::new(), Vec::new(), Vec::new());
-    for id in ids {
-        for (row, aspect) in classify_decision_rows(id, extractions, arrivals) {
-            match aspect {
-                RowAspect::Extraction => left.push(row),
-                RowAspect::Arrival => entered.push(row),
-                RowAspect::Rearrangement => stayed.push(row),
-                // Unreachable: every row here came from one of the two maps.
-                RowAspect::Outside => {}
-            }
+    for (row, aspect) in placements.values().flatten() {
+        match aspect {
+            RowAspect::Extraction => left.push(row),
+            RowAspect::Arrival => entered.push(row),
+            RowAspect::Rearrangement => stayed.push(row),
+            // Unreachable: `Outside` rows were dropped at classification.
+            RowAspect::Outside => {}
         }
     }
 
@@ -688,7 +647,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Extraction ledger visibility (Story 1/2)
+    // Extraction ledger visibility — the outbound direction
     // ------------------------------------------------------------------
 
     fn extraction_row(
@@ -713,50 +672,107 @@ mod tests {
         }
     }
 
+    /// The tagged aspects a classified decision's rows carry, in row order.
+    fn aspects_of(
+        placements: &HashMap<i64, Vec<(crate::domain::extraction::DecisionExtraction, RowAspect)>>,
+        id: i64,
+    ) -> Vec<RowAspect> {
+        placements
+            .get(&id)
+            .map(|rows| rows.iter().map(|(_, aspect)| *aspect).collect())
+            .unwrap_or_default()
+    }
+
     #[test]
-    fn classify_decision_rows_judges_each_row_by_its_own_endpoints() {
+    fn classify_extraction_rows_judges_each_row_by_its_own_endpoints() {
         // Per row, not per decision. One apply reaches three ways at once, and
         // each row is judged by its own two endpoints:
         //   - `inside`  drawn from the view, landing in it  -> rearrangement
         //   - `left`    drawn from the view, landing outside -> extraction
         //   - `outside` drawn from elsewhere, landing here   -> arrival
-        // Any classification that asks "is this decision in both maps?"
-        // instead of asking it of each row gets `left` wrong and drops
-        // `outside` entirely.
-        let inside = extraction_row(42, 1, "/archive", "2016", 47, Some(10), "/archive/2020");
-        let left = extraction_row(42, 3, "/archive", "raw", 5, Some(1), "/elsewhere");
-        let outside = extraction_row(42, 2, "/Volumes/sd", "dcim", 8, Some(2), "/archive/2020");
+        // Any classification that asks the question of the decision instead
+        // of each row gets `left` wrong and drops `outside` entirely.
+        let rows = vec![
+            extraction_row(42, 1, "/archive", "2016", 47, Some(10), "/archive/2020"),
+            extraction_row(42, 1, "/archive", "raw", 5, Some(1), "/elsewhere"),
+            extraction_row(42, 2, "/Volumes/sd", "dcim", 8, Some(2), "/archive/2020"),
+        ];
+        let pairs = vec![(1, String::new())]; // the view's own root: /archive
+        let prefixes = vec!["/archive".to_string()];
 
-        let extractions = HashMap::from([(42, vec![inside.clone(), left.clone()])]);
-        let arrivals = HashMap::from([(42, vec![inside.clone(), outside.clone()])]);
-
+        let placements = classify_extraction_rows(rows, &pairs, &prefixes);
         assert_eq!(
-            classify_decision_rows(42, &extractions, &arrivals),
+            aspects_of(&placements, 42),
             vec![
-                (&inside, RowAspect::Rearrangement),
-                (&left, RowAspect::Extraction),
-                (&outside, RowAspect::Arrival)
+                RowAspect::Rearrangement,
+                RowAspect::Extraction,
+                RowAspect::Arrival
             ]
         );
     }
 
     #[test]
-    fn classify_decision_rows_classifies_one_directional_decisions() {
+    fn classify_extraction_rows_classifies_one_directional_decisions() {
         let row = extraction_row(42, 1, "/src", "photos", 3, Some(9), "/archive/2020");
-        let only_out = HashMap::from([(42, vec![row.clone()])]);
-        let only_in = HashMap::from([(42, vec![row.clone()])]);
 
-        assert_eq!(
-            classify_decision_rows(42, &only_out, &HashMap::new()),
-            vec![(&row, RowAspect::Extraction)]
+        // Viewed from the drawn-from root: an extraction.
+        let out = classify_extraction_rows(
+            vec![row.clone()],
+            &[(1, String::new())],
+            &["/src".to_string()],
         );
-        assert_eq!(
-            classify_decision_rows(42, &HashMap::new(), &only_in),
-            vec![(&row, RowAspect::Arrival)]
+        assert_eq!(aspects_of(&out, 42), vec![RowAspect::Extraction]);
+
+        // Viewed from the destination: an arrival (the view's own roots don't
+        // include the source root, whatever ids they carry).
+        let inbound = classify_extraction_rows(
+            vec![row.clone()],
+            &[(9, String::new())],
+            &["/archive/2020".to_string()],
         );
-        // A decision touching neither map contributes no row at all — the
-        // caller falls back to the selection-scope headline.
-        assert!(classify_decision_rows(42, &HashMap::new(), &HashMap::new()).is_empty());
+        assert_eq!(aspects_of(&inbound, 42), vec![RowAspect::Arrival]);
+
+        // A row touching neither endpoint is dropped, not tagged `Outside` —
+        // the caller falls back to the selection-scope headline.
+        let neither = classify_extraction_rows(
+            vec![row.clone()],
+            &[(9, String::new())],
+            &["/elsewhere".to_string()],
+        );
+        assert!(neither.is_empty());
+    }
+
+    #[test]
+    fn classify_extraction_rows_never_matches_a_placement_above_the_view() {
+        // The manufactured-history guard, both directions. A recorded
+        // location that is an *ancestor* of the view claims nothing about
+        // the view: a common prefix of `m/01` and `m/02` says nothing about
+        // `m/03`. Bidirectional matching here is how #25 once rendered 245
+        // files at a folder it never touched.
+        let row = extraction_row(7, 1, "/src", "m", 245, Some(10), "/archive/m");
+
+        // Destination `/archive/m` must not surface at the deeper sibling
+        // view `/archive/m/03`...
+        let deep_dest = classify_extraction_rows(
+            vec![row.clone()],
+            &[(9, String::new())],
+            &["/archive/m/03".to_string()],
+        );
+        assert!(deep_dest.is_empty());
+
+        // ...and origin prefix `m` must not surface at the deeper view
+        // `m/03` of the same root.
+        let deep_origin = classify_extraction_rows(
+            vec![row.clone()],
+            &[(1, "m/03".to_string())],
+            &["/src/m/03".to_string()],
+        );
+        assert!(deep_origin.is_empty());
+
+        // At a view that *contains* the placements, both match as before.
+        let containing =
+            classify_extraction_rows(vec![row], &[(1, String::new())], &["/src".to_string()]);
+        assert_eq!(aspects_of(&containing, 7), vec![RowAspect::Extraction]);
     }
 
     #[test]
@@ -783,7 +799,10 @@ mod tests {
         // Surfaces in a view of the drawn-from root...
         let view_a = compute_trail(&conn, &params(vec!["/a".to_string()])).unwrap();
         assert_eq!(decision_ids(&view_a.view), vec![decision_id]);
-        assert!(view_a.extractions.contains_key(&decision_id));
+        assert_eq!(
+            aspects_of(&view_a.placements, decision_id),
+            vec![RowAspect::Extraction]
+        );
         // ...and being shown here means it must not double as "not shown".
         assert_eq!(view_a.unscoped_decisions, 0);
 
@@ -818,7 +837,7 @@ mod tests {
         // Union+dedup: one id, not two — never both a selection line and an
         // extraction line (the id-set union collapses to one appearance).
         assert_eq!(decision_ids(&result.view), vec![decision_id]);
-        assert!(result.extractions.contains_key(&decision_id));
+        assert!(result.placements.contains_key(&decision_id));
     }
 
     #[test]
@@ -916,7 +935,7 @@ mod tests {
 
         let result = compute_trail(&conn, &params(Vec::new())).unwrap();
         assert!(result.extraction_rollup.is_none());
-        assert!(result.extractions.is_empty());
+        assert!(result.placements.is_empty());
     }
 
     #[test]
@@ -967,20 +986,29 @@ mod tests {
         // Surfaces in a view of the destination it landed in...
         let view = compute_trail(&conn, &params(vec!["/archive".to_string()])).unwrap();
         assert_eq!(decision_ids(&view.view), vec![decision_id]);
-        assert!(view.arrivals.contains_key(&decision_id));
-        assert!(!view.extractions.contains_key(&decision_id));
+        assert_eq!(
+            aspects_of(&view.placements, decision_id),
+            vec![RowAspect::Arrival]
+        );
         // ...and being shown here means it must not double as "not shown".
         assert_eq!(view.unscoped_decisions, 0);
 
-        // A view of the source root sees the outbound extraction line, not
-        // an arrival line — the two directions are distinct maps.
+        // A view of the source root sees the outbound extraction aspect, not
+        // an arrival — the two directions are distinct per-row tags.
         let source_view = compute_trail(&conn, &params(vec!["/a".to_string()])).unwrap();
-        assert!(source_view.extractions.contains_key(&decision_id));
-        assert!(!source_view.arrivals.contains_key(&decision_id));
+        assert_eq!(
+            aspects_of(&source_view.placements, decision_id),
+            vec![RowAspect::Extraction]
+        );
     }
 
     #[test]
-    fn arrival_matching_is_bidirectional_and_segment_aware() {
+    fn arrival_matching_is_descendant_or_equal_and_segment_aware() {
+        // Re-pointed from `arrival_matching_is_bidirectional_and_segment_aware`
+        // when the placement law landed: an ancestor destination used to match
+        // (`shallower` surfaced at `/archive/x`), which is exactly how a
+        // common-prefix destination manufactured arrivals at sibling folders.
+        // The recorded location must now be *contained by* the view.
         let conn = open_in_memory_for_test();
         let source_root = insert_test_root(&conn, "/a", "source", false);
         insert_test_root(&conn, "/archive", "archive", false);
@@ -1029,9 +1057,109 @@ mod tests {
 
         let result = compute_trail(&conn, &params(vec!["/archive/x".to_string()])).unwrap();
         let ids = decision_ids(&result.view);
-        assert!(ids.contains(&deeper));
-        assert!(ids.contains(&shallower));
+        assert!(ids.contains(&deeper)); // /archive/x/y is inside the view
+        assert!(!ids.contains(&shallower)); // /archive claims nothing about /archive/x
         assert!(!ids.contains(&sibling)); // /archive/xc is not under /archive/x
+
+        // At the ancestor view every placement is contained — all three match.
+        let wide = compute_trail(&conn, &params(vec!["/archive".to_string()])).unwrap();
+        let wide_ids = decision_ids(&wide.view);
+        assert!(wide_ids.contains(&deeper));
+        assert!(wide_ids.contains(&shallower));
+        assert!(wide_ids.contains(&sibling));
+    }
+
+    #[test]
+    fn a_sibling_view_never_lists_a_delivery_that_missed_it() {
+        // The acceptance-review finding, as a guard. Decision `elsewhere`
+        // delivered 245 files to `m/01` and `m/02`; its recorded destination
+        // collapsed to the common prefix `/archive/m`. Decision `here`
+        // delivered 1,005 files into `m/03` itself. Standing at `m/03`, the
+        // trail once listed both, identically — the header's promise broken.
+        let conn = open_in_memory_for_test();
+        let source_root = insert_test_root(&conn, "/a", "source", false);
+        insert_test_root(&conn, "/archive", "archive", false);
+        let elsewhere = insert_decision_at(&conn, "apply", 100);
+        repo::decision::upsert_extractions(
+            &conn,
+            &[extraction_row(
+                elsewhere,
+                source_root,
+                "/a",
+                "",
+                245,
+                Some(2_450),
+                "/archive/m",
+            )],
+        )
+        .unwrap();
+        let here = insert_decision_at(&conn, "apply", 200);
+        repo::decision::upsert_extractions(
+            &conn,
+            &[extraction_row(
+                here,
+                source_root,
+                "/a",
+                "",
+                1_005,
+                Some(10_050),
+                "/archive/m/03",
+            )],
+        )
+        .unwrap();
+
+        // At m/03: only the decision that actually delivered there — and the
+        // rollup counts its files alone, not the 1,250-file sum.
+        let month = compute_trail(&conn, &params(vec!["/archive/m/03".to_string()])).unwrap();
+        assert_eq!(decision_ids(&month.view), vec![here]);
+        assert!(month.placements.get(&elsewhere).is_none());
+        let rollup = month.arrival_rollup.expect("m/03 received content");
+        assert_eq!(rollup.files, 1_005);
+        assert_eq!(rollup.bytes, Some(10_050));
+
+        // At the year the coarse row's claim is true, so both surface and
+        // the rollup honestly sums them.
+        let year = compute_trail(&conn, &params(vec!["/archive/m".to_string()])).unwrap();
+        let ids = decision_ids(&year.view);
+        assert!(ids.contains(&elsewhere) && ids.contains(&here));
+        assert_eq!(
+            year.arrival_rollup.expect("m received content").files,
+            1_250
+        );
+    }
+
+    #[test]
+    fn time_lens_applies_the_same_placement_law() {
+        // Arrivals join --since/--on views through the same id extension, so
+        // a placement above the view must stay invisible there too.
+        let conn = open_in_memory_for_test();
+        let source_root = insert_test_root(&conn, "/a", "source", false);
+        insert_test_root(&conn, "/archive", "archive", false);
+        let day = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
+        let apply = insert_decision_at(&conn, "apply", local_midnight(day) + 3_600);
+        repo::decision::upsert_extractions(
+            &conn,
+            &[extraction_row(
+                apply,
+                source_root,
+                "/a",
+                "",
+                245,
+                Some(2_450),
+                "/archive/m",
+            )],
+        )
+        .unwrap();
+
+        let mut p = params(vec!["/archive/m/03".to_string()]);
+        p.timeframe = Some(WhenValue::Since(day));
+        let result = compute_trail(&conn, &p).unwrap();
+        assert!(decision_ids(&result.view).is_empty());
+
+        let mut wide = params(vec!["/archive/m".to_string()]);
+        wide.timeframe = Some(WhenValue::Since(day));
+        let seen = compute_trail(&conn, &wide).unwrap();
+        assert_eq!(decision_ids(&seen.view), vec![apply]);
     }
 
     #[test]
@@ -1061,7 +1189,10 @@ mod tests {
             .unwrap();
 
         let result = compute_trail(&conn, &params(vec!["/archive/media".to_string()])).unwrap();
-        assert!(result.arrivals.contains_key(&decision_id));
+        assert_eq!(
+            aspects_of(&result.placements, decision_id),
+            vec![RowAspect::Arrival]
+        );
         // Shown here means it must not also count as "not shown".
         assert_eq!(result.unscoped_decisions, 0);
     }
@@ -1098,16 +1229,18 @@ mod tests {
         );
 
         let result = compute_trail(&conn, &params(vec!["/archive/media".to_string()])).unwrap();
-        assert!(result.arrivals.contains_key(&decision_id));
+        assert_eq!(
+            aspects_of(&result.placements, decision_id),
+            vec![RowAspect::Arrival]
+        );
         assert_eq!(result.unscoped_decisions, 0);
     }
 
     #[test]
     fn decision_with_extraction_and_arrival_row_touching_same_view_appears_once() {
         // Intra-view relocation: a decision whose source and destination are
-        // both inside the viewed scope. It must list once, with both maps
-        // populated — rendering is responsible for collapsing that into one
-        // line rather than two.
+        // both inside the viewed scope. It must list once, its row tagged as
+        // a rearrangement — one row, one aspect, one rendered line.
         let conn = open_in_memory_for_test();
         let root = insert_test_root(&conn, "/a", "source", false);
         let decision_id = insert_decision_at(&conn, "apply", 100);
@@ -1127,8 +1260,10 @@ mod tests {
 
         let result = compute_trail(&conn, &params(vec!["/a".to_string()])).unwrap();
         assert_eq!(decision_ids(&result.view), vec![decision_id]);
-        assert!(result.extractions.contains_key(&decision_id));
-        assert!(result.arrivals.contains_key(&decision_id));
+        assert_eq!(
+            aspects_of(&result.placements, decision_id),
+            vec![RowAspect::Rearrangement]
+        );
     }
 
     #[test]
@@ -1266,7 +1401,7 @@ mod tests {
         .unwrap();
 
         let result = compute_trail(&conn, &params(Vec::new())).unwrap();
-        assert!(result.arrivals.is_empty());
+        assert!(result.placements.is_empty());
         assert!(result.arrival_rollup.is_none());
     }
 
@@ -1523,7 +1658,7 @@ mod tests {
 
         let result = compute_trail(&conn, &params(Vec::new())).unwrap();
         // The touching map is empty at global scope (nothing to touch)...
-        assert!(result.extractions.is_empty());
+        assert!(result.placements.is_empty());
         // ...but the full-per-decision map used for JSONL still has it.
         assert!(result.extractions_all.contains_key(&d));
         assert_eq!(result.extractions_all[&d].len(), 1);
@@ -1769,9 +1904,9 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Time lens pinning (Story 4): extraction-touching decisions join
-    // --since/--on views through the same shared scoped id-union as the
-    // scope lens; day rollups need no new mechanics.
+    // Time lens pinning: extraction-touching decisions join --since/--on
+    // views through the same shared scoped id-union as the scope lens; day
+    // rollups need no new mechanics.
     // ------------------------------------------------------------------
 
     #[test]

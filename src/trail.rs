@@ -29,8 +29,8 @@ use crate::domain::trail::{
 use crate::ops;
 use crate::ops::scope::ResolvedScope;
 use crate::ops::trail::{
-    classify_decision_rows, ArrivalRollup, ExtractionRollup, RearrangementRollup, TrailParams,
-    TrailResult, TrailView, DEFAULT_LIMIT,
+    ArrivalRollup, ExtractionRollup, RearrangementRollup, TrailParams, TrailResult, TrailView,
+    DEFAULT_LIMIT,
 };
 use crate::repo::{self, Db};
 
@@ -187,7 +187,7 @@ fn print_human(
     let width = |events: &[&TimelineEvent]| -> usize {
         events
             .iter()
-            .flat_map(|e| event_cells(e, resolved, roots, &result.extractions, &result.arrivals))
+            .flat_map(|e| event_cells(e, resolved, roots, &result.placements))
             .map(|cell| cell.chars().count())
             .max()
             .unwrap_or(0)
@@ -208,15 +208,7 @@ fn print_human(
                 let refs: Vec<&TimelineEvent> = events.iter().collect();
                 let w = width(&refs);
                 for event in events {
-                    print_event(
-                        event,
-                        true,
-                        resolved,
-                        roots,
-                        w,
-                        &result.extractions,
-                        &result.arrivals,
-                    );
+                    print_event(event, true, resolved, roots, w, &result.placements);
                 }
             }
         }
@@ -237,15 +229,7 @@ fn print_human(
                 }
                 println!();
                 for event in &day.events {
-                    print_event(
-                        event,
-                        false,
-                        resolved,
-                        roots,
-                        w,
-                        &result.extractions,
-                        &result.arrivals,
-                    );
+                    print_event(event, false, resolved, roots, w, &result.placements);
                 }
             }
         }
@@ -501,21 +485,19 @@ const SCOPE_CELL_MAX: usize = 35;
 /// counts and reason; notes carry the `~` voice marker and never an id,
 /// counts, or status — a thought must not be mistakable for an action.
 ///
-/// Three-way aspect selection, one tested rule, applied per row (see
-/// `decision_rows`): outbound rows render the *extraction aspect*, inbound
-/// rows the *arrival aspect* (`←`), and a row whose two endpoints both sit
-/// inside the view renders once as an *intra-view relocation* — the
-/// extraction-aspect line with its destination shown view-relative rather
-/// than absolute. Never both a selection line and an extraction/arrival line
-/// for the same decision.
+/// Aspect rendering, applied per row from the ops-classified tagged map:
+/// extraction-aspect rows render the outbound line, arrival-aspect rows the
+/// inbound line (`←`), and a rearrangement row (both endpoints inside the
+/// view) renders once as the extraction-aspect line with its destination
+/// shown view-relative rather than absolute. Never both a selection line and
+/// an extraction/arrival line for the same decision.
 fn print_event(
     event: &TimelineEvent,
     with_date: bool,
     resolved: &ResolvedScope,
     roots: &HashMap<i64, Root>,
     width: usize,
-    extractions: &HashMap<i64, Vec<DecisionExtraction>>,
-    arrivals: &HashMap<i64, Vec<DecisionExtraction>>,
+    placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>,
 ) {
     match event {
         TimelineEvent::Decision(d) => {
@@ -532,8 +514,8 @@ fn print_event(
                     line.push_str(&format!("  [{}]", d.status));
                 }
             };
-            let cells = event_cells(event, resolved, roots, extractions, arrivals);
-            let rows = classify_decision_rows(d.id, extractions, arrivals);
+            let cells = event_cells(event, resolved, roots, placements);
+            let rows = placements.get(&d.id).map(Vec::as_slice).unwrap_or_default();
             if !rows.is_empty() {
                 for ((row, aspect), cell) in rows.iter().zip(&cells) {
                     let narration = match aspect {
@@ -585,18 +567,17 @@ fn print_event(
 /// extraction cell (the drawn-from location) or an arrival cell (the
 /// destination) is a different string from the selection-scope cell: width
 /// computed from one and lines printed with the other pushes the wider
-/// narration out of alignment. Both passes classify through `decision_rows`,
-/// so the measured cells and the printed lines cannot diverge in count or
-/// order.
+/// narration out of alignment. Both passes read the same ops-classified
+/// tagged rows, so the measured cells and the printed lines cannot diverge
+/// in count or order.
 fn event_cells(
     event: &TimelineEvent,
     resolved: &ResolvedScope,
     roots: &HashMap<i64, Root>,
-    extractions: &HashMap<i64, Vec<DecisionExtraction>>,
-    arrivals: &HashMap<i64, Vec<DecisionExtraction>>,
+    placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>,
 ) -> Vec<String> {
     if let TimelineEvent::Decision(d) = event {
-        let rows = classify_decision_rows(d.id, extractions, arrivals);
+        let rows = placements.get(&d.id).map(Vec::as_slice).unwrap_or_default();
         if !rows.is_empty() {
             return rows
                 .iter()
@@ -1345,27 +1326,18 @@ mod tests {
         };
         let event = TimelineEvent::Decision(mk_decision(1, Some(vec!["/short".to_string()])));
 
-        let mut extractions = HashMap::new();
-        extractions.insert(1, vec![mk_extraction_row(None, None)]);
-        // Capped at SCOPE_CELL_MAX like every other cell.
-        let cells = event_cells(
-            &event,
-            &global,
-            &HashMap::new(),
-            &extractions,
-            &HashMap::new(),
+        let mut placements = HashMap::new();
+        placements.insert(
+            1,
+            vec![(mk_extraction_row(None, None), RowAspect::Extraction)],
         );
+        // Capped at SCOPE_CELL_MAX like every other cell.
+        let cells = event_cells(&event, &global, &HashMap::new(), &placements);
         assert_eq!(cells, vec!["...mes/old-laptop/photos/2016/italy"]);
         assert!(cells[0].chars().count() <= SCOPE_CELL_MAX);
 
         // With no extraction rows the selection scope is the cell, as before.
-        let cells = event_cells(
-            &event,
-            &global,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let cells = event_cells(&event, &global, &HashMap::new(), &HashMap::new());
         assert_eq!(cells, vec!["/short"]);
     }
 
@@ -1380,16 +1352,16 @@ mod tests {
         let mut second = mk_extraction_row(None, None);
         second.root_path = "/Volumes/nikon-sd".to_string();
         second.rel_prefix = "dcim".to_string();
-        let mut extractions = HashMap::new();
-        extractions.insert(1, vec![mk_extraction_row(None, None), second]);
-
-        let cells = event_cells(
-            &event,
-            &global,
-            &HashMap::new(),
-            &extractions,
-            &HashMap::new(),
+        let mut placements = HashMap::new();
+        placements.insert(
+            1,
+            vec![
+                (mk_extraction_row(None, None), RowAspect::Extraction),
+                (second, RowAspect::Extraction),
+            ],
         );
+
+        let cells = event_cells(&event, &global, &HashMap::new(), &placements);
         assert_eq!(
             cells,
             vec![
@@ -1409,10 +1381,10 @@ mod tests {
             auto_include_archived: false,
         };
         let event = TimelineEvent::Decision(mk_decision(1, None));
-        let mut arrivals = HashMap::new();
-        arrivals.insert(1, vec![mk_extraction_row(None, None)]);
+        let mut placements = HashMap::new();
+        placements.insert(1, vec![(mk_extraction_row(None, None), RowAspect::Arrival)]);
 
-        let cells = event_cells(&event, &scoped, &HashMap::new(), &HashMap::new(), &arrivals);
+        let cells = event_cells(&event, &scoped, &HashMap::new(), &placements);
         assert_eq!(cells, vec!["2016/Italy"]);
     }
 
@@ -1424,38 +1396,39 @@ mod tests {
             auto_include_archived: false,
         };
         let event = TimelineEvent::Decision(mk_decision(1, None));
-        let mut arrivals = HashMap::new();
-        arrivals.insert(1, vec![mk_extraction_row(None, None)]);
+        let mut placements = HashMap::new();
+        placements.insert(1, vec![(mk_extraction_row(None, None), RowAspect::Arrival)]);
 
-        let cells = event_cells(&event, &scoped, &HashMap::new(), &HashMap::new(), &arrivals);
+        let cells = event_cells(&event, &scoped, &HashMap::new(), &placements);
         assert_eq!(cells, vec!["."]);
     }
 
     #[test]
     fn event_cells_intra_view_relocation_uses_drawn_from_cell_not_destination() {
-        // A decision present in both maps (intra-view relocation) still
-        // renders the extraction-aspect cell — the drawn-from location —
-        // never the arrival cell.
+        // A rearrangement row (both endpoints inside the view) still renders
+        // the extraction-aspect cell — the drawn-from location — never the
+        // arrival cell.
         let scoped = ResolvedScope {
             prefixes: vec!["/Volumes/old-laptop".to_string()],
             from_cwd: true,
             auto_include_archived: false,
         };
         let event = TimelineEvent::Decision(mk_decision(1, None));
-        let mut extractions = HashMap::new();
-        extractions.insert(1, vec![mk_extraction_row(None, None)]);
-        let mut arrivals = HashMap::new();
-        arrivals.insert(1, vec![mk_extraction_row(None, None)]);
+        let mut placements = HashMap::new();
+        placements.insert(
+            1,
+            vec![(mk_extraction_row(None, None), RowAspect::Rearrangement)],
+        );
 
-        let cells = event_cells(&event, &scoped, &HashMap::new(), &extractions, &arrivals);
+        let cells = event_cells(&event, &scoped, &HashMap::new(), &placements);
         assert_eq!(cells, vec!["photos/2016/italy"]);
     }
 
     #[test]
     fn event_cells_measures_every_row_of_a_mixed_origin_decision() {
-        // The width pass and the print pass classify through the same
-        // function, so a mixed-origin decision measures both cells: the
-        // relocation's drawn-from location and the arrival's destination.
+        // The width pass and the print pass read the same tagged rows, so a
+        // mixed-origin decision measures both cells: the rearrangement's
+        // drawn-from location and the arrival's destination.
         let scoped = ResolvedScope {
             prefixes: vec!["/Volumes/old-laptop".to_string()],
             from_cwd: true,
@@ -1468,10 +1441,15 @@ mod tests {
         outside.root_path = "/Volumes/nikon-sd".to_string();
         outside.rel_prefix = "dcim".to_string();
 
-        let extractions = HashMap::from([(42, vec![inside.clone()])]);
-        let arrivals = HashMap::from([(42, vec![inside, outside])]);
+        let placements = HashMap::from([(
+            42,
+            vec![
+                (inside, RowAspect::Rearrangement),
+                (outside, RowAspect::Arrival),
+            ],
+        )]);
 
-        let cells = event_cells(&event, &scoped, &HashMap::new(), &extractions, &arrivals);
+        let cells = event_cells(&event, &scoped, &HashMap::new(), &placements);
         assert_eq!(
             cells,
             vec!["photos/2016/italy", "/Archive/Media/2016/Italy"]
