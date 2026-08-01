@@ -1014,8 +1014,8 @@ fn assemble_finding(
             ..
         }
     );
-    // Verify outranks Dismiss: an archive-covered claim whose keeper sits on
-    // a disconnected drive is not actionable until re-verified.
+    // Verify outranks Dismiss: an archive-covered claim whose counterpart
+    // sits on a disconnected drive is not actionable until re-verified.
     let nature = if counterpart_suspended {
         FindingNature::Verify
     } else if archive_cover_pct >= params.lifting_tolerance {
@@ -1067,7 +1067,8 @@ fn assemble_finding(
 
 /// The leaderboard as the reduction lens ranks it: findings sharing a
 /// counterpart grouped into hubs, everything ordered by the opinionated
-/// default — tier, then weight, then keeper safety, then residual burden —
+/// default — tier, then weight, then counterpart standing, then residual
+/// burden —
 /// with a path tie-break so identical input always ranks identically.
 #[derive(Debug, PartialEq)]
 pub struct RankedSweep {
@@ -1156,11 +1157,12 @@ fn tier_rank(tier: FindingTier) -> u8 {
     }
 }
 
-/// How safely the finding's redundancy claim can be acted on: an archived
-/// keeper outranks a merely-present one, which outranks a suspended one;
-/// scattered coverage with nothing archived ranks last. A lens constant,
-/// derived from lens-free facts — never stored on the finding.
-fn keeper_safety(finding: &StructuralFinding) -> u8 {
+/// The counterpart's standing — how safely the finding's redundancy claim
+/// can be acted on: an archived counterpart outranks a merely-present one,
+/// which outranks a suspended one; scattered coverage with nothing archived
+/// ranks last. A lens constant, derived from lens-free facts — never stored
+/// on the finding.
+fn counterpart_standing(finding: &StructuralFinding) -> u8 {
     match (finding.nature, &finding.shape) {
         (FindingNature::Dismiss, _) => 0,
         (FindingNature::Verify, _) => 2,
@@ -1180,13 +1182,13 @@ fn keeper_safety(finding: &StructuralFinding) -> u8 {
     }
 }
 
-/// The reduction lens's ordering: tier, weight (size-led), keeper safety,
-/// residual burden. Lower sorts first.
+/// The reduction lens's ordering: tier, weight (size-led), counterpart
+/// standing, residual burden. Lower sorts first.
 fn rank_key(finding: &StructuralFinding) -> (u8, Reverse<u64>, u8, u64) {
     (
         tier_rank(finding.tier),
         Reverse(finding.gain_bytes),
-        keeper_safety(finding),
+        counterpart_standing(finding),
         finding.residual_bytes,
     )
 }
@@ -1203,7 +1205,11 @@ fn entry_key(entry: &LeaderboardEntry) -> (u8, Reverse<u64>, u8, u64) {
                 .min()
                 .unwrap_or(u8::MAX),
             Reverse(h.total_gain_bytes),
-            h.members.iter().map(keeper_safety).min().unwrap_or(u8::MAX),
+            h.members
+                .iter()
+                .map(counterpart_standing)
+                .min()
+                .unwrap_or(u8::MAX),
             h.members.iter().map(|m| m.residual_bytes).sum(),
         ),
     }
@@ -2483,9 +2489,9 @@ mod tests {
     }
 
     #[test]
-    fn keeper_safety_orders_equal_weights() {
+    fn counterpart_standing_orders_equal_weights() {
         // Names are reverse-alphabetical so a path sort would invert the
-        // expected order — only keeper safety can produce it.
+        // expected order — only counterpart standing can produce it.
         let ranked = lens(vec![
             lens_finding(
                 "w-scattered",
@@ -2553,8 +2559,8 @@ mod tests {
                 archived_locations: 0,
             },
         );
-        assert_eq!(keeper_safety(&covered), 1);
-        assert_eq!(keeper_safety(&bare), 3);
+        assert_eq!(counterpart_standing(&covered), 1);
+        assert_eq!(counterpart_standing(&bare), 3);
     }
 
     #[test]

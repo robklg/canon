@@ -159,8 +159,7 @@ fn print_finding(
             }
             println!(
                 "    {}",
-                keeper_line(
-                    *class,
+                counterpart_line(
                     *counterpart_is_archive,
                     *counterpart_suspended,
                     counterpart,
@@ -313,12 +312,12 @@ fn print_notes(loc: &Location, report: &SweepReport, indent: &str, label: Option
     }
 }
 
-/// The keeper/basis line of a pair finding. Wording discipline: "keeper"
-/// appears only for subsets (structure decides); mirrors stay neutral —
-/// the display must never imply a preferred side. Declarative throughout:
-/// "inside X", never "keep X".
-fn keeper_line(
-    class: RelationClass,
+/// The counterpart-standing line of a pair finding, uniform across subset
+/// and mirror (the relation line above it already carries the class).
+/// Wording discipline: the line states the counterpart's standing and must
+/// never imply a preferred side — a containment fact is not a worth verdict.
+/// Declarative throughout: "inside X", never "keep X".
+fn counterpart_line(
     is_archive: bool,
     suspended: bool,
     counterpart: &Location,
@@ -326,32 +325,18 @@ fn keeper_line(
     subject_scanned: Option<i64>,
     now: i64,
 ) -> String {
-    let noun = match class {
-        RelationClass::Subset => "keeper",
-        RelationClass::Mirror => "counterpart",
-    };
     let subject_part = format!("subject {}", age(subject_scanned, now));
     if suspended {
         return format!(
-            "{noun} on suspended root {} — reconnect to verify · {subject_part}",
+            "counterpart on suspended root {} — reconnect to verify · {subject_part}",
             counterpart.root_path
         );
     }
-    let status = match (class, is_archive) {
-        (RelationClass::Subset, true) => {
-            format!("keeper: archived, {}", age(counterpart_scanned, now))
-        }
-        (RelationClass::Subset, false) => {
-            format!("keeper: present, {}", age(counterpart_scanned, now))
-        }
-        (RelationClass::Mirror, true) => {
-            format!("counterpart archived, {}", age(counterpart_scanned, now))
-        }
-        (RelationClass::Mirror, false) => {
-            format!("counterpart {}", age(counterpart_scanned, now))
-        }
-    };
-    format!("{status} · {subject_part}")
+    let standing = if is_archive { "archived" } else { "present" };
+    format!(
+        "counterpart: {standing}, {} · {subject_part}",
+        age(counterpart_scanned, now)
+    )
 }
 
 /// The judging handoff for an entry: the display line and the argv the

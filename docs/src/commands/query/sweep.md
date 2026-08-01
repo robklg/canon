@@ -27,14 +27,14 @@ The sweep takes no paths and no filters — it is inherently universe-wide, comp
 ```
 #1  /Volumes/OldBackup/Backup/ARCHIVED/Super8
     96% inside /Volumes/Archive/Media/Super8  (by size · 89% by count)
-    keeper: archived, scanned 5d ago · subject scanned 2d ago
+    counterpart: archived, scanned 5d ago · subject scanned 2d ago
     gain: 1,204 files · 33.7 GB     residual: 1 file · 3.9 GB nowhere else
     → canon survey . --other /Volumes/Archive/Media/Super8
 ```
 
 - **The subject** (the full path on the first line) is the place the finding is about — the side you might dismiss. The other side is the **counterpart**: where the copies live. (One reading rule to hold on to: a single finding's headline is its *subject*; a hub's headline is the shared *counterpart* — the hub's own "shared counterpart" line says so explicitly.)
 - **The relation** states how the subject's content connects elsewhere, in survey's vocabulary: a *subset* sits inside a counterpart that holds more; a *mirror* matches its counterpart in both directions. Both percentages matter — a large gap between "by size" and "by count" means many small files carry little weight.
-- **The keeper line** appears for subsets only — the structure decides which side holds more; the wording stays declarative ("inside X", never "keep X"), because the smaller side can still be the better copy. Mirrors name a *counterpart* and imply no preferred side. A keeper on a suspended root reads `reconnect to verify` — nothing is safe to act on until that root is scanned again. Both sides carry their scan age: a claim is only as fresh as its basis.
+- **The counterpart line** states the counterpart's *standing* — `archived` or `present` — which is what makes acting on the finding safe or not. It implies no preferred side: even for a subset, where structure decides which side holds more, the smaller side can still be the better copy, so the wording stays declarative ("inside X", never "keep X"). A counterpart on a suspended root reads `reconnect to verify` — nothing is safe to act on until that root is scanned again. Both sides carry their scan age: a claim is only as fresh as its basis.
 - **Gain** is what acting on the finding resolves. **Residual** is the verdict line: content existing nowhere else in the universe. `residual: none` means a clean dismissal; a small residual often means one rescue away from one.
 - **The `→` handoff** is the ready-to-run judging command, written as if you `cd` into the subject first. The sweep only ever hands off to judgment — never to a ready-made exclusion.
 
@@ -76,7 +76,7 @@ There is no composite score — every ranking factor is visible on the finding, 
 
 1. **Cleanliness**: ready-to-assess findings (at or above the lifting tolerance) above consolidation-grade overlap.
 2. **Weight**: resolution gain, size-led (counts always shown beside sizes).
-3. **Keeper safety**: archived counterpart above merely-present, above suspended; scattered content with nothing archived last.
+3. **Counterpart standing**: archived above merely-present, above suspended; scattered content with nothing archived last.
 4. **Residual burden**: content existing nowhere else penalizes — a clean dismissal outranks one that needs a rescue first.
 
 Two runs against an unchanged database produce identical output.

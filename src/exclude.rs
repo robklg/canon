@@ -329,7 +329,8 @@ pub fn set_by_path(
 ///
 /// Logic:
 /// - scope (path) = which sources are candidates for exclusion
-/// - prefer = where the "keeper" copies should be
+/// - prefer = where the surviving copies live — the user's election of the
+///   preferred side
 ///
 /// For each source in scope, we check if there's a duplicate in the prefer path.
 /// If exactly one duplicate exists in prefer, we exclude the scoped source.
