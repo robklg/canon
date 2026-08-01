@@ -10,6 +10,7 @@ use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 
 use crate::domain;
+use crate::domain::object_index::{ArchivePresence, ObjectIndex};
 use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::domain::IncludeSet;
@@ -171,40 +172,19 @@ pub fn compute_survey(
     let sel_object_ids: HashSet<i64> = hashed.iter().filter_map(|s| s.object_id).collect();
     let sel_source_ids: HashSet<i64> = selection.iter().map(|s| s.id).collect();
 
-    // Build object index from ALL active, non-excluded, hashed sources
-    let mut by_object_id: HashMap<i64, Vec<&Source>> = HashMap::new();
-    for s in all_sources {
-        if s.is_active() && !s.is_excluded() {
-            if let Some(oid) = s.object_id {
-                by_object_id.entry(oid).or_default().push(s);
-            }
-        }
-    }
+    // Build object index from ALL active, non-excluded sources
+    let index = ObjectIndex::build(
+        all_sources
+            .iter()
+            .filter(|s| s.is_active() && !s.is_excluded()),
+    );
 
     // Archive status: find selection content that exists on archive roots
-    let mut archive_sources: Vec<&Source> = Vec::new();
-    let mut archived_object_ids: HashSet<i64> = HashSet::new();
-
-    for &oid in &sel_object_ids {
-        if let Some(siblings) = by_object_id.get(&oid) {
-            let mut found_archive = false;
-            for sib in siblings {
-                if sib.is_from_role("archive") {
-                    // When --archive is specified, only count that archive
-                    if let Some(target_id) = archive_root_id {
-                        if sib.root_id != target_id {
-                            continue;
-                        }
-                    }
-                    if !found_archive {
-                        archived_object_ids.insert(oid);
-                        found_archive = true;
-                    }
-                    archive_sources.push(sib);
-                }
-            }
-        }
-    }
+    // (--archive restricts to that archive root)
+    let ArchivePresence {
+        archived_object_ids,
+        archive_sources,
+    } = index.archive_presence(&sel_object_ids, archive_root_id);
 
     // Count selection sources that are archived (source-based counting)
     let archived_source_count = hashed
@@ -219,11 +199,9 @@ pub fn compute_survey(
     // Overlap: find selection content that exists on other source roots
     let mut overlap_sources: Vec<&Source> = Vec::new();
     for &oid in &sel_object_ids {
-        if let Some(siblings) = by_object_id.get(&oid) {
-            for sib in siblings {
-                if !sel_source_ids.contains(&sib.id) && sib.is_from_role("source") {
-                    overlap_sources.push(sib);
-                }
+        for sib in index.locations_of(oid) {
+            if !sel_source_ids.contains(&sib.id) && sib.is_from_role("source") {
+                overlap_sources.push(sib);
             }
         }
     }
@@ -335,7 +313,7 @@ pub fn compute_survey(
             // Step 5: "Only here" — unique object_ids among complementary
             let comp_oids: HashSet<i64> =
                 complementary.iter().filter_map(|s| s.object_id).collect();
-            let only_here = domain::survey::count_only_here(&comp_oids, scope_path, &by_object_id);
+            let only_here = domain::survey::count_only_here(&comp_oids, scope_path, index.as_map());
 
             // Step 6: Classify
             let kind = domain::survey::classify_location(
@@ -364,21 +342,17 @@ pub fn compute_survey(
                 .filter(|s| loc_oids.contains(&s.object_id.unwrap()))
                 .map(|s| {
                     let oid = s.object_id.unwrap();
-                    let mut counterpart_paths: Vec<String> = by_object_id
-                        .get(&oid)
-                        .map(|sources| {
-                            sources
-                                .iter()
-                                .filter(|cs| cs.matches_scope(&loc_scope))
-                                .filter(|cs| !sel_source_ids.contains(&cs.id))
-                                .map(|cs| {
-                                    domain::path::path_strip_prefix(&cs.path(), scope_path)
-                                        .map(|p| p.to_string())
-                                        .unwrap_or_else(|| cs.path())
-                                })
-                                .collect()
+                    let mut counterpart_paths: Vec<String> = index
+                        .locations_of(oid)
+                        .iter()
+                        .filter(|cs| cs.matches_scope(&loc_scope))
+                        .filter(|cs| !sel_source_ids.contains(&cs.id))
+                        .map(|cs| {
+                            domain::path::path_strip_prefix(&cs.path(), scope_path)
+                                .map(|p| p.to_string())
+                                .unwrap_or_else(|| cs.path())
                         })
-                        .unwrap_or_default();
+                        .collect();
                     counterpart_paths.sort_unstable();
                     OverlapPair {
                         selection_path: s.path(),
@@ -443,7 +417,7 @@ pub fn compute_survey(
 
     // Unique: selection content that exists nowhere else
     let unique_oids =
-        domain::survey::find_unique_object_ids(&sel_object_ids, &sel_source_ids, &by_object_id);
+        domain::survey::find_unique_object_ids(&sel_object_ids, &sel_source_ids, index.as_map());
     let unique_count = unique_oids.len();
     let mut unique_paths: Vec<String> = hashed
         .iter()

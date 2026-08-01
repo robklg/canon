@@ -19,6 +19,7 @@ pub mod format;
 pub mod include;
 pub mod note;
 pub mod object;
+pub mod object_index;
 pub mod path;
 pub mod root;
 pub mod scan;
