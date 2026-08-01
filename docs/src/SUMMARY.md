@@ -26,6 +26,7 @@
     - [`facts`](commands/query/facts.md)
     - [`compare`](commands/query/compare.md)
     - [`survey`](commands/query/survey.md)
+    - [`sweep`](commands/query/sweep.md)
     - [`trail`](commands/query/trail.md)
   - [Managing Sources](commands/manage/index.md)
     - [`exclude`](commands/manage/exclude.md)
