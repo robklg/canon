@@ -19,6 +19,7 @@ use crate::domain::source::Source;
 ///
 /// Defaults carry the analysis prototype's constants; calibration against the
 /// real archive may adjust them.
+#[derive(Clone)]
 pub struct SweepParams {
     /// Containment at or above this emits a clean finding and stops the
     /// descent (maximal-subject emission).
@@ -37,6 +38,10 @@ pub struct SweepParams {
     pub emit_floor_bytes: u64,
     /// ...or at least this many matched files.
     pub emit_floor_files: u32,
+    /// Also localize and assemble the below-floor subjects. They are always
+    /// counted into the stats; assembling them is only worth the work when
+    /// the caller will show them.
+    pub assemble_below_floors: bool,
 }
 
 impl Default for SweepParams {
@@ -48,6 +53,7 @@ impl Default for SweepParams {
             ubiquity_cap: 50,
             emit_floor_bytes: 10_000_000,
             emit_floor_files: 25,
+            assemble_below_floors: false,
         }
     }
 }
@@ -59,6 +65,9 @@ pub struct SweepStats {
     pub ubiquitous_objects_dropped: usize,
     /// Total content weight of the dropped objects (counted once per object).
     pub ubiquitous_bytes_dropped: u64,
+    /// Maximal subjects below the emit floors, disjoint from every floored
+    /// subject — what the floors keep off the board.
+    pub below_floor_subjects: usize,
 }
 
 /// Per-root folder tree with interned folder ids. Folder `""` is the root
@@ -321,6 +330,7 @@ pub fn build_universe(sources: &[&Source], roots: &[Root], params: &SweepParams)
         stats: SweepStats {
             ubiquitous_objects_dropped: dropped.len(),
             ubiquitous_bytes_dropped,
+            below_floor_subjects: 0,
         },
     }
 }
@@ -338,6 +348,8 @@ pub struct RawSubject {
     pub root_idx: usize,
     pub fid: u32,
     pub tier: FindingTier,
+    /// Discovered only by the floor-released walk (below the emit floors).
+    pub below_floors: bool,
     /// Weight of the subject's content that exists outside the subject.
     pub matched_bytes: u64,
     pub matched_files: u32,
@@ -474,6 +486,7 @@ fn walk(
             root_idx: rd.root_idx,
             fid,
             tier,
+            below_floors: false,
             matched_bytes: m_bytes,
             matched_files: m_files,
             total_bytes: t_bytes,
@@ -879,6 +892,9 @@ pub struct StructuralFinding {
     pub subject_suspended: bool,
     pub subject_last_scanned_at: Option<i64>,
     pub tier: FindingTier,
+    /// True when this finding sits below the emit floors — discovered by the
+    /// floor-released walk, shown only when the caller asks for everything.
+    pub below_floors: bool,
     pub shape: RelationShape,
     pub context: Vec<ContextRelation>,
     /// Fraction of the subject's comparison-participating weight existing
@@ -918,10 +934,42 @@ pub fn compute_structural(
     roots: &[Root],
     params: &SweepParams,
 ) -> StructuralSweep {
-    let universe = build_universe(sources, roots, params);
+    let mut universe = build_universe(sources, roots, params);
     let weights = compute_matched(&universe);
     let subjects = discover_subjects(&universe, &weights, params);
-    let localized = localize_subjects(&universe, roots, subjects, params);
+    // The floors gate discovery (they lift below-floor fragments into an
+    // aggregated parent subject), but they must trim output, never
+    // existence: a second discovery with the floors released finds the
+    // subjects the floors kept off the board. An extra counts only where it
+    // is disjoint from every floored subject on its root — anything at,
+    // under, or over a floored subject is already that finding's territory.
+    let released = SweepParams {
+        emit_floor_bytes: 1,
+        emit_floor_files: 1,
+        ..params.clone()
+    };
+    let mut extras = discover_subjects(&universe, &weights, &released);
+    extras.retain(|e| {
+        let tree = &universe.roots_data[e.root_idx].tree;
+        !subjects.iter().any(|s| {
+            s.root_idx == e.root_idx
+                && (tree.is_ancestor_or_equal(s.fid, e.fid)
+                    || tree.is_ancestor_or_equal(e.fid, s.fid))
+        })
+    });
+    for e in &mut extras {
+        e.below_floors = true;
+    }
+    universe.stats.below_floor_subjects = extras.len();
+    // Reciprocal-mirror dedup runs within each set, so a below-floors
+    // finding never displaces an above-floors one. A reciprocal mirror pair
+    // spanning the floor boundary can therefore state itself from both ends
+    // when everything is assembled — honest, and constructible only in a
+    // thin band near the floors.
+    let mut localized = localize_subjects(&universe, roots, subjects, params);
+    if params.assemble_below_floors {
+        localized.extend(localize_subjects(&universe, roots, extras, params));
+    }
     let mut findings: Vec<StructuralFinding> = localized
         .into_iter()
         .map(|ls| assemble_finding(&universe, roots, ls, params))
@@ -976,6 +1024,7 @@ fn assemble_finding(
         subject_suspended: root.suspended,
         subject_last_scanned_at: root.last_scanned_at,
         tier: raw.tier,
+        below_floors: raw.below_floors,
         containment_size_pct: if raw.total_bytes > 0 {
             raw.matched_bytes as f64 / raw.total_bytes as f64
         } else {
@@ -1809,6 +1858,103 @@ mod tests {
         assert!((f.containment_size_pct - 100.0 / 150.0).abs() < 1e-9);
         assert!((f.hash_coverage_pct - 150.0 / 180.0).abs() < 1e-9);
         assert!(matches!(f.tier, FindingTier::Candidate));
+    }
+
+    /// Fixture with one above-floor subject (`big`, 20 MB) and one disjoint
+    /// below-floor subject (`small`, 2 MB / 1 file); unique noise keeps the
+    /// subjects from lifting to the whole root.
+    fn floor_split_fixture() -> (Vec<Source>, Vec<Root>) {
+        let roots = vec![make_root(1, "/r1"), make_root(2, "/r2")];
+        let sources = vec![
+            make_source(1, 1, "big/f", 20_000_000, Some(10)),
+            make_source(2, 1, "small/f", 2_000_000, Some(20)),
+            make_source(3, 1, "noise/u", 5_000_000, Some(90)),
+            make_source(4, 2, "q/f", 20_000_000, Some(10)),
+            make_source(5, 2, "q2/f", 2_000_000, Some(20)),
+        ];
+        (sources, roots)
+    }
+
+    #[test]
+    fn below_floor_subjects_counted_but_not_assembled_by_default() {
+        let (sources, roots) = floor_split_fixture();
+        let sweep = run_structural(&sources, &roots, &SweepParams::default());
+        assert_eq!(sweep.stats.below_floor_subjects, 1);
+        let f = find_finding(&sweep, "/r1", "big");
+        assert!(!f.below_floors);
+        assert!(!sweep
+            .findings
+            .iter()
+            .any(|f| f.subject.root_path == "/r1" && f.subject.rel_prefix == "small"));
+    }
+
+    #[test]
+    fn below_floor_subjects_assembled_and_tagged_on_request() {
+        let (sources, roots) = floor_split_fixture();
+        let params = SweepParams {
+            assemble_below_floors: true,
+            ..SweepParams::default()
+        };
+        let sweep = run_structural(&sources, &roots, &params);
+        assert_eq!(sweep.stats.below_floor_subjects, 1);
+        let small = find_finding(&sweep, "/r1", "small");
+        assert!(small.below_floors);
+        // A below-floor finding is a full finding: localized like any other.
+        match &small.shape {
+            RelationShape::Pair { counterpart, .. } => {
+                assert_eq!(counterpart.root_path, "/r2");
+            }
+            other => panic!("expected pair shape, got {other:?}"),
+        }
+        assert!(!find_finding(&sweep, "/r1", "big").below_floors);
+    }
+
+    #[test]
+    fn parent_candidate_view_unchanged_with_zero_below_floor_count() {
+        // The parent-aggregation fixture: five children each below floors
+        // lift into one candidate parent. The floor-released walk finds the
+        // children instead, but they fall inside the parent subject — the
+        // default view is unchanged and nothing counts as below-floor.
+        let roots = vec![make_root(1, "/r1"), make_root(2, "/r2")];
+        let mut sources = vec![make_source(100, 1, "p/unique.bin", 10_000_000, Some(999))];
+        for i in 0..5i64 {
+            sources.push(make_source(
+                i + 1,
+                1,
+                &format!("p/c{i}/f{i}"),
+                3_000_000,
+                Some(10 + i),
+            ));
+            sources.push(make_source(
+                i + 50,
+                2,
+                &format!("q/f{i}"),
+                3_000_000,
+                Some(10 + i),
+            ));
+        }
+        let sweep = run_structural(&sources, &roots, &SweepParams::default());
+        assert_eq!(sweep.stats.below_floor_subjects, 0);
+        let p = find_finding(&sweep, "/r1", "p");
+        assert!(matches!(p.tier, FindingTier::Candidate));
+        assert!(!p.below_floors);
+        let r1_subjects: Vec<_> = sweep
+            .findings
+            .iter()
+            .filter(|f| f.subject.root_path == "/r1")
+            .collect();
+        assert_eq!(r1_subjects.len(), 1);
+    }
+
+    #[test]
+    fn released_floors_leave_nothing_below() {
+        // With the floors already at 1/1 the released walk rediscovers the
+        // same subjects, every extra filters as equal, and the small subject
+        // is an ordinary (untagged) finding.
+        let (sources, roots) = floor_split_fixture();
+        let sweep = run_structural(&sources, &roots, &low_floors());
+        assert_eq!(sweep.stats.below_floor_subjects, 0);
+        assert!(!find_finding(&sweep, "/r1", "small").below_floors);
     }
 
     #[test]
