@@ -200,9 +200,13 @@ pub struct RootData {
     /// Direct (non-recursive) comparison-participating files per folder:
     /// (object id, size).
     pub files: Vec<Vec<(i64, u64)>>,
-    /// Direct totals per folder over all content, hashed or not.
+    /// Direct totals per folder over all content, hashed or not. The
+    /// subtree sums derive from these; kept as the observable intermediate
+    /// the accumulation tests assert on.
+    #[allow(dead_code)]
     pub leaf_all: Vec<(u64, u32)>,
     /// Direct totals per folder over comparison-participating content.
+    #[allow(dead_code)]
     pub leaf_hashed: Vec<(u64, u32)>,
     /// Subtree-aggregated totals over all content.
     pub sub_all: Vec<(u64, u32)>,

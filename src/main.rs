@@ -70,6 +70,7 @@ mod note;
 mod roots;
 mod scan;
 mod survey;
+mod sweep;
 mod trail;
 mod worklist;
 
@@ -300,6 +301,16 @@ enum Commands {
         /// Show all paths per location
         #[arg(long)]
         verbose: bool,
+    },
+    /// Sweep the universe for reduction opportunities — ranked places where
+    /// one decision resolves the most
+    Sweep {
+        /// Maximum leaderboard entries (default: 10)
+        #[arg(long, conflicts_with = "all")]
+        limit: Option<usize>,
+        /// Show everything: all entries, all hub members, below-floor findings
+        #[arg(long)]
+        all: bool,
     },
     /// Compare two folders by content hash
     Compare {
@@ -1106,6 +1117,7 @@ fn main() -> Result<()> {
             };
             survey::run(&mut db, &scope_prefixes, &expanded, &options)?;
         }
+        Commands::Sweep { limit, all } => sweep::run(&mut db, limit, all)?,
         Commands::Compare {
             paths,
             filters,
