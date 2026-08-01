@@ -497,6 +497,368 @@ fn walk(
     emitted
 }
 
+/// A place in the universe: a root and a folder within it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Location {
+    pub root_id: i64,
+    pub root_path: String,
+    /// Folder within the root; `""` is the root itself.
+    pub rel_prefix: String,
+}
+
+/// How a pair statement reads from the subject's side. The subject is always
+/// the contained side; the percentages carry the strength.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelationClass {
+    /// Both sides are essentially the match (each at or above the lifting
+    /// tolerance).
+    Mirror,
+    /// The subject sits (partially) inside a counterpart that holds more.
+    Subset,
+}
+
+/// The finding's relation: a pair story when one counterpart scope
+/// concentrates the match, an honest coverage statement when it is scattered.
+#[derive(Debug, PartialEq)]
+pub enum RelationShape {
+    Pair {
+        counterpart: Location,
+        class: RelationClass,
+        /// Fraction of the subject's comparison-participating weight with a
+        /// copy under the counterpart scope.
+        pair_size_pct: f64,
+        pair_count_pct: f64,
+        /// Fraction of the counterpart scope that is the match — how much of
+        /// that place this relation accounts for.
+        counterpart_share_pct: f64,
+        counterpart_suspended: bool,
+        counterpart_is_archive: bool,
+        counterpart_last_scanned_at: Option<i64>,
+    },
+    Coverage {
+        /// Distinct roots holding copies of the subject's matched content.
+        locations: usize,
+        /// How many of those roots are archive roots.
+        archived_locations: usize,
+    },
+}
+
+/// A secondary counterpart scope for a subject that relates to several
+/// places: "also N% inside <location>".
+#[derive(Debug, PartialEq)]
+pub struct ContextRelation {
+    pub location: Location,
+    pub size_pct: f64,
+}
+
+/// A subject with its relation shape resolved.
+pub struct LocalizedSubject {
+    pub raw: RawSubject,
+    pub shape: RelationShape,
+    pub context: Vec<ContextRelation>,
+    /// Subject-side weight of matched content that has an outside copy on an
+    /// archive root.
+    pub archive_matched_bytes: u64,
+}
+
+/// Every folder id in the subtree under `fid`, including `fid` itself.
+fn subtree_fids(tree: &FolderTree, fid: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut stack = vec![fid];
+    while let Some(f) = stack.pop() {
+        out.push(f);
+        stack.extend_from_slice(tree.children(f));
+    }
+    out
+}
+
+/// A counterpart scope candidate produced by one root's concentration walk.
+struct ScopeCandidate {
+    root_idx: usize,
+    fid: u32,
+    /// Subject-side weight with a copy under this scope.
+    subject_bytes: u64,
+    subject_files: u32,
+    /// Counterpart-side share: matched weight under the scope over the
+    /// scope's own comparison-participating weight.
+    counterpart_share: f64,
+}
+
+/// Resolve each raw subject's relation shape and context.
+///
+/// `roots` must be the same slice the universe was built from.
+fn localize_subjects(
+    universe: &Universe,
+    roots: &[Root],
+    subjects: Vec<RawSubject>,
+    params: &SweepParams,
+) -> Vec<LocalizedSubject> {
+    let mut localized: Vec<LocalizedSubject> = subjects
+        .into_iter()
+        .map(|raw| localize_one(universe, roots, raw, params))
+        .collect();
+    dedup_reciprocal_mirrors(universe, roots, &mut localized);
+    localized
+}
+
+fn localize_one(
+    universe: &Universe,
+    roots: &[Root],
+    raw: RawSubject,
+    params: &SweepParams,
+) -> LocalizedSubject {
+    let rd = &universe.roots_data[raw.root_idx];
+
+    // Subject-side weight per object under the subject.
+    let mut subject_objects: HashMap<i64, (u64, u32)> = HashMap::new();
+    for fid in subtree_fids(&rd.tree, raw.fid) {
+        for &(oid, size) in &rd.files[fid as usize] {
+            let cell = subject_objects.entry(oid).or_insert((0, 0));
+            cell.0 += size;
+            cell.1 += 1;
+        }
+    }
+
+    // Outside copies of the subject's matched objects, per counterpart root.
+    let mut per_root: HashMap<usize, Vec<(u32, u64)>> = HashMap::new();
+    let mut matched_objects: Vec<i64> = Vec::new();
+    let mut matched_bytes: u64 = 0;
+    let mut matched_files: u32 = 0;
+    let mut archive_matched_bytes: u64 = 0;
+    for (&oid, &(bytes, files)) in &subject_objects {
+        let locs = &universe.obj_locs[&oid];
+        let mut outside_any = false;
+        let mut outside_archived = false;
+        for &(ri, fid) in locs {
+            let outside = ri != raw.root_idx || !rd.tree.is_ancestor_or_equal(raw.fid, fid);
+            if outside {
+                per_root
+                    .entry(ri)
+                    .or_default()
+                    .push((fid, universe.obj_size[&oid]));
+                outside_any = true;
+                if roots[ri].role == "archive" {
+                    outside_archived = true;
+                }
+            }
+        }
+        if outside_any {
+            matched_objects.push(oid);
+            matched_bytes += bytes;
+            matched_files += files;
+            if outside_archived {
+                archive_matched_bytes += bytes;
+            }
+        }
+    }
+    // The per-object recomputation must agree with the descent's arrays —
+    // one union semantics, two derivations.
+    debug_assert_eq!(matched_bytes, raw.matched_bytes);
+    debug_assert_eq!(matched_files, raw.matched_files);
+
+    // One concentration walk per counterpart root, in deterministic order.
+    let mut involved: Vec<usize> = per_root.keys().copied().collect();
+    involved.sort_unstable();
+    let mut scopes: Vec<ScopeCandidate> = Vec::new();
+    for ri in involved.iter().copied() {
+        let cd = &universe.roots_data[ri];
+        let mut leaf: Vec<(u64, u32)> = vec![(0, 0); cd.tree.len()];
+        for &(fid, size) in &per_root[&ri] {
+            let cell = &mut leaf[fid as usize];
+            cell.0 += size;
+            cell.1 += 1;
+        }
+        let m = subtree_sums(&cd.tree, &leaf);
+        // Folder id 0 is the root folder: interning always creates it first.
+        let total = m[0].0;
+        if total == 0 {
+            continue;
+        }
+        let mut cur: u32 = 0;
+        loop {
+            let next = cd.tree.children(cur).iter().copied().find(|&ch| {
+                m[ch as usize].0 as f64 >= params.concentration_threshold * total as f64
+            });
+            match next {
+                Some(ch) => cur = ch,
+                None => break,
+            }
+        }
+        // A counterpart must be disjoint from the subject: a walk that
+        // settles on the subject's own ancestor found no localized scope in
+        // this root — the root still counts as coverage.
+        if ri == raw.root_idx && cd.tree.is_ancestor_or_equal(cur, raw.fid) {
+            continue;
+        }
+        // Subject-side weight with a copy under the settled scope.
+        let mut subject_bytes: u64 = 0;
+        let mut subject_files: u32 = 0;
+        for &oid in &matched_objects {
+            let under = universe.obj_locs[&oid]
+                .iter()
+                .any(|&(lri, lfid)| lri == ri && cd.tree.is_ancestor_or_equal(cur, lfid));
+            if under {
+                let (bytes, files) = subject_objects[&oid];
+                subject_bytes += bytes;
+                subject_files += files;
+            }
+        }
+        let scope_hashed = cd.sub_hashed[cur as usize].0;
+        scopes.push(ScopeCandidate {
+            root_idx: ri,
+            fid: cur,
+            subject_bytes,
+            subject_files,
+            counterpart_share: if scope_hashed > 0 {
+                m[cur as usize].0 as f64 / scope_hashed as f64
+            } else {
+                0.0
+            },
+        });
+    }
+
+    // The best scope carries the pair statement iff it concentrates the
+    // match; otherwise the honest statement is coverage-shaped.
+    scopes.sort_by(|a, b| {
+        b.subject_bytes.cmp(&a.subject_bytes).then_with(|| {
+            let pa = (&roots[a.root_idx].path, a.fid);
+            let pb = (&roots[b.root_idx].path, b.fid);
+            pa.cmp(&pb)
+        })
+    });
+    let location = |sc: &ScopeCandidate| {
+        let root = &roots[sc.root_idx];
+        Location {
+            root_id: root.id,
+            root_path: root.path.clone(),
+            rel_prefix: universe.roots_data[sc.root_idx]
+                .tree
+                .path(sc.fid)
+                .to_string(),
+        }
+    };
+    let concentrated = |sc: &ScopeCandidate| {
+        matched_bytes > 0
+            && sc.subject_bytes as f64 >= params.concentration_threshold * matched_bytes as f64
+    };
+    let (shape, context_from) = match scopes.first() {
+        Some(best) if concentrated(best) => {
+            let root = &roots[best.root_idx];
+            let pair_size_pct = if raw.total_bytes > 0 {
+                best.subject_bytes as f64 / raw.total_bytes as f64
+            } else {
+                0.0
+            };
+            let pair_count_pct = if raw.total_files > 0 {
+                f64::from(best.subject_files) / f64::from(raw.total_files)
+            } else {
+                0.0
+            };
+            let class = if pair_size_pct >= params.lifting_tolerance
+                && best.counterpart_share >= params.lifting_tolerance
+            {
+                RelationClass::Mirror
+            } else {
+                RelationClass::Subset
+            };
+            (
+                RelationShape::Pair {
+                    counterpart: location(best),
+                    class,
+                    pair_size_pct,
+                    pair_count_pct,
+                    counterpart_share_pct: best.counterpart_share,
+                    counterpart_suspended: root.suspended,
+                    counterpart_is_archive: root.role == "archive",
+                    counterpart_last_scanned_at: root.last_scanned_at,
+                },
+                1,
+            )
+        }
+        _ => (
+            RelationShape::Coverage {
+                locations: involved.len(),
+                archived_locations: involved
+                    .iter()
+                    .filter(|&&ri| roots[ri].role == "archive")
+                    .count(),
+            },
+            0,
+        ),
+    };
+    let context: Vec<ContextRelation> = scopes
+        .iter()
+        .skip(context_from)
+        .map(|sc| ContextRelation {
+            location: location(sc),
+            size_pct: if raw.total_bytes > 0 {
+                sc.subject_bytes as f64 / raw.total_bytes as f64
+            } else {
+                0.0
+            },
+        })
+        .collect();
+
+    LocalizedSubject {
+        raw,
+        shape,
+        context,
+        archive_matched_bytes,
+    }
+}
+
+/// Two mirror findings that are each other's reciprocal are one statement:
+/// keep the canonical side (root path, then subject path). Reciprocal
+/// subset findings are deliberately kept — each is an honest, distinct
+/// statement about its own subject.
+fn dedup_reciprocal_mirrors(
+    universe: &Universe,
+    roots: &[Root],
+    localized: &mut Vec<LocalizedSubject>,
+) {
+    let subject_loc = |ls: &LocalizedSubject| {
+        (
+            roots[ls.raw.root_idx].id,
+            universe.roots_data[ls.raw.root_idx]
+                .tree
+                .path(ls.raw.fid)
+                .to_string(),
+        )
+    };
+    let mirror_counterpart = |ls: &LocalizedSubject| match &ls.shape {
+        RelationShape::Pair {
+            counterpart,
+            class: RelationClass::Mirror,
+            ..
+        } => Some((counterpart.root_id, counterpart.rel_prefix.clone())),
+        _ => None,
+    };
+    let by_subject: HashMap<(i64, String), (i64, String)> = localized
+        .iter()
+        .filter_map(|ls| mirror_counterpart(ls).map(|cp| (subject_loc(ls), cp)))
+        .collect();
+    localized.retain(|ls| {
+        let Some(cp) = mirror_counterpart(ls) else {
+            return true;
+        };
+        let subject = subject_loc(ls);
+        // Reciprocal iff the counterpart is itself a mirror subject pointing
+        // back; the canonically smaller subject carries the statement.
+        let reciprocal = by_subject.get(&cp).is_some_and(|back| *back == subject);
+        !reciprocal || subject_key(roots, &subject) <= subject_key(roots, &cp)
+    });
+}
+
+/// Canonical ordering key for a (root id, rel prefix) subject location.
+fn subject_key<'a>(roots: &'a [Root], loc: &'a (i64, String)) -> (&'a str, &'a str) {
+    let root_path = roots
+        .iter()
+        .find(|r| r.id == loc.0)
+        .map(|r| r.path.as_str())
+        .unwrap_or("");
+    (root_path, loc.1.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -994,6 +1356,279 @@ mod tests {
         let u = universe(&sources, &roots, &params);
         assert!(u.obj_locs.contains_key(&10));
         assert_eq!(u.stats.ubiquitous_objects_dropped, 0);
+    }
+
+    fn make_archive_root(id: i64, path: &str) -> Root {
+        Root {
+            role: "archive".to_string(),
+            ..make_root(id, path)
+        }
+    }
+
+    fn run_localize(
+        sources: &[Source],
+        roots: &[Root],
+        params: &SweepParams,
+    ) -> (Universe, Vec<LocalizedSubject>) {
+        let u = universe(sources, roots, params);
+        let matched = compute_matched(&u);
+        let subjects = discover_subjects(&u, &matched, params);
+        let localized = localize_subjects(&u, roots, subjects, params);
+        (u, localized)
+    }
+
+    fn find_subject<'a>(
+        u: &Universe,
+        localized: &'a [LocalizedSubject],
+        root_idx: usize,
+        path: &str,
+    ) -> &'a LocalizedSubject {
+        localized
+            .iter()
+            .find(|ls| {
+                ls.raw.root_idx == root_idx && u.roots_data[root_idx].tree.path(ls.raw.fid) == path
+            })
+            .unwrap_or_else(|| panic!("no subject at root {root_idx} path {path:?}"))
+    }
+
+    #[test]
+    fn tight_counterpart_found_through_nesting() {
+        let roots = vec![make_root(1, "/r1"), make_root(2, "/r2")];
+        let sources = vec![
+            make_source(1, 1, "dup/f1", 100, Some(10)),
+            make_source(2, 1, "dup/f2", 100, Some(20)),
+            make_source(3, 1, "noise/u", 100, Some(90)), // unique
+            make_source(4, 2, "archive/2020/photos/f1", 100, Some(10)),
+            make_source(5, 2, "archive/2020/photos/f2", 100, Some(20)),
+        ];
+        let (u, localized) = run_localize(&sources, &roots, &low_floors());
+        let ls = find_subject(&u, &localized, 0, "dup");
+        match &ls.shape {
+            RelationShape::Pair {
+                counterpart,
+                class,
+                pair_size_pct,
+                counterpart_share_pct,
+                ..
+            } => {
+                assert_eq!(counterpart.rel_prefix, "archive/2020/photos");
+                assert_eq!(counterpart.root_path, "/r2");
+                assert_eq!(*class, RelationClass::Mirror);
+                assert!((pair_size_pct - 1.0).abs() < 1e-9);
+                assert!((counterpart_share_pct - 1.0).abs() < 1e-9);
+            }
+            RelationShape::Coverage { .. } => panic!("expected a pair statement"),
+        }
+    }
+
+    #[test]
+    fn scattered_counterpart_degrades_to_coverage() {
+        let mut roots = vec![make_root(1, "/r1"), make_archive_root(2, "/r2")];
+        for id in 3..=6 {
+            roots.push(make_root(id, &format!("/r{id}")));
+        }
+        let mut sources = vec![make_source(100, 1, "noise/u", 100, Some(90))];
+        for i in 0..5i64 {
+            sources.push(make_source(
+                i + 1,
+                1,
+                &format!("scatter/f{i}"),
+                100,
+                Some(10 + i),
+            ));
+            sources.push(make_source(i + 50, i + 2, "k/f", 100, Some(10 + i)));
+        }
+        let (u, localized) = run_localize(&sources, &roots, &low_floors());
+        let ls = find_subject(&u, &localized, 0, "scatter");
+        match &ls.shape {
+            RelationShape::Coverage {
+                locations,
+                archived_locations,
+            } => {
+                assert_eq!(*locations, 5);
+                assert_eq!(*archived_locations, 1);
+            }
+            RelationShape::Pair { .. } => panic!("expected a coverage statement"),
+        }
+        // Every counterpart scope remains visible as context.
+        assert_eq!(ls.context.len(), 5);
+    }
+
+    #[test]
+    fn ancestor_settle_degrades_to_coverage() {
+        let roots = vec![make_root(1, "/r1")];
+        // Subject a/sub's outside copies scatter over two ancestor branches:
+        // the concentration walk settles on the root folder, an ancestor of
+        // the subject — no counterpart, coverage instead.
+        let sources = vec![
+            make_source(1, 1, "a/sub/f1", 100, Some(10)),
+            make_source(2, 1, "a/x/f1c", 100, Some(10)),
+            make_source(3, 1, "a/sub/f2", 100, Some(20)),
+            make_source(4, 1, "b/f2c", 100, Some(20)),
+        ];
+        let (u, localized) = run_localize(&sources, &roots, &low_floors());
+        let ls = find_subject(&u, &localized, 0, "a/sub");
+        match &ls.shape {
+            RelationShape::Coverage {
+                locations,
+                archived_locations,
+            } => {
+                assert_eq!(*locations, 1);
+                assert_eq!(*archived_locations, 0);
+            }
+            RelationShape::Pair { .. } => panic!("an ancestor must not become a counterpart"),
+        }
+    }
+
+    #[test]
+    fn intra_root_sibling_pair_dedups_to_canonical_mirror() {
+        let roots = vec![make_root(1, "/r1")];
+        let sources = vec![
+            make_source(1, 1, "docs/f1", 100, Some(10)),
+            make_source(2, 1, "docs kopie/f1", 100, Some(10)),
+        ];
+        let (u, localized) = run_localize(&sources, &roots, &low_floors());
+        assert_eq!(localized.len(), 1);
+        let ls = &localized[0];
+        assert_eq!(u.roots_data[0].tree.path(ls.raw.fid), "docs");
+        match &ls.shape {
+            RelationShape::Pair {
+                counterpart, class, ..
+            } => {
+                assert_eq!(counterpart.rel_prefix, "docs kopie");
+                assert_eq!(*class, RelationClass::Mirror);
+            }
+            RelationShape::Coverage { .. } => panic!("expected an intra-root pair"),
+        }
+    }
+
+    #[test]
+    fn subset_when_counterpart_larger() {
+        let roots = vec![make_root(1, "/r1"), make_root(2, "/r2")];
+        let sources = vec![
+            make_source(1, 1, "a/f1", 100, Some(10)),
+            make_source(2, 1, "n/u", 50, Some(90)), // unique
+            make_source(3, 2, "b/f1", 100, Some(10)),
+            make_source(4, 2, "b/extra", 100, Some(80)), // unique to b
+        ];
+        let (u, localized) = run_localize(&sources, &roots, &low_floors());
+        let ls = find_subject(&u, &localized, 0, "a");
+        match &ls.shape {
+            RelationShape::Pair {
+                counterpart,
+                class,
+                pair_size_pct,
+                counterpart_share_pct,
+                ..
+            } => {
+                assert_eq!(counterpart.rel_prefix, "b");
+                assert_eq!(*class, RelationClass::Subset);
+                assert!((pair_size_pct - 1.0).abs() < 1e-9);
+                assert!((counterpart_share_pct - 0.5).abs() < 1e-9);
+            }
+            RelationShape::Coverage { .. } => panic!("expected a pair statement"),
+        }
+    }
+
+    #[test]
+    fn mirror_reciprocal_dedups_canonical() {
+        let roots = vec![make_root(1, "/r1"), make_root(2, "/r2")];
+        let sources = vec![
+            make_source(1, 1, "m/f1", 100, Some(10)),
+            make_source(2, 1, "m/f2", 100, Some(20)),
+            make_source(3, 1, "u1/x", 50, Some(91)),
+            make_source(4, 2, "n/f1", 100, Some(10)),
+            make_source(5, 2, "n/f2", 100, Some(20)),
+            make_source(6, 2, "u2/y", 50, Some(92)),
+        ];
+        let (u, localized) = run_localize(&sources, &roots, &low_floors());
+        let mirrors: Vec<_> = localized
+            .iter()
+            .filter(|ls| {
+                matches!(
+                    ls.shape,
+                    RelationShape::Pair {
+                        class: RelationClass::Mirror,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(mirrors.len(), 1);
+        assert_eq!(mirrors[0].raw.root_idx, 0);
+        assert_eq!(u.roots_data[0].tree.path(mirrors[0].raw.fid), "m");
+    }
+
+    #[test]
+    fn subset_reciprocal_not_deduped() {
+        let roots = vec![make_root(1, "/r1"), make_root(2, "/r2")];
+        let sources = vec![
+            make_source(1, 1, "a/f1", 100, Some(10)),
+            make_source(2, 1, "z1/u", 100, Some(91)),
+            make_source(3, 2, "b/f1", 100, Some(10)),
+            make_source(4, 2, "b/u", 50, Some(93)), // unique inside b
+            make_source(5, 2, "z2/u", 100, Some(92)),
+        ];
+        let (u, localized) = run_localize(&sources, &roots, &low_floors());
+        // Subject a (clean, subset of b) and subject b (candidate, partially
+        // inside a) are distinct honest statements — both survive.
+        let a = find_subject(&u, &localized, 0, "a");
+        let b = find_subject(&u, &localized, 1, "b");
+        assert!(matches!(
+            a.shape,
+            RelationShape::Pair {
+                class: RelationClass::Subset,
+                ..
+            }
+        ));
+        assert!(matches!(
+            b.shape,
+            RelationShape::Pair {
+                class: RelationClass::Subset,
+                ..
+            }
+        ));
+        assert!(matches!(b.raw.tier, FindingTier::Candidate));
+    }
+
+    #[test]
+    fn context_lines_carry_secondary_counterparts() {
+        let roots = vec![
+            make_root(1, "/r1"),
+            make_root(2, "/r2"),
+            make_root(3, "/r3"),
+        ];
+        let mut sources = vec![make_source(200, 1, "noise/u", 200, Some(90))];
+        for i in 0..19i64 {
+            sources.push(make_source(i + 1, 1, &format!("s/f{i}"), 100, Some(10 + i)));
+            sources.push(make_source(
+                i + 100,
+                2,
+                &format!("main/f{i}"),
+                100,
+                Some(10 + i),
+            ));
+        }
+        sources.push(make_source(20, 1, "s/f19", 100, Some(50)));
+        sources.push(make_source(150, 3, "side/f19", 100, Some(50)));
+        let (u, localized) = run_localize(&sources, &roots, &low_floors());
+        let ls = find_subject(&u, &localized, 0, "s");
+        match &ls.shape {
+            RelationShape::Pair {
+                counterpart,
+                pair_size_pct,
+                ..
+            } => {
+                assert_eq!(counterpart.root_path, "/r2");
+                assert_eq!(counterpart.rel_prefix, "main");
+                assert!((pair_size_pct - 0.95).abs() < 1e-9);
+            }
+            RelationShape::Coverage { .. } => panic!("expected a pair statement"),
+        }
+        assert_eq!(ls.context.len(), 1);
+        assert_eq!(ls.context[0].location.root_path, "/r3");
+        assert_eq!(ls.context[0].location.rel_prefix, "side");
+        assert!((ls.context[0].size_pct - 0.05).abs() < 1e-9);
     }
 
 }
