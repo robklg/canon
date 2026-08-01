@@ -859,6 +859,149 @@ fn subject_key<'a>(roots: &'a [Root], loc: &'a (i64, String)) -> (&'a str, &'a s
     (root_path, loc.1.as_str())
 }
 
+/// The finding's natural next move, derived from structural facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FindingNature {
+    /// The counterpart lives on a suspended root: nothing reads as safe
+    /// until that root is reconnected and re-verified.
+    Verify,
+    /// The subject's content is essentially archive-covered.
+    Dismiss,
+    /// Copies exist, but the archive doesn't hold them yet.
+    Consolidate,
+}
+
+/// One reduction opportunity, as lens-free data. Ranking and presentation
+/// derive from these fields; nothing here presumes the triage lens.
+#[derive(Debug, PartialEq)]
+pub struct StructuralFinding {
+    pub subject: Location,
+    pub subject_suspended: bool,
+    pub subject_last_scanned_at: Option<i64>,
+    pub tier: FindingTier,
+    pub shape: RelationShape,
+    pub context: Vec<ContextRelation>,
+    /// Fraction of the subject's comparison-participating weight existing
+    /// outside the subject (the union containment).
+    pub containment_size_pct: f64,
+    pub containment_count_pct: f64,
+    /// Resolution gain: what acting on this finding resolves.
+    pub gain_bytes: u64,
+    pub gain_files: u32,
+    /// Content existing nowhere else (over comparison-participating weight).
+    pub residual_bytes: u64,
+    pub residual_files: u32,
+    /// Fraction of the subject's comparison-participating weight with an
+    /// outside copy on an archive root.
+    pub archive_cover_pct: f64,
+    /// Comparison-participating weight over all content in the subject —
+    /// the honesty qualifier ("compared on N% by size").
+    pub hash_coverage_pct: f64,
+    pub nature: FindingNature,
+}
+
+/// The structural computation's result: every finding, plus the honesty
+/// stats for the header.
+#[derive(Debug, PartialEq)]
+pub struct StructuralSweep {
+    pub findings: Vec<StructuralFinding>,
+    pub stats: SweepStats,
+}
+
+/// Compute every reduction-opportunity finding in the universe.
+///
+/// `sources` is the policy-filtered slice (presence, exclusion, zero-byte —
+/// the caller's rules); `roots` must contain every root the sources belong
+/// to. Output order is deterministic: subject root path, then subject path.
+pub fn compute_structural(
+    sources: &[&Source],
+    roots: &[Root],
+    params: &SweepParams,
+) -> StructuralSweep {
+    let universe = build_universe(sources, roots, params);
+    let weights = compute_matched(&universe);
+    let subjects = discover_subjects(&universe, &weights, params);
+    let localized = localize_subjects(&universe, roots, subjects, params);
+    let mut findings: Vec<StructuralFinding> = localized
+        .into_iter()
+        .map(|ls| assemble_finding(&universe, roots, ls, params))
+        .collect();
+    findings.sort_by(|a, b| {
+        (&a.subject.root_path, &a.subject.rel_prefix)
+            .cmp(&(&b.subject.root_path, &b.subject.rel_prefix))
+    });
+    StructuralSweep {
+        findings,
+        stats: universe.stats,
+    }
+}
+
+fn assemble_finding(
+    universe: &Universe,
+    roots: &[Root],
+    ls: LocalizedSubject,
+    params: &SweepParams,
+) -> StructuralFinding {
+    let raw = &ls.raw;
+    let rd = &universe.roots_data[raw.root_idx];
+    let root = &roots[raw.root_idx];
+    let (all_bytes, _) = rd.sub_all[raw.fid as usize];
+    let archive_cover_pct = if raw.total_bytes > 0 {
+        ls.archive_matched_bytes as f64 / raw.total_bytes as f64
+    } else {
+        0.0
+    };
+    let counterpart_suspended = matches!(
+        ls.shape,
+        RelationShape::Pair {
+            counterpart_suspended: true,
+            ..
+        }
+    );
+    // Verify outranks Dismiss: an archive-covered claim whose keeper sits on
+    // a disconnected drive is not actionable until re-verified.
+    let nature = if counterpart_suspended {
+        FindingNature::Verify
+    } else if archive_cover_pct >= params.lifting_tolerance {
+        FindingNature::Dismiss
+    } else {
+        FindingNature::Consolidate
+    };
+    StructuralFinding {
+        subject: Location {
+            root_id: root.id,
+            root_path: root.path.clone(),
+            rel_prefix: rd.tree.path(raw.fid).to_string(),
+        },
+        subject_suspended: root.suspended,
+        subject_last_scanned_at: root.last_scanned_at,
+        tier: raw.tier,
+        containment_size_pct: if raw.total_bytes > 0 {
+            raw.matched_bytes as f64 / raw.total_bytes as f64
+        } else {
+            0.0
+        },
+        containment_count_pct: if raw.total_files > 0 {
+            f64::from(raw.matched_files) / f64::from(raw.total_files)
+        } else {
+            0.0
+        },
+        gain_bytes: raw.matched_bytes,
+        gain_files: raw.matched_files,
+        residual_bytes: raw.total_bytes - raw.matched_bytes,
+        residual_files: raw.total_files - raw.matched_files,
+        archive_cover_pct,
+        hash_coverage_pct: if all_bytes > 0 {
+            raw.total_bytes as f64 / all_bytes as f64
+        } else {
+            1.0
+        },
+        nature,
+        shape: ls.shape,
+        context: ls.context,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1631,4 +1774,243 @@ mod tests {
         assert!((ls.context[0].size_pct - 0.05).abs() < 1e-9);
     }
 
+    fn run_structural(sources: &[Source], roots: &[Root], params: &SweepParams) -> StructuralSweep {
+        let refs: Vec<&Source> = sources.iter().collect();
+        compute_structural(&refs, roots, params)
+    }
+
+    fn find_finding<'a>(
+        sweep: &'a StructuralSweep,
+        root_path: &str,
+        rel_prefix: &str,
+    ) -> &'a StructuralFinding {
+        sweep
+            .findings
+            .iter()
+            .find(|f| f.subject.root_path == root_path && f.subject.rel_prefix == rel_prefix)
+            .unwrap_or_else(|| panic!("no finding at {root_path} {rel_prefix:?}"))
+    }
+
+    #[test]
+    fn residual_arithmetic_excludes_unhashed() {
+        let roots = vec![make_root(1, "/r1"), make_root(2, "/r2")];
+        let sources = vec![
+            make_source(1, 1, "s/f1", 100, Some(10)),
+            make_source(2, 1, "s/f2", 50, Some(20)), // unique: the residual
+            make_source(3, 1, "s/u", 30, None),      // unhashed: qualifier, not residual
+            make_source(4, 2, "q/f1", 100, Some(10)),
+        ];
+        let sweep = run_structural(&sources, &roots, &low_floors());
+        let f = find_finding(&sweep, "/r1", "s");
+        assert_eq!(f.gain_bytes, 100);
+        assert_eq!(f.gain_files, 1);
+        assert_eq!(f.residual_bytes, 50);
+        assert_eq!(f.residual_files, 1);
+        assert!((f.containment_size_pct - 100.0 / 150.0).abs() < 1e-9);
+        assert!((f.hash_coverage_pct - 150.0 / 180.0).abs() < 1e-9);
+        assert!(matches!(f.tier, FindingTier::Candidate));
+    }
+
+    #[test]
+    fn archive_coverage_unions_across_archive_roots() {
+        let roots = vec![
+            make_root(1, "/r1"),
+            make_archive_root(2, "/a1"),
+            make_archive_root(3, "/a2"),
+        ];
+        let sources = vec![
+            make_source(1, 1, "s/f1", 100, Some(10)),
+            make_source(2, 1, "s/f2", 100, Some(20)),
+            make_source(3, 1, "noise/u", 100, Some(90)),
+            make_source(4, 2, "kept/f1", 100, Some(10)),
+            make_source(5, 3, "kept/f2", 100, Some(20)),
+        ];
+        let sweep = run_structural(&sources, &roots, &low_floors());
+        let f = find_finding(&sweep, "/r1", "s");
+        assert!((f.archive_cover_pct - 1.0).abs() < 1e-9);
+        assert_eq!(f.nature, FindingNature::Dismiss);
+    }
+
+    #[test]
+    fn nature_consolidate_when_unarchived() {
+        let roots = vec![make_root(1, "/r1"), make_root(2, "/r2")];
+        let sources = vec![
+            make_source(1, 1, "s/f1", 100, Some(10)),
+            make_source(2, 1, "noise/u", 100, Some(90)),
+            make_source(3, 2, "elsewhere/f1", 100, Some(10)),
+        ];
+        let sweep = run_structural(&sources, &roots, &low_floors());
+        let f = find_finding(&sweep, "/r1", "s");
+        assert!((f.archive_cover_pct).abs() < 1e-9);
+        assert_eq!(f.nature, FindingNature::Consolidate);
+    }
+
+    #[test]
+    fn nature_verify_outranks_dismiss() {
+        let mut archive = make_archive_root(2, "/a1");
+        archive.suspended = true;
+        archive.last_scanned_at = Some(1_000);
+        let roots = vec![make_root(1, "/r1"), archive];
+        let sources = vec![
+            make_source(1, 1, "s/f1", 100, Some(10)),
+            make_source(2, 1, "noise/u", 100, Some(90)),
+            make_source(3, 2, "kept/f1", 100, Some(10)),
+        ];
+        let sweep = run_structural(&sources, &roots, &low_floors());
+        let f = find_finding(&sweep, "/r1", "s");
+        assert!((f.archive_cover_pct - 1.0).abs() < 1e-9);
+        assert_eq!(f.nature, FindingNature::Verify);
+        match &f.shape {
+            RelationShape::Pair {
+                counterpart_suspended,
+                counterpart_is_archive,
+                counterpart_last_scanned_at,
+                ..
+            } => {
+                assert!(counterpart_suspended);
+                assert!(counterpart_is_archive);
+                assert_eq!(*counterpart_last_scanned_at, Some(1_000));
+            }
+            RelationShape::Coverage { .. } => panic!("expected a pair statement"),
+        }
+    }
+
+    #[test]
+    fn suspension_flags_on_both_sides() {
+        let mut r1 = make_root(1, "/r1");
+        r1.suspended = true;
+        r1.last_scanned_at = Some(500);
+        let mut r2 = make_root(2, "/r2");
+        r2.suspended = true;
+        let roots = vec![r1, r2];
+        let sources = vec![
+            make_source(1, 1, "m/f1", 100, Some(10)),
+            make_source(2, 1, "u1/x", 50, Some(91)),
+            make_source(3, 2, "n/f1", 100, Some(10)),
+            make_source(4, 2, "u2/y", 50, Some(92)),
+        ];
+        let sweep = run_structural(&sources, &roots, &low_floors());
+        let f = find_finding(&sweep, "/r1", "m");
+        assert!(f.subject_suspended);
+        assert_eq!(f.subject_last_scanned_at, Some(500));
+        assert!(matches!(
+            f.shape,
+            RelationShape::Pair {
+                counterpart_suspended: true,
+                ..
+            }
+        ));
+    }
+
+    /// A moderate-scale synthetic universe: a 30-subject star, a scattered
+    /// subject, intra-root siblings, and unique noise.
+    fn scale_fixture() -> (Vec<Source>, Vec<Root>) {
+        let roots = vec![
+            make_root(1, "/r1"),
+            make_root(2, "/r2"),
+            make_root(3, "/r3"),
+            make_root(4, "/r4"),
+        ];
+        let mut sources = Vec::new();
+        let mut id = 0i64;
+        let mut next = |root_id: i64, rel: String, size: i64, oid: Option<i64>| {
+            id += 1;
+            Source {
+                id,
+                root_id,
+                root_path: format!("/root{root_id}"),
+                rel_path: rel,
+                object_id: oid,
+                size,
+                mtime: 0,
+                excluded: false,
+                object_excluded: None,
+                device: 0,
+                inode: 0,
+                partial_hash: String::new(),
+                basis_rev: 0,
+                root_role: "source".to_string(),
+                root_suspended: false,
+                decision_id: None,
+            }
+        };
+        // The star: 30 subjects in r1, all pointing into r2's hub.
+        for i in 0..30i64 {
+            for j in 0..100i64 {
+                let oid = 100_000 + i * 100 + j;
+                sources.push(next(1, format!("mb/{i:02}/f{j}"), 10, Some(oid)));
+                sources.push(next(2, format!("hub/f{i}_{j}"), 10, Some(oid)));
+            }
+        }
+        // Unique noise inside mb keeps the star from lifting to one subject.
+        for k in 0..50i64 {
+            sources.push(next(1, format!("mb/u{k}"), 100, Some(200_000 + k)));
+        }
+        // The scattered subject: half its copies in r3, half in r4.
+        for i in 0..10i64 {
+            let oid = 300_000 + i;
+            sources.push(next(1, format!("scatter/f{i}"), 10, Some(oid)));
+            let other = if i % 2 == 0 { 3 } else { 4 };
+            sources.push(next(other, format!("k/f{i}"), 10, Some(oid)));
+        }
+        // Intra-root siblings in r3.
+        for i in 0..500i64 {
+            let oid = 400_000 + i;
+            sources.push(next(3, format!("Documents/g{i}"), 10, Some(oid)));
+            sources.push(next(3, format!("Documents kopie/g{i}"), 10, Some(oid)));
+        }
+        (sources, roots)
+    }
+
+    #[test]
+    fn scale_synthetic_star_scatter_and_siblings() {
+        let (sources, roots) = scale_fixture();
+        assert!(sources.len() > 7_000);
+        let sweep = run_structural(&sources, &roots, &low_floors());
+
+        // The star: exactly 30 subjects under mb/, each a pair into r2's hub.
+        let star: Vec<_> = sweep
+            .findings
+            .iter()
+            .filter(|f| f.subject.root_path == "/r1" && f.subject.rel_prefix.starts_with("mb/"))
+            .collect();
+        assert_eq!(star.len(), 30);
+        for f in &star {
+            match &f.shape {
+                RelationShape::Pair { counterpart, .. } => {
+                    assert_eq!(counterpart.root_path, "/r2");
+                    assert_eq!(counterpart.rel_prefix, "hub");
+                }
+                RelationShape::Coverage { .. } => panic!("star member lost its hub"),
+            }
+        }
+
+        // The scattered subject degrades to coverage over two roots.
+        let scatter = find_finding(&sweep, "/r1", "scatter");
+        assert_eq!(
+            scatter.shape,
+            RelationShape::Coverage {
+                locations: 2,
+                archived_locations: 0
+            }
+        );
+
+        // The intra-root mirror dedups to the canonical sibling.
+        assert!(sweep
+            .findings
+            .iter()
+            .any(|f| f.subject.root_path == "/r3" && f.subject.rel_prefix == "Documents"));
+        assert!(!sweep
+            .findings
+            .iter()
+            .any(|f| f.subject.root_path == "/r3" && f.subject.rel_prefix == "Documents kopie"));
+    }
+
+    #[test]
+    fn determinism_run_twice_identical() {
+        let (sources, roots) = scale_fixture();
+        let a = run_structural(&sources, &roots, &low_floors());
+        let b = run_structural(&sources, &roots, &low_floors());
+        assert_eq!(a, b);
+    }
 }
