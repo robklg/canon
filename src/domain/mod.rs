@@ -26,6 +26,7 @@ pub mod scan;
 pub mod scope;
 pub mod source;
 pub mod survey;
+pub mod sweep;
 pub mod trail;
 
 // Re-export primary types for convenient access
