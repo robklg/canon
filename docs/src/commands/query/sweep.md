@@ -32,13 +32,15 @@ The sweep takes no paths and no filters — it is inherently universe-wide, comp
     → canon survey . --other /Volumes/Archive/Media/Super8
 ```
 
-- **The subject** (the full path on the first line) is the place the finding is about.
+- **The subject** (the full path on the first line) is the place the finding is about — the side you might dismiss. The other side is the **counterpart**: where the copies live. (One reading rule to hold on to: a single finding's headline is its *subject*; a hub's headline is the shared *counterpart* — the hub's own "shared counterpart" line says so explicitly.)
 - **The relation** states how the subject's content connects elsewhere, in survey's vocabulary: a *subset* sits inside a counterpart that holds more; a *mirror* matches its counterpart in both directions. Both percentages matter — a large gap between "by size" and "by count" means many small files carry little weight.
 - **The keeper line** appears for subsets only — the structure decides which side holds more; the wording stays declarative ("inside X", never "keep X"), because the smaller side can still be the better copy. Mirrors name a *counterpart* and imply no preferred side. A keeper on a suspended root reads `reconnect to verify` — nothing is safe to act on until that root is scanned again. Both sides carry their scan age: a claim is only as fresh as its basis.
 - **Gain** is what acting on the finding resolves. **Residual** is the verdict line: content existing nowhere else in the universe. `residual: none` means a clean dismissal; a small residual often means one rescue away from one.
 - **The `→` handoff** is the ready-to-run judging command, written as if you `cd` into the subject first. The sweep only ever hands off to judgment — never to a ready-made exclusion.
 
 When the subject is not fully hashed, the finding says so (`compared on 92% by size`) — unhashed content is unverified, never silently omitted. Notes you've left on the subject or counterpart (`canon note`) surface beside the finding.
+
+A subject that itself stands on an archive root is marked `(in the archive)`: its content is already resolved, and the real opportunity usually sits on the counterpart side. The relation is stated anyway — the sweep compares any-to-any — but the mark keeps the triage reading honest.
 
 ### Scattered findings
 
@@ -57,8 +59,9 @@ Nothing archived holds this content yet — it typically ranks low, but it is vi
 Many places pointing into one counterpart render as a single entry — one constellation, not thirty competing findings:
 
 ```
-#2  /Volumes/Archive/Media/iphone-backup — 36 places point here
-    counterpart archived, scanned 5d ago · total gain: 7,820 files · 41.2 GB
+#2  /Volumes/Archive/Media/iphone-backup
+    shared counterpart — 36 places hold copies inside it · archived, scanned 5d ago
+    total gain: 7,820 files · 41.2 GB
       /Volumes/OldBackup/old/iphone-2019  98% inside · 402 files · 2.1 GB
       /Volumes/old-disk/dumps/phone       97% inside · 371 files · 1.9 GB
       … 34 more (--all)

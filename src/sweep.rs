@@ -127,7 +127,11 @@ fn print_finding(
     now: i64,
     handoff_line: &str,
 ) {
-    println!("#{rank}  {}", abs_path(&finding.subject));
+    println!(
+        "#{rank}  {}{}",
+        abs_path(&finding.subject),
+        archive_mark(finding)
+    );
     match &finding.shape {
         RelationShape::Pair {
             counterpart,
@@ -214,11 +218,7 @@ fn print_hub(
     all: bool,
     handoff_line: &str,
 ) {
-    println!(
-        "#{rank}  {} — {} places point here",
-        abs_path(&hub.counterpart),
-        format_count(hub.members.len())
-    );
+    println!("#{rank}  {}", abs_path(&hub.counterpart));
     let status = if hub.counterpart_suspended {
         format!(
             "on suspended root {} — reconnect to verify",
@@ -230,7 +230,11 @@ fn print_hub(
         age(hub.counterpart_last_scanned_at, now)
     };
     println!(
-        "    counterpart {status} · total gain: {} · {}",
+        "    shared counterpart — {} hold copies inside it · {status}",
+        counted_phrase(hub.members.len(), "place")
+    );
+    println!(
+        "    total gain: {} · {}",
         files_phrase(hub.total_gain_files),
         format_size(hub.total_gain_bytes as i64)
     );
@@ -258,8 +262,9 @@ fn print_hub(
             }
         };
         println!(
-            "      {}  {} · {} · {}",
+            "      {}{}  {} · {} · {}",
             abs_path(&member.subject),
+            archive_mark(member),
             relation,
             files_phrase(member.gain_files),
             format_size(member.gain_bytes as i64)
@@ -274,6 +279,16 @@ fn print_hub(
         );
     }
     println!("    {handoff_line}");
+}
+
+/// A subject standing on an archive root is already resolved under the
+/// triage lens — stated on the finding, never silently.
+fn archive_mark(finding: &StructuralFinding) -> &'static str {
+    if finding.subject_is_archive {
+        "  (in the archive)"
+    } else {
+        ""
+    }
 }
 
 fn print_excluded_context(subject: &Location, report: &SweepReport, indent: &str) {
@@ -442,6 +457,7 @@ mod tests {
         StructuralFinding {
             subject: loc("/r1", "subject"),
             subject_suspended: false,
+            subject_is_archive: false,
             subject_last_scanned_at: None,
             tier: FindingTier::Clean,
             below_floors: false,

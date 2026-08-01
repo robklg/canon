@@ -895,6 +895,9 @@ pub enum FindingNature {
 pub struct StructuralFinding {
     pub subject: Location,
     pub subject_suspended: bool,
+    /// The subject stands on an archive root — under the triage lens its
+    /// content is already resolved; surfaces honestly marked.
+    pub subject_is_archive: bool,
     pub subject_last_scanned_at: Option<i64>,
     pub tier: FindingTier,
     /// True when this finding sits below the emit floors — discovered by the
@@ -1027,6 +1030,7 @@ fn assemble_finding(
             rel_prefix: rd.tree.path(raw.fid).to_string(),
         },
         subject_suspended: root.suspended,
+        subject_is_archive: root.role == "archive",
         subject_last_scanned_at: root.last_scanned_at,
         tier: raw.tier,
         below_floors: raw.below_floors,
@@ -2390,6 +2394,7 @@ mod tests {
         StructuralFinding {
             subject: lens_loc("/r1", rel),
             subject_suspended: false,
+            subject_is_archive: false,
             subject_last_scanned_at: None,
             tier,
             below_floors: false,
