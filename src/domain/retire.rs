@@ -36,7 +36,6 @@ impl Readiness {
     /// `--allow unresolved` acknowledgment — never `--yes`: the prompt-skip
     /// and the acknowledgment are orthogonal, and this signature is what
     /// enforces it.
-    #[allow(dead_code)]
     pub fn blocks(&self, allow_unresolved: bool) -> bool {
         match self {
             Readiness::NotReady { .. } => !allow_unresolved,
@@ -76,7 +75,6 @@ pub struct ResolutionAccount {
 
 impl ResolutionAccount {
     /// Present rows, partitioned exactly: covered + excluded + unresolved.
-    #[allow(dead_code)]
     pub fn standing(&self) -> i64 {
         self.covered + self.excluded + self.unresolved
     }
@@ -84,7 +82,6 @@ impl ResolutionAccount {
     /// Every source ever indexed here: standing + absent + moved away.
     /// `None` when any extraction row lacks a disposition — without it the
     /// moved count is unsupported by the record (omitted, never guessed).
-    #[allow(dead_code)]
     pub fn ever_indexed(&self) -> Option<i64> {
         if self.archived_unrecorded > 0 {
             return None;

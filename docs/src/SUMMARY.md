@@ -17,6 +17,7 @@
   - [Managing Roots](commands/roots/index.md)
     - [`scan`](commands/roots/scan.md)
     - [`roots`](commands/roots/roots.md)
+    - [`roots retire`](commands/roots/retire.md)
   - [Enriching](commands/enrich/index.md)
     - [`worklist`](commands/enrich/worklist.md)
     - [`import-facts`](commands/enrich/import-facts.md)

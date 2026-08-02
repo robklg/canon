@@ -5,8 +5,6 @@
 //! (the second lens) builds on the same substrate. One fetch, two
 //! renderings: the gate and the book can never drift apart.
 
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -46,9 +44,12 @@ pub struct ReadinessReview {
     pub account: ResolutionAccount,
     pub gaps: GapFacts,
     pub readiness: Readiness,
-    /// Review-time basis: total source rows (present + absent).
+    /// Review-time basis: total source rows (present + absent). Consumed by
+    /// the release movement's world-moved re-check.
+    #[allow(dead_code)]
     pub snapshot_source_count: i64,
     /// Review-time basis: highest decision id seen touching this root.
+    #[allow(dead_code)]
     pub snapshot_max_decision_id: Option<i64>,
 }
 

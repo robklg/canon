@@ -29,6 +29,11 @@ enum ImportFactsAllow {
     Archived,
 }
 
+#[derive(Clone, PartialEq, clap::ValueEnum)]
+enum RetireAllow {
+    Unresolved,
+}
+
 fn include_set_from(values: &[IncludeValue]) -> IncludeSet {
     let mut set = IncludeSet::default();
     for v in values {
@@ -631,6 +636,24 @@ enum RootsAction {
     Unsuspend {
         /// Root specifier: id:<N> or path:<path>
         spec: String,
+    },
+    /// Retire a root: review its readiness (the full ceremony arrives in a
+    /// coming version)
+    Retire {
+        /// Root specifier: id:<N> or path:<path>
+        spec: String,
+        /// Readiness review only; exits 0
+        #[arg(long)]
+        dry_run: bool,
+        /// Allow: unresolved (retire despite unresolved sources)
+        #[arg(long, value_delimiter = ',')]
+        allow: Vec<RetireAllow>,
+        /// Reason for this operation (recorded in decision log)
+        #[arg(long)]
+        reason: Option<String>,
+        /// Skip confirmation prompts (never implies --allow)
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -1502,6 +1525,18 @@ fn main() -> Result<()> {
             }
             Some(RootsAction::Unsuspend { spec }) => {
                 roots::unsuspend(&db, &spec, &command_line, &config, cli.no_receipt)?;
+            }
+            Some(RootsAction::Retire {
+                spec,
+                dry_run,
+                allow,
+                reason: _,
+                yes: _,
+            }) => {
+                // reason/yes are parsed for CLI stability; they act from the
+                // binding movements on (a read-only review records nothing).
+                let allow_unresolved = allow.contains(&RetireAllow::Unresolved);
+                roots::retire(&db, &spec, dry_run, allow_unresolved, &config)?;
             }
         },
     }

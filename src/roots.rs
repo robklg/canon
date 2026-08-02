@@ -6,8 +6,10 @@ use anyhow::Result;
 use crate::ceremony;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
+use crate::domain::format::format_size;
 use crate::domain::format_count;
 use crate::domain::path::resolve_path;
+use crate::domain::retire::Readiness;
 use crate::domain::scope::DecisionScope;
 use crate::domain::{parse_root_spec, parse_root_spec_any, Root};
 use crate::ops;
@@ -167,7 +169,10 @@ pub fn remove(
                     format_count(plan.source_count),
                     format_count(plan.note_count as i64)
                 );
-                eprintln!("To bind it first: canon roots retire {}", plan.root_path);
+                eprintln!(
+                    "To bind it first: canon roots retire path:{}",
+                    plan.root_path
+                );
             }
         }
         eprintln!();
@@ -199,6 +204,205 @@ pub fn remove(
     println!("{}", result.summary);
 
     Ok(())
+}
+
+/// The retirement readiness review — the opening movement of the ceremony.
+/// Review on stdout (a ceremony surface, not a list command); `--dry-run`
+/// always exits 0 (it is a report); a NOT READY verdict without
+/// `--allow unresolved` exits non-zero after the review (compare precedent:
+/// the verdict is the message, no `Error:` duplication).
+pub fn retire(
+    db: &Db,
+    spec: &str,
+    dry_run: bool,
+    allow_unresolved: bool,
+    config: &LedgerConfig,
+) -> Result<()> {
+    let conn = db.conn();
+    let roots = repo::root::fetch_all(conn)?;
+    // `_any`: a suspended root retires on faith — surfaced, never refused.
+    let root_id = parse_root_spec_any(&roots, spec)?;
+    ops::retire::validate_retire_target(&roots, root_id, config)?;
+
+    let review = ops::retire::compute_readiness(conn, root_id)?;
+    print_review(&review);
+
+    match &review.readiness {
+        Readiness::NotReady { unresolved, .. } => {
+            println!(
+                "NOT READY for retirement — {} sources are neither archived nor excluded.",
+                format_count(*unresolved)
+            );
+            if !allow_unresolved {
+                println!(
+                    "To retire anyway: canon roots retire path:{} --allow unresolved",
+                    review.root.path
+                );
+            }
+        }
+        Readiness::NoBlockersFound => {
+            println!("No blockers found. Whether this story is complete is yours to judge.");
+        }
+    }
+
+    if dry_run {
+        return Ok(());
+    }
+    if review.readiness.blocks(allow_unresolved) {
+        std::process::exit(1);
+    }
+    if matches!(review.readiness, Readiness::NotReady { .. }) {
+        println!("Retiring with unresolved sources acknowledged (--allow unresolved).");
+    }
+    println!();
+    println!("The review is complete. Binding the book is not yet available in this version.");
+    Ok(())
+}
+
+fn print_review(review: &ops::retire::ReadinessReview) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let account = &review.account;
+
+    println!("Retirement review: {}", review.root.path);
+    println!();
+    println!("  role         {}", review.root.role);
+    if let Some(comment) = &review.root.comment {
+        println!("  comment      {comment}");
+    }
+    println!(
+        "  suspended    {}",
+        if review.root.is_suspended() {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    println!(
+        "  first scan   {}",
+        match review.first_scan {
+            Some(ts) => format_date(ts),
+            None => "unknown".to_string(),
+        }
+    );
+    println!(
+        "  last scan    {}",
+        match review.gaps.last_scanned_at {
+            Some(ts) => format!("{} ({})", format_date(ts), format_time_ago(Some(ts), now)),
+            None => "never".to_string(),
+        }
+    );
+    println!();
+
+    println!("Resolution account");
+    println!(
+        "  ever indexed here      {}",
+        match account.ever_indexed() {
+            Some(n) => format!("{} sources", format_count(n)),
+            None => format!(
+                "not derivable — {} files have unrecorded disposition",
+                format_count(account.archived_unrecorded)
+            ),
+        }
+    );
+    println!();
+    println!("  the story so far");
+    let mut archived = format!("{} files", format_count(account.archived_files));
+    if let Some(bytes) = account.archived_bytes {
+        if account.archived_files > 0 {
+            archived.push_str(&format!(", {}", format_size(bytes)));
+        }
+    }
+    let mut split = Vec::new();
+    if account.archived_moved > 0 {
+        split.push(format!("{} moved", format_count(account.archived_moved)));
+    }
+    if account.archived_copied > 0 {
+        split.push(format!("{} copied", format_count(account.archived_copied)));
+    }
+    if account.archived_unrecorded > 0 {
+        split.push(format!(
+            "disposition unrecorded for {}",
+            format_count(account.archived_unrecorded)
+        ));
+    }
+    if !split.is_empty() {
+        archived.push_str(&format!("   ({})", split.join(", ")));
+    }
+    println!("    archived from here   {archived}");
+    println!(
+        "    deleted              {} sources           (scan-observed)",
+        format_count(account.deleted)
+    );
+    println!(
+        "    missing, unexplained {} sources",
+        format_count(account.unexplained_missing)
+    );
+    println!();
+    println!(
+        "  standing here now      {} sources",
+        format_count(account.standing())
+    );
+    println!(
+        "    covered              {}   (content verified present in the archive)",
+        format_count(account.covered)
+    );
+    println!(
+        "    excluded             {}",
+        format_count(account.excluded)
+    );
+    let mut unresolved = format_count(account.unresolved);
+    if account.unhashed_unresolved > 0 {
+        unresolved.push_str(&format!(
+            "      ({} unhashed — listed by name only)",
+            format_count(account.unhashed_unresolved)
+        ));
+    }
+    println!("    unresolved           {unresolved}");
+    println!();
+
+    let mut facts = Vec::new();
+    if account.unexplained_missing > 0 {
+        facts.push(format!(
+            "{} sources are missing without a recorded deletion.",
+            format_count(account.unexplained_missing)
+        ));
+    }
+    if account.unhashed_unresolved > 0 {
+        facts.push(format!(
+            "{} present sources were never hashed — they cannot be content-verified.",
+            format_count(account.unhashed_unresolved)
+        ));
+    }
+    if !review.gaps.reachable {
+        facts.push(
+            "The root's path is unreachable — retirement would bind the story as last observed."
+                .to_string(),
+        );
+    }
+    if review.gaps.open_cluster_intentions > 0 {
+        facts.push(format!(
+            "{} cluster-generate decisions on this root have no subsequent apply — possible open intentions.",
+            format_count(review.gaps.open_cluster_intentions)
+        ));
+    }
+    if !facts.is_empty() {
+        println!("Facts to weigh");
+        for fact in facts {
+            println!("  {fact}");
+        }
+        println!();
+    }
+}
+
+fn format_date(ts: i64) -> String {
+    use chrono::{Local, TimeZone};
+    match Local.timestamp_opt(ts, 0) {
+        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
+        _ => format!("@{ts}"),
+    }
 }
 
 pub fn set_comment(db: &Db, spec: &str, comment: Option<&str>) -> Result<()> {
@@ -309,5 +513,39 @@ pub fn unsuspend(
             Ok(())
         }
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    #[test]
+    fn retire_argv_parses_through_the_real_cli() {
+        // The handoff-law discipline: CLI drift is a test failure.
+        for argv in [
+            vec!["canon", "roots", "retire", "/mnt/old-drive"],
+            vec!["canon", "roots", "retire", "id:3", "--dry-run"],
+            vec![
+                "canon",
+                "roots",
+                "retire",
+                "/mnt/old-drive",
+                "--allow",
+                "unresolved",
+                "--reason",
+                "resolved this summer",
+                "--yes",
+            ],
+        ] {
+            crate::Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("must parse: {argv:?}\n{e}"));
+        }
+    }
+
+    #[test]
+    fn retire_allow_rejects_unknown_values() {
+        let argv = ["canon", "roots", "retire", "/r", "--allow", "everything"];
+        assert!(crate::Cli::try_parse_from(argv).is_err());
     }
 }
