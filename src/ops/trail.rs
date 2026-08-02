@@ -485,14 +485,22 @@ pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
         });
     }
     // Per-root receipts (e.g. one deletion receipt per source root).
+    // Snapshot-first: the row's write-time root path renders even after the
+    // root is removed; the live join covers pre-migration rows the hook
+    // couldn't recover, and only then the marked fallback — the pointer
+    // line is never silently absent.
     for row in repo::decision::fetch_scope_rows(conn, id)? {
         if let Some(rel) = row.receipt_rel_path {
+            let display = row
+                .root_path
+                .clone()
+                .unwrap_or_else(|| root_display(row.root_id));
             let dup = receipts
                 .iter()
-                .any(|p| p.rel_path == rel && p.root_display == root_display(row.root_id));
+                .any(|p| p.rel_path == rel && p.root_display == display);
             if !dup {
                 receipts.push(ReceiptPointer {
-                    root_display: root_display(row.root_id),
+                    root_display: display,
                     rel_path: rel,
                 });
             }
@@ -1900,7 +1908,30 @@ mod tests {
         let show = compute_show(&conn, d).unwrap().unwrap();
         assert_eq!(show.receipts.len(), 2);
         assert_eq!(show.receipts[0].root_display, "/a");
-        assert_eq!(show.receipts[1].root_display, "root #999 (removed)");
+        // The removed root's pointer renders its snapshotted path — the
+        // observable bug this snapshot exists to fix.
+        assert_eq!(show.receipts[1].root_display, "/gone");
+        assert!(show.receipt_absence.is_none());
+    }
+
+    #[test]
+    fn show_receipt_pointer_without_snapshot_renders_marked_fallback() {
+        // A pre-snapshot row the migration hook couldn't recover: NULL
+        // root_path, root long removed. The pointer line still renders,
+        // marked — never silently absent.
+        let conn = open_in_memory_for_test();
+        let d = insert_decision_at(&conn, "scan", 100);
+        conn.execute(
+            "INSERT INTO decision_scopes
+             (decision_id, root_id, root_path, rel_prefix, receipt_rel_path)
+             VALUES (?1, 999, NULL, '', '.canon-ledger/000001-scan.toml')",
+            [d],
+        )
+        .unwrap();
+
+        let show = compute_show(&conn, d).unwrap().unwrap();
+        assert_eq!(show.receipts.len(), 1);
+        assert_eq!(show.receipts[0].root_display, "root #999 (removed)");
         assert!(show.receipt_absence.is_none());
     }
 

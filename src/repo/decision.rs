@@ -162,7 +162,9 @@ const DECISION_COLUMNS: &str = "id, command, scope, command_line, reason, status
 
 fn decision_from_row(row: &rusqlite::Row) -> rusqlite::Result<Decision> {
     let scope_json: Option<String> = row.get(2)?;
-    let scope = scope_json.map(|s| serde_json::from_str(&s).unwrap());
+    // A scope that doesn't parse reads as no scope rather than failing the
+    // whole query — one corrupt row must not take the trail down with it.
+    let scope = scope_json.and_then(|s| serde_json::from_str(&s).ok());
     Ok(Decision {
         id: row.get(0)?,
         command: row.get(1)?,
@@ -263,6 +265,9 @@ pub fn fetch_in_range(conn: &Connection, start: i64, end: i64) -> Result<Vec<Dec
 pub struct DecisionScopeRow {
     pub decision_id: i64,
     pub root_id: i64,
+    /// Write-time snapshot of the root's path; `None` on pre-snapshot rows
+    /// the migration hook could not recover.
+    pub root_path: Option<String>,
     pub rel_prefix: String,
     pub receipt_rel_path: Option<String>,
 }
@@ -271,8 +276,9 @@ fn scope_row_from_row(row: &rusqlite::Row) -> rusqlite::Result<DecisionScopeRow>
     Ok(DecisionScopeRow {
         decision_id: row.get(0)?,
         root_id: row.get(1)?,
-        rel_prefix: row.get(2)?,
-        receipt_rel_path: row.get(3)?,
+        root_path: row.get(2)?,
+        rel_prefix: row.get(3)?,
+        receipt_rel_path: row.get(4)?,
     })
 }
 
@@ -286,7 +292,7 @@ pub fn fetch_scope_rows_by_roots(
     for chunk in root_ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
         let sql = format!(
-            "SELECT decision_id, root_id, rel_prefix, receipt_rel_path
+            "SELECT decision_id, root_id, root_path, rel_prefix, receipt_rel_path
              FROM decision_scopes WHERE root_id IN ({})",
             placeholders.join(",")
         );
@@ -302,7 +308,7 @@ pub fn fetch_scope_rows_by_roots(
 /// Fetch the scope-index rows of one decision (per-root receipt pointers).
 pub fn fetch_scope_rows(conn: &Connection, decision_id: i64) -> Result<Vec<DecisionScopeRow>> {
     let mut stmt = conn.prepare(
-        "SELECT decision_id, root_id, rel_prefix, receipt_rel_path
+        "SELECT decision_id, root_id, root_path, rel_prefix, receipt_rel_path
          FROM decision_scopes WHERE decision_id = ? ORDER BY root_id, rel_prefix",
     )?;
     let rows = stmt.query_map([decision_id], scope_row_from_row)?;
@@ -519,6 +525,19 @@ mod tests {
         let d = fetch_by_id(&conn, id).unwrap().unwrap();
         assert_eq!(d.receipt_root_id, None);
         assert_eq!(d.receipt_rel_path, None);
+    }
+
+    #[test]
+    fn corrupt_scope_json_reads_as_no_scope() {
+        // One corrupt row must not take the whole trail down: an unparseable
+        // decisions.scope value reads as no scope, not a panic or an error.
+        let conn = setup_test_db();
+        let id =
+            insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
+        conn.execute("UPDATE decisions SET scope = 'not json' WHERE id = ?", [id])
+            .unwrap();
+        let d = fetch_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(d.scope, None);
     }
 
     #[test]
