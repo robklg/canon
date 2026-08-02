@@ -447,6 +447,26 @@ pub fn fetch_all_extractions(conn: &Connection) -> Result<Vec<DecisionExtraction
     Ok(rows_out)
 }
 
+/// Fetch every extraction row whose *origin* is the given root — what was
+/// archived from there. Serves the retirement account's event register.
+#[allow(dead_code)]
+pub fn fetch_extractions_by_origin_root(
+    conn: &Connection,
+    root_id: i64,
+) -> Result<Vec<DecisionExtraction>> {
+    let sql = format!(
+        "SELECT {EXTRACTION_COLUMNS} FROM decision_extractions WHERE root_id = ?
+         ORDER BY decision_id, rel_prefix"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([root_id], extraction_from_row)?;
+    let mut rows_out = Vec::new();
+    for row in rows {
+        rows_out.push(row?);
+    }
+    Ok(rows_out)
+}
+
 /// Fetch all extraction rows for the given decisions (chunked). Used to make
 /// JSONL output view-independent (extraction fields present regardless of
 /// which lens surfaced the decision).
@@ -1294,6 +1314,31 @@ mod tests {
             fetch_extractions_by_decisions(&conn, &[d]).unwrap().len(),
             2
         );
+    }
+
+    #[test]
+    fn fetch_extractions_by_origin_root_filters_and_round_trips() {
+        let conn = setup_test_db();
+        let d1 = insert_decision_at(&conn, "apply", 100);
+        let d2 = insert_decision_at(&conn, "apply", 200);
+        replace_extractions(&conn, &[mk_extraction(d1, 1), mk_extraction(d1, 2)]).unwrap();
+        replace_extractions(&conn, &[mk_extraction(d2, 1)]).unwrap();
+
+        let rows = fetch_extractions_by_origin_root(&conn, 1).unwrap();
+        assert_eq!(rows.len(), 2, "root 2's row must not surface");
+        assert!(rows.iter().all(|r| r.root_id == 1));
+        // Full round-trip through the shared mapper.
+        let row = &rows[0];
+        assert_eq!(row.root_path, "/root1");
+        assert_eq!(row.rel_prefix, "2016/italy");
+        assert_eq!(row.files, 47);
+        assert_eq!(row.bytes, Some(3_900_000));
+        assert_eq!(row.destination_path, "/archive/2016/Italy");
+        assert_eq!(row.disposition, Some(OriginDisposition::Retained));
+
+        assert!(fetch_extractions_by_origin_root(&conn, 99)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

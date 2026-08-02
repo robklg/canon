@@ -84,6 +84,38 @@ fn source_from_row(row: &rusqlite::Row) -> rusqlite::Result<Source> {
     })
 }
 
+/// Fetch all absent sources (tombstones, `present = 0`) for the given root
+/// IDs — the mirror of [`batch_fetch_by_roots`]. The retirement account
+/// partitions a root by presence: present rows through the existing fetch,
+/// absent rows through this one.
+#[allow(dead_code)]
+pub fn fetch_absent_by_roots(conn: &Connection, root_ids: &[i64]) -> Result<Vec<Source>> {
+    if root_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut sources = Vec::new();
+    for chunk in root_ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT {} {} WHERE s.present = 0 AND s.root_id IN ({})",
+            SOURCE_COLUMNS,
+            SOURCE_FROM,
+            placeholders.join(",")
+        );
+
+        let params: Vec<Value> = chunk.iter().map(|&id| Value::from(id)).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), source_from_row)?;
+
+        for row in rows {
+            sources.push(row?);
+        }
+    }
+
+    Ok(sources)
+}
+
 /// Fetch all present sources for the given root IDs.
 ///
 /// Returns sources in no particular order. Callers should sort if needed.
@@ -1286,6 +1318,38 @@ mod tests {
         let sources = batch_fetch_by_roots(&conn, &[root_id]).unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].rel_path, "present.jpg");
+    }
+
+    #[test]
+    fn fetch_absent_by_roots_is_the_presence_mirror() {
+        // The exact mirror of batch_fetch_by_roots_excludes_non_present:
+        // same rows, the other presence class.
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "present.jpg", None, true, false);
+        insert_source(&conn, root_id, "deleted.jpg", None, false, false);
+
+        let sources = fetch_absent_by_roots(&conn, &[root_id]).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].rel_path, "deleted.jpg");
+        assert_eq!(sources[0].root_path, "/photos");
+    }
+
+    #[test]
+    fn fetch_absent_by_roots_carries_stamp_and_exclusion_columns() {
+        // The account classifies tombstones by their decision_id stamp; the
+        // mapper must round-trip it (and empty ids stay cheap).
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let id = insert_source(&conn, root_id, "gone.jpg", None, false, false);
+        conn.execute("UPDATE sources SET decision_id = 42 WHERE id = ?", [id])
+            .unwrap();
+
+        assert!(fetch_absent_by_roots(&conn, &[]).unwrap().is_empty());
+        let sources = fetch_absent_by_roots(&conn, &[root_id]).unwrap();
+        assert_eq!(sources[0].decision_id, Some(42));
+        assert!(!sources[0].excluded);
     }
 
     #[test]
