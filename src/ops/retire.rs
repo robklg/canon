@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::domain::config::LedgerConfig;
 use crate::domain::decision::{Decision, DecisionCommand};
@@ -20,9 +20,11 @@ use crate::domain::format::format_size;
 use crate::domain::retire::{
     build_account, build_book_entries, derive_posture, derive_readiness, disposition_word,
     ApplyOrigin, BookEntry, FateContext, Readiness, ResolutionAccount, SourceFate,
-    VerificationPosture,
+    VerificationPosture, STANDING_COVERED, STANDING_MISSING_UNEXPLAINED, STANDING_PRESENT,
 };
-use crate::domain::trail::{decision_family, DecisionFamily, TimelineEvent};
+use crate::domain::trail::{
+    decision_family, fate_transition, DecisionFamily, FateAspect, TimelineEvent,
+};
 use crate::domain::{format_count, Note, Root, Source};
 use crate::ops;
 use crate::ops::ledger::{read_apply_receipt, ReceiptRead};
@@ -734,7 +736,7 @@ struct MetaPosture {
     reason: Option<&'static str>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct MetaCounts {
     entries: i64,
     archived_from_here: i64,
@@ -745,7 +747,7 @@ struct MetaCounts {
     missing_unexplained: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct MetaLedger {
     gathered: bool,
     files: usize,
@@ -952,6 +954,144 @@ fn write_readme(
 
     std::fs::write(dir.join("README.md"), out)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Book verification — the hinge the release movement's safety hangs on
+// ---------------------------------------------------------------------------
+
+/// Lenient read side of `meta.toml` for verification. Identity and account
+/// are prose for the future reader; verification needs only the claims it
+/// can check against the directory.
+#[derive(Deserialize)]
+struct MetaDoc {
+    version: u32,
+    #[serde(default)]
+    gaps: Vec<String>,
+    counts: MetaCounts,
+    ledger: MetaLedger,
+}
+
+#[derive(Deserialize)]
+struct InventoryLineDoc {
+    fate: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct BookVerification {
+    pub entries: i64,
+}
+
+/// Structural verification of a compiled book: parse `meta.toml` back,
+/// stream-count the inventory per fate, and require every artifact the meta
+/// claims. Deliberately not an existence test — a book that fails here is
+/// partial or tampered, and the removal movement must not proceed on it.
+#[allow(dead_code)]
+pub fn verify_book(dir: &Path) -> Result<BookVerification> {
+    let meta_path = dir.join("meta.toml");
+    let meta_raw = std::fs::read_to_string(&meta_path)
+        .with_context(|| format!("Book meta missing or unreadable: {}", meta_path.display()))?;
+    let meta: MetaDoc = toml::from_str(&meta_raw).context("Book meta failed to parse")?;
+    if meta.version != 1 {
+        bail!(
+            "Book meta version {} is not supported by this canon (expected 1)",
+            meta.version
+        );
+    }
+
+    for file in ["README.md", "timeline.md", "notes.md"] {
+        if !dir.join(file).is_file() {
+            bail!("Book is incomplete: {file} is missing");
+        }
+    }
+
+    let inventory = std::fs::File::open(dir.join("inventory.jsonl"))
+        .context("Book is incomplete: inventory.jsonl is missing")?;
+    let reader = std::io::BufReader::new(inventory);
+    let mut counted = MetaCounts {
+        entries: 0,
+        archived_from_here: 0,
+        covered: 0,
+        excluded: 0,
+        deleted: 0,
+        present: 0,
+        missing_unexplained: 0,
+    };
+    // The same word derivations the writer used — the never-literal law
+    // holds on the read side too.
+    let archived = fate_transition(DecisionFamily::Archive, FateAspect::Present)
+        .expect("Archive+Present is a registered transition")
+        .as_str();
+    let excluded = fate_transition(DecisionFamily::Exclude, FateAspect::Present)
+        .expect("Exclude is a registered transition")
+        .as_str();
+    let deleted = fate_transition(DecisionFamily::Observe, FateAspect::Absent)
+        .expect("Observe+Absent is a registered transition")
+        .as_str();
+    for (index, line) in std::io::BufRead::lines(reader).enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let doc: InventoryLineDoc = serde_json::from_str(&line)
+            .with_context(|| format!("inventory.jsonl line {} failed to parse", index + 1))?;
+        counted.entries += 1;
+        match doc.fate.as_str() {
+            w if w == archived => counted.archived_from_here += 1,
+            w if w == excluded => counted.excluded += 1,
+            w if w == deleted => counted.deleted += 1,
+            w if w == STANDING_COVERED => counted.covered += 1,
+            w if w == STANDING_PRESENT => counted.present += 1,
+            w if w == STANDING_MISSING_UNEXPLAINED => counted.missing_unexplained += 1,
+            other => bail!(
+                "inventory.jsonl line {}: unknown fate word {other:?}",
+                index + 1
+            ),
+        }
+    }
+
+    if counted != meta.counts {
+        bail!(
+            "Book counts disagree with the inventory — meta claims {:?}, the inventory holds {:?}",
+            meta.counts,
+            counted
+        );
+    }
+
+    if meta.ledger.gathered {
+        let found = count_files(&dir.join("ledger"))?;
+        if found != meta.ledger.files {
+            bail!(
+                "Book ledger disagrees — meta claims {} gathered files, ledger/ holds {}",
+                meta.ledger.files,
+                found
+            );
+        }
+    } else if meta.gaps.is_empty() {
+        bail!("Book says the ledger was not gathered but records no gap explaining it");
+    }
+
+    Ok(BookVerification {
+        entries: counted.entries,
+    })
+}
+
+fn count_files(dir: &Path) -> Result<usize> {
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let mut count = 0;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            count += count_files(&entry.path())?;
+        } else if file_type.is_file() {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -1546,6 +1686,247 @@ size = 1
         let lines = inventory_lines(&excluded_dest);
         assert_eq!(lines[0]["fate"], "excluded");
         assert_eq!(lines[0]["reason"], "not worth keeping");
+    }
+
+    // verify_book — the round-trip law and tamper detection
+
+    /// A root exercising every fate at once: covered-enriched (archived from
+    /// here), covered plain, excluded, unresolved hashed + unhashed, deleted,
+    /// unexplained, and a receipt-recovered moved entry.
+    fn every_fate_fixture() -> (Connection, tempfile::TempDir, tempfile::TempDir, i64) {
+        let conn = open_in_memory_for_test();
+        let src_dir = tempfile::tempdir().unwrap();
+        let arch_dir = tempfile::tempdir().unwrap();
+        let src_path = src_dir.path().to_str().unwrap().to_string();
+        let arch_path = arch_dir.path().to_str().unwrap().to_string();
+        let root_id = insert_test_root(&conn, &src_path, "source", false);
+        let archive_id = insert_test_root(&conn, &arch_path, "archive", false);
+
+        let copied = insert_object(&conn, "copiedhash");
+        let plain = insert_object(&conn, "plainhash");
+        let uncovered = insert_object(&conn, "uncoveredhash");
+        let moved = insert_object(&conn, "movedhash");
+        insert_source(
+            &conn,
+            archive_id,
+            "a/copied.jpg",
+            Some(copied),
+            true,
+            false,
+            None,
+        );
+        insert_source(
+            &conn,
+            archive_id,
+            "a/plain.jpg",
+            Some(plain),
+            true,
+            false,
+            None,
+        );
+        insert_source(
+            &conn,
+            archive_id,
+            "a/moved.jpg",
+            Some(moved),
+            true,
+            false,
+            None,
+        );
+
+        insert_source(
+            &conn,
+            root_id,
+            "copied.jpg",
+            Some(copied),
+            true,
+            false,
+            None,
+        );
+        insert_source(&conn, root_id, "plain.jpg", Some(plain), true, false, None);
+        let exclude = insert_decision(&conn, "exclude_set", 400);
+        set_decision_extras(&conn, exclude, None, Some("duplicate"));
+        insert_source(&conn, root_id, "junk.jpg", None, true, true, Some(exclude));
+        insert_source(
+            &conn,
+            root_id,
+            "loose.jpg",
+            Some(uncovered),
+            true,
+            false,
+            None,
+        );
+        insert_source(&conn, root_id, "unhashed.jpg", None, true, false, None);
+        let scan = insert_decision(&conn, "scan", 500);
+        insert_source(
+            &conn,
+            root_id,
+            "deleted.jpg",
+            None,
+            false,
+            false,
+            Some(scan),
+        );
+        insert_source(&conn, root_id, "vanished.jpg", None, false, false, None);
+
+        let apply = insert_decision(&conn, "apply", 600);
+        extraction_from(&conn, apply, root_id, 2);
+        let receipt_rel = ".canon-ledger/000001-apply.toml";
+        std::fs::create_dir_all(arch_dir.path().join(".canon-ledger")).unwrap();
+        std::fs::write(
+            arch_dir.path().join(receipt_rel),
+            format!(
+                r#"
+[meta]
+decision_id = {apply}
+origin_disposition = "relocated"
+
+[meta.locus]
+path = "{arch_path}"
+id = {archive_id}
+
+[[items]]
+source_root = "{src_path}"
+source_rel_path = "copied.jpg"
+destination_rel_path = "a/copied.jpg"
+size = 1000
+hash = "sha256:copiedhash"
+mtime = 0
+
+[[items]]
+source_root = "{src_path}"
+source_rel_path = "gone/moved.jpg"
+destination_rel_path = "a/moved.jpg"
+size = 555
+hash = "sha256:movedhash"
+mtime = 1700000000
+"#
+            ),
+        )
+        .unwrap();
+        set_decision_receipt(&conn, apply, archive_id, receipt_rel);
+
+        (conn, src_dir, arch_dir, root_id)
+    }
+
+    #[test]
+    fn round_trip_law_verify_matches_the_compiled_db_state() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let book_dir = tempfile::tempdir().unwrap();
+        let dest = book_dir.path().join("book");
+        let book = compile_to(&conn, root_id, &dest);
+
+        let verified = verify_book(&dest).unwrap();
+        assert_eq!(verified.entries, book.entry_count);
+        assert_eq!(verified.entries, 8);
+
+        let meta: toml::Value =
+            toml::from_str(&std::fs::read_to_string(dest.join("meta.toml")).unwrap()).unwrap();
+        let counts = &meta["counts"];
+        assert_eq!(counts["archived_from_here"].as_integer(), Some(2));
+        assert_eq!(counts["covered"].as_integer(), Some(1));
+        assert_eq!(counts["excluded"].as_integer(), Some(1));
+        assert_eq!(counts["deleted"].as_integer(), Some(1));
+        assert_eq!(counts["present"].as_integer(), Some(2));
+        assert_eq!(counts["missing_unexplained"].as_integer(), Some(1));
+
+        // The account and the book tell one story: covered bucket = the two
+        // covered rows (one enriched into archived-from-here), unresolved =
+        // the present entries, absent buckets match one-to-one.
+        let story = fetch_root_story(&conn, root_id).unwrap();
+        let review = readiness_lens(&story);
+        assert_eq!(review.account.covered, 2);
+        assert_eq!(review.account.excluded, 1);
+        assert_eq!(review.account.unresolved, 2);
+        assert_eq!(review.account.deleted, 1);
+        assert_eq!(review.account.unexplained_missing, 1);
+    }
+
+    #[test]
+    fn verify_book_catches_a_tampered_inventory() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let book_dir = tempfile::tempdir().unwrap();
+        let dest = book_dir.path().join("book");
+        compile_to(&conn, root_id, &dest);
+
+        let inventory = std::fs::read_to_string(dest.join("inventory.jsonl")).unwrap();
+        let truncated: Vec<&str> = inventory.lines().skip(1).collect();
+        std::fs::write(dest.join("inventory.jsonl"), truncated.join("\n")).unwrap();
+
+        let err = verify_book(&dest).unwrap_err();
+        assert!(err.to_string().contains("disagree"));
+    }
+
+    #[test]
+    fn verify_book_requires_the_readme() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let book_dir = tempfile::tempdir().unwrap();
+        let dest = book_dir.path().join("book");
+        compile_to(&conn, root_id, &dest);
+
+        std::fs::remove_file(dest.join("README.md")).unwrap();
+        let err = verify_book(&dest).unwrap_err();
+        assert!(err.to_string().contains("README.md is missing"));
+    }
+
+    #[test]
+    fn verify_book_catches_a_missing_gathered_ledger() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let book_dir = tempfile::tempdir().unwrap();
+        let dest = book_dir.path().join("book");
+        let book = compile_to(&conn, root_id, &dest);
+        assert!(book.ledger_files.is_none() || book.ledger_files == Some(0));
+
+        // Claim a gathered ledger the directory doesn't hold.
+        let meta = std::fs::read_to_string(dest.join("meta.toml")).unwrap();
+        let tampered = meta.replace("files = 0", "files = 3");
+        std::fs::write(dest.join("meta.toml"), tampered).unwrap();
+
+        let err = verify_book(&dest).unwrap_err();
+        assert!(err.to_string().contains("ledger disagrees"));
+    }
+
+    #[test]
+    fn scale_compile_round_trips_past_the_chunking_boundary() {
+        let conn = open_in_memory_for_test();
+        let src_dir = tempfile::tempdir().unwrap();
+        let book_dir = tempfile::tempdir().unwrap();
+        let root_id = insert_test_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_id = insert_test_root(&conn, "/archive", "archive", false);
+
+        conn.execute_batch("BEGIN").unwrap();
+        for i in 0..2000 {
+            let object = insert_object(&conn, &format!("hash{i:05}"));
+            insert_source(
+                &conn,
+                root_id,
+                &format!("d{}/f{i:05}.jpg", i % 7),
+                Some(object),
+                true,
+                false,
+                None,
+            );
+            insert_source(
+                &conn,
+                archive_id,
+                &format!("a/f{i:05}.jpg"),
+                Some(object),
+                true,
+                false,
+                None,
+            );
+        }
+        conn.execute_batch("COMMIT").unwrap();
+
+        let dest = book_dir.path().join("book");
+        let book = compile_to(&conn, root_id, &dest);
+        assert_eq!(book.entry_count, 2000);
+
+        let verified = verify_book(&dest).unwrap();
+        assert_eq!(verified.entries, 2000);
+        let meta: toml::Value =
+            toml::from_str(&std::fs::read_to_string(dest.join("meta.toml")).unwrap()).unwrap();
+        assert_eq!(meta["counts"]["covered"].as_integer(), Some(2000));
     }
 
     #[test]
