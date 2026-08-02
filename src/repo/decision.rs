@@ -319,6 +319,31 @@ pub fn fetch_scope_rows(conn: &Connection, decision_id: i64) -> Result<Vec<Decis
     Ok(rows_out)
 }
 
+/// The receipt reference of the most recent decision with the given command
+/// touching a root (via the decision_scopes index): `(receipt_root_id,
+/// receipt_rel_path)` of the newest such decision that recorded one.
+pub fn fetch_latest_receipt_for_root(
+    conn: &Connection,
+    command: &str,
+    root_id: i64,
+) -> Result<Option<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT d.receipt_root_id, d.receipt_rel_path
+         FROM decisions d
+         JOIN decision_scopes s ON s.decision_id = d.id
+         WHERE d.command = ?1 AND s.root_id = ?2
+           AND d.receipt_root_id IS NOT NULL AND d.receipt_rel_path IS NOT NULL
+         ORDER BY d.created_at DESC, d.id DESC
+         LIMIT 1",
+    )?;
+    let result = stmt
+        .query_row(rusqlite::params![command, root_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()?;
+    Ok(result)
+}
+
 /// Count all decisions.
 pub fn count_all(conn: &Connection) -> Result<i64> {
     let count = conn.query_row("SELECT COUNT(*) FROM decisions", [], |row| row.get(0))?;

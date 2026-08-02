@@ -56,6 +56,8 @@ Suspended roots are hidden from listings, excluded from `scan --all`, and their 
 
 When removing a root, Canon shows how many sources are "in archive" (same content exists in an archive) vs "not in archive", and suggests using `canon ls <path>` to preview which sources will be forgotten.
 
+The confirmation also states what removal means for the root's story. If no retirement artifact exists, Canon says so plainly: removing the root deletes its inventory, notes, and recorded fates — the story will not be reviewable afterward — and points at `canon roots retire` as the way to bind it first. If the root was already retired, the line instead points at where its story is bound. This is information, not a gate: the removal proceeds through the normal confirmation either way.
+
 Removal is itself recorded as a [decision](../../concepts/decisions.md) — add `--reason` to say why the root is going. And while the root's sources, facts, and notes leave the database, its history does not: receipts already written to the root's `.canon-ledger/` stay on the drive, and past decisions keep rendering in [`canon trail`](../query/trail.md) — an apply that drew content from the root still shows its path in `trail show`, marked `(root removed)`, because those records are write-time snapshots, not lookups.
 
 ## Root Specs

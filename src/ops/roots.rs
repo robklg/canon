@@ -19,7 +19,22 @@ pub struct RemoveRootPlan {
     pub in_archive_count: i64,
     pub not_in_archive: i64,
     pub note_count: usize,
+    /// The root's bound story, when one exists: the receipt of the latest
+    /// `roots retire` decision touching this root. `None` means removal
+    /// destroys the only reviewable record.
+    pub retirement: Option<RetirementPointer>,
 }
+
+/// Pointer to a root's retirement artifact (the book).
+pub struct RetirementPointer {
+    pub artifact_display: String,
+}
+
+/// The decision command identifier of the retirement ceremony. The ceremony
+/// itself ships later (retirement epic story 5); until a decision with this
+/// identifier exists the lookup structurally finds nothing — the "no
+/// artifact" arm, which is correct today, not a stub.
+const ROOTS_RETIRE_COMMAND: &str = "roots_retire";
 
 #[allow(dead_code)]
 pub struct RemoveRootResult {
@@ -53,6 +68,20 @@ pub fn plan_remove(conn: &Connection, root_id: i64) -> Result<RemoveRootPlan> {
 
     let note_count = repo::note::count_subtree_notes(conn, root_id, "")?;
 
+    let retirement =
+        repo::decision::fetch_latest_receipt_for_root(conn, ROOTS_RETIRE_COMMAND, root_id)?.map(
+            |(receipt_root_id, rel_path)| {
+                let receipt_root = roots
+                    .iter()
+                    .find(|r| r.id == receipt_root_id)
+                    .map(|r| r.path.clone())
+                    .unwrap_or_else(|| format!("root #{receipt_root_id} (removed)"));
+                RetirementPointer {
+                    artifact_display: format!("{receipt_root}/{rel_path}"),
+                }
+            },
+        );
+
     Ok(RemoveRootPlan {
         root_id,
         root_path: root.path.clone(),
@@ -61,6 +90,7 @@ pub fn plan_remove(conn: &Connection, root_id: i64) -> Result<RemoveRootPlan> {
         in_archive_count,
         not_in_archive,
         note_count,
+        retirement,
     })
 }
 
@@ -289,6 +319,93 @@ mod tests {
         let conn = setup_test_db();
         let result = plan_remove(&conn, 999);
         assert!(result.is_err());
+    }
+
+    fn insert_retire_decision(
+        conn: &Connection,
+        root_id: i64,
+        created_at: i64,
+        receipt_root_id: Option<i64>,
+        receipt_rel_path: Option<&str>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO decisions
+             (command, command_line, status, canon_version, created_at,
+              receipt_root_id, receipt_rel_path)
+             VALUES ('roots_retire', 'canon roots retire', 'completed', '0', ?1, ?2, ?3)",
+            rusqlite::params![created_at, receipt_root_id, receipt_rel_path],
+        )
+        .unwrap();
+        let decision_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO decision_scopes (decision_id, root_id, root_path, rel_prefix)
+             VALUES (?1, ?2, '/photos', '')",
+            rusqlite::params![decision_id, root_id],
+        )
+        .unwrap();
+        decision_id
+    }
+
+    #[test]
+    fn plan_remove_retirement_is_none_on_plain_root() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let plan = plan_remove(&conn, root_id).unwrap();
+        assert!(plan.retirement.is_none());
+    }
+
+    #[test]
+    fn plan_remove_retirement_points_at_the_bound_story() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let archive_id = insert_root(&conn, "/archive", "archive", false);
+        insert_retire_decision(
+            &conn,
+            root_id,
+            100,
+            Some(archive_id),
+            Some(".canon-ledger/retired/000007-roots_retire.toml"),
+        );
+
+        let plan = plan_remove(&conn, root_id).unwrap();
+        let pointer = plan.retirement.expect("retirement pointer");
+        assert_eq!(
+            pointer.artifact_display,
+            "/archive/.canon-ledger/retired/000007-roots_retire.toml"
+        );
+    }
+
+    #[test]
+    fn plan_remove_retirement_uses_the_latest_receipted_decision() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let archive_id = insert_root(&conn, "/archive", "archive", false);
+        insert_retire_decision(&conn, root_id, 100, Some(archive_id), Some("old.toml"));
+        insert_retire_decision(&conn, root_id, 200, Some(archive_id), Some("new.toml"));
+        // Newer still, but no receipt recorded — must not shadow the bound one.
+        insert_retire_decision(&conn, root_id, 300, None, None);
+        // Another root's retirement is not this root's story.
+        let other = insert_root(&conn, "/other", "source", false);
+        insert_retire_decision(&conn, other, 400, Some(archive_id), Some("other.toml"));
+
+        let plan = plan_remove(&conn, root_id).unwrap();
+        assert_eq!(
+            plan.retirement.unwrap().artifact_display,
+            "/archive/new.toml"
+        );
+    }
+
+    #[test]
+    fn plan_remove_retirement_marks_a_removed_receipt_root() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_retire_decision(&conn, root_id, 100, Some(999), Some("book.toml"));
+
+        let plan = plan_remove(&conn, root_id).unwrap();
+        assert_eq!(
+            plan.retirement.unwrap().artifact_display,
+            "root #999 (removed)/book.toml"
+        );
     }
 
     // =========================================================================

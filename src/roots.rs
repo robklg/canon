@@ -6,6 +6,7 @@ use anyhow::Result;
 use crate::ceremony;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
+use crate::domain::format_count;
 use crate::domain::path::resolve_path;
 use crate::domain::scope::DecisionScope;
 use crate::domain::{parse_root_spec, parse_root_spec_any, Root};
@@ -150,6 +151,25 @@ pub fn remove(
             plan.source_count, plan.in_archive_count, plan.not_in_archive
         );
         eprintln!("Files on disk will NOT be deleted.");
+        eprintln!();
+        match &plan.retirement {
+            Some(pointer) => {
+                eprintln!(
+                    "The story of this root is already bound at {}.",
+                    pointer.artifact_display
+                );
+            }
+            None => {
+                eprintln!("No retirement artifact exists for this root.");
+                eprintln!(
+                    "Removing it deletes the inventory of {} sources, {} notes, and the \
+                     recorded fates — the story will not be reviewable afterward.",
+                    format_count(plan.source_count),
+                    format_count(plan.note_count as i64)
+                );
+                eprintln!("To bind it first: canon roots retire {}", plan.root_path);
+            }
+        }
         eprintln!();
         eprintln!("To see which sources will be forgotten:");
         eprintln!("  canon ls {}", plan.root_path);
