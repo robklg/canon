@@ -410,6 +410,25 @@ impl DecisionRecorder {
         self.complete(conn, status, counts, summary);
     }
 
+    /// Point the decision's receipt columns at a durable artifact that is not
+    /// a receipt file — the retirement ceremony's book. The columns hold "the
+    /// decision's durable record", which for every other command happens to be
+    /// a receipt; here the artifact exists independent of receipt settings, so
+    /// this is gated only on recording being enabled (a disabled recorder is a
+    /// no-op). A failure is collected as a warning, never fatal.
+    #[allow(dead_code)]
+    pub fn record_artifact_pointer(&mut self, conn: &Connection, root_id: i64, rel_path: &str) {
+        let Some(id) = self.id else {
+            return;
+        };
+        if let Err(e) = repo::decision::update_receipt_path(conn, id, Some(root_id), Some(rel_path))
+        {
+            self.warnings.push(format!(
+                "Warning: failed to record the artifact pointer: {e}"
+            ));
+        }
+    }
+
     /// Drain accumulated warnings. Returns an empty vec if no warnings.
     pub fn take_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.warnings)
@@ -586,6 +605,37 @@ mod tests {
 
         assert!(recorder.id.is_none());
         assert_eq!(count_decisions(&conn), 0);
+    }
+
+    #[test]
+    fn record_artifact_pointer_sets_receipt_columns() {
+        let conn = setup_test_db();
+        let params = make_params(DecisionCommand::RootsRetire, true);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+
+        recorder.record_artifact_pointer(&conn, 7, "retired/photos-backup-2026-08-02");
+
+        let decision = repo::decision::fetch_by_id(&conn, recorder.id.unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(decision.receipt_root_id, Some(7));
+        assert_eq!(
+            decision.receipt_rel_path.as_deref(),
+            Some("retired/photos-backup-2026-08-02")
+        );
+        assert!(recorder.take_warnings().is_empty());
+    }
+
+    #[test]
+    fn record_artifact_pointer_is_a_noop_when_disabled() {
+        let conn = setup_test_db();
+        let params = make_params(DecisionCommand::RootsRetire, false);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+
+        recorder.record_artifact_pointer(&conn, 7, "retired/photos-backup-2026-08-02");
+
+        assert_eq!(count_decisions(&conn), 0);
+        assert!(recorder.take_warnings().is_empty());
     }
 
     #[test]

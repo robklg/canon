@@ -48,7 +48,7 @@ pub fn decision_family(command: &str) -> DecisionFamily {
         "exclude_set" | "exclude_duplicates" | "exclude_set_object" => DecisionFamily::Exclude,
         "exclude_clear" | "exclude_clear_object" => DecisionFamily::Restore,
         "scan" => DecisionFamily::Observe,
-        "cluster_generate" | "cluster_refresh" | "roots_rm" | "roots_suspend"
+        "cluster_generate" | "cluster_refresh" | "roots_rm" | "roots_retire" | "roots_suspend"
         | "roots_unsuspend" | "import_facts" | "prune" | "facts_delete" | "note_clear" => {
             DecisionFamily::Other
         }
@@ -565,6 +565,7 @@ mod tests {
             (DecisionCommand::ClusterGenerate, DecisionFamily::Other),
             (DecisionCommand::ClusterRefresh, DecisionFamily::Other),
             (DecisionCommand::RootsRm, DecisionFamily::Other),
+            (DecisionCommand::RootsRetire, DecisionFamily::Other),
             (DecisionCommand::RootsSuspend, DecisionFamily::Other),
             (DecisionCommand::RootsUnsuspend, DecisionFamily::Other),
             (DecisionCommand::ImportFacts, DecisionFamily::Other),

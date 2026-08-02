@@ -15,6 +15,7 @@ pub enum DecisionCommand {
     ClusterGenerate,
     ClusterRefresh,
     RootsRm,
+    RootsRetire,
     RootsSuspend,
     RootsUnsuspend,
     ImportFacts,
@@ -36,6 +37,7 @@ impl DecisionCommand {
             Self::ClusterGenerate => "cluster_generate",
             Self::ClusterRefresh => "cluster_refresh",
             Self::RootsRm => "roots_rm",
+            Self::RootsRetire => "roots_retire",
             Self::RootsSuspend => "roots_suspend",
             Self::RootsUnsuspend => "roots_unsuspend",
             Self::ImportFacts => "import_facts",
@@ -117,6 +119,7 @@ mod tests {
         );
         assert_eq!(DecisionCommand::ClusterRefresh.as_str(), "cluster_refresh");
         assert_eq!(DecisionCommand::RootsRm.as_str(), "roots_rm");
+        assert_eq!(DecisionCommand::RootsRetire.as_str(), "roots_retire");
         assert_eq!(DecisionCommand::RootsSuspend.as_str(), "roots_suspend");
         assert_eq!(DecisionCommand::RootsUnsuspend.as_str(), "roots_unsuspend");
         assert_eq!(DecisionCommand::ImportFacts.as_str(), "import_facts");
@@ -138,6 +141,7 @@ mod tests {
             DecisionCommand::ClusterGenerate,
             DecisionCommand::ClusterRefresh,
             DecisionCommand::RootsRm,
+            DecisionCommand::RootsRetire,
             DecisionCommand::RootsSuspend,
             DecisionCommand::RootsUnsuspend,
             DecisionCommand::ImportFacts,

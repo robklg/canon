@@ -115,6 +115,20 @@ pub fn fetch_absent_by_roots(conn: &Connection, root_ids: &[i64]) -> Result<Vec<
     Ok(sources)
 }
 
+/// Count every source row for a root, present and absent alike. One half of
+/// the retirement ceremony's world-moved re-check: computes over SQL exactly
+/// what `readiness_lens` derived from the fetched rows, so equality with the
+/// review-time snapshot means "same world".
+#[allow(dead_code)]
+pub fn count_all_by_root(conn: &Connection, root_id: i64) -> Result<i64> {
+    let count = conn.query_row(
+        "SELECT COUNT(*) FROM sources WHERE root_id = ?1",
+        [root_id],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
 /// Fetch all present sources for the given root IDs.
 ///
 /// Returns sources in no particular order. Callers should sort if needed.
@@ -1317,6 +1331,23 @@ mod tests {
         let sources = batch_fetch_by_roots(&conn, &[root_id]).unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].rel_path, "present.jpg");
+    }
+
+    #[test]
+    fn count_all_by_root_spans_both_presence_classes() {
+        // The world-moved re-check counts what fetch_root_story fetched:
+        // present + absent, this root only.
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let other = crate::repo::insert_test_root(&conn, "/other", "source", false);
+        insert_source(&conn, root_id, "present.jpg", None, true, false);
+        insert_source(&conn, root_id, "deleted.jpg", None, false, false);
+        insert_source(&conn, other, "elsewhere.jpg", None, true, false);
+
+        assert_eq!(count_all_by_root(&conn, root_id).unwrap(), 2);
+        assert_eq!(count_all_by_root(&conn, other).unwrap(), 1);
+        assert_eq!(count_all_by_root(&conn, 999).unwrap(), 0);
     }
 
     #[test]

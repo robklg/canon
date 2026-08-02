@@ -505,6 +505,38 @@ pub fn derive_posture(
     }
 }
 
+/// The book directory's name: the root's last path component slugified
+/// (lowercased; runs of anything non-alphanumeric collapse to a single `-`),
+/// then the retirement date — `/mnt/photos-backup` on 2026-08-02 becomes
+/// `photos-backup-2026-08-02`. A bare `/` falls back to `root`. Collision
+/// handling (same-name siblings on the shelf) is the caller's concern; this
+/// is only the base name.
+#[allow(dead_code)]
+pub fn book_dir_name(root_path: &str, date: &str) -> String {
+    let last = root_path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    let mut slug = String::with_capacity(last.len());
+    let mut pending_dash = false;
+    for c in last.chars() {
+        if c.is_alphanumeric() {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_dash = false;
+            slug.extend(c.to_lowercase());
+        } else {
+            pending_dash = true;
+        }
+    }
+    if slug.is_empty() {
+        slug.push_str("root");
+    }
+    format!("{slug}-{date}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1180,5 +1212,46 @@ mod tests {
             SourceFate::MissingUnexplained.word(),
             STANDING_MISSING_UNEXPLAINED
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // book_dir_name
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn book_dir_name_slugs_the_last_component() {
+        assert_eq!(
+            book_dir_name("/mnt/photos-backup", "2026-08-02"),
+            "photos-backup-2026-08-02"
+        );
+        assert_eq!(
+            book_dir_name("/mnt/drives/Old Laptop", "2026-08-02"),
+            "old-laptop-2026-08-02"
+        );
+        // A trailing slash never changes the name.
+        assert_eq!(
+            book_dir_name("/mnt/photos-backup/", "2026-08-02"),
+            "photos-backup-2026-08-02"
+        );
+    }
+
+    #[test]
+    fn book_dir_name_collapses_punctuation_without_edge_dashes() {
+        // Runs of non-alphanumerics collapse to one dash; none leads or trails.
+        assert_eq!(
+            book_dir_name("/mnt/__weird!!  (copy) __", "2026-08-02"),
+            "weird-copy-2026-08-02"
+        );
+        // Unicode letters survive, lowercased.
+        assert_eq!(
+            book_dir_name("/mnt/Fotoś Über", "2026-08-02"),
+            "fotoś-über-2026-08-02"
+        );
+    }
+
+    #[test]
+    fn book_dir_name_bare_root_falls_back() {
+        assert_eq!(book_dir_name("/", "2026-08-02"), "root-2026-08-02");
+        assert_eq!(book_dir_name("", "2026-08-02"), "root-2026-08-02");
     }
 }

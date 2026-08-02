@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use rusqlite::Connection;
 
-use crate::domain::decision::DecisionStatus;
+use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::format_count;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::repo;
@@ -30,11 +30,12 @@ pub struct RetirementPointer {
     pub artifact_display: String,
 }
 
-/// The decision command identifier of the retirement ceremony. The ceremony
-/// itself ships later (retirement epic story 5); until a decision with this
-/// identifier exists the lookup structurally finds nothing — the "no
-/// artifact" arm, which is correct today, not a stub.
-const ROOTS_RETIRE_COMMAND: &str = "roots_retire";
+/// What `remove_root_data` deleted — the removal mechanics rm and retire
+/// share, under their different decisions.
+pub struct RemovedRootData {
+    pub deleted_sources: i64,
+    pub deleted_notes: usize,
+}
 
 #[allow(dead_code)]
 pub struct RemoveRootResult {
@@ -68,19 +69,21 @@ pub fn plan_remove(conn: &Connection, root_id: i64) -> Result<RemoveRootPlan> {
 
     let note_count = repo::note::count_subtree_notes(conn, root_id, "")?;
 
-    let retirement =
-        repo::decision::fetch_latest_receipt_for_root(conn, ROOTS_RETIRE_COMMAND, root_id)?.map(
-            |(receipt_root_id, rel_path)| {
-                let receipt_root = roots
-                    .iter()
-                    .find(|r| r.id == receipt_root_id)
-                    .map(|r| r.path.clone())
-                    .unwrap_or_else(|| format!("root #{receipt_root_id} (removed)"));
-                RetirementPointer {
-                    artifact_display: format!("{receipt_root}/{rel_path}"),
-                }
-            },
-        );
+    let retirement = repo::decision::fetch_latest_receipt_for_root(
+        conn,
+        DecisionCommand::RootsRetire.as_str(),
+        root_id,
+    )?
+    .map(|(receipt_root_id, rel_path)| {
+        let receipt_root = roots
+            .iter()
+            .find(|r| r.id == receipt_root_id)
+            .map(|r| r.path.clone())
+            .unwrap_or_else(|| format!("root #{receipt_root_id} (removed)"));
+        RetirementPointer {
+            artifact_display: format!("{receipt_root}/{rel_path}"),
+        }
+    });
 
     Ok(RemoveRootPlan {
         root_id,
@@ -94,6 +97,18 @@ pub fn plan_remove(conn: &Connection, root_id: i64) -> Result<RemoveRootPlan> {
     })
 }
 
+/// Delete a root's notes, facts, sources, and root row — the shared removal
+/// mechanics under rm's and retire's different decisions. No transaction
+/// management here; callers establish scope.
+pub fn remove_root_data(conn: &Connection, root_id: i64) -> Result<RemovedRootData> {
+    let deleted_notes = repo::note::delete_by_root(conn, root_id)?;
+    let deleted_sources = repo::root::remove(conn, root_id)?;
+    Ok(RemovedRootData {
+        deleted_sources,
+        deleted_notes,
+    })
+}
+
 /// Execute the removal. Deletes notes, facts, sources, and the root.
 pub fn execute_remove(
     conn: &Connection,
@@ -102,8 +117,8 @@ pub fn execute_remove(
 ) -> Result<RemoveRootResult> {
     let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
-    let deleted_notes = repo::note::delete_by_root(conn, plan.root_id)?;
-    let deleted_sources = repo::root::remove(conn, plan.root_id)?;
+    let removed = remove_root_data(conn, plan.root_id)?;
+    let (deleted_sources, deleted_notes) = (removed.deleted_sources, removed.deleted_notes);
 
     let summary = format!(
         "Removed root {} and {} sources",
@@ -409,8 +424,38 @@ mod tests {
     }
 
     // =========================================================================
-    // execute_remove tests
+    // remove_root_data / execute_remove tests
     // =========================================================================
+
+    #[test]
+    fn remove_root_data_deletes_notes_facts_sources_and_root_row() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let keep = insert_root(&conn, "/archive", "archive", false);
+        let source_id = insert_source(&conn, root_id, "a.jpg");
+        insert_source(&conn, root_id, "b.jpg");
+        insert_note(&conn, root_id, "", "a note");
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev)
+             VALUES ('source', ?1, 'content.Make', 'X', 0, 0)",
+            [source_id],
+        )
+        .unwrap();
+
+        let removed = remove_root_data(&conn, root_id).unwrap();
+        assert_eq!(removed.deleted_sources, 2);
+        assert_eq!(removed.deleted_notes, 1);
+
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM sources"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM notes"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM facts"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM roots"), 1);
+        let survivor: i64 = conn
+            .query_row("SELECT id FROM roots", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(survivor, keep);
+    }
 
     #[test]
     fn execute_remove_deletes_all() {

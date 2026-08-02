@@ -344,6 +344,41 @@ pub fn fetch_latest_receipt_for_root(
     Ok(result)
 }
 
+/// Highest decision id referenced by anything touching a root — source
+/// stamps, scope-index rows, and extraction rows (by origin), the same three
+/// tables `fetch_root_story` draws referenced ids from. The other half of the
+/// retirement ceremony's world-moved re-check.
+///
+/// `exclude` drops exactly one id: the ceremony's own decision, which `begin`
+/// inserted with a scope row for this root — without the exclusion the check
+/// would always trip over itself. A concurrent process's decision has a
+/// different id and correctly trips it.
+#[allow(dead_code)]
+pub fn max_decision_id_touching_root(
+    conn: &Connection,
+    root_id: i64,
+    exclude: Option<i64>,
+) -> Result<Option<i64>> {
+    // In SQLite `x != NULL` is NULL (filtering everything), so a no-exclusion
+    // call passes a sentinel no real rowid can carry.
+    let exclude = exclude.unwrap_or(-1);
+    let max = conn.query_row(
+        "SELECT MAX(m) FROM (
+            SELECT MAX(decision_id) AS m FROM sources
+             WHERE root_id = ?1 AND decision_id IS NOT NULL AND decision_id != ?2
+            UNION ALL
+            SELECT MAX(decision_id) FROM decision_scopes
+             WHERE root_id = ?1 AND decision_id != ?2
+            UNION ALL
+            SELECT MAX(decision_id) FROM decision_extractions
+             WHERE root_id = ?1 AND decision_id != ?2
+         )",
+        [root_id, exclude],
+        |row| row.get(0),
+    )?;
+    Ok(max)
+}
+
 /// Count all decisions.
 pub fn count_all(conn: &Connection) -> Result<i64> {
     let count = conn.query_row("SELECT COUNT(*) FROM decisions", [], |row| row.get(0))?;
@@ -569,6 +604,130 @@ mod tests {
         let d = fetch_by_id(&conn, id).unwrap().unwrap();
         assert_eq!(d.receipt_root_id, None);
         assert_eq!(d.receipt_rel_path, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // max_decision_id_touching_root
+    // -----------------------------------------------------------------------
+
+    /// A decision row with a caller-chosen id (the max queries compare raw
+    /// ids, so tests pick meaningful ones).
+    fn decision_with_id(conn: &Connection, id: i64) {
+        conn.execute(
+            "INSERT INTO decisions (id, command, command_line, status, canon_version, created_at)
+             VALUES (?1, 'scan', 'canon scan', 'completed', '0', 0)",
+            [id],
+        )
+        .unwrap();
+    }
+
+    /// A source row on `root_id` stamped with `decision_id` (absent, like the
+    /// tombstones a scan stamps — presence is irrelevant to the max).
+    fn stamp_source(conn: &Connection, root_id: i64, rel_path: &str, decision_id: i64) {
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime,
+                                  partial_hash, scanned_at, last_seen_at, present, decision_id)
+             VALUES (?1, ?2, 0, 0, 100, 0, 'h', 0, 0, 0, ?3)",
+            rusqlite::params![root_id, rel_path, decision_id],
+        )
+        .unwrap();
+    }
+
+    fn scope_row(conn: &Connection, decision_id: i64, root_id: i64) {
+        conn.execute(
+            "INSERT INTO decision_scopes (decision_id, root_id, rel_prefix) VALUES (?1, ?2, '')",
+            rusqlite::params![decision_id, root_id],
+        )
+        .unwrap();
+    }
+
+    fn extraction_row(conn: &Connection, decision_id: i64, root_id: i64) {
+        conn.execute(
+            "INSERT INTO decision_extractions
+                (decision_id, root_id, root_path, rel_prefix, files, bytes,
+                 destination_root_id, destination_path)
+             VALUES (?1, ?2, '/photos', '', 1, 10, 99, '/archive/x')",
+            rusqlite::params![decision_id, root_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn max_decision_id_takes_the_max_across_all_three_tables() {
+        let conn = setup_test_db();
+        let root = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let other = crate::repo::insert_test_root(&conn, "/other", "source", false);
+        for id in [5, 7, 9, 50] {
+            decision_with_id(&conn, id);
+        }
+
+        // Each table alone can supply the max.
+        stamp_source(&conn, root, "a.jpg", 5);
+        assert_eq!(
+            max_decision_id_touching_root(&conn, root, None).unwrap(),
+            Some(5)
+        );
+        scope_row(&conn, 7, root);
+        assert_eq!(
+            max_decision_id_touching_root(&conn, root, None).unwrap(),
+            Some(7)
+        );
+        extraction_row(&conn, 9, root);
+        assert_eq!(
+            max_decision_id_touching_root(&conn, root, None).unwrap(),
+            Some(9)
+        );
+        // Another root's references never count.
+        scope_row(&conn, 50, other);
+        assert_eq!(
+            max_decision_id_touching_root(&conn, root, None).unwrap(),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn max_decision_id_excludes_exactly_the_given_id() {
+        let conn = setup_test_db();
+        let root = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        for id in [5, 8, 9] {
+            decision_with_id(&conn, id);
+        }
+        stamp_source(&conn, root, "a.jpg", 5);
+        scope_row(&conn, 8, root);
+
+        // The excluded id (the ceremony's own decision) disappears...
+        assert_eq!(
+            max_decision_id_touching_root(&conn, root, Some(8)).unwrap(),
+            Some(5)
+        );
+        // ...but a higher foreign id still wins over the exclusion.
+        scope_row(&conn, 9, root);
+        assert_eq!(
+            max_decision_id_touching_root(&conn, root, Some(8)).unwrap(),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn max_decision_id_empty_root_is_none() {
+        let conn = setup_test_db();
+        let root = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        assert_eq!(
+            max_decision_id_touching_root(&conn, root, None).unwrap(),
+            None
+        );
+        // Unstamped sources contribute nothing.
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime,
+                                  partial_hash, scanned_at, last_seen_at)
+             VALUES (?1, 'a.jpg', 0, 0, 100, 0, 'h', 0, 0)",
+            [root],
+        )
+        .unwrap();
+        assert_eq!(
+            max_decision_id_touching_root(&conn, root, None).unwrap(),
+            None
+        );
     }
 
     #[test]
