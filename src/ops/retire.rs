@@ -13,20 +13,23 @@ use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::config::LedgerConfig;
+use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::{Decision, DecisionCommand};
 use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::domain::format::format_size;
 use crate::domain::retire::{
-    build_account, build_book_entries, derive_posture, derive_readiness, disposition_word,
-    ApplyOrigin, BookEntry, FateContext, Readiness, ResolutionAccount, SourceFate,
-    VerificationPosture, STANDING_COVERED, STANDING_MISSING_UNEXPLAINED, STANDING_PRESENT,
+    book_dir_name, build_account, build_book_entries, derive_posture, derive_readiness,
+    disposition_word, ApplyOrigin, BookEntry, FateContext, Readiness, ResolutionAccount,
+    SourceFate, VerificationPosture, STANDING_COVERED, STANDING_MISSING_UNEXPLAINED,
+    STANDING_PRESENT,
 };
+use crate::domain::scope::DecisionScope;
 use crate::domain::trail::{
     decision_family, fate_transition, DecisionFamily, FateAspect, TimelineEvent,
 };
 use crate::domain::{format_count, Note, Root, Source};
 use crate::ops;
+use crate::ops::decision::{DecisionParams, DecisionRecorder};
 use crate::ops::ledger::{read_apply_receipt, ReceiptRead};
 use crate::ops::trail::{TrailParams, TrailResult, TrailView};
 use crate::repo;
@@ -59,10 +62,8 @@ pub struct ReadinessReview {
     pub readiness: Readiness,
     /// Review-time basis: total source rows (present + absent). Consumed by
     /// the release movement's world-moved re-check.
-    #[allow(dead_code)]
     pub snapshot_source_count: i64,
     /// Review-time basis: highest decision id seen touching this root.
-    #[allow(dead_code)]
     pub snapshot_max_decision_id: Option<i64>,
 }
 
@@ -239,7 +240,6 @@ fn first_scan_of(story: &RootStory) -> Option<i64> {
 // The book compile — the second lens over the story
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 pub struct CompileParams {
     /// The user's `--reason`, bound onto the identity page.
     pub reason: Option<String>,
@@ -251,9 +251,11 @@ pub struct CompileParams {
     pub dest_dir: PathBuf,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct CompiledBook {
+    /// The compile target. The ceremony reports the *placed* path from its
+    /// plan; this one names where the compile itself wrote.
+    #[allow(dead_code)]
     pub dir: PathBuf,
     pub entry_count: i64,
     /// Self-explaining gaps, also recorded in `meta.toml` and the README.
@@ -267,7 +269,6 @@ pub struct CompiledBook {
 /// directory); gaps are recorded inside the book, never silent. The README
 /// is written last, so a partial compile is self-evident: no README, no
 /// complete book.
-#[allow(dead_code)]
 pub fn compile_book(
     conn: &Connection,
     story: &RootStory,
@@ -987,7 +988,6 @@ pub struct BookVerification {
 /// stream-count the inventory per fate, and require every artifact the meta
 /// claims. Deliberately not an existence test — a book that fails here is
 /// partial or tampered, and the removal movement must not proceed on it.
-#[allow(dead_code)]
 pub fn verify_book(dir: &Path) -> Result<BookVerification> {
     let meta_path = dir.join("meta.toml");
     let meta_raw = std::fs::read_to_string(&meta_path)
@@ -1092,6 +1092,327 @@ fn count_files(dir: &Path) -> Result<usize> {
         }
     }
     Ok(count)
+}
+
+// ---------------------------------------------------------------------------
+// The ceremony — plan, begin, bind
+// ---------------------------------------------------------------------------
+
+/// The shelf's directory name at the archive ledger root: a visible place,
+/// deliberately not under `.canon-ledger/` — the books are for human eyes.
+pub const SHELF_DIR: &str = "retired";
+
+/// Where the book will land — computed before any confirmation, so the
+/// interface can state a replacement as awareness, never surprise.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct BindPlan {
+    pub shelf: PathBuf,
+    /// `retired/<name>` — the book's final home.
+    pub final_dir: PathBuf,
+    /// `retired/.compiling-<name>` — the compile target. Inside the shelf so
+    /// the placement rename never crosses a filesystem boundary (atomic).
+    pub temp_dir: PathBuf,
+    pub ledger_root_id: i64,
+    /// A same-root book already stands at `final_dir` (a prior
+    /// aborted-after-bind run) — this run replaces it with a fresh compile.
+    pub replaces_existing: bool,
+    /// `false` → first use: the shelf directory and its README are generated.
+    pub shelf_exists: bool,
+}
+
+/// Resolve the shelf and the book's name. Collision handling is keyed on the
+/// standing book's own `meta.toml` identity — deliberately disk-keyed, never
+/// a decision-row lookup, so convergence survives any recording-mode history:
+/// the same root's book is replaced (a re-run converges); a different root's
+/// book pushes this one to a `-2`/`-3`… sibling; a directory that cannot be
+/// identified refuses the ceremony.
+#[allow(dead_code)]
+pub fn plan_bind(story: &RootStory, config: &LedgerConfig, now: i64) -> Result<BindPlan> {
+    let (ledger_root_id, ledger_root_path) =
+        ops::receipt::resolve_ledger_root(&story.roots, config).ok_or_else(|| {
+            anyhow::anyhow!(
+            "Retirement needs an archive root to hold the record — no archive root is registered"
+        )
+        })?;
+    let shelf = PathBuf::from(&ledger_root_path).join(SHELF_DIR);
+    let base = book_dir_name(&story.root.path, &iso_date(now));
+
+    let mut chosen: Option<(String, bool)> = None;
+    for attempt in 1u32..=99 {
+        let name = if attempt == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{attempt}")
+        };
+        let candidate = shelf.join(&name);
+        if !candidate.exists() {
+            chosen = Some((name, false));
+            break;
+        }
+        let standing_root = read_book_root_path(&candidate)?;
+        if standing_root == story.root.path {
+            chosen = Some((name, true));
+            break;
+        }
+    }
+    let Some((name, replaces_existing)) = chosen else {
+        bail!(
+            "No free book name beside {} after 99 attempts — the shelf needs attention",
+            shelf.join(&base).display()
+        );
+    };
+
+    Ok(BindPlan {
+        final_dir: shelf.join(&name),
+        temp_dir: shelf.join(format!(".compiling-{name}")),
+        shelf_exists: shelf.is_dir(),
+        shelf,
+        ledger_root_id,
+        replaces_existing,
+    })
+}
+
+/// The identity half of a standing book's `meta.toml` — read only to answer
+/// "whose book is this?" during collision planning. Deliberately separate
+/// from `verify_book`'s `MetaDoc`: different question, different tolerance.
+#[derive(Deserialize)]
+struct IdentityProbe {
+    identity: IdentityProbePath,
+}
+
+#[derive(Deserialize)]
+struct IdentityProbePath {
+    path: String,
+}
+
+fn read_book_root_path(dir: &Path) -> Result<String> {
+    let refusal = || {
+        format!(
+            "A directory stands at {} but cannot be identified as a book — refusing to replace what cannot be identified; move it aside and re-run",
+            dir.display()
+        )
+    };
+    let raw = std::fs::read_to_string(dir.join("meta.toml")).with_context(refusal)?;
+    let probe: IdentityProbe = toml::from_str(&raw).with_context(refusal)?;
+    Ok(probe.identity.path)
+}
+
+/// The ceremony's parameters, held for the life of one invocation — the
+/// config is read once, so recording modes cannot change mid-ceremony.
+#[allow(dead_code)]
+pub struct CeremonyParams {
+    /// The user's `--reason`: bound onto the book and the decision row.
+    pub reason: Option<String>,
+    pub now: i64,
+    pub command_line: String,
+    pub config: LedgerConfig,
+}
+
+/// The ceremony across its movements: one decision spanning bind and
+/// release, with the interface's confirmations between them. Ops owns the
+/// ceremony policy (ordering, recording, verification gating); the interface
+/// owns the prompts and the printing.
+#[allow(dead_code)]
+pub struct RetireCeremony {
+    story: RootStory,
+    plan: BindPlan,
+    recorder: DecisionRecorder,
+    reason: Option<String>,
+    now: i64,
+    /// Review-time basis for the release movement's world-moved re-check.
+    #[allow(dead_code)]
+    snapshot_source_count: i64,
+    #[allow(dead_code)]
+    snapshot_max_decision_id: Option<i64>,
+}
+
+/// Start the ceremony's two-phase decision (status: `started` — an
+/// interrupted ceremony is findable from here on). Called after the first
+/// confirmation; a declined prompt records nothing.
+#[allow(dead_code)]
+pub fn begin_ceremony(
+    conn: &Connection,
+    story: RootStory,
+    review: &ReadinessReview,
+    plan: BindPlan,
+    params: CeremonyParams,
+) -> RetireCeremony {
+    let decision = DecisionParams {
+        command: DecisionCommand::RootsRetire,
+        scope: vec![DecisionScope::new(
+            story.root.id,
+            story.root.path.clone(),
+            String::new(),
+        )],
+        command_line: params.command_line,
+        reason: params.reason.clone().filter(|r| !r.trim().is_empty()),
+        record_enabled: params.config.recording != RecordingMode::Off,
+        // The book is the decision's artifact — retire never writes a receipt
+        // file. The pointer columns are recorded separately at bind, gated on
+        // recording alone.
+        receipt_enabled: false,
+        ledger_config: params.config,
+    };
+    let recorder = DecisionRecorder::start(conn, &decision, None);
+
+    RetireCeremony {
+        story,
+        plan,
+        recorder,
+        reason: params.reason,
+        now: params.now,
+        snapshot_source_count: review.snapshot_source_count,
+        snapshot_max_decision_id: review.snapshot_max_decision_id,
+    }
+}
+
+/// The placed, verified book — what the bind movement hands the interface
+/// for the inspection window.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct BoundBook {
+    pub dir: PathBuf,
+    pub entry_count: i64,
+    pub gaps: Vec<String>,
+    pub ledger_files: Option<usize>,
+    pub replaced_previous: bool,
+    pub warnings: Vec<String>,
+}
+
+impl RetireCeremony {
+    /// The bind movement: shelf, compile to temp, verify, place, pointer.
+    ///
+    /// Verify-before-touch is the load-bearing order: the book is verified at
+    /// its temp name, so a standing book is never touched until the fresh one
+    /// is proven whole — and the placement rename is what commits a book, so
+    /// anything still at a temp name was structurally never placed.
+    #[allow(dead_code)]
+    pub fn bind(&mut self, conn: &Connection) -> Result<BoundBook> {
+        if !self.plan.shelf_exists {
+            std::fs::create_dir_all(&self.plan.shelf).with_context(|| {
+                format!(
+                    "Could not create the shelf at {}",
+                    self.plan.shelf.display()
+                )
+            })?;
+        }
+        write_shelf_readme(&self.plan.shelf)?;
+
+        // A leftover temp dir is a compile that was never placed — removable
+        // without ceremony.
+        if self.plan.temp_dir.exists() {
+            std::fs::remove_dir_all(&self.plan.temp_dir).with_context(|| {
+                format!(
+                    "Could not clear the leftover compile at {}",
+                    self.plan.temp_dir.display()
+                )
+            })?;
+        }
+
+        let compiled = compile_book(
+            conn,
+            &self.story,
+            &CompileParams {
+                reason: self.reason.clone(),
+                now: self.now,
+                dest_dir: self.plan.temp_dir.clone(),
+            },
+        )?;
+        verify_book(&self.plan.temp_dir).with_context(|| {
+            format!(
+                "The compiled book failed verification — nothing was placed; the compile is kept for inspection at {}",
+                self.plan.temp_dir.display()
+            )
+        })?;
+
+        place_book(&self.plan)?;
+
+        let name = self
+            .plan
+            .final_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.recorder.record_artifact_pointer(
+            conn,
+            self.plan.ledger_root_id,
+            &format!("{SHELF_DIR}/{name}"),
+        );
+
+        Ok(BoundBook {
+            dir: self.plan.final_dir.clone(),
+            entry_count: compiled.entry_count,
+            gaps: compiled.gaps,
+            ledger_files: compiled.ledger_files,
+            replaced_previous: self.plan.replaces_existing,
+            warnings: self.recorder.take_warnings(),
+        })
+    }
+}
+
+/// Commit the verified temp compile to its final name. In the replacement
+/// case the standing book steps aside first, so there is never a moment with
+/// a partial book at the final name — the only non-atomic instant has both
+/// the old book (aside) and the new one (placed) present.
+fn place_book(plan: &BindPlan) -> Result<()> {
+    if !plan.replaces_existing {
+        return std::fs::rename(&plan.temp_dir, &plan.final_dir)
+            .with_context(|| format!("Could not place the book at {}", plan.final_dir.display()));
+    }
+
+    let name = plan
+        .final_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let aside = plan.shelf.join(format!(".replaced-{name}"));
+    // A leftover aside dir is a book a prior swap already replaced —
+    // removable, same standing as a leftover temp.
+    if aside.exists() {
+        std::fs::remove_dir_all(&aside)?;
+    }
+    std::fs::rename(&plan.final_dir, &aside).with_context(|| {
+        format!(
+            "Could not move the standing book aside at {}",
+            plan.final_dir.display()
+        )
+    })?;
+    std::fs::rename(&plan.temp_dir, &plan.final_dir).with_context(|| {
+        format!(
+            "Could not place the book at {} (the previous book is at {})",
+            plan.final_dir.display(),
+            aside.display()
+        )
+    })?;
+    std::fs::remove_dir_all(&aside)
+        .with_context(|| format!("Could not remove the replaced book at {}", aside.display()))?;
+    Ok(())
+}
+
+/// The shelf explains itself once; the README is never rewritten.
+fn write_shelf_readme(shelf: &Path) -> Result<()> {
+    let path = shelf.join("README.md");
+    if path.exists() {
+        return Ok(());
+    }
+    let text = "\
+# The Shelf
+
+This directory holds the books of retired roots — drives and folders whose
+complete story was compiled by `canon roots retire` before their index was
+removed.
+
+Each book is a plain directory: open its `README.md` and start reading. Books
+are self-contained — inventory, decisions, notes, and receipts in plain,
+stable formats — and are meant to outlive Canon itself. No database and no
+tool is needed to read them.
+
+Keep this directory with your archive. Deleting a book deletes the only
+reviewable story of a root that is already gone.
+";
+    std::fs::write(&path, text)
+        .with_context(|| format!("Could not write the shelf README at {}", path.display()))
 }
 
 #[cfg(test)]
@@ -1951,5 +2272,256 @@ mtime = 1700000000
         )
         .unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    // The ceremony: plan_bind + begin + bind
+
+    const CEREMONY_NOW: i64 = 1_753_000_000;
+
+    fn config_with(recording: RecordingMode) -> LedgerConfig {
+        LedgerConfig {
+            recording,
+            ..LedgerConfig::default()
+        }
+    }
+
+    fn plan_for(conn: &Connection, root_id: i64) -> BindPlan {
+        let story = fetch_root_story(conn, root_id).unwrap();
+        plan_bind(&story, &ledger_config(), CEREMONY_NOW).unwrap()
+    }
+
+    fn begin_with(conn: &Connection, root_id: i64, recording: RecordingMode) -> RetireCeremony {
+        let story = fetch_root_story(conn, root_id).unwrap();
+        let review = readiness_lens(&story);
+        let config = config_with(recording);
+        let plan = plan_bind(&story, &config, CEREMONY_NOW).unwrap();
+        begin_ceremony(
+            conn,
+            story,
+            &review,
+            plan,
+            CeremonyParams {
+                reason: Some("story complete".to_string()),
+                now: CEREMONY_NOW,
+                command_line: "canon roots retire".to_string(),
+                config,
+            },
+        )
+    }
+
+    fn count_retire_decisions(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM decisions WHERE command = 'roots_retire'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// A directory that identifies itself as some root's book — just enough
+    /// meta.toml for the collision probe.
+    fn fake_book(shelf: &std::path::Path, name: &str, root_path: &str) {
+        let dir = shelf.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("meta.toml"),
+            format!("version = 1\n\n[identity]\npath = \"{root_path}\"\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn plan_bind_fresh_shelf_takes_the_plain_name() {
+        let (conn, _src, arch, root_id) = every_fate_fixture();
+        let story = fetch_root_story(&conn, root_id).unwrap();
+
+        let plan = plan_for(&conn, root_id);
+
+        let shelf = arch.path().join(SHELF_DIR);
+        assert_eq!(plan.shelf, shelf);
+        assert!(!plan.shelf_exists);
+        assert!(!plan.replaces_existing);
+        let name = book_dir_name(&story.root.path, &iso_date(CEREMONY_NOW));
+        assert_eq!(plan.final_dir, shelf.join(&name));
+        assert_eq!(plan.temp_dir, shelf.join(format!(".compiling-{name}")));
+    }
+
+    #[test]
+    fn plan_bind_same_root_book_is_a_replacement() {
+        let (conn, _src, arch, root_id) = every_fate_fixture();
+        let story = fetch_root_story(&conn, root_id).unwrap();
+        let shelf = arch.path().join(SHELF_DIR);
+        let name = book_dir_name(&story.root.path, &iso_date(CEREMONY_NOW));
+        fake_book(&shelf, &name, &story.root.path);
+
+        let plan = plan_for(&conn, root_id);
+
+        assert!(plan.replaces_existing);
+        assert_eq!(plan.final_dir, shelf.join(&name));
+    }
+
+    #[test]
+    fn plan_bind_different_root_book_probes_to_a_sibling_name() {
+        let (conn, _src, arch, root_id) = every_fate_fixture();
+        let story = fetch_root_story(&conn, root_id).unwrap();
+        let shelf = arch.path().join(SHELF_DIR);
+        let name = book_dir_name(&story.root.path, &iso_date(CEREMONY_NOW));
+        fake_book(&shelf, &name, "/somebody/else");
+
+        let plan = plan_for(&conn, root_id);
+        assert!(!plan.replaces_existing);
+        assert_eq!(plan.final_dir, shelf.join(format!("{name}-2")));
+
+        // A second stranger pushes to -3.
+        fake_book(&shelf, &format!("{name}-2"), "/a/third/party");
+        let plan = plan_for(&conn, root_id);
+        assert_eq!(plan.final_dir, shelf.join(format!("{name}-3")));
+    }
+
+    #[test]
+    fn plan_bind_refuses_an_unidentifiable_directory() {
+        let (conn, _src, arch, root_id) = every_fate_fixture();
+        let story = fetch_root_story(&conn, root_id).unwrap();
+        let shelf = arch.path().join(SHELF_DIR);
+        let name = book_dir_name(&story.root.path, &iso_date(CEREMONY_NOW));
+        // A directory at the book's name with no meta.toml at all.
+        std::fs::create_dir_all(shelf.join(&name)).unwrap();
+
+        let err = plan_bind(
+            &fetch_root_story(&conn, root_id).unwrap(),
+            &ledger_config(),
+            CEREMONY_NOW,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("refusing to replace"), "{err:#}");
+    }
+
+    #[test]
+    fn bind_places_a_verified_book_and_records_the_pointer() {
+        let (conn, _src, arch, root_id) = every_fate_fixture();
+        let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+
+        let bound = ceremony.bind(&conn).unwrap();
+
+        assert!(bound.dir.is_dir());
+        assert_eq!(bound.entry_count, 8);
+        assert!(!bound.replaced_previous);
+        assert!(bound.warnings.is_empty(), "{:?}", bound.warnings);
+        verify_book(&bound.dir).unwrap();
+        assert!(arch.path().join(SHELF_DIR).join("README.md").is_file());
+        // No compile residue on the shelf.
+        assert!(!ceremony.plan.temp_dir.exists());
+
+        // The decision is still open (release hasn't run) but the pointer is
+        // already recorded — abort-after-bind stays findable.
+        let decision_id = ceremony.recorder.decision_id().unwrap();
+        let decision = repo::decision::fetch_by_id(&conn, decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decision.status, "started");
+        let name = bound.dir.file_name().unwrap().to_string_lossy();
+        assert_eq!(
+            decision.receipt_rel_path.as_deref(),
+            Some(format!("{SHELF_DIR}/{name}").as_str())
+        );
+        let (arch_id, _) = ops::receipt::resolve_ledger_root(
+            &fetch_root_story(&conn, root_id).unwrap().roots,
+            &ledger_config(),
+        )
+        .unwrap();
+        assert_eq!(decision.receipt_root_id, Some(arch_id));
+    }
+
+    #[test]
+    fn bind_clears_a_leftover_temp_compile() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+        std::fs::create_dir_all(&ceremony.plan.temp_dir).unwrap();
+        std::fs::write(ceremony.plan.temp_dir.join("junk.txt"), "leftover").unwrap();
+
+        let bound = ceremony.bind(&conn).unwrap();
+
+        verify_book(&bound.dir).unwrap();
+        assert!(!ceremony.plan.temp_dir.exists());
+    }
+
+    #[test]
+    fn shelf_readme_is_written_once_and_kept() {
+        let (conn, _src, arch, root_id) = every_fate_fixture();
+        let shelf = arch.path().join(SHELF_DIR);
+        std::fs::create_dir_all(&shelf).unwrap();
+        std::fs::write(shelf.join("README.md"), "my own shelf notes\n").unwrap();
+
+        let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+        ceremony.bind(&conn).unwrap();
+
+        let readme = std::fs::read_to_string(shelf.join("README.md")).unwrap();
+        assert_eq!(readme, "my own shelf notes\n");
+    }
+
+    #[test]
+    fn bind_replaces_a_standing_same_root_book_without_residue() {
+        let (conn, _src, arch, root_id) = every_fate_fixture();
+
+        // First ceremony binds, then is abandoned before release.
+        let mut first = begin_with(&conn, root_id, RecordingMode::Full);
+        let first_book = first.bind(&conn).unwrap();
+        let sentinel = first_book.dir.join("meta.toml");
+        let first_meta = std::fs::read_to_string(&sentinel).unwrap();
+
+        // The re-run converges: same name, fresh compile, old book gone.
+        let mut second = begin_with(&conn, root_id, RecordingMode::Full);
+        assert!(second.plan.replaces_existing);
+        let second_book = second.bind(&conn).unwrap();
+
+        assert!(second_book.replaced_previous);
+        assert_eq!(second_book.dir, first_book.dir);
+        verify_book(&second_book.dir).unwrap();
+        // Same content class, freshly written (the compile stamps the same
+        // now, so compare by mtime-independent means: the file was replaced).
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), first_meta);
+
+        // No swap residue on the shelf: only the book and the README.
+        let shelf = arch.path().join(SHELF_DIR);
+        let mut names: Vec<String> = std::fs::read_dir(&shelf)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        let book_name = second_book.dir.file_name().unwrap().to_string_lossy();
+        assert_eq!(names, vec!["README.md".to_string(), book_name.to_string()]);
+    }
+
+    #[test]
+    fn bind_failure_at_placement_leaves_the_verified_temp_standing() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+
+        // The plan saw a free final name; an interloper appears before the
+        // rename (a concurrent process racing the shelf). Placement must
+        // fail, and fail without touching anything.
+        std::fs::create_dir_all(&ceremony.plan.final_dir).unwrap();
+        std::fs::write(ceremony.plan.final_dir.join("interloper.txt"), "mine").unwrap();
+
+        let err = ceremony.bind(&conn).unwrap_err();
+        assert!(err.to_string().contains("Could not place"), "{err:#}");
+
+        // The verified compile still stands at its temp name for inspection…
+        verify_book(&ceremony.plan.temp_dir).unwrap();
+        // …and the interloper is untouched.
+        let interloper = ceremony.plan.final_dir.join("interloper.txt");
+        assert_eq!(std::fs::read_to_string(interloper).unwrap(), "mine");
+    }
+
+    #[test]
+    fn bind_under_recording_off_places_the_book_and_indexes_nothing() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let mut ceremony = begin_with(&conn, root_id, RecordingMode::Off);
+
+        let bound = ceremony.bind(&conn).unwrap();
+
+        verify_book(&bound.dir).unwrap();
+        assert!(bound.warnings.is_empty(), "{:?}", bound.warnings);
+        assert_eq!(count_retire_decisions(&conn), 0);
     }
 }

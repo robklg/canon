@@ -511,7 +511,6 @@ pub fn derive_posture(
 /// `photos-backup-2026-08-02`. A bare `/` falls back to `root`. Collision
 /// handling (same-name siblings on the shelf) is the caller's concern; this
 /// is only the base name.
-#[allow(dead_code)]
 pub fn book_dir_name(root_path: &str, date: &str) -> String {
     let last = root_path
         .trim_end_matches('/')

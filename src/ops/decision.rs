@@ -416,7 +416,6 @@ impl DecisionRecorder {
     /// a receipt; here the artifact exists independent of receipt settings, so
     /// this is gated only on recording being enabled (a disabled recorder is a
     /// no-op). A failure is collected as a warning, never fatal.
-    #[allow(dead_code)]
     pub fn record_artifact_pointer(&mut self, conn: &Connection, root_id: i64, rel_path: &str) {
         let Some(id) = self.id else {
             return;
