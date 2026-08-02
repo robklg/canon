@@ -88,7 +88,6 @@ fn source_from_row(row: &rusqlite::Row) -> rusqlite::Result<Source> {
 /// IDs — the mirror of [`batch_fetch_by_roots`]. The retirement account
 /// partitions a root by presence: present rows through the existing fetch,
 /// absent rows through this one.
-#[allow(dead_code)]
 pub fn fetch_absent_by_roots(conn: &Connection, root_ids: &[i64]) -> Result<Vec<Source>> {
     if root_ids.is_empty() {
         return Ok(Vec::new());

@@ -129,6 +129,12 @@ pub fn check_destination_writable(base_dir: &Path) -> Result<()> {
     }
 }
 
+/// Whether the path exists and is a directory — the reachability probe for
+/// review surfaces (a disconnected drive reads as unreachable, not an error).
+pub fn dir_exists(path: &Path) -> bool {
+    path.is_dir()
+}
+
 /// Create parent directories for a path.
 pub fn ensure_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {

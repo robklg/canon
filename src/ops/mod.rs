@@ -18,6 +18,7 @@ pub mod ledger;
 pub mod ls;
 pub mod note;
 pub mod receipt;
+pub mod retire;
 pub mod roots;
 pub mod scan;
 pub mod scope;

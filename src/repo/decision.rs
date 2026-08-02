@@ -449,7 +449,6 @@ pub fn fetch_all_extractions(conn: &Connection) -> Result<Vec<DecisionExtraction
 
 /// Fetch every extraction row whose *origin* is the given root — what was
 /// archived from there. Serves the retirement account's event register.
-#[allow(dead_code)]
 pub fn fetch_extractions_by_origin_root(
     conn: &Connection,
     root_id: i64,
