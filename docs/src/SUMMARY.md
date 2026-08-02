@@ -13,6 +13,7 @@
   - [Sources v. Objects](./concepts/source-object.md)
   - [Facts](concepts/facts.md)
   - [Decision Provenance](concepts/decisions.md)
+  - [Retirement, the Book, and the Shelf](concepts/retirement.md)
 - [Commands](commands/index.md)
   - [Managing Roots](commands/roots/index.md)
     - [`scan`](commands/roots/scan.md)

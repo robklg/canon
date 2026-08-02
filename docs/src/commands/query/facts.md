@@ -81,12 +81,12 @@ Example grouped output (`--by-root`):
 source.ext (by root)
 
 jpg (total: 12,500, 36.0%)
-  id:1  ...stack/Backup/Pictures          8,000   64.0%
-  id:2  ...castor-import/gringo           4,500   36.0%
+  id:1  ...OldBackup/Backup/Pictures          8,000   64.0%
+  id:2  ...import/photos-backup           4,500   36.0%
 
 png (total: 8,200, 23.6%)
-  id:1  ...stack/Backup/Pictures          5,000   61.0%
-  id:3  ...castor-import/hydra            3,200   39.0%
+  id:1  ...OldBackup/Backup/Pictures          5,000   61.0%
+  id:3  ...laptop-import/media            3,200   39.0%
 ```
 
 See also: [`facts delete`](../maintain/facts-delete.md) for removing incorrect metadata, [`prune`](../maintain/prune.md) for cleaning up stale or orphaned data.

@@ -8,7 +8,7 @@ and nothing else. This page is the format contract.
 A book directory contains:
 
 ```
-old-drive-2026-08-02/
+photos-backup-2026-08-02/
 ├── README.md         the human entry point — start here
 ├── inventory.jsonl   every source the root ever had, with fates
 ├── timeline.md       every decision that touched the root, with reasons
@@ -37,10 +37,11 @@ any index. Fields:
 | `mtime` | usually | Modification time, ISO-8601 UTC (`2015-06-12T09:30:00Z`); absent only on entries recovered from receipts that predate per-item mtimes |
 | `hash` | where known | Content hash with algorithm prefix (`sha256:…`) |
 | `fate` | always | What happened to this source — see the vocabulary below |
+| `decision` | where recorded | The fate-determining decision: for `archived`, the apply; for `excluded`/`deleted`, the decision that stamped it; for the standings, the source's most recent recorded transition. Cross-references the timeline's `#N` and the `NNNNNN-command.toml` receipt filenames — in the gathered `ledger/` for drive-local receipts, in the archive's live ledger for apply and exclusion receipts |
 | `verification` | always | `content_verified` (hashed) or `name_only` (listed by name; never content-verified) |
 | `disposition` | archived only | `moved` or `copied`; absent when the record predates the vocabulary — omitted, never guessed |
 | `destination` | archived only | The recorded destination of the apply — readable without Canon |
-| `locations` | where known | Archive paths holding this content at compile time (the live tier; `destination` is the recorded fallback) |
+| `locations` | where known | Archive paths holding this content at compile time (the live tier; `destination` is the recorded fallback). Zero-byte sources carry no location lists: every empty file shares the one empty-content object, so the list would answer nothing about this file |
 | `reason` | where recorded | The user's reason on the excluding/deleting decision |
 
 ### Fate vocabulary
@@ -67,7 +68,10 @@ this distinction is the whole book, and the book says so plainly.
 Every decision that touched the root, oldest first: date, decision id, command, the
 decision's summary as Canon printed it at the time, and the user's reason beneath.
 Global decisions (which touch the whole universe, not this root specifically) are
-counted at the end rather than listed.
+counted at the end rather than listed. The retirement's own in-flight decision is
+not listed — the book is compiled before the release completes, so that decision
+cannot narrate itself; the retirement's facts live on the identity page. A *prior*
+retirement attempt (bound but not released) is history and is listed.
 
 ## notes.md
 
@@ -90,8 +94,10 @@ The machine-readable half, `version = 1`:
 - `gaps` — every self-explaining gap: unreadable receipts (per-item origin degraded
   to `covered`), an ungathered ledger, and so on. An empty list is a claim: nothing
   this book should hold is missing from it.
-- `[identity]` — path, role, comment, suspension, first/last scan, `compiled_at`,
-  the user's reason, and the Canon version that wrote the book.
+- `[identity]` — path, role, comment, suspension, `first_indexed` (when the earliest
+  surviving row was first indexed — row evidence, honest on roots older than
+  decision recording), last scan, `compiled_at`, the user's reason, and the Canon
+  version that wrote the book.
 - `[account]` — the resolution account in counts: the story so far (archived files
   and bytes with the moved/copied split, deleted, unexplained missing) and the
   standing at binding (covered, excluded, unresolved). Bytes and derived totals are
