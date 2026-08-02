@@ -715,7 +715,10 @@ pub fn write_deletion_receipts(
             ),
             items,
         };
-        let placement = ReceiptPlacement::LedgerRoot { root_id, root_path };
+        let placement = ReceiptPlacement::LedgerRoot {
+            root_id,
+            root_path: root_path.clone(),
+        };
         if let Some(receipt_ref) =
             recorder.write_placed_receipt(&placement, command, &receipt, summary)
         {
@@ -723,6 +726,7 @@ pub fn write_deletion_receipts(
                 conn,
                 decision_id,
                 receipt_ref.root_id,
+                &root_path,
                 &receipt_ref.rel_path,
             ) {
                 recorder.push_warning(format!(

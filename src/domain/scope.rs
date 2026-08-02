@@ -102,9 +102,46 @@ impl DecisionScope {
         }
     }
 
-    /// The `(root_id, rel_prefix)` pair for the `decision_scopes` index.
-    pub fn index_pair(&self) -> (i64, String) {
-        (self.root_id, self.rel_prefix.clone())
+    /// The `(root_id, root_path, rel_prefix)` row for the `decision_scopes`
+    /// index. `root_path` is a write-time snapshot (the same precedent as
+    /// `decision_extractions`): it keeps the row renderable after the root is
+    /// removed, when a live join can no longer resolve the path.
+    pub fn index_row(&self) -> (i64, String, String) {
+        (
+            self.root_id,
+            self.root_path.clone(),
+            self.rel_prefix.clone(),
+        )
+    }
+}
+
+/// Recover a scope row's root path from its decision's display paths.
+///
+/// A `decision_scopes` row written before root-path snapshots existed only has
+/// `rel_prefix`; the decision's `scope` column holds display paths of the form
+/// `root_path` or `root_path/rel_prefix` (see [`DecisionScope::display_path`]).
+/// Given the row's known `rel_prefix`, the root path is the candidate with that
+/// suffix stripped at a path boundary. NULL-over-guess: exactly one candidate
+/// must match — ambiguity or no match returns `None` and the row stays
+/// unrecovered rather than wrong.
+pub fn recover_root_path(candidates: &[String], rel_prefix: &str) -> Option<String> {
+    let matches: Vec<String> = if rel_prefix.is_empty() {
+        // A whole-root scope's display IS the root path; only an unambiguous
+        // single-candidate decision can attribute it.
+        candidates.to_vec()
+    } else {
+        let suffix = format!("/{rel_prefix}");
+        candidates
+            .iter()
+            .filter_map(|c| {
+                let stripped = c.strip_suffix(&suffix)?;
+                (!stripped.is_empty()).then(|| stripped.to_string())
+            })
+            .collect()
+    };
+    match matches.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
     }
 }
 
@@ -136,9 +173,9 @@ mod decision_scope_tests {
     }
 
     #[test]
-    fn index_pair_round_trips() {
+    fn index_row_round_trips() {
         let s = DecisionScope::new(7, "/r".to_string(), "sub".to_string());
-        assert_eq!(s.index_pair(), (7, "sub".to_string()));
+        assert_eq!(s.index_row(), (7, "/r".to_string(), "sub".to_string()));
     }
 
     #[test]
@@ -183,7 +220,71 @@ mod decision_scope_tests {
             &roots,
         );
         assert_eq!(scopes.len(), 1);
-        assert_eq!(scopes[0].index_pair(), (1, "2016".to_string()));
+        assert_eq!(
+            scopes[0].index_row(),
+            (1, "/vol/photos".to_string(), "2016".to_string())
+        );
+    }
+
+    // recover_root_path — NULL-over-guess recovery for pre-snapshot rows
+
+    #[test]
+    fn recover_is_the_inverse_of_display_path() {
+        // The law that keeps the pair honest: for any scope, recovering from its
+        // own display path with its own rel_prefix yields its root path.
+        for (root_path, rel_prefix) in [
+            ("/vol/photos", ""),
+            ("/vol/photos", "2016"),
+            ("/vol/photos", "2016/italy"),
+            ("/r", "a/b/c"),
+        ] {
+            let s = DecisionScope::new(1, root_path.to_string(), rel_prefix.to_string());
+            assert_eq!(
+                recover_root_path(&[s.display_path()], &s.rel_prefix),
+                Some(s.root_path.clone()),
+                "failed for ({root_path}, {rel_prefix})"
+            );
+        }
+    }
+
+    #[test]
+    fn recover_strips_known_suffix_at_path_boundary() {
+        let candidates = vec!["/vol/photos/2016/italy".to_string()];
+        assert_eq!(
+            recover_root_path(&candidates, "2016/italy"),
+            Some("/vol/photos".to_string())
+        );
+    }
+
+    #[test]
+    fn recover_empty_prefix_needs_single_candidate() {
+        let one = vec!["/vol/photos".to_string()];
+        assert_eq!(recover_root_path(&one, ""), Some("/vol/photos".to_string()));
+        let two = vec!["/vol/photos".to_string(), "/vol/music".to_string()];
+        assert_eq!(recover_root_path(&two, ""), None);
+    }
+
+    #[test]
+    fn recover_ambiguous_suffix_is_none() {
+        let candidates = vec!["/a/sub".to_string(), "/b/sub".to_string()];
+        assert_eq!(recover_root_path(&candidates, "sub"), None);
+    }
+
+    #[test]
+    fn recover_no_match_is_none() {
+        let candidates = vec!["/vol/photos/2016".to_string()];
+        assert_eq!(recover_root_path(&candidates, "2017"), None);
+    }
+
+    #[test]
+    fn recover_requires_path_boundary_not_substring() {
+        // "/a/bc" must not recover for prefix "c" — suffix match is
+        // boundary-safe by construction ("/c" is not a suffix of "/a/bc"),
+        // and a candidate equal to "/" + prefix leaves an empty root.
+        let candidates = vec!["/a/bc".to_string()];
+        assert_eq!(recover_root_path(&candidates, "c"), None);
+        let root_is_empty = vec!["/sub".to_string()];
+        assert_eq!(recover_root_path(&root_is_empty, "sub"), None);
     }
 
     #[test]

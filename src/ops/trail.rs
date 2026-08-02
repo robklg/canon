@@ -627,8 +627,19 @@ mod tests {
     }
 
     fn scope(conn: &Connection, decision_id: i64, root_id: i64, rel_prefix: &str) {
-        repo::decision::insert_scopes(conn, decision_id, &[(root_id, rel_prefix.to_string())])
-            .unwrap();
+        // Mirror production: scope rows snapshot the root's path at write time.
+        // A root the test never inserted gets a synthetic path, like a legacy row.
+        let root_path: String = conn
+            .query_row("SELECT path FROM roots WHERE id = ?", [root_id], |r| {
+                r.get(0)
+            })
+            .unwrap_or_else(|_| format!("/removed/{root_id}"));
+        repo::decision::insert_scopes(
+            conn,
+            decision_id,
+            &[(root_id, root_path, rel_prefix.to_string())],
+        )
+        .unwrap();
     }
 
     fn params(prefixes: Vec<String>) -> TrailParams {
@@ -1880,10 +1891,11 @@ mod tests {
         let root = insert_test_root(&conn, "/a", "source", false);
         let d = insert_decision_at(&conn, "scan", 100);
         scope(&conn, d, root, "");
-        repo::decision::set_scope_receipt(&conn, d, root, ".canon-ledger/000001-scan.toml")
+        repo::decision::set_scope_receipt(&conn, d, root, "/a", ".canon-ledger/000001-scan.toml")
             .unwrap();
         // A second, since-removed root also wrote a receipt.
-        repo::decision::set_scope_receipt(&conn, d, 999, ".canon-ledger/000001-scan.toml").unwrap();
+        repo::decision::set_scope_receipt(&conn, d, 999, "/gone", ".canon-ledger/000001-scan.toml")
+            .unwrap();
 
         let show = compute_show(&conn, d).unwrap().unwrap();
         assert_eq!(show.receipts.len(), 2);

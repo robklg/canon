@@ -101,16 +101,20 @@ pub fn update_scope_display(conn: &Connection, id: i64, scope: &[String]) -> Res
 /// left untouched (its `receipt_rel_path`, if any, is preserved). This lets scan
 /// record newly-created roots at completion without duplicating the rows written
 /// at `start()`.
-pub fn insert_scopes(conn: &Connection, decision_id: i64, pairs: &[(i64, String)]) -> Result<()> {
-    for (root_id, rel_prefix) in pairs {
+pub fn insert_scopes(
+    conn: &Connection,
+    decision_id: i64,
+    rows: &[(i64, String, String)],
+) -> Result<()> {
+    for (root_id, root_path, rel_prefix) in rows {
         conn.execute(
-            "INSERT INTO decision_scopes (decision_id, root_id, rel_prefix)
-             SELECT ?1, ?2, ?3
+            "INSERT INTO decision_scopes (decision_id, root_id, root_path, rel_prefix)
+             SELECT ?1, ?2, ?3, ?4
              WHERE NOT EXISTS (
                  SELECT 1 FROM decision_scopes
-                 WHERE decision_id = ?1 AND root_id = ?2 AND rel_prefix = ?3
+                 WHERE decision_id = ?1 AND root_id = ?2 AND rel_prefix = ?4
              )",
-            rusqlite::params![decision_id, root_id, rel_prefix],
+            rusqlite::params![decision_id, root_id, root_path, rel_prefix],
         )?;
     }
     Ok(())
@@ -128,18 +132,20 @@ pub fn set_scope_receipt(
     conn: &Connection,
     decision_id: i64,
     root_id: i64,
+    root_path: &str,
     rel_path: &str,
 ) -> Result<()> {
     let updated = conn.execute(
-        "UPDATE decision_scopes SET receipt_rel_path = ?3
+        "UPDATE decision_scopes
+         SET receipt_rel_path = ?3, root_path = COALESCE(root_path, ?4)
          WHERE decision_id = ?1 AND root_id = ?2",
-        rusqlite::params![decision_id, root_id, rel_path],
+        rusqlite::params![decision_id, root_id, rel_path, root_path],
     )?;
     if updated == 0 {
         conn.execute(
-            "INSERT INTO decision_scopes (decision_id, root_id, rel_prefix, receipt_rel_path)
-             VALUES (?1, ?2, '', ?3)",
-            rusqlite::params![decision_id, root_id, rel_path],
+            "INSERT INTO decision_scopes (decision_id, root_id, root_path, rel_prefix, receipt_rel_path)
+             VALUES (?1, ?2, ?3, '', ?4)",
+            rusqlite::params![decision_id, root_id, root_path, rel_path],
         )?;
     }
     Ok(())
@@ -587,7 +593,10 @@ mod tests {
         insert_scopes(
             &conn,
             decision_id,
-            &[(1, "photos".to_string()), (2, String::new())],
+            &[
+                (1, "/vol/a".to_string(), "photos".to_string()),
+                (2, "/vol/b".to_string(), String::new()),
+            ],
         )
         .unwrap();
 
@@ -599,6 +608,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 2);
+
+        // The write-time root_path snapshot lands on the row.
+        let snapshot: String = conn
+            .query_row(
+                "SELECT root_path FROM decision_scopes WHERE decision_id = ? AND root_id = 1",
+                [decision_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(snapshot, "/vol/a");
     }
 
     #[test]
@@ -618,8 +637,18 @@ mod tests {
         )
         .unwrap();
 
-        insert_scopes(&conn, decision_id, &[(3, String::new())]).unwrap();
-        insert_scopes(&conn, decision_id, &[(3, String::new())]).unwrap();
+        insert_scopes(
+            &conn,
+            decision_id,
+            &[(3, "/vol/c".to_string(), String::new())],
+        )
+        .unwrap();
+        insert_scopes(
+            &conn,
+            decision_id,
+            &[(3, "/vol/c".to_string(), String::new())],
+        )
+        .unwrap();
 
         let count: i64 = conn
             .query_row(
@@ -648,8 +677,20 @@ mod tests {
         )
         .unwrap();
 
-        set_scope_receipt(&conn, decision_id, 4, ".canon-ledger/000001-scan.toml").unwrap();
-        insert_scopes(&conn, decision_id, &[(4, String::new())]).unwrap();
+        set_scope_receipt(
+            &conn,
+            decision_id,
+            4,
+            "/vol/d",
+            ".canon-ledger/000001-scan.toml",
+        )
+        .unwrap();
+        insert_scopes(
+            &conn,
+            decision_id,
+            &[(4, "/vol/d".to_string(), String::new())],
+        )
+        .unwrap();
 
         let (count, receipt): (i64, Option<String>) = conn
             .query_row(
@@ -677,9 +718,14 @@ mod tests {
             None,
         )
         .unwrap();
-        insert_scopes(&conn, decision_id, &[(7, "photos".to_string())]).unwrap();
+        insert_scopes(
+            &conn,
+            decision_id,
+            &[(7, "/vol/e".to_string(), "photos".to_string())],
+        )
+        .unwrap();
 
-        set_scope_receipt(&conn, decision_id, 7, "000042-scan.toml").unwrap();
+        set_scope_receipt(&conn, decision_id, 7, "/vol/e", "000042-scan.toml").unwrap();
 
         let (prefix, receipt): (String, Option<String>) = conn
             .query_row(
@@ -710,7 +756,7 @@ mod tests {
         )
         .unwrap();
 
-        set_scope_receipt(&conn, decision_id, 3, "000009-scan.toml").unwrap();
+        set_scope_receipt(&conn, decision_id, 3, "/vol/f", "000009-scan.toml").unwrap();
 
         let (prefix, receipt): (String, Option<String>) = conn
             .query_row(
@@ -739,8 +785,8 @@ mod tests {
         )
         .unwrap();
 
-        set_scope_receipt(&conn, decision_id, 5, "000001-scan.toml").unwrap();
-        set_scope_receipt(&conn, decision_id, 5, "000001-scan.toml").unwrap();
+        set_scope_receipt(&conn, decision_id, 5, "/vol/g", "000001-scan.toml").unwrap();
+        set_scope_receipt(&conn, decision_id, 5, "/vol/g", "000001-scan.toml").unwrap();
 
         // Second call updates the row inserted by the first — no duplicate.
         let count: i64 = conn
@@ -779,8 +825,8 @@ mod tests {
             None,
         )
         .unwrap();
-        set_scope_receipt(&conn, d1, 2, "000001-scan.toml").unwrap();
-        set_scope_receipt(&conn, d2, 9, "000002-scan.toml").unwrap();
+        set_scope_receipt(&conn, d1, 2, "/vol/h", "000001-scan.toml").unwrap();
+        set_scope_receipt(&conn, d2, 9, "/vol/i", "000002-scan.toml").unwrap();
 
         let (did, receipt): (i64, String) = conn
             .query_row(
@@ -1099,7 +1145,7 @@ mod tests {
     fn count_unscoped_ignores_scoped_decisions() {
         let conn = setup_test_db();
         let scoped = insert_decision_at(&conn, "scan", 100);
-        insert_scopes(&conn, scoped, &[(1, String::new())]).unwrap();
+        insert_scopes(&conn, scoped, &[(1, "/vol/j".to_string(), String::new())]).unwrap();
         insert_decision_at(&conn, "import_facts", 150);
         insert_decision_at(&conn, "import_facts", 250);
 
@@ -1112,8 +1158,16 @@ mod tests {
     fn scope_rows_round_trip_with_receipt_path() {
         let conn = setup_test_db();
         let d = insert_decision_at(&conn, "scan", 100);
-        insert_scopes(&conn, d, &[(1, "a/b".to_string()), (2, String::new())]).unwrap();
-        set_scope_receipt(&conn, d, 2, ".canon-ledger/000001-scan.toml").unwrap();
+        insert_scopes(
+            &conn,
+            d,
+            &[
+                (1, "/vol/k".to_string(), "a/b".to_string()),
+                (2, "/vol/l".to_string(), String::new()),
+            ],
+        )
+        .unwrap();
+        set_scope_receipt(&conn, d, 2, "/vol/l", ".canon-ledger/000001-scan.toml").unwrap();
 
         let by_root = fetch_scope_rows_by_roots(&conn, &[2]).unwrap();
         assert_eq!(by_root.len(), 1);
@@ -1277,7 +1331,7 @@ mod tests {
     fn filter_unscoped_ids_against_mixed_decisions() {
         let conn = setup_test_db();
         let scoped = insert_decision_at(&conn, "exclude_set", 100);
-        insert_scopes(&conn, scoped, &[(1, String::new())]).unwrap();
+        insert_scopes(&conn, scoped, &[(1, "/vol/m".to_string(), String::new())]).unwrap();
         let unscoped = insert_decision_at(&conn, "apply", 200);
 
         let result = filter_unscoped_ids(&conn, &[scoped, unscoped]).unwrap();

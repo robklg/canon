@@ -350,8 +350,9 @@ impl DecisionRecorder {
         if scopes.is_empty() {
             return;
         }
-        let pairs: Vec<(i64, String)> = scopes.iter().map(DecisionScope::index_pair).collect();
-        if let Err(e) = repo::decision::insert_scopes(conn, id, &pairs) {
+        let rows: Vec<(i64, String, String)> =
+            scopes.iter().map(DecisionScope::index_row).collect();
+        if let Err(e) = repo::decision::insert_scopes(conn, id, &rows) {
             self.warnings.push(format!(
                 "Warning: failed to update decision scope index: {e}"
             ));
@@ -498,9 +499,10 @@ fn populate_decision_scopes(
         return Vec::new();
     }
 
-    let pairs: Vec<(i64, String)> = params.scope.iter().map(DecisionScope::index_pair).collect();
+    let rows: Vec<(i64, String, String)> =
+        params.scope.iter().map(DecisionScope::index_row).collect();
 
-    match repo::decision::insert_scopes(conn, decision_id, &pairs) {
+    match repo::decision::insert_scopes(conn, decision_id, &rows) {
         Ok(()) => Vec::new(),
         Err(e) => vec![format!(
             "Warning: failed to write decision scope index: {e}"
@@ -1122,6 +1124,15 @@ mod tests {
         );
 
         assert_eq!(scope_row_count(&conn, decision_id, root_id), 1);
+        // The index row carries the write-time root_path snapshot.
+        let snapshot: Option<String> = conn
+            .query_row(
+                "SELECT root_path FROM decision_scopes WHERE decision_id = ? AND root_id = ?",
+                rusqlite::params![decision_id, root_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(snapshot.as_deref(), Some("/newdrive/photos"));
         // The display column is backfilled with the newly-recorded root's path,
         // so a --add scan's decisions.scope is not left NULL.
         let d = repo::decision::fetch_by_id(&conn, decision_id)
@@ -1153,6 +1164,15 @@ mod tests {
         let mut recorder = DecisionRecorder::start(&conn, &params, None);
         let decision_id = recorder.decision_id().unwrap();
         assert_eq!(scope_row_count(&conn, decision_id, root_id), 1);
+        // start()-time population snapshots the root path too.
+        let snapshot: Option<String> = conn
+            .query_row(
+                "SELECT root_path FROM decision_scopes WHERE decision_id = ? AND root_id = ?",
+                rusqlite::params![decision_id, root_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(snapshot.as_deref(), Some("/photos"));
 
         recorder.record_scopes(
             &conn,

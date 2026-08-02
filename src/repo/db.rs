@@ -391,6 +391,48 @@ fn migrations() -> Migrations<'static> {
              CREATE INDEX decision_extractions_root_id
                  ON decision_extractions(root_id);",
         ),
+        // 6: root-path snapshot on the scope index (same precedent as
+        //    decision_extractions.root_path) — keeps scope rows renderable
+        //    after their root is removed. The SQL backfills rows whose root
+        //    still lives; the hook recovers already-dangling rows from the
+        //    decision's scope display strings (a JSON array of
+        //    root_path/rel_prefix joins — the row's known rel_prefix strips
+        //    deterministically). NULL-over-guess: ambiguous or unmatched rows
+        //    stay NULL and render as a marked removed-root fallback.
+        M::up_with_hook(
+            "ALTER TABLE decision_scopes ADD COLUMN root_path TEXT;
+             UPDATE decision_scopes
+                 SET root_path = (SELECT path FROM roots WHERE roots.id = decision_scopes.root_id)
+                 WHERE root_path IS NULL;",
+            |tx: &rusqlite::Transaction| -> HookResult {
+                let mut stmt = tx.prepare(
+                    "SELECT ds.decision_id, ds.root_id, ds.rel_prefix, d.scope
+                     FROM decision_scopes ds JOIN decisions d ON d.id = ds.decision_id
+                     WHERE ds.root_path IS NULL AND d.scope IS NOT NULL",
+                )?;
+                let dangling: Vec<(i64, i64, String, String)> = stmt
+                    .query_map([], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                for (decision_id, root_id, rel_prefix, scope_json) in dangling {
+                    let candidates: Vec<String> =
+                        serde_json::from_str(&scope_json).unwrap_or_default();
+                    if let Some(root_path) =
+                        crate::domain::scope::recover_root_path(&candidates, &rel_prefix)
+                    {
+                        tx.execute(
+                            "UPDATE decision_scopes SET root_path = ?4
+                             WHERE decision_id = ?1 AND root_id = ?2 AND rel_prefix = ?3
+                               AND root_path IS NULL",
+                            rusqlite::params![decision_id, root_id, rel_prefix, root_path],
+                        )?;
+                    }
+                }
+                Ok(())
+            },
+        ),
     ])
 }
 
@@ -665,6 +707,46 @@ mod tests {
         // Migration 1's IF NOT EXISTS no-ops the existing table; migration 2 adds
         // the column.
         assert!(has_column(&conn, "decision_scopes", "receipt_rel_path"));
+    }
+
+    /// Simulate a pre-snapshot (v5) database: decision_scopes without root_path.
+    /// Upgrading must add the column, backfill live-root rows via SQL, and
+    /// recover dangling rows from the decision's scope JSON — NULL-over-guess
+    /// for the unrecoverable rest.
+    #[test]
+    fn migrating_v5_backfills_and_recovers_scope_root_paths() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 5).unwrap();
+        assert!(!has_column(&conn, "decision_scopes", "root_path"));
+
+        conn.execute_batch(
+            r#"INSERT INTO roots (id, path) VALUES (1, '/vol/live');
+               INSERT INTO decisions (id, command, scope, command_line, canon_version, created_at)
+                   VALUES (10, 'exclude_set', '["/gone/root/sub"]', 'x', '0', 0);
+               INSERT INTO decisions (id, command, scope, command_line, canon_version, created_at)
+                   VALUES (11, 'scan', '["/a/sub","/b/sub"]', 'x', '0', 0);
+               INSERT INTO decision_scopes (decision_id, root_id, rel_prefix) VALUES (10, 1, '');
+               INSERT INTO decision_scopes (decision_id, root_id, rel_prefix) VALUES (10, 99, 'sub');
+               INSERT INTO decision_scopes (decision_id, root_id, rel_prefix) VALUES (11, 98, 'sub');"#,
+        )
+        .unwrap();
+
+        migrations().to_latest(&mut conn).unwrap();
+
+        let get = |root_id: i64| -> Option<String> {
+            conn.query_row(
+                "SELECT root_path FROM decision_scopes WHERE root_id = ?",
+                [root_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        // Live root: backfilled from roots by the migration SQL.
+        assert_eq!(get(1).as_deref(), Some("/vol/live"));
+        // Dangling row with a unique display-path match: recovered by the hook.
+        assert_eq!(get(99).as_deref(), Some("/gone/root"));
+        // Dangling row with an ambiguous match: stays NULL, never guessed.
+        assert_eq!(get(98), None);
     }
 
     #[test]
