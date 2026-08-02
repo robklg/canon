@@ -12,12 +12,14 @@ use anyhow::{bail, Result};
 use rusqlite::Connection;
 
 use crate::domain::config::LedgerConfig;
-use crate::domain::decision::DecisionCommand;
+use crate::domain::decision::{Decision, DecisionCommand};
+use crate::domain::extraction::DecisionExtraction;
 use crate::domain::retire::{build_account, derive_readiness, Readiness, ResolutionAccount};
 use crate::domain::trail::{decision_family, DecisionFamily};
-use crate::domain::Root;
+use crate::domain::{Root, Source};
 use crate::ops;
 use crate::repo;
+use crate::repo::decision::DecisionScopeRow;
 
 /// Facts the review states beside the account — facts, never warnings, and
 /// none of them block. Unexplained-missing and unhashed counts render from
@@ -74,7 +76,34 @@ pub fn validate_retire_target(roots: &[Root], root_id: i64, config: &LedgerConfi
     Ok(())
 }
 
-pub fn compute_readiness(conn: &Connection, root_id: i64) -> Result<ReadinessReview> {
+/// The root's complete story, fetched once — the retirement ceremony's one
+/// structural substrate. The readiness review and the book compile are both
+/// lenses over this, so the ceremony fetches once and the gate and the book
+/// read the same world by construction.
+pub struct RootStory {
+    pub root: Root,
+    pub present: Vec<Source>,
+    pub absent: Vec<Source>,
+    /// Object ids among the present rows verified present in the archive.
+    pub archived: HashSet<i64>,
+    /// Extraction rows whose origin is this root.
+    pub extractions: Vec<DecisionExtraction>,
+    pub scope_rows: Vec<DecisionScopeRow>,
+    /// Every decision touching the root (stamps, scopes, extractions),
+    /// deduped, ascending by id.
+    pub decisions: Vec<Decision>,
+    pub stamp_families: HashMap<i64, DecisionFamily>,
+    /// Fetch-time observation: whether the root's path is a reachable
+    /// directory. An unreachable root retires on faith — surfaced, never
+    /// refused.
+    pub reachable: bool,
+    /// Highest decision id seen touching the root — computed over the raw
+    /// referenced ids at fetch time, not over `decisions` (a stamped id may
+    /// no longer resolve to a row and must still count as world state).
+    pub max_decision_id: Option<i64>,
+}
+
+pub fn fetch_root_story(conn: &Connection, root_id: i64) -> Result<RootStory> {
     let roots = repo::root::fetch_all(conn)?;
     let root = roots
         .iter()
@@ -91,8 +120,9 @@ pub fn compute_readiness(conn: &Connection, root_id: i64) -> Result<ReadinessRev
     let extractions = repo::decision::fetch_extractions_by_origin_root(conn, root_id)?;
     let scope_rows = repo::decision::fetch_scope_rows_by_roots(conn, &[root_id])?;
 
-    // One decision fetch serves three needs: the absent rows' stamp
-    // families, first-scan, and the open-intentions comparison.
+    // One decision fetch serves every consumer: the absent rows' stamp
+    // families, first-scan, the open-intentions comparison, and (for the
+    // compile) the per-decision reasons.
     let mut decision_ids: Vec<i64> = absent.iter().filter_map(|s| s.decision_id).collect();
     decision_ids.extend(present.iter().filter_map(|s| s.decision_id));
     decision_ids.extend(scope_rows.iter().map(|r| r.decision_id));
@@ -100,15 +130,34 @@ pub fn compute_readiness(conn: &Connection, root_id: i64) -> Result<ReadinessRev
     decision_ids.sort_unstable();
     decision_ids.dedup();
     let decisions = repo::decision::fetch_by_ids(conn, &decision_ids)?;
-    let by_id: HashMap<i64, &crate::domain::decision::Decision> =
-        decisions.iter().map(|d| (d.id, d)).collect();
 
     let stamp_families: HashMap<i64, DecisionFamily> = decisions
         .iter()
         .map(|d| (d.id, decision_family(&d.command)))
         .collect();
 
-    let scope_decision_ids: HashSet<i64> = scope_rows.iter().map(|r| r.decision_id).collect();
+    let reachable = ops::fs::dir_exists(Path::new(&root.path));
+    let max_decision_id = decision_ids.last().copied();
+
+    Ok(RootStory {
+        root,
+        present,
+        absent,
+        archived,
+        extractions,
+        scope_rows,
+        decisions,
+        stamp_families,
+        reachable,
+        max_decision_id,
+    })
+}
+
+/// The readiness review as a pure lens over the fetched story.
+pub fn readiness_lens(story: &RootStory) -> ReadinessReview {
+    let by_id: HashMap<i64, &Decision> = story.decisions.iter().map(|d| (d.id, d)).collect();
+
+    let scope_decision_ids: HashSet<i64> = story.scope_rows.iter().map(|r| r.decision_id).collect();
     let first_scan = scope_decision_ids
         .iter()
         .filter_map(|id| by_id.get(id))
@@ -116,7 +165,8 @@ pub fn compute_readiness(conn: &Connection, root_id: i64) -> Result<ReadinessRev
         .map(|d| d.created_at)
         .min();
 
-    let last_apply_from_here = extractions
+    let last_apply_from_here = story
+        .extractions
         .iter()
         .filter_map(|r| by_id.get(&r.decision_id))
         .map(|d| d.created_at)
@@ -131,27 +181,35 @@ pub fn compute_readiness(conn: &Connection, root_id: i64) -> Result<ReadinessRev
         })
         .count() as i64;
 
-    let account = build_account(&present, &absent, &archived, &extractions, &stamp_families);
+    let account = build_account(
+        &story.present,
+        &story.absent,
+        &story.archived,
+        &story.extractions,
+        &story.stamp_families,
+    );
     let readiness = derive_readiness(&account);
 
     let gaps = GapFacts {
-        last_scanned_at: root.last_scanned_at,
-        reachable: ops::fs::dir_exists(Path::new(&root.path)),
+        last_scanned_at: story.root.last_scanned_at,
+        reachable: story.reachable,
         open_cluster_intentions,
     };
 
-    let snapshot_source_count = (present.len() + absent.len()) as i64;
-    let snapshot_max_decision_id = decision_ids.last().copied();
-
-    Ok(ReadinessReview {
-        root,
+    ReadinessReview {
+        root: story.root.clone(),
         first_scan,
         account,
         gaps,
         readiness,
-        snapshot_source_count,
-        snapshot_max_decision_id,
-    })
+        snapshot_source_count: (story.present.len() + story.absent.len()) as i64,
+        snapshot_max_decision_id: story.max_decision_id,
+    }
+}
+
+pub fn compute_readiness(conn: &Connection, root_id: i64) -> Result<ReadinessReview> {
+    let story = fetch_root_story(conn, root_id)?;
+    Ok(readiness_lens(&story))
 }
 
 #[cfg(test)]

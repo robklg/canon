@@ -20,8 +20,9 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Deserialize;
 
-use crate::domain::decision::DecisionCommand;
+use crate::domain::decision::{Decision, DecisionCommand};
 use crate::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
+use crate::domain::Root;
 use crate::repo::{self, Connection};
 
 pub struct ReindexParams {
@@ -64,39 +65,146 @@ pub struct ReindexResult {
     pub unknown_source_roots: Vec<(i64, String)>,
 }
 
-/// Lenient mirror of an apply receipt for the maintenance read path. Every
+/// Lenient mirror of an apply receipt for receipt-file readers. Every
 /// self-describing field is optional: pre-2026-07 receipts lack
-/// transition/posture/origin_disposition/[meta.locus]. Item fields below are
-/// present since the first apply receipts — required.
+/// transition/posture/origin_disposition/[meta.locus]. Required item fields
+/// below are present since the first apply receipts.
 #[derive(Deserialize)]
-struct ApplyReceiptDoc {
-    meta: ReceiptMetaDoc,
+pub(crate) struct ApplyReceiptDoc {
+    pub(crate) meta: ReceiptMetaDoc,
     #[serde(default)]
-    items: Vec<ApplyItemDoc>,
+    pub(crate) items: Vec<ApplyItemDoc>,
 }
 
 #[derive(Deserialize)]
-struct ReceiptMetaDoc {
-    decision_id: i64,
+pub(crate) struct ReceiptMetaDoc {
+    pub(crate) decision_id: i64,
     #[serde(default)]
-    origin_disposition: Option<String>,
+    pub(crate) origin_disposition: Option<String>,
     #[serde(default)]
-    locus: Option<ReceiptLocusDoc>,
+    pub(crate) locus: Option<ReceiptLocusDoc>,
 }
 
 #[derive(Deserialize)]
-struct ReceiptLocusDoc {
-    path: String,
-    id: i64,
+pub(crate) struct ReceiptLocusDoc {
+    pub(crate) path: String,
+    pub(crate) id: i64,
 }
 
+/// One receipt item. The per-item fields beyond the aggregation inputs
+/// (`hash`/`mtime`/`previous_decision_id`) serve the book compile, which is
+/// per-item by design; the aggregate-only law governs what lands in
+/// `decision_extractions` — the index writer never consumes them.
 #[derive(Deserialize)]
-struct ApplyItemDoc {
-    source_root: String,
-    source_rel_path: String,
-    destination_rel_path: String,
-    size: i64,
-    // hash/mtime/previous_decision_id deliberately not read — aggregate-only law.
+pub(crate) struct ApplyItemDoc {
+    pub(crate) source_root: String,
+    pub(crate) source_rel_path: String,
+    pub(crate) destination_rel_path: String,
+    pub(crate) size: i64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) hash: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) mtime: Option<i64>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) previous_decision_id: Option<i64>,
+}
+
+/// Outcome of locating and leniently parsing one decision's apply receipt.
+/// The one shared reader — `ledger reindex` and the book compile categorize
+/// identically, and a non-`Ok` outcome is a reportable gap, never an error.
+pub(crate) enum ReceiptRead {
+    Ok(ReadApplyReceipt),
+    /// No receipt was ever recorded for this decision.
+    NoReceipt {
+        reason: String,
+    },
+    /// A receipt was recorded but isn't readable right now — nothing is
+    /// concluded from absence, only that this read couldn't reach the file.
+    Unreachable {
+        reason: String,
+    },
+    /// The receipt read but failed parsing or integrity checks.
+    Malformed {
+        reason: String,
+    },
+}
+
+pub(crate) struct ReadApplyReceipt {
+    pub(crate) doc: ApplyReceiptDoc,
+    /// The receipt's locus root as recorded on the decision row — the base
+    /// `destination_rel_path` resolves against when the receipt predates
+    /// `[meta.locus]`.
+    pub(crate) receipt_root_id: i64,
+    pub(crate) receipt_root_path: String,
+}
+
+pub(crate) fn read_apply_receipt(decision: &Decision, roots: &[Root]) -> ReceiptRead {
+    let (Some(receipt_root_id), Some(receipt_rel_path)) =
+        (decision.receipt_root_id, decision.receipt_rel_path.as_ref())
+    else {
+        let reason = if decision.command_line.contains("--no-receipt") {
+            "--no-receipt".to_string()
+        } else {
+            "recording mode had receipts off".to_string()
+        };
+        return ReceiptRead::NoReceipt { reason };
+    };
+
+    let Some(root) = roots.iter().find(|r| r.id == receipt_root_id) else {
+        return ReceiptRead::Unreachable {
+            reason: format!("destination root #{receipt_root_id} no longer known"),
+        };
+    };
+
+    let root_path = Path::new(&root.path);
+    if !root_path.is_dir() {
+        return ReceiptRead::Unreachable {
+            reason: format!("root path not present (offline?): {}", root.path),
+        };
+    }
+
+    let full_path = root_path.join(receipt_rel_path);
+    let content = match std::fs::read_to_string(&full_path) {
+        Ok(c) => c,
+        Err(_) => {
+            return ReceiptRead::Unreachable {
+                reason: format!("receipt file missing: {}", full_path.display()),
+            }
+        }
+    };
+
+    let doc: ApplyReceiptDoc = match toml::from_str(&content) {
+        Ok(d) => d,
+        Err(e) => {
+            return ReceiptRead::Malformed {
+                reason: format!("failed to parse receipt: {e}"),
+            }
+        }
+    };
+
+    if doc.meta.decision_id != decision.id {
+        return ReceiptRead::Malformed {
+            reason: format!(
+                "receipt decision_id {} does not match decision #{}",
+                doc.meta.decision_id, decision.id
+            ),
+        };
+    }
+
+    if doc.items.is_empty() {
+        return ReceiptRead::Malformed {
+            reason: "receipt has no items".to_string(),
+        };
+    }
+
+    ReceiptRead::Ok(ReadApplyReceipt {
+        doc,
+        receipt_root_id,
+        receipt_root_path: root.path.clone(),
+    })
 }
 
 /// Rebuild the extraction index from apply receipts on disk. Global,
@@ -122,74 +230,22 @@ pub fn reindex_extractions(conn: &Connection, params: &ReindexParams) -> Result<
     };
 
     for decision in &decisions {
-        let (Some(receipt_root_id), Some(receipt_rel_path)) =
-            (decision.receipt_root_id, decision.receipt_rel_path.as_ref())
-        else {
-            let reason = if decision.command_line.contains("--no-receipt") {
-                "--no-receipt".to_string()
-            } else {
-                "recording mode had receipts off".to_string()
-            };
-            result.no_receipt.push((decision.id, reason));
-            continue;
-        };
-
-        let Some(root) = roots.iter().find(|r| r.id == receipt_root_id) else {
-            result.unreachable.push((
-                decision.id,
-                format!("destination root #{receipt_root_id} no longer known"),
-            ));
-            continue;
-        };
-
-        let root_path = Path::new(&root.path);
-        if !root_path.is_dir() {
-            result.unreachable.push((
-                decision.id,
-                format!("root path not present (offline?): {}", root.path),
-            ));
-            continue;
-        }
-
-        let full_path = root_path.join(receipt_rel_path);
-        let content = match std::fs::read_to_string(&full_path) {
-            Ok(c) => c,
-            Err(_) => {
-                result.unreachable.push((
-                    decision.id,
-                    format!("receipt file missing: {}", full_path.display()),
-                ));
+        let read = match read_apply_receipt(decision, &roots) {
+            ReceiptRead::Ok(read) => read,
+            ReceiptRead::NoReceipt { reason } => {
+                result.no_receipt.push((decision.id, reason));
+                continue;
+            }
+            ReceiptRead::Unreachable { reason } => {
+                result.unreachable.push((decision.id, reason));
+                continue;
+            }
+            ReceiptRead::Malformed { reason } => {
+                result.malformed.push((decision.id, reason));
                 continue;
             }
         };
-
-        let doc: ApplyReceiptDoc = match toml::from_str(&content) {
-            Ok(d) => d,
-            Err(e) => {
-                result
-                    .malformed
-                    .push((decision.id, format!("failed to parse receipt: {e}")));
-                continue;
-            }
-        };
-
-        if doc.meta.decision_id != decision.id {
-            result.malformed.push((
-                decision.id,
-                format!(
-                    "receipt decision_id {} does not match decision #{}",
-                    doc.meta.decision_id, decision.id
-                ),
-            ));
-            continue;
-        }
-
-        if doc.items.is_empty() {
-            result
-                .malformed
-                .push((decision.id, "receipt has no items".to_string()));
-            continue;
-        }
+        let doc = &read.doc;
 
         let items: Vec<ExtractionItem> = doc
             .items
@@ -204,7 +260,7 @@ pub fn reindex_extractions(conn: &Connection, params: &ReindexParams) -> Result<
 
         let (destination_root_id, destination_root_path) = match &doc.meta.locus {
             Some(locus) => (Some(locus.id), locus.path.clone()),
-            None => (Some(receipt_root_id), root.path.clone()),
+            None => (Some(read.receipt_root_id), read.receipt_root_path.clone()),
         };
 
         let disposition = doc
@@ -822,5 +878,41 @@ mtime = 0
         assert_eq!(result.indexed, vec![decision_id]);
         assert_eq!(result.rows_written, 0);
         assert!(fetch_rows(&conn, decision_id).is_empty());
+    }
+
+    #[test]
+    fn item_doc_per_item_fields_parse_when_present_and_default_when_absent() {
+        let with_fields = r#"
+            [meta]
+            decision_id = 7
+
+            [[items]]
+            source_root = "/src"
+            source_rel_path = "a.jpg"
+            destination_rel_path = "2015/a.jpg"
+            size = 100
+            hash = "sha256:abc"
+            mtime = 1704067200
+            previous_decision_id = 3
+        "#;
+        let doc: ApplyReceiptDoc = toml::from_str(with_fields).unwrap();
+        assert_eq!(doc.items[0].hash.as_deref(), Some("sha256:abc"));
+        assert_eq!(doc.items[0].mtime, Some(1704067200));
+        assert_eq!(doc.items[0].previous_decision_id, Some(3));
+
+        let without_fields = r#"
+            [meta]
+            decision_id = 7
+
+            [[items]]
+            source_root = "/src"
+            source_rel_path = "a.jpg"
+            destination_rel_path = "2015/a.jpg"
+            size = 100
+        "#;
+        let doc: ApplyReceiptDoc = toml::from_str(without_fields).unwrap();
+        assert_eq!(doc.items[0].hash, None);
+        assert_eq!(doc.items[0].mtime, None);
+        assert_eq!(doc.items[0].previous_decision_id, None);
     }
 }
