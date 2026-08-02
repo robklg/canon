@@ -637,8 +637,8 @@ enum RootsAction {
         /// Root specifier: id:<N> or path:<path>
         spec: String,
     },
-    /// Retire a root: review its readiness (the full ceremony arrives in a
-    /// coming version)
+    /// Retire a root: review readiness, bind its story into the book on the
+    /// shelf, then remove it from the index
     Retire {
         /// Root specifier: id:<N> or path:<path>
         spec: String,
@@ -1530,13 +1530,20 @@ fn main() -> Result<()> {
                 spec,
                 dry_run,
                 allow,
-                reason: _,
-                yes: _,
+                reason,
+                yes,
             }) => {
-                // reason/yes are parsed for CLI stability; they act from the
-                // binding movements on (a read-only review records nothing).
                 let allow_unresolved = allow.contains(&RetireAllow::Unresolved);
-                roots::retire(&db, &spec, dry_run, allow_unresolved, &config)?;
+                roots::retire(
+                    &db,
+                    &spec,
+                    dry_run,
+                    allow_unresolved,
+                    reason.as_deref(),
+                    yes,
+                    &command_line,
+                    &config,
+                )?;
             }
         },
     }

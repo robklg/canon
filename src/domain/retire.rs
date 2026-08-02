@@ -312,6 +312,14 @@ pub struct BookEntry {
     /// `"sha256:<hex>"`, where known.
     pub hash: Option<String>,
     pub fate: SourceFate,
+    /// The decision behind this entry's fate — `archived` entries carry the
+    /// apply; `excluded`/`deleted` the stamping decision; the standings
+    /// carry the source's most recent recorded transition (often the
+    /// indexing scan). The id cross-references the timeline (`#N`) and the
+    /// `{id:06}-{command}.toml` receipt-filename convention, in the gathered
+    /// ledger and the archive's live ledger alike. `None` = no recorded
+    /// decision — omitted, never guessed.
+    pub decision: Option<i64>,
 }
 
 impl BookEntry {
@@ -337,6 +345,8 @@ impl BookEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyOrigin {
     pub rel_path: String,
+    /// The apply decision whose receipt recorded this origin claim.
+    pub decision_id: i64,
     /// `None` for pre-vocabulary receipts — omitted, never guessed.
     pub disposition: Option<OriginDisposition>,
     /// Absolute recorded destination path.
@@ -381,17 +391,25 @@ pub fn build_book_entries(
 
     for source in present {
         row_paths.insert(source.rel_path.as_str());
+        // The line's decision pointer: the fate-determining decision — the
+        // apply for archived-from-here (the row's own stamp would name the
+        // indexing scan, not the archiving) — else the source's most recent
+        // recorded transition.
+        let mut decision = source.decision_id;
         let fate = match classify_present(source, ctx.archived) {
             StandingBucket::Excluded => SourceFate::Excluded {
                 reason: stamp_reason(source, ctx),
                 archive_locations: locations_for(source, ctx),
             },
             StandingBucket::Covered => match ctx.origins.get(source.rel_path.as_str()) {
-                Some(origin) => SourceFate::ArchivedFromHere {
-                    disposition: origin.disposition,
-                    destination: origin.destination.clone(),
-                    current_locations: locations_for(source, ctx),
-                },
+                Some(origin) => {
+                    decision = Some(origin.decision_id);
+                    SourceFate::ArchivedFromHere {
+                        disposition: origin.disposition,
+                        destination: origin.destination.clone(),
+                        current_locations: locations_for(source, ctx),
+                    }
+                }
                 None => SourceFate::Covered {
                     locations: locations_for(source, ctx),
                 },
@@ -404,6 +422,7 @@ pub fn build_book_entries(
             mtime: Some(source.mtime),
             hash: hash_for(source, ctx),
             fate,
+            decision,
         });
     }
 
@@ -424,6 +443,7 @@ pub fn build_book_entries(
             mtime: Some(source.mtime),
             hash: hash_for(source, ctx),
             fate,
+            decision: source.decision_id,
         });
     }
 
@@ -441,6 +461,7 @@ pub fn build_book_entries(
                 destination: origin.destination.clone(),
                 current_locations: origin.current_locations.clone(),
             },
+            decision: Some(origin.decision_id),
         });
     }
 
@@ -461,6 +482,15 @@ fn hash_for(source: &Source, ctx: &FateContext) -> Option<String> {
 }
 
 fn locations_for(source: &Source, ctx: &FateContext) -> Vec<String> {
+    // Zero-byte objects are contentless (the sweep's rule, applied here the
+    // same locally-scoped way; the suite-wide question stays a /vision
+    // item): every empty file shares the one empty-content object, so a
+    // location list would name every zero-byte file in the archive while
+    // answering nothing about *this* file. Fate and account are untouched —
+    // only the where-does-this-content-live claim is withheld.
+    if source.size == 0 {
+        return Vec::new();
+    }
     source
         .object_id
         .and_then(|id| ctx.archive_locations.get(&id).cloned())
@@ -847,6 +877,7 @@ mod tests {
     fn origin(rel_path: &str, disposition: Option<OriginDisposition>) -> ApplyOrigin {
         ApplyOrigin {
             rel_path: rel_path.to_string(),
+            decision_id: 41,
             disposition,
             destination: format!("/archive/{rel_path}"),
             size: 77,
@@ -879,6 +910,54 @@ mod tests {
             }
         );
         assert_eq!(entries[0].hash.as_deref(), Some("sha256:abc"));
+    }
+
+    #[test]
+    fn entry_decision_points_at_the_fate_determining_decision() {
+        let mut cx = Ctx::default();
+        cx.archived.insert(10);
+        cx.hashes.insert(10, "sha256:abc".to_string());
+        // A present row whose stamp is its indexing scan (#5) but whose
+        // origin claim comes from apply #41: the line points at the apply —
+        // the stamp would name the indexing, not the archiving.
+        add_origin(&mut cx, origin("a.jpg", Some(OriginDisposition::Retained)));
+        let archived_here = stamped(at(source(1, Some(10), false, false), "a.jpg"), 5);
+        // A covered row with no origin keeps its own stamp as the pointer.
+        let covered = stamped(at(source(2, Some(10), false, false), "b.jpg"), 5);
+        // A recovered entry (no row) carries its receipt's decision.
+        add_origin(
+            &mut cx,
+            origin("gone.jpg", Some(OriginDisposition::Relocated)),
+        );
+
+        let entries = build_book_entries(&[archived_here, covered], &[], &cx.context());
+        let by_path: HashMap<&str, &BookEntry> =
+            entries.iter().map(|e| (e.rel_path.as_str(), e)).collect();
+        assert_eq!(by_path["a.jpg"].decision, Some(41));
+        assert_eq!(by_path["b.jpg"].decision, Some(5));
+        assert_eq!(by_path["gone.jpg"].decision, Some(41));
+    }
+
+    #[test]
+    fn zero_byte_entry_carries_its_fate_but_no_locations() {
+        // Every empty file shares the one empty-content object — a location
+        // list would name every zero-byte file in the archive while saying
+        // nothing about this one. Fate and verification stay honest: size 0
+        // is on the line, the hash genuinely proves the (empty) content.
+        let mut cx = Ctx::default();
+        cx.archived.insert(10);
+        cx.hashes.insert(10, "sha256:empty".to_string());
+        cx.locations
+            .insert(10, vec!["/archive/a/.DS_Store".to_string()]);
+        let mut empty = source(1, Some(10), false, false);
+        empty.size = 0;
+
+        let entries = build_book_entries(&[empty], &[], &cx.context());
+        assert_eq!(entries[0].fate, SourceFate::Covered { locations: vec![] });
+        assert_eq!(
+            entries[0].verification(),
+            EntryVerification::ContentVerified
+        );
     }
 
     #[test]

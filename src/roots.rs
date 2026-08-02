@@ -206,16 +206,21 @@ pub fn remove(
     Ok(())
 }
 
-/// The retirement readiness review — the opening movement of the ceremony.
-/// Review on stdout (a ceremony surface, not a list command); `--dry-run`
-/// always exits 0 (it is a report); a NOT READY verdict without
+/// The retirement ceremony: review → confirm → bind → confirm → release.
+/// Review and ceremony on stdout (a ceremony surface, not a list command);
+/// `--dry-run` always exits 0 (it is a report); a NOT READY verdict without
 /// `--allow unresolved` exits non-zero after the review (compare precedent:
-/// the verdict is the message, no `Error:` duplication).
+/// the verdict is the message, no `Error:` duplication). A world-moved
+/// release exits non-zero and asks to be re-run.
+#[allow(clippy::too_many_arguments)]
 pub fn retire(
     db: &Db,
     spec: &str,
     dry_run: bool,
     allow_unresolved: bool,
+    reason: Option<&str>,
+    yes: bool,
+    command_line: &str,
     config: &LedgerConfig,
 ) -> Result<()> {
     let conn = db.conn();
@@ -224,7 +229,8 @@ pub fn retire(
     let root_id = parse_root_spec_any(&roots, spec)?;
     ops::retire::validate_retire_target(&roots, root_id, config)?;
 
-    let review = ops::retire::compute_readiness(conn, root_id)?;
+    let story = ops::retire::fetch_root_story(conn, root_id)?;
+    let review = ops::retire::readiness_lens(&story);
     print_review(&review);
 
     match &review.readiness {
@@ -254,8 +260,111 @@ pub fn retire(
     if matches!(review.readiness, Readiness::NotReady { .. }) {
         println!("Retiring with unresolved sources acknowledged (--allow unresolved).");
     }
+
+    // Movement 1: bind the book.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let plan = ops::retire::plan_bind(&story, config, now)?;
+
     println!();
-    println!("The review is complete. Binding the book is not yet available in this version.");
+    if !yes {
+        if plan.replaces_existing {
+            println!(
+                "A book for this root already stands at {} and will be replaced by this fresh compile.",
+                plan.final_dir.display()
+            );
+        }
+        if config.recording == RecordingMode::Off {
+            println!(
+                "Recording is off — this retirement will not be indexed. The book still \
+                 binds; the shelf listing will not show it."
+            );
+        }
+        println!("Bind the book at {}?", plan.final_dir.display());
+    }
+    if !ceremony::confirm(yes)? {
+        return Ok(());
+    }
+
+    let mut ceremony_state = ops::retire::begin_ceremony(
+        conn,
+        story,
+        &review,
+        plan,
+        ops::retire::CeremonyParams {
+            reason: reason.map(|r| r.to_string()),
+            now,
+            command_line: command_line.to_string(),
+            config: config.clone(),
+        },
+    );
+
+    let bound = match ceremony_state.bind(conn) {
+        Ok(bound) => bound,
+        Err(e) => {
+            for warning in ceremony_state.interrupt(conn, &format!("{e:#}")) {
+                eprintln!("{warning}");
+            }
+            return Err(e);
+        }
+    };
+
+    println!();
+    println!("The book is at {}", bound.dir.display());
+    let ledger_line = match bound.ledger_files {
+        Some(n) => format!("{} receipts gathered", format_count(n as i64)),
+        None => "ledger not gathered".to_string(),
+    };
+    println!(
+        "  {} entries bound; {ledger_line}",
+        format_count(bound.entry_count)
+    );
+    if bound.replaced_previous {
+        println!("  the previous book was replaced");
+    }
+    for gap in &bound.gaps {
+        println!("  gap: {gap}");
+    }
+    for warning in &bound.warnings {
+        eprintln!("{warning}");
+    }
+
+    // Movement 2: release the root — after the inspection window.
+    println!();
+    if !yes {
+        println!("Remove the root from the index? Aborting keeps both the root and the book.");
+    }
+    if !ceremony::confirm(yes)? {
+        let abandoned = ceremony_state.abandon(conn);
+        println!("{}", abandoned.summary);
+        for warning in &abandoned.warnings {
+            eprintln!("{warning}");
+        }
+        return Ok(());
+    }
+
+    match ceremony_state.release(conn)? {
+        ops::retire::ReleaseOutcome::Released {
+            summary, warnings, ..
+        } => {
+            println!("{summary}");
+            println!("The drive is yours to discard.");
+            for warning in &warnings {
+                eprintln!("{warning}");
+            }
+        }
+        ops::retire::ReleaseOutcome::WorldMoved { detail, warnings } => {
+            println!("The world has moved since the review: {detail}.");
+            println!("The root remains in the index; the book is bound. Re-run the ceremony.");
+            for warning in &warnings {
+                eprintln!("{warning}");
+            }
+            std::process::exit(1);
+        }
+    }
+
     Ok(())
 }
 
@@ -268,12 +377,12 @@ fn print_review(review: &ops::retire::ReadinessReview) {
 
     println!("Retirement review: {}", review.root.path);
     println!();
-    println!("  role         {}", review.root.role);
+    println!("  role           {}", review.root.role);
     if let Some(comment) = &review.root.comment {
-        println!("  comment      {comment}");
+        println!("  comment        {comment}");
     }
     println!(
-        "  suspended    {}",
+        "  suspended      {}",
         if review.root.is_suspended() {
             "yes"
         } else {
@@ -281,14 +390,14 @@ fn print_review(review: &ops::retire::ReadinessReview) {
         }
     );
     println!(
-        "  first scan   {}",
-        match review.first_scan {
+        "  first indexed  {}",
+        match review.first_indexed {
             Some(ts) => format_date(ts),
             None => "unknown".to_string(),
         }
     );
     println!(
-        "  last scan    {}",
+        "  last scan      {}",
         match review.gaps.last_scanned_at {
             Some(ts) => format!("{} ({})", format_date(ts), format_time_ago(Some(ts), now)),
             None => "never".to_string(),
@@ -524,13 +633,13 @@ mod tests {
     fn retire_argv_parses_through_the_real_cli() {
         // The handoff-law discipline: CLI drift is a test failure.
         for argv in [
-            vec!["canon", "roots", "retire", "/mnt/old-drive"],
+            vec!["canon", "roots", "retire", "/mnt/photos-backup"],
             vec!["canon", "roots", "retire", "id:3", "--dry-run"],
             vec![
                 "canon",
                 "roots",
                 "retire",
-                "/mnt/old-drive",
+                "/mnt/photos-backup",
                 "--allow",
                 "unresolved",
                 "--reason",

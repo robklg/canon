@@ -10,13 +10,14 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::config::{LedgerConfig, RecordingMode};
-use crate::domain::decision::{Decision, DecisionCommand};
+use crate::domain::decision::{Decision, DecisionCommand, DecisionStatus};
 use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::domain::format::format_size;
+use crate::domain::note::note_display_path;
 use crate::domain::retire::{
     book_dir_name, build_account, build_book_entries, derive_posture, derive_readiness,
     disposition_word, ApplyOrigin, BookEntry, FateContext, Readiness, ResolutionAccount,
@@ -29,7 +30,7 @@ use crate::domain::trail::{
 };
 use crate::domain::{format_count, Note, Root, Source};
 use crate::ops;
-use crate::ops::decision::{DecisionParams, DecisionRecorder};
+use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::ledger::{read_apply_receipt, ReceiptRead};
 use crate::ops::trail::{TrailParams, TrailResult, TrailView};
 use crate::repo;
@@ -54,9 +55,11 @@ pub struct GapFacts {
 /// notice).
 pub struct ReadinessReview {
     pub root: Root,
-    /// Earliest scan decision touching this root; `None` = unknown (the
-    /// root may predate decision recording).
-    pub first_scan: Option<i64>,
+    /// When the earliest surviving row was first indexed (min `scanned_at`
+    /// over present + absent rows) — data-level evidence that predates
+    /// decision recording. `None` = no rows. The first *recorded* scan is
+    /// the timeline's opening line, not an identity claim.
+    pub first_indexed: Option<i64>,
     pub account: ResolutionAccount,
     pub gaps: GapFacts,
     pub readiness: Readiness,
@@ -112,6 +115,11 @@ pub struct RootStory {
     /// directory. An unreachable root retires on faith — surfaced, never
     /// refused.
     pub reachable: bool,
+    /// When the earliest surviving row was first indexed (min `scanned_at`,
+    /// present + absent) — identity evidence that predates decision
+    /// recording. A scan-decision date would overclaim on any root older
+    /// than the trail.
+    pub first_indexed: Option<i64>,
     /// Highest decision id seen touching the root — computed over the raw
     /// referenced ids at fetch time, not over `decisions` (a stamped id may
     /// no longer resolve to a row and must still count as world state).
@@ -153,6 +161,7 @@ pub fn fetch_root_story(conn: &Connection, root_id: i64) -> Result<RootStory> {
 
     let reachable = ops::fs::dir_exists(Path::new(&root.path));
     let max_decision_id = decision_ids.last().copied();
+    let first_indexed = repo::source::min_scanned_at_by_root(conn, root_id)?;
 
     Ok(RootStory {
         root,
@@ -165,6 +174,7 @@ pub fn fetch_root_story(conn: &Connection, root_id: i64) -> Result<RootStory> {
         decisions,
         stamp_families,
         reachable,
+        first_indexed,
         max_decision_id,
     })
 }
@@ -174,7 +184,6 @@ pub fn readiness_lens(story: &RootStory) -> ReadinessReview {
     let by_id: HashMap<i64, &Decision> = story.decisions.iter().map(|d| (d.id, d)).collect();
 
     let scope_decision_ids: HashSet<i64> = story.scope_rows.iter().map(|r| r.decision_id).collect();
-    let first_scan = first_scan_of(story);
 
     let last_apply_from_here = story
         .extractions
@@ -209,7 +218,7 @@ pub fn readiness_lens(story: &RootStory) -> ReadinessReview {
 
     ReadinessReview {
         root: story.root.clone(),
-        first_scan,
+        first_indexed: story.first_indexed,
         account,
         gaps,
         readiness,
@@ -218,22 +227,12 @@ pub fn readiness_lens(story: &RootStory) -> ReadinessReview {
     }
 }
 
+/// Fetch + lens in one call, for callers that need only the review. The
+/// ceremony itself fetches once and runs both lenses over the same story.
+#[allow(dead_code)]
 pub fn compute_readiness(conn: &Connection, root_id: i64) -> Result<ReadinessReview> {
     let story = fetch_root_story(conn, root_id)?;
     Ok(readiness_lens(&story))
-}
-
-/// Earliest scan decision scoped to this root — shared by the review's
-/// identity block and the book's identity page.
-fn first_scan_of(story: &RootStory) -> Option<i64> {
-    let scope_decision_ids: HashSet<i64> = story.scope_rows.iter().map(|r| r.decision_id).collect();
-    story
-        .decisions
-        .iter()
-        .filter(|d| scope_decision_ids.contains(&d.id))
-        .filter(|d| d.command == DecisionCommand::Scan.as_str())
-        .map(|d| d.created_at)
-        .min()
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +248,10 @@ pub struct CompileParams {
     /// explicit collision, never silently overwritten. The ceremony passes
     /// a temp name beside the shelf; the final rename is the placement step.
     pub dest_dir: PathBuf,
+    /// The ceremony's own in-flight decision, kept out of the timeline —
+    /// compiled before release completes, it cannot narrate itself; the
+    /// identity page carries the retirement.
+    pub exclude_decision_id: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -342,8 +345,8 @@ pub fn compile_book(
     );
 
     write_inventory(&params.dest_dir, &entries)?;
-    write_timeline(&params.dest_dir, &trail)?;
-    write_notes(&params.dest_dir, &notes)?;
+    write_timeline(&params.dest_dir, &trail, params.exclude_decision_id)?;
+    write_notes(&params.dest_dir, &notes, &story.roots)?;
     let ledger_files = gather_ledger(&params.dest_dir, story, &mut gaps)?;
     let counts = fate_counts(&entries);
     write_meta(
@@ -443,6 +446,7 @@ fn collect_origins(
                 item.source_rel_path.clone(),
                 ApplyOrigin {
                     rel_path: item.source_rel_path.clone(),
+                    decision_id: decision.id,
                     disposition,
                     destination,
                     size: item.size,
@@ -504,6 +508,10 @@ struct InventoryLine<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     hash: Option<&'a str>,
     fate: &'a str,
+    /// The fate-determining decision — cross-references the timeline's `#N`
+    /// and the `{id:06}-{command}.toml` receipt-filename convention.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision: Option<i64>,
     verification: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     disposition: Option<&'a str>,
@@ -556,6 +564,7 @@ fn write_inventory(dir: &Path, entries: &[BookEntry]) -> Result<()> {
             mtime: entry.mtime.map(iso_utc),
             hash: entry.hash.as_deref(),
             fate: entry.fate.word(),
+            decision: entry.decision,
             verification: entry.verification().word(),
             disposition,
             destination,
@@ -569,7 +578,7 @@ fn write_inventory(dir: &Path, entries: &[BookEntry]) -> Result<()> {
     Ok(())
 }
 
-fn write_timeline(dir: &Path, trail: &TrailResult) -> Result<()> {
+fn write_timeline(dir: &Path, trail: &TrailResult, exclude_decision_id: Option<i64>) -> Result<()> {
     let mut out = String::from(
         "# Decision timeline\n\nEvery decision that touched this root, oldest first.\n\n",
     );
@@ -577,20 +586,40 @@ fn write_timeline(dir: &Path, trail: &TrailResult) -> Result<()> {
     if let TrailView::Recent(events) = &trail.view {
         for event in events {
             if let TimelineEvent::Decision(decision) = event {
+                // The ceremony's own in-flight decision cannot narrate
+                // itself — the book is compiled before release completes,
+                // so its row holds no summary yet; the identity page
+                // carries the retirement. A *prior* attempt's decision
+                // (release declined, interrupted) renders like any other.
+                if Some(decision.id) == exclude_decision_id {
+                    continue;
+                }
                 any = true;
-                let line = decision
+                let text = decision
                     .summary
                     .clone()
                     .unwrap_or_else(|| decision.command.clone());
+                let mut lines = text.lines();
                 out.push_str(&format!(
                     "- {}  #{} {}: {}\n",
                     iso_date(decision.created_at),
                     decision.id,
                     decision.command,
-                    line
+                    lines.next().unwrap_or("")
                 ));
+                // Continuation lines of a multi-line summary sit indented
+                // under their entry, keeping their own relative indent.
+                for continuation in lines {
+                    out.push_str(&format!("  {continuation}\n"));
+                }
                 if let Some(reason) = &decision.reason {
-                    out.push_str(&format!("  reason: {reason}\n"));
+                    let mut reason_lines = reason.lines();
+                    if let Some(first) = reason_lines.next() {
+                        out.push_str(&format!("  reason: {first}\n"));
+                    }
+                    for continuation in reason_lines {
+                        out.push_str(&format!("  {continuation}\n"));
+                    }
                 }
             }
         }
@@ -608,25 +637,25 @@ fn write_timeline(dir: &Path, trail: &TrailResult) -> Result<()> {
     Ok(())
 }
 
-fn write_notes(dir: &Path, notes: &[Note]) -> Result<()> {
+fn write_notes(dir: &Path, notes: &[Note], roots: &[Root]) -> Result<()> {
     let mut out = String::from(
         "# Notes\n\nEvery note on this root, oldest first — the thinking between the actions.\n\n",
     );
     if notes.is_empty() {
         out.push_str("No notes were recorded on this root.\n");
     } else {
+        // The one shared note-identity rendering (note list, the trail's
+        // mixed timeline, and the book): root-relative, `(root)` for the
+        // root itself — never a view-relative `.` a future reader can't
+        // anchor.
+        let by_id: HashMap<i64, Root> = roots.iter().map(|r| (r.id, r.clone())).collect();
         let mut sorted: Vec<&Note> = notes.iter().collect();
         sorted.sort_by_key(|n| (n.created_at, n.id));
         for note in sorted {
-            let location = if note.rel_path.is_empty() {
-                "."
-            } else {
-                note.rel_path.as_str()
-            };
             out.push_str(&format!(
                 "- {}  {}: {}\n",
                 iso_date(note.created_at),
-                location,
+                note_display_path(note, &by_id, false),
                 note.text
             ));
         }
@@ -700,7 +729,7 @@ struct MetaIdentity<'a> {
     comment: Option<&'a str>,
     suspended: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    first_scan: Option<String>,
+    first_indexed: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_scan: Option<String>,
     compiled_at: String,
@@ -781,7 +810,7 @@ fn write_meta(
             role: &story.root.role,
             comment: story.root.comment.as_deref(),
             suspended: story.root.suspended,
-            first_scan: first_scan_of(story).map(iso_utc),
+            first_indexed: story.first_indexed.map(iso_utc),
             last_scan: story.root.last_scanned_at.map(iso_utc),
             compiled_at: iso_utc(params.now),
             reason: params.reason.as_deref(),
@@ -841,8 +870,8 @@ fn write_readme(
     if let Some(comment) = &story.root.comment {
         out.push_str(&format!("- comment: {comment}\n"));
     }
-    if let Some(first) = first_scan_of(story) {
-        out.push_str(&format!("- first scan: {}\n", iso_date(first)));
+    if let Some(first) = story.first_indexed {
+        out.push_str(&format!("- first indexed: {}\n", iso_date(first)));
     }
     if let Some(last) = story.root.last_scanned_at {
         out.push_str(&format!("- last scan: {}\n", iso_date(last)));
@@ -1104,7 +1133,6 @@ pub const SHELF_DIR: &str = "retired";
 
 /// Where the book will land — computed before any confirmation, so the
 /// interface can state a replacement as awareness, never surprise.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct BindPlan {
     pub shelf: PathBuf,
@@ -1127,7 +1155,6 @@ pub struct BindPlan {
 /// the same root's book is replaced (a re-run converges); a different root's
 /// book pushes this one to a `-2`/`-3`… sibling; a directory that cannot be
 /// identified refuses the ceremony.
-#[allow(dead_code)]
 pub fn plan_bind(story: &RootStory, config: &LedgerConfig, now: i64) -> Result<BindPlan> {
     let (ledger_root_id, ledger_root_path) =
         ops::receipt::resolve_ledger_root(&story.roots, config).ok_or_else(|| {
@@ -1200,7 +1227,6 @@ fn read_book_root_path(dir: &Path) -> Result<String> {
 
 /// The ceremony's parameters, held for the life of one invocation — the
 /// config is read once, so recording modes cannot change mid-ceremony.
-#[allow(dead_code)]
 pub struct CeremonyParams {
     /// The user's `--reason`: bound onto the book and the decision row.
     pub reason: Option<String>,
@@ -1213,7 +1239,6 @@ pub struct CeremonyParams {
 /// release, with the interface's confirmations between them. Ops owns the
 /// ceremony policy (ordering, recording, verification gating); the interface
 /// owns the prompts and the printing.
-#[allow(dead_code)]
 pub struct RetireCeremony {
     story: RootStory,
     plan: BindPlan,
@@ -1221,16 +1246,13 @@ pub struct RetireCeremony {
     reason: Option<String>,
     now: i64,
     /// Review-time basis for the release movement's world-moved re-check.
-    #[allow(dead_code)]
     snapshot_source_count: i64,
-    #[allow(dead_code)]
     snapshot_max_decision_id: Option<i64>,
 }
 
 /// Start the ceremony's two-phase decision (status: `started` — an
 /// interrupted ceremony is findable from here on). Called after the first
 /// confirmation; a declined prompt records nothing.
-#[allow(dead_code)]
 pub fn begin_ceremony(
     conn: &Connection,
     story: RootStory,
@@ -1269,7 +1291,6 @@ pub fn begin_ceremony(
 
 /// The placed, verified book — what the bind movement hands the interface
 /// for the inspection window.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct BoundBook {
     pub dir: PathBuf,
@@ -1287,7 +1308,6 @@ impl RetireCeremony {
     /// its temp name, so a standing book is never touched until the fresh one
     /// is proven whole — and the placement rename is what commits a book, so
     /// anything still at a temp name was structurally never placed.
-    #[allow(dead_code)]
     pub fn bind(&mut self, conn: &Connection) -> Result<BoundBook> {
         if !self.plan.shelf_exists {
             std::fs::create_dir_all(&self.plan.shelf).with_context(|| {
@@ -1317,6 +1337,7 @@ impl RetireCeremony {
                 reason: self.reason.clone(),
                 now: self.now,
                 dest_dir: self.plan.temp_dir.clone(),
+                exclude_decision_id: self.recorder.decision_id(),
             },
         )?;
         verify_book(&self.plan.temp_dir).with_context(|| {
@@ -1349,6 +1370,161 @@ impl RetireCeremony {
             warnings: self.recorder.take_warnings(),
         })
     }
+
+    /// The release movement: one `BEGIN IMMEDIATE` transaction holding the
+    /// world-moved re-check, the removal, and the decision's completion — the
+    /// re-check's reads must be authoritative against concurrent writers, and
+    /// the transaction is short.
+    pub fn release(&mut self, conn: &Connection) -> Result<ReleaseOutcome> {
+        let book_display = self.plan.final_dir.display().to_string();
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+
+        if let Some(detail) = self.world_moved(&tx)? {
+            // Nothing was written — dropping the transaction rolls back.
+            drop(tx);
+            let summary = format!(
+                "The book is bound at {book_display}; the world moved before release ({detail}) — the root remains in the index"
+            );
+            self.recorder.complete_db(
+                conn,
+                DecisionStatus::Partial,
+                DecisionCounts {
+                    attempted: Some(self.snapshot_source_count),
+                    completed: None,
+                    failed: None,
+                    skipped: None,
+                },
+                &summary,
+            );
+            return Ok(ReleaseOutcome::WorldMoved {
+                detail,
+                warnings: self.recorder.take_warnings(),
+            });
+        }
+
+        let removed = ops::roots::remove_root_data(&tx, self.story.root.id)?;
+        let summary = format!(
+            "Retired {}: {} sources released; the story is bound at {book_display}",
+            self.story.root.path,
+            format_count(removed.deleted_sources),
+        );
+        self.recorder.complete_db(
+            &tx,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(self.snapshot_source_count),
+                completed: Some(removed.deleted_sources),
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+        tx.commit()?;
+
+        Ok(ReleaseOutcome::Released {
+            deleted_sources: removed.deleted_sources,
+            deleted_notes: removed.deleted_notes,
+            summary,
+            warnings: self.recorder.take_warnings(),
+        })
+    }
+
+    /// Has the world moved since the review? Two cheap aggregates against the
+    /// review-time snapshots — computed over SQL exactly as `readiness_lens`
+    /// derived them from the fetched rows, so equality means "same world".
+    /// The ceremony's own decision is excluded: its recording must not read
+    /// as the world moving (a concurrent process's decision has a different
+    /// id and correctly trips the check).
+    fn world_moved(&self, conn: &Connection) -> Result<Option<String>> {
+        let count = repo::source::count_all_by_root(conn, self.story.root.id)?;
+        if count != self.snapshot_source_count {
+            return Ok(Some(format!(
+                "the root held {} source rows at review, {} now",
+                format_count(self.snapshot_source_count),
+                format_count(count)
+            )));
+        }
+        let max = repo::decision::max_decision_id_touching_root(
+            conn,
+            self.story.root.id,
+            self.recorder.decision_id(),
+        )?;
+        if max != self.snapshot_max_decision_id {
+            return Ok(Some(
+                "another decision touched this root since the review".to_string(),
+            ));
+        }
+        Ok(None)
+    }
+
+    /// The declined second confirmation: the book stands, the root stays.
+    /// The decision completes `partial` — a findable state the rm guard and
+    /// a re-run both read (the re-run converges by replacing the book).
+    pub fn abandon(&mut self, conn: &Connection) -> AbandonResult {
+        let summary = format!(
+            "The book is bound at {}; the root remains in the index (release declined)",
+            self.plan.final_dir.display()
+        );
+        self.recorder.complete_db(
+            conn,
+            DecisionStatus::Partial,
+            DecisionCounts {
+                attempted: Some(self.snapshot_source_count),
+                completed: None,
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+        AbandonResult {
+            summary,
+            warnings: self.recorder.take_warnings(),
+        }
+    }
+
+    /// Record a failed bind as `interrupted` — fix-forward: the failure is
+    /// findable in the trail, the root untouched. The error itself is the
+    /// caller's to propagate; this only records. Returns drained warnings.
+    pub fn interrupt(&mut self, conn: &Connection, error: &str) -> Vec<String> {
+        let summary = format!("Retirement interrupted during bind: {error}");
+        self.recorder.complete_db(
+            conn,
+            DecisionStatus::Interrupted,
+            DecisionCounts {
+                attempted: Some(self.snapshot_source_count),
+                completed: None,
+                failed: None,
+                skipped: None,
+            },
+            &summary,
+        );
+        self.recorder.take_warnings()
+    }
+}
+
+/// The release movement's outcome. `WorldMoved` is a ceremony outcome, not a
+/// program error: the ceremony stops (root intact, book standing, decision
+/// `partial`) and asks to be re-run.
+pub enum ReleaseOutcome {
+    Released {
+        /// Counts carried per the typed-result convention; the summary is
+        /// the composed narration the interface prints.
+        #[allow(dead_code)]
+        deleted_sources: i64,
+        #[allow(dead_code)]
+        deleted_notes: usize,
+        summary: String,
+        warnings: Vec<String>,
+    },
+    WorldMoved {
+        detail: String,
+        warnings: Vec<String>,
+    },
+}
+
+pub struct AbandonResult {
+    pub summary: String,
+    pub warnings: Vec<String>,
 }
 
 /// Commit the verified temp compile to its final name. In the replacement
@@ -1625,28 +1801,40 @@ mod tests {
         assert!(compute_readiness(&conn, 999).is_err());
     }
 
-    // first_scan
+    // first_indexed
 
     #[test]
-    fn first_scan_is_the_earliest_scan_decision() {
+    fn first_indexed_is_the_earliest_row_evidence_not_a_decision_date() {
+        // A root scanned long before decision recording existed: the only
+        // scan *decision* is recent, but the rows carry the older truth.
         let conn = open_in_memory_for_test();
         let root = insert_test_root(&conn, "/r", "source", false);
-        let s1 = insert_decision(&conn, "scan", 300);
-        let s2 = insert_decision(&conn, "scan", 100);
-        let other = insert_decision(&conn, "exclude_set", 50);
-        for d in [s1, s2, other] {
-            scope(&conn, d, root);
-        }
+        let recent_scan = insert_decision(&conn, "scan", 9_000);
+        scope(&conn, recent_scan, root);
+        let old = insert_source(&conn, root, "old.jpg", None, true, false, None);
+        let tombstone = insert_source(&conn, root, "gone.jpg", None, false, false, None);
+        let newer = insert_source(&conn, root, "new.jpg", None, true, false, None);
+        conn.execute("UPDATE sources SET scanned_at = 500 WHERE id = ?", [old])
+            .unwrap();
+        // A tombstone's evidence counts — the absent rows are part of identity.
+        conn.execute(
+            "UPDATE sources SET scanned_at = 100 WHERE id = ?",
+            [tombstone],
+        )
+        .unwrap();
+        conn.execute("UPDATE sources SET scanned_at = 700 WHERE id = ?", [newer])
+            .unwrap();
+
         let review = compute_readiness(&conn, root).unwrap();
-        assert_eq!(review.first_scan, Some(100), "earliest scan, not exclude");
+        assert_eq!(review.first_indexed, Some(100));
     }
 
     #[test]
-    fn first_scan_unknown_without_scan_decisions() {
+    fn first_indexed_unknown_without_rows() {
         let conn = open_in_memory_for_test();
         let root = insert_test_root(&conn, "/r", "source", false);
         let review = compute_readiness(&conn, root).unwrap();
-        assert_eq!(review.first_scan, None);
+        assert_eq!(review.first_indexed, None);
     }
 
     // open cluster intentions
@@ -1753,6 +1941,7 @@ mod tests {
                 reason: Some("story complete".to_string()),
                 now: 1_753_000_000,
                 dest_dir: dest.to_path_buf(),
+                exclude_decision_id: None,
             },
         )
         .unwrap()
@@ -1780,6 +1969,7 @@ mod tests {
         insert_source(&conn, root_id, "z/last.jpg", None, true, false, None);
         insert_source(&conn, root_id, "a/first.jpg", None, true, false, None);
         repo::note::insert(&conn, root_id, "a", "looks like the 2015 batch").unwrap();
+        repo::note::insert(&conn, root_id, "", "ready to retire").unwrap();
 
         let dest = book_dir.path().join("book");
         let book = compile_to(&conn, root_id, &dest);
@@ -1806,7 +1996,10 @@ mod tests {
         assert!(timeline.contains("Indexed 2 sources"));
         assert!(timeline.contains("reason: first gather"));
         let notes = std::fs::read_to_string(dest.join("notes.md")).unwrap();
-        assert!(notes.contains("looks like the 2015 batch"));
+        // Note identity through the one shared rendering: root-relative,
+        // `(root)` for the root itself — never a view-relative `.`.
+        assert!(notes.contains("a: looks like the 2015 batch"), "{notes}");
+        assert!(notes.contains("(root): ready to retire"), "{notes}");
 
         let meta: toml::Value =
             toml::from_str(&std::fs::read_to_string(dest.join("meta.toml")).unwrap()).unwrap();
@@ -2164,6 +2357,44 @@ mtime = 1700000000
     }
 
     #[test]
+    fn inventory_lines_carry_the_fate_determining_decision() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let book_dir = tempfile::tempdir().unwrap();
+        let dest = book_dir.path().join("book");
+        compile_to(&conn, root_id, &dest);
+
+        let id_of = |command: &str| -> i64 {
+            conn.query_row(
+                "SELECT id FROM decisions WHERE command = ?1",
+                [command],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let lines = inventory_lines(&dest);
+        let by_path = |p: &str| {
+            lines
+                .iter()
+                .find(|l| l["path"] == p)
+                .unwrap_or_else(|| panic!("no line for {p}"))
+                .clone()
+        };
+
+        // Archived-from-here points at the apply — row-backed and recovered
+        // alike — not at the row's indexing stamp.
+        let apply = id_of("apply");
+        assert_eq!(by_path("copied.jpg")["decision"].as_i64(), Some(apply));
+        assert_eq!(by_path("gone/moved.jpg")["decision"].as_i64(), Some(apply));
+        // Excluded points at the stamping exclusion.
+        assert_eq!(
+            by_path("junk.jpg")["decision"].as_i64(),
+            Some(id_of("exclude_set"))
+        );
+        // No recorded decision → the key is absent, never guessed.
+        assert!(by_path("loose.jpg")["decision"].is_null());
+    }
+
+    #[test]
     fn verify_book_catches_a_tampered_inventory() {
         let (conn, _src, _arch, root_id) = every_fate_fixture();
         let book_dir = tempfile::tempdir().unwrap();
@@ -2208,12 +2439,15 @@ mtime = 1700000000
     }
 
     #[test]
-    fn scale_compile_round_trips_past_the_chunking_boundary() {
+    fn scale_ceremony_round_trips_past_the_chunking_boundary() {
+        // The whole ceremony — bind (compile + verify + place) and release —
+        // over a root past the SQL chunking boundary.
         let conn = open_in_memory_for_test();
         let src_dir = tempfile::tempdir().unwrap();
-        let book_dir = tempfile::tempdir().unwrap();
+        let arch_dir = tempfile::tempdir().unwrap();
         let root_id = insert_test_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
-        let archive_id = insert_test_root(&conn, "/archive", "archive", false);
+        let archive_id =
+            insert_test_root(&conn, arch_dir.path().to_str().unwrap(), "archive", false);
 
         conn.execute_batch("BEGIN").unwrap();
         for i in 0..2000 {
@@ -2239,15 +2473,23 @@ mtime = 1700000000
         }
         conn.execute_batch("COMMIT").unwrap();
 
-        let dest = book_dir.path().join("book");
-        let book = compile_to(&conn, root_id, &dest);
-        assert_eq!(book.entry_count, 2000);
-
-        let verified = verify_book(&dest).unwrap();
-        assert_eq!(verified.entries, 2000);
+        let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+        let bound = ceremony.bind(&conn).unwrap();
+        assert_eq!(bound.entry_count, 2000);
         let meta: toml::Value =
-            toml::from_str(&std::fs::read_to_string(dest.join("meta.toml")).unwrap()).unwrap();
+            toml::from_str(&std::fs::read_to_string(bound.dir.join("meta.toml")).unwrap()).unwrap();
         assert_eq!(meta["counts"]["covered"].as_integer(), Some(2000));
+
+        match ceremony.release(&conn).unwrap() {
+            ReleaseOutcome::Released {
+                deleted_sources, ..
+            } => assert_eq!(deleted_sources, 2000),
+            ReleaseOutcome::WorldMoved { detail, .. } => panic!("world moved: {detail}"),
+        }
+        assert!(!repo::root::fetch_all(&conn)
+            .unwrap()
+            .iter()
+            .any(|r| r.id == root_id));
     }
 
     #[test]
@@ -2268,6 +2510,7 @@ mtime = 1700000000
                 reason: None,
                 now: 0,
                 dest_dir: dest,
+                exclude_decision_id: None,
             },
         )
         .unwrap_err();
@@ -2433,6 +2676,66 @@ mtime = 1700000000
     }
 
     #[test]
+    fn timeline_indents_multi_line_summaries_and_reasons() {
+        let conn = open_in_memory_for_test();
+        let src_dir = tempfile::tempdir().unwrap();
+        let book_dir = tempfile::tempdir().unwrap();
+        let root_id = insert_test_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        insert_test_root(&conn, "/archive", "archive", false);
+        insert_source(&conn, root_id, "a.jpg", None, true, false, None);
+        let scan = insert_decision(&conn, "scan", 100);
+        scope(&conn, scan, root_id);
+        set_decision_extras(
+            &conn,
+            scan,
+            Some("Scanned 4 files: 4 new\nHashed 7 files"),
+            Some("first pass\nsecond thoughts, still open"),
+        );
+
+        let dest = book_dir.path().join("book");
+        compile_to(&conn, root_id, &dest);
+
+        let timeline = std::fs::read_to_string(dest.join("timeline.md")).unwrap();
+        assert!(
+            timeline.contains(": Scanned 4 files: 4 new\n  Hashed 7 files\n"),
+            "{timeline}"
+        );
+        assert!(
+            timeline.contains("  reason: first pass\n  second thoughts, still open\n"),
+            "{timeline}"
+        );
+    }
+
+    #[test]
+    fn bind_keeps_its_own_in_flight_decision_out_of_the_timeline() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+
+        let bound = ceremony.bind(&conn).unwrap();
+
+        let timeline = std::fs::read_to_string(bound.dir.join("timeline.md")).unwrap();
+        assert!(!timeline.contains("roots_retire"), "{timeline}");
+    }
+
+    #[test]
+    fn a_prior_attempts_decision_renders_in_the_next_books_timeline() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let mut first = begin_with(&conn, root_id, RecordingMode::Full);
+        first.bind(&conn).unwrap();
+        first.abandon(&conn);
+
+        let mut second = begin_with(&conn, root_id, RecordingMode::Full);
+        let bound = second.bind(&conn).unwrap();
+
+        // The abandoned attempt is history and narrates itself; only the
+        // current in-flight decision stays out.
+        let timeline = std::fs::read_to_string(bound.dir.join("timeline.md")).unwrap();
+        assert!(timeline.contains("release declined"), "{timeline}");
+        let own_id = second.recorder.decision_id().unwrap();
+        assert!(!timeline.contains(&format!("#{own_id} ")), "{timeline}");
+    }
+
+    #[test]
     fn bind_clears_a_leftover_temp_compile() {
         let (conn, _src, _arch, root_id) = every_fate_fixture();
         let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
@@ -2523,5 +2826,177 @@ mtime = 1700000000
         verify_book(&bound.dir).unwrap();
         assert!(bound.warnings.is_empty(), "{:?}", bound.warnings);
         assert_eq!(count_retire_decisions(&conn), 0);
+    }
+
+    // The ceremony: release, abandon, world-moved
+
+    fn retire_decision_row(conn: &Connection, ceremony: &RetireCeremony) -> Decision {
+        repo::decision::fetch_by_id(conn, ceremony.recorder.decision_id().unwrap())
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn full_ceremony_releases_the_root_and_completes_the_decision() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+        let bound = ceremony.bind(&conn).unwrap();
+        let rows_before = repo::source::count_all_by_root(&conn, root_id).unwrap();
+
+        // Between review and release, the only new world state is the
+        // ceremony's own decision and its scope row — releasing cleanly here
+        // is the self-exclusion regression test.
+        let outcome = ceremony.release(&conn).unwrap();
+
+        let ReleaseOutcome::Released {
+            deleted_sources,
+            summary,
+            warnings,
+            ..
+        } = outcome
+        else {
+            panic!("expected Released");
+        };
+        assert_eq!(deleted_sources, rows_before);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let root_path = &ceremony.story.root.path;
+        assert!(summary.contains(&format!("Retired {root_path}")));
+        assert!(summary.contains("the story is bound at"));
+        assert!(summary.contains(bound.dir.to_str().unwrap()));
+
+        // The root and its rows are gone; the book stands.
+        assert!(!repo::root::fetch_all(&conn)
+            .unwrap()
+            .iter()
+            .any(|r| r.id == root_id));
+        assert_eq!(repo::source::count_all_by_root(&conn, root_id).unwrap(), 0);
+        verify_book(&bound.dir).unwrap();
+
+        let decision = retire_decision_row(&conn, &ceremony);
+        assert_eq!(decision.status, "completed");
+        assert_eq!(decision.count_attempted, Some(rows_before));
+        assert_eq!(decision.count_completed, Some(rows_before));
+        assert_eq!(decision.summary.as_deref(), Some(summary.as_str()));
+    }
+
+    #[test]
+    fn abandon_after_bind_leaves_root_and_book_standing() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+        let bound = ceremony.bind(&conn).unwrap();
+
+        let abandoned = ceremony.abandon(&conn);
+
+        assert!(abandoned.summary.contains("release declined"));
+        assert!(abandoned.summary.contains(bound.dir.to_str().unwrap()));
+        // Root intact, book standing — the safety invariant's abort arm.
+        assert!(repo::root::fetch_all(&conn)
+            .unwrap()
+            .iter()
+            .any(|r| r.id == root_id));
+        verify_book(&bound.dir).unwrap();
+
+        let decision = retire_decision_row(&conn, &ceremony);
+        assert_eq!(decision.status, "partial");
+
+        // The rm guard now reads the pointer: the story is already bound.
+        let plan = ops::roots::plan_remove(&conn, root_id).unwrap();
+        let pointer = plan.retirement.expect("retirement pointer");
+        assert!(pointer.artifact_display.contains("retired/"));
+    }
+
+    #[test]
+    fn release_stops_when_a_source_row_appeared_since_review() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+        let bound = ceremony.bind(&conn).unwrap();
+
+        // A concurrent scan indexed a new file between review and release.
+        insert_source(&conn, root_id, "new/arrival.jpg", None, true, false, None);
+
+        let outcome = ceremony.release(&conn).unwrap();
+        let ReleaseOutcome::WorldMoved { detail, .. } = outcome else {
+            panic!("expected WorldMoved");
+        };
+        assert!(detail.contains("source rows"), "{detail}");
+
+        // Root intact (the transaction wrote nothing), book standing,
+        // decision partial — never both partial.
+        assert!(repo::root::fetch_all(&conn)
+            .unwrap()
+            .iter()
+            .any(|r| r.id == root_id));
+        verify_book(&bound.dir).unwrap();
+        assert_eq!(retire_decision_row(&conn, &ceremony).status, "partial");
+    }
+
+    #[test]
+    fn release_stops_when_a_foreign_decision_touched_the_root() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+        let bound = ceremony.bind(&conn).unwrap();
+
+        // Another process's decision landed a scope row on this root.
+        let foreign = insert_decision(&conn, "exclude_set", 9_999);
+        scope(&conn, foreign, root_id);
+
+        let outcome = ceremony.release(&conn).unwrap();
+        let ReleaseOutcome::WorldMoved { detail, .. } = outcome else {
+            panic!("expected WorldMoved");
+        };
+        assert!(detail.contains("another decision"), "{detail}");
+        assert!(repo::root::fetch_all(&conn)
+            .unwrap()
+            .iter()
+            .any(|r| r.id == root_id));
+        verify_book(&bound.dir).unwrap();
+    }
+
+    #[test]
+    fn off_then_full_rerun_converges_from_disk() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+
+        // First ceremony under Off: the book binds, nothing is indexed.
+        let mut first = begin_with(&conn, root_id, RecordingMode::Off);
+        let first_book = first.bind(&conn).unwrap();
+        first.abandon(&conn);
+        assert_eq!(count_retire_decisions(&conn), 0);
+
+        // The re-run under Full finds the standing book on disk — collision
+        // detection is meta.toml-keyed, so no decision row is needed.
+        let mut second = begin_with(&conn, root_id, RecordingMode::Full);
+        assert!(second.plan.replaces_existing);
+        let second_book = second.bind(&conn).unwrap();
+        assert_eq!(second_book.dir, first_book.dir);
+
+        let outcome = second.release(&conn).unwrap();
+        assert!(matches!(outcome, ReleaseOutcome::Released { .. }));
+        let decision = retire_decision_row(&conn, &second);
+        assert_eq!(decision.status, "completed");
+        assert!(decision.receipt_rel_path.unwrap().starts_with("retired/"));
+    }
+
+    #[test]
+    fn interrupt_records_a_findable_interrupted_decision() {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+        // Force a placement failure: an interloper at the final name.
+        std::fs::create_dir_all(&ceremony.plan.final_dir).unwrap();
+        std::fs::write(ceremony.plan.final_dir.join("interloper.txt"), "mine").unwrap();
+        let err = ceremony.bind(&conn).unwrap_err();
+
+        ceremony.interrupt(&conn, &format!("{err:#}"));
+
+        let decision = retire_decision_row(&conn, &ceremony);
+        assert_eq!(decision.status, "interrupted");
+        assert!(decision
+            .summary
+            .unwrap()
+            .contains("Retirement interrupted during bind"));
+        // The root is untouched.
+        assert!(repo::root::fetch_all(&conn)
+            .unwrap()
+            .iter()
+            .any(|r| r.id == root_id));
     }
 }

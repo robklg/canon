@@ -115,11 +115,26 @@ pub fn fetch_absent_by_roots(conn: &Connection, root_ids: &[i64]) -> Result<Vec<
     Ok(sources)
 }
 
+/// The earliest `scanned_at` across every row of a root, present and absent
+/// alike — evidence of when the earliest surviving row was first indexed.
+/// Data-level, so it reaches back before decision recording existed (a
+/// scan *decision* date would claim only what the trail records).
+/// `scanned_at` is set on `New` and preserved by every other reconciliation,
+/// so this is an observation, never a guess — though a lower bound: a
+/// replaced file resets its row's clock.
+pub fn min_scanned_at_by_root(conn: &Connection, root_id: i64) -> Result<Option<i64>> {
+    let min = conn.query_row(
+        "SELECT MIN(scanned_at) FROM sources WHERE root_id = ?1",
+        [root_id],
+        |row| row.get(0),
+    )?;
+    Ok(min)
+}
+
 /// Count every source row for a root, present and absent alike. One half of
 /// the retirement ceremony's world-moved re-check: computes over SQL exactly
 /// what `readiness_lens` derived from the fetched rows, so equality with the
 /// review-time snapshot means "same world".
-#[allow(dead_code)]
 pub fn count_all_by_root(conn: &Connection, root_id: i64) -> Result<i64> {
     let count = conn.query_row(
         "SELECT COUNT(*) FROM sources WHERE root_id = ?1",
@@ -1348,6 +1363,22 @@ mod tests {
         assert_eq!(count_all_by_root(&conn, root_id).unwrap(), 2);
         assert_eq!(count_all_by_root(&conn, other).unwrap(), 1);
         assert_eq!(count_all_by_root(&conn, 999).unwrap(), 0);
+    }
+
+    #[test]
+    fn min_scanned_at_by_root_ignores_other_roots() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let other = crate::repo::insert_test_root(&conn, "/other", "source", false);
+        let a = insert_source(&conn, root_id, "a.jpg", None, true, false);
+        let b = insert_source(&conn, other, "b.jpg", None, true, false);
+        conn.execute("UPDATE sources SET scanned_at = 200 WHERE id = ?", [a])
+            .unwrap();
+        conn.execute("UPDATE sources SET scanned_at = 50 WHERE id = ?", [b])
+            .unwrap();
+
+        assert_eq!(min_scanned_at_by_root(&conn, root_id).unwrap(), Some(200));
+        assert_eq!(min_scanned_at_by_root(&conn, 999).unwrap(), None);
     }
 
     #[test]

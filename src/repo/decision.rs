@@ -353,7 +353,6 @@ pub fn fetch_latest_receipt_for_root(
 /// inserted with a scope row for this root — without the exclusion the check
 /// would always trip over itself. A concurrent process's decision has a
 /// different id and correctly trips it.
-#[allow(dead_code)]
 pub fn max_decision_id_touching_root(
     conn: &Connection,
     root_id: i64,
