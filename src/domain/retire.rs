@@ -205,26 +205,34 @@ pub fn derive_readiness(account: &ResolutionAccount) -> Readiness {
 /// — present-tense facts, not state changes — and are named here, their one
 /// home, rather than forced through a derivation that rightly doesn't know
 /// them.
-#[allow(dead_code)]
+/// The book's disposition words, aligned with the review's moved/copied
+/// register: receipt vocabulary says retained/relocated (the origin's
+/// perspective); the reader-facing account says moved/copied.
+pub fn disposition_word(disposition: OriginDisposition) -> &'static str {
+    match disposition {
+        OriginDisposition::Relocated => "moved",
+        OriginDisposition::Retained => "copied",
+    }
+}
+
 pub const STANDING_COVERED: &str = "covered";
-#[allow(dead_code)]
 pub const STANDING_PRESENT: &str = "present";
-#[allow(dead_code)]
 pub const STANDING_MISSING_UNEXPLAINED: &str = "missing_unexplained";
 
 /// The fate of one book entry — what happened to (or presently holds for)
 /// this path on the retired root. The bucket decision underneath is
 /// `classify_present`/`classify_absent` — the same derivation the account
 /// folds over, so the inventory and the account cannot drift.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceFate {
     /// Extraction-recorded as an apply origin: a receipt item names this
     /// path. `destination` is the recorded destination (the
     /// Canon-independent fallback tier); `current_locations` are the archive
     /// paths holding the content at compile time (the live tier).
+    /// `disposition` is `None` for pre-vocabulary receipts — moved vs.
+    /// copied is omitted, never guessed.
     ArchivedFromHere {
-        moved: bool,
+        disposition: Option<OriginDisposition>,
         destination: String,
         current_locations: Vec<String>,
     },
@@ -249,7 +257,6 @@ pub enum SourceFate {
     MissingUnexplained,
 }
 
-#[allow(dead_code)]
 impl SourceFate {
     /// The wire word for this fate. Terminal fates derive through
     /// `fate_transition` (the never-literal law); standings come from the
@@ -279,14 +286,12 @@ impl SourceFate {
 }
 
 /// Hash honesty as a property of the entry, never the formatter.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryVerification {
     ContentVerified,
     NameOnly,
 }
 
-#[allow(dead_code)]
 impl EntryVerification {
     pub fn word(&self) -> &'static str {
         match self {
@@ -297,7 +302,6 @@ impl EntryVerification {
 }
 
 /// One inventory entry of the book.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BookEntry {
     pub rel_path: String,
@@ -310,7 +314,6 @@ pub struct BookEntry {
     pub fate: SourceFate,
 }
 
-#[allow(dead_code)]
 impl BookEntry {
     /// Derived from hash presence — structurally incapable of disagreeing
     /// with the data: an unhashed entry can never render content-verified.
@@ -331,12 +334,11 @@ impl BookEntry {
 /// no row exists at the path it *recovers* the entry outright — move-mode
 /// applies relocate the origin row to the destination root, so nothing
 /// remains to fetch. Receipt reading is entry recovery, not enrichment.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyOrigin {
     pub rel_path: String,
-    /// Disposition relocated (moved) vs retained (copied).
-    pub moved: bool,
+    /// `None` for pre-vocabulary receipts — omitted, never guessed.
+    pub disposition: Option<OriginDisposition>,
     /// Absolute recorded destination path.
     pub destination: String,
     pub size: i64,
@@ -347,7 +349,6 @@ pub struct ApplyOrigin {
 
 /// Prepared lookup context for fate derivation — ops fetches, domain
 /// derives.
-#[allow(dead_code)]
 pub struct FateContext<'a> {
     /// Object ids verified present in the archive.
     pub archived: &'a HashSet<i64>,
@@ -370,7 +371,6 @@ pub struct FateContext<'a> {
 /// supersedes the receipt's older claim, and the inventory stays
 /// one-entry-per-path. Sorted by `rel_path`: that order is the book's tree
 /// structure.
-#[allow(dead_code)]
 pub fn build_book_entries(
     present: &[Source],
     absent: &[Source],
@@ -388,7 +388,7 @@ pub fn build_book_entries(
             },
             StandingBucket::Covered => match ctx.origins.get(source.rel_path.as_str()) {
                 Some(origin) => SourceFate::ArchivedFromHere {
-                    moved: origin.moved,
+                    disposition: origin.disposition,
                     destination: origin.destination.clone(),
                     current_locations: locations_for(source, ctx),
                 },
@@ -437,7 +437,7 @@ pub fn build_book_entries(
             mtime: origin.mtime,
             hash: origin.hash.clone(),
             fate: SourceFate::ArchivedFromHere {
-                moved: origin.moved,
+                disposition: origin.disposition,
                 destination: origin.destination.clone(),
                 current_locations: origin.current_locations.clone(),
             },
@@ -448,26 +448,61 @@ pub fn build_book_entries(
     entries
 }
 
-#[allow(dead_code)]
 fn stamp_reason(source: &Source, ctx: &FateContext) -> Option<String> {
     source
         .decision_id
         .and_then(|id| ctx.stamp_reasons.get(&id).cloned())
 }
 
-#[allow(dead_code)]
 fn hash_for(source: &Source, ctx: &FateContext) -> Option<String> {
     source
         .object_id
         .and_then(|id| ctx.object_hashes.get(&id).cloned())
 }
 
-#[allow(dead_code)]
 fn locations_for(source: &Source, ctx: &FateContext) -> Vec<String> {
     source
         .object_id
         .and_then(|id| ctx.archive_locations.get(&id).cloned())
         .unwrap_or_default()
+}
+
+/// The book's verification posture: whether the bound state was
+/// scan-verified, or bound on faith — and when the last verification
+/// happened. An observation must never read as a certainty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerificationPosture {
+    ScanVerified {
+        last_scan: i64,
+    },
+    OnFaith {
+        last_scan: Option<i64>,
+        reason: &'static str,
+    },
+}
+
+/// A root that was never scanned, is suspended, or whose path is
+/// unreachable binds on faith — the story as last observed.
+pub fn derive_posture(
+    suspended: bool,
+    reachable: bool,
+    last_scanned_at: Option<i64>,
+) -> VerificationPosture {
+    match last_scanned_at {
+        None => VerificationPosture::OnFaith {
+            last_scan: None,
+            reason: "never scanned",
+        },
+        Some(last_scan) if suspended => VerificationPosture::OnFaith {
+            last_scan: Some(last_scan),
+            reason: "root suspended",
+        },
+        Some(last_scan) if !reachable => VerificationPosture::OnFaith {
+            last_scan: Some(last_scan),
+            reason: "path unreachable",
+        },
+        Some(last_scan) => VerificationPosture::ScanVerified { last_scan },
+    }
 }
 
 #[cfg(test)]
@@ -778,10 +813,10 @@ mod tests {
         s
     }
 
-    fn origin(rel_path: &str, moved: bool) -> ApplyOrigin {
+    fn origin(rel_path: &str, disposition: Option<OriginDisposition>) -> ApplyOrigin {
         ApplyOrigin {
             rel_path: rel_path.to_string(),
-            moved,
+            disposition,
             destination: format!("/archive/{rel_path}"),
             size: 77,
             mtime: Some(1_704_067_200),
@@ -831,7 +866,7 @@ mod tests {
         // the map is compile-time truth, the origin the recorded claim.
         cx.locations
             .insert(10, vec!["/archive/live.jpg".to_string()]);
-        add_origin(&mut cx, origin("f1.jpg", false));
+        add_origin(&mut cx, origin("f1.jpg", Some(OriginDisposition::Retained)));
         let present = vec![source(1, Some(10), false, false)];
 
         let entries = build_book_entries(&present, &[], &cx.context());
@@ -843,7 +878,7 @@ mod tests {
         assert_eq!(
             entries[0].fate,
             SourceFate::ArchivedFromHere {
-                moved: false,
+                disposition: Some(OriginDisposition::Retained),
                 destination: "/archive/f1.jpg".to_string(),
                 current_locations: vec!["/archive/live.jpg".to_string()],
             }
@@ -915,7 +950,10 @@ mod tests {
     #[test]
     fn origin_without_row_recovers_the_entry_with_item_metadata() {
         let mut cx = Ctx::default();
-        add_origin(&mut cx, origin("moved/away.jpg", true));
+        add_origin(
+            &mut cx,
+            origin("moved/away.jpg", Some(OriginDisposition::Relocated)),
+        );
 
         let entries = build_book_entries(&[], &[], &cx.context());
         assert_eq!(entries.len(), 1);
@@ -927,7 +965,7 @@ mod tests {
         assert_eq!(
             e.fate,
             SourceFate::ArchivedFromHere {
-                moved: true,
+                disposition: Some(OriginDisposition::Relocated),
                 destination: "/archive/moved/away.jpg".to_string(),
                 current_locations: vec!["/archive/moved/away.jpg".to_string()],
             }
@@ -935,9 +973,24 @@ mod tests {
     }
 
     #[test]
+    fn legacy_origin_without_disposition_recovers_with_disposition_omitted() {
+        let mut cx = Ctx::default();
+        add_origin(&mut cx, origin("old/receipt.jpg", None));
+
+        let entries = build_book_entries(&[], &[], &cx.context());
+        assert!(matches!(
+            &entries[0].fate,
+            SourceFate::ArchivedFromHere {
+                disposition: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn unhashed_entries_can_never_be_content_verified() {
         let mut cx = Ctx::default();
-        let mut recovered = origin("gone.jpg", true);
+        let mut recovered = origin("gone.jpg", Some(OriginDisposition::Relocated));
         recovered.hash = None;
         add_origin(&mut cx, recovered);
         let present = vec![source(1, None, false, false)];
@@ -965,7 +1018,10 @@ mod tests {
     #[test]
     fn entries_sort_by_rel_path_tree_order() {
         let mut cx = Ctx::default();
-        add_origin(&mut cx, origin("b/moved.jpg", true));
+        add_origin(
+            &mut cx,
+            origin("b/moved.jpg", Some(OriginDisposition::Relocated)),
+        );
         let present = vec![
             at(source(1, None, false, false), "c/last.jpg"),
             at(source(2, None, false, false), "a/first.jpg"),
@@ -998,11 +1054,16 @@ mod tests {
         let archived = archived_set(&[10, 11]);
         let account = build_account(&present, &absent, &archived, &[], &families);
 
-        let mut cx = Ctx::default();
-        cx.archived = archived;
-        cx.families = families;
-        add_origin(&mut cx, origin("f1.jpg", false)); // enriches present row 1
-        add_origin(&mut cx, origin("recovered.jpg", true)); // no row — recovered
+        let mut cx = Ctx {
+            archived,
+            families,
+            ..Ctx::default()
+        };
+        add_origin(&mut cx, origin("f1.jpg", Some(OriginDisposition::Retained))); // enriches present row 1
+        add_origin(
+            &mut cx,
+            origin("recovered.jpg", Some(OriginDisposition::Relocated)),
+        ); // no row — recovered
 
         let entries = build_book_entries(&present, &absent, &cx.context());
         let recovered = entries.len() as i64 - (present.len() + absent.len()) as i64;
@@ -1044,7 +1105,7 @@ mod tests {
     #[test]
     fn terminal_fate_words_derive_through_fate_transition() {
         let archived = SourceFate::ArchivedFromHere {
-            moved: true,
+            disposition: None,
             destination: String::new(),
             current_locations: vec![],
         };
@@ -1070,6 +1131,41 @@ mod tests {
             fate_transition(DecisionFamily::Observe, FateAspect::Absent)
                 .unwrap()
                 .as_str()
+        );
+    }
+
+    // derive_posture
+
+    #[test]
+    fn reachable_scanned_root_is_scan_verified() {
+        assert_eq!(
+            derive_posture(false, true, Some(42)),
+            VerificationPosture::ScanVerified { last_scan: 42 }
+        );
+    }
+
+    #[test]
+    fn suspended_unreachable_and_unscanned_bind_on_faith() {
+        assert_eq!(
+            derive_posture(true, true, Some(42)),
+            VerificationPosture::OnFaith {
+                last_scan: Some(42),
+                reason: "root suspended",
+            }
+        );
+        assert_eq!(
+            derive_posture(false, false, Some(42)),
+            VerificationPosture::OnFaith {
+                last_scan: Some(42),
+                reason: "path unreachable",
+            }
+        );
+        assert_eq!(
+            derive_posture(false, true, None),
+            VerificationPosture::OnFaith {
+                last_scan: None,
+                reason: "never scanned",
+            }
         );
     }
 

@@ -102,10 +102,8 @@ pub(crate) struct ApplyItemDoc {
     pub(crate) destination_rel_path: String,
     pub(crate) size: i64,
     #[serde(default)]
-    #[allow(dead_code)]
     pub(crate) hash: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub(crate) mtime: Option<i64>,
     #[serde(default)]
     #[allow(dead_code)]

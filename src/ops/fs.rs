@@ -182,6 +182,30 @@ pub fn copy_file(src: &Path, dest: &Path, noclobber: bool) -> Result<()> {
     Ok(())
 }
 
+/// Recursively copy a directory tree, preserving each file's metadata
+/// (mtime, permissions) via `copy_file` with noclobber. Returns the number
+/// of files copied. Fails on the first error; non-file, non-directory
+/// entries (sockets, symlinks) are skipped.
+pub fn copy_tree(src: &Path, dest: &Path) -> Result<usize> {
+    fs::create_dir_all(dest)
+        .with_context(|| format!("Failed to create directory: {}", dest.display()))?;
+    let mut count = 0;
+    let entries = fs::read_dir(src)
+        .with_context(|| format!("Failed to read directory: {}", src.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let target = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            count += copy_tree(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            copy_file(&entry.path(), &target, true)?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 /// Rename with atomic noclobber where the platform supports it.
 /// Falls back to stat-then-rename on unsupported platforms.
 fn noclobber_rename(src: &Path, dest: &Path) -> Result<()> {
@@ -488,6 +512,35 @@ mod tests {
         let dest_meta = fs::metadata(&dest).unwrap();
         let dest_mtime = FileTime::from_last_modification_time(&dest_meta);
         assert_eq!(dest_mtime, known_mtime);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_copies_nested_files_preserving_mtime() {
+        use filetime::FileTime;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("ledger");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("000001-scan.toml"), b"a").unwrap();
+        std::fs::write(src.join("sub/000002-apply.toml"), b"b").unwrap();
+        let known_mtime = FileTime::from_unix_time(1704067200, 0);
+        filetime::set_file_mtime(src.join("000001-scan.toml"), known_mtime).unwrap();
+
+        let dest = dir.path().join("copy");
+        let count = copy_tree(&src, &dest).unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(
+            std::fs::read(dest.join("000001-scan.toml")).unwrap(),
+            b"a".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(dest.join("sub/000002-apply.toml")).unwrap(),
+            b"b".to_vec()
+        );
+        let meta = fs::metadata(dest.join("000001-scan.toml")).unwrap();
+        assert_eq!(FileTime::from_last_modification_time(&meta), known_mtime);
     }
 
     #[test]
