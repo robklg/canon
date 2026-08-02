@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::extraction::{DecisionExtraction, OriginDisposition};
 use super::source::Source;
-use super::trail::DecisionFamily;
+use super::trail::{fate_transition, DecisionFamily, FateAspect};
 
 /// The asymmetric verdict. There is deliberately no `Ready` variant: Canon
 /// can know NOT READY — present sources neither archived nor excluded — but
@@ -193,6 +193,281 @@ pub fn derive_readiness(account: &ResolutionAccount) -> Readiness {
     } else {
         Readiness::NoBlockersFound
     }
+}
+
+// ---------------------------------------------------------------------------
+// The book's per-entry model
+// ---------------------------------------------------------------------------
+
+/// Standing words for book entries whose state is not a transition. The
+/// never-literal law covers *transition* words (always derived through
+/// `fate_transition`); covered / present / missing-unexplained are standings
+/// — present-tense facts, not state changes — and are named here, their one
+/// home, rather than forced through a derivation that rightly doesn't know
+/// them.
+#[allow(dead_code)]
+pub const STANDING_COVERED: &str = "covered";
+#[allow(dead_code)]
+pub const STANDING_PRESENT: &str = "present";
+#[allow(dead_code)]
+pub const STANDING_MISSING_UNEXPLAINED: &str = "missing_unexplained";
+
+/// The fate of one book entry — what happened to (or presently holds for)
+/// this path on the retired root. The bucket decision underneath is
+/// `classify_present`/`classify_absent` — the same derivation the account
+/// folds over, so the inventory and the account cannot drift.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceFate {
+    /// Extraction-recorded as an apply origin: a receipt item names this
+    /// path. `destination` is the recorded destination (the
+    /// Canon-independent fallback tier); `current_locations` are the archive
+    /// paths holding the content at compile time (the live tier).
+    ArchivedFromHere {
+        moved: bool,
+        destination: String,
+        current_locations: Vec<String>,
+    },
+    /// Content verified present in the archive, archived from elsewhere —
+    /// or from here in Records mode (no receipt to say so; the compile
+    /// records that gap).
+    Covered { locations: Vec<String> },
+    /// Dismissed — with the recorded reason, and the archive locations as
+    /// context when the content is also archived (both truths carried).
+    Excluded {
+        reason: Option<String>,
+        archive_locations: Vec<String>,
+    },
+    /// Absent, and the stamp is the Observe-family decision that witnessed
+    /// the loss.
+    Deleted { reason: Option<String> },
+    /// Present at retirement, nothing above applies — listed honestly.
+    PresentAtRetirement,
+    /// Absent without a recorded deletion — the account's unexplained
+    /// tombstones. The inventory must list them: "every source the root
+    /// ever had" includes the ones whose loss the record cannot explain.
+    MissingUnexplained,
+}
+
+#[allow(dead_code)]
+impl SourceFate {
+    /// The wire word for this fate. Terminal fates derive through
+    /// `fate_transition` (the never-literal law); standings come from the
+    /// named constants above.
+    pub fn word(&self) -> &'static str {
+        match self {
+            SourceFate::ArchivedFromHere { .. } => {
+                fate_transition(DecisionFamily::Archive, FateAspect::Present)
+                    .expect("Archive+Present is a registered transition")
+                    .as_str()
+            }
+            SourceFate::Excluded { .. } => {
+                fate_transition(DecisionFamily::Exclude, FateAspect::Present)
+                    .expect("Exclude is a registered transition")
+                    .as_str()
+            }
+            SourceFate::Deleted { .. } => {
+                fate_transition(DecisionFamily::Observe, FateAspect::Absent)
+                    .expect("Observe+Absent is a registered transition")
+                    .as_str()
+            }
+            SourceFate::Covered { .. } => STANDING_COVERED,
+            SourceFate::PresentAtRetirement => STANDING_PRESENT,
+            SourceFate::MissingUnexplained => STANDING_MISSING_UNEXPLAINED,
+        }
+    }
+}
+
+/// Hash honesty as a property of the entry, never the formatter.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryVerification {
+    ContentVerified,
+    NameOnly,
+}
+
+#[allow(dead_code)]
+impl EntryVerification {
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::ContentVerified => "content_verified",
+            Self::NameOnly => "name_only",
+        }
+    }
+}
+
+/// One inventory entry of the book.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookEntry {
+    pub rel_path: String,
+    pub size: i64,
+    /// `None` only on recovered entries whose receipt predates per-item
+    /// mtimes.
+    pub mtime: Option<i64>,
+    /// `"sha256:<hex>"`, where known.
+    pub hash: Option<String>,
+    pub fate: SourceFate,
+}
+
+#[allow(dead_code)]
+impl BookEntry {
+    /// Derived from hash presence — structurally incapable of disagreeing
+    /// with the data: an unhashed entry can never render content-verified.
+    pub fn verification(&self) -> EntryVerification {
+        if self.hash.is_some() {
+            EntryVerification::ContentVerified
+        } else {
+            EntryVerification::NameOnly
+        }
+    }
+}
+
+/// One apply-receipt item naming this root as origin — prepared by ops
+/// (destination resolved absolute, current locations resolved by hash,
+/// latest decision winning when several receipts name one path).
+///
+/// An origin *enriches* a matching present row into `ArchivedFromHere`; when
+/// no row exists at the path it *recovers* the entry outright — move-mode
+/// applies relocate the origin row to the destination root, so nothing
+/// remains to fetch. Receipt reading is entry recovery, not enrichment.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyOrigin {
+    pub rel_path: String,
+    /// Disposition relocated (moved) vs retained (copied).
+    pub moved: bool,
+    /// Absolute recorded destination path.
+    pub destination: String,
+    pub size: i64,
+    pub mtime: Option<i64>,
+    pub hash: Option<String>,
+    pub current_locations: Vec<String>,
+}
+
+/// Prepared lookup context for fate derivation — ops fetches, domain
+/// derives.
+#[allow(dead_code)]
+pub struct FateContext<'a> {
+    /// Object ids verified present in the archive.
+    pub archived: &'a HashSet<i64>,
+    /// `decision_id` → family, for the absent rows' stamps.
+    pub stamp_families: &'a HashMap<i64, DecisionFamily>,
+    /// `decision_id` → recorded reason (entries only where a reason exists).
+    pub stamp_reasons: &'a HashMap<i64, String>,
+    /// `object_id` → `"sha256:<hex>"`.
+    pub object_hashes: &'a HashMap<i64, String>,
+    /// `object_id` → current archive locations (absolute paths).
+    pub archive_locations: &'a HashMap<i64, Vec<String>>,
+    /// `rel_path` → the apply-origin claim for that path.
+    pub origins: &'a HashMap<String, ApplyOrigin>,
+}
+
+/// Build the full inventory: every source the root ever had. Present and
+/// absent rows classify through the account's own bucket derivations;
+/// origins without a matching row are recovered as entries of their own.
+/// Rows win over origins on a shared path — the row's current story
+/// supersedes the receipt's older claim, and the inventory stays
+/// one-entry-per-path. Sorted by `rel_path`: that order is the book's tree
+/// structure.
+#[allow(dead_code)]
+pub fn build_book_entries(
+    present: &[Source],
+    absent: &[Source],
+    ctx: &FateContext,
+) -> Vec<BookEntry> {
+    let mut entries: Vec<BookEntry> = Vec::with_capacity(present.len() + absent.len());
+    let mut row_paths: HashSet<&str> = HashSet::with_capacity(present.len() + absent.len());
+
+    for source in present {
+        row_paths.insert(source.rel_path.as_str());
+        let fate = match classify_present(source, ctx.archived) {
+            StandingBucket::Excluded => SourceFate::Excluded {
+                reason: stamp_reason(source, ctx),
+                archive_locations: locations_for(source, ctx),
+            },
+            StandingBucket::Covered => match ctx.origins.get(source.rel_path.as_str()) {
+                Some(origin) => SourceFate::ArchivedFromHere {
+                    moved: origin.moved,
+                    destination: origin.destination.clone(),
+                    current_locations: locations_for(source, ctx),
+                },
+                None => SourceFate::Covered {
+                    locations: locations_for(source, ctx),
+                },
+            },
+            StandingBucket::Unresolved { .. } => SourceFate::PresentAtRetirement,
+        };
+        entries.push(BookEntry {
+            rel_path: source.rel_path.clone(),
+            size: source.size,
+            mtime: Some(source.mtime),
+            hash: hash_for(source, ctx),
+            fate,
+        });
+    }
+
+    for source in absent {
+        row_paths.insert(source.rel_path.as_str());
+        let family = source
+            .decision_id
+            .and_then(|id| ctx.stamp_families.get(&id).copied());
+        let fate = match classify_absent(family) {
+            AbsentBucket::Deleted => SourceFate::Deleted {
+                reason: stamp_reason(source, ctx),
+            },
+            AbsentBucket::Unexplained => SourceFate::MissingUnexplained,
+        };
+        entries.push(BookEntry {
+            rel_path: source.rel_path.clone(),
+            size: source.size,
+            mtime: Some(source.mtime),
+            hash: hash_for(source, ctx),
+            fate,
+        });
+    }
+
+    for (rel_path, origin) in ctx.origins {
+        if row_paths.contains(rel_path.as_str()) {
+            continue;
+        }
+        entries.push(BookEntry {
+            rel_path: rel_path.clone(),
+            size: origin.size,
+            mtime: origin.mtime,
+            hash: origin.hash.clone(),
+            fate: SourceFate::ArchivedFromHere {
+                moved: origin.moved,
+                destination: origin.destination.clone(),
+                current_locations: origin.current_locations.clone(),
+            },
+        });
+    }
+
+    entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    entries
+}
+
+#[allow(dead_code)]
+fn stamp_reason(source: &Source, ctx: &FateContext) -> Option<String> {
+    source
+        .decision_id
+        .and_then(|id| ctx.stamp_reasons.get(&id).cloned())
+}
+
+#[allow(dead_code)]
+fn hash_for(source: &Source, ctx: &FateContext) -> Option<String> {
+    source
+        .object_id
+        .and_then(|id| ctx.object_hashes.get(&id).cloned())
+}
+
+#[allow(dead_code)]
+fn locations_for(source: &Source, ctx: &FateContext) -> Vec<String> {
+    source
+        .object_id
+        .and_then(|id| ctx.archive_locations.get(&id).cloned())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -471,5 +746,343 @@ mod tests {
         assert!(!not_ready.blocks(true));
         assert!(!Readiness::NoBlockersFound.blocks(false));
         assert!(!Readiness::NoBlockersFound.blocks(true));
+    }
+
+    // build_book_entries — the fate truth table
+
+    #[derive(Default)]
+    struct Ctx {
+        archived: HashSet<i64>,
+        families: HashMap<i64, DecisionFamily>,
+        reasons: HashMap<i64, String>,
+        hashes: HashMap<i64, String>,
+        locations: HashMap<i64, Vec<String>>,
+        origins: HashMap<String, ApplyOrigin>,
+    }
+
+    impl Ctx {
+        fn context(&self) -> FateContext<'_> {
+            FateContext {
+                archived: &self.archived,
+                stamp_families: &self.families,
+                stamp_reasons: &self.reasons,
+                object_hashes: &self.hashes,
+                archive_locations: &self.locations,
+                origins: &self.origins,
+            }
+        }
+    }
+
+    fn at(mut s: Source, rel_path: &str) -> Source {
+        s.rel_path = rel_path.to_string();
+        s
+    }
+
+    fn origin(rel_path: &str, moved: bool) -> ApplyOrigin {
+        ApplyOrigin {
+            rel_path: rel_path.to_string(),
+            moved,
+            destination: format!("/archive/{rel_path}"),
+            size: 77,
+            mtime: Some(1_704_067_200),
+            hash: Some("sha256:origin".to_string()),
+            current_locations: vec![format!("/archive/{rel_path}")],
+        }
+    }
+
+    fn add_origin(cx: &mut Ctx, o: ApplyOrigin) {
+        cx.origins.insert(o.rel_path.clone(), o);
+    }
+
+    #[test]
+    fn excluded_present_entry_carries_both_truths() {
+        let mut cx = Ctx::default();
+        cx.archived.insert(10);
+        cx.reasons.insert(5, "duplicate of archive".to_string());
+        cx.hashes.insert(10, "sha256:abc".to_string());
+        cx.locations.insert(10, vec!["/archive/a.jpg".to_string()]);
+        let present = vec![stamped(source(1, Some(10), true, false), 5)];
+
+        let entries = build_book_entries(&present, &[], &cx.context());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].fate,
+            SourceFate::Excluded {
+                reason: Some("duplicate of archive".to_string()),
+                archive_locations: vec!["/archive/a.jpg".to_string()],
+            }
+        );
+        assert_eq!(entries[0].hash.as_deref(), Some("sha256:abc"));
+    }
+
+    #[test]
+    fn object_excluded_present_entry_is_excluded() {
+        let cx = Ctx::default();
+        let present = vec![source(1, Some(10), false, true)];
+        let entries = build_book_entries(&present, &[], &cx.context());
+        assert!(matches!(entries[0].fate, SourceFate::Excluded { .. }));
+    }
+
+    #[test]
+    fn covered_present_with_origin_is_archived_from_here() {
+        let mut cx = Ctx::default();
+        cx.archived.insert(10);
+        // Live locations come from the archive-location map, not the origin:
+        // the map is compile-time truth, the origin the recorded claim.
+        cx.locations
+            .insert(10, vec!["/archive/live.jpg".to_string()]);
+        add_origin(&mut cx, origin("f1.jpg", false));
+        let present = vec![source(1, Some(10), false, false)];
+
+        let entries = build_book_entries(&present, &[], &cx.context());
+        assert_eq!(
+            entries.len(),
+            1,
+            "origin enriches the row, never duplicates"
+        );
+        assert_eq!(
+            entries[0].fate,
+            SourceFate::ArchivedFromHere {
+                moved: false,
+                destination: "/archive/f1.jpg".to_string(),
+                current_locations: vec!["/archive/live.jpg".to_string()],
+            }
+        );
+        // Row metadata wins over the receipt item's.
+        assert_eq!(entries[0].size, 100);
+        assert_eq!(entries[0].mtime, Some(0));
+    }
+
+    #[test]
+    fn covered_present_without_origin_is_covered() {
+        let mut cx = Ctx::default();
+        cx.archived.insert(10);
+        cx.locations.insert(10, vec!["/archive/a.jpg".to_string()]);
+        let present = vec![source(1, Some(10), false, false)];
+
+        let entries = build_book_entries(&present, &[], &cx.context());
+        assert_eq!(
+            entries[0].fate,
+            SourceFate::Covered {
+                locations: vec!["/archive/a.jpg".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn unresolved_present_is_present_at_retirement() {
+        let cx = Ctx::default();
+        let present = vec![
+            source(1, Some(10), false, false), // hashed, uncovered
+            source(2, None, false, false),     // unhashed
+        ];
+        let entries = build_book_entries(&present, &[], &cx.context());
+        assert!(entries
+            .iter()
+            .all(|e| e.fate == SourceFate::PresentAtRetirement));
+    }
+
+    #[test]
+    fn absent_observe_stamp_entry_is_deleted_with_reason() {
+        let mut cx = Ctx::default();
+        cx.families.insert(100, DecisionFamily::Observe);
+        cx.reasons.insert(100, "spring cleaning".to_string());
+        let absent = vec![stamped(source(6, Some(14), false, false), 100)];
+
+        let entries = build_book_entries(&[], &absent, &cx.context());
+        assert_eq!(
+            entries[0].fate,
+            SourceFate::Deleted {
+                reason: Some("spring cleaning".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn absent_other_or_no_stamp_is_missing_unexplained() {
+        let mut cx = Ctx::default();
+        cx.families.insert(200, DecisionFamily::Exclude);
+        let absent = vec![
+            stamped(source(7, None, false, false), 200),
+            source(8, None, false, false),
+        ];
+        let entries = build_book_entries(&[], &absent, &cx.context());
+        assert!(entries
+            .iter()
+            .all(|e| e.fate == SourceFate::MissingUnexplained));
+    }
+
+    #[test]
+    fn origin_without_row_recovers_the_entry_with_item_metadata() {
+        let mut cx = Ctx::default();
+        add_origin(&mut cx, origin("moved/away.jpg", true));
+
+        let entries = build_book_entries(&[], &[], &cx.context());
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.rel_path, "moved/away.jpg");
+        assert_eq!(e.size, 77);
+        assert_eq!(e.mtime, Some(1_704_067_200));
+        assert_eq!(e.hash.as_deref(), Some("sha256:origin"));
+        assert_eq!(
+            e.fate,
+            SourceFate::ArchivedFromHere {
+                moved: true,
+                destination: "/archive/moved/away.jpg".to_string(),
+                current_locations: vec!["/archive/moved/away.jpg".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn unhashed_entries_can_never_be_content_verified() {
+        let mut cx = Ctx::default();
+        let mut recovered = origin("gone.jpg", true);
+        recovered.hash = None;
+        add_origin(&mut cx, recovered);
+        let present = vec![source(1, None, false, false)];
+        let absent = vec![source(2, None, false, false)];
+
+        let entries = build_book_entries(&present, &absent, &cx.context());
+        assert_eq!(entries.len(), 3);
+        assert!(entries
+            .iter()
+            .all(|e| e.verification() == EntryVerification::NameOnly));
+    }
+
+    #[test]
+    fn hashed_entry_is_content_verified() {
+        let mut cx = Ctx::default();
+        cx.hashes.insert(10, "sha256:abc".to_string());
+        let present = vec![source(1, Some(10), false, false)];
+        let entries = build_book_entries(&present, &[], &cx.context());
+        assert_eq!(
+            entries[0].verification(),
+            EntryVerification::ContentVerified
+        );
+    }
+
+    #[test]
+    fn entries_sort_by_rel_path_tree_order() {
+        let mut cx = Ctx::default();
+        add_origin(&mut cx, origin("b/moved.jpg", true));
+        let present = vec![
+            at(source(1, None, false, false), "c/last.jpg"),
+            at(source(2, None, false, false), "a/first.jpg"),
+        ];
+        let entries = build_book_entries(&present, &[], &cx.context());
+        let paths: Vec<&str> = entries.iter().map(|e| e.rel_path.as_str()).collect();
+        assert_eq!(paths, vec!["a/first.jpg", "b/moved.jpg", "c/last.jpg"]);
+    }
+
+    // The agreement law: folding the entries' fates reproduces the account.
+
+    #[test]
+    fn entries_fold_to_the_account_buckets() {
+        let present = vec![
+            source(1, Some(10), false, false), // covered, origin → archived from here
+            source(2, Some(11), false, false), // covered, no origin
+            source(3, Some(12), true, false),  // excluded
+            source(4, Some(13), false, false), // unresolved, hashed
+            source(5, None, false, false),     // unresolved, unhashed
+        ];
+        let absent = vec![
+            stamped(source(6, Some(14), false, false), 100), // Observe → deleted
+            stamped(source(7, None, false, false), 200),     // Exclude → unexplained
+            source(8, None, false, false),                   // no stamp → unexplained
+        ];
+        let families = HashMap::from([
+            (100, DecisionFamily::Observe),
+            (200, DecisionFamily::Exclude),
+        ]);
+        let archived = archived_set(&[10, 11]);
+        let account = build_account(&present, &absent, &archived, &[], &families);
+
+        let mut cx = Ctx::default();
+        cx.archived = archived;
+        cx.families = families;
+        add_origin(&mut cx, origin("f1.jpg", false)); // enriches present row 1
+        add_origin(&mut cx, origin("recovered.jpg", true)); // no row — recovered
+
+        let entries = build_book_entries(&present, &absent, &cx.context());
+        let recovered = entries.len() as i64 - (present.len() + absent.len()) as i64;
+        let count =
+            |f: fn(&SourceFate) -> bool| entries.iter().filter(|e| f(&e.fate)).count() as i64;
+
+        assert_eq!(recovered, 1);
+        assert_eq!(
+            count(|f| matches!(f, SourceFate::Excluded { .. })),
+            account.excluded
+        );
+        assert_eq!(
+            count(|f| matches!(f, SourceFate::Deleted { .. })),
+            account.deleted
+        );
+        assert_eq!(
+            count(|f| matches!(f, SourceFate::MissingUnexplained)),
+            account.unexplained_missing
+        );
+        assert_eq!(
+            count(|f| matches!(f, SourceFate::PresentAtRetirement)),
+            account.unresolved
+        );
+        assert_eq!(
+            count(|f| matches!(
+                f,
+                SourceFate::Covered { .. } | SourceFate::ArchivedFromHere { .. }
+            )) - recovered,
+            account.covered
+        );
+        assert_eq!(
+            entries.len() as i64,
+            account.standing() + account.deleted + account.unexplained_missing + recovered
+        );
+    }
+
+    // Fate words: terminal fates derive, standings are the constants.
+
+    #[test]
+    fn terminal_fate_words_derive_through_fate_transition() {
+        let archived = SourceFate::ArchivedFromHere {
+            moved: true,
+            destination: String::new(),
+            current_locations: vec![],
+        };
+        assert_eq!(
+            archived.word(),
+            fate_transition(DecisionFamily::Archive, FateAspect::Present)
+                .unwrap()
+                .as_str()
+        );
+        let excluded = SourceFate::Excluded {
+            reason: None,
+            archive_locations: vec![],
+        };
+        assert_eq!(
+            excluded.word(),
+            fate_transition(DecisionFamily::Exclude, FateAspect::Present)
+                .unwrap()
+                .as_str()
+        );
+        let deleted = SourceFate::Deleted { reason: None };
+        assert_eq!(
+            deleted.word(),
+            fate_transition(DecisionFamily::Observe, FateAspect::Absent)
+                .unwrap()
+                .as_str()
+        );
+    }
+
+    #[test]
+    fn standing_words_are_the_named_constants() {
+        assert_eq!(
+            SourceFate::Covered { locations: vec![] }.word(),
+            STANDING_COVERED
+        );
+        assert_eq!(SourceFate::PresentAtRetirement.word(), STANDING_PRESENT);
+        assert_eq!(
+            SourceFate::MissingUnexplained.word(),
+            STANDING_MISSING_UNEXPLAINED
+        );
     }
 }
