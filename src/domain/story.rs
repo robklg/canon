@@ -10,10 +10,15 @@
 //!
 //! No I/O anywhere here; callers supply everything fetched.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use super::extraction::{DecisionExtraction, OriginDisposition};
 use super::folder_tree::FolderTree;
+use super::note::Note;
 use super::path::path_is_under;
+use super::retire::{classify_absent, classify_present, AbsentBucket, StandingBucket};
+use super::source::Source;
+use super::trail::{fate_posture, fate_transition, DecisionFamily, FateAspect, Posture};
 
 /// Named calibratable constants (the sweep discipline). Defaults are initial
 /// guesses until the first calibration pass against the real archive locks
@@ -347,6 +352,591 @@ pub fn group_acts(atoms: &[ActAtom], bases: &[&str], cap: usize) -> Vec<ActGroup
     groups
 }
 
+/// What the splitter needs to know about one decision.
+#[derive(Debug, Clone)]
+pub struct DecisionInfo {
+    pub family: DecisionFamily,
+    pub created_at: i64,
+    pub reason: Option<String>,
+}
+
+/// Everything the place walk consumes, decomposed from the fetched story.
+/// The ops layer supplies borrowed slices; no repo types cross this boundary.
+pub struct StoryInputs<'a> {
+    pub present: &'a [Source],
+    pub absent: &'a [Source],
+    /// Object ids among the present rows verified present in the archive.
+    pub archived: &'a HashSet<i64>,
+    /// Extraction rows whose origin is this root — the archived acts.
+    pub extractions: &'a [DecisionExtraction],
+    /// (decision id, rel prefix), one entry per decision-scope row on this
+    /// root: where each decision declared it operated.
+    pub operated_scopes: &'a [(i64, String)],
+    pub decisions: &'a HashMap<i64, DecisionInfo>,
+    pub notes: &'a [Note],
+    /// Object id → full paths of the archive copies. Zero-byte objects are
+    /// excluded upstream (the book's contentless gate, reused), so a covered
+    /// empty file counts in the standing but claims no locations.
+    pub archive_locations: &'a HashMap<i64, Vec<String>>,
+    /// Known root paths — the legibility bases for every "where" answer.
+    pub bases: &'a [String],
+}
+
+/// Present standings and record-quality facts attributed to one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PlaceStanding {
+    pub covered: i64,
+    pub excluded: i64,
+    pub unresolved: i64,
+    /// Subset of `unresolved`: never hashed — cannot be content-verified.
+    pub unhashed_unresolved: i64,
+    /// Absent without a recorded deletion — a record-quality fact.
+    pub missing_unexplained: i64,
+}
+
+impl PlaceStanding {
+    pub fn is_empty(&self) -> bool {
+        self.covered == 0
+            && self.excluded == 0
+            && self.unresolved == 0
+            && self.missing_unexplained == 0
+    }
+}
+
+/// One place on the map: a node the walk emitted, with everything under it
+/// attributed by deepest match.
+#[derive(Debug)]
+pub struct StoryPlace {
+    /// Path relative to the root; `""` is the root itself.
+    pub rel_path: String,
+    /// The acts, grouped for the what/why register; empty = no decision here.
+    pub acts: Vec<ActGroup>,
+    pub standing: PlaceStanding,
+    /// Where this place's covered copies stand — observed, nobody chose it.
+    pub covered_where: LocationAggregate,
+    /// The user's own testimony at this place, oldest first.
+    pub notes: Vec<Note>,
+    /// Distinct folders holding content merged into this line.
+    pub folder_breadth: u32,
+    pub children: Vec<StoryPlace>,
+}
+
+impl StoryPlace {
+    /// No decision here: nothing was ever acted on at or under this place
+    /// (its standing is evidence without an act).
+    pub fn undecided(&self) -> bool {
+        self.acts.is_empty()
+    }
+}
+
+/// Per-node accumulation for the walk: direct, then subtree by a reverse
+/// pass (ids are parents-first).
+#[derive(Debug, Clone, Copy, Default)]
+struct Counts {
+    covered: i64,
+    excluded: i64,
+    unresolved: i64,
+    unhashed: i64,
+    missing: i64,
+    files_present: i64,
+    bytes_present: i64,
+}
+
+impl Counts {
+    fn add(&mut self, other: &Counts) {
+        self.covered += other.covered;
+        self.excluded += other.excluded;
+        self.unresolved += other.unresolved;
+        self.unhashed += other.unhashed;
+        self.missing += other.missing;
+        self.files_present += other.files_present;
+        self.bytes_present += other.bytes_present;
+    }
+
+    /// The judgment population: present rows plus unexplained-missing rows.
+    fn population(&self) -> i64 {
+        self.files_present + self.missing
+    }
+
+    fn proportions(&self) -> [f64; 4] {
+        let pop = self.population() as f64;
+        [
+            self.covered as f64 / pop,
+            self.excluded as f64 / pop,
+            self.unresolved as f64 / pop,
+            self.missing as f64 / pop,
+        ]
+    }
+}
+
+fn dir_of(rel: &str) -> &str {
+    match rel.rsplit_once('/') {
+        Some((dir, _)) => dir,
+        None => "",
+    }
+}
+
+/// Build the place map: the containment tree of emitted places, everything
+/// attributed by deepest match.
+///
+/// The walk is the sweep's emission discipline transplanted — emit at the
+/// widest boundary where the line stays honest, descend only while the story
+/// changes: operated nodes (act anchors) and noted nodes always emit; an
+/// undecided node emits when its judgment signature (standing proportions +
+/// which of the context's covered-where groups it touches) diverges from its
+/// nearest emitted ancestor's; dust-sized subtrees lift into their parent.
+/// Pockets surface: a merged node's descendants are still walked against the
+/// same context, so a divergent grandchild splits out even when its parent
+/// blended in.
+pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlace {
+    let bases: Vec<&str> = inputs.bases.iter().map(String::as_str).collect();
+
+    // ---- tree: intern every location anything refers to ----
+    let mut tree = FolderTree::new();
+    tree.intern("");
+    let present_fids: Vec<u32> = inputs
+        .present
+        .iter()
+        .map(|s| tree.intern(dir_of(&s.rel_path)))
+        .collect();
+    let absent_fids: Vec<u32> = inputs
+        .absent
+        .iter()
+        .map(|s| tree.intern(dir_of(&s.rel_path)))
+        .collect();
+    let note_fids: Vec<u32> = inputs
+        .notes
+        .iter()
+        .map(|n| tree.intern(&n.rel_path))
+        .collect();
+    for (_, prefix) in inputs.operated_scopes {
+        tree.intern(prefix);
+    }
+    for row in inputs.extractions {
+        tree.intern(&row.rel_prefix);
+    }
+
+    let lca_all = |tree: &FolderTree, fids: &[u32]| -> u32 {
+        fids.iter()
+            .copied()
+            .reduce(|a, b| tree.lca(a, b))
+            .unwrap_or(0)
+    };
+
+    let mut scope_fids: HashMap<i64, Vec<u32>> = HashMap::new();
+    for (id, prefix) in inputs.operated_scopes {
+        let fid = tree.id(prefix).expect("interned above");
+        scope_fids.entry(*id).or_default().push(fid);
+    }
+
+    // ---- act atoms, each anchored at the node where the user acted ----
+    // Archived acts come from extraction rows (never receipts, never Archive
+    // stamps — apply stamps the destination rows, not this root's).
+    struct ArchAccum<'a> {
+        files: i64,
+        bytes: i64,
+        bytes_known: bool,
+        moved: i64,
+        copied: i64,
+        disposition_known: bool,
+        destination_dirs: Vec<(&'a str, i64)>,
+        origin_fids: Vec<u32>,
+    }
+    let mut arch: BTreeMap<i64, ArchAccum> = BTreeMap::new();
+    for row in inputs.extractions {
+        let acc = arch.entry(row.decision_id).or_insert_with(|| ArchAccum {
+            files: 0,
+            bytes: 0,
+            bytes_known: true,
+            moved: 0,
+            copied: 0,
+            disposition_known: true,
+            destination_dirs: Vec::new(),
+            origin_fids: Vec::new(),
+        });
+        acc.files += row.files;
+        match row.bytes {
+            Some(b) => acc.bytes += b,
+            None => acc.bytes_known = false,
+        }
+        match row.disposition {
+            Some(OriginDisposition::Relocated) => acc.moved += row.files,
+            Some(OriginDisposition::Retained) => acc.copied += row.files,
+            None => acc.disposition_known = false,
+        }
+        acc.destination_dirs
+            .push((row.destination_path.as_str(), row.files));
+        acc.origin_fids
+            .push(tree.id(&row.rel_prefix).expect("interned above"));
+    }
+
+    let archived_word = fate_transition(DecisionFamily::Archive, FateAspect::Present)
+        .expect("archive/present is a registered transition")
+        .as_str();
+    let mut atoms: Vec<(u32, ActAtom)> = Vec::new();
+    for (id, acc) in &arch {
+        let info = inputs.decisions.get(id);
+        let anchor = match scope_fids.get(id) {
+            Some(fids) => lca_all(&tree, fids),
+            None => lca_all(&tree, &acc.origin_fids),
+        };
+        atoms.push((
+            anchor,
+            ActAtom {
+                decision_id: *id,
+                created_at: info.map(|i| i.created_at).unwrap_or(0),
+                reason: info.and_then(|i| i.reason.as_deref()),
+                transition: archived_word,
+                observed: false,
+                files: acc.files,
+                bytes: acc.bytes_known.then_some(acc.bytes),
+                moved: acc.disposition_known.then_some(acc.moved),
+                copied: acc.disposition_known.then_some(acc.copied),
+                destination_dirs: acc.destination_dirs.clone(),
+            },
+        ));
+    }
+
+    // Stamp acts: exclusions, restores, scan-observed deletions.
+    #[derive(Default)]
+    struct StampAccum {
+        present: i64,
+        present_bytes: i64,
+        absent: i64,
+        absent_bytes: i64,
+        stamped_fids: Vec<u32>,
+        absent_fids: Vec<u32>,
+    }
+    let mut stamps: BTreeMap<i64, StampAccum> = BTreeMap::new();
+    for (source, fid) in inputs.present.iter().zip(&present_fids) {
+        if let Some(id) = source.decision_id {
+            let acc = stamps.entry(id).or_default();
+            acc.present += 1;
+            acc.present_bytes += source.size;
+            acc.stamped_fids.push(*fid);
+        }
+    }
+    for (source, fid) in inputs.absent.iter().zip(&absent_fids) {
+        if let Some(id) = source.decision_id {
+            let acc = stamps.entry(id).or_default();
+            acc.absent += 1;
+            acc.absent_bytes += source.size;
+            acc.stamped_fids.push(*fid);
+            acc.absent_fids.push(*fid);
+        }
+    }
+    for (id, acc) in &stamps {
+        let Some(info) = inputs.decisions.get(id) else {
+            continue; // unknown stamp: no act to narrate (classify_absent
+                      // already reads it as unexplained)
+        };
+        match info.family {
+            DecisionFamily::Archive => continue,
+            DecisionFamily::Observe => {
+                // A deletion is placed where it happened (the absent rows),
+                // not at the scan's scope — the scan observed, the user
+                // didn't act there.
+                if acc.absent > 0 {
+                    let transition = fate_transition(DecisionFamily::Observe, FateAspect::Absent)
+                        .expect("observe/absent is a registered transition")
+                        .as_str();
+                    let observed = fate_posture(DecisionFamily::Observe, FateAspect::Absent)
+                        == Posture::Observed;
+                    atoms.push((
+                        lca_all(&tree, &acc.absent_fids),
+                        ActAtom {
+                            decision_id: *id,
+                            created_at: info.created_at,
+                            reason: info.reason.as_deref(),
+                            transition,
+                            observed,
+                            files: acc.absent,
+                            bytes: Some(acc.absent_bytes),
+                            moved: None,
+                            copied: None,
+                            destination_dirs: Vec::new(),
+                        },
+                    ));
+                }
+            }
+            family => {
+                let Some(transition) = fate_transition(family, FateAspect::Present) else {
+                    continue;
+                };
+                let files = acc.present + acc.absent;
+                if files == 0 {
+                    continue;
+                }
+                let anchor = match scope_fids.get(id) {
+                    Some(fids) => lca_all(&tree, fids),
+                    None => lca_all(&tree, &acc.stamped_fids),
+                };
+                atoms.push((
+                    anchor,
+                    ActAtom {
+                        decision_id: *id,
+                        created_at: info.created_at,
+                        reason: info.reason.as_deref(),
+                        transition: transition.as_str(),
+                        observed: false,
+                        files,
+                        bytes: Some(acc.present_bytes + acc.absent_bytes),
+                        moved: None,
+                        copied: None,
+                        destination_dirs: Vec::new(),
+                    },
+                ));
+            }
+        }
+    }
+
+    // ---- per-node payloads: direct, then subtree by reverse pass ----
+    let n = tree.len();
+    let mut direct = vec![Counts::default(); n];
+    let mut direct_locs: Vec<HashMap<&str, i64>> = vec![HashMap::new(); n];
+    for (source, &fid) in inputs.present.iter().zip(&present_fids) {
+        let counts = &mut direct[fid as usize];
+        counts.files_present += 1;
+        counts.bytes_present += source.size;
+        match classify_present(source, inputs.archived) {
+            StandingBucket::Covered => {
+                counts.covered += 1;
+                if let Some(paths) = source
+                    .object_id
+                    .and_then(|obj| inputs.archive_locations.get(&obj))
+                {
+                    let mut seen: HashSet<&str> = HashSet::new();
+                    for path in paths {
+                        let dir = dir_of(path);
+                        if seen.insert(dir) {
+                            *direct_locs[fid as usize].entry(dir).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            StandingBucket::Excluded => counts.excluded += 1,
+            StandingBucket::Unresolved { unhashed } => {
+                counts.unresolved += 1;
+                if unhashed {
+                    counts.unhashed += 1;
+                }
+            }
+        }
+    }
+    for (source, &fid) in inputs.absent.iter().zip(&absent_fids) {
+        let family = source
+            .decision_id
+            .and_then(|id| inputs.decisions.get(&id))
+            .map(|i| i.family);
+        if classify_absent(family) == AbsentBucket::Unexplained {
+            direct[fid as usize].missing += 1;
+        }
+    }
+
+    let mut sub = direct.clone();
+    let mut sub_locs = direct_locs.clone();
+    for fid in (1..n as u32).rev() {
+        let parent = tree.parent(fid).expect("non-root has a parent") as usize;
+        let child_counts = sub[fid as usize];
+        sub[parent].add(&child_counts);
+        let child_locs = sub_locs[fid as usize].clone();
+        for (dir, files) in child_locs {
+            *sub_locs[parent].entry(dir).or_insert(0) += files;
+        }
+    }
+
+    // ---- the walk ----
+    let mut forced: HashSet<u32> = HashSet::new();
+    forced.insert(0);
+    forced.extend(note_fids.iter().copied());
+    forced.extend(atoms.iter().map(|(anchor, _)| *anchor));
+
+    // The context's covered-where groups, computed once per emitted place:
+    // which archive prefixes the context's line answers with, and which of
+    // them the context itself touches.
+    struct CtxSig {
+        groups: Vec<String>,
+        multi: bool,
+        full_set: BTreeSet<usize>,
+    }
+    let group_set = |dirs: &HashMap<&str, i64>, groups: &[String]| -> BTreeSet<usize> {
+        let mut set = BTreeSet::new();
+        for dir in dirs.keys() {
+            let idx = groups
+                .iter()
+                .position(|g| path_is_under(dir, g))
+                .unwrap_or(usize::MAX);
+            set.insert(idx);
+        }
+        set
+    };
+    let mut ctx_sigs: HashMap<u32, CtxSig> = HashMap::new();
+
+    let mut emitted: HashSet<u32> = HashSet::new();
+    emitted.insert(0);
+    let mut stack: Vec<(u32, u32)> = tree.children(0).iter().map(|&c| (c, 0)).collect();
+    while let Some((fid, ctx)) = stack.pop() {
+        let force = forced.contains(&fid);
+        let counts = &sub[fid as usize];
+        let dusty = counts.files_present < params.dust_floor_files
+            && counts.bytes_present < params.dust_floor_bytes;
+        let mut split = force;
+        if !split && !dusty {
+            let ctx_counts = &sub[ctx as usize];
+            if counts.population() > 0 && ctx_counts.population() > 0 {
+                let a = counts.proportions();
+                let b = ctx_counts.proportions();
+                split = a
+                    .iter()
+                    .zip(b.iter())
+                    .any(|(x, y)| (x - y).abs() > params.signature_tolerance);
+            }
+            if !split && !sub_locs[fid as usize].is_empty() {
+                let sig = ctx_sigs.entry(ctx).or_insert_with(|| {
+                    let dirs: Vec<(&str, i64)> = sub_locs[ctx as usize]
+                        .iter()
+                        .map(|(d, f)| (*d, *f))
+                        .collect();
+                    let agg = aggregate_locations(&dirs, &bases, usize::MAX);
+                    let groups: Vec<String> = agg.locations.into_iter().map(|l| l.path).collect();
+                    let multi = groups.len() > 1;
+                    let full_set = group_set(&sub_locs[ctx as usize], &groups);
+                    CtxSig {
+                        groups,
+                        multi,
+                        full_set,
+                    }
+                });
+                if sig.multi {
+                    let child_set = group_set(&sub_locs[fid as usize], &sig.groups);
+                    split = child_set != sig.full_set;
+                }
+            }
+        }
+        let next_ctx = if split {
+            emitted.insert(fid);
+            fid
+        } else {
+            ctx
+        };
+        for &child in tree.children(fid) {
+            stack.push((child, next_ctx));
+        }
+    }
+
+    // ---- attribution by deepest emitted ancestor ----
+    let resolve = |fid: u32| -> u32 {
+        let mut cur = fid;
+        loop {
+            if emitted.contains(&cur) {
+                return cur;
+            }
+            cur = tree.parent(cur).expect("root is emitted");
+        }
+    };
+
+    struct PlaceAccum<'a> {
+        standing: PlaceStanding,
+        locs: HashMap<&'a str, i64>,
+        notes: Vec<Note>,
+        atoms: Vec<ActAtom<'a>>,
+        content_dirs: HashSet<u32>,
+    }
+    let mut accums: HashMap<u32, PlaceAccum> = emitted
+        .iter()
+        .map(|&fid| {
+            (
+                fid,
+                PlaceAccum {
+                    standing: PlaceStanding::default(),
+                    locs: HashMap::new(),
+                    notes: Vec::new(),
+                    atoms: Vec::new(),
+                    content_dirs: HashSet::new(),
+                },
+            )
+        })
+        .collect();
+
+    for fid in 0..n as u32 {
+        let counts = &direct[fid as usize];
+        let has_content = counts.files_present > 0 || counts.missing > 0;
+        if !has_content && direct_locs[fid as usize].is_empty() {
+            continue;
+        }
+        let place = resolve(fid);
+        let accum = accums.get_mut(&place).expect("emitted place");
+        accum.standing.covered += counts.covered;
+        accum.standing.excluded += counts.excluded;
+        accum.standing.unresolved += counts.unresolved;
+        accum.standing.unhashed_unresolved += counts.unhashed;
+        accum.standing.missing_unexplained += counts.missing;
+        if has_content {
+            accum.content_dirs.insert(fid);
+        }
+        for (dir, files) in &direct_locs[fid as usize] {
+            *accum.locs.entry(dir).or_insert(0) += files;
+        }
+    }
+    for (note, fid) in inputs.notes.iter().zip(&note_fids) {
+        accums
+            .get_mut(&resolve(*fid))
+            .expect("emitted place")
+            .notes
+            .push(note.clone());
+    }
+    for (anchor, atom) in atoms {
+        accums
+            .get_mut(&resolve(anchor))
+            .expect("emitted place")
+            .atoms
+            .push(atom);
+    }
+
+    // ---- assemble the containment tree (ids are parents-first, so a
+    // descending pass sees every child before its parent) ----
+    let mut emitted_sorted: Vec<u32> = emitted.iter().copied().collect();
+    emitted_sorted.sort_unstable();
+    let mut built: HashMap<u32, StoryPlace> = HashMap::new();
+    let mut children_of: HashMap<u32, Vec<StoryPlace>> = HashMap::new();
+    for &fid in emitted_sorted.iter().rev() {
+        let accum = accums.remove(&fid).expect("accumulated place");
+        let mut notes = accum.notes;
+        notes.sort_by_key(|note| (note.created_at, note.id));
+        let loc_dirs: Vec<(&str, i64)> = {
+            let mut dirs: Vec<(&str, i64)> = accum.locs.iter().map(|(d, f)| (*d, *f)).collect();
+            dirs.sort();
+            dirs
+        };
+        let mut children = children_of.remove(&fid).unwrap_or_default();
+        children.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        let place = StoryPlace {
+            rel_path: tree.path(fid).to_string(),
+            acts: group_acts(&accum.atoms, &bases, params.where_cap),
+            standing: accum.standing,
+            covered_where: aggregate_locations(&loc_dirs, &bases, params.where_cap),
+            notes,
+            folder_breadth: accum.content_dirs.len() as u32,
+            children,
+        };
+        if fid == 0 {
+            built.insert(0, place);
+        } else {
+            let parent_place = {
+                let mut cur = tree.parent(fid).expect("non-root has a parent");
+                loop {
+                    if emitted.contains(&cur) {
+                        break cur;
+                    }
+                    cur = tree.parent(cur).expect("root is emitted");
+                }
+            };
+            children_of.entry(parent_place).or_default().push(place);
+        }
+    }
+    built.remove(&0).expect("root place")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,5 +1190,475 @@ mod tests {
         let groups = group_acts(&atoms, &[], 3);
         let ids: Vec<i64> = groups[0].decisions.iter().map(|d| d.id).collect();
         assert_eq!(ids, vec![57, 61, 63]);
+    }
+
+    // ---- the splitter ----
+
+    use crate::domain::retire::build_account;
+
+    fn src(id: i64, rel: &str, object_id: Option<i64>) -> Source {
+        Source {
+            id,
+            root_id: 1,
+            root_path: "/root".to_string(),
+            rel_path: rel.to_string(),
+            object_id,
+            size: 100,
+            mtime: 0,
+            excluded: false,
+            object_excluded: None,
+            device: 0,
+            inode: 0,
+            partial_hash: String::new(),
+            basis_rev: 0,
+            root_role: "source".to_string(),
+            root_suspended: false,
+            decision_id: None,
+        }
+    }
+
+    fn stamped(id: i64, rel: &str, object_id: Option<i64>, decision: i64) -> Source {
+        Source {
+            decision_id: Some(decision),
+            ..src(id, rel, object_id)
+        }
+    }
+
+    fn excluded_src(id: i64, rel: &str, object_id: Option<i64>, decision: i64) -> Source {
+        Source {
+            excluded: true,
+            ..stamped(id, rel, object_id, decision)
+        }
+    }
+
+    fn note_at(id: i64, rel: &str, text: &str) -> Note {
+        Note {
+            id,
+            root_id: 1,
+            rel_path: rel.to_string(),
+            text: text.to_string(),
+            created_at: id * 100,
+        }
+    }
+
+    fn extraction(
+        decision_id: i64,
+        rel_prefix: &str,
+        files: i64,
+        destination: &str,
+    ) -> DecisionExtraction {
+        DecisionExtraction {
+            decision_id,
+            root_id: 1,
+            root_path: "/root".to_string(),
+            rel_prefix: rel_prefix.to_string(),
+            files,
+            bytes: Some(files * 100),
+            destination_root_id: Some(2),
+            destination_path: destination.to_string(),
+            disposition: Some(OriginDisposition::Relocated),
+        }
+    }
+
+    fn dinfo(family: DecisionFamily, created_at: i64, reason: Option<&str>) -> DecisionInfo {
+        DecisionInfo {
+            family,
+            created_at,
+            reason: reason.map(str::to_string),
+        }
+    }
+
+    fn no_dust() -> StoryParams {
+        StoryParams {
+            dust_floor_files: 0,
+            dust_floor_bytes: 0,
+            ..StoryParams::default()
+        }
+    }
+
+    struct Fixture {
+        present: Vec<Source>,
+        absent: Vec<Source>,
+        archived: HashSet<i64>,
+        extractions: Vec<DecisionExtraction>,
+        operated_scopes: Vec<(i64, String)>,
+        decisions: HashMap<i64, DecisionInfo>,
+        notes: Vec<Note>,
+        archive_locations: HashMap<i64, Vec<String>>,
+        bases: Vec<String>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self {
+                present: vec![],
+                absent: vec![],
+                archived: HashSet::new(),
+                extractions: vec![],
+                operated_scopes: vec![],
+                decisions: HashMap::new(),
+                notes: vec![],
+                archive_locations: HashMap::new(),
+                bases: vec!["/root".to_string(), "/archive".to_string()],
+            }
+        }
+
+        /// A covered present source: hashed, archived, standing at one or
+        /// more archive locations.
+        fn covered(&mut self, id: i64, rel: &str, locations: &[&str]) {
+            let obj = 1000 + id;
+            self.present.push(src(id, rel, Some(obj)));
+            self.archived.insert(obj);
+            self.archive_locations
+                .insert(obj, locations.iter().map(|l| l.to_string()).collect());
+        }
+
+        fn build(&self, params: &StoryParams) -> StoryPlace {
+            build_places(
+                &StoryInputs {
+                    present: &self.present,
+                    absent: &self.absent,
+                    archived: &self.archived,
+                    extractions: &self.extractions,
+                    operated_scopes: &self.operated_scopes,
+                    decisions: &self.decisions,
+                    notes: &self.notes,
+                    archive_locations: &self.archive_locations,
+                    bases: &self.bases,
+                },
+                params,
+            )
+        }
+    }
+
+    fn child_paths(place: &StoryPlace) -> Vec<&str> {
+        place.children.iter().map(|c| c.rel_path.as_str()).collect()
+    }
+
+    #[test]
+    fn empty_root_is_a_bare_root_place() {
+        let fx = Fixture::new();
+        let root = fx.build(&no_dust());
+        assert_eq!(root.rel_path, "");
+        assert!(root.undecided());
+        assert!(root.standing.is_empty());
+        assert!(root.children.is_empty());
+        assert_eq!(root.folder_breadth, 0);
+    }
+
+    #[test]
+    fn uniform_undecided_tree_merges_to_one_line() {
+        let mut fx = Fixture::new();
+        fx.covered(1, "a/x.jpg", &["/archive/media/x.jpg"]);
+        fx.covered(2, "a/y.jpg", &["/archive/media/y.jpg"]);
+        fx.covered(3, "b/z.jpg", &["/archive/media/z.jpg"]);
+        let root = fx.build(&no_dust());
+        assert!(root.children.is_empty());
+        assert_eq!(root.standing.covered, 3);
+        assert!(root.undecided());
+        assert_eq!(root.folder_breadth, 2, "a and b merged into the root line");
+        assert_eq!(
+            root.covered_where.locations,
+            vec![LocationCount {
+                path: "/archive/media".into(),
+                files: 3
+            }]
+        );
+    }
+
+    #[test]
+    fn covered_where_divergence_splits_the_minecraft_case() {
+        let mut fx = Fixture::new();
+        fx.covered(
+            1,
+            "home/minecraft/world1/level.dat",
+            &["/archive/staging-2019/worlds/level.dat"],
+        );
+        fx.covered(
+            2,
+            "home/minecraft/world1/region.mca",
+            &["/archive/staging-2019/worlds/region.mca"],
+        );
+        fx.covered(3, "home/photos/a.jpg", &["/archive/media/a.jpg"]);
+        fx.covered(4, "home/photos/b.jpg", &["/archive/media/b.jpg"]);
+        let root = fx.build(&no_dust());
+        // `home` blends both stories; its children diverge and surface as
+        // pockets — children of the root place, not of an unemitted `home`.
+        assert_eq!(child_paths(&root), vec!["home/minecraft", "home/photos"]);
+        let minecraft = &root.children[0];
+        assert!(minecraft.undecided());
+        assert_eq!(minecraft.standing.covered, 2);
+        assert_eq!(
+            minecraft.covered_where.locations[0].path,
+            "/archive/staging-2019/worlds"
+        );
+        assert_eq!(root.standing.covered, 0, "everything attributed deeper");
+    }
+
+    #[test]
+    fn standing_divergence_splits() {
+        let mut fx = Fixture::new();
+        fx.covered(1, "a/x.jpg", &["/archive/media/x.jpg"]);
+        fx.covered(2, "a/y.jpg", &["/archive/media/y.jpg"]);
+        fx.covered(3, "a/z.jpg", &["/archive/media/z.jpg"]);
+        // Hashed but not archived: unresolved.
+        for (i, rel) in ["b/p.raw", "b/q.raw", "b/r.raw"].iter().enumerate() {
+            fx.present
+                .push(src(10 + i as i64, rel, Some(500 + i as i64)));
+        }
+        let root = fx.build(&no_dust());
+        assert_eq!(child_paths(&root), vec!["a", "b"]);
+        assert_eq!(root.children[0].standing.covered, 3);
+        assert_eq!(root.children[1].standing.unresolved, 3);
+        assert!(root.children[1].covered_where.is_empty());
+    }
+
+    #[test]
+    fn within_tolerance_children_merge() {
+        let mut fx = Fixture::new();
+        fx.covered(1, "a/x.jpg", &["/archive/media/x.jpg"]);
+        fx.present.push(src(2, "a/y.raw", Some(501)));
+        fx.covered(3, "b/z.jpg", &["/archive/media/z.jpg"]);
+        fx.present.push(src(4, "b/w.raw", Some(502)));
+        let root = fx.build(&no_dust());
+        assert!(root.children.is_empty());
+        assert_eq!(root.standing.covered, 2);
+        assert_eq!(root.standing.unresolved, 2);
+    }
+
+    #[test]
+    fn dust_floor_lifts_fragments() {
+        let mut fx = Fixture::new();
+        for i in 0..100 {
+            fx.covered(i, &format!("big/f{i}.jpg"), &["/archive/media/f.jpg"]);
+        }
+        // Strongly divergent but tiny: five unresolved files under the
+        // default floors lift into the root line instead of splitting.
+        for i in 0..5 {
+            fx.present
+                .push(src(200 + i, &format!("tiny/t{i}.raw"), Some(600 + i)));
+        }
+        let root = fx.build(&StoryParams::default());
+        assert!(root.children.is_empty());
+        assert_eq!(root.standing.covered, 100);
+        assert_eq!(root.standing.unresolved, 5);
+    }
+
+    #[test]
+    fn a_note_forces_a_place() {
+        let mut fx = Fixture::new();
+        fx.covered(1, "a/x.jpg", &["/archive/media/x.jpg"]);
+        fx.covered(2, "b/y.jpg", &["/archive/media/y.jpg"]);
+        fx.notes
+            .push(note_at(7, "b", "beautiful pictures, still need a home"));
+        let root = fx.build(&no_dust());
+        assert_eq!(child_paths(&root), vec!["b"]);
+        let b = &root.children[0];
+        assert_eq!(b.notes.len(), 1);
+        assert_eq!(b.notes[0].text, "beautiful pictures, still need a home");
+        assert_eq!(b.standing.covered, 1);
+        assert!(b.undecided(), "a note is testimony, not a decision stamp");
+    }
+
+    #[test]
+    fn an_operated_scope_is_an_unconditional_place() {
+        let mut fx = Fixture::new();
+        fx.present.push(excluded_src(1, "old/setup1.exe", None, 57));
+        fx.present.push(excluded_src(2, "old/setup2.exe", None, 57));
+        fx.operated_scopes.push((57, "old".to_string()));
+        fx.decisions.insert(
+            57,
+            dinfo(DecisionFamily::Exclude, 100, Some("installer junk")),
+        );
+        let root = fx.build(&no_dust());
+        assert_eq!(child_paths(&root), vec!["old"]);
+        let old = &root.children[0];
+        assert!(!old.undecided());
+        assert_eq!(old.acts.len(), 1);
+        assert_eq!(old.acts[0].transition, "excluded");
+        assert_eq!(old.acts[0].files, 2);
+        assert_eq!(old.standing.excluded, 2);
+        let reasons = old.acts[0].reason_summary();
+        assert_eq!(reasons.reasons[0].0, "installer junk");
+    }
+
+    #[test]
+    fn nested_operated_scopes_render_as_containment() {
+        let mut fx = Fixture::new();
+        fx.extractions.push(extraction(
+            42,
+            "pictures/italy",
+            640,
+            "/archive/media/2016-italy",
+        ));
+        fx.extractions
+            .push(extraction(51, "pictures", 4102, "/archive/media/rest"));
+        fx.operated_scopes.push((42, "pictures/italy".to_string()));
+        fx.operated_scopes.push((51, "pictures".to_string()));
+        fx.decisions.insert(
+            42,
+            dinfo(DecisionFamily::Archive, 100, Some("the Italy trip")),
+        );
+        fx.decisions
+            .insert(51, dinfo(DecisionFamily::Archive, 200, None));
+        fx.covered(
+            9,
+            "pictures/italy/leftover.jpg",
+            &["/archive/media/2016-italy/leftover.jpg"],
+        );
+        let root = fx.build(&no_dust());
+        assert_eq!(child_paths(&root), vec!["pictures"]);
+        let pictures = &root.children[0];
+        assert_eq!(pictures.acts.len(), 1);
+        assert_eq!(pictures.acts[0].files, 4102);
+        assert_eq!(
+            pictures.acts[0].destination.locations[0].path,
+            "/archive/media/rest"
+        );
+        assert_eq!(child_paths(pictures), vec!["pictures/italy"]);
+        let italy = &pictures.children[0];
+        assert_eq!(italy.acts[0].files, 640);
+        assert_eq!(italy.acts[0].moved, Some(640));
+        assert_eq!(
+            italy.standing.covered, 1,
+            "deepest-match: the leftover belongs to italy, not pictures"
+        );
+        let reasons = italy.acts[0].reason_summary();
+        assert_eq!(reasons.reasons[0].0, "the Italy trip");
+    }
+
+    #[test]
+    fn a_multi_scope_decision_anchors_at_the_lca() {
+        let mut fx = Fixture::new();
+        fx.present.push(excluded_src(1, "a/b/x.tmp", None, 60));
+        fx.present.push(excluded_src(2, "a/c/y.tmp", None, 60));
+        fx.operated_scopes.push((60, "a/b".to_string()));
+        fx.operated_scopes.push((60, "a/c".to_string()));
+        fx.decisions
+            .insert(60, dinfo(DecisionFamily::Exclude, 100, None));
+        let root = fx.build(&no_dust());
+        assert_eq!(child_paths(&root), vec!["a"]);
+        assert_eq!(root.children[0].acts[0].files, 2);
+    }
+
+    #[test]
+    fn a_global_decision_anchors_at_the_stamped_lca() {
+        let mut fx = Fixture::new();
+        fx.present.push(excluded_src(1, "d/x.tmp", None, 61));
+        fx.present.push(excluded_src(2, "d/y.tmp", None, 61));
+        fx.decisions
+            .insert(61, dinfo(DecisionFamily::Exclude, 100, None));
+        let root = fx.build(&no_dust());
+        assert_eq!(child_paths(&root), vec!["d"]);
+        assert_eq!(root.children[0].acts[0].transition, "excluded");
+    }
+
+    #[test]
+    fn an_observed_deletion_lands_where_it_happened() {
+        let mut fx = Fixture::new();
+        fx.absent.push(stamped(1, "gone/a.jpg", None, 70));
+        fx.absent.push(stamped(2, "gone/b.jpg", None, 70));
+        // The scan operated at the root; the loss happened at `gone`.
+        fx.operated_scopes.push((70, String::new()));
+        fx.decisions
+            .insert(70, dinfo(DecisionFamily::Observe, 100, None));
+        let root = fx.build(&no_dust());
+        assert_eq!(child_paths(&root), vec!["gone"]);
+        let gone = &root.children[0];
+        assert_eq!(gone.acts.len(), 1);
+        assert_eq!(gone.acts[0].transition, "deleted");
+        assert!(gone.acts[0].observed);
+        assert_eq!(gone.acts[0].files, 2);
+        assert_eq!(gone.standing.missing_unexplained, 0);
+    }
+
+    #[test]
+    fn missing_without_a_stamp_is_standing_not_an_act() {
+        let mut fx = Fixture::new();
+        fx.absent.push(src(1, "lost/x.jpg", None));
+        let root = fx.build(&no_dust());
+        assert!(root.children.is_empty());
+        assert!(root.undecided());
+        assert_eq!(root.standing.missing_unexplained, 1);
+    }
+
+    #[test]
+    fn copies_count_per_location_never_per_item() {
+        let mut fx = Fixture::new();
+        // Two copies in one archive dir count that dir once for this file.
+        fx.covered(
+            1,
+            "m/x.jpg",
+            &[
+                "/archive/a/x.jpg",
+                "/archive/a/x-copy.jpg",
+                "/archive/b/x.jpg",
+            ],
+        );
+        let root = fx.build(&no_dust());
+        let paths: Vec<(&str, i64)> = root
+            .covered_where
+            .locations
+            .iter()
+            .map(|l| (l.path.as_str(), l.files))
+            .collect();
+        assert_eq!(paths, vec![("/archive/a", 1), ("/archive/b", 1)]);
+    }
+
+    #[test]
+    fn agreement_law_place_sums_fold_to_the_account() {
+        let mut fx = Fixture::new();
+        fx.covered(1, "a/x.jpg", &["/archive/media/x.jpg"]);
+        fx.covered(2, "a/y.jpg", &["/archive/media/y.jpg"]);
+        fx.covered(3, "a/z.jpg", &["/archive/media/z.jpg"]);
+        fx.present.push(excluded_src(10, "b/i.exe", None, 57));
+        fx.present.push(excluded_src(11, "b/j.exe", None, 57));
+        fx.present.push(src(12, "c/u.raw", Some(700)));
+        fx.present.push(src(13, "c/v.raw", None));
+        fx.absent.push(stamped(20, "gone/a.jpg", None, 70));
+        fx.absent.push(stamped(21, "gone/b.jpg", None, 70));
+        fx.absent.push(src(22, "lost/w.jpg", None));
+        fx.extractions
+            .push(extraction(42, "a", 5, "/archive/media"));
+        fx.operated_scopes.push((57, "b".to_string()));
+        fx.operated_scopes.push((42, "a".to_string()));
+        fx.decisions
+            .insert(57, dinfo(DecisionFamily::Exclude, 100, None));
+        fx.decisions
+            .insert(70, dinfo(DecisionFamily::Observe, 200, None));
+        fx.decisions
+            .insert(42, dinfo(DecisionFamily::Archive, 300, None));
+        let root = fx.build(&no_dust());
+
+        fn fold(place: &StoryPlace, sum: &mut PlaceStanding) {
+            sum.covered += place.standing.covered;
+            sum.excluded += place.standing.excluded;
+            sum.unresolved += place.standing.unresolved;
+            sum.unhashed_unresolved += place.standing.unhashed_unresolved;
+            sum.missing_unexplained += place.standing.missing_unexplained;
+            for child in &place.children {
+                fold(child, sum);
+            }
+        }
+        let mut sum = PlaceStanding::default();
+        fold(&root, &mut sum);
+
+        let stamp_families: HashMap<i64, DecisionFamily> = fx
+            .decisions
+            .iter()
+            .map(|(id, info)| (*id, info.family))
+            .collect();
+        let account = build_account(
+            &fx.present,
+            &fx.absent,
+            &fx.archived,
+            &fx.extractions,
+            &stamp_families,
+        );
+        assert_eq!(sum.covered, account.covered);
+        assert_eq!(sum.excluded, account.excluded);
+        assert_eq!(sum.unresolved, account.unresolved);
+        assert_eq!(sum.unhashed_unresolved, account.unhashed_unresolved);
+        assert_eq!(sum.missing_unexplained, account.unexplained_missing);
     }
 }
