@@ -639,6 +639,18 @@ enum RootsAction {
     },
     /// List the retired fleet: the books on the shelf
     Retired,
+    /// Read a root's story: the map of places — where you acted, and what
+    /// no decision ever touched
+    Story {
+        /// Root specifier: id:<N> or path:<path>
+        spec: String,
+        /// Cap the number of place lines (omissions are counted, never silent)
+        #[arg(long, default_value_t = 50, conflicts_with = "all")]
+        limit: usize,
+        /// Show every place line
+        #[arg(long)]
+        all: bool,
+    },
     /// Retire a root: review readiness, bind its story into the book on the
     /// shelf, then remove it from the index
     Retire {
@@ -1530,6 +1542,9 @@ fn main() -> Result<()> {
             }
             Some(RootsAction::Retired) => {
                 roots::retired(&db, &config)?;
+            }
+            Some(RootsAction::Story { spec, limit, all }) => {
+                roots::story(&db, &spec, limit, all)?;
             }
             Some(RootsAction::Retire {
                 spec,

@@ -47,7 +47,12 @@ Facts to weigh
 
 NOT READY for retirement — 35 sources are neither archived nor excluded.
 To retire anyway: canon roots retire path:/mnt/photos-backup --allow unresolved
+To read the story behind these counts: canon roots story path:/mnt/photos-backup
 ```
+
+The review is the gate's counts; the substance behind them — the map of places,
+the acts with their reasons, where the covered copies stand — is
+[`canon roots story`](story.md), and the review points to it on both verdicts.
 
 The account has two registers, deliberately not reconciled. **The story so far** counts
 whole-history events: what was archived from here (both moves and copies, as the

@@ -51,6 +51,8 @@ Each line carries the decision id, timestamp, the scope it acted on, the complet
 
 The listing is capped at the 20 most recent decisions; the footer tells you what's beyond the cap (`--limit N` or `--all` to widen). Decisions recorded without a scope — global operations — can't be attributed to any folder, so scoped views count them in a footer instead of silently hiding them.
 
+The trail is the sequence view — what happened here, in order. Its shape-first counterpart is [`canon roots story`](../roots/story.md), which renders a whole root as a map of places and hands each place back to the trail for its full event story.
+
 ## The outbound direction: what left from here
 
 Standing at a source location, an `apply` that drew content out of this scope shows up too — even though the apply's own selection scope may have been global or elsewhere. It renders in the *extraction aspect*, replacing the usual summary line:

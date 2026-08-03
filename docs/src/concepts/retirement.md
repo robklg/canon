@@ -22,6 +22,12 @@ is yours), the compile and placement of the book, an inspection window, and only
 then the release of the index. At every failure point either the root is fully
 intact or the book is fully placed — never both partial.
 
+The judgment itself doesn't wait for the ceremony. Between passes, long before
+retiring, [`canon roots story`](../commands/roots/story.md) renders the root's
+story live — where you acted and why, and what no decision ever touched. The
+journey's seats, in order: the sweep finds, survey judges a place, the story review
+confirms a root, the ceremony binds.
+
 ## The book
 
 The **book** is the bound story of a retired root: what it held, the fate of every

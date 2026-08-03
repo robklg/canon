@@ -368,7 +368,7 @@ pub(crate) fn handoff(entry: &LeaderboardEntry) -> (String, Vec<String>) {
 }
 
 /// Quote an argument for display when it wouldn't survive a shell verbatim.
-fn shell_quote(arg: &str) -> String {
+pub(crate) fn shell_quote(arg: &str) -> String {
     let safe = |c: char| c.is_ascii_alphanumeric() || "/.-_:@%+=,".contains(c);
     if !arg.is_empty() && arg.chars().all(safe) {
         arg.to_string()
