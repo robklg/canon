@@ -67,13 +67,20 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<()> {
         Ok(resolved) => resolved,
         // An explicit path that misses every live root may be a retired
         // root's old mount path — then the retirement is the answer, not
-        // the error. Anything else propagates the original error untouched.
+        // the error. On a live root, a miss means an emptied place — no
+        // sources stand there, but its history (extraction rows, notes)
+        // still does, and refusing the question would 404 exactly the
+        // best-resolved places. Anything else propagates the original
+        // error untouched.
         Err(err) => {
             if let Some(statement) = retired_scope_statement(db.conn(), &args.paths)? {
                 print_retired_statement(&statement);
                 return Ok(());
             }
-            return Err(err);
+            match ops::scope::resolve_history_scope(&args.paths, &all_roots) {
+                Some(resolved) => resolved,
+                None => return Err(err),
+            }
         }
     };
 

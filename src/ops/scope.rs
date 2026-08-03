@@ -105,6 +105,31 @@ pub fn resolve_scope(
     }
 }
 
+/// History-tense resolution: an explicit path under a live root resolves
+/// even when no sources stand there anymore. The source-existence gate is
+/// right for present-tense commands ("no sources known" is `ls`'s honest
+/// answer) — but the trail's subject is what *happened*, and a place fully
+/// moved into the archive still holds its history (extraction rows, notes).
+/// Returns `None` when the paths don't resolve under live roots at all —
+/// the caller propagates its original error untouched.
+pub fn resolve_history_scope(explicit_paths: &[PathBuf], roots: &[Root]) -> Option<ResolvedScope> {
+    if explicit_paths.is_empty() {
+        return None;
+    }
+    let prefixes = resolve_paths(explicit_paths, roots).ok()?;
+    validate_paths_in_roots(&prefixes, roots).ok()?;
+    let auto_include_archived = prefixes.iter().any(|p| {
+        domain::root::find_containing_root(p, roots)
+            .map(|(_, _, role, _)| role == "archive")
+            .unwrap_or(false)
+    });
+    Some(ResolvedScope {
+        prefixes,
+        from_cwd: false,
+        auto_include_archived,
+    })
+}
+
 /// Validate that sources exist at each scope path.
 /// Errors on the first path with no known sources.
 /// Skips root-level paths (empty rel_path) — roots are always valid.
@@ -217,6 +242,34 @@ mod tests {
 
         let result = resolve_scope(&conn, &[PathBuf::from("/photos/2011")], false, &roots).unwrap();
         assert_eq!(result.prefixes, vec!["/photos/2011".to_string()]);
+    }
+
+    #[test]
+    fn history_scope_resolves_an_emptied_place_on_a_live_root() {
+        // No sources stand at /photos/moved-away — a move-mode apply took
+        // them all — but the path is under a live root, so the history
+        // question still resolves.
+        let roots = vec![make_test_root(1, "/photos", "source")];
+        let resolved =
+            resolve_history_scope(&[PathBuf::from("/photos/moved-away")], &roots).unwrap();
+        assert_eq!(resolved.prefixes, vec!["/photos/moved-away".to_string()]);
+        assert!(!resolved.from_cwd);
+        assert!(!resolved.auto_include_archived);
+    }
+
+    #[test]
+    fn history_scope_declines_paths_under_no_root() {
+        let roots = vec![make_test_root(1, "/photos", "source")];
+        assert!(resolve_history_scope(&[PathBuf::from("/elsewhere/x")], &roots).is_none());
+        assert!(resolve_history_scope(&[], &roots).is_none());
+    }
+
+    #[test]
+    fn history_scope_carries_the_archive_include_rule() {
+        let roots = vec![make_test_root(2, "/archive", "archive")];
+        let resolved =
+            resolve_history_scope(&[PathBuf::from("/archive/media/old")], &roots).unwrap();
+        assert!(resolved.auto_include_archived);
     }
 
     #[test]
