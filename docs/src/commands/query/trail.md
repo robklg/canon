@@ -221,7 +221,7 @@ When a root leaves through [`canon roots retire`](../roots/retire.md), its histo
 ```
   receipts:
     /Volumes/old-drive/.canon-ledger/000057-scan.toml
-      (root retired — gathered into the book at /archive/.canon-ledger/retired/old-drive/ledger/000057-scan.toml)
+      (root retired — gathered into the book at /archive/retired/old-drive/ledger/000057-scan.toml)
 ```
 
 The first line is where the receipt was written — history, unchanged. The second is where it lives now: a path you can actually open, without Canon. Two other honest states exist: if the book holds no gathered copy (a root retired on faith — its drive was unreachable at binding), the line says so and defers to the book, which records the gap (`not gathered into the book; the book at <path> records why`); if the book's own location isn't reachable right now (the archive is unmounted), the line states where the story is bound without claiming what's inside (`the story is bound at <path>, not reachable now`). Canon checks only that the files exist — it never reads the book to answer a trail query.
@@ -230,7 +230,7 @@ The first line is where the receipt was written — history, unchanged. The seco
 
 ```
 This place is retired: /Volumes/old-drive — retired 2026-08-02, "drive failing".
-The story is bound at /archive/.canon-ledger/retired/old-drive (decision #61).
+The story is bound at /archive/retired/old-drive (decision #61).
 ```
 
 That is the answer to the question asked, so the command exits 0. A path that was never retired keeps the normal behavior: an explicit unknown path is still an error, and a working directory outside every root still falls back to the global view. (A root removed with plain `roots rm` has no bound story to point at — its decisions still render with snapshot paths, but there is no retirement to state.)

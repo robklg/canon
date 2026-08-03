@@ -138,12 +138,37 @@ trail`](../query/trail.md#after-retirement-the-trail-stays-whole) at the old pat
 states the retirement and points at the book, and receipt pointers follow the
 gathered ledger into it.
 
+## The shelf listing
+
+`canon roots retired` reads the fleet — finished stories, counted:
+
+```
+The retired fleet: 2 books on the shelf (/Volumes/Archive/retired)
+
+2026-08-02  /Volumes/laptop-import/icloud-export — 3,980 entries → icloud-export-2026-08-02
+2026-09-14  /Volumes/old-laptop — 12,404 entries → old-laptop-2026-09-14 · "sold it"
+```
+
+The books on the shelf are the primary lines — the listing *reads the shelf*, so
+a book bound under `recording = Off` appears too (marked `(not indexed)`) — each
+enriched from its decision row with the retirement date and your reason. What
+either side knows alone is stated rather than dropped: a recorded retirement
+whose book no longer stands on the shelf lists as exactly that, and a directory
+on the shelf that cannot be identified as a book is counted, not skipped. When
+the shelf isn't reachable (the archive unmounted), the listing falls back to the
+index and says so. An empty shelf is stated plainly.
+
+Identification is not verification: the listing reads each book's `meta.toml`
+identity and counts, nothing more — a book of a future format version still
+lists, and nothing about its contents is checked or claimed.
+
 ## Recording modes
 
 `Full` and `Records` behave identically here: retirement writes no receipt file — the
 book *is* the decision's durable artifact, referenced from the decision row. Under
 `recording = Off` the ceremony still binds the book and releases the root, but leaves
-no index entry: the trail, the rm-guard, and the shelf listing won't know of it. Canon
+no index entry: the trail and the rm-guard won't know of it, and the shelf listing
+shows the book from disk alone, marked `(not indexed)`. Canon
 states this at the first confirmation. The book on disk is the durable truth either
 way. `--no-receipt` never suppresses the book — it is the command's deliverable, not
 a provenance side-channel.

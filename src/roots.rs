@@ -213,6 +213,105 @@ pub fn remove(
 /// the verdict is the message, no `Error:` duplication). A world-moved
 /// release exits non-zero and asks to be re-run.
 #[allow(clippy::too_many_arguments)]
+/// `canon roots retired` — the retired fleet, one line per book.
+pub fn retired(db: &Db, config: &LedgerConfig) -> Result<()> {
+    let listing = ops::retire::compute_shelf_listing(db.conn(), config)?;
+    let books = listing
+        .lines
+        .iter()
+        .filter(|l| matches!(l, ops::retire::ShelfLine::Book { .. }))
+        .count();
+
+    // The shelf can be observed (books are the primary lines) or not (the
+    // index still answers, hedged) — the header states which reading this is.
+    let shelf_observed = match (&listing.shelf, listing.shelf_reachable) {
+        (None, _) => {
+            if listing.lines.is_empty() {
+                println!(
+                    "No archive root is registered — there is no shelf, and the index records no retirements."
+                );
+                return Ok(());
+            }
+            println!("No archive root is registered — there is no shelf. The index records:");
+            false
+        }
+        (Some(shelf), false) => {
+            if listing.lines.is_empty() {
+                println!(
+                    "The shelf at {shelf} is not reachable right now, and the index records no retirements."
+                );
+                return Ok(());
+            }
+            println!("The shelf at {shelf} is not reachable right now — listing from the index:");
+            false
+        }
+        (Some(shelf), true) => {
+            if listing.lines.is_empty() {
+                println!("The shelf is empty — no roots retired yet. ({shelf})");
+                return Ok(());
+            }
+            let word = if books == 1 { "book" } else { "books" };
+            println!(
+                "The retired fleet: {} {word} on the shelf ({shelf})",
+                format_count(books as i64)
+            );
+            true
+        }
+    };
+    println!();
+
+    for line in &listing.lines {
+        match line {
+            ops::retire::ShelfLine::Book {
+                root_path,
+                retired_on,
+                entries,
+                book_dir,
+                reason,
+                indexed,
+            } => {
+                let date = retired_on.as_deref().unwrap_or("(undated)");
+                let mut s = format!("{date}  {root_path}");
+                if let Some(entries) = entries {
+                    s.push_str(&format!(" — {} entries", format_count(*entries)));
+                }
+                s.push_str(&format!(" → {book_dir}"));
+                if let Some(reason) = reason {
+                    s.push_str(&format!(" · \"{reason}\""));
+                }
+                if !indexed {
+                    s.push_str(" (not indexed)");
+                }
+                println!("{s}");
+            }
+            ops::retire::ShelfLine::RecordedOnly {
+                root_path,
+                retired_on,
+                book_path,
+                reason,
+            } => {
+                // With the shelf in view, absence is a fact; without it,
+                // only the recorded location can be claimed.
+                let mut s = if shelf_observed {
+                    format!(
+                        "{retired_on}  {root_path} — recorded, but no book stands at {book_path}"
+                    )
+                } else {
+                    format!("{retired_on}  {root_path} → {book_path}")
+                };
+                if let Some(reason) = reason {
+                    s.push_str(&format!(" · \"{reason}\""));
+                }
+                println!("{s}");
+            }
+            ops::retire::ShelfLine::Unidentified { dir_name } => {
+                println!("            {dir_name}/ — on the shelf, but not identifiable as a book");
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn retire(
     db: &Db,
     spec: &str,
@@ -656,5 +755,13 @@ mod tests {
     fn retire_allow_rejects_unknown_values() {
         let argv = ["canon", "roots", "retire", "/r", "--allow", "everything"];
         assert!(crate::Cli::try_parse_from(argv).is_err());
+    }
+
+    #[test]
+    fn retired_argv_parses_through_the_real_cli() {
+        crate::Cli::try_parse_from(["canon", "roots", "retired"])
+            .unwrap_or_else(|e| panic!("must parse: {e}"));
+        // The listing takes no arguments in v1.
+        assert!(crate::Cli::try_parse_from(["canon", "roots", "retired", "/path"]).is_err());
     }
 }

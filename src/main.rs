@@ -637,6 +637,8 @@ enum RootsAction {
         /// Root specifier: id:<N> or path:<path>
         spec: String,
     },
+    /// List the retired fleet: the books on the shelf
+    Retired,
     /// Retire a root: review readiness, bind its story into the book on the
     /// shelf, then remove it from the index
     Retire {
@@ -1525,6 +1527,9 @@ fn main() -> Result<()> {
             }
             Some(RootsAction::Unsuspend { spec }) => {
                 roots::unsuspend(&db, &spec, &command_line, &config, cli.no_receipt)?;
+            }
+            Some(RootsAction::Retired) => {
+                roots::retired(&db, &config)?;
             }
             Some(RootsAction::Retire {
                 spec,

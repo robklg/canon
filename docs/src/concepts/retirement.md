@@ -54,7 +54,8 @@ a book deletes the only reviewable story of a root that is already gone.
   and notes from the database — but the decisions survive in the trail, and the
   complete per-file story is bound in the book.
 - **The book is disk truth.** The database is a rebuildable index; the shelf is not.
-  DB loss loses the listing convenience, never the books.
+  The listing reads the shelf itself, so DB loss costs only its enrichment (dates,
+  reasons) — never the books, and not even the fleet's count.
 - **Receipts follow the surviving content.** The root's drive-local receipts are
   gathered into the book verbatim, filenames preserved, so decision chains stay
   walkable from disk into the book. Receipts that live at the archive (apply,
