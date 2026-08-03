@@ -248,10 +248,12 @@ pub struct CompileParams {
     /// explicit collision, never silently overwritten. The ceremony passes
     /// a temp name beside the shelf; the final rename is the placement step.
     pub dest_dir: PathBuf,
-    /// The ceremony's own in-flight decision, kept out of the timeline —
-    /// compiled before release completes, it cannot narrate itself; the
-    /// identity page carries the retirement.
-    pub exclude_decision_id: Option<i64>,
+    /// The ceremony's own in-flight decision. Two consumers: kept out of
+    /// the timeline — compiled before release completes, it cannot narrate
+    /// itself; the identity page carries the retirement — and stamped as
+    /// `identity.decision_id`, the id the index references this retirement
+    /// by, readable from the book alone.
+    pub ceremony_decision_id: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -345,7 +347,7 @@ pub fn compile_book(
     );
 
     write_inventory(&params.dest_dir, &entries)?;
-    write_timeline(&params.dest_dir, &trail, params.exclude_decision_id)?;
+    write_timeline(&params.dest_dir, &trail, params.ceremony_decision_id)?;
     write_notes(&params.dest_dir, &notes, &story.roots)?;
     let ledger_files = gather_ledger(&params.dest_dir, story, &mut gaps)?;
     let counts = fate_counts(&entries);
@@ -735,6 +737,8 @@ struct MetaIdentity<'a> {
     compiled_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision_id: Option<i64>,
     canon_version: &'a str,
 }
 
@@ -814,6 +818,7 @@ fn write_meta(
             last_scan: story.root.last_scanned_at.map(iso_utc),
             compiled_at: iso_utc(params.now),
             reason: params.reason.as_deref(),
+            decision_id: params.ceremony_decision_id,
             canon_version: env!("CARGO_PKG_VERSION"),
         },
         account: MetaAccount {
@@ -1337,7 +1342,7 @@ impl RetireCeremony {
                 reason: self.reason.clone(),
                 now: self.now,
                 dest_dir: self.plan.temp_dir.clone(),
-                exclude_decision_id: self.recorder.decision_id(),
+                ceremony_decision_id: self.recorder.decision_id(),
             },
         )?;
         verify_book(&self.plan.temp_dir).with_context(|| {
@@ -1941,7 +1946,7 @@ mod tests {
                 reason: Some("story complete".to_string()),
                 now: 1_753_000_000,
                 dest_dir: dest.to_path_buf(),
-                exclude_decision_id: None,
+                ceremony_decision_id: None,
             },
         )
         .unwrap()
@@ -2007,6 +2012,9 @@ mod tests {
         assert_eq!(meta["counts"]["entries"].as_integer(), Some(2));
         assert_eq!(meta["counts"]["present"].as_integer(), Some(2));
         assert_eq!(meta["identity"]["reason"].as_str(), Some("story complete"));
+        // A compile outside a ceremony has no retirement decision to name —
+        // the field is absent, never guessed.
+        assert!(meta["identity"].get("decision_id").is_none());
 
         let readme = std::fs::read_to_string(dest.join("README.md")).unwrap();
         assert!(readme.contains("The book of"));
@@ -2510,7 +2518,7 @@ mtime = 1700000000
                 reason: None,
                 now: 0,
                 dest_dir: dest,
-                exclude_decision_id: None,
+                ceremony_decision_id: None,
             },
         )
         .unwrap_err();
@@ -2673,6 +2681,15 @@ mtime = 1700000000
         )
         .unwrap();
         assert_eq!(decision.receipt_root_id, Some(arch_id));
+
+        // The book names the decision that bound it — the index reference is
+        // readable from the shelf alone.
+        let meta: toml::Value =
+            toml::from_str(&std::fs::read_to_string(bound.dir.join("meta.toml")).unwrap()).unwrap();
+        assert_eq!(
+            meta["identity"]["decision_id"].as_integer(),
+            Some(decision_id)
+        );
     }
 
     #[test]
@@ -2780,9 +2797,21 @@ mtime = 1700000000
         assert!(second_book.replaced_previous);
         assert_eq!(second_book.dir, first_book.dir);
         verify_book(&second_book.dir).unwrap();
-        // Same content class, freshly written (the compile stamps the same
-        // now, so compare by mtime-independent means: the file was replaced).
-        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), first_meta);
+        // Freshly written: the standing book names the *second* binding's
+        // decision — the old id is exactly the residue that must be gone —
+        // and everything else is identical (the compile stamps the same now).
+        let second_meta = std::fs::read_to_string(&sentinel).unwrap();
+        let first_id = first.recorder.decision_id().unwrap();
+        let second_id = second.recorder.decision_id().unwrap();
+        assert!(second_meta.contains(&format!("decision_id = {second_id}")));
+        assert!(!second_meta.contains(&format!("decision_id = {first_id}")));
+        assert_eq!(
+            second_meta.replace(
+                &format!("decision_id = {second_id}"),
+                &format!("decision_id = {first_id}")
+            ),
+            first_meta
+        );
 
         // No swap residue on the shelf: only the book and the README.
         let shelf = arch.path().join(SHELF_DIR);

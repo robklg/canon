@@ -96,8 +96,11 @@ The machine-readable half, `version = 1`:
   this book should hold is missing from it.
 - `[identity]` — path, role, comment, suspension, `first_indexed` (when the earliest
   surviving row was first indexed — row evidence, honest on roots older than
-  decision recording), last scan, `compiled_at`, the user's reason, and the Canon
-  version that wrote the book.
+  decision recording), last scan, `compiled_at`, the user's reason, `decision_id`
+  (the retirement decision that bound this book — the id the trail and the index
+  reference this retirement by, readable from the book alone; absent when the
+  ceremony ran with recording off — omitted, never guessed), and the Canon version
+  that wrote the book.
 - `[account]` — the resolution account in counts: the story so far (archived files
   and bytes with the moved/copied split, deleted, unexplained missing) and the
   standing at binding (covered, excluded, unresolved). Bytes and derived totals are
