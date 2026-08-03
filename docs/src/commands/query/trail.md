@@ -212,6 +212,29 @@ No section when the decision drew from nowhere (every other decision kind).
 
 `show` lists where the decision's [receipts](../../concepts/decisions.md) live on disk — including one receipt per source root for deletions. It does not print receipt contents; open the file to see the per-item record. When there is no receipt, the reason is stated (`no receipt (--no-receipt)` or `no receipt recorded`) — absence is never silent. A receipt pointer whose root has since been removed renders as `root #N (removed)/…` — the same honesty as the `drew from:` marker: the receipt was written, but the file now lives on a drive Canon no longer indexes.
 
+## After retirement: the trail stays whole
+
+When a root leaves through [`canon roots retire`](../roots/retire.md), its history keeps rendering — that is the ceremony's promise, and the trail keeps it in two places.
+
+**Receipt pointers follow the gathered ledger.** A deletion receipt was written on the source drive itself; retirement gathered a copy into the book's `ledger/`, filenames preserved. `trail show` on such a decision renders the pointer as a relocation:
+
+```
+  receipts:
+    /Volumes/old-drive/.canon-ledger/000057-scan.toml
+      (root retired — gathered into the book at /archive/.canon-ledger/retired/old-drive/ledger/000057-scan.toml)
+```
+
+The first line is where the receipt was written — history, unchanged. The second is where it lives now: a path you can actually open, without Canon. Two other honest states exist: if the book holds no gathered copy (a root retired on faith — its drive was unreachable at binding), the line says so and defers to the book, which records the gap (`not gathered into the book; the book at <path> records why`); if the book's own location isn't reachable right now (the archive is unmounted), the line states where the story is bound without claiming what's inside (`the story is bound at <path>, not reachable now`). Canon checks only that the files exist — it never reads the book to answer a trail query.
+
+**A scoped trail at a retired root's old path states the retirement.** Asking `canon trail /Volumes/old-drive` — or running `canon trail` while standing inside the old mount path — answers with the retirement itself instead of an error or a silently global view:
+
+```
+This place is retired: /Volumes/old-drive — retired 2026-08-02, "drive failing".
+The story is bound at /archive/.canon-ledger/retired/old-drive (decision #61).
+```
+
+That is the answer to the question asked, so the command exits 0. A path that was never retired keeps the normal behavior: an explicit unknown path is still an error, and a working directory outside every root still falls back to the global view. (A root removed with plain `roots rm` has no bound story to point at — its decisions still render with snapshot paths, but there is no retirement to state.)
+
 ## Machine output
 
 `--jsonl` emits one JSON object per timeline event, with a `type` field (`"decision"` or `"note"`), the raw command identifier, timestamps, counts, reason, scope, summary, and receipt location. An `apply` event additionally carries `extractions` — one entry per recorded placement, a source root's origin directory paired with the destination directory it fed (`root`, `rel_prefix`, `files`, `bytes`, `destination`, `disposition`) — populated regardless of view, including `--global`, so machine consumers never have to re-derive it from a scoped run. (Rows recorded before directory precision are one per source root, with common-prefix locations — the same fields, coarser values.) The field is absent (not `[]`) for decisions that drew from nothing. The scope header moves to stderr so stdout stays clean:

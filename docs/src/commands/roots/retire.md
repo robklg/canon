@@ -133,6 +133,11 @@ The drive is yours to discard.
 Disposal — unmounting, binning the drive, `rm -rf` on the folder — is yours to
 perform, licensed by the book.
 
+The trail keeps rendering the retired root's history afterward: [`canon
+trail`](../query/trail.md#after-retirement-the-trail-stays-whole) at the old path
+states the retirement and points at the book, and receipt pointers follow the
+gathered ledger into it.
+
 ## Recording modes
 
 `Full` and `Records` behave identically here: retirement writes no receipt file — the
