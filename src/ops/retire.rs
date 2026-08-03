@@ -141,6 +141,172 @@ pub fn find_retirement_covering_path(
     }))
 }
 
+/// One line of the retired fleet.
+pub enum ShelfLine {
+    /// A book standing on the shelf, enriched from its decision row when one
+    /// matches (`indexed`); an Off-mode book renders from its meta alone.
+    Book {
+        root_path: String,
+        /// The retirement decision's date, or the book's own compile date
+        /// when no row matches. `None` only if the meta carries no date.
+        retired_on: Option<String>,
+        entries: Option<i64>,
+        /// The book's directory name on the shelf.
+        book_dir: String,
+        reason: Option<String>,
+        indexed: bool,
+    },
+    /// A recorded retirement with no standing book on the shelf.
+    RecordedOnly {
+        root_path: String,
+        retired_on: String,
+        /// The recorded book location (marked fallback if the shelf's root
+        /// left the index).
+        book_path: String,
+        reason: Option<String>,
+    },
+    /// A directory on the shelf that could not be identified as a book —
+    /// counted, never silently skipped.
+    Unidentified { dir_name: String },
+}
+
+/// The retired fleet: a union, disk-primary. Books on the shelf are the
+/// primary lines (the concept's "browsing the shelf reads the retired
+/// fleet"); decision rows enrich them and contribute marked lines for
+/// retirements whose book is not standing. When the shelf is unreachable
+/// the rows still answer, hedged (`shelf_reachable`).
+pub struct ShelfListing {
+    /// The shelf's path; `None` when no archive root is registered.
+    pub shelf: Option<String>,
+    pub shelf_reachable: bool,
+    /// Chronological; unidentified directories last.
+    pub lines: Vec<ShelfLine>,
+}
+
+/// The listing probe: identify a book for its fleet line. Identification,
+/// not verification — deliberately no version gate (a future-version book
+/// still lists; only `verify_book` refuses what it cannot check).
+#[derive(Deserialize)]
+struct ListingProbe {
+    identity: ListingIdentity,
+    counts: Option<ListingCounts>,
+}
+
+#[derive(Deserialize)]
+struct ListingIdentity {
+    path: String,
+    compiled_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ListingCounts {
+    entries: Option<i64>,
+}
+
+fn read_listing_probe(dir: &Path) -> Option<ListingProbe> {
+    let raw = std::fs::read_to_string(dir.join("meta.toml")).ok()?;
+    toml::from_str(&raw).ok()
+}
+
+/// Compute the retired fleet. Rows join books on one key: the decision's
+/// recorded artifact reference naming the book's directory — the key every
+/// bound book carries, past and future, so no book needs a special case.
+pub fn compute_shelf_listing(conn: &Connection, config: &LedgerConfig) -> Result<ShelfListing> {
+    let roots = repo::root::fetch_all(conn)?;
+    let rows =
+        repo::decision::fetch_bound_retirements(conn, DecisionCommand::RootsRetire.as_str())?;
+    let shelf = ops::receipt::resolve_ledger_root(&roots, config)
+        .map(|(_, path)| format!("{path}/{SHELF_DIR}"));
+
+    let basename = |rel: &str| rel.rsplit('/').next().unwrap_or(rel).to_string();
+
+    let mut lines: Vec<ShelfLine> = Vec::new();
+    let mut book_dirs: HashSet<String> = HashSet::new();
+    let mut shelf_reachable = false;
+    if let Some(shelf_path) = &shelf {
+        if let Ok(entries) = std::fs::read_dir(shelf_path) {
+            shelf_reachable = true;
+            let mut dirs: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| e.file_name().to_str().map(String::from))
+                // A `.compiling-<name>` temp was never placed — not fleet.
+                .filter(|name| !name.starts_with('.'))
+                .collect();
+            dirs.sort();
+            for dir_name in dirs {
+                let dir = Path::new(shelf_path).join(&dir_name);
+                match read_listing_probe(&dir) {
+                    Some(probe) => {
+                        // Newest first, so the first match is the newest
+                        // retirement referencing this book.
+                        let row = rows
+                            .iter()
+                            .find(|r| basename(&r.receipt_rel_path) == dir_name);
+                        lines.push(ShelfLine::Book {
+                            root_path: probe.identity.path,
+                            retired_on: row.map(|r| iso_date(r.created_at)).or_else(|| {
+                                probe
+                                    .identity
+                                    .compiled_at
+                                    .map(|at| at.chars().take(10).collect())
+                            }),
+                            entries: probe.counts.and_then(|c| c.entries),
+                            book_dir: dir_name.clone(),
+                            reason: row.and_then(|r| r.reason.clone()),
+                            indexed: row.is_some(),
+                        });
+                        book_dirs.insert(dir_name);
+                    }
+                    None => lines.push(ShelfLine::Unidentified { dir_name }),
+                }
+            }
+        }
+    }
+
+    // Rows whose book is not standing — deduped to the newest per recorded
+    // location (a replaced re-run's older decision references the same book).
+    let mut seen_paths: HashSet<(i64, String)> = HashSet::new();
+    for row in &rows {
+        if shelf_reachable && book_dirs.contains(&basename(&row.receipt_rel_path)) {
+            continue;
+        }
+        if !seen_paths.insert((row.receipt_root_id, row.receipt_rel_path.clone())) {
+            continue;
+        }
+        let book_path = match roots.iter().find(|r| r.id == row.receipt_root_id) {
+            Some(root) => format!("{}/{}", root.path, row.receipt_rel_path),
+            None => format!(
+                "root #{} (removed)/{}",
+                row.receipt_root_id, row.receipt_rel_path
+            ),
+        };
+        lines.push(ShelfLine::RecordedOnly {
+            root_path: row.root_path.clone(),
+            retired_on: iso_date(row.created_at),
+            book_path,
+            reason: row.reason.clone(),
+        });
+    }
+
+    // Chronological (the trail's convention: the fleet reads as the story of
+    // finishing); unidentified directories last, in name order.
+    lines.sort_by(|a, b| {
+        let key = |l: &ShelfLine| match l {
+            ShelfLine::Book { retired_on, .. } => (0, retired_on.clone().unwrap_or_default()),
+            ShelfLine::RecordedOnly { retired_on, .. } => (0, retired_on.clone()),
+            ShelfLine::Unidentified { dir_name } => (1, dir_name.clone()),
+        };
+        key(a).cmp(&key(b))
+    });
+
+    Ok(ShelfListing {
+        shelf,
+        shelf_reachable,
+        lines,
+    })
+}
+
 /// The root's complete story, fetched once — the retirement ceremony's one
 /// structural substrate. The readiness review and the book compile are both
 /// lenses over this, so the ceremony fetches once and the gate and the book
@@ -1772,6 +1938,164 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(hit.book_display, "root #777 (removed)/retired/gone");
+    }
+
+    /// A minimal identifiable book on the shelf: a directory with a
+    /// `meta.toml` carrying identity and counts.
+    fn place_book(shelf: &Path, dir_name: &str, root_path: &str, entries: i64) {
+        let dir = shelf.join(dir_name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("meta.toml"),
+            format!(
+                "version = 1\n\n[identity]\npath = \"{root_path}\"\ncompiled_at = \"2026-08-02T10:00:00Z\"\n\n[counts]\nentries = {entries}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn listing_with_archive(conn: &Connection, archive_path: &str) -> ShelfListing {
+        insert_test_root(conn, archive_path, "archive", false);
+        compute_shelf_listing(conn, &LedgerConfig::default()).unwrap()
+    }
+
+    #[test]
+    fn shelf_listing_enriches_a_book_from_its_decision_row() {
+        let conn = open_in_memory_for_test();
+        let archive = tempfile::tempdir().unwrap();
+        let shelf = archive.path().join(SHELF_DIR);
+        place_book(&shelf, "gone-2026-08-02", "/gone", 3980);
+        insert_bound_retirement(
+            &conn,
+            "/gone",
+            100,
+            1,
+            Some("retired/gone-2026-08-02"),
+            Some("drive failing"),
+        );
+
+        let listing = listing_with_archive(&conn, archive.path().to_str().unwrap());
+        assert!(listing.shelf_reachable);
+        assert_eq!(listing.lines.len(), 1);
+        match &listing.lines[0] {
+            ShelfLine::Book {
+                root_path,
+                retired_on,
+                entries,
+                book_dir,
+                reason,
+                indexed,
+            } => {
+                assert_eq!(root_path, "/gone");
+                // The decision's date, not the meta's compile date.
+                assert_eq!(retired_on.as_deref(), Some(iso_date(100).as_str()));
+                assert_eq!(*entries, Some(3980));
+                assert_eq!(book_dir, "gone-2026-08-02");
+                assert_eq!(reason.as_deref(), Some("drive failing"));
+                assert!(indexed);
+            }
+            _ => panic!("expected an enriched Book line"),
+        }
+    }
+
+    #[test]
+    fn shelf_listing_renders_an_unindexed_book_from_meta_alone() {
+        // The Off-mode shape: a book stands, no decision row exists.
+        let conn = open_in_memory_for_test();
+        let archive = tempfile::tempdir().unwrap();
+        place_book(
+            &archive.path().join(SHELF_DIR),
+            "gone-2026-08-02",
+            "/gone",
+            12,
+        );
+
+        let listing = listing_with_archive(&conn, archive.path().to_str().unwrap());
+        assert_eq!(listing.lines.len(), 1);
+        match &listing.lines[0] {
+            ShelfLine::Book {
+                retired_on,
+                indexed,
+                reason,
+                ..
+            } => {
+                assert_eq!(retired_on.as_deref(), Some("2026-08-02"));
+                assert!(!indexed);
+                assert!(reason.is_none());
+            }
+            _ => panic!("expected a meta-only Book line"),
+        }
+    }
+
+    #[test]
+    fn shelf_listing_marks_a_recorded_retirement_without_a_standing_book() {
+        let conn = open_in_memory_for_test();
+        let archive = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(archive.path().join(SHELF_DIR)).unwrap();
+        let archive_path = archive.path().to_str().unwrap().to_string();
+        insert_bound_retirement(&conn, "/gone", 100, 1, Some("retired/vanished"), None);
+
+        let listing = listing_with_archive(&conn, &archive_path);
+        assert_eq!(listing.lines.len(), 1);
+        match &listing.lines[0] {
+            ShelfLine::RecordedOnly {
+                root_path,
+                book_path,
+                ..
+            } => {
+                assert_eq!(root_path, "/gone");
+                assert_eq!(book_path, &format!("{archive_path}/retired/vanished"));
+            }
+            _ => panic!("expected a RecordedOnly line"),
+        }
+    }
+
+    #[test]
+    fn shelf_listing_counts_an_unidentifiable_directory() {
+        let conn = open_in_memory_for_test();
+        let archive = tempfile::tempdir().unwrap();
+        let shelf = archive.path().join(SHELF_DIR);
+        place_book(&shelf, "gone-2026-08-02", "/gone", 12);
+        std::fs::create_dir_all(shelf.join("random-stuff")).unwrap();
+
+        let listing = listing_with_archive(&conn, archive.path().to_str().unwrap());
+        assert_eq!(listing.lines.len(), 2);
+        // Unidentified sorts last.
+        assert!(matches!(listing.lines[0], ShelfLine::Book { .. }));
+        match &listing.lines[1] {
+            ShelfLine::Unidentified { dir_name } => assert_eq!(dir_name, "random-stuff"),
+            _ => panic!("expected an Unidentified line"),
+        }
+    }
+
+    #[test]
+    fn shelf_listing_falls_back_to_rows_when_the_shelf_is_unreachable() {
+        let conn = open_in_memory_for_test();
+        insert_bound_retirement(
+            &conn,
+            "/gone",
+            100,
+            1,
+            Some("retired/gone-2026-08-02"),
+            None,
+        );
+
+        let listing = listing_with_archive(&conn, "/no/such/archive");
+        assert!(!listing.shelf_reachable);
+        assert_eq!(listing.shelf.as_deref(), Some("/no/such/archive/retired"));
+        assert_eq!(listing.lines.len(), 1);
+        assert!(matches!(listing.lines[0], ShelfLine::RecordedOnly { .. }));
+    }
+
+    #[test]
+    fn shelf_listing_empty_shelf_is_empty_and_reachable() {
+        let conn = open_in_memory_for_test();
+        let archive = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(archive.path().join(SHELF_DIR)).unwrap();
+
+        let listing = listing_with_archive(&conn, archive.path().to_str().unwrap());
+        assert!(listing.shelf_reachable);
+        assert!(listing.lines.is_empty());
     }
 
     fn insert_source(
