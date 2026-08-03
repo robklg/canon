@@ -28,6 +28,7 @@ use crate::domain::trail::{
 };
 use crate::ops;
 use crate::ops::scope::ResolvedScope;
+use crate::ops::trail::PointerRelocation;
 use crate::ops::trail::{
     ArrivalRollup, ExtractionRollup, RearrangementRollup, TrailParams, TrailResult, TrailView,
     DEFAULT_LIMIT,
@@ -141,6 +142,22 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
         println!("  receipts:");
         for receipt in &show.receipts {
             println!("    {}/{}", receipt.root_display, receipt.rel_path);
+            match &receipt.relocation {
+                Some(PointerRelocation::Gathered { book_ledger_path }) => {
+                    println!("      (root retired — gathered into the book at {book_ledger_path})");
+                }
+                Some(PointerRelocation::NotGathered { book_path }) => {
+                    println!(
+                        "      (root retired — not gathered into the book; the book at {book_path} records why)"
+                    );
+                }
+                Some(PointerRelocation::Unreachable { book_path }) => {
+                    println!(
+                        "      (root retired — the story is bound at {book_path}, not reachable now)"
+                    );
+                }
+                None => {}
+            }
         }
     }
     Ok(())

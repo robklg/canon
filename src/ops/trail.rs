@@ -3,7 +3,10 @@
 //! This is the reader; the recorder lives in `ops/decision.rs` and the two
 //! stay separate (the reader never records, the recorder never reads for
 //! display). Everything here is served from DB projections — receipt files
-//! are never read; `show` returns their locations as pointers only.
+//! are never read; `show` returns their locations as pointers only. The one
+//! carve-out: pointer relocation may *stat* the book (existence only, never
+//! contents) — all data still comes from the index; only the redirect
+//! target's existence is observed, and unreachability degrades to a hedge.
 //!
 //! Read operations: no transactions, no stdio.
 
@@ -12,9 +15,9 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use chrono::{Duration, Local, NaiveDate, TimeZone};
 
-use crate::domain::decision::Decision;
+use crate::domain::decision::{Decision, DecisionCommand};
 use crate::domain::extraction::DecisionExtraction;
-use crate::domain::root::find_containing_root;
+use crate::domain::root::{find_containing_root, Root};
 use crate::domain::trail::{
     aggregate_placement_lines, group_by_day, merge_events, placement_in_view, row_aspect,
     scopes_touch, DayGroup, RowAspect, TimelineEvent, WhenValue,
@@ -426,6 +429,22 @@ fn build_rollups(placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>
 pub struct ReceiptPointer {
     pub root_display: String,
     pub rel_path: String,
+    /// When the locus root is retired: where the pointer now leads.
+    pub relocation: Option<PointerRelocation>,
+}
+
+/// Where a retired root's receipt leads now. The book's location is a DB
+/// projection (the retirement decision's artifact reference); the filesystem
+/// is only consulted for existence — the book is stat'ed, never read.
+pub enum PointerRelocation {
+    /// The gathered copy stands in the book — a redirect you can follow.
+    Gathered { book_ledger_path: String },
+    /// The book stands but holds no gathered copy — the book records why
+    /// (retired on faith, or the copy is gone). A stat cannot tell which,
+    /// so this claims neither; the book's own gap record can.
+    NotGathered { book_path: String },
+    /// The book's location isn't reachable right now — no claim either way.
+    Unreachable { book_path: String },
 }
 
 /// One `drew from:` line: an origin root's aggregate over the decision's
@@ -477,12 +496,11 @@ pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
             .unwrap_or_else(|| format!("root #{root_id} (removed)"))
     };
 
-    let mut receipts = Vec::new();
+    // Pointer rows carry their locus root id — it drives retirement
+    // detection below; the display stays snapshot-first.
+    let mut pointer_rows: Vec<(i64, String, String)> = Vec::new();
     if let (Some(root_id), Some(rel)) = (decision.receipt_root_id, &decision.receipt_rel_path) {
-        receipts.push(ReceiptPointer {
-            root_display: root_display(root_id),
-            rel_path: rel.clone(),
-        });
+        pointer_rows.push((root_id, root_display(root_id), rel.clone()));
     }
     // Per-root receipts (e.g. one deletion receipt per source root).
     // Snapshot-first: the row's write-time root path renders even after the
@@ -495,17 +513,48 @@ pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
                 .root_path
                 .clone()
                 .unwrap_or_else(|| root_display(row.root_id));
-            let dup = receipts
+            let dup = pointer_rows
                 .iter()
-                .any(|p| p.rel_path == rel && p.root_display == display);
+                .any(|(_, d, r)| *r == rel && *d == display);
             if !dup {
-                receipts.push(ReceiptPointer {
-                    root_display: display,
-                    rel_path: rel,
-                });
+                pointer_rows.push((row.root_id, display, rel));
             }
         }
     }
+
+    // Relocation: a pointer whose locus root is retired leads to the book
+    // now. Detection is a DB projection — the newest bound `roots retire`
+    // decision touching the root (the rm guard's lookup, reused). A removed
+    // root with no such decision (plain rm, Off-mode retirement) keeps the
+    // plain pointer.
+    let live_ids: HashSet<i64> = roots.iter().map(|r| r.id).collect();
+    let mut bindings: HashMap<i64, Option<(i64, String)>> = HashMap::new();
+    for (root_id, _, _) in &pointer_rows {
+        if !live_ids.contains(root_id) && !bindings.contains_key(root_id) {
+            let binding = repo::decision::fetch_latest_receipt_for_root(
+                conn,
+                DecisionCommand::RootsRetire.as_str(),
+                *root_id,
+            )?;
+            bindings.insert(*root_id, binding);
+        }
+    }
+    let receipts: Vec<ReceiptPointer> =
+        pointer_rows
+            .into_iter()
+            .map(|(root_id, root_display, rel_path)| {
+                let relocation = bindings.get(&root_id).and_then(|b| b.as_ref()).map(
+                    |(book_root_id, book_rel)| {
+                        relocate_pointer(&roots, *book_root_id, book_rel, &rel_path)
+                    },
+                );
+                ReceiptPointer {
+                    root_display,
+                    rel_path,
+                    relocation,
+                }
+            })
+            .collect();
 
     let receipt_absence = if receipts.is_empty() {
         // The opt-out is recorded in the command line itself; beyond that the
@@ -566,6 +615,38 @@ pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
         receipt_absence,
         extractions,
     }))
+}
+
+/// Where a retired root's receipt leads now. The book's location comes from
+/// the retirement decision's artifact reference; the filesystem is only
+/// consulted for existence — the narrow carve-out to the no-receipt-reads
+/// law (stat the book, never read it). The gather copied `.canon-ledger/`
+/// verbatim into the book's `ledger/`, subpaths and filenames preserved, so
+/// the receipt→gathered-copy mapping is mechanical.
+fn relocate_pointer(
+    roots: &[Root],
+    book_root_id: i64,
+    book_rel: &str,
+    receipt_rel: &str,
+) -> PointerRelocation {
+    let Some(book_root) = roots.iter().find(|r| r.id == book_root_id) else {
+        // The shelf's own root left the index — no absolute path to observe.
+        return PointerRelocation::Unreachable {
+            book_path: format!("root #{book_root_id} (removed)/{book_rel}"),
+        };
+    };
+    let book_path = format!("{}/{}", book_root.path, book_rel);
+    let gathered_rel = receipt_rel
+        .strip_prefix(".canon-ledger/")
+        .unwrap_or(receipt_rel);
+    let book_ledger_path = format!("{book_path}/ledger/{gathered_rel}");
+    if std::path::Path::new(&book_ledger_path).exists() {
+        PointerRelocation::Gathered { book_ledger_path }
+    } else if std::path::Path::new(&book_path).exists() {
+        PointerRelocation::NotGathered { book_path }
+    } else {
+        PointerRelocation::Unreachable { book_path }
+    }
 }
 
 /// Epoch range [start, end) for a time-lens value, in local time.
@@ -1933,6 +2014,284 @@ mod tests {
         assert_eq!(show.receipts.len(), 1);
         assert_eq!(show.receipts[0].root_display, "root #999 (removed)");
         assert!(show.receipt_absence.is_none());
+    }
+
+    /// A bound retirement of `root_id`: a `roots_retire` decision whose
+    /// receipt columns reference the book, with a scope-row snapshot —
+    /// the shape the ceremony's `begin`/`bind` leave behind.
+    fn insert_retire_decision(
+        conn: &Connection,
+        retired_root_id: i64,
+        retired_root_path: &str,
+        created_at: i64,
+        receipt_root_id: i64,
+        receipt_rel_path: &str,
+        status: &str,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO decisions
+             (command, command_line, status, canon_version, created_at,
+              receipt_root_id, receipt_rel_path)
+             VALUES ('roots_retire', 'canon roots retire', ?1, 'test', ?2, ?3, ?4)",
+            rusqlite::params![status, created_at, receipt_root_id, receipt_rel_path],
+        )
+        .unwrap();
+        let decision_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO decision_scopes (decision_id, root_id, root_path, rel_prefix)
+             VALUES (?1, ?2, ?3, '')",
+            rusqlite::params![decision_id, retired_root_id, retired_root_path],
+        )
+        .unwrap();
+        decision_id
+    }
+
+    /// A scan decision with a source-local deletion receipt on a root that
+    /// is no longer in the index (snapshot row only).
+    fn insert_deletion_on_removed_root(
+        conn: &Connection,
+        removed_root_id: i64,
+        removed_root_path: &str,
+        receipt_rel: &str,
+    ) -> i64 {
+        let d = insert_decision_at(conn, "scan", 100);
+        conn.execute(
+            "INSERT INTO decision_scopes
+             (decision_id, root_id, root_path, rel_prefix, receipt_rel_path)
+             VALUES (?1, ?2, ?3, '', ?4)",
+            rusqlite::params![d, removed_root_id, removed_root_path, receipt_rel],
+        )
+        .unwrap();
+        d
+    }
+
+    #[test]
+    fn show_relocates_a_retired_roots_receipt_into_the_gathered_ledger() {
+        let conn = open_in_memory_for_test();
+        let shelf = tempfile::tempdir().unwrap();
+        let archive_path = shelf.path().to_str().unwrap().to_string();
+        let archive = insert_test_root(&conn, &archive_path, "archive", false);
+        let d =
+            insert_deletion_on_removed_root(&conn, 999, "/gone", ".canon-ledger/000042-scan.toml");
+        insert_retire_decision(
+            &conn,
+            999,
+            "/gone",
+            200,
+            archive,
+            ".canon-ledger/retired/gone",
+            "completed",
+        );
+        let ledger_dir = shelf.path().join(".canon-ledger/retired/gone/ledger");
+        std::fs::create_dir_all(&ledger_dir).unwrap();
+        std::fs::write(ledger_dir.join("000042-scan.toml"), "x").unwrap();
+
+        let show = compute_show(&conn, d).unwrap().unwrap();
+        assert_eq!(show.receipts.len(), 1);
+        match &show.receipts[0].relocation {
+            Some(PointerRelocation::Gathered { book_ledger_path }) => assert_eq!(
+                book_ledger_path,
+                &format!("{archive_path}/.canon-ledger/retired/gone/ledger/000042-scan.toml")
+            ),
+            other => panic!("expected Gathered, got {:?}", relocation_name(other)),
+        }
+    }
+
+    #[test]
+    fn show_relocation_preserves_a_nested_receipt_subpath() {
+        let conn = open_in_memory_for_test();
+        let shelf = tempfile::tempdir().unwrap();
+        let archive_path = shelf.path().to_str().unwrap().to_string();
+        let archive = insert_test_root(&conn, &archive_path, "archive", false);
+        let d = insert_deletion_on_removed_root(
+            &conn,
+            999,
+            "/gone",
+            ".canon-ledger/sub/000042-scan.toml",
+        );
+        insert_retire_decision(
+            &conn,
+            999,
+            "/gone",
+            200,
+            archive,
+            "retired/gone",
+            "completed",
+        );
+        let ledger_dir = shelf.path().join("retired/gone/ledger/sub");
+        std::fs::create_dir_all(&ledger_dir).unwrap();
+        std::fs::write(ledger_dir.join("000042-scan.toml"), "x").unwrap();
+
+        let show = compute_show(&conn, d).unwrap().unwrap();
+        match &show.receipts[0].relocation {
+            Some(PointerRelocation::Gathered { book_ledger_path }) => assert_eq!(
+                book_ledger_path,
+                &format!("{archive_path}/retired/gone/ledger/sub/000042-scan.toml")
+            ),
+            other => panic!("expected Gathered, got {:?}", relocation_name(other)),
+        }
+    }
+
+    #[test]
+    fn show_relocation_delegates_when_the_book_holds_no_gathered_copy() {
+        let conn = open_in_memory_for_test();
+        let shelf = tempfile::tempdir().unwrap();
+        let archive_path = shelf.path().to_str().unwrap().to_string();
+        let archive = insert_test_root(&conn, &archive_path, "archive", false);
+        let d =
+            insert_deletion_on_removed_root(&conn, 999, "/gone", ".canon-ledger/000042-scan.toml");
+        insert_retire_decision(
+            &conn,
+            999,
+            "/gone",
+            200,
+            archive,
+            "retired/gone",
+            "completed",
+        );
+        // The book stands — retired on faith, no ledger/ inside.
+        std::fs::create_dir_all(shelf.path().join("retired/gone")).unwrap();
+
+        let show = compute_show(&conn, d).unwrap().unwrap();
+        match &show.receipts[0].relocation {
+            Some(PointerRelocation::NotGathered { book_path }) => {
+                assert_eq!(book_path, &format!("{archive_path}/retired/gone"));
+            }
+            other => panic!("expected NotGathered, got {:?}", relocation_name(other)),
+        }
+    }
+
+    #[test]
+    fn show_relocation_hedges_when_the_book_is_unreachable() {
+        let conn = open_in_memory_for_test();
+        // The archive root is in the index but its path doesn't exist on
+        // this machine — the shelf can't be observed right now.
+        let archive = insert_test_root(&conn, "/no/such/archive", "archive", false);
+        let d =
+            insert_deletion_on_removed_root(&conn, 999, "/gone", ".canon-ledger/000042-scan.toml");
+        insert_retire_decision(
+            &conn,
+            999,
+            "/gone",
+            200,
+            archive,
+            "retired/gone",
+            "completed",
+        );
+
+        let show = compute_show(&conn, d).unwrap().unwrap();
+        match &show.receipts[0].relocation {
+            Some(PointerRelocation::Unreachable { book_path }) => {
+                assert_eq!(book_path, "/no/such/archive/retired/gone");
+            }
+            other => panic!("expected Unreachable, got {:?}", relocation_name(other)),
+        }
+
+        // The shelf's own root gone from the index: no path to observe —
+        // the marked fallback, same hedge.
+        let conn = open_in_memory_for_test();
+        let d =
+            insert_deletion_on_removed_root(&conn, 999, "/gone", ".canon-ledger/000042-scan.toml");
+        insert_retire_decision(&conn, 999, "/gone", 200, 777, "retired/gone", "completed");
+        let show = compute_show(&conn, d).unwrap().unwrap();
+        match &show.receipts[0].relocation {
+            Some(PointerRelocation::Unreachable { book_path }) => {
+                assert_eq!(book_path, "root #777 (removed)/retired/gone");
+            }
+            other => panic!("expected Unreachable, got {:?}", relocation_name(other)),
+        }
+    }
+
+    #[test]
+    fn show_relocation_ignores_a_plain_removed_root() {
+        // Removed but never retired (plain rm, or an Off-mode ceremony):
+        // no retire decision to project — today's pointer stands unchanged.
+        let conn = open_in_memory_for_test();
+        let d =
+            insert_deletion_on_removed_root(&conn, 999, "/gone", ".canon-ledger/000042-scan.toml");
+        let show = compute_show(&conn, d).unwrap().unwrap();
+        assert_eq!(show.receipts.len(), 1);
+        assert!(show.receipts[0].relocation.is_none());
+    }
+
+    #[test]
+    fn show_relocates_every_pointer_on_a_retired_root() {
+        let conn = open_in_memory_for_test();
+        let shelf = tempfile::tempdir().unwrap();
+        let archive_path = shelf.path().to_str().unwrap().to_string();
+        let archive = insert_test_root(&conn, &archive_path, "archive", false);
+        // One decision, two receipt rows on the same removed root (two
+        // prefixes) — both pointers must relocate.
+        let d = insert_decision_at(&conn, "scan", 100);
+        for (prefix, rel) in [
+            ("a", ".canon-ledger/000042-scan.toml"),
+            ("b", ".canon-ledger/000043-scan.toml"),
+        ] {
+            conn.execute(
+                "INSERT INTO decision_scopes
+                 (decision_id, root_id, root_path, rel_prefix, receipt_rel_path)
+                 VALUES (?1, 999, '/gone', ?2, ?3)",
+                rusqlite::params![d, prefix, rel],
+            )
+            .unwrap();
+        }
+        insert_retire_decision(
+            &conn,
+            999,
+            "/gone",
+            200,
+            archive,
+            "retired/gone",
+            "completed",
+        );
+        let ledger_dir = shelf.path().join("retired/gone/ledger");
+        std::fs::create_dir_all(&ledger_dir).unwrap();
+        std::fs::write(ledger_dir.join("000042-scan.toml"), "x").unwrap();
+        std::fs::write(ledger_dir.join("000043-scan.toml"), "x").unwrap();
+
+        let show = compute_show(&conn, d).unwrap().unwrap();
+        assert_eq!(show.receipts.len(), 2);
+        for receipt in &show.receipts {
+            assert!(matches!(
+                receipt.relocation,
+                Some(PointerRelocation::Gathered { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn show_relocates_after_abandoned_bind_then_rm() {
+        // An abandoned-after-bind ceremony (partial, bound-not-released)
+        // followed by a plain rm: the root left through the rm door, but a
+        // bound book with a gathered ledger stands — the stat finds the
+        // copy and renders the redirect. The disk-truth case.
+        let conn = open_in_memory_for_test();
+        let shelf = tempfile::tempdir().unwrap();
+        let archive_path = shelf.path().to_str().unwrap().to_string();
+        let archive = insert_test_root(&conn, &archive_path, "archive", false);
+        let d =
+            insert_deletion_on_removed_root(&conn, 999, "/gone", ".canon-ledger/000042-scan.toml");
+        insert_retire_decision(&conn, 999, "/gone", 200, archive, "retired/gone", "partial");
+        let ledger_dir = shelf.path().join("retired/gone/ledger");
+        std::fs::create_dir_all(&ledger_dir).unwrap();
+        std::fs::write(ledger_dir.join("000042-scan.toml"), "x").unwrap();
+
+        let show = compute_show(&conn, d).unwrap().unwrap();
+        assert!(matches!(
+            show.receipts[0].relocation,
+            Some(PointerRelocation::Gathered { .. })
+        ));
+    }
+
+    /// Test-failure labels for the relocation variants (the production enum
+    /// deliberately carries no Debug — it is a rendering contract).
+    fn relocation_name(r: &Option<PointerRelocation>) -> &'static str {
+        match r {
+            None => "None",
+            Some(PointerRelocation::Gathered { .. }) => "Gathered",
+            Some(PointerRelocation::NotGathered { .. }) => "NotGathered",
+            Some(PointerRelocation::Unreachable { .. }) => "Unreachable",
+        }
     }
 
     #[test]
