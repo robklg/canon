@@ -27,6 +27,7 @@ pub mod root;
 pub mod scan;
 pub mod scope;
 pub mod source;
+pub mod story;
 pub mod survey;
 pub mod sweep;
 pub mod trail;
