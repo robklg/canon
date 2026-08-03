@@ -62,7 +62,35 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<()> {
     };
 
     let all_roots = repo::root::fetch_all(db.conn())?;
-    let resolved = ops::scope::resolve_scope(db.conn(), &args.paths, args.global, &all_roots)?;
+    let resolved = match ops::scope::resolve_scope(db.conn(), &args.paths, args.global, &all_roots)
+    {
+        Ok(resolved) => resolved,
+        // An explicit path that misses every live root may be a retired
+        // root's old mount path — then the retirement is the answer, not
+        // the error. Anything else propagates the original error untouched.
+        Err(err) => {
+            if let Some(statement) = retired_scope_statement(db.conn(), &args.paths)? {
+                print_retired_statement(&statement);
+                return Ok(());
+            }
+            return Err(err);
+        }
+    };
+
+    // The silent CWD-global fallback: standing inside a retired root's old
+    // mount path, `canon trail` must state the retirement rather than
+    // quietly showing the whole universe.
+    if !args.global && args.paths.is_empty() && resolved.is_global() {
+        if let Ok(cwd) = std::env::current_dir() {
+            let cleaned = crate::domain::path::clean_path(&cwd, &cwd);
+            if let Some(statement) =
+                ops::retire::find_retirement_covering_path(db.conn(), &cleaned.to_string_lossy())?
+            {
+                print_retired_statement(&statement);
+                return Ok(());
+            }
+        }
+    }
 
     let limit = if args.all {
         None
@@ -105,6 +133,48 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The newest bound retirement covering any of the requested paths, cleaned
+/// lexically (the old mount path may no longer exist on disk, so resolution
+/// must not require it to).
+fn retired_scope_statement(
+    conn: &rusqlite::Connection,
+    paths: &[PathBuf],
+) -> Result<Option<ops::retire::RetiredScope>> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    for path in paths {
+        let cleaned = crate::domain::path::clean_path(path, &cwd);
+        if let Some(statement) =
+            ops::retire::find_retirement_covering_path(conn, &cleaned.to_string_lossy())?
+        {
+            return Ok(Some(statement));
+        }
+    }
+    Ok(None)
+}
+
+/// The retired-scope statement: this place's story is closed and bound —
+/// stated as fact, pointing at the book (exit 0: the command answered the
+/// question asked).
+fn print_retired_statement(s: &ops::retire::RetiredScope) {
+    match &s.reason {
+        Some(reason) => println!(
+            "This place is retired: {} — retired {}, \"{}\".",
+            s.root_path,
+            format_date_only(s.retired_at),
+            reason
+        ),
+        None => println!(
+            "This place is retired: {} — retired {}.",
+            s.root_path,
+            format_date_only(s.retired_at)
+        ),
+    }
+    println!(
+        "The story is bound at {} (decision #{}).",
+        s.book_display, s.decision_id
+    );
 }
 
 pub fn run_show(db: &mut Db, id: i64) -> Result<()> {

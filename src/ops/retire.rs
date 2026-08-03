@@ -91,6 +91,56 @@ pub fn validate_retire_target(roots: &[Root], root_id: i64, config: &LedgerConfi
     Ok(())
 }
 
+/// A bound retirement covering a path — the retired-scope statement's data.
+pub struct RetiredScope {
+    /// The retired root's path, from the scope-row snapshot.
+    pub root_path: String,
+    /// When the retirement decision was made (epoch seconds).
+    pub retired_at: i64,
+    pub reason: Option<String>,
+    /// Where the story is bound: the book's location, marked fallback when
+    /// the shelf's own root has left the index.
+    pub book_display: String,
+    pub decision_id: i64,
+}
+
+/// The newest bound retirement whose scope snapshot contains `path`
+/// (descendant-or-equal — a view merely containing a retired root is not
+/// "this place is retired"). Serves the trail's retired-scope statement on
+/// a scope miss; a live root at the path never reaches this (resolution
+/// succeeds). Off-mode retirements left no decision row and cannot match —
+/// the caller's existing miss behavior stands.
+pub fn find_retirement_covering_path(
+    conn: &Connection,
+    path: &str,
+) -> Result<Option<RetiredScope>> {
+    let rows =
+        repo::decision::fetch_bound_retirements(conn, DecisionCommand::RootsRetire.as_str())?;
+    // Newest first — the first hit is the latest retirement of the place
+    // (a re-retired path resolves to its newest telling).
+    let Some(hit) = rows
+        .into_iter()
+        .find(|r| crate::domain::path::path_is_under(path, &r.root_path))
+    else {
+        return Ok(None);
+    };
+    let roots = repo::root::fetch_all(conn)?;
+    let book_display = match roots.iter().find(|r| r.id == hit.receipt_root_id) {
+        Some(root) => format!("{}/{}", root.path, hit.receipt_rel_path),
+        None => format!(
+            "root #{} (removed)/{}",
+            hit.receipt_root_id, hit.receipt_rel_path
+        ),
+    };
+    Ok(Some(RetiredScope {
+        root_path: hit.root_path,
+        retired_at: hit.created_at,
+        reason: hit.reason,
+        book_display,
+        decision_id: hit.decision_id,
+    }))
+}
+
 /// The root's complete story, fetched once — the retirement ceremony's one
 /// structural substrate. The readiness review and the book compile are both
 /// lenses over this, so the ceremony fetches once and the gate and the book
@@ -1601,6 +1651,128 @@ mod tests {
     use super::*;
     use crate::repo::db::open_in_memory_for_test;
     use crate::repo::insert_test_root;
+
+    /// A bound retirement of a (since-removed) root: decision with an
+    /// artifact reference + a scope-row path snapshot — the shape the
+    /// ceremony's `begin`/`bind` leave behind.
+    fn insert_bound_retirement(
+        conn: &Connection,
+        retired_root_path: &str,
+        created_at: i64,
+        receipt_root_id: i64,
+        receipt_rel_path: Option<&str>,
+        reason: Option<&str>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO decisions
+             (command, command_line, status, canon_version, created_at, reason,
+              receipt_root_id, receipt_rel_path)
+             VALUES ('roots_retire', 'canon roots retire', 'completed', 'test', ?1, ?2,
+                     ?3, ?4)",
+            rusqlite::params![
+                created_at,
+                reason,
+                receipt_rel_path.map(|_| receipt_root_id),
+                receipt_rel_path
+            ],
+        )
+        .unwrap();
+        let decision_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO decision_scopes (decision_id, root_id, root_path, rel_prefix)
+             VALUES (?1, 999, ?2, '')",
+            rusqlite::params![decision_id, retired_root_path],
+        )
+        .unwrap();
+        decision_id
+    }
+
+    #[test]
+    fn find_retirement_covers_a_subpath_of_the_snapshot() {
+        let conn = open_in_memory_for_test();
+        let archive = insert_test_root(&conn, "/archive", "archive", false);
+        let d = insert_bound_retirement(
+            &conn,
+            "/gone",
+            100,
+            archive,
+            Some(".canon-ledger/retired/gone"),
+            Some("drive failing"),
+        );
+
+        for path in ["/gone", "/gone/photos/2016"] {
+            let hit = find_retirement_covering_path(&conn, path)
+                .unwrap()
+                .unwrap_or_else(|| panic!("no hit for {path}"));
+            assert_eq!(hit.root_path, "/gone");
+            assert_eq!(hit.retired_at, 100);
+            assert_eq!(hit.reason.as_deref(), Some("drive failing"));
+            assert_eq!(hit.book_display, "/archive/.canon-ledger/retired/gone");
+            assert_eq!(hit.decision_id, d);
+        }
+    }
+
+    #[test]
+    fn find_retirement_ignores_an_ancestor_path() {
+        // A view merely containing a retired root is not "this place is
+        // retired" — descendant-or-equal only. And `/gon` must not match
+        // `/gone` (directory boundaries, not string prefixes).
+        let conn = open_in_memory_for_test();
+        let archive = insert_test_root(&conn, "/archive", "archive", false);
+        insert_bound_retirement(&conn, "/vol/gone", 100, archive, Some("retired/gone"), None);
+
+        assert!(find_retirement_covering_path(&conn, "/vol")
+            .unwrap()
+            .is_none());
+        assert!(find_retirement_covering_path(&conn, "/vol/gon")
+            .unwrap()
+            .is_none());
+        assert!(find_retirement_covering_path(&conn, "/elsewhere")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn find_retirement_prefers_the_newest_of_two_retirements() {
+        // A re-added, re-retired path resolves to its newest telling.
+        let conn = open_in_memory_for_test();
+        let archive = insert_test_root(&conn, "/archive", "archive", false);
+        insert_bound_retirement(&conn, "/gone", 100, archive, Some("retired/gone"), None);
+        let newer =
+            insert_bound_retirement(&conn, "/gone", 200, archive, Some("retired/gone-2"), None);
+
+        let hit = find_retirement_covering_path(&conn, "/gone")
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.decision_id, newer);
+        assert_eq!(hit.book_display, "/archive/retired/gone-2");
+    }
+
+    #[test]
+    fn find_retirement_requires_a_bound_decision() {
+        // A retire decision that never recorded an artifact reference (no
+        // bind happened) cannot claim "the story is bound at" — no match,
+        // so a caller's original miss behavior stands.
+        let conn = open_in_memory_for_test();
+        insert_bound_retirement(&conn, "/gone", 100, 1, None, None);
+
+        assert!(find_retirement_covering_path(&conn, "/gone")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn find_retirement_marks_a_removed_archive_root() {
+        // The shelf's own root left the index — the book display renders
+        // the marked fallback rather than silently dropping the pointer.
+        let conn = open_in_memory_for_test();
+        insert_bound_retirement(&conn, "/gone", 100, 777, Some("retired/gone"), None);
+
+        let hit = find_retirement_covering_path(&conn, "/gone")
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.book_display, "root #777 (removed)/retired/gone");
+    }
 
     fn insert_source(
         conn: &Connection,

@@ -344,6 +344,53 @@ pub fn fetch_latest_receipt_for_root(
     Ok(result)
 }
 
+/// One bound retirement: a decision holding an artifact reference, joined to
+/// a scope-row path snapshot of the root it retired. Newest first. Serves
+/// the trail's retired-scope statement; path matching happens in the caller
+/// (repo never compares paths).
+pub struct BoundRetirementRow {
+    pub decision_id: i64,
+    pub created_at: i64,
+    pub reason: Option<String>,
+    /// The retired root's write-time path snapshot.
+    pub root_path: String,
+    pub receipt_root_id: i64,
+    pub receipt_rel_path: String,
+}
+
+/// Every decision with the given command that recorded an artifact reference
+/// and a scope-row path snapshot — the bound retirements, newest first.
+pub fn fetch_bound_retirements(
+    conn: &Connection,
+    command: &str,
+) -> Result<Vec<BoundRetirementRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT d.id, d.created_at, d.reason, s.root_path,
+                d.receipt_root_id, d.receipt_rel_path
+         FROM decisions d
+         JOIN decision_scopes s ON s.decision_id = d.id
+         WHERE d.command = ?1
+           AND d.receipt_root_id IS NOT NULL AND d.receipt_rel_path IS NOT NULL
+           AND s.root_path IS NOT NULL
+         ORDER BY d.created_at DESC, d.id DESC",
+    )?;
+    let rows = stmt.query_map([command], |row| {
+        Ok(BoundRetirementRow {
+            decision_id: row.get(0)?,
+            created_at: row.get(1)?,
+            reason: row.get(2)?,
+            root_path: row.get(3)?,
+            receipt_root_id: row.get(4)?,
+            receipt_rel_path: row.get(5)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// Highest decision id referenced by anything touching a root — source
 /// stamps, scope-index rows, and extraction rows (by origin), the same three
 /// tables `fetch_root_story` draws referenced ids from. The other half of the
