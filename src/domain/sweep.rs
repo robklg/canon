@@ -71,126 +71,7 @@ pub struct SweepStats {
     pub below_floor_subjects: usize,
 }
 
-/// Per-root folder tree with interned folder ids. Folder `""` is the root
-/// folder itself. Ids are created parents-first, so `parent(fid) < fid`
-/// always holds — bottom-up aggregation is a reverse walk over ids.
-pub struct FolderTree {
-    ids: HashMap<String, u32>,
-    paths: Vec<String>,
-    parent: Vec<Option<u32>>,
-    depth: Vec<u32>,
-    children: Vec<Vec<u32>>,
-}
-
-impl FolderTree {
-    pub fn new() -> Self {
-        Self {
-            ids: HashMap::new(),
-            paths: Vec::new(),
-            parent: Vec::new(),
-            depth: Vec::new(),
-            children: Vec::new(),
-        }
-    }
-
-    /// Intern a folder path (and any missing ancestors), returning its id.
-    pub fn intern(&mut self, folder: &str) -> u32 {
-        if let Some(&fid) = self.ids.get(folder) {
-            return fid;
-        }
-        // Walk up to the nearest interned ancestor, collecting the missing
-        // chain, then create it shallowest-first so parents precede children.
-        let mut chain: Vec<String> = Vec::new();
-        let mut cur = folder.to_string();
-        let mut anchor: Option<u32> = None;
-        loop {
-            chain.push(cur.clone());
-            if cur.is_empty() {
-                break;
-            }
-            let head = match cur.rsplit_once('/') {
-                Some((head, _)) => head.to_string(),
-                None => String::new(),
-            };
-            if let Some(&fid) = self.ids.get(&head) {
-                anchor = Some(fid);
-                break;
-            }
-            cur = head;
-        }
-        let mut parent = anchor;
-        for path in chain.into_iter().rev() {
-            let fid = self.paths.len() as u32;
-            self.ids.insert(path.clone(), fid);
-            self.paths.push(path);
-            self.parent.push(parent);
-            self.depth.push(match parent {
-                Some(p) => self.depth[p as usize] + 1,
-                None => 0,
-            });
-            self.children.push(Vec::new());
-            if let Some(p) = parent {
-                self.children[p as usize].push(fid);
-            }
-            parent = Some(fid);
-        }
-        parent.expect("intern creates at least one folder")
-    }
-
-    pub fn len(&self) -> usize {
-        self.paths.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.paths.is_empty()
-    }
-
-    pub fn path(&self, fid: u32) -> &str {
-        &self.paths[fid as usize]
-    }
-
-    pub fn parent(&self, fid: u32) -> Option<u32> {
-        self.parent[fid as usize]
-    }
-
-    pub fn children(&self, fid: u32) -> &[u32] {
-        &self.children[fid as usize]
-    }
-
-    /// Whether `anc` is `desc` or one of its ancestors.
-    pub fn is_ancestor_or_equal(&self, anc: u32, desc: u32) -> bool {
-        let mut cur = Some(desc);
-        while let Some(f) = cur {
-            if f == anc {
-                return true;
-            }
-            cur = self.parent[f as usize];
-        }
-        false
-    }
-
-    /// Lowest common ancestor of two folders.
-    pub fn lca(&self, a: u32, b: u32) -> u32 {
-        let (mut a, mut b) = (a, b);
-        while self.depth[a as usize] > self.depth[b as usize] {
-            a = self.parent[a as usize].expect("deeper folder has a parent");
-        }
-        while self.depth[b as usize] > self.depth[a as usize] {
-            b = self.parent[b as usize].expect("deeper folder has a parent");
-        }
-        while a != b {
-            a = self.parent[a as usize].expect("distinct folders share a root ancestor");
-            b = self.parent[b as usize].expect("distinct folders share a root ancestor");
-        }
-        a
-    }
-}
-
-impl Default for FolderTree {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use crate::domain::folder_tree::FolderTree;
 
 /// One root's folders and content, indexed by folder id.
 pub struct RootData {
@@ -1355,7 +1236,7 @@ mod tests {
         ];
         let u = universe(&sources, &roots, &SweepParams::default());
         let rd = &u.roots_data[0];
-        let fid = |p: &str| *rd.tree.ids.get(p).unwrap() as usize;
+        let fid = |p: &str| rd.tree.id(p).unwrap() as usize;
         assert_eq!(rd.sub_all[fid("")], (65, 4));
         assert_eq!(rd.sub_all[fid("a")], (60, 3));
         assert_eq!(rd.sub_all[fid("a/b")], (20, 1));
@@ -1402,7 +1283,7 @@ mod tests {
         assert_eq!(u.stats.ubiquitous_bytes_dropped, 100);
         // Dropped object leaves hashed totals but stays in all-content totals.
         let rd = &u.roots_data[0];
-        let fid_a = *rd.tree.ids.get("a").unwrap() as usize;
+        let fid_a = rd.tree.id("a").unwrap() as usize;
         assert_eq!(rd.leaf_all[fid_a], (140, 2));
         assert_eq!(rd.leaf_hashed[fid_a], (40, 1));
         assert!(rd.files[fid_a].iter().all(|&(oid, _)| oid != 10));
@@ -1417,7 +1298,7 @@ mod tests {
     }
 
     fn matched_at(u: &Universe, weights: &MatchedWeights, ri: usize, path: &str) -> (u64, u32) {
-        let fid = *u.roots_data[ri].tree.ids.get(path).unwrap() as usize;
+        let fid = u.roots_data[ri].tree.id(path).unwrap() as usize;
         weights.matched[ri][fid]
     }
 

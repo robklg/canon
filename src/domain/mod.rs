@@ -15,6 +15,7 @@ pub mod decision;
 pub mod exclusion;
 pub mod extraction;
 pub mod fact;
+pub mod folder_tree;
 pub mod format;
 pub mod include;
 pub mod note;
