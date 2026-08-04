@@ -898,11 +898,20 @@ fn act_lines(group: &ActGroup, indent: &str, lines: &mut Vec<String>) {
                 .join(", ");
             lines.push(format!("{indent}    · {ids}"));
         }
-        if summary.without_reason > 0 {
-            lines.push(format!(
-                "{indent}    · {} without reason",
-                summary.without_reason
-            ));
+        if !summary.without_reason.is_empty() {
+            // Ids, not a bare count: "without reason" must never read as
+            // "without decision" — these are real recorded acts.
+            let ids = summary
+                .without_reason
+                .iter()
+                .map(|id| format!("#{id}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if summary.without_reason.len() == 1 {
+                lines.push(format!("{indent}    · {ids} — no reason given"));
+            } else {
+                lines.push(format!("{indent}    · {ids} — without reason"));
+            }
         }
     }
 }
@@ -1323,7 +1332,9 @@ mod tests {
         let lines = story_lines(&report(root), usize::MAX, 0);
         assert_has_line(&lines, "excluded 4,890 files   across 3 decisions");
         assert_has_line(&lines, "· \"installer junk\"   #57, #61");
-        assert_has_line(&lines, "· 1 without reason");
+        // The reasonless decision shows its id — "without reason" must
+        // never read as "without decision".
+        assert_has_line(&lines, "· #63 — no reason given");
     }
 
     fn assert_no_line(lines: &[String], needle: &str) {
@@ -1370,9 +1381,12 @@ mod tests {
     }
 
     #[test]
-    fn covered_present_renders_everything() {
-        // Covered/unresolved/missing are never omittable; their presence
-        // keeps the excluded line too.
+    fn coincident_excluded_omits_even_beside_covered() {
+        // Amended 2026-08-04 (the excluded-twice friction): covered/
+        // unresolved/missing stay never-omittable and render their own
+        // lines, but they no longer force a bare restatement of the act
+        // register's excluded count beside them — exact coincidence omits
+        // the excluded line regardless of the other buckets.
         let mut old = place("old");
         let mut group = act("excluded", 2, vec![(57, None)]);
         group.present_files = 2;
@@ -1384,7 +1398,8 @@ mod tests {
 
         let lines = story_lines(&report(root), usize::MAX, 0);
         assert_has_line(&lines, "1 covered");
-        assert_has_line(&lines, "2 excluded");
+        assert_has_line(&lines, "excluded 2 files"); // the act register narrates
+        assert_no_line(&lines, "2 excluded"); // the standing restatement is gone
     }
 
     #[test]
@@ -1427,7 +1442,7 @@ mod tests {
         let lines = story_lines(&report(root), usize::MAX, 0);
         assert_has_line(&lines, "· \"old exports\"   #155");
         assert_has_line(&lines, "· #131");
-        assert_has_line(&lines, "· 1 without reason");
+        assert_has_line(&lines, "· #63 — no reason given");
         assert_no_line(&lines, "scattered sweep");
     }
 

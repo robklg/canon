@@ -264,21 +264,22 @@ pub struct ActGroup {
 /// The whys of an act group, ready to render: distinct reasons in
 /// first-seen order with the decisions that gave them, the reasoned
 /// decisions whose full text renders elsewhere (cited by bare id), and the
-/// count that recorded none. `cited` and `without_reason` never conflate —
-/// `without_reason` stays an exact truth-claim about decisions with no
-/// reason anywhere.
+/// decisions that recorded none — by id, so "without reason" never reads
+/// as "without decision" (a reasonless decision is still a real recorded
+/// act). `cited` and `without_reason` never conflate — `without_reason`
+/// stays an exact truth-claim about decisions with no reason anywhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReasonSummary {
     pub reasons: Vec<(String, Vec<i64>)>,
     pub cited: Vec<i64>,
-    pub without_reason: usize,
+    pub without_reason: Vec<i64>,
 }
 
 impl ActGroup {
     pub fn reason_summary(&self) -> ReasonSummary {
         let mut reasons: Vec<(String, Vec<i64>)> = Vec::new();
         let mut cited = Vec::new();
-        let mut without_reason = 0;
+        let mut without_reason = Vec::new();
         for decision in &self.decisions {
             match &decision.reason {
                 Some(_) if !decision.reason_here => cited.push(decision.id),
@@ -286,7 +287,7 @@ impl ActGroup {
                     Some((_, ids)) => ids.push(decision.id),
                     None => reasons.push((reason.clone(), vec![decision.id])),
                 },
-                None => without_reason += 1,
+                None => without_reason.push(decision.id),
             }
         }
         ReasonSummary {
@@ -503,24 +504,19 @@ impl StoryPlace {
         self.acts.is_empty()
     }
 
-    /// The standing register says nothing the act register hasn't: every
-    /// other bucket is zero and the excluded standing is exactly what the
-    /// excluded-transition performed acts narrate — same count, all still
-    /// standing. Only the excluded line is ever coincidence-omittable —
-    /// covered/unresolved/missing are spec-protected — and the match is
+    /// The excluded standing line says nothing the act register hasn't:
+    /// the excluded standing is exactly what the excluded-transition
+    /// performed acts narrate — same count, all still standing. Only the
+    /// excluded line is ever coincidence-omittable — covered/unresolved/
+    /// missing are spec-protected and render regardless — and the match is
     /// exact both ways: unaccounted standing (a stampless exclusion) fails
     /// the sum, and a tombstone-carrying slice fails it too (the act's
     /// whole-history count exceeds what stands, so omitting the standing
-    /// line would misread as all of it still standing).
+    /// line would misread as all of it still standing). Other buckets
+    /// don't guard the omission (amended 2026-08-04, the excluded-twice
+    /// friction): their own lines still render, and a bare restatement of
+    /// the act count beside them adds nothing.
     pub fn standing_coincides(&self) -> bool {
-        if self.standing.archived != 0
-            || self.standing.covered != 0
-            || self.standing.contentless != 0
-            || self.standing.unresolved != 0
-            || self.standing.missing_unexplained != 0
-        {
-            return false;
-        }
         let excluded_word = fate_transition(DecisionFamily::Exclude, FateAspect::Present)
             .expect("exclude/present is a registered transition")
             .as_str();
@@ -1549,7 +1545,7 @@ mod tests {
                 ("old exports".to_string(), vec![63]),
             ]
         );
-        assert_eq!(summary.without_reason, 1);
+        assert_eq!(summary.without_reason, vec![64], "reasonless ids carried");
     }
 
     #[test]
@@ -2183,7 +2179,7 @@ mod tests {
         assert_eq!(group.files, 9);
         let ids: Vec<i64> = group.decisions.iter().map(|d| d.id).collect();
         assert_eq!(ids, vec![114, 115, 116], "every id enumerated");
-        assert_eq!(group.reason_summary().without_reason, 3);
+        assert_eq!(group.reason_summary().without_reason, vec![114, 115, 116]);
     }
 
     #[test]
@@ -2690,7 +2686,10 @@ mod tests {
         let summary = b.acts[0].reason_summary();
         assert!(summary.reasons.is_empty());
         assert_eq!(summary.cited, vec![50]);
-        assert_eq!(summary.without_reason, 0, "cited is never without-reason");
+        assert!(
+            summary.without_reason.is_empty(),
+            "cited is never without-reason"
+        );
     }
 
     #[test]
@@ -2761,8 +2760,10 @@ mod tests {
         // A tombstone-carrying slice fails: the act's whole-history count
         // exceeds what stands — omitting the standing line would misread.
         assert!(!place(excluded_only(2), vec![excluded_group(3, 2)]).standing_coincides());
-        // Any question bucket present renders everything.
-        assert!(!place(
+        // Other buckets don't guard the omission (amended 2026-08-04, the
+        // excluded-twice friction): covered renders its own line; the
+        // exact excluded coincidence still omits the restatement.
+        assert!(place(
             PlaceStanding {
                 covered: 1,
                 excluded: 2,

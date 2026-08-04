@@ -51,9 +51,8 @@ The places
   downloads   · across 61 folders
     excluded 4,890 files   across 3 decisions
       · "installer junk"   #57, #61
-      · 1 without reason
+      · #63 — no reason given
     deleted 1,204 files (scan-observed)   #64
-    4,890 excluded
     35 unresolved (19 never hashed — cannot be content-verified)
     → canon trail /mnt/old-disk/downloads
 
@@ -107,12 +106,13 @@ a deciding stamp exists, or it doesn't. Canon never infers intent.
 The arrow and the phrase are deliberate and never mix: `→` always means *sent there
 by your act*; `copies stand in` always means *observed there today*.
 
-Two wordings keep the record honest at the seams. `1 without reason` counts a real
-recorded decision that simply had no `--reason` attached — never a missing
-decision. `N excluded (no recorded decision)` is the opposite gap: excluded content
-whose deciding record is absent (excluded before provenance existed, or with
-recording off) — exclusion is always deliberate, so this line states an unrecorded
-decision rather than pretending there was none.
+Two wordings keep the record honest at the seams. `#63 — no reason given` names a
+real recorded decision that simply had no `--reason` attached — the id renders
+precisely so it never reads as a missing decision. `N excluded (no recorded
+decision)` is the opposite gap: excluded content whose deciding record is absent
+(excluded before provenance existed, or with recording off) — exclusion is always
+deliberate, so this line states an unrecorded decision rather than pretending
+there was none.
 
 Notes surface at their places verbatim — your own thinking beside the standings —
 and a noted place always earns its own line, however uniform its surroundings. A
@@ -126,14 +126,14 @@ decision's **first slice in reading order**. Every later slice cites the bare
 `#id`: in the sample, `#66`'s reason opens the story at the root, and the
 `pictures/italy` slice cites it back. In a shared register the cited ids collapse
 to one line (`· #155, #131`), separate from the reasons quoted in full and from the
-`without reason` count — the three never conflate.
+reasonless ids (`— no reason given`) — the three never conflate.
 
 The excluded standing line follows the same discipline: when it would exactly
 restate what the excluded acts already narrate — same count, everything still
-standing — it is omitted (`system-cache` above). Any question content at the place,
-any exclusion the acts don't account for, or acts whose whole-history count exceeds
-what still stands keep both registers (`downloads` above). Covered, unresolved, and
-missing lines are never omitted.
+standing — it is omitted (`system-cache` and `downloads` above; `downloads` keeps
+its other standing lines, which say what the acts don't). Any exclusion the acts
+don't account for, or acts whose whole-history count exceeds what still stands,
+keep both registers. Covered, unresolved, and missing lines are never omitted.
 
 ## Drilling down
 
