@@ -211,6 +211,11 @@ pub struct ActAtom<'a> {
     /// Scan-observed (a deletion the world made) as opposed to performed.
     pub observed: bool,
     pub files: i64,
+    /// How many of this slice's files still stand (present rows) — the
+    /// stamp accumulator's present split. Extraction and deletion atoms
+    /// contribute 0: nothing they narrate stands here. Feeds the
+    /// coincidence predicate, never a rendered count.
+    pub present_files: i64,
     /// `None` when the record cannot say — all-or-omitted at group level.
     pub bytes: Option<i64>,
     /// Disposition split for archivals; `None` when any contributing row
@@ -228,6 +233,11 @@ pub struct ActDecision {
     pub id: i64,
     pub created_at: i64,
     pub reason: Option<String>,
+    /// Whether the full reason renders here. Defaults `true` (every slice
+    /// states its reason); `assign_reason_sites` narrows to the decision's
+    /// first emitted slice in reading order — the other slices cite the
+    /// bare id.
+    pub reason_here: bool,
 }
 
 /// Acts aggregated for one place line: same transition, same destination
@@ -240,6 +250,9 @@ pub struct ActGroup {
     pub observed: bool,
     pub destination: LocationAggregate,
     pub files: i64,
+    /// Present-file share of the group's slices (see `ActAtom`); the
+    /// coincidence predicate's evidence, never a rendered count.
+    pub present_files: i64,
     /// All-or-omitted: `Some` only when every grouped decision knew.
     pub bytes: Option<i64>,
     pub moved: Option<i64>,
@@ -248,20 +261,26 @@ pub struct ActGroup {
 }
 
 /// The whys of an act group, ready to render: distinct reasons in
-/// first-seen order with the decisions that gave them, and the count that
-/// recorded none.
+/// first-seen order with the decisions that gave them, the reasoned
+/// decisions whose full text renders elsewhere (cited by bare id), and the
+/// count that recorded none. `cited` and `without_reason` never conflate —
+/// `without_reason` stays an exact truth-claim about decisions with no
+/// reason anywhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReasonSummary {
     pub reasons: Vec<(String, Vec<i64>)>,
+    pub cited: Vec<i64>,
     pub without_reason: usize,
 }
 
 impl ActGroup {
     pub fn reason_summary(&self) -> ReasonSummary {
         let mut reasons: Vec<(String, Vec<i64>)> = Vec::new();
+        let mut cited = Vec::new();
         let mut without_reason = 0;
         for decision in &self.decisions {
             match &decision.reason {
+                Some(_) if !decision.reason_here => cited.push(decision.id),
                 Some(reason) => match reasons.iter_mut().find(|(r, _)| r == reason) {
                     Some((_, ids)) => ids.push(decision.id),
                     None => reasons.push((reason.clone(), vec![decision.id])),
@@ -271,6 +290,7 @@ impl ActGroup {
         }
         ReasonSummary {
             reasons,
+            cited,
             without_reason,
         }
     }
@@ -285,6 +305,7 @@ pub fn group_acts(atoms: &[ActAtom], bases: &[&str], cap: usize) -> Vec<ActGroup
         observed: bool,
         pooled_dirs: HashMap<&'a str, i64>,
         files: i64,
+        present_files: i64,
         bytes: Option<i64>,
         bytes_complete: bool,
         moved: Option<i64>,
@@ -312,6 +333,7 @@ pub fn group_acts(atoms: &[ActAtom], bases: &[&str], cap: usize) -> Vec<ActGroup
                 observed: atom.observed,
                 pooled_dirs: HashMap::new(),
                 files: 0,
+                present_files: 0,
                 bytes: Some(0),
                 bytes_complete: true,
                 moved: Some(0),
@@ -325,6 +347,7 @@ pub fn group_acts(atoms: &[ActAtom], bases: &[&str], cap: usize) -> Vec<ActGroup
             *accum.pooled_dirs.entry(dir).or_insert(0) += files;
         }
         accum.files += atom.files;
+        accum.present_files += atom.present_files;
         match atom.bytes {
             Some(b) => accum.bytes = accum.bytes.map(|acc| acc + b),
             None => accum.bytes_complete = false,
@@ -341,6 +364,7 @@ pub fn group_acts(atoms: &[ActAtom], bases: &[&str], cap: usize) -> Vec<ActGroup
             id: atom.decision_id,
             created_at: atom.created_at,
             reason: atom.reason.map(str::to_string),
+            reason_here: true,
         });
     }
 
@@ -362,6 +386,7 @@ pub fn group_acts(atoms: &[ActAtom], bases: &[&str], cap: usize) -> Vec<ActGroup
                 observed: accum.observed,
                 destination: aggregate_locations(&pooled, bases, cap),
                 files: accum.files,
+                present_files: accum.present_files,
                 bytes: if accum.bytes_complete {
                     accum.bytes
                 } else {
@@ -467,6 +492,81 @@ impl StoryPlace {
     pub fn undecided(&self) -> bool {
         self.acts.is_empty()
     }
+
+    /// The standing register says nothing the act register hasn't: every
+    /// other bucket is zero and the excluded standing is exactly what the
+    /// excluded-transition performed acts narrate — same count, all still
+    /// standing. Only the excluded line is ever coincidence-omittable —
+    /// covered/unresolved/missing are spec-protected — and the match is
+    /// exact both ways: unaccounted standing (a stampless exclusion) fails
+    /// the sum, and a tombstone-carrying slice fails it too (the act's
+    /// whole-history count exceeds what stands, so omitting the standing
+    /// line would misread as all of it still standing).
+    pub fn standing_coincides(&self) -> bool {
+        if self.standing.covered != 0
+            || self.standing.unresolved != 0
+            || self.standing.missing_unexplained != 0
+        {
+            return false;
+        }
+        let excluded_word = fate_transition(DecisionFamily::Exclude, FateAspect::Present)
+            .expect("exclude/present is a registered transition")
+            .as_str();
+        let mut acted_files = 0i64;
+        let mut acted_present = 0i64;
+        for group in &self.acts {
+            if group.transition == excluded_word && !group.observed {
+                acted_files += group.files;
+                acted_present += group.present_files;
+            }
+        }
+        self.standing.excluded == acted_present && acted_present == acted_files
+    }
+}
+
+/// Site each reasoned decision's full reason at its first emitted slice in
+/// pre-order (= render order; children are `rel_path`-sorted) and mark
+/// every other slice as a bare-id citation — the reader meets the full
+/// reason the first time they meet the id, and every later cite is a
+/// backward reference (a widest-slice site was tried and read wrong: the
+/// reason landed deep in the tree while the top-of-story slices cited
+/// forward to it). A post-pass over the built tree, deliberately: the fold
+/// composes first, so the site is an *emitted* slice, and the once-rule is
+/// precomputed — never render-order-coupled.
+pub fn assign_reason_sites(root: &mut StoryPlace) {
+    // Pass 1: per reasoned decision, the pre-order index of its first slice.
+    fn collect(place: &StoryPlace, index: &mut usize, sites: &mut HashMap<i64, usize>) {
+        let my_index = *index;
+        *index += 1;
+        for group in &place.acts {
+            for decision in &group.decisions {
+                if decision.reason.is_some() {
+                    sites.entry(decision.id).or_insert(my_index);
+                }
+            }
+        }
+        for child in &place.children {
+            collect(child, index, sites);
+        }
+    }
+    // Pass 2: mark each slice — the site renders the reason, the rest cite.
+    fn apply(place: &mut StoryPlace, index: &mut usize, sites: &HashMap<i64, usize>) {
+        let my_index = *index;
+        *index += 1;
+        for group in &mut place.acts {
+            for decision in &mut group.decisions {
+                if let Some(site) = sites.get(&decision.id) {
+                    decision.reason_here = *site == my_index;
+                }
+            }
+        }
+        for child in &mut place.children {
+            apply(child, index, sites);
+        }
+    }
+    let mut sites = HashMap::new();
+    collect(root, &mut 0, &mut sites);
+    apply(root, &mut 0, &sites);
 }
 
 /// Per-node accumulation for the walk: direct, then subtree by a reverse
@@ -552,6 +652,7 @@ fn merge_slices(atoms: Vec<ActAtom<'_>>) -> Vec<ActAtom<'_>> {
             Entry::Occupied(mut entry) => {
                 let acc = entry.get_mut();
                 acc.files += atom.files;
+                acc.present_files += atom.present_files;
                 acc.bytes = match (acc.bytes, atom.bytes) {
                     (Some(a), Some(b)) => Some(a + b),
                     _ => None,
@@ -713,6 +814,7 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
                 transition: archived_word,
                 observed: false,
                 files: acc.files,
+                present_files: 0,
                 bytes: acc.bytes_known.then_some(acc.bytes),
                 moved: acc.disposition_known.then_some(acc.moved),
                 copied: acc.disposition_known.then_some(acc.copied),
@@ -773,6 +875,7 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
                             transition,
                             observed,
                             files: acc.absent,
+                            present_files: 0,
                             bytes: Some(acc.absent_bytes),
                             moved: None,
                             copied: None,
@@ -798,6 +901,7 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
                         transition: transition.as_str(),
                         observed: false,
                         files,
+                        present_files: acc.present,
                         bytes: Some(acc.present_bytes + acc.absent_bytes),
                         moved: None,
                         copied: None,
@@ -1388,6 +1492,7 @@ mod tests {
             transition,
             observed: false,
             files,
+            present_files: 0,
             bytes: None,
             moved: None,
             copied: None,
@@ -2511,5 +2616,145 @@ mod tests {
         assert_eq!(sum.unresolved, account.unresolved);
         assert_eq!(sum.unhashed_unresolved, account.unhashed_unresolved);
         assert_eq!(sum.missing_unexplained, account.unexplained_missing);
+    }
+
+    fn child<'a>(root: &'a StoryPlace, rel: &str) -> &'a StoryPlace {
+        root.children
+            .iter()
+            .find(|p| p.rel_path == rel)
+            .unwrap_or_else(|| panic!("expected place {rel:?}"))
+    }
+
+    #[test]
+    fn the_first_slice_in_reading_order_carries_the_reason() {
+        // #50's slices weigh 2 at `a` and 3 at `b` — the reason still
+        // sites at `a`, the first place in pre-order (= render order): the
+        // reader meets the full reason the first time they meet the id,
+        // and the wider later slice cites backward.
+        let mut fx = Fixture::new();
+        for i in 0..2 {
+            fx.present
+                .push(excluded_src(1 + i, &format!("a/f{i}"), None, 50));
+        }
+        for i in 0..3 {
+            fx.present
+                .push(excluded_src(10 + i, &format!("b/f{i}"), None, 50));
+        }
+        fx.decisions
+            .insert(50, dinfo(DecisionFamily::Exclude, 100, Some("junk")));
+        fx.notes.push(note_at(1, "a", "watching"));
+        fx.notes.push(note_at(2, "b", "watching"));
+        let mut root = fx.build(&no_dust());
+        assign_reason_sites(&mut root);
+
+        let a = child(&root, "a");
+        let b = child(&root, "b");
+        assert!(a.acts[0].decisions[0].reason_here, "first in reading order");
+        assert!(!b.acts[0].decisions[0].reason_here, "wider, but later");
+        let summary = b.acts[0].reason_summary();
+        assert!(summary.reasons.is_empty());
+        assert_eq!(summary.cited, vec![50]);
+        assert_eq!(summary.without_reason, 0, "cited is never without-reason");
+    }
+
+    #[test]
+    fn reason_site_is_an_emitted_slice() {
+        // #70's raw dirs a/x and a/y fold into `a`: the site is the first
+        // EMITTED slice in reading order — the post-pass runs over the
+        // built tree, never over raw atoms.
+        let mut fx = Fixture::new();
+        for i in 0..3 {
+            fx.present
+                .push(excluded_src(1 + i, &format!("a/x/f{i}"), None, 70));
+        }
+        for i in 0..2 {
+            fx.present
+                .push(excluded_src(10 + i, &format!("a/y/f{i}"), None, 70));
+        }
+        for i in 0..4 {
+            fx.present
+                .push(excluded_src(20 + i, &format!("b/f{i}"), None, 70));
+        }
+        fx.decisions
+            .insert(70, dinfo(DecisionFamily::Exclude, 100, Some("old builds")));
+        fx.notes.push(note_at(1, "a", "watching"));
+        fx.notes.push(note_at(2, "b", "watching"));
+        let mut root = fx.build(&no_dust());
+        assign_reason_sites(&mut root);
+
+        let a = child(&root, "a");
+        let b = child(&root, "b");
+        assert_eq!(a.acts[0].files, 5, "a/x and a/y folded into one slice");
+        assert!(a.acts[0].decisions[0].reason_here);
+        assert!(!b.acts[0].decisions[0].reason_here);
+    }
+
+    #[test]
+    fn standing_coincidence_is_exact_both_ways() {
+        let excluded_group = |files: i64, present_files: i64| ActGroup {
+            transition: fate_transition(DecisionFamily::Exclude, FateAspect::Present)
+                .expect("registered")
+                .as_str(),
+            observed: false,
+            destination: LocationAggregate::default(),
+            files,
+            present_files,
+            bytes: None,
+            moved: None,
+            copied: None,
+            decisions: vec![],
+        };
+        let place = |standing: PlaceStanding, acts: Vec<ActGroup>| StoryPlace {
+            rel_path: "old".to_string(),
+            acts,
+            standing,
+            covered_where: LocationAggregate::default(),
+            notes: vec![],
+            folder_breadth: 1,
+            children: vec![],
+        };
+        let excluded_only = |n: i64| PlaceStanding {
+            excluded: n,
+            ..PlaceStanding::default()
+        };
+
+        // The stutter: standing exactly what the act narrates, all standing.
+        assert!(place(excluded_only(2), vec![excluded_group(2, 2)]).standing_coincides());
+        // Unaccounted standing (a stampless exclusion) fails the sum.
+        assert!(!place(excluded_only(3), vec![excluded_group(2, 2)]).standing_coincides());
+        // A tombstone-carrying slice fails: the act's whole-history count
+        // exceeds what stands — omitting the standing line would misread.
+        assert!(!place(excluded_only(2), vec![excluded_group(3, 2)]).standing_coincides());
+        // Any question bucket present renders everything.
+        assert!(!place(
+            PlaceStanding {
+                covered: 1,
+                excluded: 2,
+                ..PlaceStanding::default()
+            },
+            vec![excluded_group(2, 2)]
+        )
+        .standing_coincides());
+        // A non-exclusion act never accounts for excluded standing.
+        let mut archived = excluded_group(2, 2);
+        archived.transition = fate_transition(DecisionFamily::Archive, FateAspect::Present)
+            .expect("registered")
+            .as_str();
+        assert!(!place(excluded_only(2), vec![archived]).standing_coincides());
+    }
+
+    #[test]
+    fn coincidence_holds_through_the_real_splitter() {
+        // Two stamped exclusions and nothing else: the built place's
+        // excluded standing is exactly the act's present share.
+        let mut fx = Fixture::new();
+        fx.present.push(excluded_src(1, "old/a.exe", None, 57));
+        fx.present.push(excluded_src(2, "old/b.exe", None, 57));
+        fx.decisions
+            .insert(57, dinfo(DecisionFamily::Exclude, 100, None));
+        let root = fx.build(&no_dust());
+        assert_eq!(root.standing.excluded, 2);
+        assert_eq!(root.acts[0].present_files, 2);
+        assert!(root.standing_coincides());
     }
 }

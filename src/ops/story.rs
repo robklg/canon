@@ -13,7 +13,9 @@ use std::collections::HashMap;
 
 use crate::domain::retire::{build_account, ResolutionAccount};
 use crate::domain::root::Root;
-use crate::domain::story::{build_places, DecisionInfo, StoryInputs, StoryParams, StoryPlace};
+use crate::domain::story::{
+    assign_reason_sites, build_places, DecisionInfo, StoryInputs, StoryParams, StoryPlace,
+};
 use crate::ops;
 use crate::repo;
 
@@ -80,7 +82,7 @@ pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> R
         .collect();
     let bases: Vec<String> = story.roots.iter().map(|r| r.path.clone()).collect();
 
-    let places = build_places(
+    let mut places = build_places(
         &StoryInputs {
             present: &story.present,
             absent: &story.absent,
@@ -93,6 +95,10 @@ pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> R
         },
         params,
     );
+    // The once-rule: each reasoned decision's full reason renders at its
+    // widest emitted slice; other slices cite the bare id. Precomputed here
+    // so the tree carries the answer — rendering never decides.
+    assign_reason_sites(&mut places);
     let account = build_account(
         &story.present,
         &story.absent,

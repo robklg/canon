@@ -838,11 +838,15 @@ fn act_lines(group: &ActGroup, indent: &str, lines: &mut Vec<String>) {
     if group.decisions.len() == 1 {
         let decision = &group.decisions[0];
         line.push_str(&format!("   #{}", decision.id));
+        // The once-rule: the full reason renders only at the decision's
+        // widest emitted slice; every other slice cites the bare id.
         if let Some(reason) = &decision.reason {
-            line.push_str(&format!(
-                " · \"{}\"",
-                indent_multiline(reason, &format!("{indent}      "))
-            ));
+            if decision.reason_here {
+                line.push_str(&format!(
+                    " · \"{}\"",
+                    indent_multiline(reason, &format!("{indent}      "))
+                ));
+            }
         }
         lines.push(line);
     } else {
@@ -859,6 +863,15 @@ fn act_lines(group: &ActGroup, indent: &str, lines: &mut Vec<String>) {
                 "{indent}    · \"{}\"   {ids}",
                 indent_multiline(reason, &format!("{indent}       "))
             ));
+        }
+        if !summary.cited.is_empty() {
+            let ids = summary
+                .cited
+                .iter()
+                .map(|id| format!("#{id}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("{indent}    · {ids}"));
         }
         if summary.without_reason > 0 {
             lines.push(format!(
@@ -886,7 +899,7 @@ fn standing_lines(place: &StoryPlace, indent: &str, lines: &mut Vec<String>) {
         }
         lines.push(line);
     }
-    if standing.excluded > 0 {
+    if standing.excluded > 0 && !place.standing_coincides() {
         let mut line = format!("{indent}  {} excluded", format_count(standing.excluded));
         if place.undecided() {
             // Exclusion is always a deliberate act; at a place with no act
@@ -1113,6 +1126,7 @@ mod tests {
             observed: false,
             destination: LocationAggregate::default(),
             files,
+            present_files: 0,
             bytes: None,
             moved: None,
             copied: None,
@@ -1123,6 +1137,7 @@ mod tests {
                     id,
                     created_at: (i as i64 + 1) * 100,
                     reason: reason.map(str::to_string),
+                    reason_here: true,
                 })
                 .collect(),
         }
@@ -1259,6 +1274,111 @@ mod tests {
         assert_has_line(&lines, "excluded 4,890 files   across 3 decisions");
         assert_has_line(&lines, "· \"installer junk\"   #57, #61");
         assert_has_line(&lines, "· 1 without reason");
+    }
+
+    fn assert_no_line(lines: &[String], needle: &str) {
+        assert!(
+            !lines.iter().any(|l| l.contains(needle)),
+            "unexpected {needle:?} in:\n{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
+    fn coincidence_omits_the_excluded_line() {
+        // The stutter resolved: the excluded standing is exactly what the
+        // act narrates (same count, all standing), so the standing line
+        // says nothing the act line hasn't.
+        let mut old = place("old");
+        let mut group = act("excluded", 176, vec![(57, Some("installer junk"))]);
+        group.present_files = 176;
+        old.acts.push(group);
+        old.standing.excluded = 176;
+        let mut root = place("");
+        root.children.push(old);
+
+        let lines = story_lines(&report(root), usize::MAX, 0);
+        assert_has_line(&lines, "excluded 176 files   #57 · \"installer junk\"");
+        assert_no_line(&lines, "176 excluded");
+    }
+
+    #[test]
+    fn tombstone_mismatch_renders_both() {
+        // The act's whole-history count exceeds what stands: omitting the
+        // standing line would misread as all three still standing.
+        let mut old = place("old");
+        let mut group = act("excluded", 3, vec![(57, None)]);
+        group.present_files = 2;
+        old.acts.push(group);
+        old.standing.excluded = 2;
+        let mut root = place("");
+        root.children.push(old);
+
+        let lines = story_lines(&report(root), usize::MAX, 0);
+        assert_has_line(&lines, "excluded 3 files   #57");
+        assert_has_line(&lines, "2 excluded");
+    }
+
+    #[test]
+    fn covered_present_renders_everything() {
+        // Covered/unresolved/missing are never omittable; their presence
+        // keeps the excluded line too.
+        let mut old = place("old");
+        let mut group = act("excluded", 2, vec![(57, None)]);
+        group.present_files = 2;
+        old.acts.push(group);
+        old.standing.excluded = 2;
+        old.standing.covered = 1;
+        let mut root = place("");
+        root.children.push(old);
+
+        let lines = story_lines(&report(root), usize::MAX, 0);
+        assert_has_line(&lines, "1 covered");
+        assert_has_line(&lines, "2 excluded");
+    }
+
+    #[test]
+    fn a_cited_slice_shows_the_bare_id() {
+        // A slice whose reason renders elsewhere cites the bare id — no
+        // quote, no repetition.
+        let mut old = place("old");
+        let mut group = act("excluded", 4, vec![(57, Some("installer junk"))]);
+        group.decisions[0].reason_here = false;
+        old.acts.push(group);
+        old.standing.excluded = 4;
+        let mut root = place("");
+        root.children.push(old);
+
+        let lines = story_lines(&report(root), usize::MAX, 0);
+        assert_has_line(&lines, "excluded 4 files   #57");
+        assert_no_line(&lines, "installer junk");
+    }
+
+    #[test]
+    fn cited_ids_share_one_line_in_the_register() {
+        // Multi-decision register: reasoned-here entries render in full,
+        // cited ids collapse to one bare line, and "without reason" stays
+        // an exact truth-claim about decisions with no reason anywhere.
+        let mut old = place("old");
+        let mut group = act(
+            "excluded",
+            500,
+            vec![
+                (131, Some("scattered sweep")),
+                (155, Some("old exports")),
+                (63, None),
+            ],
+        );
+        group.decisions[0].reason_here = false; // #131 cited
+        old.acts.push(group);
+        let mut root = place("");
+        root.children.push(old);
+
+        let lines = story_lines(&report(root), usize::MAX, 0);
+        assert_has_line(&lines, "· \"old exports\"   #155");
+        assert_has_line(&lines, "· #131");
+        assert_has_line(&lines, "· 1 without reason");
+        assert_no_line(&lines, "scattered sweep");
     }
 
     #[test]
