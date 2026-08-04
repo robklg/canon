@@ -8,8 +8,11 @@
 //!   here (extraction-recorded, copies and moves alike — the trail rollup's
 //!   established meaning of "archived from here"), what was deleted
 //!   (scan-observed), and what is missing without a recorded deletion.
-//! - **Standing here now** partitions the present rows: covered, excluded,
-//!   unresolved.
+//! - **Standing here now** partitions the present rows: archived from here
+//!   (the surviving originals of copy-mode applies — extraction-linked,
+//!   object-grain), covered (copies elsewhere, nobody chose it), excluded,
+//!   contentless (empty files — all shape, no content; stated, never
+//!   blocking), unresolved.
 //!
 //! Copies overlap the two registers deliberately (a file copied to the
 //! archive is both "archived from here" and typically standing `covered`);
@@ -65,8 +68,14 @@ pub struct ResolutionAccount {
     /// record-quality fact, not a distinct physical state.
     pub unexplained_missing: i64,
     // Standing here now (state register, present rows).
+    /// Present rows whose content was archived *from here* and still stands
+    /// in the archive — the deliberate act, told apart from mere coverage.
+    pub archived_standing: i64,
     pub covered: i64,
     pub excluded: i64,
+    /// Empty files — contentless: nothing to cover, nothing to verify;
+    /// stated, never silent, never blocking.
+    pub contentless: i64,
     pub unresolved: i64,
     /// Subset of `unresolved`: present, non-excluded, never hashed — they
     /// cannot be verified covered, which is exactly why they block.
@@ -74,9 +83,10 @@ pub struct ResolutionAccount {
 }
 
 impl ResolutionAccount {
-    /// Present rows, partitioned exactly: covered + excluded + unresolved.
+    /// Present rows, partitioned exactly: archived + covered + excluded +
+    /// contentless + unresolved.
     pub fn standing(&self) -> i64 {
-        self.covered + self.excluded + self.unresolved
+        self.archived_standing + self.covered + self.excluded + self.contentless + self.unresolved
     }
 
     /// Every source ever indexed here: standing + absent + moved away.
@@ -90,14 +100,25 @@ impl ResolutionAccount {
     }
 }
 
-/// Where a present row stands, by priority excluded > covered > unresolved:
-/// an excluded-and-covered source counts excluded — its resolution is
-/// already recorded, which is the fact the account reports.
+/// Where a present row stands, by priority excluded > contentless >
+/// archived > covered > unresolved. Exclusion first: dismissal is a
+/// judgment, and judgment covers shape too. Contentless second, before any
+/// identity test (including the hash test — an unhashed empty source is
+/// Contentless, never unresolved): identity evidence about no-content is
+/// vacuous (ADR 2026-08-04-contentless-law). Archived over covered: the
+/// deliberate act wins mixed evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StandingBucket {
+    /// Archived from here and the copy still stands in the archive —
+    /// extraction-linked, object-grain (`batch_check_archived_from_root`).
+    Archived,
     Covered,
     Excluded,
-    Unresolved { unhashed: bool },
+    /// Empty — all shape, no content; carried with its place.
+    Contentless,
+    Unresolved {
+        unhashed: bool,
+    },
 }
 
 /// What an absent row's stamp still explains.
@@ -107,11 +128,19 @@ pub enum AbsentBucket {
     Unexplained,
 }
 
-pub fn classify_present(source: &Source, archived: &HashSet<i64>) -> StandingBucket {
+pub fn classify_present(
+    source: &Source,
+    archived: &HashSet<i64>,
+    archived_from_here: &HashSet<i64>,
+) -> StandingBucket {
     if source.is_excluded() {
         return StandingBucket::Excluded;
     }
+    if source.is_contentless() {
+        return StandingBucket::Contentless;
+    }
     match source.object_id {
+        Some(object_id) if archived_from_here.contains(&object_id) => StandingBucket::Archived,
         Some(object_id) if archived.contains(&object_id) => StandingBucket::Covered,
         Some(_) => StandingBucket::Unresolved { unhashed: false },
         None => StandingBucket::Unresolved { unhashed: true },
@@ -128,12 +157,14 @@ pub fn classify_absent(family: Option<DecisionFamily>) -> AbsentBucket {
 }
 
 /// Build the account from the two presence classes, the archive membership
-/// set, the root's origin extraction rows, and the absent rows' stamp
+/// sets (all archive copies; the extraction-linked archived-from-here
+/// subset), the root's origin extraction rows, and the absent rows' stamp
 /// families (`decision_id` → family).
 pub fn build_account(
     present: &[Source],
     absent: &[Source],
     archived: &HashSet<i64>,
+    archived_from_here: &HashSet<i64>,
     extractions: &[DecisionExtraction],
     stamp_families: &HashMap<i64, DecisionFamily>,
 ) -> ResolutionAccount {
@@ -143,9 +174,11 @@ pub fn build_account(
     };
 
     for source in present {
-        match classify_present(source, archived) {
+        match classify_present(source, archived, archived_from_here) {
+            StandingBucket::Archived => account.archived_standing += 1,
             StandingBucket::Covered => account.covered += 1,
             StandingBucket::Excluded => account.excluded += 1,
+            StandingBucket::Contentless => account.contentless += 1,
             StandingBucket::Unresolved { unhashed } => {
                 account.unresolved += 1;
                 if unhashed {
@@ -218,6 +251,9 @@ pub fn disposition_word(disposition: OriginDisposition) -> &'static str {
 pub const STANDING_COVERED: &str = "covered";
 pub const STANDING_PRESENT: &str = "present";
 pub const STANDING_MISSING_UNEXPLAINED: &str = "missing_unexplained";
+/// Empty at retirement — all shape, no content; nothing to cover, nothing
+/// to verify (ADR 2026-08-04-contentless-law).
+pub const STANDING_CONTENTLESS: &str = "contentless";
 
 /// The fate of one book entry — what happened to (or presently holds for)
 /// this path on the retired root. The bucket decision underneath is
@@ -251,6 +287,10 @@ pub enum SourceFate {
     Deleted { reason: Option<String> },
     /// Present at retirement, nothing above applies — listed honestly.
     PresentAtRetirement,
+    /// Empty at retirement — contentless: carried with its place; coverage
+    /// can say nothing about it, so the entry claims neither covered nor
+    /// unresolved.
+    Contentless,
     /// Absent without a recorded deletion — the account's unexplained
     /// tombstones. The inventory must list them: "every source the root
     /// ever had" includes the ones whose loss the record cannot explain.
@@ -280,6 +320,7 @@ impl SourceFate {
             }
             SourceFate::Covered { .. } => STANDING_COVERED,
             SourceFate::PresentAtRetirement => STANDING_PRESENT,
+            SourceFate::Contentless => STANDING_CONTENTLESS,
             SourceFate::MissingUnexplained => STANDING_MISSING_UNEXPLAINED,
         }
     }
@@ -362,6 +403,9 @@ pub struct ApplyOrigin {
 pub struct FateContext<'a> {
     /// Object ids verified present in the archive.
     pub archived: &'a HashSet<i64>,
+    /// Subset archived *from this root* (extraction-linked, object-grain) —
+    /// the standing split's evidence.
+    pub archived_from_here: &'a HashSet<i64>,
     /// `decision_id` → family, for the absent rows' stamps.
     pub stamp_families: &'a HashMap<i64, DecisionFamily>,
     /// `decision_id` → recorded reason (entries only where a reason exists).
@@ -396,24 +440,33 @@ pub fn build_book_entries(
         // indexing scan, not the archiving) — else the source's most recent
         // recorded transition.
         let mut decision = source.decision_id;
-        let fate = match classify_present(source, ctx.archived) {
+        let fate = match classify_present(source, ctx.archived, ctx.archived_from_here) {
             StandingBucket::Excluded => SourceFate::Excluded {
                 reason: stamp_reason(source, ctx),
                 archive_locations: locations_for(source, ctx),
             },
-            StandingBucket::Covered => match ctx.origins.get(source.rel_path.as_str()) {
-                Some(origin) => {
-                    decision = Some(origin.decision_id);
-                    SourceFate::ArchivedFromHere {
-                        disposition: origin.disposition,
-                        destination: origin.destination.clone(),
-                        current_locations: locations_for(source, ctx),
+            StandingBucket::Contentless => SourceFate::Contentless,
+            // Archived and Covered both key the receipt-origin check: the
+            // origin enriches the entry with the recorded destination; an
+            // Archived standing without a readable origin (Records mode, or
+            // an unreadable receipt — the compile records that gap) degrades
+            // to the Covered fate, exactly as before the split. The book
+            // claims destinations only from receipts.
+            StandingBucket::Archived | StandingBucket::Covered => {
+                match ctx.origins.get(source.rel_path.as_str()) {
+                    Some(origin) => {
+                        decision = Some(origin.decision_id);
+                        SourceFate::ArchivedFromHere {
+                            disposition: origin.disposition,
+                            destination: origin.destination.clone(),
+                            current_locations: locations_for(source, ctx),
+                        }
                     }
+                    None => SourceFate::Covered {
+                        locations: locations_for(source, ctx),
+                    },
                 }
-                None => SourceFate::Covered {
-                    locations: locations_for(source, ctx),
-                },
-            },
+            }
             StandingBucket::Unresolved { .. } => SourceFate::PresentAtRetirement,
         };
         entries.push(BookEntry {
@@ -482,13 +535,13 @@ fn hash_for(source: &Source, ctx: &FateContext) -> Option<String> {
 }
 
 fn locations_for(source: &Source, ctx: &FateContext) -> Vec<String> {
-    // Zero-byte objects are contentless (the sweep's rule, applied here the
-    // same locally-scoped way; the suite-wide question stays a /vision
-    // item): every empty file shares the one empty-content object, so a
-    // location list would name every zero-byte file in the archive while
-    // answering nothing about *this* file. Fate and account are untouched —
-    // only the where-does-this-content-live claim is withheld.
-    if source.size == 0 {
+    // The contentless law: every empty file shares the one empty-content
+    // object, so a location list would name every zero-byte file in the
+    // archive while answering nothing about *this* file. Reached only by
+    // the Excluded fate's archive-context (Contentless classifies out
+    // before the identity fates); redundant once the archived-ness SQL
+    // carries the law — kept as the domain-side statement of the same rule.
+    if source.is_contentless() {
         return Vec::new();
     }
     source
@@ -626,7 +679,7 @@ mod tests {
     fn present_source_excluded_beats_archived_object() {
         let s = source(1, Some(10), true, false);
         assert_eq!(
-            classify_present(&s, &archived_set(&[10])),
+            classify_present(&s, &archived_set(&[10]), &archived_set(&[])),
             StandingBucket::Excluded
         );
     }
@@ -635,7 +688,7 @@ mod tests {
     fn present_object_excluded_beats_archived_object() {
         let s = source(1, Some(10), false, true);
         assert_eq!(
-            classify_present(&s, &archived_set(&[10])),
+            classify_present(&s, &archived_set(&[10]), &archived_set(&[])),
             StandingBucket::Excluded
         );
     }
@@ -644,7 +697,7 @@ mod tests {
     fn present_hashed_in_archive_is_covered() {
         let s = source(1, Some(10), false, false);
         assert_eq!(
-            classify_present(&s, &archived_set(&[10])),
+            classify_present(&s, &archived_set(&[10]), &archived_set(&[])),
             StandingBucket::Covered
         );
     }
@@ -653,7 +706,7 @@ mod tests {
     fn present_hashed_uncovered_is_unresolved() {
         let s = source(1, Some(10), false, false);
         assert_eq!(
-            classify_present(&s, &archived_set(&[])),
+            classify_present(&s, &archived_set(&[]), &archived_set(&[])),
             StandingBucket::Unresolved { unhashed: false }
         );
     }
@@ -662,7 +715,7 @@ mod tests {
     fn present_unhashed_is_unresolved_unhashed() {
         let s = source(1, None, false, false);
         assert_eq!(
-            classify_present(&s, &archived_set(&[])),
+            classify_present(&s, &archived_set(&[]), &archived_set(&[])),
             StandingBucket::Unresolved { unhashed: true }
         );
     }
@@ -671,8 +724,56 @@ mod tests {
     fn present_unhashed_but_excluded_is_excluded() {
         let s = source(1, None, true, false);
         assert_eq!(
-            classify_present(&s, &archived_set(&[])),
+            classify_present(&s, &archived_set(&[]), &archived_set(&[])),
             StandingBucket::Excluded
+        );
+    }
+
+    // The contentless law + the standing split: precedence
+    // excluded > contentless > archived > covered > unresolved.
+
+    #[test]
+    fn empty_source_is_contentless_even_when_its_object_is_archived() {
+        let mut s = source(1, Some(10), false, false);
+        s.size = 0;
+        assert_eq!(
+            classify_present(&s, &archived_set(&[10]), &archived_set(&[10])),
+            StandingBucket::Contentless,
+            "identity evidence about no-content is vacuous"
+        );
+    }
+
+    #[test]
+    fn unhashed_empty_source_is_contentless_not_unresolved() {
+        // Contentless precedes the hash test — empty files on a
+        // never-enriched root must not block retirement.
+        let mut s = source(1, None, false, false);
+        s.size = 0;
+        assert_eq!(
+            classify_present(&s, &archived_set(&[]), &archived_set(&[])),
+            StandingBucket::Contentless
+        );
+    }
+
+    #[test]
+    fn excluded_empty_source_is_excluded() {
+        // Judgment covers shape: exclusion outranks contentless.
+        let mut s = source(1, Some(10), true, false);
+        s.size = 0;
+        assert_eq!(
+            classify_present(&s, &archived_set(&[10]), &archived_set(&[])),
+            StandingBucket::Excluded
+        );
+    }
+
+    #[test]
+    fn archived_from_here_beats_covered() {
+        // The deliberate act wins mixed evidence: an object both archived
+        // from here and standing in the archive reads Archived, not Covered.
+        let s = source(1, Some(10), false, false);
+        assert_eq!(
+            classify_present(&s, &archived_set(&[10]), &archived_set(&[10])),
+            StandingBucket::Archived
         );
     }
 
@@ -734,9 +835,69 @@ mod tests {
             &present,
             &absent,
             &archived_set(&[10, 11]),
+            &archived_set(&[]),
             &extractions,
             &families,
         )
+    }
+
+    #[test]
+    fn standing_sum_holds_across_all_five_buckets() {
+        // The sum invariant with the split and the contentless standing:
+        // standing() = archived + covered + excluded + contentless +
+        // unresolved, exactly.
+        let mut empty = source(5, Some(12), false, false);
+        empty.size = 0;
+        let present = vec![
+            source(1, Some(10), false, false), // archived from here
+            source(2, Some(11), false, false), // covered
+            source(3, Some(11), true, false),  // excluded
+            source(4, None, false, false),     // unresolved (unhashed)
+            empty,                             // contentless
+        ];
+        let a = build_account(
+            &present,
+            &[],
+            &archived_set(&[10, 11]),
+            &archived_set(&[10]),
+            &[],
+            &HashMap::new(),
+        );
+        assert_eq!(a.archived_standing, 1);
+        assert_eq!(a.covered, 1);
+        assert_eq!(a.excluded, 1);
+        assert_eq!(a.contentless, 1);
+        assert_eq!(a.unresolved, 1);
+        assert_eq!(a.standing(), 5);
+        assert_eq!(
+            derive_readiness(&a),
+            Readiness::NotReady {
+                unresolved: 1,
+                unhashed: 1
+            },
+            "contentless never blocks — only the unresolved source does"
+        );
+    }
+
+    #[test]
+    fn contentless_only_root_has_no_blockers() {
+        // A root of pure empty files retires with no blockers: there is no
+        // content to lose. The account still states them (never silent).
+        let mut e1 = source(1, Some(10), false, false);
+        e1.size = 0;
+        let mut e2 = source(2, None, false, false);
+        e2.size = 0;
+        let a = build_account(
+            &[e1, e2],
+            &[],
+            &archived_set(&[]),
+            &archived_set(&[]),
+            &[],
+            &HashMap::new(),
+        );
+        assert_eq!(a.contentless, 2);
+        assert_eq!(a.unresolved, 0);
+        assert_eq!(derive_readiness(&a), Readiness::NoBlockersFound);
     }
 
     #[test]
@@ -771,7 +932,14 @@ mod tests {
             extraction(3, Some(300), Some(OriginDisposition::Relocated)),
             extraction(4, Some(400), None), // legacy row
         ];
-        let a = build_account(&[], &[], &archived_set(&[]), &extractions, &HashMap::new());
+        let a = build_account(
+            &[],
+            &[],
+            &archived_set(&[]),
+            &archived_set(&[]),
+            &extractions,
+            &HashMap::new(),
+        );
         assert_eq!(a.archived_files, 7);
         assert_eq!(a.archived_unrecorded, 4);
         assert_eq!(a.ever_indexed(), None, "moved count unsupported → omitted");
@@ -783,13 +951,27 @@ mod tests {
             extraction(3, Some(300), Some(OriginDisposition::Relocated)),
             extraction(2, None, Some(OriginDisposition::Retained)),
         ];
-        let a = build_account(&[], &[], &archived_set(&[]), &extractions, &HashMap::new());
+        let a = build_account(
+            &[],
+            &[],
+            &archived_set(&[]),
+            &archived_set(&[]),
+            &extractions,
+            &HashMap::new(),
+        );
         assert_eq!(a.archived_bytes, None);
     }
 
     #[test]
     fn empty_account_is_all_zero_with_zero_bytes() {
-        let a = build_account(&[], &[], &archived_set(&[]), &[], &HashMap::new());
+        let a = build_account(
+            &[],
+            &[],
+            &archived_set(&[]),
+            &archived_set(&[]),
+            &[],
+            &HashMap::new(),
+        );
         assert_eq!(a.archived_files, 0);
         assert_eq!(a.archived_bytes, Some(0), "zero known bytes, not omitted");
         assert_eq!(a.standing(), 0);
@@ -814,7 +996,14 @@ mod tests {
     #[test]
     fn no_unresolved_is_no_blockers_found_never_ready() {
         let present = vec![source(1, Some(10), false, false)];
-        let a = build_account(&present, &[], &archived_set(&[10]), &[], &HashMap::new());
+        let a = build_account(
+            &present,
+            &[],
+            &archived_set(&[10]),
+            &archived_set(&[]),
+            &[],
+            &HashMap::new(),
+        );
         assert_eq!(derive_readiness(&a), Readiness::NoBlockersFound);
     }
 
@@ -822,7 +1011,14 @@ mod tests {
     fn unhashed_only_root_still_blocks() {
         // The "user forgot to hash" case: unhashed ⊆ unresolved, blocks.
         let present = vec![source(1, None, false, false)];
-        let a = build_account(&present, &[], &archived_set(&[]), &[], &HashMap::new());
+        let a = build_account(
+            &present,
+            &[],
+            &archived_set(&[]),
+            &archived_set(&[]),
+            &[],
+            &HashMap::new(),
+        );
         assert_eq!(
             derive_readiness(&a),
             Readiness::NotReady {
@@ -849,6 +1045,7 @@ mod tests {
     #[derive(Default)]
     struct Ctx {
         archived: HashSet<i64>,
+        archived_from_here: HashSet<i64>,
         families: HashMap<i64, DecisionFamily>,
         reasons: HashMap<i64, String>,
         hashes: HashMap<i64, String>,
@@ -860,6 +1057,7 @@ mod tests {
         fn context(&self) -> FateContext<'_> {
             FateContext {
                 archived: &self.archived,
+                archived_from_here: &self.archived_from_here,
                 stamp_families: &self.families,
                 stamp_reasons: &self.reasons,
                 object_hashes: &self.hashes,
@@ -939,11 +1137,12 @@ mod tests {
     }
 
     #[test]
-    fn zero_byte_entry_carries_its_fate_but_no_locations() {
-        // Every empty file shares the one empty-content object — a location
-        // list would name every zero-byte file in the archive while saying
-        // nothing about this one. Fate and verification stay honest: size 0
-        // is on the line, the hash genuinely proves the (empty) content.
+    fn zero_byte_entry_is_contentless_never_covered() {
+        // The contentless law: every empty file shares the one empty-content
+        // object, so coverage by it is hollow — the entry states the
+        // standing (all shape, no content) instead of a vacuous covered
+        // claim. Verification stays honest: the hash genuinely proves the
+        // (empty) content, so the entry is content-verified.
         let mut cx = Ctx::default();
         cx.archived.insert(10);
         cx.hashes.insert(10, "sha256:empty".to_string());
@@ -953,7 +1152,8 @@ mod tests {
         empty.size = 0;
 
         let entries = build_book_entries(&[empty], &[], &cx.context());
-        assert_eq!(entries[0].fate, SourceFate::Covered { locations: vec![] });
+        assert_eq!(entries[0].fate, SourceFate::Contentless);
+        assert_eq!(entries[0].fate.word(), STANDING_CONTENTLESS);
         assert_eq!(
             entries[0].verification(),
             EntryVerification::ContentVerified
@@ -1162,7 +1362,14 @@ mod tests {
             (200, DecisionFamily::Exclude),
         ]);
         let archived = archived_set(&[10, 11]);
-        let account = build_account(&present, &absent, &archived, &[], &families);
+        let account = build_account(
+            &present,
+            &absent,
+            &archived,
+            &archived_set(&[]),
+            &[],
+            &families,
+        );
 
         let mut cx = Ctx {
             archived,

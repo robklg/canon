@@ -80,7 +80,9 @@ pub fn compute_sweep(conn: &Connection, options: &SweepOptions) -> Result<SweepO
     for source in &all_sources {
         if source.is_excluded() {
             excluded.push(source);
-        } else if source.size == 0 {
+        } else if source.is_contentless() {
+            // The contentless law: no identity claims about empty content —
+            // counted as context, deliberately never filtered silently.
             empty_files_ignored += 1;
         } else {
             kept.push(source);

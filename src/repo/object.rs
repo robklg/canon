@@ -172,6 +172,55 @@ pub fn batch_check_archived(
     Ok(result)
 }
 
+/// Which of these objects were archived *from* the given root: an archive
+/// copy of the object stands (present, archive-role root) stamped by a
+/// decision whose extraction rows draw from `origin_root_id`. Object-grain,
+/// like coverage itself — the standing split's evidence. DB projections
+/// only: apply stamps the destination rows (never the origin root's), so the
+/// archive side carries the apply id and the extraction ledger names its
+/// origin — no receipt is read.
+///
+/// **Important**: Callers must filter out sources with object_id=None before
+/// calling this function. Only valid object IDs should be passed.
+pub fn batch_check_archived_from_root(
+    conn: &Connection,
+    object_ids: &[i64],
+    origin_root_id: i64,
+) -> Result<HashSet<i64>> {
+    if object_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let mut result = HashSet::new();
+
+    for chunk in object_ids.chunks(BATCH_SIZE) {
+        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT DISTINCT s.object_id
+             FROM sources s
+             JOIN roots r ON s.root_id = r.id
+             JOIN decision_extractions de ON de.decision_id = s.decision_id
+             WHERE r.role = 'archive' AND s.present = 1
+               AND de.root_id = ?
+               AND s.object_id IN ({})",
+            placeholders.join(",")
+        );
+        let mut params = vec![rusqlite::types::Value::from(origin_root_id)];
+        params.extend(chunk.iter().map(|&id| rusqlite::types::Value::from(id)));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            row.get::<_, i64>(0)
+        })?;
+
+        for row in rows {
+            result.insert(row?);
+        }
+    }
+
+    Ok(result)
+}
+
 /// Find archive paths for objects.
 ///
 /// Returns map from object_id to list of archive paths where that content exists.
@@ -651,6 +700,84 @@ mod tests {
         assert_eq!(result.len(), 1);
         let obj = result.get(&obj_id).unwrap();
         assert!(obj.is_excluded());
+    }
+
+    // =========================================================================
+    // batch_check_archived_from_root tests
+    // =========================================================================
+
+    fn link_extraction(conn: &RusqliteConnection, decision_id: i64, origin_root_id: i64) {
+        conn.execute(
+            "INSERT INTO decision_extractions
+             (decision_id, root_id, root_path, rel_prefix, files, bytes,
+              destination_root_id, destination_path, disposition)
+             VALUES (?, ?, '/origin', '', 1, 0, NULL, '/archive/x', 'retained')",
+            rusqlite::params![decision_id, origin_root_id],
+        )
+        .unwrap();
+    }
+
+    fn stamp_source(conn: &RusqliteConnection, source_id: i64, decision_id: i64) {
+        conn.execute(
+            "UPDATE sources SET decision_id = ? WHERE id = ?",
+            rusqlite::params![decision_id, source_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn archived_from_root_links_archive_stamp_to_origin_extraction() {
+        // The standing split's evidence: the archive copy carries the apply
+        // id, and the extraction ledger names that decision's origin root —
+        // the join is DB projections only, no receipt read.
+        let conn = setup_test_db();
+        let origin_id = insert_root(&conn, "/origin", "source");
+        let other_origin = insert_root(&conn, "/other", "source");
+        let archive_id = insert_root(&conn, "/archive", "archive");
+
+        // Object archived from /origin by decision 41.
+        let from_here = insert_object(&conn, "aaa", false);
+        let s1 = insert_source(&conn, archive_id, "a.jpg", Some(from_here), true);
+        stamp_source(&conn, s1, 41);
+        link_extraction(&conn, 41, origin_id);
+
+        // Object archived from the OTHER root by decision 42.
+        let from_elsewhere = insert_object(&conn, "bbb", false);
+        let s2 = insert_source(&conn, archive_id, "b.jpg", Some(from_elsewhere), true);
+        stamp_source(&conn, s2, 42);
+        link_extraction(&conn, 42, other_origin);
+
+        // Object in the archive with no extraction-linked stamp at all.
+        let merely_covered = insert_object(&conn, "ccc", false);
+        insert_source(&conn, archive_id, "c.jpg", Some(merely_covered), true);
+
+        let result = batch_check_archived_from_root(
+            &conn,
+            &[from_here, from_elsewhere, merely_covered],
+            origin_id,
+        )
+        .unwrap();
+        assert!(result.contains(&from_here));
+        assert!(
+            !result.contains(&from_elsewhere),
+            "another root's apply is not this root's deliberate act"
+        );
+        assert!(!result.contains(&merely_covered));
+    }
+
+    #[test]
+    fn archived_from_root_requires_present_archive_copy() {
+        // Live evidence only: an absent archive copy supports no standing.
+        let conn = setup_test_db();
+        let origin_id = insert_root(&conn, "/origin", "source");
+        let archive_id = insert_root(&conn, "/archive", "archive");
+        let obj = insert_object(&conn, "aaa", false);
+        let s = insert_source(&conn, archive_id, "a.jpg", Some(obj), false);
+        stamp_source(&conn, s, 41);
+        link_extraction(&conn, 41, origin_id);
+
+        let result = batch_check_archived_from_root(&conn, &[obj], origin_id).unwrap();
+        assert!(result.is_empty());
     }
 
     // =========================================================================

@@ -175,6 +175,18 @@ impl Source {
         self.excluded || self.object_excluded.unwrap_or(false)
     }
 
+    /// An empty source is all shape, no content — **contentless**: content
+    /// identity has nothing to identify, so it never participates in
+    /// coverage, overlap, uniqueness, or archive-conflict claims; it is
+    /// carried with its place and resolves with the place's fate. This is
+    /// the contentless law's one vocabulary point — the only place
+    /// `size == 0` is written; every other site consumes this predicate or a
+    /// repo query documented as its SQL projection (ADR
+    /// 2026-08-04-contentless-law).
+    pub fn is_contentless(&self) -> bool {
+        self.size == 0
+    }
+
     /// Check if this source is from a root with the given role.
     ///
     /// Common roles are "source" and "archive".

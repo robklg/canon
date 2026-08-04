@@ -555,6 +555,12 @@ fn print_review(review: &ops::retire::ReadinessReview) {
         "  standing here now      {} sources",
         format_count(account.standing())
     );
+    if account.archived_standing > 0 {
+        println!(
+            "    archived from here   {}   (this copy still stands; the archive holds it)",
+            format_count(account.archived_standing)
+        );
+    }
     println!(
         "    covered              {}   (content verified present in the archive)",
         format_count(account.covered)
@@ -563,6 +569,12 @@ fn print_review(review: &ops::retire::ReadinessReview) {
         "    excluded             {}",
         format_count(account.excluded)
     );
+    if account.contentless > 0 {
+        println!(
+            "    empty files          {}   (contentless — nothing to cover, nothing to verify)",
+            format_count(account.contentless)
+        );
+    }
     let mut unresolved = format_count(account.unresolved);
     if account.unhashed_unresolved > 0 {
         unresolved.push_str(&format!(
@@ -695,12 +707,23 @@ fn story_lines(report: &ops::story::StoryReport, cap: usize, now: i64) -> Vec<St
             format_count(account.unhashed_unresolved)
         ));
     }
+    let mut parts: Vec<String> = Vec::new();
+    if account.archived_standing > 0 {
+        parts.push(format!(
+            "{} archived from here",
+            format_count(account.archived_standing)
+        ));
+    }
+    parts.push(format!("{} covered", format_count(account.covered)));
+    parts.push(format!("{} excluded", format_count(account.excluded)));
+    if account.contentless > 0 {
+        parts.push(format!("{} empty files", format_count(account.contentless)));
+    }
+    parts.push(format!("{unresolved} unresolved"));
     lines.push(format!(
-        "Standing: {} sources — {} covered · {} excluded · {} unresolved",
+        "Standing: {} sources — {}",
         format_count(account.standing()),
-        format_count(account.covered),
-        format_count(account.excluded),
-        unresolved,
+        parts.join(" · "),
     ));
     lines.push("Whether this story is complete is yours to judge.".to_string());
     lines.push(format!(
@@ -763,7 +786,9 @@ fn render_place(
         // unresolved, missing: nothing evidences a decision either way.
         // Excluded standing is different: exclusion is always a deliberate
         // act, so at an undecided place it evidences an UNRECORDED decision
-        // — its line says so instead (never "no decision here").
+        // — its line says so instead (never "no decision here"). Archived
+        // standing likewise evidences the apply; contentless has nothing to
+        // decide (the contentless law) — neither joins the question here.
         let question =
             place.standing.covered + place.standing.unresolved + place.standing.missing_unexplained;
         if place.undecided() && question > 0 {
@@ -884,6 +909,21 @@ fn act_lines(group: &ActGroup, indent: &str, lines: &mut Vec<String>) {
 
 fn standing_lines(place: &StoryPlace, indent: &str, lines: &mut Vec<String>) {
     let standing = &place.standing;
+    if standing.archived > 0 {
+        let mut line = format!(
+            "{indent}  {} archived from here",
+            format_count(standing.archived)
+        );
+        // The covered-where answer serves both archive-standing buckets;
+        // it rides the covered line when one renders, else lands here.
+        if standing.covered == 0 && !place.covered_where.is_empty() {
+            line.push_str(&format!(
+                " — copies stand in {}",
+                fmt_locations(&place.covered_where)
+            ));
+        }
+        lines.push(line);
+    }
     if standing.covered > 0 {
         let mut line = format!("{indent}  {} covered", format_count(standing.covered));
         if !place.covered_where.is_empty() {
@@ -891,13 +931,16 @@ fn standing_lines(place: &StoryPlace, indent: &str, lines: &mut Vec<String>) {
                 " — copies stand in {}",
                 fmt_locations(&place.covered_where)
             ));
-        } else if standing.covered_empty == standing.covered {
-            // Contentless files claim no locations (every empty file shares
-            // one object) — say so rather than leaving the line silently
-            // bare.
-            line.push_str(" (empty files)");
         }
         lines.push(line);
+    }
+    if standing.contentless > 0 {
+        // The plain referent beside the concept: empty files are all shape,
+        // no content — they claim no coverage and no locations.
+        lines.push(format!(
+            "{indent}  {} empty files — carried with this place",
+            format_count(standing.contentless)
+        ));
     }
     if standing.excluded > 0 && !place.standing_coincides() {
         let mut line = format!("{indent}  {} excluded", format_count(standing.excluded));
@@ -1152,8 +1195,10 @@ mod tests {
             archived_unrecorded: 0,
             deleted: 0,
             unexplained_missing: 0,
+            archived_standing: 0,
             covered: 0,
             excluded: 0,
+            contentless: 0,
             unresolved: 0,
             unhashed_unresolved: 0,
         }

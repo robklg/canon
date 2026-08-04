@@ -52,14 +52,14 @@ pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> R
 
     let notes = repo::note::fetch_by_roots(conn, &[root_id])?;
 
-    // Covered-copy locations for the "copies stand in" lines. Zero-byte
-    // sources are gated out (the book's contentless rule, reused): every
-    // empty file shares the one empty-content object, so a location list
-    // would answer nothing about this file.
+    // Covered-copy locations for the "copies stand in" lines. Contentless
+    // sources are gated out (the contentless law): every empty file shares
+    // the one empty-content object, so a location list would answer nothing
+    // about this file. Redundant once the archived-ness SQL carries the law.
     let mut object_ids: Vec<i64> = story
         .present
         .iter()
-        .filter(|s| s.size > 0)
+        .filter(|s| !s.is_contentless())
         .filter_map(|s| s.object_id)
         .collect();
     object_ids.sort_unstable();
@@ -87,6 +87,7 @@ pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> R
             present: &story.present,
             absent: &story.absent,
             archived: &story.archived,
+            archived_from_here: &story.archived_from_here,
             extractions: &story.extractions,
             decisions: &decisions,
             notes: &notes,
@@ -96,13 +97,15 @@ pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> R
         params,
     );
     // The once-rule: each reasoned decision's full reason renders at its
-    // widest emitted slice; other slices cite the bare id. Precomputed here
-    // so the tree carries the answer — rendering never decides.
+    // first emitted slice in reading order; other slices cite the bare id.
+    // Precomputed here so the tree carries the answer — rendering never
+    // decides.
     assign_reason_sites(&mut places);
     let account = build_account(
         &story.present,
         &story.absent,
         &story.archived,
+        &story.archived_from_here,
         &story.extractions,
         &story.stamp_families,
     );
@@ -407,14 +410,17 @@ mod tests {
         );
 
         let report = compute_story(&conn, root, &no_dust()).unwrap();
-        assert_eq!(report.places.standing.covered, 1, "covered by content");
-        assert!(
-            report.places.covered_where.is_empty(),
-            "but the empty object claims no locations"
+        assert_eq!(
+            report.places.standing.contentless, 1,
+            "an empty source is contentless — never covered (the contentless law)"
         );
         assert_eq!(
-            report.places.standing.covered_empty, 1,
-            "and the standing carries why, so the line can say '(empty files)'"
+            report.places.standing.covered, 0,
+            "the universal empty object creates no coverage"
+        );
+        assert!(
+            report.places.covered_where.is_empty(),
+            "and it claims no locations"
         );
     }
 

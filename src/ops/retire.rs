@@ -21,8 +21,8 @@ use crate::domain::note::note_display_path;
 use crate::domain::retire::{
     book_dir_name, build_account, build_book_entries, derive_posture, derive_readiness,
     disposition_word, ApplyOrigin, BookEntry, FateContext, Readiness, ResolutionAccount,
-    SourceFate, VerificationPosture, STANDING_COVERED, STANDING_MISSING_UNEXPLAINED,
-    STANDING_PRESENT,
+    SourceFate, VerificationPosture, STANDING_CONTENTLESS, STANDING_COVERED,
+    STANDING_MISSING_UNEXPLAINED, STANDING_PRESENT,
 };
 use crate::domain::scope::DecisionScope;
 use crate::domain::trail::{
@@ -320,6 +320,11 @@ pub struct RootStory {
     pub absent: Vec<Source>,
     /// Object ids among the present rows verified present in the archive.
     pub archived: HashSet<i64>,
+    /// Subset archived *from this root*: an archive copy stands stamped by a
+    /// decision whose extraction rows draw from here (object-grain, DB
+    /// projections only — apply stamps the destination rows, so the archive
+    /// side carries the apply id and the ledger names its origin).
+    pub archived_from_here: HashSet<i64>,
     /// Extraction rows whose origin is this root.
     pub extractions: Vec<DecisionExtraction>,
     pub scope_rows: Vec<DecisionScopeRow>,
@@ -355,6 +360,8 @@ pub fn fetch_root_story(conn: &Connection, root_id: i64) -> Result<RootStory> {
 
     let present_object_ids: Vec<i64> = present.iter().filter_map(|s| s.object_id).collect();
     let archived = repo::object::batch_check_archived(conn, &present_object_ids, None)?;
+    let archived_from_here =
+        repo::object::batch_check_archived_from_root(conn, &present_object_ids, root_id)?;
 
     let extractions = repo::decision::fetch_extractions_by_origin_root(conn, root_id)?;
     let scope_rows = repo::decision::fetch_scope_rows_by_roots(conn, &[root_id])?;
@@ -385,6 +392,7 @@ pub fn fetch_root_story(conn: &Connection, root_id: i64) -> Result<RootStory> {
         present,
         absent,
         archived,
+        archived_from_here,
         extractions,
         scope_rows,
         decisions,
@@ -421,6 +429,7 @@ pub fn readiness_lens(story: &RootStory) -> ReadinessReview {
         &story.present,
         &story.absent,
         &story.archived,
+        &story.archived_from_here,
         &story.extractions,
         &story.stamp_families,
     );
@@ -541,6 +550,7 @@ pub fn compile_book(
 
     let ctx = FateContext {
         archived: &story.archived,
+        archived_from_here: &story.archived_from_here,
         stamp_families: &story.stamp_families,
         stamp_reasons: &stamp_reasons,
         object_hashes: &object_hashes,
@@ -553,6 +563,7 @@ pub fn compile_book(
         &story.present,
         &story.absent,
         &story.archived,
+        &story.archived_from_here,
         &story.extractions,
         &story.stamp_families,
     );
@@ -772,9 +783,9 @@ fn write_inventory(dir: &Path, entries: &[BookEntry]) -> Result<()> {
                 reason.as_deref(),
             ),
             SourceFate::Deleted { reason } => (None, None, Vec::new(), reason.as_deref()),
-            SourceFate::PresentAtRetirement | SourceFate::MissingUnexplained => {
-                (None, None, Vec::new(), None)
-            }
+            SourceFate::PresentAtRetirement
+            | SourceFate::Contentless
+            | SourceFate::MissingUnexplained => (None, None, Vec::new(), None),
         };
         let line = InventoryLine {
             path: &entry.rel_path,
@@ -911,6 +922,7 @@ fn fate_counts(entries: &[BookEntry]) -> MetaCounts {
         excluded: 0,
         deleted: 0,
         present: 0,
+        contentless: 0,
         missing_unexplained: 0,
     };
     for entry in entries {
@@ -920,6 +932,7 @@ fn fate_counts(entries: &[BookEntry]) -> MetaCounts {
             SourceFate::Excluded { .. } => counts.excluded += 1,
             SourceFate::Deleted { .. } => counts.deleted += 1,
             SourceFate::PresentAtRetirement => counts.present += 1,
+            SourceFate::Contentless => counts.contentless += 1,
             SourceFate::MissingUnexplained => counts.missing_unexplained += 1,
         }
     }
@@ -968,8 +981,13 @@ struct MetaAccount {
     archived_unrecorded: i64,
     deleted: i64,
     unexplained_missing: i64,
+    /// Archived from here and still standing — the standing split's
+    /// deliberate side (additive within format v1).
+    archived_standing: i64,
     covered: i64,
     excluded: i64,
+    /// Empty files — contentless (additive within format v1).
+    contentless: i64,
     unresolved: i64,
     unhashed_unresolved: i64,
     standing: i64,
@@ -994,6 +1012,11 @@ struct MetaCounts {
     excluded: i64,
     deleted: i64,
     present: i64,
+    /// Empty at retirement — additive within format v1; `default` so books
+    /// bound before the contentless standing still parse (their inventories
+    /// hold no contentless entries, so the recount agrees at 0).
+    #[serde(default)]
+    contentless: i64,
     missing_unexplained: i64,
 }
 
@@ -1045,8 +1068,10 @@ fn write_meta(
             archived_unrecorded: account.archived_unrecorded,
             deleted: account.deleted,
             unexplained_missing: account.unexplained_missing,
+            archived_standing: account.archived_standing,
             covered: account.covered,
             excluded: account.excluded,
+            contentless: account.contentless,
             unresolved: account.unresolved,
             unhashed_unresolved: account.unhashed_unresolved,
             standing: account.standing(),
@@ -1148,8 +1173,20 @@ fn write_readme(
         "\nStanding at binding: {} sources\n",
         format_count(account.standing())
     ));
+    if account.archived_standing > 0 {
+        out.push_str(&format!(
+            "- archived from here, still standing: {}\n",
+            format_count(account.archived_standing)
+        ));
+    }
     out.push_str(&format!("- covered: {}\n", format_count(account.covered)));
     out.push_str(&format!("- excluded: {}\n", format_count(account.excluded)));
+    if account.contentless > 0 {
+        out.push_str(&format!(
+            "- empty files (contentless — nothing to cover, nothing to verify): {}\n",
+            format_count(account.contentless)
+        ));
+    }
     let unhashed = if account.unhashed_unresolved > 0 {
         format!(" ({} unhashed)", format_count(account.unhashed_unresolved))
     } else {
@@ -1266,6 +1303,7 @@ pub fn verify_book(dir: &Path) -> Result<BookVerification> {
         excluded: 0,
         deleted: 0,
         present: 0,
+        contentless: 0,
         missing_unexplained: 0,
     };
     // The same word derivations the writer used — the never-literal law
@@ -1293,6 +1331,7 @@ pub fn verify_book(dir: &Path) -> Result<BookVerification> {
             w if w == deleted => counted.deleted += 1,
             w if w == STANDING_COVERED => counted.covered += 1,
             w if w == STANDING_PRESENT => counted.present += 1,
+            w if w == STANDING_CONTENTLESS => counted.contentless += 1,
             w if w == STANDING_MISSING_UNEXPLAINED => counted.missing_unexplained += 1,
             other => bail!(
                 "inventory.jsonl line {}: unknown fate word {other:?}",

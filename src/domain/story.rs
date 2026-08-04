@@ -432,6 +432,9 @@ pub struct StoryInputs<'a> {
     pub absent: &'a [Source],
     /// Object ids among the present rows verified present in the archive.
     pub archived: &'a HashSet<i64>,
+    /// Subset archived *from this root* (extraction-linked, object-grain) —
+    /// the covered/archived standing split's evidence.
+    pub archived_from_here: &'a HashSet<i64>,
     /// Extraction rows whose origin is this root — the archived acts.
     pub extractions: &'a [DecisionExtraction],
     pub decisions: &'a HashMap<i64, DecisionInfo>,
@@ -447,11 +450,15 @@ pub struct StoryInputs<'a> {
 /// Present standings and record-quality facts attributed to one place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PlaceStanding {
+    /// Archived from here, the copy standing in the archive — the
+    /// deliberate side of the covered/archived split (extraction-linked,
+    /// object-grain).
+    pub archived: i64,
     pub covered: i64,
-    /// Subset of `covered`: zero-byte files — contentless, so they claim no
-    /// locations (the book's `locations_for` gate). Lets the rendering say
-    /// why a covered line names no where instead of staying silently bare.
-    pub covered_empty: i64,
+    /// Empty files — contentless: all shape, no content; they claim no
+    /// coverage and no locations, and they never block (the contentless
+    /// law).
+    pub contentless: i64,
     pub excluded: i64,
     pub unresolved: i64,
     /// Subset of `unresolved`: never hashed — cannot be content-verified.
@@ -462,7 +469,9 @@ pub struct PlaceStanding {
 
 impl PlaceStanding {
     pub fn is_empty(&self) -> bool {
-        self.covered == 0
+        self.archived == 0
+            && self.covered == 0
+            && self.contentless == 0
             && self.excluded == 0
             && self.unresolved == 0
             && self.missing_unexplained == 0
@@ -504,7 +513,9 @@ impl StoryPlace {
     /// whole-history count exceeds what stands, so omitting the standing
     /// line would misread as all of it still standing).
     pub fn standing_coincides(&self) -> bool {
-        if self.standing.covered != 0
+        if self.standing.archived != 0
+            || self.standing.covered != 0
+            || self.standing.contentless != 0
             || self.standing.unresolved != 0
             || self.standing.missing_unexplained != 0
         {
@@ -574,8 +585,16 @@ pub fn assign_reason_sites(root: &mut StoryPlace) {
 /// pass (ids are parents-first).
 #[derive(Debug, Clone, Copy, Default)]
 struct Counts {
+    /// Archived-from-here standing — kept beside `covered` for rendering,
+    /// merged with it in the divergence signature (one axis: the split is a
+    /// reading distinction, not a boundary the splitter should cut on).
+    archived: i64,
     covered: i64,
-    covered_empty: i64,
+    /// Contentless standing — outside the question population, like
+    /// excluded: nothing to second-guess about no-content (the contentless
+    /// law; this is also what keeps empty-file walls from splitting on
+    /// hollow coverage).
+    contentless: i64,
     excluded: i64,
     unresolved: i64,
     unhashed: i64,
@@ -590,8 +609,9 @@ struct Counts {
 
 impl Counts {
     fn add(&mut self, other: &Counts) {
+        self.archived += other.archived;
         self.covered += other.covered;
-        self.covered_empty += other.covered_empty;
+        self.contentless += other.contentless;
         self.excluded += other.excluded;
         self.unresolved += other.unresolved;
         self.unhashed += other.unhashed;
@@ -614,16 +634,18 @@ impl Counts {
     /// deliberate-uniform, split on the second-guessable") — a uniformly
     /// excluded child has nothing to ask and never splits on standing.
     fn question(&self) -> i64 {
-        self.covered + self.unresolved + self.missing + self.deleted
+        self.archived + self.covered + self.unresolved + self.missing + self.deleted
     }
 
     /// Proportions within the question population, plus question density
     /// over the whole population — a child far more question-dense than its
-    /// context diverges even when the question mix matches.
+    /// context diverges even when the question mix matches. Archived and
+    /// covered share one axis (the split is a reading distinction, not a
+    /// boundary); contentless is outside the question entirely.
     fn question_proportions(&self) -> [f64; 5] {
         let q = self.question() as f64;
         [
-            self.covered as f64 / q,
+            (self.archived + self.covered) as f64 / q,
             self.unresolved as f64 / q,
             self.missing as f64 / q,
             self.deleted as f64 / q,
@@ -983,12 +1005,15 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         let counts = &mut direct[fid as usize];
         counts.files_present += 1;
         counts.bytes_present += source.size;
-        match classify_present(source, inputs.archived) {
-            StandingBucket::Covered => {
-                counts.covered += 1;
-                if source.size == 0 {
-                    counts.covered_empty += 1;
+        let bucket = classify_present(source, inputs.archived, inputs.archived_from_here);
+        match bucket {
+            StandingBucket::Archived | StandingBucket::Covered => {
+                match bucket {
+                    StandingBucket::Archived => counts.archived += 1,
+                    _ => counts.covered += 1,
                 }
+                // Both standings have copies in the archive; both feed the
+                // covered-where answer.
                 if let Some(paths) = source
                     .object_id
                     .and_then(|obj| inputs.archive_locations.get(&obj))
@@ -1002,6 +1027,7 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
                     }
                 }
             }
+            StandingBucket::Contentless => counts.contentless += 1,
             StandingBucket::Excluded => counts.excluded += 1,
             StandingBucket::Unresolved { unhashed } => {
                 counts.unresolved += 1;
@@ -1246,8 +1272,9 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         }
         let place = resolve(fid);
         let accum = accums.get_mut(&place).expect("emitted place");
+        accum.standing.archived += counts.archived;
         accum.standing.covered += counts.covered;
-        accum.standing.covered_empty += counts.covered_empty;
+        accum.standing.contentless += counts.contentless;
         accum.standing.excluded += counts.excluded;
         accum.standing.unresolved += counts.unresolved;
         accum.standing.unhashed_unresolved += counts.unhashed;
@@ -1709,6 +1736,7 @@ mod tests {
         present: Vec<Source>,
         absent: Vec<Source>,
         archived: HashSet<i64>,
+        archived_from_here: HashSet<i64>,
         extractions: Vec<DecisionExtraction>,
         decisions: HashMap<i64, DecisionInfo>,
         notes: Vec<Note>,
@@ -1722,6 +1750,7 @@ mod tests {
                 present: vec![],
                 absent: vec![],
                 archived: HashSet::new(),
+                archived_from_here: HashSet::new(),
                 extractions: vec![],
                 decisions: HashMap::new(),
                 notes: vec![],
@@ -1746,6 +1775,7 @@ mod tests {
                     present: &self.present,
                     absent: &self.absent,
                     archived: &self.archived,
+                    archived_from_here: &self.archived_from_here,
                     extractions: &self.extractions,
                     decisions: &self.decisions,
                     notes: &self.notes,
@@ -2588,7 +2618,9 @@ mod tests {
         let root = fx.build(&no_dust());
 
         fn fold(place: &StoryPlace, sum: &mut PlaceStanding) {
+            sum.archived += place.standing.archived;
             sum.covered += place.standing.covered;
+            sum.contentless += place.standing.contentless;
             sum.excluded += place.standing.excluded;
             sum.unresolved += place.standing.unresolved;
             sum.unhashed_unresolved += place.standing.unhashed_unresolved;
@@ -2609,10 +2641,13 @@ mod tests {
             &fx.present,
             &fx.absent,
             &fx.archived,
+            &fx.archived_from_here,
             &fx.extractions,
             &stamp_families,
         );
+        assert_eq!(sum.archived, account.archived_standing);
         assert_eq!(sum.covered, account.covered);
+        assert_eq!(sum.contentless, account.contentless);
         assert_eq!(sum.excluded, account.excluded);
         assert_eq!(sum.unresolved, account.unresolved);
         assert_eq!(sum.unhashed_unresolved, account.unhashed_unresolved);
