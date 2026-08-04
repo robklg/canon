@@ -5,9 +5,15 @@
 //! sources, ground content comparisons (duplicates don't make content more
 //! irreplaceable).
 //!
-//! The index applies no inclusion policy of its own. Callers filter sources
-//! (visibility, exclusion, role, size) before building, so different consumers
-//! can reason over different populations while sharing one structure.
+//! The index applies no inclusion *policy* of its own — callers filter
+//! sources (visibility, exclusion, role) before building, so different
+//! consumers can reason over different populations while sharing one
+//! structure. It does enforce one *law*: contentless sources are refused at
+//! build (ADR 2026-08-04-contentless-law). An empty file's identity is the
+//! one universal empty object — letting it in would manufacture overlap,
+//! coverage, and uniqueness claims about no-content. The law lives here,
+//! at the chokepoint, so "an empty file creates overlap" is structurally
+//! unreachable for every index consumer; policy stays above, in ops.
 
 use std::collections::{HashMap, HashSet};
 
@@ -28,10 +34,15 @@ pub struct ArchivePresence<'a> {
 
 impl<'a> ObjectIndex<'a> {
     /// Build from sources. Unhashed sources (no object id) cannot be indexed
-    /// and are skipped; any other inclusion policy is the caller's.
+    /// and are skipped; contentless sources are refused (the contentless
+    /// law — see the module doc); any other inclusion policy is the
+    /// caller's.
     pub fn build(sources: impl IntoIterator<Item = &'a Source>) -> Self {
         let mut by_object: HashMap<i64, Vec<&'a Source>> = HashMap::new();
         for s in sources {
+            if s.is_contentless() {
+                continue;
+            }
             if let Some(oid) = s.object_id {
                 by_object.entry(oid).or_default().push(s);
             }
@@ -137,12 +148,21 @@ mod tests {
     }
 
     #[test]
-    fn build_applies_no_inclusion_policy() {
-        // An excluded source fed to build IS indexed — filtering is the
-        // caller's job, and this test pins that contract.
-        let sources = vec![make_source(1, 1, "source", Some(10), true)];
+    fn build_applies_the_law_but_no_policy() {
+        // Two contracts in one: an excluded source fed to build IS indexed
+        // (policy is the caller's job), while a contentless source is
+        // refused (the law is the index's own — empty content can never
+        // create overlap, coverage, or uniqueness).
+        let excluded = make_source(1, 1, "source", Some(10), true);
+        let mut empty = make_source(2, 1, "source", Some(11), false);
+        empty.size = 0;
+        let sources = vec![excluded, empty];
         let index = ObjectIndex::build(&sources);
-        assert_eq!(index.locations_of(10).len(), 1);
+        assert_eq!(index.locations_of(10).len(), 1, "policy stays out");
+        assert!(
+            index.locations_of(11).is_empty(),
+            "the contentless law is enforced at build"
+        );
     }
 
     #[test]

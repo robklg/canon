@@ -113,6 +113,11 @@ pub fn fetch_by_hash(conn: &Connection, hash: &str) -> Result<Option<Object>> {
 /// If `archive_root_id` is Some, checks only that specific archive.
 /// If `archive_root_id` is None, checks all archive roots.
 ///
+/// SQL projection of the contentless law (`Source::is_contentless`, ADR
+/// 2026-08-04-contentless-law): the archive side requires `s.size > 0` —
+/// an empty archive copy is no coverage evidence (the universal empty
+/// object would hollowly "cover" every empty file in the universe).
+///
 /// **Important**: Callers must filter out sources with object_id=None before
 /// calling this function. Only valid object IDs should be passed.
 pub fn batch_check_archived(
@@ -135,7 +140,7 @@ pub fn batch_check_archived(
                 let sql = format!(
                     "SELECT DISTINCT s.object_id
                  FROM sources s
-                 WHERE s.root_id = ? AND s.present = 1
+                 WHERE s.root_id = ? AND s.present = 1 AND s.size > 0
                    AND s.object_id IN ({})",
                     placeholders.join(",")
                 );
@@ -148,7 +153,7 @@ pub fn batch_check_archived(
                     "SELECT DISTINCT s.object_id
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
-                 WHERE r.role = 'archive' AND s.present = 1
+                 WHERE r.role = 'archive' AND s.present = 1 AND s.size > 0
                    AND s.object_id IN ({})",
                     placeholders.join(",")
                 );
@@ -195,12 +200,15 @@ pub fn batch_check_archived_from_root(
 
     for chunk in object_ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        // s.size > 0: the contentless law (see batch_check_archived) —
+        // consistent with the classifier, which never lets an empty source
+        // reach the Archived standing.
         let sql = format!(
             "SELECT DISTINCT s.object_id
              FROM sources s
              JOIN roots r ON s.root_id = r.id
              JOIN decision_extractions de ON de.decision_id = s.decision_id
-             WHERE r.role = 'archive' AND s.present = 1
+             WHERE r.role = 'archive' AND s.present = 1 AND s.size > 0
                AND de.root_id = ?
                AND s.object_id IN ({})",
             placeholders.join(",")
@@ -241,11 +249,15 @@ pub fn batch_find_archive_paths(
 
     for chunk in object_ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        // s.size > 0: the contentless law (see batch_check_archived) — the
+        // universal empty object claims no locations, so coverage-location
+        // answers (cluster's skip set, the story's covered-where, the
+        // compile's locations) never see it.
         let sql = format!(
             "SELECT s.object_id, r.path, s.rel_path
              FROM sources s
              JOIN roots r ON s.root_id = r.id
-             WHERE r.role = 'archive' AND s.present = 1
+             WHERE r.role = 'archive' AND s.present = 1 AND s.size > 0
                AND s.object_id IN ({})
              ORDER BY s.object_id, r.path, s.rel_path",
             placeholders.join(",")
@@ -310,12 +322,16 @@ pub fn batch_find_archive_info_by_hash(
 
     for chunk in hash_values.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+        // s.size > 0: the contentless law (see batch_check_archived) —
+        // identity-keyed archive-conflict claims about empty content are
+        // vacuous (an empty file being applied must not "conflict" with
+        // every empty file already in the archive).
         let sql = format!(
             "SELECT o.hash_value, r.id, r.path, s.rel_path
              FROM sources s
              JOIN roots r ON s.root_id = r.id
              JOIN objects o ON s.object_id = o.id
-             WHERE r.role = 'archive' AND s.present = 1
+             WHERE r.role = 'archive' AND s.present = 1 AND s.size > 0
                AND o.hash_value IN ({})
              ORDER BY o.hash_value, r.id, s.rel_path",
             placeholders.join(",")
@@ -644,7 +660,7 @@ mod tests {
     ) -> i64 {
         conn.execute(
             "INSERT INTO sources (root_id, rel_path, object_id, present, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
-             VALUES (?, ?, ?, ?, 0, 0, '', 0, 0, 0, 0)",
+             VALUES (?, ?, ?, ?, 100, 0, '', 0, 0, 0, 0)",
             rusqlite::params![root_id, rel_path, object_id, present as i64],
         )
         .unwrap();

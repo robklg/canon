@@ -535,15 +535,10 @@ fn hash_for(source: &Source, ctx: &FateContext) -> Option<String> {
 }
 
 fn locations_for(source: &Source, ctx: &FateContext) -> Vec<String> {
-    // The contentless law: every empty file shares the one empty-content
-    // object, so a location list would name every zero-byte file in the
-    // archive while answering nothing about *this* file. Reached only by
-    // the Excluded fate's archive-context (Contentless classifies out
-    // before the identity fates); redundant once the archived-ness SQL
-    // carries the law — kept as the domain-side statement of the same rule.
-    if source.is_contentless() {
-        return Vec::new();
-    }
+    // Empty objects never appear in `ctx.archive_locations` — the
+    // archived-ness SQL carries the contentless law (a location list for
+    // the universal empty object would name every zero-byte file in the
+    // archive while answering nothing about *this* file).
     source
         .object_id
         .and_then(|id| ctx.archive_locations.get(&id).cloned())

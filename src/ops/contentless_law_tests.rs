@@ -1,0 +1,157 @@
+//! The contentless-law canary — one module, every surface (ADR
+//! 2026-08-04-contentless-law).
+//!
+//! One empty file stands in the archive and one in a source root, beside a
+//! genuine duplicate pair. No surface may read the empty content as
+//! archived, covering, overlapping, conflicting, or skippable: the law says
+//! identity claims about no-content are vacuous. If any single surface
+//! regresses — a query losing its `size > 0` arm, the index losing its
+//! build filter, the classifier reordering — exactly one assertion here
+//! names it.
+
+use std::collections::HashSet;
+
+use crate::domain::object_index::ObjectIndex;
+use crate::domain::retire::{classify_present, StandingBucket};
+use crate::ops::cluster::{plan_generate, ClusterGenerateParams};
+use crate::ops::test_helpers::*;
+use crate::repo;
+
+struct Canary {
+    conn: crate::repo::Connection,
+    source_root: i64,
+    empty_obj: i64,
+    data_obj: i64,
+}
+
+/// Archive: keep/empty.log (0 B) + keep/data.bin (100 B).
+/// Source root: folder/empty.log (0 B, same object) + folder/data.bin
+/// (100 B, same object).
+fn canary() -> Canary {
+    let conn = setup_test_db();
+    let source_root = insert_root(&conn, "/r", "source", false);
+    let archive = insert_root(&conn, "/archive", "archive", false);
+    let empty_obj = insert_object(&conn, "emptyhash", false);
+    let data_obj = insert_object(&conn, "datahash", false);
+    insert_source_with_size(&conn, archive, "keep/empty.log", Some(empty_obj), 0);
+    insert_source_with_size(&conn, archive, "keep/data.bin", Some(data_obj), 100);
+    insert_source_with_size(&conn, source_root, "folder/empty.log", Some(empty_obj), 0);
+    insert_source_with_size(&conn, source_root, "folder/data.bin", Some(data_obj), 100);
+    Canary {
+        conn,
+        source_root,
+        empty_obj,
+        data_obj,
+    }
+}
+
+#[test]
+fn archived_ness_never_reads_empty_content() {
+    // The `archived?` predicate, coverage stats, the ceremonies' archive
+    // context, and the readiness archived-set all derive here.
+    let c = canary();
+    let archived =
+        repo::object::batch_check_archived(&c.conn, &[c.empty_obj, c.data_obj], None).unwrap();
+    assert!(archived.contains(&c.data_obj));
+    assert!(
+        !archived.contains(&c.empty_obj),
+        "an empty archive copy is no coverage evidence"
+    );
+}
+
+#[test]
+fn coverage_locations_never_name_the_empty_object() {
+    // Cluster's skip set, the story's covered-where, and the compile's
+    // locations all derive here.
+    let c = canary();
+    let paths =
+        repo::object::batch_find_archive_paths(&c.conn, &[c.empty_obj, c.data_obj]).unwrap();
+    assert!(paths.contains_key(&c.data_obj));
+    assert!(
+        !paths.contains_key(&c.empty_obj),
+        "the universal empty object claims no locations"
+    );
+}
+
+#[test]
+fn archive_conflicts_never_fire_on_empty_content() {
+    // Apply's preflight archive-conflict check derives here: an empty file
+    // being applied must not "conflict" with every empty file already in
+    // the archive.
+    let c = canary();
+    let info =
+        repo::object::batch_find_archive_info_by_hash(&c.conn, &["emptyhash", "datahash"]).unwrap();
+    assert!(info.contains_key("datahash"));
+    assert!(!info.contains_key("emptyhash"));
+}
+
+#[test]
+fn the_index_refuses_contentless_sources() {
+    // Survey's overlap, archive-status, and only-here reasoning all start
+    // at the index.
+    let c = canary();
+    let all = repo::source::batch_fetch_by_roots(&c.conn, &[c.source_root]).unwrap();
+    let index = ObjectIndex::build(&all);
+    assert!(index.locations_of(c.empty_obj).is_empty());
+    assert_eq!(index.locations_of(c.data_obj).len(), 1);
+}
+
+#[test]
+fn the_classifier_reads_the_empty_source_as_contentless() {
+    // SQL → classifier, tied end to end: with the law in the queries the
+    // empty object never enters the archived set, and the Contentless arm
+    // (which precedes the identity tests) is what keeps it from falling
+    // through to Unresolved.
+    let c = canary();
+    let sources = repo::source::batch_fetch_by_roots(&c.conn, &[c.source_root]).unwrap();
+    let object_ids: Vec<i64> = sources.iter().filter_map(|s| s.object_id).collect();
+    let archived = repo::object::batch_check_archived(&c.conn, &object_ids, None).unwrap();
+    let empty = sources
+        .iter()
+        .find(|s| s.rel_path == "folder/empty.log")
+        .unwrap();
+    let data = sources
+        .iter()
+        .find(|s| s.rel_path == "folder/data.bin")
+        .unwrap();
+    assert_eq!(
+        classify_present(empty, &archived, &HashSet::new()),
+        StandingBucket::Contentless
+    );
+    assert_eq!(
+        classify_present(data, &archived, &HashSet::new()),
+        StandingBucket::Covered
+    );
+}
+
+#[test]
+fn cluster_generate_carries_empty_files_instead_of_skipping_them() {
+    // The ratified default flip: contentless files are never "already
+    // archived", so an archive-everything pass carries them with their
+    // folders — the verbatim-folder copy stays faithful.
+    let mut c = canary();
+    let plan = plan_generate(
+        &mut c.conn,
+        &ClusterGenerateParams {
+            scopes: vec![],
+            filters: vec![],
+            allow_archived: false,
+            allow_duplicates: false,
+        },
+    )
+    .unwrap();
+    let planned: Vec<&str> = plan.lock_entries.iter().map(|e| e.path.as_str()).collect();
+    assert!(
+        planned.iter().any(|p| p.contains("empty.log")),
+        "the empty file is planned, not skipped"
+    );
+    let skipped: Vec<&str> = plan.archived.iter().map(|(s, _)| s.as_str()).collect();
+    assert!(
+        skipped.iter().any(|s| s.contains("data.bin")),
+        "the genuinely covered file still skips"
+    );
+    assert!(
+        !skipped.iter().any(|s| s.contains("empty.log")),
+        "no empty file in the already-archived skip list"
+    );
+}

@@ -30,4 +30,6 @@ pub mod trail;
 pub mod worklist;
 
 #[cfg(test)]
+mod contentless_law_tests;
+#[cfg(test)]
 pub(crate) mod test_helpers;

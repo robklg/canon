@@ -206,7 +206,11 @@ pub fn plan_generate(
     let object_ids: Vec<i64> = hashed_sources.iter().filter_map(|s| s.object_id).collect();
     let objects = repo::object::batch_fetch_by_ids(conn, &object_ids)?;
 
-    // 4. Batch fetch archive paths for archive detection
+    // 4. Batch fetch archive paths for archive detection. Empty files never
+    // come back as archived — the archived-ness SQL carries the contentless
+    // law, so archive-everything passes carry them with their folders
+    // instead of skipping them as "already archived" (a verbatim folder
+    // copy stays faithful; ADR 2026-08-04-contentless-law).
     let archive_paths = repo::object::batch_find_archive_paths(conn, &object_ids)?;
 
     // 5. Collect root paths from sources (before consuming them)

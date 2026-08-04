@@ -52,16 +52,10 @@ pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> R
 
     let notes = repo::note::fetch_by_roots(conn, &[root_id])?;
 
-    // Covered-copy locations for the "copies stand in" lines. Contentless
-    // sources are gated out (the contentless law): every empty file shares
-    // the one empty-content object, so a location list would answer nothing
-    // about this file. Redundant once the archived-ness SQL carries the law.
-    let mut object_ids: Vec<i64> = story
-        .present
-        .iter()
-        .filter(|s| !s.is_contentless())
-        .filter_map(|s| s.object_id)
-        .collect();
+    // Covered-copy locations for the "copies stand in" lines. Empty objects
+    // never come back — the archived-ness SQL carries the contentless law
+    // (`batch_find_archive_paths` requires size > 0 on the archive side).
+    let mut object_ids: Vec<i64> = story.present.iter().filter_map(|s| s.object_id).collect();
     object_ids.sort_unstable();
     object_ids.dedup();
     let archive_locations = repo::object::batch_find_archive_paths(conn, &object_ids)?;
