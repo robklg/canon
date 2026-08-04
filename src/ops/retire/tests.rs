@@ -1207,6 +1207,31 @@ fn a_book_without_a_story_claim_still_verifies() {
 }
 
 #[test]
+fn a_hand_refined_telling_is_marked_in_the_meta() {
+    // The honesty marker travels: a refined page is never passed off as
+    // pure derivation, and the text binds verbatim either way.
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+    let bound = ceremony
+        .bind(
+            &conn,
+            TellingArtifact {
+                text: "# my own words\n".to_string(),
+                hand_edited: true,
+                params: crate::domain::story::StoryParams::default(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(bound.dir.join("story.md")).unwrap(),
+        "# my own words\n"
+    );
+    let meta = std::fs::read_to_string(bound.dir.join("meta.toml")).unwrap();
+    assert!(meta.contains("hand_edited = true"), "{meta}");
+    verify_book(&bound.dir).unwrap();
+}
+
+#[test]
 fn the_telling_reads_the_ceremony_snapshot() {
     // The one-fetch law: the composed telling reflects the world the
     // ceremony fetched at review time — a concurrent write after `begin`

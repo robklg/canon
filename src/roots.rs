@@ -382,16 +382,11 @@ pub fn retire(
         },
     );
 
-    // The story as it will bind — composed over the ceremony's own fetch.
-    let telling = match ceremony_state
-        .compose_telling(conn)
-        .and_then(|draft| ops::telling::finalize_telling(&draft))
-    {
-        Ok(text) => ops::telling::TellingArtifact {
-            text,
-            hand_edited: false,
-            params: StoryParams::default(),
-        },
+    // The story as it will bind — composed over the ceremony's own fetch,
+    // offered once to the user's editor (the manifest precedent: composed
+    // declaration, human refinement, then binding).
+    let telling = match prepare_telling(&ceremony_state, conn, yes) {
+        Ok(telling) => telling,
         Err(e) => {
             for warning in ceremony_state.interrupt(conn, &format!("{e:#}")) {
                 eprintln!("{warning}");
@@ -420,6 +415,7 @@ pub fn retire(
         "  {} entries bound; {ledger_line}",
         format_count(bound.entry_count)
     );
+    println!("  story.md — the story as told");
     if bound.replaced_previous {
         println!("  the previous book was replaced");
     }
@@ -465,6 +461,59 @@ pub fn retire(
     }
 
     Ok(())
+}
+
+/// Compose the telling and offer it once to the user's editor before it
+/// binds. Under `--yes` the composed story binds silently — no prompt, no
+/// editor, ever. An editor failure or an empty edit never aborts the
+/// ceremony: the choice re-opens until the user edits successfully or
+/// binds the composed draft (Ctrl-C remains the escape — an interrupted
+/// ceremony is findable).
+fn prepare_telling(
+    ceremony_state: &ops::retire::RetireCeremony,
+    conn: &rusqlite::Connection,
+    yes: bool,
+) -> Result<ops::telling::TellingArtifact> {
+    let draft = ceremony_state.compose_telling(conn)?;
+    let composed = ops::telling::finalize_telling(&draft)?;
+    let artifact = |text: String| {
+        let hand_edited = text != composed;
+        ops::telling::TellingArtifact {
+            text,
+            hand_edited,
+            params: StoryParams::default(),
+        }
+    };
+    if yes {
+        return Ok(artifact(composed.clone()));
+    }
+
+    println!();
+    println!("The book will carry the story as composed — title, foreword slot, and all.");
+    loop {
+        if !ceremony::ask("Edit the story before it is written into the book?")? {
+            return Ok(artifact(composed.clone()));
+        }
+        match ceremony::edit_in_editor(&draft, "story.md") {
+            Ok(None) => {
+                eprintln!("No $VISUAL or $EDITOR is set — the story binds as composed.");
+                return Ok(artifact(composed.clone()));
+            }
+            Ok(Some(edited)) => match ops::telling::finalize_telling(&edited) {
+                Ok(text) => return Ok(artifact(text)),
+                Err(e) => {
+                    eprintln!("{e:#}");
+                    eprintln!("Nothing was bound — edit again, or answer no to bind the story as composed.");
+                }
+            },
+            Err(e) => {
+                eprintln!("{e:#}");
+                eprintln!(
+                    "Nothing was bound — edit again, or answer no to bind the story as composed."
+                );
+            }
+        }
+    }
 }
 
 fn print_review(review: &ops::retire::ReadinessReview) {
