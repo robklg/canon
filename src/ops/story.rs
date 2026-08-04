@@ -64,11 +64,6 @@ pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> R
     object_ids.dedup();
     let archive_locations = repo::object::batch_find_archive_paths(conn, &object_ids)?;
 
-    let operated_scopes: Vec<(i64, String)> = story
-        .scope_rows
-        .iter()
-        .map(|row| (row.decision_id, row.rel_prefix.clone()))
-        .collect();
     let decisions: HashMap<i64, DecisionInfo> = story
         .decisions
         .iter()
@@ -91,7 +86,6 @@ pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> R
             absent: &story.absent,
             archived: &story.archived,
             extractions: &story.extractions,
-            operated_scopes: &operated_scopes,
             decisions: &decisions,
             notes: &notes,
             archive_locations: &archive_locations,
@@ -411,6 +405,10 @@ mod tests {
         assert!(
             report.places.covered_where.is_empty(),
             "but the empty object claims no locations"
+        );
+        assert_eq!(
+            report.places.standing.covered_empty, 1,
+            "and the standing carries why, so the line can say '(empty files)'"
         );
     }
 

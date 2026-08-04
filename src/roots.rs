@@ -759,8 +759,28 @@ fn render_place(
         for group in &place.acts {
             act_lines(group, &indent, lines);
         }
-        if place.undecided() && (!place.standing.is_empty() || !place.covered_where.is_empty()) {
+        // "no decision here" speaks for the question content only — covered,
+        // unresolved, missing: nothing evidences a decision either way.
+        // Excluded standing is different: exclusion is always a deliberate
+        // act, so at an undecided place it evidences an UNRECORDED decision
+        // — its line says so instead (never "no decision here").
+        let question =
+            place.standing.covered + place.standing.unresolved + place.standing.missing_unexplained;
+        if place.undecided() && question > 0 {
             lines.push(format!("{indent}  no decision here"));
+        }
+        if place.undecided()
+            && place.standing.is_empty()
+            && place.covered_where.is_empty()
+            && !place.notes.is_empty()
+            && place.children.is_empty()
+        {
+            // A note-forced leaf whose content is all gone: say so, rather
+            // than leaving the testimony hanging beside nothing. What left
+            // is narrated by the containing place's act slices. A noted
+            // place WITH children stays bare — its content stands one line
+            // down, claimed by the deeper places.
+            lines.push(format!("{indent}  nothing stands here now"));
         }
         standing_lines(place, &indent, lines);
         for note in &place.notes {
@@ -858,14 +878,24 @@ fn standing_lines(place: &StoryPlace, indent: &str, lines: &mut Vec<String>) {
                 " — copies stand in {}",
                 fmt_locations(&place.covered_where)
             ));
+        } else if standing.covered_empty == standing.covered {
+            // Contentless files claim no locations (every empty file shares
+            // one object) — say so rather than leaving the line silently
+            // bare.
+            line.push_str(" (empty files)");
         }
         lines.push(line);
     }
     if standing.excluded > 0 {
-        lines.push(format!(
-            "{indent}  {} excluded",
-            format_count(standing.excluded)
-        ));
+        let mut line = format!("{indent}  {} excluded", format_count(standing.excluded));
+        if place.undecided() {
+            // Exclusion is always a deliberate act; at a place with no act
+            // slices, the excluded standing evidences a decision whose
+            // record is absent (pre-provenance, or recording off) — state
+            // the gap, never "no decision here".
+            line.push_str(" (no recorded decision)");
+        }
+        lines.push(line);
     }
     if standing.unresolved > 0 {
         let mut line = format!("{indent}  {} unresolved", format_count(standing.unresolved));

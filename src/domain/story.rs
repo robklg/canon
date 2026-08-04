@@ -89,6 +89,28 @@ impl LocationAggregate {
 /// to where it first branches or holds files, ordered by weight then path,
 /// capped with a counted remainder.
 pub fn aggregate_locations(dirs: &[(&str, i64)], bases: &[&str], cap: usize) -> LocationAggregate {
+    aggregate_impl(dirs, bases, cap, false)
+}
+
+/// The observed-scatter variant ("copies stand in"): a legible one-line
+/// answer descends one level when its branch groups fit the cap — a huge
+/// hub node ("Archive/Media") can hide a short, far more informative list.
+/// One step, never recursion. Chosen destinations keep the one-line answer
+/// (the arrow states a choice; the scatter is what nobody chose).
+pub fn aggregate_locations_expanded(
+    dirs: &[(&str, i64)],
+    bases: &[&str],
+    cap: usize,
+) -> LocationAggregate {
+    aggregate_impl(dirs, bases, cap, true)
+}
+
+fn aggregate_impl(
+    dirs: &[(&str, i64)],
+    bases: &[&str],
+    cap: usize,
+    expand: bool,
+) -> LocationAggregate {
     if dirs.is_empty() {
         return LocationAggregate::default();
     }
@@ -121,10 +143,41 @@ pub fn aggregate_locations(dirs: &[(&str, i64)], bases: &[&str], cap: usize) -> 
 
     let top = collapse(0);
     let top_path = tree.path(top);
+    let branch_groups = |top: u32| -> Vec<LocationCount> {
+        let mut groups: Vec<LocationCount> = Vec::new();
+        if direct[top as usize] > 0 {
+            groups.push(LocationCount {
+                path: tree.path(top).to_string(),
+                files: direct[top as usize],
+            });
+        }
+        for &child in tree.children(top) {
+            let group = collapse(child);
+            groups.push(LocationCount {
+                path: tree.path(group).to_string(),
+                files: sub[child as usize],
+            });
+        }
+        groups.sort_by(|a, b| b.files.cmp(&a.files).then_with(|| a.path.cmp(&b.path)));
+        groups
+    };
+
     let legible = bases
         .iter()
         .any(|base| top_path != *base && path_is_under(top_path, base));
     if legible {
+        // The widest honest one-line where — unless the caller asked for
+        // the expanded form and the hub's branch groups fit the cap whole,
+        // in which case the short list is the more informative answer.
+        if expand {
+            let groups = branch_groups(top);
+            if groups.len() > 1 && groups.len() <= cap {
+                return LocationAggregate {
+                    locations: groups,
+                    omitted_locations: 0,
+                };
+            }
+        }
         return LocationAggregate {
             locations: vec![LocationCount {
                 path: top_path.to_string(),
@@ -135,21 +188,7 @@ pub fn aggregate_locations(dirs: &[(&str, i64)], bases: &[&str], cap: usize) -> 
     }
 
     // Vacuous common node: emit its branch groups instead.
-    let mut groups: Vec<LocationCount> = Vec::new();
-    if direct[top as usize] > 0 {
-        groups.push(LocationCount {
-            path: tree.path(top).to_string(),
-            files: direct[top as usize],
-        });
-    }
-    for &child in tree.children(top) {
-        let group = collapse(child);
-        groups.push(LocationCount {
-            path: tree.path(group).to_string(),
-            files: sub[child as usize],
-        });
-    }
-    groups.sort_by(|a, b| b.files.cmp(&a.files).then_with(|| a.path.cmp(&b.path)));
+    let mut groups = branch_groups(top);
     let omitted_locations = groups.len().saturating_sub(cap);
     groups.truncate(cap);
 
@@ -369,9 +408,6 @@ pub struct StoryInputs<'a> {
     pub archived: &'a HashSet<i64>,
     /// Extraction rows whose origin is this root — the archived acts.
     pub extractions: &'a [DecisionExtraction],
-    /// (decision id, rel prefix), one entry per decision-scope row on this
-    /// root: where each decision declared it operated.
-    pub operated_scopes: &'a [(i64, String)],
     pub decisions: &'a HashMap<i64, DecisionInfo>,
     pub notes: &'a [Note],
     /// Object id → full paths of the archive copies. Zero-byte objects are
@@ -386,6 +422,10 @@ pub struct StoryInputs<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PlaceStanding {
     pub covered: i64,
+    /// Subset of `covered`: zero-byte files — contentless, so they claim no
+    /// locations (the book's `locations_for` gate). Lets the rendering say
+    /// why a covered line names no where instead of staying silently bare.
+    pub covered_empty: i64,
     pub excluded: i64,
     pub unresolved: i64,
     /// Subset of `unresolved`: never hashed — cannot be content-verified.
@@ -434,10 +474,15 @@ impl StoryPlace {
 #[derive(Debug, Clone, Copy, Default)]
 struct Counts {
     covered: i64,
+    covered_empty: i64,
     excluded: i64,
     unresolved: i64,
     unhashed: i64,
     missing: i64,
+    /// Absent with an Observe-family stamp — a recorded loss. Part of the
+    /// story population so a deleted-away dir can diverge from its context
+    /// (it has no present rows to diverge with).
+    deleted: i64,
     files_present: i64,
     bytes_present: i64,
 }
@@ -445,26 +490,43 @@ struct Counts {
 impl Counts {
     fn add(&mut self, other: &Counts) {
         self.covered += other.covered;
+        self.covered_empty += other.covered_empty;
         self.excluded += other.excluded;
         self.unresolved += other.unresolved;
         self.unhashed += other.unhashed;
         self.missing += other.missing;
+        self.deleted += other.deleted;
         self.files_present += other.files_present;
         self.bytes_present += other.bytes_present;
     }
 
-    /// The judgment population: present rows plus unexplained-missing rows.
+    /// The whole story population: present rows, unexplained-missing rows,
+    /// and recorded deletions.
     fn population(&self) -> i64 {
-        self.files_present + self.missing
+        self.files_present + self.missing + self.deleted
     }
 
-    fn proportions(&self) -> [f64; 4] {
-        let pop = self.population() as f64;
+    /// The question population — the second-guessable and the narratable:
+    /// covered (evidence without an act), unresolved, unexplained-missing,
+    /// and observed deletions. Excluded content is deliberately absent:
+    /// exclusion is resolution, the fold target ("fold the
+    /// deliberate-uniform, split on the second-guessable") — a uniformly
+    /// excluded child has nothing to ask and never splits on standing.
+    fn question(&self) -> i64 {
+        self.covered + self.unresolved + self.missing + self.deleted
+    }
+
+    /// Proportions within the question population, plus question density
+    /// over the whole population — a child far more question-dense than its
+    /// context diverges even when the question mix matches.
+    fn question_proportions(&self) -> [f64; 5] {
+        let q = self.question() as f64;
         [
-            self.covered as f64 / pop,
-            self.excluded as f64 / pop,
-            self.unresolved as f64 / pop,
-            self.missing as f64 / pop,
+            self.covered as f64 / q,
+            self.unresolved as f64 / q,
+            self.missing as f64 / q,
+            self.deleted as f64 / q,
+            q / self.population() as f64,
         ]
     }
 }
@@ -476,42 +538,101 @@ fn dir_of(rel: &str) -> &str {
     }
 }
 
+/// Merge one place's attributed atoms so each decision contributes one
+/// slice: several of a decision's dirs can resolve to the same emitted
+/// boundary, and `group_acts` expects one entry per decision per group. The
+/// merged atom's `files` is the decision's slice weight at this place.
+fn merge_slices(atoms: Vec<ActAtom<'_>>) -> Vec<ActAtom<'_>> {
+    use std::collections::hash_map::Entry;
+    let mut order: Vec<(i64, &'static str, bool)> = Vec::new();
+    let mut merged: HashMap<(i64, &'static str, bool), ActAtom<'_>> = HashMap::new();
+    for atom in atoms {
+        let key = (atom.decision_id, atom.transition, atom.observed);
+        match merged.entry(key) {
+            Entry::Occupied(mut entry) => {
+                let acc = entry.get_mut();
+                acc.files += atom.files;
+                acc.bytes = match (acc.bytes, atom.bytes) {
+                    (Some(a), Some(b)) => Some(a + b),
+                    _ => None,
+                };
+                acc.moved = match (acc.moved, atom.moved) {
+                    (Some(a), Some(b)) => Some(a + b),
+                    _ => None,
+                };
+                acc.copied = match (acc.copied, atom.copied) {
+                    (Some(a), Some(b)) => Some(a + b),
+                    _ => None,
+                };
+                acc.destination_dirs.extend(atom.destination_dirs);
+            }
+            Entry::Vacant(entry) => {
+                order.push(key);
+                entry.insert(atom);
+            }
+        }
+    }
+    order
+        .into_iter()
+        .map(|key| merged.remove(&key).expect("merged key"))
+        .collect()
+}
+
 /// Build the place map: the containment tree of emitted places, everything
 /// attributed by deepest match.
 ///
+/// Acts land where they touched — per-(decision, directory) slices from
+/// extraction origins and stamped dirs, never scope claims — so a decision
+/// spanning places renders as slices (partial counts, same id) and
+/// `no decision here` is true wherever it renders (the place-grain ruling of
+/// the 2026-08-03 tuning spec, superseding the earlier decision-grain
+/// anchoring).
+///
 /// The walk is the sweep's emission discipline transplanted — emit at the
 /// widest boundary where the line stays honest, descend only while the story
-/// changes: operated nodes (act anchors) and noted nodes always emit; an
-/// undecided node emits when its judgment signature (standing proportions +
-/// which of the context's covered-where groups it touches) diverges from its
-/// nearest emitted ancestor's; dust-sized subtrees lift into their parent.
-/// Pockets surface: a merged node's descendants are still walked against the
-/// same context, so a divergent grandchild splits out even when its parent
+/// changes: noted nodes and care anchors (a reasoned decision's dir-LCA)
+/// always emit; a node emits when its judgment signature (standing
+/// proportions over the whole story population, act-signature proportions,
+/// or which of the context's covered-where groups it touches) diverges from
+/// its nearest emitted ancestor's; dust-sized subtrees — present weight and
+/// act weight both under the floors — lift into their parent. Pockets
+/// surface: a merged node's descendants are still walked against the same
+/// context, so a divergent grandchild splits out even when its parent
 /// blended in.
 pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlace {
     let bases: Vec<&str> = inputs.bases.iter().map(String::as_str).collect();
 
     // ---- tree: intern every location anything refers to ----
+    // A source normally lives at its directory's node — but a source whose
+    // path is itself a noted place gets its own node, so a note on a file
+    // gathers that file's standing and act slices beside the testimony
+    // (a noted file whose fate renders elsewhere reads as a mute place —
+    // the noted-script finding, first review).
+    let noted_paths: HashSet<&str> = inputs.notes.iter().map(|n| n.rel_path.as_str()).collect();
     let mut tree = FolderTree::new();
     tree.intern("");
+    let node_of = |tree: &mut FolderTree, rel_path: &str| -> u32 {
+        if noted_paths.contains(rel_path) {
+            tree.intern(rel_path)
+        } else {
+            tree.intern(dir_of(rel_path))
+        }
+    };
     let present_fids: Vec<u32> = inputs
         .present
         .iter()
-        .map(|s| tree.intern(dir_of(&s.rel_path)))
+        .map(|s| node_of(&mut tree, &s.rel_path))
         .collect();
     let absent_fids: Vec<u32> = inputs
         .absent
         .iter()
-        .map(|s| tree.intern(dir_of(&s.rel_path)))
+        .map(|s| node_of(&mut tree, &s.rel_path))
         .collect();
     let note_fids: Vec<u32> = inputs
         .notes
         .iter()
         .map(|n| tree.intern(&n.rel_path))
         .collect();
-    for (_, prefix) in inputs.operated_scopes {
-        tree.intern(prefix);
-    }
     for row in inputs.extractions {
         tree.intern(&row.rel_prefix);
     }
@@ -523,15 +644,13 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
             .unwrap_or(0)
     };
 
-    let mut scope_fids: HashMap<i64, Vec<u32>> = HashMap::new();
-    for (id, prefix) in inputs.operated_scopes {
-        let fid = tree.id(prefix).expect("interned above");
-        scope_fids.entry(*id).or_default().push(fid);
-    }
-
-    // ---- act atoms, each anchored at the node where the user acted ----
-    // Archived acts come from extraction rows (never receipts, never Archive
-    // stamps — apply stamps the destination rows, not this root's).
+    // ---- act atoms, one per (decision, directory) — the slice grain ----
+    // Acts land where they touched: archived acts at the extraction rows'
+    // origin dirs, stamp acts at the stamped sources' dirs — never scope
+    // claims. A decision spanning places renders as slices; `no decision
+    // here` is true wherever it renders. (Archived acts come from extraction
+    // rows, never receipts, never Archive stamps — apply stamps the
+    // destination rows, not this root's.)
     struct ArchAccum<'a> {
         files: i64,
         bytes: i64,
@@ -540,20 +659,26 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         copied: i64,
         disposition_known: bool,
         destination_dirs: Vec<(&'a str, i64)>,
-        origin_fids: Vec<u32>,
     }
-    let mut arch: BTreeMap<i64, ArchAccum> = BTreeMap::new();
+    let mut arch: BTreeMap<(i64, u32), ArchAccum> = BTreeMap::new();
+    // Decision-level destination pool: the act signature's destination
+    // answer is computed once per decision over all its rows, so
+    // same-decision slices share one signature and a mirrored-destination
+    // apply cannot fragment into per-dir signatures.
+    let mut dest_pool: HashMap<i64, HashMap<&str, i64>> = HashMap::new();
     for row in inputs.extractions {
-        let acc = arch.entry(row.decision_id).or_insert_with(|| ArchAccum {
-            files: 0,
-            bytes: 0,
-            bytes_known: true,
-            moved: 0,
-            copied: 0,
-            disposition_known: true,
-            destination_dirs: Vec::new(),
-            origin_fids: Vec::new(),
-        });
+        let fid = tree.id(&row.rel_prefix).expect("interned above");
+        let acc = arch
+            .entry((row.decision_id, fid))
+            .or_insert_with(|| ArchAccum {
+                files: 0,
+                bytes: 0,
+                bytes_known: true,
+                moved: 0,
+                copied: 0,
+                disposition_known: true,
+                destination_dirs: Vec::new(),
+            });
         acc.files += row.files;
         match row.bytes {
             Some(b) => acc.bytes += b,
@@ -566,22 +691,21 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         }
         acc.destination_dirs
             .push((row.destination_path.as_str(), row.files));
-        acc.origin_fids
-            .push(tree.id(&row.rel_prefix).expect("interned above"));
+        *dest_pool
+            .entry(row.decision_id)
+            .or_default()
+            .entry(row.destination_path.as_str())
+            .or_insert(0) += row.files;
     }
 
     let archived_word = fate_transition(DecisionFamily::Archive, FateAspect::Present)
         .expect("archive/present is a registered transition")
         .as_str();
     let mut atoms: Vec<(u32, ActAtom)> = Vec::new();
-    for (id, acc) in &arch {
+    for ((id, fid), acc) in &arch {
         let info = inputs.decisions.get(id);
-        let anchor = match scope_fids.get(id) {
-            Some(fids) => lca_all(&tree, fids),
-            None => lca_all(&tree, &acc.origin_fids),
-        };
         atoms.push((
-            anchor,
+            *fid,
             ActAtom {
                 decision_id: *id,
                 created_at: info.map(|i| i.created_at).unwrap_or(0),
@@ -597,35 +721,34 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         ));
     }
 
-    // Stamp acts: exclusions, restores, scan-observed deletions.
+    // Stamp acts per (decision, dir): exclusions, restores, scan-observed
+    // deletions. Absent stamped rows (an object exclusion's tombstones)
+    // carry slices too — the act register is whole-history, so a dir whose
+    // stamped files are all gone still narrates the act while the standing
+    // registers stay present-tense. Do not "fix" tombstone slices away.
     #[derive(Default)]
     struct StampAccum {
         present: i64,
         present_bytes: i64,
         absent: i64,
         absent_bytes: i64,
-        stamped_fids: Vec<u32>,
-        absent_fids: Vec<u32>,
     }
-    let mut stamps: BTreeMap<i64, StampAccum> = BTreeMap::new();
+    let mut stamps: BTreeMap<(i64, u32), StampAccum> = BTreeMap::new();
     for (source, fid) in inputs.present.iter().zip(&present_fids) {
         if let Some(id) = source.decision_id {
-            let acc = stamps.entry(id).or_default();
+            let acc = stamps.entry((id, *fid)).or_default();
             acc.present += 1;
             acc.present_bytes += source.size;
-            acc.stamped_fids.push(*fid);
         }
     }
     for (source, fid) in inputs.absent.iter().zip(&absent_fids) {
         if let Some(id) = source.decision_id {
-            let acc = stamps.entry(id).or_default();
+            let acc = stamps.entry((id, *fid)).or_default();
             acc.absent += 1;
             acc.absent_bytes += source.size;
-            acc.stamped_fids.push(*fid);
-            acc.absent_fids.push(*fid);
         }
     }
-    for (id, acc) in &stamps {
+    for ((id, fid), acc) in &stamps {
         let Some(info) = inputs.decisions.get(id) else {
             continue; // unknown stamp: no act to narrate (classify_absent
                       // already reads it as unexplained)
@@ -633,9 +756,8 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         match info.family {
             DecisionFamily::Archive => continue,
             DecisionFamily::Observe => {
-                // A deletion is placed where it happened (the absent rows),
-                // not at the scan's scope — the scan observed, the user
-                // didn't act there.
+                // A deletion is narrated where it happened — the absent
+                // rows' own dirs; the scan merely observed.
                 if acc.absent > 0 {
                     let transition = fate_transition(DecisionFamily::Observe, FateAspect::Absent)
                         .expect("observe/absent is a registered transition")
@@ -643,7 +765,7 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
                     let observed = fate_posture(DecisionFamily::Observe, FateAspect::Absent)
                         == Posture::Observed;
                     atoms.push((
-                        lca_all(&tree, &acc.absent_fids),
+                        *fid,
                         ActAtom {
                             decision_id: *id,
                             created_at: info.created_at,
@@ -667,12 +789,8 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
                 if files == 0 {
                     continue;
                 }
-                let anchor = match scope_fids.get(id) {
-                    Some(fids) => lca_all(&tree, fids),
-                    None => lca_all(&tree, &acc.stamped_fids),
-                };
                 atoms.push((
-                    anchor,
+                    *fid,
                     ActAtom {
                         decision_id: *id,
                         created_at: info.created_at,
@@ -690,6 +808,68 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         }
     }
 
+    // ---- the care anchor: a reasoned decision forces exactly one node —
+    // the LCA of the dirs it touched. Care was expressed at the decision's
+    // grain, never per-dir (per-dir forcing would explode a reasoned
+    // root-level apply into dozens of forced places); reasonless decisions
+    // force nothing — their slices fold wherever the story allows.
+    let mut decision_dirs: HashMap<i64, Vec<u32>> = HashMap::new();
+    for (fid, atom) in &atoms {
+        decision_dirs
+            .entry(atom.decision_id)
+            .or_default()
+            .push(*fid);
+    }
+    let mut care_anchors: Vec<u32> = Vec::new();
+    for (id, fids) in &decision_dirs {
+        let reasoned = inputs
+            .decisions
+            .get(id)
+            .and_then(|i| i.reason.as_deref())
+            .map(|r| !r.trim().is_empty())
+            .unwrap_or(false);
+        if reasoned {
+            care_anchors.push(lca_all(&tree, fids));
+        }
+    }
+
+    // ---- act signatures: (transition, posture, decision-level destination
+    // answer), interned. Signatures key on what/where, never decision
+    // identity: exclusions across many decisions share one signature and
+    // fold together, ids and reasons enumerated in the shared register. The
+    // why is deliberately NOT a divergence axis — a reasoned act surfaces
+    // through its care anchor; putting reasons in the proportional
+    // comparison fragments any region where differently-reasoned
+    // same-transition acts interleave (the data/usr sgml wall, first
+    // review).
+    let mut dest_keys: HashMap<i64, String> = HashMap::new();
+    for (id, pool) in &dest_pool {
+        let mut dirs: Vec<(&str, i64)> = pool.iter().map(|(d, f)| (*d, *f)).collect();
+        dirs.sort();
+        let agg = aggregate_locations(&dirs, &bases, usize::MAX);
+        let key = agg
+            .locations
+            .iter()
+            .map(|l| l.path.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        dest_keys.insert(*id, key);
+    }
+    let mut sig_ids: HashMap<(&'static str, bool, String), usize> = HashMap::new();
+    let mut atom_sigs: Vec<usize> = Vec::with_capacity(atoms.len());
+    for (_, atom) in &atoms {
+        let key = (
+            atom.transition,
+            atom.observed,
+            dest_keys
+                .get(&atom.decision_id)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        let next = sig_ids.len();
+        atom_sigs.push(*sig_ids.entry(key).or_insert(next));
+    }
+
     // ---- per-node payloads: direct, then subtree by reverse pass ----
     let n = tree.len();
     let mut direct = vec![Counts::default(); n];
@@ -701,6 +881,9 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         match classify_present(source, inputs.archived) {
             StandingBucket::Covered => {
                 counts.covered += 1;
+                if source.size == 0 {
+                    counts.covered_empty += 1;
+                }
                 if let Some(paths) = source
                     .object_id
                     .and_then(|obj| inputs.archive_locations.get(&obj))
@@ -728,9 +911,22 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
             .decision_id
             .and_then(|id| inputs.decisions.get(&id))
             .map(|i| i.family);
-        if classify_absent(family) == AbsentBucket::Unexplained {
-            direct[fid as usize].missing += 1;
+        match classify_absent(family) {
+            AbsentBucket::Unexplained => direct[fid as usize].missing += 1,
+            AbsentBucket::Deleted => direct[fid as usize].deleted += 1,
         }
+    }
+
+    // Act weight per node: signature files for the divergence test, plain
+    // files/bytes for the dust test (a fully-moved-away place has zero
+    // present files but a real story).
+    let mut direct_acts: Vec<HashMap<usize, i64>> = vec![HashMap::new(); n];
+    let mut direct_act_files = vec![0i64; n];
+    let mut direct_act_bytes = vec![0i64; n];
+    for ((fid, atom), sig) in atoms.iter().zip(&atom_sigs) {
+        *direct_acts[*fid as usize].entry(*sig).or_insert(0) += atom.files;
+        direct_act_files[*fid as usize] += atom.files;
+        direct_act_bytes[*fid as usize] += atom.bytes.unwrap_or(0);
     }
 
     let mut sub = direct.clone();
@@ -745,11 +941,59 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         }
     }
 
-    // ---- the walk ----
+    // Forced places: the root, noted nodes, and care anchors — never bare
+    // operated scopes. Boundaries fall where the what/why changes, not
+    // wherever a command happened to be typed; recorded care (a note, a
+    // reasoned act) earns a line, floors notwithstanding.
     let mut forced: HashSet<u32> = HashSet::new();
     forced.insert(0);
     forced.extend(note_fids.iter().copied());
-    forced.extend(atoms.iter().map(|(anchor, _)| *anchor));
+    forced.extend(care_anchors.iter().copied());
+
+    // Residual act weight per node: the subtree's acts MINUS forced
+    // descendants' (the cut happens at each forced node, so a forced
+    // node's own residual stays its own). A folding child merges into its
+    // context's register, and by deepest-match that register holds only
+    // what isn't claimed deeper — so the divergence test must compare
+    // against what the child would actually fold into, or forced-out
+    // siblings dilute the context and same-story children split (the
+    // old-home-dotfolder over-emission caught on first smoke test).
+    // `res_narratable` counts non-exclusion act files — the act-side
+    // question gate (excluded is never a question, in standing or in
+    // acts: a child whose acts are exclusion-only has nothing narratable
+    // to split on).
+    let excluded_word = fate_transition(DecisionFamily::Exclude, FateAspect::Present)
+        .expect("exclude/present is a registered transition")
+        .as_str();
+    let narratable_sigs: HashSet<usize> = sig_ids
+        .iter()
+        .filter(|((transition, _, _), _)| *transition != excluded_word)
+        .map(|(_, sig)| *sig)
+        .collect();
+    let mut res_narratable = vec![0i64; n];
+    for ((fid, atom), sig) in atoms.iter().zip(&atom_sigs) {
+        if narratable_sigs.contains(sig) {
+            res_narratable[*fid as usize] += atom.files;
+        }
+    }
+    let mut res_acts = direct_acts;
+    let mut res_act_files = direct_act_files;
+    let mut res_act_bytes = direct_act_bytes;
+    for fid in (1..n as u32).rev() {
+        if forced.contains(&fid) {
+            continue;
+        }
+        let parent = tree.parent(fid).expect("non-root has a parent") as usize;
+        let child_acts = res_acts[fid as usize].clone();
+        for (sig, files) in child_acts {
+            *res_acts[parent].entry(sig).or_insert(0) += files;
+        }
+        res_act_files[parent] += res_act_files[fid as usize];
+        res_act_bytes[parent] += res_act_bytes[fid as usize];
+        res_narratable[parent] += res_narratable[fid as usize];
+    }
+
+    // ---- the walk ----
 
     // The context's covered-where groups, computed once per emitted place:
     // which archive prefixes the context's line answers with, and which of
@@ -778,18 +1022,49 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
     while let Some((fid, ctx)) = stack.pop() {
         let force = forced.contains(&fid);
         let counts = &sub[fid as usize];
+        // Dusty only when present weight AND act weight both sit under the
+        // floors.
         let dusty = counts.files_present < params.dust_floor_files
-            && counts.bytes_present < params.dust_floor_bytes;
+            && counts.bytes_present < params.dust_floor_bytes
+            && res_act_files[fid as usize] < params.dust_floor_files
+            && res_act_bytes[fid as usize] < params.dust_floor_bytes;
         let mut split = force;
         if !split && !dusty {
             let ctx_counts = &sub[ctx as usize];
-            if counts.population() > 0 && ctx_counts.population() > 0 {
-                let a = counts.proportions();
-                let b = ctx_counts.proportions();
+            // Standing divergence over the question axes only: a child with
+            // no question population has nothing second-guessable and never
+            // splits on standing (its resolved content folds into the
+            // context's register). The context's question population is at
+            // least the child's (subtree sums), so both sides are positive.
+            if counts.question() > 0 && ctx_counts.question() > 0 {
+                let a = counts.question_proportions();
+                let b = ctx_counts.question_proportions();
                 split = a
                     .iter()
                     .zip(b.iter())
                     .any(|(x, y)| (x - y).abs() > params.signature_tolerance);
+            }
+            // Act-signature proportions over the residuals, same tolerance:
+            // a node whose act mix diverges from what it would fold into
+            // earns a line. Gated on narratable act weight — a child whose
+            // acts are exclusion-only has nothing to split on (resolution,
+            // the fold target). A residual child's signatures are a subset
+            // of its context's residual (both cut at the same forced
+            // nodes), so iterating the context covers the union.
+            if !split && res_narratable[fid as usize] > 0 {
+                let child_total = res_act_files[fid as usize];
+                let ctx_total = res_act_files[ctx as usize];
+                if child_total > 0 && ctx_total > 0 {
+                    let child_map = &res_acts[fid as usize];
+                    for (sig, ctx_files) in &res_acts[ctx as usize] {
+                        let c = *child_map.get(sig).unwrap_or(&0) as f64 / child_total as f64;
+                        let x = *ctx_files as f64 / ctx_total as f64;
+                        if (c - x).abs() > params.signature_tolerance {
+                            split = true;
+                            break;
+                        }
+                    }
+                }
             }
             if !split && !sub_locs[fid as usize].is_empty() {
                 let sig = ctx_sigs.entry(ctx).or_insert_with(|| {
@@ -867,6 +1142,7 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         let place = resolve(fid);
         let accum = accums.get_mut(&place).expect("emitted place");
         accum.standing.covered += counts.covered;
+        accum.standing.covered_empty += counts.covered_empty;
         accum.standing.excluded += counts.excluded;
         accum.standing.unresolved += counts.unresolved;
         accum.standing.unhashed_unresolved += counts.unhashed;
@@ -912,9 +1188,9 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         children.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
         let place = StoryPlace {
             rel_path: tree.path(fid).to_string(),
-            acts: group_acts(&accum.atoms, &bases, params.where_cap),
+            acts: group_acts(&merge_slices(accum.atoms), &bases, params.where_cap),
             standing: accum.standing,
-            covered_where: aggregate_locations(&loc_dirs, &bases, params.where_cap),
+            covered_where: aggregate_locations_expanded(&loc_dirs, &bases, params.where_cap),
             notes,
             folder_breadth: accum.content_dirs.len() as u32,
             children,
@@ -1042,6 +1318,53 @@ mod tests {
         );
         let paths: Vec<&str> = out.locations.iter().map(|l| l.path.as_str()).collect();
         assert_eq!(paths, vec!["/old-archive/media", "/old-archive/docs"]);
+    }
+
+    #[test]
+    fn expanded_form_descends_into_a_hub_when_the_list_is_short() {
+        // "copies stand in Archive/Media" hides a two-entry answer; the
+        // expanded form lists the branches when they fit the cap whole.
+        let dirs = [
+            ("/archive/media/2010/june", 280),
+            ("/archive/media/2011/spain", 300),
+            ("/archive/media/2011/home", 60),
+        ];
+        let plain = aggregate_locations(&dirs, &["/archive"], 3);
+        assert_eq!(plain.locations[0].path, "/archive/media");
+        assert_eq!(plain.locations.len(), 1);
+
+        let expanded = aggregate_locations_expanded(&dirs, &["/archive"], 3);
+        assert_eq!(
+            expanded.locations,
+            vec![
+                LocationCount {
+                    path: "/archive/media/2011".into(),
+                    files: 360
+                },
+                LocationCount {
+                    path: "/archive/media/2010/june".into(),
+                    files: 280
+                },
+            ]
+        );
+        assert_eq!(expanded.omitted_locations, 0);
+    }
+
+    #[test]
+    fn expanded_form_keeps_the_hub_when_branches_exceed_the_cap() {
+        let dirs: Vec<(String, i64)> = (0..5)
+            .map(|i| (format!("/archive/media/{}", 2010 + i), 10))
+            .collect();
+        let refs: Vec<(&str, i64)> = dirs.iter().map(|(d, f)| (d.as_str(), *f)).collect();
+        let expanded = aggregate_locations_expanded(&refs, &["/archive"], 3);
+        assert_eq!(
+            expanded.locations,
+            vec![LocationCount {
+                path: "/archive/media".into(),
+                files: 50
+            }],
+            "five branches never truncate to three — the hub stays the one honest line"
+        );
     }
 
     #[test]
@@ -1281,7 +1604,6 @@ mod tests {
         absent: Vec<Source>,
         archived: HashSet<i64>,
         extractions: Vec<DecisionExtraction>,
-        operated_scopes: Vec<(i64, String)>,
         decisions: HashMap<i64, DecisionInfo>,
         notes: Vec<Note>,
         archive_locations: HashMap<i64, Vec<String>>,
@@ -1295,7 +1617,6 @@ mod tests {
                 absent: vec![],
                 archived: HashSet::new(),
                 extractions: vec![],
-                operated_scopes: vec![],
                 decisions: HashMap::new(),
                 notes: vec![],
                 archive_locations: HashMap::new(),
@@ -1320,7 +1641,6 @@ mod tests {
                     absent: &self.absent,
                     archived: &self.archived,
                     extractions: &self.extractions,
-                    operated_scopes: &self.operated_scopes,
                     decisions: &self.decisions,
                     notes: &self.notes,
                     archive_locations: &self.archive_locations,
@@ -1461,16 +1781,16 @@ mod tests {
     }
 
     #[test]
-    fn an_operated_scope_is_an_unconditional_place() {
+    fn a_reasoned_exclusion_forces_its_place() {
         let mut fx = Fixture::new();
         fx.present.push(excluded_src(1, "old/setup1.exe", None, 57));
         fx.present.push(excluded_src(2, "old/setup2.exe", None, 57));
-        fx.operated_scopes.push((57, "old".to_string()));
         fx.decisions.insert(
             57,
             dinfo(DecisionFamily::Exclude, 100, Some("installer junk")),
         );
         let root = fx.build(&no_dust());
+        // The care anchor: the reasoned decision's dirs LCA is `old`.
         assert_eq!(child_paths(&root), vec!["old"]);
         let old = &root.children[0];
         assert!(!old.undecided());
@@ -1483,7 +1803,23 @@ mod tests {
     }
 
     #[test]
-    fn nested_operated_scopes_render_as_containment() {
+    fn a_reasonless_uniform_exclusion_folds_to_the_root() {
+        let mut fx = Fixture::new();
+        fx.present.push(excluded_src(1, "old/setup1.exe", None, 57));
+        fx.present.push(excluded_src(2, "old/setup2.exe", None, 57));
+        fx.decisions
+            .insert(57, dinfo(DecisionFamily::Exclude, 100, None));
+        let root = fx.build(&no_dust());
+        // No care, no divergence: the slice folds to the root line.
+        assert!(root.children.is_empty());
+        assert_eq!(root.acts.len(), 1);
+        assert_eq!(root.acts[0].transition, "excluded");
+        assert_eq!(root.acts[0].files, 2);
+        assert_eq!(root.standing.excluded, 2);
+    }
+
+    #[test]
+    fn nested_reasoned_acts_render_as_containment() {
         let mut fx = Fixture::new();
         fx.extractions.push(extraction(
             42,
@@ -1493,20 +1829,26 @@ mod tests {
         ));
         fx.extractions
             .push(extraction(51, "pictures", 4102, "/archive/media/rest"));
-        fx.operated_scopes.push((42, "pictures/italy".to_string()));
-        fx.operated_scopes.push((51, "pictures".to_string()));
         fx.decisions.insert(
             42,
             dinfo(DecisionFamily::Archive, 100, Some("the Italy trip")),
         );
-        fx.decisions
-            .insert(51, dinfo(DecisionFamily::Archive, 200, None));
+        fx.decisions.insert(
+            51,
+            dinfo(
+                DecisionFamily::Archive,
+                200,
+                Some("rest of the pictures, mechanical"),
+            ),
+        );
         fx.covered(
             9,
             "pictures/italy/leftover.jpg",
             &["/archive/media/2016-italy/leftover.jpg"],
         );
         let root = fx.build(&no_dust());
+        // The onion: both reasoned acts force their care anchors, which are
+        // their origin dirs — the layered passes read as layers.
         assert_eq!(child_paths(&root), vec!["pictures"]);
         let pictures = &root.children[0];
         assert_eq!(pictures.acts.len(), 1);
@@ -1528,29 +1870,25 @@ mod tests {
     }
 
     #[test]
-    fn a_multi_scope_decision_anchors_at_the_lca() {
+    fn a_reasoned_decision_forces_the_lca_of_its_dirs() {
         let mut fx = Fixture::new();
         fx.present.push(excluded_src(1, "a/b/x.tmp", None, 60));
         fx.present.push(excluded_src(2, "a/c/y.tmp", None, 60));
-        fx.operated_scopes.push((60, "a/b".to_string()));
-        fx.operated_scopes.push((60, "a/c".to_string()));
         fx.decisions
-            .insert(60, dinfo(DecisionFamily::Exclude, 100, None));
+            .insert(60, dinfo(DecisionFamily::Exclude, 100, Some("temp litter")));
         let root = fx.build(&no_dust());
+        // Care was expressed at the decision's grain: one forced place at
+        // the dirs' LCA, the per-dir slices merged into one line there.
         assert_eq!(child_paths(&root), vec!["a"]);
-        assert_eq!(root.children[0].acts[0].files, 2);
-    }
-
-    #[test]
-    fn a_global_decision_anchors_at_the_stamped_lca() {
-        let mut fx = Fixture::new();
-        fx.present.push(excluded_src(1, "d/x.tmp", None, 61));
-        fx.present.push(excluded_src(2, "d/y.tmp", None, 61));
-        fx.decisions
-            .insert(61, dinfo(DecisionFamily::Exclude, 100, None));
-        let root = fx.build(&no_dust());
-        assert_eq!(child_paths(&root), vec!["d"]);
-        assert_eq!(root.children[0].acts[0].transition, "excluded");
+        let a = &root.children[0];
+        assert!(a.children.is_empty());
+        assert_eq!(a.acts.len(), 1);
+        assert_eq!(a.acts[0].files, 2);
+        assert_eq!(
+            a.acts[0].decisions.len(),
+            1,
+            "slices merged, not duplicated"
+        );
     }
 
     #[test]
@@ -1558,18 +1896,533 @@ mod tests {
         let mut fx = Fixture::new();
         fx.absent.push(stamped(1, "gone/a.jpg", None, 70));
         fx.absent.push(stamped(2, "gone/b.jpg", None, 70));
-        // The scan operated at the root; the loss happened at `gone`.
-        fx.operated_scopes.push((70, String::new()));
         fx.decisions
             .insert(70, dinfo(DecisionFamily::Observe, 100, None));
+        // Divergent surroundings: the loss reads as `gone`'s story, not the
+        // root's (deleted rows join the story population).
+        fx.covered(10, "kept/a.jpg", &["/archive/media/a.jpg"]);
+        fx.covered(11, "kept/b.jpg", &["/archive/media/b.jpg"]);
         let root = fx.build(&no_dust());
-        assert_eq!(child_paths(&root), vec!["gone"]);
+        assert_eq!(child_paths(&root), vec!["gone", "kept"]);
         let gone = &root.children[0];
         assert_eq!(gone.acts.len(), 1);
         assert_eq!(gone.acts[0].transition, "deleted");
         assert!(gone.acts[0].observed);
         assert_eq!(gone.acts[0].files, 2);
         assert_eq!(gone.standing.missing_unexplained, 0);
+    }
+
+    #[test]
+    fn slice_sum_law_reconciles_through_any_fold() {
+        // One apply drew from three dirs; the emission shape must never
+        // change the totals. Distinct reasons keep groups one-decision so
+        // per-decision files are readable from the built tree.
+        let mut fx = Fixture::new();
+        fx.extractions
+            .push(extraction(42, "a", 5, "/archive/media/set"));
+        fx.extractions
+            .push(extraction(42, "a/b", 3, "/archive/media/set"));
+        fx.extractions
+            .push(extraction(42, "c", 2, "/archive/media/set"));
+        fx.decisions.insert(
+            42,
+            dinfo(DecisionFamily::Archive, 100, Some("the whole set")),
+        );
+        // Divergent standings force `a` out while `c` folds to the root.
+        for i in 0..20 {
+            fx.covered(100 + i, &format!("a/k{i}.jpg"), &["/archive/media/k.jpg"]);
+        }
+        for i in 0..20 {
+            fx.present
+                .push(src(200 + i, &format!("z/u{i}.raw"), Some(900 + i)));
+        }
+        let root = fx.build(&no_dust());
+
+        fn slice_files(place: &StoryPlace, id: i64, sum: &mut i64) {
+            for group in &place.acts {
+                if group.decisions.iter().any(|d| d.id == id) {
+                    *sum += group.files;
+                }
+            }
+            for child in &place.children {
+                slice_files(child, id, sum);
+            }
+        }
+        let mut total = 0;
+        slice_files(&root, 42, &mut total);
+        assert_eq!(total, 10, "slices reconcile exactly to the row totals");
+
+        // And the shape: `a` split out (care anchor at `a` — the LCA of the
+        // decision's dirs — plus covered divergence), holding its merged
+        // slice; the `c` slice folded to the root line.
+        let a = root
+            .children
+            .iter()
+            .find(|p| p.rel_path == "a")
+            .expect("a splits");
+        let a_slice: i64 = a.acts.iter().map(|g| g.files).sum();
+        assert_eq!(a_slice, 8, "a's dirs merged into one slice");
+        let root_slice: i64 = root.acts.iter().map(|g| g.files).sum();
+        assert_eq!(root_slice, 2, "c's slice folded to the root");
+    }
+
+    #[test]
+    fn no_decision_here_never_lies() {
+        // The `.cache` contradiction: a child uniformly excluded by a
+        // decision stamped in its own dirs must either fold into a register
+        // that shows the act, or show its slice — never render undecided
+        // beside excluded standing.
+        let mut fx = Fixture::new();
+        for i in 0..20 {
+            fx.present
+                .push(excluded_src(i, &format!("home/.cache/c{i}.tmp"), None, 114));
+        }
+        fx.decisions
+            .insert(114, dinfo(DecisionFamily::Exclude, 100, None));
+        for i in 0..20 {
+            fx.covered(
+                100 + i,
+                &format!("home/pics/p{i}.jpg"),
+                &["/archive/m/p.jpg"],
+            );
+        }
+        let root = fx.build(&no_dust());
+
+        fn assert_honest(place: &StoryPlace) {
+            if place.undecided() {
+                assert_eq!(
+                    place.standing.excluded, 0,
+                    "{}: no decision here beside excluded standing",
+                    place.rel_path
+                );
+            }
+            for child in &place.children {
+                assert_honest(child);
+            }
+        }
+        assert_honest(&root);
+    }
+
+    #[test]
+    fn reasonless_mechanical_exclusions_fold_ids_enumerated() {
+        // The dotfolder wall: three sibling folders excluded by three
+        // different reasonless decisions tell the same story — one register,
+        // every id enumerated.
+        let mut fx = Fixture::new();
+        for i in 0..4 {
+            fx.present
+                .push(excluded_src(i, &format!("home/.cache/c{i}.tmp"), None, 114));
+        }
+        for i in 0..3 {
+            fx.present.push(excluded_src(
+                10 + i,
+                &format!("home/.opera/o{i}.dat"),
+                None,
+                115,
+            ));
+        }
+        for i in 0..2 {
+            fx.present.push(excluded_src(
+                20 + i,
+                &format!("home/.purple/p{i}.xml"),
+                None,
+                116,
+            ));
+        }
+        for id in [114, 115, 116] {
+            fx.decisions
+                .insert(id, dinfo(DecisionFamily::Exclude, id * 10, None));
+        }
+        // Divergent context so `home` earns its own line.
+        for i in 0..10 {
+            fx.covered(100 + i, &format!("pics/p{i}.jpg"), &["/archive/m/p.jpg"]);
+        }
+        let root = fx.build(&no_dust());
+        // Nothing about `home` is second-guessable (uniformly excluded, one
+        // shared signature), so the wall folds all the way into the root's
+        // register; only the covered context splits out.
+        assert_eq!(child_paths(&root), vec!["pics"]);
+        assert_eq!(root.acts.len(), 1, "one shared register");
+        let group = &root.acts[0];
+        assert_eq!(group.files, 9);
+        let ids: Vec<i64> = group.decisions.iter().map(|d| d.id).collect();
+        assert_eq!(ids, vec![114, 115, 116], "every id enumerated");
+        assert_eq!(group.reason_summary().without_reason, 3);
+    }
+
+    #[test]
+    fn same_story_children_fold_against_the_residual_context() {
+        // A reasoned sibling forced out of the fold (.tvtime) must not
+        // dilute the context: the dotfolders' story is compared against
+        // what they would fold into — the parent's residual register —
+        // not the whole subtree (the old-home over-emission).
+        let mut fx = Fixture::new();
+        for i in 0..5 {
+            fx.present
+                .push(excluded_src(i, &format!("old-home/k{i}.dat"), None, 98));
+        }
+        for i in 0..20 {
+            fx.present.push(excluded_src(
+                10 + i,
+                &format!("old-home/.cache/c{i}"),
+                None,
+                98,
+            ));
+        }
+        for i in 0..15 {
+            fx.present.push(excluded_src(
+                40 + i,
+                &format!("old-home/.compiz/z{i}"),
+                None,
+                98,
+            ));
+        }
+        fx.decisions.insert(
+            98,
+            dinfo(
+                DecisionFamily::Exclude,
+                100,
+                Some("nothing important remains here"),
+            ),
+        );
+        for i in 0..6 {
+            fx.present.push(excluded_src(
+                60 + i,
+                &format!("old-home/.tvtime/t{i}"),
+                None,
+                97,
+            ));
+        }
+        fx.decisions.insert(
+            97,
+            dinfo(
+                DecisionFamily::Exclude,
+                90,
+                Some("channels worth remembering"),
+            ),
+        );
+        let root = fx.build(&no_dust());
+        let old-home = root
+            .children
+            .iter()
+            .find(|p| p.rel_path == "old-home")
+            .expect("the care anchor forces old-home");
+        assert_eq!(
+            child_paths(old-home),
+            vec!["old-home/.tvtime"],
+            "only the differently-reasoned act splits; same-story dotfolders fold"
+        );
+        let register: i64 = old-home.acts.iter().map(|g| g.files).sum();
+        assert_eq!(register, 40, "the folded slices land in old-home's register");
+    }
+
+    #[test]
+    fn a_note_on_a_file_gathers_that_files_fate() {
+        // The noted-script finding: a noted file is its own place, and
+        // that place carries the file's standing and act slice — intent and
+        // fate side by side, discrepancies visible without the trail.
+        let mut fx = Fixture::new();
+        fx.present
+            .push(excluded_src(1, "usr/local/bin/keepme.sh", None, 153));
+        for i in 0..10 {
+            fx.present.push(excluded_src(
+                10 + i,
+                &format!("usr/local/bin/b{i}"),
+                None,
+                153,
+            ));
+        }
+        fx.decisions.insert(
+            153,
+            dinfo(
+                DecisionFamily::Exclude,
+                100,
+                Some("non-package files are not important"),
+            ),
+        );
+        fx.notes
+            .push(note_at(7, "usr/local/bin/keepme.sh", "important script"));
+        let root = fx.build(&no_dust());
+
+        fn find<'a>(place: &'a StoryPlace, rel: &str) -> Option<&'a StoryPlace> {
+            if place.rel_path == rel {
+                return Some(place);
+            }
+            place.children.iter().find_map(|c| find(c, rel))
+        }
+        let script =
+            find(&root, "usr/local/bin/keepme.sh").expect("the noted file is its own place");
+        assert_eq!(script.standing.excluded, 1, "the file's standing sits here");
+        assert_eq!(script.acts.len(), 1, "and its act slice");
+        assert_eq!(script.acts[0].transition, "excluded");
+        assert_eq!(script.acts[0].files, 1);
+        assert_eq!(script.notes[0].text, "important script");
+    }
+
+    #[test]
+    fn a_note_on_a_dir_gathers_the_subtree_it_alone_claims() {
+        // With no deeper place forced, a noted dir is the deepest emitted
+        // ancestor of everything beneath it — standings and act slices from
+        // the whole subtree render at the noted place.
+        let mut fx = Fixture::new();
+        fx.present
+            .push(excluded_src(1, "keep/sub/tool.sh", None, 153));
+        fx.decisions
+            .insert(153, dinfo(DecisionFamily::Exclude, 100, None));
+        fx.notes.push(note_at(7, "keep", "the tool lives here"));
+        // Divergent surroundings so the root context differs.
+        for i in 0..10 {
+            fx.covered(100 + i, &format!("pics/p{i}.jpg"), &["/archive/m/p.jpg"]);
+        }
+        let root = fx.build(&no_dust());
+        let keep = root
+            .children
+            .iter()
+            .find(|p| p.rel_path == "keep")
+            .expect("the note forces keep");
+        assert!(keep.children.is_empty());
+        assert_eq!(
+            keep.standing.excluded, 1,
+            "the subtree's standing gathers here"
+        );
+        assert_eq!(keep.acts.len(), 1, "and its act slice");
+        assert_eq!(keep.acts[0].files, 1);
+    }
+
+    #[test]
+    fn disjoint_reasoned_footprints_surface_as_crossing_boundaries() {
+        // Two reasoned exclusions with coherent, disjoint footprints: the
+        // care anchors land at each decision's own dirs-LCA — the map shows
+        // exactly the boundary where the decisions cross, each place with
+        // its reason.
+        let mut fx = Fixture::new();
+        for i in 0..20 {
+            fx.present
+                .push(excluded_src(i, &format!("usr/sgml/4.0/f{i}"), None, 131));
+        }
+        for i in 0..20 {
+            fx.present.push(excluded_src(
+                30 + i,
+                &format!("usr/sgml/4.1/g{i}"),
+                None,
+                153,
+            ));
+        }
+        fx.decisions.insert(
+            131,
+            dinfo(
+                DecisionFamily::Exclude,
+                100,
+                Some("only the script matters"),
+            ),
+        );
+        fx.decisions.insert(
+            153,
+            dinfo(
+                DecisionFamily::Exclude,
+                200,
+                Some("non-package files checked"),
+            ),
+        );
+        let root = fx.build(&no_dust());
+        assert_eq!(
+            child_paths(&root),
+            vec!["usr/sgml/4.0", "usr/sgml/4.1"],
+            "each decision's footprint is its own boundary"
+        );
+        let r40 = root.children[0].acts[0].reason_summary();
+        assert_eq!(r40.reasons[0].0, "only the script matters");
+        let r41 = root.children[1].acts[0].reason_summary();
+        assert_eq!(r41.reasons[0].0, "non-package files checked");
+    }
+
+    #[test]
+    fn interleaved_scattered_acts_share_one_register() {
+        // The same two decisions with scattered, interleaved footprints
+        // (the data/usr sgml wall): there is no clean crossing line — both
+        // care anchors land on the shared region, dirs holding a slice of
+        // only one decision tell the same what/where story and fold, and
+        // both reasons render in the one register. The why is deliberately
+        // not a divergence axis; it surfaces at each decision's own grain
+        // via the care anchor.
+        let mut fx2 = Fixture::new();
+        for (i, dir) in ["usr/a", "usr/b", "usr/c"].iter().enumerate() {
+            for j in 0..10 {
+                fx2.present.push(excluded_src(
+                    (i * 10 + j) as i64,
+                    &format!("{dir}/f{j}"),
+                    None,
+                    131,
+                ));
+            }
+            for j in 0..10 {
+                fx2.present.push(excluded_src(
+                    (100 + i * 10 + j) as i64,
+                    &format!("{dir}/sub/g{j}"),
+                    None,
+                    153,
+                ));
+            }
+        }
+        fx2.decisions.insert(
+            131,
+            dinfo(
+                DecisionFamily::Exclude,
+                100,
+                Some("only the script matters"),
+            ),
+        );
+        fx2.decisions.insert(
+            153,
+            dinfo(
+                DecisionFamily::Exclude,
+                200,
+                Some("non-package files checked"),
+            ),
+        );
+        let root2 = fx2.build(&no_dust());
+        // Both decisions' dirs LCA to `usr` — one forced place, no
+        // fragmentation beneath, both reasons in its register.
+        assert_eq!(child_paths(&root2), vec!["usr"]);
+        let usr = &root2.children[0];
+        assert!(usr.children.is_empty(), "interleaved slices fold");
+        assert_eq!(usr.acts.len(), 1, "one shared what/where register");
+        let summary = usr.acts[0].reason_summary();
+        assert_eq!(summary.reasons.len(), 2, "both whys enumerated");
+    }
+
+    #[test]
+    fn reasoned_act_forces_below_dust() {
+        // `data/.deb`: one reasoned file far under the floors still
+        // surfaces — recorded care earns a line, floors notwithstanding.
+        let mut fx = Fixture::new();
+        fx.present
+            .push(excluded_src(1, "data/.deb/stray.deb", None, 161));
+        fx.decisions
+            .insert(161, dinfo(DecisionFamily::Exclude, 100, Some("stray file")));
+        for i in 0..100 {
+            fx.present
+                .push(excluded_src(10 + i, &format!("data/bin/b{i}"), None, 157));
+        }
+        fx.decisions
+            .insert(157, dinfo(DecisionFamily::Exclude, 90, None));
+        let root = fx.build(&StoryParams::default());
+        let deb = root
+            .children
+            .iter()
+            .find(|p| p.rel_path == "data/.deb")
+            .expect("the reasoned act surfaces despite the dust floors");
+        assert_eq!(deb.acts[0].files, 1);
+        assert_eq!(deb.acts[0].reason_summary().reasons[0].0, "stray file");
+    }
+
+    #[test]
+    fn mirror_destination_apply_does_not_fragment() {
+        // A reasonless export whose per-dir destinations mirror the origins:
+        // the signature's destination answer is decision-level, so the
+        // slices share one signature and fold to one line.
+        let mut fx = Fixture::new();
+        fx.extractions
+            .push(extraction(174, "home/a", 2, "/archive/export/home/a"));
+        fx.extractions
+            .push(extraction(174, "home/b", 3, "/archive/export/home/b"));
+        fx.extractions
+            .push(extraction(174, "etc/x", 1, "/archive/export/etc/x"));
+        fx.decisions
+            .insert(174, dinfo(DecisionFamily::Archive, 100, None));
+        let root = fx.build(&no_dust());
+        assert!(root.children.is_empty(), "uniform story, no fragmentation");
+        assert_eq!(root.acts.len(), 1);
+        assert_eq!(root.acts[0].files, 6);
+        assert_eq!(
+            root.acts[0].destination.locations[0].path, "/archive/export",
+            "the pooled destination collapses to the common answer"
+        );
+    }
+
+    #[test]
+    fn tombstone_dirs_carry_slices() {
+        // An object exclusion stamps an absent sharer in another dir: the
+        // act register is whole-history, so that dir narrates the act while
+        // its standing stays a missing fact.
+        let mut fx = Fixture::new();
+        fx.present.push(excluded_src(1, "keep/x.jpg", None, 120));
+        fx.absent.push(stamped(2, "gone2/x.jpg", None, 120));
+        fx.decisions
+            .insert(120, dinfo(DecisionFamily::Exclude, 100, None));
+        let root = fx.build(&no_dust());
+        let gone2 = root
+            .children
+            .iter()
+            .find(|p| p.rel_path == "gone2")
+            .expect("the tombstone dir diverges");
+        assert_eq!(gone2.acts.len(), 1, "the tombstone carries the slice");
+        assert_eq!(gone2.acts[0].transition, "excluded");
+        assert_eq!(gone2.acts[0].files, 1);
+        assert_eq!(gone2.standing.excluded, 0, "standing stays present-tense");
+        assert_eq!(gone2.standing.missing_unexplained, 1);
+    }
+
+    #[test]
+    fn emptied_place_dust_uses_act_weight() {
+        // The emptied-place shape: a move-mode apply left zero present files,
+        // but the act weight carries the place past the floors; a sibling
+        // one-file slice under both floors folds instead.
+        let mut fx = Fixture::new();
+        fx.extractions.push(DecisionExtraction {
+            decision_id: 174,
+            root_id: 1,
+            root_path: "/root".to_string(),
+            rel_prefix: "bin/exported-dir".to_string(),
+            files: 2,
+            bytes: Some(2_000_000),
+            destination_root_id: Some(2),
+            destination_path: "/archive/export/exported-dir".to_string(),
+            disposition: Some(OriginDisposition::Relocated),
+        });
+        fx.extractions.push(DecisionExtraction {
+            decision_id: 174,
+            root_id: 1,
+            root_path: "/root".to_string(),
+            rel_prefix: "tiny".to_string(),
+            files: 1,
+            bytes: Some(100),
+            destination_root_id: Some(2),
+            destination_path: "/archive/export/tiny".to_string(),
+            disposition: Some(OriginDisposition::Relocated),
+        });
+        fx.decisions
+            .insert(174, dinfo(DecisionFamily::Archive, 100, None));
+        for i in 0..50 {
+            fx.present
+                .push(excluded_src(10 + i, &format!("data/d{i}"), None, 100));
+        }
+        fx.decisions
+            .insert(100, dinfo(DecisionFamily::Exclude, 50, None));
+        let root = fx.build(&StoryParams::default());
+        // The boundary settles at the widest honest node of the emptied
+        // chain (`bin`); the note is what forces `bin/exported-dir` itself in
+        // real data.
+        let bin = root
+            .children
+            .iter()
+            .find(|p| p.rel_path == "bin")
+            .expect("act weight carries the emptied place past the floors");
+        assert_eq!(bin.acts[0].files, 2);
+        assert!(
+            !root.children.iter().any(|p| p.rel_path == "tiny"),
+            "a dust-sized slice folds"
+        );
+        let root_archived: i64 = root
+            .acts
+            .iter()
+            .filter(|g| g.transition == "archived")
+            .map(|g| g.files)
+            .sum();
+        assert_eq!(
+            root_archived, 1,
+            "the folded slice lands in the root register"
+        );
     }
 
     #[test]
@@ -1620,8 +2473,6 @@ mod tests {
         fx.absent.push(src(22, "lost/w.jpg", None));
         fx.extractions
             .push(extraction(42, "a", 5, "/archive/media"));
-        fx.operated_scopes.push((57, "b".to_string()));
-        fx.operated_scopes.push((42, "a".to_string()));
         fx.decisions
             .insert(57, dinfo(DecisionFamily::Exclude, 100, None));
         fx.decisions
