@@ -20,9 +20,10 @@ use super::retire::{classify_absent, classify_present, AbsentBucket, StandingBuc
 use super::source::Source;
 use super::trail::{fate_posture, fate_transition, DecisionFamily, FateAspect, Posture};
 
-/// Named calibratable constants (the sweep discipline). Defaults are initial
-/// guesses until the first calibration pass against the real archive locks
-/// them; recalibration changes constants, never code paths.
+/// Named calibratable constants (the sweep discipline). Defaults were
+/// calibrated against the real archive 2026-08-04 across three root shapes
+/// (session journal `.claude/specs/2026-08-04-story-calibration-journal.md`);
+/// recalibration changes constants, never code paths.
 pub struct StoryParams {
     /// Children whose standing proportions differ by no more than this tell
     /// the same line and merge into their parent place.
@@ -38,9 +39,9 @@ pub struct StoryParams {
 impl Default for StoryParams {
     fn default() -> Self {
         Self {
-            signature_tolerance: 0.10,
-            dust_floor_files: 10,
-            dust_floor_bytes: 1_000_000,
+            signature_tolerance: 0.15,
+            dust_floor_files: 20,
+            dust_floor_bytes: 5_000_000,
             where_cap: 3,
         }
     }
@@ -2470,19 +2471,19 @@ mod tests {
 
     #[test]
     fn emptied_place_dust_uses_act_weight() {
-        // The emptied-place shape: a move-mode apply left zero present files,
-        // but the act weight carries the place past the floors; a sibling
-        // one-file slice under both floors folds instead.
+        // The emptied-place shape: a move-mode apply left zero present
+        // files, but the act weight carries the place past the floors; a
+        // sibling one-file slice under both floors folds instead.
         let mut fx = Fixture::new();
         fx.extractions.push(DecisionExtraction {
             decision_id: 174,
             root_id: 1,
             root_path: "/root".to_string(),
-            rel_prefix: "bin/exported-dir".to_string(),
+            rel_prefix: "some/important/dir".to_string(),
             files: 2,
-            bytes: Some(2_000_000),
+            bytes: Some(3_100_000_000),
             destination_root_id: Some(2),
-            destination_path: "/archive/export/exported-dir".to_string(),
+            destination_path: "/archive/export/some/important/dir".to_string(),
             disposition: Some(OriginDisposition::Relocated),
         });
         fx.extractions.push(DecisionExtraction {
@@ -2506,14 +2507,14 @@ mod tests {
             .insert(100, dinfo(DecisionFamily::Exclude, 50, None));
         let root = fx.build(&StoryParams::default());
         // The boundary settles at the widest honest node of the emptied
-        // chain (`bin`); the note is what forces `bin/exported-dir` itself in
-        // real data.
-        let bin = root
+        // chain (`some`); in real data a note is what would force the deep
+        // dir itself.
+        let widest = root
             .children
             .iter()
-            .find(|p| p.rel_path == "bin")
+            .find(|p| p.rel_path == "some")
             .expect("act weight carries the emptied place past the floors");
-        assert_eq!(bin.acts[0].files, 2);
+        assert_eq!(widest.acts[0].files, 2);
         assert!(
             !root.children.iter().any(|p| p.rel_path == "tiny"),
             "a dust-sized slice folds"
