@@ -150,6 +150,12 @@ standing totals and hands the gate to [`canon roots retire
 --dry-run`](retire.md), whose review states the same totals as counts. Both are
 lenses over one fetch of the same world, so they cannot disagree.
 
+This live reading is the **judgment voicing** — present tense, open questions,
+trail handoffs, for the reader deciding. At retirement the same story is
+re-voiced for the future reader and bound into the book as
+[`story.md`](../../reference/book-format.md#storymd): plain fate words, no
+handoffs, framed with a beginning and a last page. Same map, two readers.
+
 ## Flags
 
 - `--limit N` — cap the number of place lines (default 50). Omissions are counted,

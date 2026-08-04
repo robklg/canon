@@ -10,6 +10,7 @@ A book directory contains:
 ```
 photos-backup-2026-08-02/
 ├── README.md         the human entry point — start here
+├── story.md          the story as told, written at the retirement
 ├── inventory.jsonl   every source the root ever had, with fates
 ├── timeline.md       every decision that touched the root, with reasons
 ├── notes.md          the notes, bound beside the timeline
@@ -22,7 +23,29 @@ photos-backup-2026-08-02/
 The rendered summary a person can just read: the root's identity (path, role,
 comment, scan history, the retirement reason), the resolution account, the
 verification posture, a guide to the other files, and the gaps — anything this book
-should hold but doesn't, stated plainly.
+should hold but doesn't, stated plainly. It is the book's front door: it names
+`story.md` as the way in, and carries the mapping from the story's plain words to
+Canon's own (chosen for the archive = archived, let go = excluded, preserved by
+copies = covered, no known copy = unresolved, empty file = contentless).
+
+## story.md
+
+The story as told — the same reading [`canon roots
+story`](../commands/roots/story.md) renders live, re-voiced for a reader with no
+Canon and no memory of the place: what was on it, what was chosen for the archive
+and where it lives now, what was let go and why, in plain words. It opens by
+orienting (what this is, dated), explains how to read its entries, tells the
+places in full — a bound story is never capped — tallies where everything went,
+states its gaps in prose (left open on purpose: seen, weighed, accepted), and
+closes with a last page. It names itself **one telling of the record** — another
+telling could be drawn from the facts beside it; this is the one written at the
+letting-go.
+
+The ceremony invites a **foreword**: your own words about the whole place, bound
+verbatim above Canon's narration — and offers the entire page to your editor
+before it binds. A hand-refined telling is marked in `meta.toml`
+(`hand_edited`); the inventory and counts beside it remain the machine-verified
+record either way.
 
 ## inventory.jsonl
 
@@ -119,6 +142,13 @@ The machine-readable half, `version = 1`:
   anchor: Canon's structural check recounts the inventory and compares against
   them before any removal proceeds.
 - `[ledger]` — whether the drive-local ledger was gathered, and how many files.
+- `[story]` — the telling's claim: its file (`story.md`), whether it was
+  hand-refined at the binding (`hand_edited`), and the reading settings that
+  shaped it (the place-map calibration constants). Verification requires the
+  claimed file to exist and hold text — the prose itself is never recounted;
+  the inventory and `[counts]` remain the verification anchor. Absent in books
+  bound before the telling (added within version 1, 2026-08-05); such books
+  verify unchanged.
 
 ## Versioning
 

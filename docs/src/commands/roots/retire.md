@@ -92,16 +92,44 @@ After the review (and the verdict gate), Canon names where the book will stand �
 `retired/<name>-<date>/` on the shelf at the archive ledger root — and asks the first
 confirmation. On yes:
 
-1. The book is compiled into a temporary directory beside the shelf.
-2. The compile is **verified** — structure, per-fate counts, gathered ledger — before
-   anything standing is touched.
-3. The verified book is placed by rename (same filesystem, atomic). On first use the
+1. The **story is composed** — the same reading [`canon roots story`](story.md)
+   renders, re-voiced for the book (see [the book
+   format](../../reference/book-format.md#storymd)) — and offered once to your
+   editor (below).
+2. The book is compiled into a temporary directory beside the shelf, the story
+   bound inside as `story.md`.
+3. The compile is **verified** — structure, per-fate counts, gathered ledger, the
+   claimed story — before anything standing is touched.
+4. The verified book is placed by rename (same filesystem, atomic). On first use the
    shelf is created with a README explaining what it holds.
 
 ```
 The book is at /archive/retired/photos-backup-2026-08-02
   14,215 entries bound; 41 receipts gathered
+  story.md — the story as told
 ```
+
+### The story and your foreword
+
+Before the compile, Canon asks once:
+
+```
+Edit the story before it is written into the book? [y/N]
+```
+
+Yes opens `$VISUAL`/`$EDITOR` on the composed page — the same gesture as a
+manifest: Canon composes the declaration, you refine it, then it binds. The
+draft opens with a suggested title (`<name> — <comment>`) and a **Foreword**
+section awaiting your words — a reflection on the whole place, signed however
+you wish, bound verbatim above Canon's narration. Left exactly as it is, the
+foreword section simply drops out of the bound page. Everything else you
+reshape binds as you leave it: the story is your artifact; the inventory and
+meta beside it remain the machine-verified record, and a hand-refined story is
+marked as such in the book's meta.
+
+Answering no — or having no editor set — binds the story as composed. An editor
+failure or an emptied page never aborts the ceremony: the choice simply
+re-opens. `--yes` never asks and binds the composed story.
 
 Any gaps the compile recorded (unreadable receipts, an ungatherable drive-local
 ledger) are printed and bound inside the book — self-explaining, never silent. See
