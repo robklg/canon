@@ -23,6 +23,10 @@ pub struct CoverageStats {
     pub excluded_sources: i64,
     pub hashed_sources: i64,
     pub archived_sources: i64,
+    /// Hashed, non-excluded, empty — contentless: coverage can say nothing
+    /// about them (the contentless law), so they leave both the archivable
+    /// denominator and the unarchived remainder.
+    pub contentless_sources: i64,
 }
 
 impl CoverageStats {
@@ -35,11 +39,19 @@ impl CoverageStats {
             excluded_sources: 0,
             hashed_sources: 0,
             archived_sources: 0,
+            contentless_sources: 0,
         }
     }
 
     pub fn included_sources(&self) -> i64 {
         self.total_sources - self.excluded_sources
+    }
+
+    /// Hashed sources coverage can speak about at all — the archivable
+    /// denominator (empty files can never be archived-by-identity, so
+    /// counting them would cap the percentage below 100 forever).
+    pub fn coverable_sources(&self) -> i64 {
+        self.hashed_sources - self.contentless_sources
     }
 
     pub fn hashed_pct(&self) -> f64 {
@@ -52,15 +64,19 @@ impl CoverageStats {
     }
 
     pub fn archived_pct(&self) -> f64 {
-        if self.hashed_sources == 0 {
+        let coverable = self.coverable_sources();
+        if coverable == 0 {
             0.0
         } else {
-            (self.archived_sources as f64 / self.hashed_sources as f64) * 100.0
+            (self.archived_sources as f64 / coverable as f64) * 100.0
         }
     }
 
+    /// The honest remainder: what is hashed, coverable, and not archived.
+    /// Contentless sources are neither archived nor waiting to be — they
+    /// no longer hide inside this number.
     pub fn unarchived(&self) -> i64 {
-        self.hashed_sources - self.archived_sources
+        self.coverable_sources() - self.archived_sources
     }
 }
 
@@ -84,6 +100,7 @@ pub fn compute_stats(
         .filter(|s| s.object_id.is_some() && !s.is_excluded())
         .collect();
     stats.hashed_sources = hashed_sources.len() as i64;
+    stats.contentless_sources = hashed_sources.iter().filter(|s| s.is_contentless()).count() as i64;
 
     // Archived sources — use batch archive detection
     if stats.hashed_sources > 0 {
@@ -214,6 +231,35 @@ mod tests {
         );
         assert_eq!(stats.total_sources, 4);
         assert_eq!(stats.hashed_sources, 4);
+    }
+
+    #[test]
+    fn contentless_leaves_the_denominator_and_the_remainder() {
+        // The contentless law at the coverage surface: an empty file is
+        // neither archived nor waiting to be — a fully-covered root with
+        // empties reads 100%, and the unarchived remainder never hides
+        // them.
+        use crate::ops::test_helpers::insert_source_with_size;
+        let mut conn = setup_test_db();
+        let source_root = insert_root(&conn, "/photos", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        let data_obj = insert_object(&conn, "datahash", false);
+        let empty_obj = insert_object(&conn, "emptyhash", false);
+        insert_source_with_size(&conn, source_root, "photo.jpg", Some(data_obj), 100);
+        insert_source_with_size(&conn, source_root, "empty.log", Some(empty_obj), 0);
+        insert_source_with_size(&conn, archive_root, "photo.jpg", Some(data_obj), 100);
+
+        let sources = repo::source::batch_fetch_by_roots(&conn, &[source_root]).unwrap();
+        let refs: Vec<&Source> = sources.iter().collect();
+        let stats = compute_stats(&mut conn, &refs, None).unwrap();
+
+        assert_eq!(stats.hashed_sources, 2);
+        assert_eq!(stats.contentless_sources, 1);
+        assert_eq!(stats.coverable_sources(), 1);
+        assert_eq!(stats.archived_sources, 1);
+        assert_eq!(stats.unarchived(), 0, "the empty file is not 'unarchived'");
+        assert_eq!(stats.archived_pct(), 100.0, "covered means covered");
     }
 
     #[test]

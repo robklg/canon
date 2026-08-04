@@ -99,7 +99,7 @@ Use `--root` to apply only a subset of sources from the manifest. Useful for sta
 
 3. **Stale destination records** - If the database shows files as present in the archive but they're missing from disk, apply aborts. Run `canon scan <archive>` to update the database before retrying.
 
-4. **Archive conflicts** - Checks if files already exist in the destination archive or other archives.
+4. **Archive conflicts** - Checks if files already exist in the destination archive or other archives. Empty files are exempt: they are [contentless](../../concepts/object.md#empty-files-are-contentless), so an empty file being applied never "conflicts" with the empty files already standing in the archive.
 
 5. **Excluded sources** - Blocks if any sources in the manifest are marked as excluded.
 

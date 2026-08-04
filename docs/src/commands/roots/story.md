@@ -62,6 +62,15 @@ Whether this story is complete is yours to judge.
 For the readiness gate: canon roots retire path:/mnt/old-disk --dry-run
 ```
 
+Two more standing lines appear where they apply. `N archived from here` marks
+content you deliberately archived *from this root* whose copy you left standing
+(a copy-mode apply) — told apart from `covered`, which is content that merely
+happens to have identical copies in the archive. And `N empty files — carried
+with this place` states the
+[contentless](../../concepts/object.md#empty-files-are-contentless) sources
+plainly: all shape, no content — they claim no coverage, never block
+retirement, and travel with their folder when the place is archived.
+
 The map is path-ordered — a map of the root, never a leaderboard. A place earns a
 line for one of two reasons: it is **second-guessable** — its standing mix, its act
 mix, or where its covered copies stand diverges from its surroundings — or it

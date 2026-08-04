@@ -215,18 +215,29 @@ fn display_scoped_stats(stats: &CoverageStats, scope: &ResolvedScope, archive: O
         stats.hashed_pct()
     );
 
+    if stats.contentless_sources > 0 {
+        // The contentless law: empty files are all shape, no content —
+        // they can never be archived-by-identity, so they leave both the
+        // percentage's denominator and the unarchived remainder.
+        println!(
+            "  Empty files:     {:>8} (no content to cover)",
+            format_count(stats.contentless_sources)
+        );
+    }
     if archive.is_some() {
         println!(
-            "  In this archive: {:>8} ({:.1}% of hashed)",
+            "  In this archive: {:>8} ({:.1}% of {} with content)",
             format_count(stats.archived_sources),
-            stats.archived_pct()
+            stats.archived_pct(),
+            format_count(stats.coverable_sources())
         );
         println!("  Not in archive:  {:>8}", format_count(stats.unarchived()));
     } else {
         println!(
-            "  Archived:        {:>8} ({:.1}% of hashed)",
+            "  Archived:        {:>8} ({:.1}% of {} with content)",
             format_count(stats.archived_sources),
-            stats.archived_pct()
+            stats.archived_pct(),
+            format_count(stats.coverable_sources())
         );
         println!("  Unarchived:      {:>8}", format_count(stats.unarchived()));
     }
@@ -289,12 +300,23 @@ fn display_per_root_stats(
             return;
         }
 
+        if stats.contentless_sources > 0
+            && writeln!(
+                handle,
+                "  Empty files:     {:>8} (no content to cover)",
+                format_count(stats.contentless_sources)
+            )
+            .is_err()
+        {
+            return;
+        }
         if archive.is_some() {
             if writeln!(
                 handle,
-                "  In this archive: {:>8} ({:.1}% of hashed)",
+                "  In this archive: {:>8} ({:.1}% of {} with content)",
                 format_count(stats.archived_sources),
-                stats.archived_pct()
+                stats.archived_pct(),
+                format_count(stats.coverable_sources())
             )
             .is_err()
             {
@@ -312,9 +334,10 @@ fn display_per_root_stats(
         } else {
             if writeln!(
                 handle,
-                "  Archived:        {:>8} ({:.1}% of hashed)",
+                "  Archived:        {:>8} ({:.1}% of {} with content)",
                 format_count(stats.archived_sources),
-                stats.archived_pct()
+                stats.archived_pct(),
+                format_count(stats.coverable_sources())
             )
             .is_err()
             {
@@ -355,12 +378,20 @@ fn display_per_root_stats(
         overall.hashed_pct()
     );
 
+    if overall.contentless_sources > 0 {
+        let _ = writeln!(
+            handle,
+            "  Empty files:     {:>8} (no content to cover)",
+            format_count(overall.contentless_sources)
+        );
+    }
     if archive.is_some() {
         let _ = writeln!(
             handle,
-            "  In this archive: {:>8} ({:.1}% of hashed)",
+            "  In this archive: {:>8} ({:.1}% of {} with content)",
             format_count(overall.archived_sources),
-            overall.archived_pct()
+            overall.archived_pct(),
+            format_count(overall.coverable_sources())
         );
         let _ = writeln!(
             handle,
@@ -370,9 +401,10 @@ fn display_per_root_stats(
     } else {
         let _ = writeln!(
             handle,
-            "  Archived:        {:>8} ({:.1}% of hashed)",
+            "  Archived:        {:>8} ({:.1}% of {} with content)",
             format_count(overall.archived_sources),
-            overall.archived_pct()
+            overall.archived_pct(),
+            format_count(overall.coverable_sources())
         );
         let _ = writeln!(
             handle,

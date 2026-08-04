@@ -58,10 +58,14 @@ The account has two registers, deliberately not reconciled. **The story so far**
 whole-history events: what was archived from here (both moves and copies, as the
 extraction ledger recorded them), what a scan observed deleted, and what is missing
 without a recorded deletion. **Standing here now** partitions the sources presently
-there: covered (content verified present in the archive), excluded, and unresolved.
-A file copied to the archive appears in both registers — that's the two registers
-telling the truth from two directions, and the `(moved, copied)` split is what keeps
-it readable.
+there: archived from here (the still-standing originals of copy-mode applies —
+shown when present), covered (content verified present in the archive),
+excluded, empty files
+([contentless](../../concepts/object.md#empty-files-are-contentless) — nothing
+to cover, nothing to verify, never blocking; shown when present), and
+unresolved. A file copied to the archive appears in both registers — that's
+the two registers telling the truth from two directions, and the
+`(moved, copied)` split is what keeps it readable.
 
 **`first indexed`** is row evidence — when the earliest surviving source was first
 indexed — not a scan-decision date, so it stays honest on roots older than decision

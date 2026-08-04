@@ -38,23 +38,35 @@ Coverage: all roots
 Root: /path/to/backup1 (source)
   Total sources:     1,234
   Hashed:            1,100 (89.1%)
-  Archived:            850 (77.3% of hashed)
-  Unarchived:          250
+  Empty files:          40 (no content to cover)
+  Archived:            850 (80.2% of 1,060 with content)
+  Unarchived:          210
 
 Root: /path/to/backup2 (source)
   Total sources:       567
   Hashed:              500 (88.2%)
-  Archived:            400 (80.0% of hashed)
+  Archived:            400 (80.0% of 500 with content)
   Unarchived:          100
 
 ────────────────────────────────────────
 Overall:
   Total sources:     1,801
   Hashed:            1,600 (88.8%)
-  Archived:          1,250 (78.1% of hashed)
-  Unarchived:          350
+  Empty files:          40 (no content to cover)
+  Archived:          1,250 (80.1% of 1,560 with content)
+  Unarchived:          310
 ```
 
 - **Hashed**: Sources with a content hash (ready for archiving)
-- **Archived**: Sources whose content exists in an archive root
+- **Empty files**: Zero-byte sources — shown when present. There is no
+  content to cover, so coverage counts them in neither `Archived` nor
+  `Unarchived`; the lines add up as hashed = empty files + with-content,
+  and with-content = archived + unarchived. Archive operations still carry
+  empty files with their folders — a folder archived after triage keeps its
+  empty files (see
+  [empty files are contentless](../../concepts/object.md#empty-files-are-contentless))
+- **Archived**: Sources whose content exists in an archive root; the
+  percentage names its denominator (`of N with content`), so a fully-covered
+  selection reads 100% even when it contains empty files — the remainder is
+  always exactly `Unarchived`
 - With `--archive`: Shows "In this archive" vs "Not in archive" for that specific archive

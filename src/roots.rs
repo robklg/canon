@@ -937,8 +937,13 @@ fn standing_lines(place: &StoryPlace, indent: &str, lines: &mut Vec<String>) {
     if standing.contentless > 0 {
         // The plain referent beside the concept: empty files are all shape,
         // no content — they claim no coverage and no locations.
+        let noun = if standing.contentless == 1 {
+            "empty file"
+        } else {
+            "empty files"
+        };
         lines.push(format!(
-            "{indent}  {} empty files — carried with this place",
+            "{indent}  {} {noun} — carried with this place",
             format_count(standing.contentless)
         ));
     }

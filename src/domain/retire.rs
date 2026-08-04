@@ -440,33 +440,49 @@ pub fn build_book_entries(
         // indexing scan, not the archiving) — else the source's most recent
         // recorded transition.
         let mut decision = source.decision_id;
+        let origin = ctx.origins.get(source.rel_path.as_str());
         let fate = match classify_present(source, ctx.archived, ctx.archived_from_here) {
             StandingBucket::Excluded => SourceFate::Excluded {
                 reason: stamp_reason(source, ctx),
                 archive_locations: locations_for(source, ctx),
             },
-            StandingBucket::Contentless => SourceFate::Contentless,
+            // The archived fate is receipt-evidenced — the origin names
+            // this very path going to that destination — so it wins over
+            // the contentless standing: an applied empty file is archived,
+            // fate-wise (the law governs identity claims, never
+            // transitions; ADR 2026-08-04, clarification). Without an
+            // origin claim, contentless stands: no act claimed the path,
+            // and identity cannot.
+            StandingBucket::Contentless => match origin {
+                Some(origin) => {
+                    decision = Some(origin.decision_id);
+                    SourceFate::ArchivedFromHere {
+                        disposition: origin.disposition,
+                        destination: origin.destination.clone(),
+                        current_locations: locations_for(source, ctx),
+                    }
+                }
+                None => SourceFate::Contentless,
+            },
             // Archived and Covered both key the receipt-origin check: the
             // origin enriches the entry with the recorded destination; an
             // Archived standing without a readable origin (Records mode, or
             // an unreadable receipt — the compile records that gap) degrades
             // to the Covered fate, exactly as before the split. The book
             // claims destinations only from receipts.
-            StandingBucket::Archived | StandingBucket::Covered => {
-                match ctx.origins.get(source.rel_path.as_str()) {
-                    Some(origin) => {
-                        decision = Some(origin.decision_id);
-                        SourceFate::ArchivedFromHere {
-                            disposition: origin.disposition,
-                            destination: origin.destination.clone(),
-                            current_locations: locations_for(source, ctx),
-                        }
+            StandingBucket::Archived | StandingBucket::Covered => match origin {
+                Some(origin) => {
+                    decision = Some(origin.decision_id);
+                    SourceFate::ArchivedFromHere {
+                        disposition: origin.disposition,
+                        destination: origin.destination.clone(),
+                        current_locations: locations_for(source, ctx),
                     }
-                    None => SourceFate::Covered {
-                        locations: locations_for(source, ctx),
-                    },
                 }
-            }
+                None => SourceFate::Covered {
+                    locations: locations_for(source, ctx),
+                },
+            },
             StandingBucket::Unresolved { .. } => SourceFate::PresentAtRetirement,
         };
         entries.push(BookEntry {
@@ -1152,6 +1168,34 @@ mod tests {
         assert_eq!(
             entries[0].verification(),
             EntryVerification::ContentVerified
+        );
+    }
+
+    #[test]
+    fn an_applied_empty_file_is_archived_fate_wise() {
+        // The law governs identity claims, never transitions: a receipt
+        // origin names this very path going to that destination, so an
+        // applied empty file reads archived — same as its moved sibling —
+        // and contentless stands only where no act claimed the path.
+        let mut cx = Ctx::default();
+        add_origin(
+            &mut cx,
+            origin("world/level.lock", Some(OriginDisposition::Retained)),
+        );
+        let mut empty = at(source(1, Some(10), false, false), "world/level.lock");
+        empty.size = 0;
+
+        let entries = build_book_entries(&[empty], &[], &cx.context());
+        match &entries[0].fate {
+            SourceFate::ArchivedFromHere { destination, .. } => {
+                assert!(!destination.is_empty(), "the recorded destination rides");
+            }
+            other => panic!("expected the archived fate, got {other:?}"),
+        }
+        assert_eq!(
+            entries[0].decision,
+            Some(41),
+            "the fate-determining decision is the apply"
         );
     }
 

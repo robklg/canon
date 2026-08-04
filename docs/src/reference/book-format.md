@@ -57,6 +57,11 @@ any index. Fields:
   also archived, the archive locations appear as context (both truths carried).
 - `deleted` — a scan observed the loss; the recorded reason where present.
 - `present` — present at retirement, none of the above: listed honestly.
+- `contentless` — empty at retirement (zero bytes): all shape, no content.
+  Content identity has nothing to identify for an empty file, so the entry
+  claims neither covered nor unresolved — it belonged to its place and shared
+  its place's fate. (Added within version 1, 2026-08-04; books bound earlier
+  contain no such entries and recorded empty files as `covered`.)
 - `missing_unexplained` — absent without a recorded deletion: a record-quality fact,
   never hidden.
 
@@ -103,13 +108,16 @@ The machine-readable half, `version = 1`:
   that wrote the book.
 - `[account]` — the resolution account in counts: the story so far (archived files
   and bytes with the moved/copied split, deleted, unexplained missing) and the
-  standing at binding (covered, excluded, unresolved). Bytes and derived totals are
-  omitted when the record cannot support them — never guessed.
+  standing at binding (`archived_standing` — archived from here with the copy
+  still standing, `covered`, `excluded`, `contentless`, `unresolved`; the first
+  and the two additions arrived within version 1, 2026-08-04). Bytes and derived
+  totals are omitted when the record cannot support them — never guessed.
 - `[posture]` — `scan_verified` or `on_faith` (with the reason: suspended,
   unreachable, or never scanned) and the last scan time.
-- `[counts]` — entry totals per fate. These are the verification anchor: Canon's
-  structural check recounts the inventory and compares against them before any
-  removal proceeds.
+- `[counts]` — entry totals per fate (including `contentless`, added within
+  version 1; absent in earlier books, read as zero). These are the verification
+  anchor: Canon's structural check recounts the inventory and compares against
+  them before any removal proceeds.
 - `[ledger]` — whether the drive-local ledger was gathered, and how many files.
 
 ## Versioning
