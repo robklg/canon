@@ -12,6 +12,20 @@ use crate::domain::format::{format_count, format_date, format_size, format_time_
 use crate::domain::story::{ActGroup, LocationAggregate, StoryPlace};
 use crate::ops::story::StoryReport;
 
+/// The two readers of the one composition. Structure — the place walk, the
+/// slices, the once-rules, every aggregate — is computed once; only wordings
+/// differ, and they differ *by voicing*, never by consumer accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Voicing {
+    /// The live review (`canon roots story`): present tense, judgment
+    /// furniture ("no decision here"), trail handoffs — the deciding reader.
+    Judgment,
+    /// The bound reading (the book's `story.md`): the ever-axis — what was
+    /// ever here, told by where it went — in plain fate diction, no
+    /// handoffs, no bind-time claims. The future reader, without Canon.
+    Reference,
+}
+
 /// The whole report as lines — pure, so rendering is testable.
 pub fn story_lines(report: &StoryReport, cap: usize, now: i64) -> Vec<String> {
     let mut lines = Vec::new();
@@ -50,6 +64,7 @@ pub fn story_lines(report: &StoryReport, cap: usize, now: i64) -> Vec<String> {
         &report.places,
         0,
         &report.root.path,
+        Voicing::Judgment,
         cap,
         &mut shown,
         &mut omitted,
@@ -97,6 +112,38 @@ pub fn story_lines(report: &StoryReport, cap: usize, now: i64) -> Vec<String> {
     lines
 }
 
+/// The place map alone, reference-voiced — the retirement compile frames
+/// it into the bound telling. Always full: the bound story admits no
+/// display cap, so the place-omission line is structurally unreachable
+/// here; only the location aggregates' own honesty remainders may count
+/// omissions.
+pub fn reference_place_lines(report: &StoryReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut shown = 0usize;
+    let mut omitted = 0usize;
+    render_place(
+        &report.places,
+        0,
+        &report.root.path,
+        Voicing::Reference,
+        usize::MAX,
+        &mut shown,
+        &mut omitted,
+        &mut lines,
+    );
+    lines
+}
+
+/// `1 file` / `N files` — the reference voicing pluralizes; the judgment
+/// voicing keeps its historical fixed plural (byte-parity law).
+fn file_noun(n: i64) -> String {
+    if n == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{} files", format_count(n))
+    }
+}
+
 /// Whether a place earns its own block (the bare root is forced anyway).
 fn place_renderable(place: &StoryPlace) -> bool {
     !place.acts.is_empty()
@@ -113,6 +160,7 @@ fn render_place(
     place: &StoryPlace,
     depth: usize,
     root_path: &str,
+    voicing: Voicing,
     cap: usize,
     shown: &mut usize,
     omitted: &mut usize,
@@ -144,7 +192,7 @@ fn render_place(
         };
         lines.push(format!("{indent}{name}{breadth}"));
         for group in &place.acts {
-            act_lines(group, &indent, lines);
+            act_lines(group, &indent, voicing, lines);
         }
         // "no decision here" speaks for the question content only — covered,
         // unresolved, missing: nothing evidences a decision either way.
@@ -153,12 +201,16 @@ fn render_place(
         // — its line says so instead (never "no decision here"). Archived
         // standing likewise evidences the apply; contentless has nothing to
         // decide (the contentless law) — neither joins the question here.
+        // Judgment furniture: the reference reading states facts — its
+        // "preserved by copies" definition (the entries guide) already says
+        // nothing was chosen; an open question has no place in a book.
         let question =
             place.standing.covered + place.standing.unresolved + place.standing.missing_unexplained;
-        if place.undecided() && question > 0 {
+        if voicing == Voicing::Judgment && place.undecided() && question > 0 {
             lines.push(format!("{indent}  no decision here"));
         }
-        if place.undecided()
+        if voicing == Voicing::Judgment
+            && place.undecided()
             && place.standing.is_empty()
             && place.covered_where.is_empty()
             && !place.notes.is_empty()
@@ -168,10 +220,12 @@ fn render_place(
             // than leaving the testimony hanging beside nothing. What left
             // is narrated by the containing place's act slices. A noted
             // place WITH children stays bare — its content stands one line
-            // down, claimed by the deeper places.
+            // down, claimed by the deeper places. Bind-time furniture: the
+            // reference voicing drops it (the ever-axis makes no "now"
+            // claims; the note stands where it was written).
             lines.push(format!("{indent}  nothing stands here now"));
         }
-        standing_lines(place, &indent, lines);
+        standing_lines(place, &indent, voicing, lines);
         for note in &place.notes {
             lines.push(format!(
                 "{indent}  note: {}",
@@ -179,46 +233,86 @@ fn render_place(
             ));
         }
         if !place_renderable(place) {
-            lines.push(format!("{indent}  nothing indexed here"));
+            lines.push(match voicing {
+                Voicing::Judgment => format!("{indent}  nothing indexed here"),
+                Voicing::Reference => format!("{indent}  nothing was ever indexed here"),
+            });
         }
-        let abs = if place.rel_path.is_empty() {
-            root_path.to_string()
-        } else {
-            format!("{root_path}/{}", place.rel_path)
-        };
-        let (display, _argv) = trail_handoff(&abs);
-        lines.push(format!("{indent}  {display}"));
+        if voicing == Voicing::Judgment {
+            let abs = if place.rel_path.is_empty() {
+                root_path.to_string()
+            } else {
+                format!("{root_path}/{}", place.rel_path)
+            };
+            let (display, _argv) = trail_handoff(&abs);
+            lines.push(format!("{indent}  {display}"));
+        }
     }
     let child_depth = if renderable { depth + 1 } else { depth };
     for child in &place.children {
-        render_place(child, child_depth, root_path, cap, shown, omitted, lines);
+        render_place(
+            child,
+            child_depth,
+            root_path,
+            voicing,
+            cap,
+            shown,
+            omitted,
+            lines,
+        );
     }
 }
 
 /// One act group in the what/why register. The arrow means *sent there by
 /// your act* — observed coverage renders with "copies stand in" instead,
 /// never the arrow.
-fn act_lines(group: &ActGroup, indent: &str, lines: &mut Vec<String>) {
-    let mut line = format!(
-        "{indent}  {} {} files",
-        group.transition,
-        format_count(group.files)
-    );
+///
+/// Reference voicing: content leads, fate follows (`N files · chosen for
+/// the archive → dest`) — the ever-axis in the line shape itself. The
+/// moved/copied split is omitted (a bind-time mechanical fact; the dossier
+/// keeps it), and the scan-observed marker folds into the fate phrase.
+fn act_lines(group: &ActGroup, indent: &str, voicing: Voicing, lines: &mut Vec<String>) {
+    let mut line = match voicing {
+        Voicing::Judgment => format!(
+            "{indent}  {} {} files",
+            group.transition,
+            format_count(group.files)
+        ),
+        Voicing::Reference => format!("{indent}  {}", file_noun(group.files)),
+    };
     if let Some(bytes) = group.bytes {
         if bytes > 0 {
             line.push_str(&format!(", {}", format_size(bytes)));
         }
     }
-    if group.observed {
-        line.push_str(" (scan-observed)");
-    }
-    if let (Some(moved), Some(copied)) = (group.moved, group.copied) {
-        if moved > 0 && copied > 0 {
-            line.push_str(&format!(
-                " ({} moved, {} copied)",
-                format_count(moved),
-                format_count(copied)
-            ));
+    match voicing {
+        Voicing::Judgment => {
+            if group.observed {
+                line.push_str(" (scan-observed)");
+            }
+            if let (Some(moved), Some(copied)) = (group.moved, group.copied) {
+                if moved > 0 && copied > 0 {
+                    line.push_str(&format!(
+                        " ({} moved, {} copied)",
+                        format_count(moved),
+                        format_count(copied)
+                    ));
+                }
+            }
+        }
+        Voicing::Reference => {
+            // The reference derivation over the registered transition words
+            // (the never-literal law's voicing site: registered word in,
+            // plain fate phrase out). An unrecognized word renders raw —
+            // stated, never dropped.
+            let phrase = match group.transition {
+                "archived" => "chosen for the archive",
+                "excluded" => "let go",
+                "restored" => "returned to consideration",
+                "deleted" if group.observed => "deleted — a scan observed the loss",
+                other => other,
+            };
+            line.push_str(&format!(" · {phrase}"));
         }
     }
     if !group.destination.is_empty() {
@@ -281,9 +375,13 @@ fn act_lines(group: &ActGroup, indent: &str, lines: &mut Vec<String>) {
     }
 }
 
-fn standing_lines(place: &StoryPlace, indent: &str, lines: &mut Vec<String>) {
+fn standing_lines(place: &StoryPlace, indent: &str, voicing: Voicing, lines: &mut Vec<String>) {
     let standing = &place.standing;
-    if standing.archived > 0 {
+    if standing.archived > 0 && voicing == Voicing::Judgment {
+        // Judgment-only: on the ever-axis the act register owns this fate —
+        // "N archived from here (still standing)" is exactly the bind-time
+        // claim the reference reading forswears. Its covered-where rider
+        // drops with it: the act's arrow already answers where.
         let mut line = format!(
             "{indent}  {} archived from here",
             format_count(standing.archived)
@@ -299,12 +397,21 @@ fn standing_lines(place: &StoryPlace, indent: &str, lines: &mut Vec<String>) {
         lines.push(line);
     }
     if standing.covered > 0 {
-        let mut line = format!("{indent}  {} covered", format_count(standing.covered));
+        let mut line = match voicing {
+            Voicing::Judgment => {
+                format!("{indent}  {} covered", format_count(standing.covered))
+            }
+            Voicing::Reference => format!(
+                "{indent}  {} · preserved by copies in the archive",
+                file_noun(standing.covered)
+            ),
+        };
         if !place.covered_where.is_empty() {
-            line.push_str(&format!(
-                " — copies stand in {}",
-                fmt_locations(&place.covered_where)
-            ));
+            let locations = fmt_locations(&place.covered_where);
+            line.push_str(&match voicing {
+                Voicing::Judgment => format!(" — copies stand in {locations}"),
+                Voicing::Reference => format!(" — {locations}"),
+            });
         }
         lines.push(line);
     }
@@ -314,43 +421,79 @@ fn standing_lines(place: &StoryPlace, indent: &str, lines: &mut Vec<String>) {
         // left them behind, and this line cannot see either way (the
         // carried-with-this-place wording claimed history it couldn't
         // verify; friction 2026-08-04). Same phrase coverage uses — one
-        // vocabulary across surfaces.
+        // vocabulary across surfaces. The reference reading keeps the bare
+        // referent; the entries guide defines it once.
         let noun = if standing.contentless == 1 {
             "empty file"
         } else {
             "empty files"
         };
-        lines.push(format!(
-            "{indent}  {} {noun} (no content to cover)",
-            format_count(standing.contentless)
-        ));
+        lines.push(match voicing {
+            Voicing::Judgment => format!(
+                "{indent}  {} {noun} (no content to cover)",
+                format_count(standing.contentless)
+            ),
+            Voicing::Reference => {
+                format!("{indent}  {} {noun}", format_count(standing.contentless))
+            }
+        });
     }
     if standing.excluded > 0 && !place.standing_coincides() {
-        let mut line = format!("{indent}  {} excluded", format_count(standing.excluded));
+        let mut line = match voicing {
+            Voicing::Judgment => {
+                format!("{indent}  {} excluded", format_count(standing.excluded))
+            }
+            Voicing::Reference => {
+                format!("{indent}  {} · let go", file_noun(standing.excluded))
+            }
+        };
         if place.undecided() {
             // Exclusion is always a deliberate act; at a place with no act
             // slices, the excluded standing evidences a decision whose
             // record is absent (pre-provenance, or recording off) — state
             // the gap, never "no decision here".
-            line.push_str(" (no recorded decision)");
+            line.push_str(match voicing {
+                Voicing::Judgment => " (no recorded decision)",
+                Voicing::Reference => " — no record of the decision survives",
+            });
         }
         lines.push(line);
     }
     if standing.unresolved > 0 {
-        let mut line = format!("{indent}  {} unresolved", format_count(standing.unresolved));
+        let mut line = match voicing {
+            Voicing::Judgment => {
+                format!("{indent}  {} unresolved", format_count(standing.unresolved))
+            }
+            Voicing::Reference => format!(
+                "{indent}  {} · no known copy in the archive",
+                file_noun(standing.unresolved)
+            ),
+        };
         if standing.unhashed_unresolved > 0 {
-            line.push_str(&format!(
-                " ({} never hashed — cannot be content-verified)",
-                format_count(standing.unhashed_unresolved)
-            ));
+            line.push_str(&match voicing {
+                Voicing::Judgment => format!(
+                    " ({} never hashed — cannot be content-verified)",
+                    format_count(standing.unhashed_unresolved)
+                ),
+                Voicing::Reference => format!(
+                    " ({} were never content-checked)",
+                    format_count(standing.unhashed_unresolved)
+                ),
+            });
         }
         lines.push(line);
     }
     if standing.missing_unexplained > 0 {
-        lines.push(format!(
-            "{indent}  {} missing, unexplained",
-            format_count(standing.missing_unexplained)
-        ));
+        lines.push(match voicing {
+            Voicing::Judgment => format!(
+                "{indent}  {} missing, unexplained",
+                format_count(standing.missing_unexplained)
+            ),
+            Voicing::Reference => format!(
+                "{indent}  {} · went missing, without a recorded reason",
+                file_noun(standing.missing_unexplained)
+            ),
+        });
     }
 }
 
@@ -705,5 +848,273 @@ mod tests {
         let lines = story_lines(&report(place("")), usize::MAX, 0);
         assert_has_line(&lines, "  (root)");
         assert_has_line(&lines, "nothing indexed here");
+    }
+
+    // -----------------------------------------------------------------
+    // The reference voicing — the bound reading's wordings over the same
+    // structure. Every dropped line is asserted absent: the ever-axis
+    // makes no bind-time claims and carries no judgment furniture.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn reference_leads_with_content_and_names_the_fate() {
+        let mut pictures = place("pictures");
+        let mut archived = act("archived", 5, vec![(42, Some("the Italy trip"))]);
+        archived.destination = locations(&[("/archive/media", 5)]);
+        pictures.acts.push(archived);
+        let mut root = place("");
+        root.children.push(pictures);
+
+        let lines = reference_place_lines(&report(root));
+        assert_has_line(
+            &lines,
+            "5 files · chosen for the archive → /archive/media   #42 · \"the Italy trip\"",
+        );
+        assert_no_line(&lines, "archived 5 files");
+    }
+
+    #[test]
+    fn reference_drops_judgment_furniture_and_handoffs() {
+        let mut italy = place("pictures/italy");
+        italy.standing.covered = 2;
+        italy.covered_where = locations(&[("/archive/a", 1), ("/archive/b", 1)]);
+        let mut root = place("");
+        root.children.push(italy);
+
+        let lines = reference_place_lines(&report(root));
+        assert_no_line(&lines, "no decision here");
+        assert_no_line(&lines, "canon trail");
+        assert_no_line(&lines, "copies stand in");
+        assert_has_line(
+            &lines,
+            "2 files · preserved by copies in the archive — /archive/a (1), /archive/b (1)",
+        );
+    }
+
+    #[test]
+    fn reference_drops_the_archived_standing_line() {
+        // The act register owns the fate on the ever-axis; "still standing
+        // here" is exactly the bind-time claim the book forswears. The
+        // covered-where rider drops with it — the act's arrow answers where.
+        let build = || {
+            let mut kept = place("kept");
+            let mut archived = act("archived", 10, vec![(42, None)]);
+            archived.destination = locations(&[("/archive/media", 10)]);
+            kept.acts.push(archived);
+            kept.standing.archived = 10;
+            kept.covered_where = locations(&[("/archive/media", 10)]);
+            let mut root = place("");
+            root.children.push(kept);
+            root
+        };
+
+        let judgment = story_lines(&report(build()), usize::MAX, 0);
+        assert_has_line(
+            &judgment,
+            "10 archived from here — copies stand in /archive/media",
+        );
+
+        let lines = reference_place_lines(&report(build()));
+        assert_no_line(&lines, "archived from here");
+        assert_no_line(&lines, "copies stand in");
+        assert_has_line(&lines, "10 files · chosen for the archive → /archive/media");
+    }
+
+    #[test]
+    fn reference_words_exclusion_as_let_go() {
+        let mut old = place("old");
+        old.acts
+            .push(act("excluded", 3, vec![(57, Some("installer junk"))]));
+        old.standing.excluded = 2; // tombstone mismatch: both lines render
+        let mut root = place("");
+        root.children.push(old);
+
+        let lines = reference_place_lines(&report(root));
+        assert_has_line(&lines, "3 files · let go   #57 · \"installer junk\"");
+        assert_has_line(&lines, "2 files · let go");
+        assert_no_line(&lines, "excluded 3 files");
+    }
+
+    #[test]
+    fn reference_states_the_unrecorded_decision_plainly() {
+        let mut old = place("old");
+        old.standing.excluded = 4;
+        let mut root = place("");
+        root.children.push(old);
+
+        let lines = reference_place_lines(&report(root));
+        assert_has_line(
+            &lines,
+            "4 files · let go — no record of the decision survives",
+        );
+        assert_no_line(&lines, "(no recorded decision)");
+    }
+
+    #[test]
+    fn reference_coincidence_still_omits_the_restatement() {
+        let mut old = place("old");
+        let mut group = act("excluded", 176, vec![(57, Some("installer junk"))]);
+        group.present_files = 176;
+        old.acts.push(group);
+        old.standing.excluded = 176;
+        let mut root = place("");
+        root.children.push(old);
+
+        let lines = reference_place_lines(&report(root));
+        assert_has_line(&lines, "176 files · let go   #57 · \"installer junk\"");
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("let go")).count(),
+            1,
+            "coincident standing must not restate the act: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn reference_folds_observation_into_the_deleted_phrase() {
+        let mut gone = place("gone");
+        let mut deleted = act("deleted", 1204, vec![(70, None)]);
+        deleted.observed = true;
+        gone.acts.push(deleted);
+        let mut root = place("");
+        root.children.push(gone);
+
+        let lines = reference_place_lines(&report(root));
+        assert_has_line(
+            &lines,
+            "1,204 files · deleted — a scan observed the loss   #70",
+        );
+        assert_no_line(&lines, "(scan-observed)");
+    }
+
+    #[test]
+    fn reference_omits_the_moved_copied_split() {
+        let build = || {
+            let mut kept = place("kept");
+            let mut archived = act("archived", 5, vec![(42, None)]);
+            archived.moved = Some(2);
+            archived.copied = Some(3);
+            kept.acts.push(archived);
+            let mut root = place("");
+            root.children.push(kept);
+            root
+        };
+
+        let judgment = story_lines(&report(build()), usize::MAX, 0);
+        assert_has_line(&judgment, "(2 moved, 3 copied)");
+
+        let lines = reference_place_lines(&report(build()));
+        assert_no_line(&lines, "moved");
+        assert_no_line(&lines, "copied");
+    }
+
+    #[test]
+    fn reference_pluralizes_the_file_noun() {
+        let mut lone = place("lone");
+        lone.standing.unresolved = 1;
+        lone.standing.missing_unexplained = 1;
+        lone.standing.contentless = 1;
+        let mut root = place("");
+        root.children.push(lone);
+
+        let lines = reference_place_lines(&report(root));
+        assert_has_line(&lines, "1 file · no known copy in the archive");
+        assert_has_line(&lines, "1 file · went missing, without a recorded reason");
+        assert_has_line(&lines, "1 empty file");
+        assert_no_line(&lines, "1 files");
+        assert_no_line(&lines, "unresolved");
+        assert_no_line(&lines, "(no content to cover)");
+    }
+
+    #[test]
+    fn reference_keeps_the_never_hashed_honesty_in_plain_words() {
+        let mut lone = place("lone");
+        lone.standing.unresolved = 3;
+        lone.standing.unhashed_unresolved = 2;
+        let mut root = place("");
+        root.children.push(lone);
+
+        let lines = reference_place_lines(&report(root));
+        assert_has_line(
+            &lines,
+            "3 files · no known copy in the archive (2 were never content-checked)",
+        );
+        assert_no_line(&lines, "never hashed");
+    }
+
+    #[test]
+    fn reference_is_always_full_and_notes_stay_verbatim() {
+        let mut root = place("");
+        for name in ["a", "b", "c"] {
+            let mut child = place(name);
+            child.standing.unresolved = 1;
+            child.notes.push(Note {
+                id: 1,
+                root_id: 1,
+                rel_path: name.to_string(),
+                text: format!("note at {name}"),
+                created_at: 100,
+            });
+            root.children.push(child);
+        }
+        let lines = reference_place_lines(&report(root));
+        for name in ["a", "b", "c"] {
+            assert_has_line(&lines, &format!("  {name}"));
+            assert_has_line(&lines, &format!("note: note at {name}"));
+        }
+        assert_no_line(&lines, "more places");
+    }
+
+    #[test]
+    fn reference_bare_root_says_ever() {
+        let lines = reference_place_lines(&report(place("")));
+        assert_has_line(&lines, "nothing was ever indexed here");
+        // The judgment wording is not a substring of the reference one.
+        assert_no_line(&lines, "  nothing indexed here");
+    }
+
+    #[test]
+    fn judgment_golden_fixture_is_line_identical() {
+        // The byte-parity pin: the judgment voicing through the voicing
+        // refactor, exact lines. If a wording site forgets its match arm,
+        // this fails before any real archive does.
+        let mut italy = place("pictures/italy");
+        italy.standing.covered = 2;
+        italy.covered_where = locations(&[("/archive/a", 2)]);
+
+        let mut pictures = place("pictures");
+        let mut archived = act("archived", 5, vec![(42, Some("the Italy trip"))]);
+        archived.destination = locations(&[("/archive/media", 5)]);
+        pictures.acts.push(archived);
+        pictures.standing.contentless = 1;
+        pictures.children.push(italy);
+
+        let mut root = place("");
+        root.children.push(pictures);
+
+        let lines = story_lines(&report(root), usize::MAX, 0);
+        let expected = vec![
+            "Story: /r",
+            "",
+            "  role           source",
+            "  first indexed  unknown",
+            "  last scan      never",
+            "",
+            "The places",
+            "",
+            "  pictures",
+            "    archived 5 files → /archive/media   #42 · \"the Italy trip\"",
+            "    1 empty file (no content to cover)",
+            "    → canon trail /r/pictures",
+            "",
+            "    pictures/italy",
+            "      no decision here",
+            "      2 covered — copies stand in /archive/a",
+            "      → canon trail /r/pictures/italy",
+            "",
+            "Standing: 0 sources — 0 covered · 0 excluded · 0 unresolved",
+            "Whether this story is complete is yours to judge.",
+            "For the readiness gate: canon roots retire path:/r --dry-run",
+        ];
+        assert_eq!(lines, expected);
     }
 }

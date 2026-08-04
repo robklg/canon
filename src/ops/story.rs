@@ -49,8 +49,21 @@ pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> R
             story.root.path
         );
     }
+    report_over(conn, &story, params)
+}
 
-    let notes = repo::note::fetch_by_roots(conn, &[root_id])?;
+/// The lens over an already-fetched `RootStory`: enrichments + place map +
+/// account, no fetch. The retirement ceremony composes the bound telling
+/// through this over its *own* story, so the gate, the book, and the telling
+/// read one world by construction (the one-fetch law). Entry policy (the
+/// archive-role refusal) stays with `compute_story` — the ceremony's target
+/// is already validated by `validate_retire_target`.
+pub fn report_over(
+    conn: &Connection,
+    story: &ops::retire::RootStory,
+    params: &StoryParams,
+) -> Result<StoryReport> {
+    let notes = repo::note::fetch_by_roots(conn, &[story.root.id])?;
 
     // Covered-copy locations for the "copies stand in" lines. Empty objects
     // never come back — the archived-ness SQL carries the contentless law
@@ -105,7 +118,7 @@ pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> R
     );
 
     Ok(StoryReport {
-        root: story.root,
+        root: story.root.clone(),
         first_indexed: story.first_indexed,
         reachable: story.reachable,
         places,
@@ -314,6 +327,49 @@ mod tests {
         let keep = find_child(&report.places, "keep");
         assert_eq!(keep.notes.len(), 1);
         assert_eq!(keep.notes[0].text, "still deciding");
+    }
+
+    #[test]
+    fn report_over_is_compute_story_minus_the_fetch() {
+        // The lens-split law: the ceremony composes the bound telling over
+        // its own already-fetched story; the result must be exactly what
+        // the live command computes. Compared through the rendering so any
+        // divergence is visible in the terms a reader would meet.
+        let conn = open_in_memory_for_test();
+        let root = insert_test_root(&conn, "/r", "source", false);
+        let archive = insert_test_root(&conn, "/archive", "archive", false);
+        let obj = insert_object(&conn, "aaa");
+        insert_source(
+            &conn,
+            root,
+            "photos/a.jpg",
+            Some(obj),
+            100,
+            true,
+            false,
+            None,
+        );
+        insert_source(
+            &conn,
+            archive,
+            "media/a.jpg",
+            Some(obj),
+            100,
+            true,
+            false,
+            None,
+        );
+        let d = insert_decision(&conn, "exclude_set", 100, Some("junk"));
+        insert_source(&conn, root, "old/setup.exe", None, 100, true, true, Some(d));
+        insert_scope(&conn, d, root, "/r", "old");
+
+        let fetched = ops::retire::fetch_root_story(&conn, root).unwrap();
+        let via_lens = report_over(&conn, &fetched, &no_dust()).unwrap();
+        let via_command = compute_story(&conn, root, &no_dust()).unwrap();
+        assert_eq!(
+            ops::telling::story_lines(&via_lens, usize::MAX, 0),
+            ops::telling::story_lines(&via_command, usize::MAX, 0),
+        );
     }
 
     #[test]
