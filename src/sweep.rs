@@ -367,15 +367,7 @@ pub(crate) fn handoff(entry: &LeaderboardEntry) -> (String, Vec<String>) {
     (format!("→ {display}"), argv)
 }
 
-/// Quote an argument for display when it wouldn't survive a shell verbatim.
-pub(crate) fn shell_quote(arg: &str) -> String {
-    let safe = |c: char| c.is_ascii_alphanumeric() || "/.-_:@%+=,".contains(c);
-    if !arg.is_empty() && arg.chars().all(safe) {
-        arg.to_string()
-    } else {
-        format!("'{}'", arg.replace('\'', "'\\''"))
-    }
-}
+use crate::domain::format::shell_quote;
 
 fn abs_path(loc: &Location) -> String {
     if loc.rel_prefix.is_empty() {

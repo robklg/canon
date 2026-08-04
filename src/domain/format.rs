@@ -41,6 +41,48 @@ pub fn cap_path(path: &str, max: usize) -> String {
     format!("...{tail}")
 }
 
+/// A timestamp as a local calendar date (`2026-08-04`).
+pub fn format_date(ts: i64) -> String {
+    use chrono::{Local, TimeZone};
+    match Local.timestamp_opt(ts, 0) {
+        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
+        _ => format!("@{ts}"),
+    }
+}
+
+/// A coarse "how long ago" beside a date — seconds up to days.
+pub fn format_time_ago(timestamp: Option<i64>, now: i64) -> String {
+    match timestamp {
+        None => "never".to_string(),
+        Some(ts) => {
+            let secs = now - ts;
+            if secs < 0 {
+                "just now".to_string()
+            } else if secs < 60 {
+                format!("{secs}s ago")
+            } else if secs < 3600 {
+                format!("{}m ago", secs / 60)
+            } else if secs < 86400 {
+                format!("{}h ago", secs / 3600)
+            } else {
+                format!("{}d ago", secs / 86400)
+            }
+        }
+    }
+}
+
+/// Quote an argument for display when it wouldn't survive a shell verbatim.
+/// Shared by every handoff builder (the sweep's, the story's) so the
+/// round-trip law tests parse exactly what the user sees.
+pub fn shell_quote(arg: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "/.-_:@%+=,".contains(c);
+    if !arg.is_empty() && arg.chars().all(safe) {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

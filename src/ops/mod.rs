@@ -26,6 +26,7 @@ pub mod selection;
 pub mod story;
 pub mod survey;
 pub mod sweep;
+pub mod telling;
 pub mod trail;
 pub mod worklist;
 
