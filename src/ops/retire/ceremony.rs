@@ -2,6 +2,9 @@
 
 use super::*;
 
+use crate::domain::story::StoryParams;
+use crate::ops::telling::TellingArtifact;
+
 // ---------------------------------------------------------------------------
 // The ceremony — plan, begin, bind
 // ---------------------------------------------------------------------------
@@ -179,13 +182,55 @@ pub struct BoundBook {
 }
 
 impl RetireCeremony {
+    /// Compose the reference-voiced telling over the ceremony's own story —
+    /// one fetch: the gate, the book, and the telling read the same world
+    /// by construction. The interface offers this draft to the user's
+    /// editor before binding; the finalized text comes back through `bind`.
+    pub fn compose_telling(&self, conn: &Connection) -> Result<String> {
+        let params = StoryParams::default();
+        let report = ops::story::report_over(conn, &self.story, &params)?;
+        // Where the chosen content lives now: the recorded destinations,
+        // aggregated the same way every "where" line is.
+        let dirs: Vec<(&str, i64)> = self
+            .story
+            .extractions
+            .iter()
+            .map(|e| (e.destination_path.as_str(), e.files))
+            .collect();
+        let bases: Vec<&str> = self
+            .story
+            .roots
+            .iter()
+            .filter(|r| r.role == "archive")
+            .map(|r| r.path.as_str())
+            .collect();
+        let frame = ops::telling::TellingFrame {
+            title: ops::telling::suggested_title(
+                &self.story.root.path,
+                self.story.root.comment.as_deref(),
+            ),
+            retirement_reason: self.reason.clone(),
+            bound_on: self.now,
+            canon_version: env!("CARGO_PKG_VERSION").to_string(),
+            archived_destinations: crate::domain::story::aggregate_locations(
+                &dirs,
+                &bases,
+                params.where_cap,
+            ),
+        };
+        Ok(ops::telling::compose_reference_telling(&report, &frame))
+    }
+
     /// The bind movement: shelf, compile to temp, verify, place, pointer.
     ///
     /// Verify-before-touch is the load-bearing order: the book is verified at
     /// its temp name, so a standing book is never touched until the fresh one
     /// is proven whole — and the placement rename is what commits a book, so
     /// anything still at a temp name was structurally never placed.
-    pub fn bind(&mut self, conn: &Connection) -> Result<BoundBook> {
+    ///
+    /// The telling is a required parameter: a ceremony structurally cannot
+    /// bind a dossier.
+    pub fn bind(&mut self, conn: &Connection, telling: TellingArtifact) -> Result<BoundBook> {
         if !self.plan.shelf_exists {
             std::fs::create_dir_all(&self.plan.shelf).with_context(|| {
                 format!(
@@ -215,6 +260,7 @@ impl RetireCeremony {
                 now: self.now,
                 dest_dir: self.plan.temp_dir.clone(),
                 ceremony_decision_id: self.recorder.decision_id(),
+                telling: Some(telling),
             },
         )?;
         verify_book(&self.plan.temp_dir).with_context(|| {

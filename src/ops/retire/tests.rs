@@ -1,6 +1,15 @@
 use super::*;
+use crate::ops::telling::TellingArtifact;
 use crate::repo::db::open_in_memory_for_test;
 use crate::repo::insert_test_root;
+
+fn test_telling() -> TellingArtifact {
+    TellingArtifact {
+        text: "# a test telling\n".to_string(),
+        hand_edited: false,
+        params: crate::domain::story::StoryParams::default(),
+    }
+}
 
 /// A bound retirement of a (since-removed) root: decision with an
 /// artifact reference + a scope-row path snapshot — the shape the
@@ -626,6 +635,7 @@ fn compile_to(conn: &Connection, root_id: i64, dest: &std::path::Path) -> Compil
             now: 1_753_000_000,
             dest_dir: dest.to_path_buf(),
             ceremony_decision_id: None,
+            telling: Some(test_telling()),
         },
     )
     .unwrap()
@@ -1126,6 +1136,96 @@ fn verify_book_catches_a_missing_gathered_ledger() {
 }
 
 #[test]
+fn the_compile_binds_and_claims_the_story() {
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let book_dir = tempfile::tempdir().unwrap();
+    let dest = book_dir.path().join("book");
+    compile_to(&conn, root_id, &dest);
+
+    // The telling on disk, verbatim.
+    assert_eq!(
+        std::fs::read_to_string(dest.join("story.md")).unwrap(),
+        "# a test telling\n"
+    );
+    // Claimed in meta, with the honesty marker and the reading settings.
+    let meta = std::fs::read_to_string(dest.join("meta.toml")).unwrap();
+    assert!(meta.contains("[story]"), "{meta}");
+    assert!(meta.contains("file = \"story.md\""));
+    assert!(meta.contains("hand_edited = false"));
+    assert!(meta.contains("signature_tolerance"));
+    // The README opens as a story's front door and bridges the words.
+    let readme = std::fs::read_to_string(dest.join("README.md")).unwrap();
+    assert!(readme.contains("Start with story.md"));
+    assert!(readme.contains("- story.md — the story as told"));
+    assert!(readme.contains("- chosen for the archive = archived"));
+    assert!(readme.contains("- let go = excluded"));
+
+    verify_book(&dest).unwrap();
+}
+
+#[test]
+fn a_claimed_but_missing_or_empty_story_fails_verification() {
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let book_dir = tempfile::tempdir().unwrap();
+    let dest = book_dir.path().join("book");
+    compile_to(&conn, root_id, &dest);
+    verify_book(&dest).unwrap();
+
+    std::fs::remove_file(dest.join("story.md")).unwrap();
+    let err = verify_book(&dest).unwrap_err();
+    assert!(err.to_string().contains("story"), "{err}");
+
+    std::fs::write(dest.join("story.md"), "").unwrap();
+    let err = verify_book(&dest).unwrap_err();
+    assert!(err.to_string().contains("story"), "{err}");
+}
+
+#[test]
+fn a_book_without_a_story_claim_still_verifies() {
+    // Pre-telling books carry no [story] table — they verify unchanged
+    // (verification requires claimed artifacts, never retro-claims).
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let book_dir = tempfile::tempdir().unwrap();
+    let dest = book_dir.path().join("book");
+    let story = fetch_root_story(&conn, root_id).unwrap();
+    compile_book(
+        &conn,
+        &story,
+        &CompileParams {
+            reason: None,
+            now: 1_753_000_000,
+            dest_dir: dest.clone(),
+            ceremony_decision_id: None,
+            telling: None,
+        },
+    )
+    .unwrap();
+    assert!(!dest.join("story.md").exists());
+    let meta = std::fs::read_to_string(dest.join("meta.toml")).unwrap();
+    assert!(!meta.contains("[story]"));
+    verify_book(&dest).unwrap();
+}
+
+#[test]
+fn the_telling_reads_the_ceremony_snapshot() {
+    // The one-fetch law: the composed telling reflects the world the
+    // ceremony fetched at review time — a concurrent write after `begin`
+    // must not leak into the story the user confirms and binds.
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+
+    insert_source(&conn, root_id, "late/arrival.jpg", None, true, false, None);
+
+    let draft = ceremony.compose_telling(&conn).unwrap();
+    assert!(
+        !draft.contains("arrival.jpg") && !draft.contains("late/"),
+        "a post-begin source leaked into the telling:\n{draft}"
+    );
+    assert!(draft.contains("## The places"));
+    assert!(draft.contains("## Where everything went"));
+}
+
+#[test]
 fn scale_ceremony_round_trips_past_the_chunking_boundary() {
     // The whole ceremony — bind (compile + verify + place) and release —
     // over a root past the SQL chunking boundary.
@@ -1160,7 +1260,7 @@ fn scale_ceremony_round_trips_past_the_chunking_boundary() {
     conn.execute_batch("COMMIT").unwrap();
 
     let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
-    let bound = ceremony.bind(&conn).unwrap();
+    let bound = ceremony.bind(&conn, test_telling()).unwrap();
     assert_eq!(bound.entry_count, 2000);
     let meta: toml::Value =
         toml::from_str(&std::fs::read_to_string(bound.dir.join("meta.toml")).unwrap()).unwrap();
@@ -1197,6 +1297,7 @@ fn existing_compile_target_is_an_explicit_collision() {
             now: 0,
             dest_dir: dest,
             ceremony_decision_id: None,
+            telling: None,
         },
     )
     .unwrap_err();
@@ -1330,7 +1431,7 @@ fn bind_places_a_verified_book_and_records_the_pointer() {
     let (conn, _src, arch, root_id) = every_fate_fixture();
     let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
 
-    let bound = ceremony.bind(&conn).unwrap();
+    let bound = ceremony.bind(&conn, test_telling()).unwrap();
 
     assert!(bound.dir.is_dir());
     assert_eq!(bound.entry_count, 8);
@@ -1406,7 +1507,7 @@ fn bind_keeps_its_own_in_flight_decision_out_of_the_timeline() {
     let (conn, _src, _arch, root_id) = every_fate_fixture();
     let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
 
-    let bound = ceremony.bind(&conn).unwrap();
+    let bound = ceremony.bind(&conn, test_telling()).unwrap();
 
     let timeline = std::fs::read_to_string(bound.dir.join("timeline.md")).unwrap();
     assert!(!timeline.contains("roots_retire"), "{timeline}");
@@ -1416,11 +1517,11 @@ fn bind_keeps_its_own_in_flight_decision_out_of_the_timeline() {
 fn a_prior_attempts_decision_renders_in_the_next_books_timeline() {
     let (conn, _src, _arch, root_id) = every_fate_fixture();
     let mut first = begin_with(&conn, root_id, RecordingMode::Full);
-    first.bind(&conn).unwrap();
+    first.bind(&conn, test_telling()).unwrap();
     first.abandon(&conn);
 
     let mut second = begin_with(&conn, root_id, RecordingMode::Full);
-    let bound = second.bind(&conn).unwrap();
+    let bound = second.bind(&conn, test_telling()).unwrap();
 
     // The abandoned attempt is history and narrates itself; only the
     // current in-flight decision stays out.
@@ -1437,7 +1538,7 @@ fn bind_clears_a_leftover_temp_compile() {
     std::fs::create_dir_all(&ceremony.plan.temp_dir).unwrap();
     std::fs::write(ceremony.plan.temp_dir.join("junk.txt"), "leftover").unwrap();
 
-    let bound = ceremony.bind(&conn).unwrap();
+    let bound = ceremony.bind(&conn, test_telling()).unwrap();
 
     verify_book(&bound.dir).unwrap();
     assert!(!ceremony.plan.temp_dir.exists());
@@ -1451,7 +1552,7 @@ fn shelf_readme_is_written_once_and_kept() {
     std::fs::write(shelf.join("README.md"), "my own shelf notes\n").unwrap();
 
     let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
-    ceremony.bind(&conn).unwrap();
+    ceremony.bind(&conn, test_telling()).unwrap();
 
     let readme = std::fs::read_to_string(shelf.join("README.md")).unwrap();
     assert_eq!(readme, "my own shelf notes\n");
@@ -1463,14 +1564,14 @@ fn bind_replaces_a_standing_same_root_book_without_residue() {
 
     // First ceremony binds, then is abandoned before release.
     let mut first = begin_with(&conn, root_id, RecordingMode::Full);
-    let first_book = first.bind(&conn).unwrap();
+    let first_book = first.bind(&conn, test_telling()).unwrap();
     let sentinel = first_book.dir.join("meta.toml");
     let first_meta = std::fs::read_to_string(&sentinel).unwrap();
 
     // The re-run converges: same name, fresh compile, old book gone.
     let mut second = begin_with(&conn, root_id, RecordingMode::Full);
     assert!(second.plan.replaces_existing);
-    let second_book = second.bind(&conn).unwrap();
+    let second_book = second.bind(&conn, test_telling()).unwrap();
 
     assert!(second_book.replaced_previous);
     assert_eq!(second_book.dir, first_book.dir);
@@ -1513,7 +1614,7 @@ fn bind_failure_at_placement_leaves_the_verified_temp_standing() {
     std::fs::create_dir_all(&ceremony.plan.final_dir).unwrap();
     std::fs::write(ceremony.plan.final_dir.join("interloper.txt"), "mine").unwrap();
 
-    let err = ceremony.bind(&conn).unwrap_err();
+    let err = ceremony.bind(&conn, test_telling()).unwrap_err();
     assert!(err.to_string().contains("Could not place"), "{err:#}");
 
     // The verified compile still stands at its temp name for inspection…
@@ -1528,7 +1629,7 @@ fn bind_under_recording_off_places_the_book_and_indexes_nothing() {
     let (conn, _src, _arch, root_id) = every_fate_fixture();
     let mut ceremony = begin_with(&conn, root_id, RecordingMode::Off);
 
-    let bound = ceremony.bind(&conn).unwrap();
+    let bound = ceremony.bind(&conn, test_telling()).unwrap();
 
     verify_book(&bound.dir).unwrap();
     assert!(bound.warnings.is_empty(), "{:?}", bound.warnings);
@@ -1547,7 +1648,7 @@ fn retire_decision_row(conn: &Connection, ceremony: &RetireCeremony) -> Decision
 fn full_ceremony_releases_the_root_and_completes_the_decision() {
     let (conn, _src, _arch, root_id) = every_fate_fixture();
     let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
-    let bound = ceremony.bind(&conn).unwrap();
+    let bound = ceremony.bind(&conn, test_telling()).unwrap();
     let rows_before = repo::source::count_all_by_root(&conn, root_id).unwrap();
 
     // Between review and release, the only new world state is the
@@ -1590,7 +1691,7 @@ fn full_ceremony_releases_the_root_and_completes_the_decision() {
 fn abandon_after_bind_leaves_root_and_book_standing() {
     let (conn, _src, _arch, root_id) = every_fate_fixture();
     let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
-    let bound = ceremony.bind(&conn).unwrap();
+    let bound = ceremony.bind(&conn, test_telling()).unwrap();
 
     let abandoned = ceremony.abandon(&conn);
 
@@ -1616,7 +1717,7 @@ fn abandon_after_bind_leaves_root_and_book_standing() {
 fn release_stops_when_a_source_row_appeared_since_review() {
     let (conn, _src, _arch, root_id) = every_fate_fixture();
     let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
-    let bound = ceremony.bind(&conn).unwrap();
+    let bound = ceremony.bind(&conn, test_telling()).unwrap();
 
     // A concurrent scan indexed a new file between review and release.
     insert_source(&conn, root_id, "new/arrival.jpg", None, true, false, None);
@@ -1641,7 +1742,7 @@ fn release_stops_when_a_source_row_appeared_since_review() {
 fn release_stops_when_a_foreign_decision_touched_the_root() {
     let (conn, _src, _arch, root_id) = every_fate_fixture();
     let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
-    let bound = ceremony.bind(&conn).unwrap();
+    let bound = ceremony.bind(&conn, test_telling()).unwrap();
 
     // Another process's decision landed a scope row on this root.
     let foreign = insert_decision(&conn, "exclude_set", 9_999);
@@ -1665,7 +1766,7 @@ fn off_then_full_rerun_converges_from_disk() {
 
     // First ceremony under Off: the book binds, nothing is indexed.
     let mut first = begin_with(&conn, root_id, RecordingMode::Off);
-    let first_book = first.bind(&conn).unwrap();
+    let first_book = first.bind(&conn, test_telling()).unwrap();
     first.abandon(&conn);
     assert_eq!(count_retire_decisions(&conn), 0);
 
@@ -1673,7 +1774,7 @@ fn off_then_full_rerun_converges_from_disk() {
     // detection is meta.toml-keyed, so no decision row is needed.
     let mut second = begin_with(&conn, root_id, RecordingMode::Full);
     assert!(second.plan.replaces_existing);
-    let second_book = second.bind(&conn).unwrap();
+    let second_book = second.bind(&conn, test_telling()).unwrap();
     assert_eq!(second_book.dir, first_book.dir);
 
     let outcome = second.release(&conn).unwrap();
@@ -1690,7 +1791,7 @@ fn interrupt_records_a_findable_interrupted_decision() {
     // Force a placement failure: an interloper at the final name.
     std::fs::create_dir_all(&ceremony.plan.final_dir).unwrap();
     std::fs::write(ceremony.plan.final_dir.join("interloper.txt"), "mine").unwrap();
-    let err = ceremony.bind(&conn).unwrap_err();
+    let err = ceremony.bind(&conn, test_telling()).unwrap_err();
 
     ceremony.interrupt(&conn, &format!("{err:#}"));
 

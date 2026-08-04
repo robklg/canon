@@ -24,6 +24,7 @@ use super::trail::{fate_posture, fate_transition, DecisionFamily, FateAspect, Po
 /// calibrated against the real archive 2026-08-04 across three root shapes
 /// (session journal `.claude/specs/2026-08-04-story-calibration-journal.md`);
 /// recalibration changes constants, never code paths.
+#[derive(Debug, Clone, Copy)]
 pub struct StoryParams {
     /// Children whose standing proportions differ by no more than this tell
     /// the same line and merge into their parent place.

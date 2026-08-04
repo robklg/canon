@@ -8,8 +8,10 @@
 //! writes into the book — arrives as its own voicing over this same
 //! composition; structure is computed once here so the two can never drift.
 
+use anyhow::{bail, Result};
+
 use crate::domain::format::{format_count, format_date, format_size, format_time_ago, shell_quote};
-use crate::domain::story::{ActGroup, LocationAggregate, StoryPlace};
+use crate::domain::story::{ActGroup, LocationAggregate, StoryParams, StoryPlace};
 use crate::ops::story::StoryReport;
 
 /// The two readers of the one composition. Structure — the place walk, the
@@ -186,14 +188,55 @@ pub fn suggested_title(root_path: &str, comment: Option<&str>) -> String {
 pub const FOREWORD_SENTINEL: &str = "[Write your foreword here — your own words about this \
 place, signed as you wish. Leave this line as it is and the section will be left out.]";
 
-/// The full placeholder section as composed — one constant, shared by the
-/// frame (which writes it) and the finalize step (which drops it verbatim
-/// or keeps whatever the user made of it). Exact match only.
-pub const FOREWORD_PLACEHOLDER_SECTION: &str = "## Foreword\n\n\
-[Write your foreword here — your own words about this \
-place, signed as you wish. Leave this line as it is and the section will be left out.]\n\n\
-*Written at the retirement by the person who made the decisions in this\n\
-book. Their words, unedited.*\n";
+/// The full placeholder section as composed — one derivation, shared by
+/// the frame (which writes it) and the finalize step (which drops it
+/// verbatim or keeps whatever the user made of it). Exact match only.
+pub fn foreword_placeholder_section() -> String {
+    format!(
+        "## Foreword\n\n{FOREWORD_SENTINEL}\n\n\
+         *Written at the retirement by the person who made the decisions in this\n\
+         book. Their words, unedited.*\n"
+    )
+}
+
+/// The telling as it goes to the compile: the finalized text and whether a
+/// human hand refined it. The text binds verbatim — the dossier beside it
+/// remains the machine truth (custody, not curation) — and the reading
+/// settings travel with it, stamped into the book's meta.
+pub struct TellingArtifact {
+    pub text: String,
+    /// True only when the finalized text differs from the finalized
+    /// composed draft — an honesty claim about the words, not a keystroke.
+    pub hand_edited: bool,
+    /// The story params that shaped this reading.
+    pub params: StoryParams,
+}
+
+/// Finalize a telling for binding: an untouched foreword placeholder
+/// section drops out cleanly (exact match only — anything the user made of
+/// it stays verbatim, never fuzzily repaired); an empty telling is refused
+/// — absence of the artifact is not a story.
+pub fn finalize_telling(text: &str) -> Result<String> {
+    let section = foreword_placeholder_section();
+    let with_break = format!("{section}\n");
+    let finalized = if let Some(pos) = text.find(&with_break) {
+        let mut out = String::with_capacity(text.len());
+        out.push_str(&text[..pos]);
+        out.push_str(&text[pos + with_break.len()..]);
+        out
+    } else if let Some(pos) = text.find(&section) {
+        let mut out = String::with_capacity(text.len());
+        out.push_str(&text[..pos]);
+        out.push_str(&text[pos + section.len()..]);
+        out
+    } else {
+        text.to_string()
+    };
+    if finalized.trim().is_empty() {
+        bail!("The story is empty — a book must not bind an empty telling.");
+    }
+    Ok(finalized)
+}
 
 /// The complete reference-voiced telling — the text of the book's
 /// `story.md` as composed. Every sentence derives from records; absence is
@@ -248,7 +291,7 @@ pub fn compose_reference_telling(report: &StoryReport, frame: &TellingFrame) -> 
     lines.push(String::new());
 
     // The foreword placeholder — the one voice that isn't Canon's.
-    lines.push(FOREWORD_PLACEHOLDER_SECTION.trim_end().to_string());
+    lines.push(foreword_placeholder_section().trim_end().to_string());
     lines.push(String::new());
 
     // The key to the map, and the traceability claim — an honesty
@@ -287,15 +330,20 @@ pub fn compose_reference_telling(report: &StoryReport, frame: &TellingFrame) -> 
     // The tally: every file ever held, told by where it went.
     lines.push("## Where everything went".into());
     lines.push(String::new());
-    match account.ever_indexed() {
-        Some(n) if n > 0 => lines.push(format!(
-            "Over its time in the index, this place held {} files:",
-            format_count(n)
-        )),
-        _ => lines.push("This is where its files went:".into()),
+    let tally = tally_lines(account, &frame.archived_destinations);
+    if tally.is_empty() {
+        lines.push("It never held a file — there is nothing to count.".into());
+    } else {
+        match account.ever_indexed() {
+            Some(n) if n > 0 => lines.push(format!(
+                "Over its time in the index, this place held {} files:",
+                format_count(n)
+            )),
+            _ => lines.push("This is where its files went:".into()),
+        }
+        lines.push(String::new());
+        lines.extend(tally);
     }
-    lines.push(String::new());
-    lines.extend(tally_lines(account, &frame.archived_destinations));
     let gaps = gaps_paragraph(account);
     if !gaps.is_empty() {
         lines.push(String::new());
@@ -1540,6 +1588,59 @@ mod tests {
         );
         assert_eq!(suggested_title("/volumes/x/mydisk", None), "mydisk");
         assert_eq!(suggested_title("/volumes/x/mydisk", Some("  ")), "mydisk");
+    }
+
+    // -----------------------------------------------------------------
+    // Finalize — the exact-match sentinel discipline.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn finalize_drops_the_untouched_foreword_section() {
+        let text = compose_reference_telling(&report(place("")), &frame());
+        let finalized = finalize_telling(&text).unwrap();
+        assert!(!finalized.contains("## Foreword"));
+        assert!(!finalized.contains(FOREWORD_SENTINEL));
+        assert!(
+            !finalized.contains("\n\n\n"),
+            "no blank-line run left behind:\n{finalized}"
+        );
+        assert!(finalized.contains("## Reading the entries"));
+    }
+
+    #[test]
+    fn finalize_keeps_an_edited_foreword_verbatim() {
+        let text = compose_reference_telling(&report(place("")), &frame())
+            .replace(FOREWORD_SENTINEL, "> my own words about this place\n\n— me");
+        let finalized = finalize_telling(&text).unwrap();
+        assert!(finalized.contains("## Foreword"));
+        assert!(finalized.contains("> my own words about this place"));
+        assert!(finalized.contains("*Written at the retirement"));
+    }
+
+    #[test]
+    fn finalize_never_fuzzily_repairs_a_touched_sentinel() {
+        // One character changed inside the placeholder: exact match fails,
+        // the section stays exactly as the user left it.
+        let text = compose_reference_telling(&report(place("")), &frame())
+            .replace("Write your foreword", "write your foreword");
+        let finalized = finalize_telling(&text).unwrap();
+        assert!(finalized.contains("## Foreword"));
+        assert!(finalized.contains("write your foreword"));
+    }
+
+    #[test]
+    fn finalize_refuses_an_empty_telling() {
+        assert!(finalize_telling("").is_err());
+        assert!(finalize_telling("  \n\n \n").is_err());
+        // A telling that is nothing but the untouched placeholder is empty
+        // once the section drops.
+        assert!(finalize_telling(&foreword_placeholder_section()).is_err());
+    }
+
+    #[test]
+    fn finalize_without_a_foreword_section_is_identity() {
+        let text = "# a place\n\nits story\n";
+        assert_eq!(finalize_telling(text).unwrap(), text);
     }
 
     #[test]

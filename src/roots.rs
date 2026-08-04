@@ -382,7 +382,25 @@ pub fn retire(
         },
     );
 
-    let bound = match ceremony_state.bind(conn) {
+    // The story as it will bind — composed over the ceremony's own fetch.
+    let telling = match ceremony_state
+        .compose_telling(conn)
+        .and_then(|draft| ops::telling::finalize_telling(&draft))
+    {
+        Ok(text) => ops::telling::TellingArtifact {
+            text,
+            hand_edited: false,
+            params: StoryParams::default(),
+        },
+        Err(e) => {
+            for warning in ceremony_state.interrupt(conn, &format!("{e:#}")) {
+                eprintln!("{warning}");
+            }
+            return Err(e);
+        }
+    };
+
+    let bound = match ceremony_state.bind(conn, telling) {
         Ok(bound) => bound,
         Err(e) => {
             for warning in ceremony_state.interrupt(conn, &format!("{e:#}")) {

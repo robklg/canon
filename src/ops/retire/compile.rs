@@ -21,6 +21,11 @@ pub struct CompileParams {
     /// `identity.decision_id`, the id the index references this retirement
     /// by, readable from the book alone.
     pub ceremony_decision_id: Option<i64>,
+    /// The story as told — written into the book as `story.md`, claimed in
+    /// `meta.toml`, required by verification. The ceremony always passes
+    /// one (its `bind` takes the artifact as a required parameter); `None`
+    /// keeps the direct compile testable and matches pre-telling books.
+    pub telling: Option<ops::telling::TellingArtifact>,
 }
 
 #[derive(Debug)]
@@ -119,6 +124,12 @@ pub fn compile_book(
     write_timeline(&params.dest_dir, &trail, params.ceremony_decision_id)?;
     write_notes(&params.dest_dir, &notes, &story.roots)?;
     let ledger_files = gather_ledger(&params.dest_dir, story, &mut gaps)?;
+    // The story before the meta that claims it, and both before the README
+    // (written last — a partial compile stays self-evident).
+    if let Some(telling) = &params.telling {
+        std::fs::write(params.dest_dir.join("story.md"), &telling.text)
+            .context("Failed to write the book's story")?;
+    }
     let counts = fate_counts(&entries);
     write_meta(
         &params.dest_dir,
@@ -474,6 +485,8 @@ struct BookMeta<'a> {
     posture: MetaPosture,
     counts: &'a MetaCounts,
     ledger: MetaLedger,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    story: Option<MetaStory>,
 }
 
 #[derive(Serialize)]
@@ -550,6 +563,20 @@ struct MetaLedger {
     files: usize,
 }
 
+/// The telling's claim: the artifact verification requires, plus the
+/// reading settings that shaped it (additive within format v1). The prose
+/// itself is never recounted — the dossier is the verified record; a
+/// hand-refined telling is marked, never passed off as pure derivation.
+#[derive(Serialize)]
+struct MetaStory {
+    file: &'static str,
+    hand_edited: bool,
+    signature_tolerance: f64,
+    dust_floor_files: i64,
+    dust_floor_bytes: i64,
+    where_cap: usize,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_meta(
     dir: &Path,
@@ -611,6 +638,14 @@ fn write_meta(
             gathered: ledger_files.is_some(),
             files: ledger_files.unwrap_or(0),
         },
+        story: params.telling.as_ref().map(|t| MetaStory {
+            file: "story.md",
+            hand_edited: t.hand_edited,
+            signature_tolerance: t.params.signature_tolerance,
+            dust_floor_files: t.params.dust_floor_files,
+            dust_floor_bytes: t.params.dust_floor_bytes,
+            where_cap: t.params.where_cap,
+        }),
     };
     let body = toml::to_string_pretty(&meta).context("Failed to serialize meta.toml")?;
     std::fs::write(dir.join("meta.toml"), body)?;
@@ -633,6 +668,14 @@ fn write_readme(
          without Canon. Compiled {}.\n\n",
         iso_date(params.now)
     ));
+    if params.telling.is_some() {
+        // The front door names the way in: the book opens as a story, not
+        // a dossier.
+        out.push_str(
+            "Start with story.md — the story as told at the retirement. The files\n\
+             listed below are the record beneath it.\n\n",
+        );
+    }
 
     out.push_str("## Identity\n\n");
     out.push_str(&format!("- path: {}\n", story.root.path));
@@ -740,6 +783,9 @@ fn write_readme(
     }
 
     out.push_str("## Contents\n\n");
+    if params.telling.is_some() {
+        out.push_str("- story.md — the story as told, written at the retirement.\n");
+    }
     out.push_str(
         "- inventory.jsonl — every source this root ever had, one JSON line each,\n\
          \x20 sorted by path: size, dates, hash where known, and fate.\n",
@@ -754,6 +800,22 @@ fn write_readme(
         None => out.push_str("- ledger/ — not gathered (see gaps below).\n"),
     }
     out.push_str("- meta.toml — identity, account, counts, and gaps, machine-readable.\n\n");
+
+    if params.telling.is_some() {
+        // The Canon-word mapping lives here, beside the machine-facing
+        // material — the story defines its terms once, where first used,
+        // and never carries a glossary.
+        out.push_str("## The story's words\n\n");
+        out.push_str(
+            "story.md speaks plainly; the records beneath it use Canon's own words.\n\
+             The mapping:\n\n",
+        );
+        out.push_str("- chosen for the archive = archived\n");
+        out.push_str("- let go = excluded\n");
+        out.push_str("- preserved by copies in the archive = covered\n");
+        out.push_str("- no known copy in the archive = unresolved\n");
+        out.push_str("- empty file = contentless\n\n");
+    }
 
     out.push_str("## Gaps\n\n");
     if gaps.is_empty() {
@@ -782,6 +844,14 @@ struct MetaDoc {
     gaps: Vec<String>,
     counts: MetaCounts,
     ledger: MetaLedger,
+    /// Absent on books bound before the telling — they verify unchanged.
+    #[serde(default)]
+    story: Option<MetaStoryDoc>,
+}
+
+#[derive(Deserialize)]
+struct MetaStoryDoc {
+    file: String,
 }
 
 #[derive(Deserialize)]
@@ -883,6 +953,22 @@ pub fn verify_book(dir: &Path) -> Result<BookVerification> {
         }
     } else if meta.gaps.is_empty() {
         bail!("Book says the ledger was not gathered but records no gap explaining it");
+    }
+
+    // The telling is a claimed artifact: it must exist and hold text.
+    // Verification anchors on the dossier — the counts recounted above are
+    // the inventory's; the story's prose is the user's (it may be
+    // hand-refined at the binding) and is never recounted.
+    if let Some(story) = &meta.story {
+        let len = std::fs::metadata(dir.join(&story.file))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if len == 0 {
+            bail!(
+                "Book claims its story at {} but the file is missing or empty",
+                story.file
+            );
+        }
     }
 
     Ok(BookVerification {
