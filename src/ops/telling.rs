@@ -168,6 +168,13 @@ pub struct TellingFrame {
     /// decisions' recorded destinations (empty → the clause is omitted,
     /// never guessed).
     pub archived_destinations: LocationAggregate,
+    /// Receipts standing in the drive's own ledger (`.canon-ledger/`) when
+    /// the telling composes: `Some(n)` counted from the same source the
+    /// bind's gather reads; `None` when the root is unreachable (the
+    /// compile records the gather gap). Drives the trace-chain paragraph's
+    /// drive-local sentence — archive-side receipts are never in the book,
+    /// and the paragraph says which ledger holds what.
+    pub drive_ledger: Option<usize>,
 }
 
 /// The suggested book title: the place's own name, with its comment when
@@ -316,10 +323,30 @@ pub fn compose_reference_telling(report: &StoryReport, frame: &TellingFrame) -> 
     lines.push("appearance; later entries cite the bare number. `note:` lines were written".into());
     lines.push("at the folder, while the work was going on.".into());
     lines.push(String::new());
+    // The which-ledger law (vision ruling 2026-08-05): a source root's
+    // ledger only ever holds deletion receipts — apply and exclusion
+    // receipts live at the archive. The paragraph names where each kind
+    // lives; it never claims the book's `ledger/` holds the receipts for
+    // the decisions cited above.
     lines.push("Nothing here is a summary you have to take on faith. `timeline.md` lists".into());
-    lines.push("every decision with its date and words, `inventory.jsonl` names every".into());
-    lines.push("single file and its fate, and `ledger/` holds the original receipts, filed".into());
-    lines.push("by the same numbers.".into());
+    lines.push("every decision with its date and words, and `inventory.jsonl` names every".into());
+    lines.push("single file and its fate. The receipts behind the archiving and letting-go".into());
+    lines
+        .push("decisions live in the archive's own ledger — the `.canon-ledger/` folder at".into());
+    lines.push("the archive root, beside the content they concern.".into());
+    match frame.drive_ledger {
+        Some(n) if n > 0 => {
+            lines.push(
+                "`ledger/` here holds the receipts that lived on this drive itself: the".into(),
+            );
+            lines.push("record of what was lost here.".into());
+        }
+        Some(_) => lines.push("This drive kept no receipts of its own.".into()),
+        None => {
+            lines.push("The drive's own receipts could not be gathered — see the gaps in".into());
+            lines.push("`README.md`.".into());
+        }
+    }
     lines.push(String::new());
 
     // The places — the map itself, always full.
@@ -368,7 +395,11 @@ pub fn compose_reference_telling(report: &StoryReport, frame: &TellingFrame) -> 
         frame.canon_version
     ));
     lines.push("retirement, with the reading settings of its day. The facts beneath it".into());
-    lines.push("live beside it — `inventory.jsonl`, `timeline.md`, `notes.md`, `ledger/` —".into());
+    lines.push(if matches!(frame.drive_ledger, Some(n) if n > 0) {
+        "live beside it — `inventory.jsonl`, `timeline.md`, `notes.md`, `ledger/` —".into()
+    } else {
+        "live beside it — `inventory.jsonl`, `timeline.md`, `notes.md` —".to_string()
+    });
     lines.push("and another telling could be drawn from them. This is the one written at".into());
     lines.push("the letting-go.".into());
 
@@ -1451,6 +1482,7 @@ mod tests {
             bound_on: 0,
             canon_version: "0.9.0".to_string(),
             archived_destinations: locations(&[("/archive/media", 5)]),
+            drive_ledger: Some(3),
         }
     }
 
@@ -1498,6 +1530,51 @@ mod tests {
         assert!(text.contains("3 files · let go   #57 · \"installer junk\""));
         assert!(text.contains("written by Canon v0.9.0"));
         assert!(text.contains("This is the one written at\nthe letting-go."));
+    }
+
+    #[test]
+    fn the_trace_chain_names_the_archives_ledger() {
+        // The which-ledger law: the paragraph says where each kind of
+        // receipt lives — never that `ledger/` holds the cited decisions'
+        // receipts (a source root's ledger only ever holds deletion
+        // receipts).
+        let text = compose_reference_telling(&report_with(place(""), full_account()), &frame());
+        assert!(text.contains("The receipts behind the archiving and letting-go"));
+        assert!(text.contains(
+            "decisions live in the archive's own ledger — the `.canon-ledger/` folder at"
+        ));
+        assert!(
+            text.contains("`ledger/` here holds the receipts that lived on this drive itself: the")
+        );
+        assert!(text.contains("record of what was lost here."));
+        assert!(!text.contains("holds the original receipts"));
+        assert!(text.contains("`inventory.jsonl`, `timeline.md`, `notes.md`, `ledger/` —"));
+    }
+
+    #[test]
+    fn an_empty_drive_ledger_is_said_plainly() {
+        let f = TellingFrame {
+            drive_ledger: Some(0),
+            ..frame()
+        };
+        let text = compose_reference_telling(&report_with(place(""), full_account()), &f);
+        assert!(text.contains("This drive kept no receipts of its own."));
+        assert!(!text.contains("`ledger/` here holds"));
+        // The closing list of facts names only what stands in the book.
+        assert!(text.contains("`inventory.jsonl`, `timeline.md`, `notes.md` —"));
+        assert!(!text.contains("`notes.md`, `ledger/`"));
+    }
+
+    #[test]
+    fn an_unreachable_drive_ledger_points_at_the_gaps() {
+        let f = TellingFrame {
+            drive_ledger: None,
+            ..frame()
+        };
+        let text = compose_reference_telling(&report_with(place(""), full_account()), &f);
+        assert!(text.contains("The drive's own receipts could not be gathered — see the gaps in"));
+        assert!(!text.contains("`ledger/` here holds"));
+        assert!(!text.contains("`notes.md`, `ledger/`"));
     }
 
     #[test]

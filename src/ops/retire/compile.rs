@@ -446,6 +446,12 @@ fn gather_ledger(dir: &Path, story: &RootStory, gaps: &mut Vec<String>) -> Resul
         return Ok(Some(0));
     }
     let count = ops::fs::copy_tree(&src, &dir.join("ledger"))?;
+    if count == 0 {
+        // An empty gather leaves no directory: the book never lists (or
+        // holds) a `ledger/` with nothing in it — README and story say the
+        // drive kept no receipts of its own.
+        let _ = std::fs::remove_dir(dir.join("ledger"));
+    }
     Ok(Some(count))
 }
 
@@ -793,8 +799,13 @@ fn write_readme(
     out.push_str("- timeline.md — every decision that touched this root, with reasons.\n");
     out.push_str("- notes.md — the notes bound beside the timeline.\n");
     match ledger_files {
+        Some(0) => out.push_str(
+            "- (no ledger/ — the drive kept no receipts of its own; archiving and\n\
+             \x20 letting-go receipts live in the archive's own ledger.)\n",
+        ),
         Some(count) => out.push_str(&format!(
-            "- ledger/ — the drive-local receipts, gathered verbatim ({} files).\n",
+            "- ledger/ — the receipts that lived on the drive itself (what was lost\n\
+             \x20 here), gathered verbatim ({} files).\n",
             format_count(count as i64)
         )),
         None => out.push_str("- ledger/ — not gathered (see gaps below).\n"),
@@ -976,7 +987,7 @@ pub fn verify_book(dir: &Path) -> Result<BookVerification> {
     })
 }
 
-fn count_files(dir: &Path) -> Result<usize> {
+pub(super) fn count_files(dir: &Path) -> Result<usize> {
     if !dir.is_dir() {
         return Ok(0);
     }

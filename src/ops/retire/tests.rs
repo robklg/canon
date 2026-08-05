@@ -855,6 +855,31 @@ fn gather_copies_the_ledger_verbatim() {
 }
 
 #[test]
+fn an_empty_gather_leaves_no_ledger_dir_and_says_so() {
+    // The old-disk shape: a reachable root whose `.canon-ledger/` is empty (or
+    // absent). The book lists nothing that doesn't exist — no `ledger/`
+    // directory, a README line stating the plain absence and where the
+    // archiving/letting-go receipts actually live — and still verifies.
+    let conn = open_in_memory_for_test();
+    let src_dir = tempfile::tempdir().unwrap();
+    let book_dir = tempfile::tempdir().unwrap();
+    let root_id = insert_test_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+    insert_test_root(&conn, "/archive", "archive", false);
+    std::fs::create_dir_all(src_dir.path().join(".canon-ledger")).unwrap();
+
+    let dest = book_dir.path().join("book");
+    let book = compile_to(&conn, root_id, &dest);
+
+    assert_eq!(book.ledger_files, Some(0));
+    assert!(!dest.join("ledger").exists());
+    let readme = std::fs::read_to_string(dest.join("README.md")).unwrap();
+    assert!(readme.contains("(no ledger/ — the drive kept no receipts of its own"));
+    assert!(readme.contains("letting-go receipts live in the archive's own ledger.)"));
+    assert!(!readme.contains("gathered verbatim (0 files)"));
+    verify_book(&dest).unwrap();
+}
+
+#[test]
 fn unreachable_root_records_the_gather_gap_and_still_compiles() {
     let conn = open_in_memory_for_test();
     let book_dir = tempfile::tempdir().unwrap();

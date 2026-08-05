@@ -204,6 +204,16 @@ impl RetireCeremony {
             .filter(|r| r.role == "archive")
             .map(|r| r.path.as_str())
             .collect();
+        // What stands in the drive's own ledger — the same discriminant and
+        // source the bind's gather reads, so the paragraph never claims
+        // receipts the gather won't find.
+        let drive_ledger = if self.story.reachable {
+            Some(super::compile::count_files(
+                &Path::new(&self.story.root.path).join(".canon-ledger"),
+            )?)
+        } else {
+            None
+        };
         let frame = ops::telling::TellingFrame {
             title: ops::telling::suggested_title(
                 &self.story.root.path,
@@ -217,6 +227,7 @@ impl RetireCeremony {
                 &bases,
                 params.where_cap,
             ),
+            drive_ledger,
         };
         Ok(ops::telling::compose_reference_telling(&report, &frame))
     }
