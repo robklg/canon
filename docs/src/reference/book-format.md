@@ -14,7 +14,7 @@ photos-backup-2026-08-02/
 ├── inventory.jsonl   every source the root ever had, with fates
 ├── timeline.md       every decision that touched the root, with reasons
 ├── notes.md          the notes, bound beside the timeline
-├── ledger/           the drive-local receipts, gathered verbatim
+├── ledger/           the receipts that lived on the drive (absent when it kept none)
 └── meta.toml         identity, account, counts, gaps — machine-readable
 ```
 
@@ -35,7 +35,10 @@ story`](../commands/roots/story.md) renders live, re-voiced for a reader with no
 Canon and no memory of the place: what was on it, what was chosen for the archive
 and where it lives now, what was let go and why, in plain words. It opens by
 orienting (what this is, dated), explains how to read its entries, tells the
-places in full — a bound story is never capped — tallies where everything went,
+places in full — a bound story is never capped — tallies where everything went
+(stating exactly, when files copied to the archive were later dismissed here, by
+how much the tally's lines overlap its total — the registers overlap
+deliberately, and the story says so rather than reading as a partition),
 states its gaps in prose (left open on purpose: seen, weighed, accepted), and
 closes with a last page. It names itself **one telling of the record** — another
 telling could be drawn from the facts beside it; this is the one written at the
@@ -109,11 +112,19 @@ deletion safe.
 
 ## ledger/
 
-The root's drive-local `.canon-ledger/` receipts, copied verbatim with filenames and
-timestamps preserved — so `previous_decision_id` chains inside the receipts remain
-walkable from disk into the book, without Canon. If the drive was unreachable at
-compile time, this directory is absent and the gap is recorded in `meta.toml` and the
-README.
+The receipts that lived on the drive itself — the root's own `.canon-ledger/`, copied
+verbatim with filenames and timestamps preserved, so `previous_decision_id` chains
+inside the receipts remain walkable from disk into the book, without Canon. By the
+receipt placement principle a source root's ledger only ever holds **deletion
+receipts**: the record of what was lost there. The receipts behind archiving and
+letting-go decisions live in the archive's own ledger (`.canon-ledger/` at the
+archive root), beside the content they concern — the book points there rather than
+copying them; the story and timeline already carry every decision in full.
+
+When the drive kept no receipts of its own, no `ledger/` directory is written and
+the README states the absence plainly. If the drive was unreachable at compile
+time, the directory is likewise absent and the gap is recorded in `meta.toml` and
+the README.
 
 ## meta.toml
 
