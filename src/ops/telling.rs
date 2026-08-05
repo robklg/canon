@@ -823,14 +823,27 @@ fn standing_lines(place: &StoryPlace, indent: &str, voicing: Voicing, lines: &mu
                 format!("{indent}  {} · let go", file_noun(standing.excluded))
             }
         };
-        if place.undecided() {
-            // Exclusion is always a deliberate act; at a place with no act
-            // slices, the excluded standing evidences a decision whose
-            // record is absent (pre-provenance, or recording off) — state
-            // the gap, never "no decision here".
+        // Exclusion is always a deliberate act, so a stampless row
+        // evidences a decision whose record is absent (pre-provenance, or
+        // recording off) — state the gap for exactly those rows. The marker
+        // is row-grain, never place-grain: a place-level gate was wrong in
+        // both directions (a mixed place's stampless rows earned no marker;
+        // an undecided place's stamped rows earned a false one).
+        let stampless = standing.excluded_stampless;
+        if stampless == standing.excluded {
             line.push_str(match voicing {
                 Voicing::Judgment => " (no recorded decision)",
                 Voicing::Reference => " — no record of the decision survives",
+            });
+        } else if stampless > 0 {
+            line.push_str(&match voicing {
+                Voicing::Judgment => {
+                    format!(" (no recorded decision for {})", format_count(stampless))
+                }
+                Voicing::Reference => format!(
+                    " — for {} of these, no record of the decision survives",
+                    format_count(stampless)
+                ),
             });
         }
         lines.push(line);
@@ -1319,6 +1332,7 @@ mod tests {
     fn reference_states_the_unrecorded_decision_plainly() {
         let mut old = place("old");
         old.standing.excluded = 4;
+        old.standing.excluded_stampless = 4;
         let mut root = place("");
         root.children.push(old);
 
@@ -1328,6 +1342,54 @@ mod tests {
             "4 files · let go — no record of the decision survives",
         );
         assert_no_line(&lines, "(no recorded decision)");
+    }
+
+    #[test]
+    fn the_no_record_marker_is_row_grain_not_place_grain() {
+        // The old-disk `data/usr` shape: cited acts at the place AND a stampless
+        // standing remainder — the marker names exactly the stampless rows.
+        let build = || {
+            let mut mixed = place("usr");
+            mixed
+                .acts
+                .push(act("excluded", 3, vec![(153, Some("not important"))]));
+            mixed.standing.excluded = 10;
+            mixed.standing.excluded_stampless = 7;
+            let mut root = place("");
+            root.children.push(mixed);
+            root
+        };
+
+        let lines = reference_place_lines(&report(build()));
+        assert_has_line(
+            &lines,
+            "10 files · let go — for 7 of these, no record of the decision survives",
+        );
+
+        let judgment = story_lines(&report(build()), usize::MAX, 0);
+        assert!(
+            judgment
+                .iter()
+                .any(|l| l.contains("10 excluded (no recorded decision for 7)")),
+            "missing judgment partial marker in:\n{}",
+            judgment.join("\n")
+        );
+    }
+
+    #[test]
+    fn stamped_standing_at_an_undecided_place_earns_no_false_marker() {
+        // Regression: the old place-level gate marked every excluded row at
+        // an act-less place "no record survives" — false when the rows are
+        // stamped by decisions whose slices render elsewhere.
+        let mut old = place("old");
+        old.standing.excluded = 4;
+        old.standing.excluded_stampless = 0;
+        let mut root = place("");
+        root.children.push(old);
+
+        let lines = reference_place_lines(&report(root));
+        assert_has_line(&lines, "4 files · let go");
+        assert_no_line(&lines, "no record of the decision survives");
     }
 
     #[test]

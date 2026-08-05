@@ -462,6 +462,14 @@ pub struct PlaceStanding {
     /// law).
     pub contentless: i64,
     pub excluded: i64,
+    /// Subset of `excluded`: rows carrying no decision stamp at all —
+    /// exclusion is always a deliberate act, so a stampless row evidences
+    /// a decision whose record is absent (pre-provenance, or recording
+    /// off). Drives the no-record honesty marker at row grain: a place-level
+    /// gate was wrong in both directions (a mixed place's stampless rows
+    /// earned no marker; an undecided place's stamped rows earned a false
+    /// one).
+    pub excluded_stampless: i64,
     pub unresolved: i64,
     /// Subset of `unresolved`: never hashed — cannot be content-verified.
     pub unhashed_unresolved: i64,
@@ -593,6 +601,8 @@ struct Counts {
     /// hollow coverage).
     contentless: i64,
     excluded: i64,
+    /// Subset of `excluded`: no decision stamp (see `PlaceStanding`).
+    excluded_stampless: i64,
     unresolved: i64,
     unhashed: i64,
     missing: i64,
@@ -610,6 +620,7 @@ impl Counts {
         self.covered += other.covered;
         self.contentless += other.contentless;
         self.excluded += other.excluded;
+        self.excluded_stampless += other.excluded_stampless;
         self.unresolved += other.unresolved;
         self.unhashed += other.unhashed;
         self.missing += other.missing;
@@ -1025,7 +1036,12 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
                 }
             }
             StandingBucket::Contentless => counts.contentless += 1,
-            StandingBucket::Excluded => counts.excluded += 1,
+            StandingBucket::Excluded => {
+                counts.excluded += 1;
+                if source.decision_id.is_none() {
+                    counts.excluded_stampless += 1;
+                }
+            }
             StandingBucket::Unresolved { unhashed } => {
                 counts.unresolved += 1;
                 if unhashed {
@@ -1273,6 +1289,7 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         accum.standing.covered += counts.covered;
         accum.standing.contentless += counts.contentless;
         accum.standing.excluded += counts.excluded;
+        accum.standing.excluded_stampless += counts.excluded_stampless;
         accum.standing.unresolved += counts.unresolved;
         accum.standing.unhashed_unresolved += counts.unhashed;
         accum.standing.missing_unexplained += counts.missing;
@@ -1797,6 +1814,26 @@ mod tests {
         assert!(root.standing.is_empty());
         assert!(root.children.is_empty());
         assert_eq!(root.folder_breadth, 0);
+    }
+
+    #[test]
+    fn stampless_excluded_rows_are_counted_beside_the_stamped() {
+        // The no-record marker's substrate: `excluded_stampless` counts
+        // exactly the excluded rows with no decision stamp (pre-provenance,
+        // or recording off), row grain, folded like every standing count.
+        let mut fx = Fixture::new();
+        fx.present.push(excluded_src(1, "a/x.bin", None, 57));
+        fx.present.push(excluded_src(2, "a/y.bin", None, 57));
+        fx.present.push(Source {
+            excluded: true,
+            ..src(3, "a/z.bin", None)
+        });
+        fx.decisions
+            .insert(57, dinfo(DecisionFamily::Exclude, 100, None));
+
+        let root = fx.build(&no_dust());
+        assert_eq!(root.standing.excluded, 3);
+        assert_eq!(root.standing.excluded_stampless, 1);
     }
 
     #[test]
