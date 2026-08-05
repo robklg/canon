@@ -370,6 +370,34 @@ pub fn compose_reference_telling(report: &StoryReport, frame: &TellingFrame) -> 
         }
         lines.push(String::new());
         lines.extend(tally);
+        // The registers overlap deliberately: a file copied to the archive
+        // and later dismissed or lost here appears twice above — once as
+        // chosen, once by the fate of the copy that stayed. Said exactly,
+        // or the header reads as a partition it isn't. Every
+        // archived-standing file is a copy (a moved file is absent), so the
+        // overlap is copied minus still-standing; gated on a complete
+        // moved/copied split — unrecorded rows would make the count a
+        // guess.
+        if account.archived_unrecorded == 0 {
+            let overlap = (account.archived_copied - account.archived_standing).max(0);
+            if overlap > 0 {
+                lines.push(String::new());
+                lines.push(if overlap == 1 {
+                    "1 of the chosen files was copied, not moved — it appears again above by"
+                        .into()
+                } else {
+                    format!(
+                        "{} of the chosen files were copied, not moved — each appears again above by",
+                        format_count(overlap)
+                    )
+                });
+                lines.push(
+                    "what became of the copy that stayed, so the lines sum past the total by"
+                        .into(),
+                );
+                lines.push("exactly that much.".into());
+            }
+        }
     }
     let gaps = gaps_paragraph(account);
     if !gaps.is_empty() {
@@ -1637,6 +1665,69 @@ mod tests {
         assert!(text.contains("The drive's own receipts could not be gathered — see the gaps in"));
         assert!(!text.contains("`ledger/` here holds"));
         assert!(!text.contains("`notes.md`, `ledger/`"));
+    }
+
+    #[test]
+    fn the_tally_admits_the_copied_overlap_exactly() {
+        // 5 archived = 1 moved + 4 copied; 1 copy still stands here, so 3
+        // copied-then-dismissed files appear twice above.
+        let account = ResolutionAccount {
+            archived_moved: 1,
+            archived_copied: 4,
+            archived_standing: 1,
+            ..full_account()
+        };
+        let text = compose_reference_telling(&report_with(place(""), account), &frame());
+        assert!(
+            text.contains(
+                "3 of the chosen files were copied, not moved — each appears again above by"
+            ),
+            "missing overlap sentence in:\n{text}"
+        );
+        assert!(text.contains("exactly that much."));
+    }
+
+    #[test]
+    fn a_singular_overlap_reads_as_one_file() {
+        let account = ResolutionAccount {
+            archived_moved: 4,
+            archived_copied: 1,
+            archived_standing: 0,
+            ..full_account()
+        };
+        let text = compose_reference_telling(&report_with(place(""), account), &frame());
+        assert!(text
+            .contains("1 of the chosen files was copied, not moved — it appears again above by"));
+    }
+
+    #[test]
+    fn still_standing_copies_are_no_overlap() {
+        // Every copy still stands here (archived_standing): each file is
+        // counted once in the header's standing and once in the archived
+        // cell — no double count, no sentence.
+        let account = ResolutionAccount {
+            archived_moved: 3,
+            archived_copied: 2,
+            archived_standing: 2,
+            ..full_account()
+        };
+        let text = compose_reference_telling(&report_with(place(""), account), &frame());
+        assert!(!text.contains("copied, not moved"));
+    }
+
+    #[test]
+    fn an_unrecorded_split_omits_the_overlap_sentence() {
+        // Pre-vocabulary receipts: the moved/copied split is incomplete —
+        // the overlap would be a guess, so it is omitted, never guessed.
+        let account = ResolutionAccount {
+            archived_moved: 0,
+            archived_copied: 3,
+            archived_unrecorded: 2,
+            archived_standing: 0,
+            ..full_account()
+        };
+        let text = compose_reference_telling(&report_with(place(""), account), &frame());
+        assert!(!text.contains("copied, not moved"));
     }
 
     #[test]
