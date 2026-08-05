@@ -825,7 +825,8 @@ fn write_readme(
         out.push_str("- let go = excluded\n");
         out.push_str("- preserved by copies in the archive = covered\n");
         out.push_str("- no known copy in the archive = unresolved\n");
-        out.push_str("- empty file = contentless\n\n");
+        out.push_str("- empty file = contentless\n");
+        out.push_str("- returned to consideration = restored\n\n");
     }
 
     out.push_str("## Gaps\n\n");

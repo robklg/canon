@@ -1183,6 +1183,7 @@ fn the_compile_binds_and_claims_the_story() {
     assert!(readme.contains("Start with story.md"));
     assert!(readme.contains("- story.md — the story as told"));
     assert!(readme.contains("- chosen for the archive = archived"));
+    assert!(readme.contains("- returned to consideration = restored"));
     assert!(readme.contains("- let go = excluded"));
 
     verify_book(&dest).unwrap();

@@ -318,6 +318,8 @@ pub fn compose_reference_telling(report: &StoryReport, frame: &TellingFrame) -> 
     lines.push("  here; nothing was lost either.".into());
     lines.push("- **no known copy in the archive** — said plainly wherever it is true.".into());
     lines.push("- **empty file** — zero bytes: a name and a date, no content.".into());
+    lines.push("- **returned to consideration** — a letting-go undone: the file was".into());
+    lines.push("  brought back into consideration.".into());
     lines.push(String::new());
     lines.push("`#N` cites a decision. A reason is written out once, at its first".into());
     lines.push("appearance; later entries cite the bare number. `note:` lines were written".into());
@@ -1617,6 +1619,9 @@ mod tests {
         assert!(text.contains("It was retired with these words: *\"the story is complete\"*"));
         assert!(text.contains(FOREWORD_SENTINEL));
         assert!(text.contains("Nothing here is a summary you have to take on faith."));
+        assert!(
+            text.contains("- **returned to consideration** — a letting-go undone: the file was")
+        );
         assert!(text.contains("3 files · let go   #57 · \"installer junk\""));
         assert!(text.contains("written by Canon v0.9.0"));
         assert!(text.contains("This is the one written at\nthe letting-go."));
