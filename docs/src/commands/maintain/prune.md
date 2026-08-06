@@ -20,10 +20,14 @@ canon prune --orphaned-objects --yes
 canon prune --excluded-facts --yes
 ```
 
-**Stale facts** are those where `observed_basis_rev` no longer matches the source's current `basis_rev` (meaning the file was modified after the fact was imported).
+**Stale facts** are facts whose `observed_basis_rev` no longer matches the source's
+current `basis_rev` (the file was modified after the fact was imported).
 
-**Orphaned objects** are content entries with no remaining present sources. This can happen when files are deleted. You may want to keep them as a historical record, or delete them to clean up the database.
+**Orphaned objects** are content entries with no remaining present sources. This can
+happen when files are deleted. They can serve as a historical record; pruning them
+frees database space.
 
-**Excluded facts** are metadata for sources or objects you've marked as excluded. Since you've decided not to archive them, you may want to remove their facts to free up database space.
+**Excluded facts** are metadata for sources or objects marked as excluded. Pruning
+them frees database space.
 
 All prune operations are dry-run by default. Add `--yes` to execute.
