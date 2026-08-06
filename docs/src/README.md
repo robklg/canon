@@ -12,7 +12,7 @@ Canon works incrementally:
 
 1. **Scan** directories to index files and compute content hashes
 2. **Enrich** with metadata extracted by external tools (EXIF, file types, etc.)
-3. **Orient**: explore with filters and queries, [survey](commands/query/survey.md) a location's archive overlap, or [sweep](commands/query/sweep.md) all roots for the places where one decision resolves the most
+3. **Orient**: explore with filters and queries, [survey](commands/query/survey.md) a location (what's archived, where it connects, what's unique), or [sweep](commands/query/sweep.md) all roots for the places where one decision resolves the most
 4. **Archive** selected files to a canonical location, at your own pace
 5. **Resolve** the rest: [exclude](concepts/exclusion.md) what is not worth keeping, and [retire](concepts/retirement.md) storage once everything on it is archived or excluded
 
