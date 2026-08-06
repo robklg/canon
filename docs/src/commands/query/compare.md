@@ -26,12 +26,10 @@ Output shows:
 - Files only in B (by content)
 - Files in both (matching content hash)
 
-Unhashed files are skipped and counted on stderr. Empty files are skipped the
-same way (`Skipped N empty files (no content to compare)`): every empty file
-has the same hash, so "matching content" between them would be a claim about
-nothing (see
-[empty files are contentless](../../concepts/object.md#empty-files-are-contentless)).
-Compare speaks about content — whether two folders correspond file-by-file,
-empty files and all, is a shape question it deliberately does not answer.
+Unhashed files are skipped and counted on stderr. Empty files are skipped and
+counted the same way (`Skipped N empty files (no content to compare)`): they
+are [contentless](../../concepts/object.md#empty-files-are-contentless).
+Compare reports on content; whether two folders correspond file-by-file,
+empty files included, is a question it deliberately does not answer.
 
 Exit code is 0 if identical, 1 if differences found.
