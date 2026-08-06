@@ -12,13 +12,12 @@ Objects are created automatically when sources are hashed during scanning or enr
 
 ## Empty files are contentless
 
-A zero-byte file is all shape and no content: every empty file in the universe
-shares the one empty-content object, so its identity identifies nothing. Canon
-treats such sources as **contentless** — they never count as covered or
-archived (any empty file anywhere would hollowly "cover" them all), never
-count as unresolved (there is no content to lose), and never block a
-retirement. They are still real files: `ls` finds them, exclusion can dismiss
-them, and archive operations **carry them with their folders** — a verbatim
-folder copy keeps its empty files precisely because they are never skipped as
-"already archived". Where a report speaks of them, it says *empty files*
-plainly and states the count rather than hiding it.
+A zero-byte file has shape but no content. Every empty file shares the one
+empty-content object, so its hash identifies nothing. Canon treats such
+sources as **contentless**: they never count as covered or archived (any
+empty file anywhere would otherwise cover them all), never count as
+unresolved (there is no content to lose), and never block a
+[retirement](retirement.md). They are still ordinary files: `ls` finds them,
+they can be excluded, and archive operations carry them with their folders,
+so a verbatim folder copy keeps its empty files. Reports that mention them
+say *empty files* and state the count; they are never silently omitted.

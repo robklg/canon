@@ -1,6 +1,6 @@
 # Source vs. Object
 
-Understanding the relationship between sources and objects is key to how Canon handles deduplication and archive tracking.
+The relationship between sources and objects underlies Canon's deduplication and archive tracking.
 
 ## Sources Are Locations
 
@@ -25,7 +25,7 @@ When a source is linked to an object:
 - **Content facts** (like EXIF metadata) can be stored on the object and become available to all sources with that hash
 - **Source facts** (like file path) remain specific to each source
 
-This allows metadata to flow between different copies of the same content. Import a fact once, and it's available everywhere that content exists.
+Import a fact once, and it is available everywhere that content exists.
 
 ## Archive Tracking
 

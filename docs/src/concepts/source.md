@@ -19,4 +19,4 @@ Sources can be marked as excluded to skip them during archiving. A source is con
 - The source itself is marked excluded, OR
 - The source's linked object is marked excluded
 
-This two-level check means that excluding an object effectively excludes all sources with that content. Object-level exclusion is useful when you want to skip content regardless of where it appears.
+Excluding an object therefore excludes every source with that content, regardless of where it appears.
