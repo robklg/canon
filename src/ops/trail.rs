@@ -964,6 +964,45 @@ mod tests {
     }
 
     #[test]
+    fn a_story_handoff_at_an_emptied_place_gets_a_real_answer() {
+        // Handoffs must answer, not just parse: the story review points at
+        // emptied places by design (the best-resolved places are the
+        // emptiest). End to end — the history-scope resolution accepts the
+        // sourceless path, and the trail it feeds renders the extraction
+        // that emptied the place, not an empty view.
+        let conn = open_in_memory_for_test();
+        let root_id = insert_test_root(&conn, "/a", "source", false);
+        let decision_id = insert_decision_at(&conn, "apply", 100);
+        repo::decision::replace_extractions(
+            &conn,
+            &[extraction_row(
+                decision_id,
+                root_id,
+                "/a",
+                "old/photos",
+                12,
+                Some(1_000),
+                "/archive/2016",
+            )],
+        )
+        .unwrap();
+
+        let roots = repo::root::fetch_all(&conn).unwrap();
+        let resolved = crate::ops::scope::resolve_history_scope(
+            &[std::path::PathBuf::from("/a/old/photos")],
+            &roots,
+        )
+        .expect("an emptied place on a live root resolves in history tense");
+
+        let result = compute_trail(&conn, &params(resolved.prefixes)).unwrap();
+        assert_eq!(decision_ids(&result.view), vec![decision_id]);
+        assert_eq!(
+            aspects_of(&result.placements, decision_id),
+            vec![RowAspect::Extraction]
+        );
+    }
+
+    #[test]
     fn decision_with_scope_row_and_extraction_row_appears_exactly_once() {
         let conn = open_in_memory_for_test();
         let root = insert_test_root(&conn, "/a", "source", false);

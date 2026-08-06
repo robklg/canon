@@ -1254,6 +1254,33 @@ mod tests {
     }
 
     #[test]
+    fn a_note_forced_empty_leaf_says_nothing_stands_here_now() {
+        // The honest form for a noted file whose content moved away: the
+        // testimony is not left hanging beside nothing. Judgment furniture —
+        // the reference voicing drops it (the ever-axis makes no "now"
+        // claims).
+        let build = || {
+            let mut noted = place("moved-away.jpg");
+            noted.notes.push(Note {
+                id: 7,
+                root_id: 1,
+                rel_path: "moved-away.jpg".to_string(),
+                text: "the good one".to_string(),
+                created_at: 100,
+            });
+            let mut root = place("");
+            root.children.push(noted);
+            root
+        };
+
+        let judgment = story_lines(&report(build()), usize::MAX, 0);
+        assert_has_line(&judgment, "nothing stands here now");
+
+        let reference = reference_place_lines(&report(build()));
+        assert_no_line(&reference, "nothing stands here now");
+    }
+
+    #[test]
     fn the_cap_counts_omissions_and_keeps_the_close() {
         let mut root = place("");
         for name in ["a", "b", "c"] {
