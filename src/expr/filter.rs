@@ -1797,7 +1797,7 @@ mod tests {
     fn tokenize_glob_with_star() {
         let expr = Expr::parse("ext~*.tmp").unwrap();
         match expr {
-            Expr::Compare { key, op, value } => {
+            Expr::Compare { key: _, op, value } => {
                 assert_eq!(op, CompareOp::Glob);
                 assert_eq!(value, "*.tmp");
             }

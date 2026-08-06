@@ -101,6 +101,8 @@ pub struct DecisionCounts {
 pub struct DecisionRecorder {
     id: Option<i64>,
     /// Stored ReceiptRef for callers that need root_id/rel_path (e.g. receipt DB linkage).
+    /// No production caller needs this yet — only exercised via `receipt_ref()` in tests.
+    #[allow(dead_code)]
     receipt_ref: Option<ReceiptRef>,
     /// Absolute path to the final `.toml` file, used for write and finalize.
     receipt_abs_path: Option<PathBuf>,
@@ -131,6 +133,7 @@ impl DecisionRecorder {
 
     /// Expose the receipt reference (root_id + rel_path) stored in the DB.
     /// Returns None if receipts are disabled or path computation failed.
+    #[allow(dead_code)]
     pub fn receipt_ref(&self) -> Option<&ReceiptRef> {
         self.receipt_ref.as_ref()
     }

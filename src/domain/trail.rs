@@ -324,14 +324,6 @@ pub enum WhenValue {
     On(NaiveDate),
 }
 
-impl WhenValue {
-    pub fn date(&self) -> NaiveDate {
-        match self {
-            WhenValue::Since(d) | WhenValue::On(d) => *d,
-        }
-    }
-}
-
 /// Parse a time-lens value: `today`, `yesterday`, a weekday name (most recent
 /// occurrence, today included), or `YYYY-MM-DD`. Case-insensitive.
 pub fn parse_when(input: &str, today: NaiveDate) -> Result<NaiveDate, String> {

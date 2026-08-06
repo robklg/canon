@@ -426,6 +426,8 @@ pub fn max_decision_id_touching_root(
 }
 
 /// Count all decisions.
+/// No production caller yet — used as a sanity check alongside `count_unscoped` in tests.
+#[allow(dead_code)]
 pub fn count_all(conn: &Connection) -> Result<i64> {
     let count = conn.query_row("SELECT COUNT(*) FROM decisions", [], |row| row.get(0))?;
     Ok(count)

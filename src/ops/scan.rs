@@ -1078,8 +1078,12 @@ mod tests {
 
     /// Test result from process_file helper.
     struct ProcessResult {
+        // Mirrors persist_file's real return data; only `action` is currently
+        // asserted on, kept available for tests that need to check identity.
+        #[allow(dead_code)]
         source_id: i64,
         action: FileAction,
+        #[allow(dead_code)]
         old_object_id: Option<i64>,
     }
 

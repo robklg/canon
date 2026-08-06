@@ -101,7 +101,6 @@ fn display_compact_per_root(
     overall: &CoverageStats,
     scope: &ResolvedScope,
 ) {
-    use std::io::Write;
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     crate::scope::print_report_scope(&mut handle, "Coverage", scope);
@@ -187,7 +186,6 @@ fn print_compact_line_handle<W: std::io::Write>(
 
 fn display_scoped_stats(stats: &CoverageStats, scope: &ResolvedScope, archive: Option<&str>) {
     {
-        use std::io::Write;
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
         crate::scope::print_report_scope(&mut handle, "Coverage", scope);

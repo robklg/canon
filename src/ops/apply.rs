@@ -2451,8 +2451,6 @@ mod tests {
 
     #[test]
     fn validate_size_changed() {
-        use std::io::Write;
-
         // Create file, record metadata, then change it
         let f = tempfile::NamedTempFile::new().unwrap();
         let path = f.path().to_path_buf();
@@ -3216,7 +3214,7 @@ mod tests {
         use std::io::Write;
 
         let conn = setup_test_db();
-        let root_id = insert_root(&conn, "/photos", "source", false);
+        let _root_id = insert_root(&conn, "/photos", "source", false);
         let archive_root = insert_root(&conn, "/archive", "archive", false);
         let obj1 = insert_object(&conn, "hash1", false);
         let obj2 = insert_object(&conn, "hash2", false);
