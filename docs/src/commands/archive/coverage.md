@@ -1,6 +1,6 @@
 # canon coverage
 
-Show archive coverage statistics - how many sources are hashed and how many are archived.
+Show archive coverage statistics: how many sources are hashed and how many are archived.
 
 ```bash
 # Coverage for current directory (when inside a root)
@@ -58,15 +58,13 @@ Overall:
 ```
 
 - **Hashed**: Sources with a content hash (ready for archiving)
-- **Empty files**: Zero-byte sources — shown when present. There is no
-  content to cover, so coverage counts them in neither `Archived` nor
-  `Unarchived`; the lines add up as hashed = empty files + with-content,
-  and with-content = archived + unarchived. Archive operations still carry
-  empty files with their folders — a folder archived after triage keeps its
-  empty files (see
-  [empty files are contentless](../../concepts/object.md#empty-files-are-contentless))
-- **Archived**: Sources whose content exists in an archive root; the
+- **Empty files**: Zero-byte sources, shown when present. They are
+  [contentless](../../concepts/object.md#empty-files-are-contentless), so
+  coverage counts them in neither `Archived` nor `Unarchived`; the lines add
+  up as hashed = empty files + with-content, and with-content = archived +
+  unarchived
+- **Archived**: Sources whose content exists in an archive root. The
   percentage names its denominator (`of N with content`), so a fully-covered
-  selection reads 100% even when it contains empty files — the remainder is
+  selection reads 100% even when it contains empty files; the remainder is
   always exactly `Unarchived`
 - With `--archive`: Shows "In this archive" vs "Not in archive" for that specific archive

@@ -95,11 +95,11 @@ Use `--root` to apply only a subset of sources from the manifest. Useful for sta
 
 1. **Destination collisions** - If multiple sources would map to the same destination path (e.g., using `{filename}` when sources have duplicate names), apply aborts with an error showing which files conflict.
 
-2. **Destination path conflicts** - In regular mode (without `--resume`), checks if any destination paths are already occupied — either registered in the database or existing on disk. If conflicts are found, apply suggests using `--resume` to skip already-copied files.
+2. **Destination path conflicts** - In regular mode (without `--resume`), checks if any destination paths are already occupied (registered in the database or existing on disk). If conflicts are found, apply suggests using `--resume` to skip already-copied files.
 
 3. **Stale destination records** - If the database shows files as present in the archive but they're missing from disk, apply aborts. Run `canon scan <archive>` to update the database before retrying.
 
-4. **Archive conflicts** - Checks if files already exist in the destination archive or other archives. Empty files are exempt: they are [contentless](../../concepts/object.md#empty-files-are-contentless), so an empty file being applied never "conflicts" with the empty files already standing in the archive.
+4. **Archive conflicts** - Checks if files already exist in the destination archive or other archives. Empty files are exempt: they are [contentless](../../concepts/object.md#empty-files-are-contentless), so an empty file being applied never conflicts with empty files already in the archive.
 
 5. **Excluded sources** - Blocks if any sources in the manifest are marked as excluded.
 
@@ -129,12 +129,7 @@ If apply is interrupted or encounters errors:
    canon apply manifest.toml --resume
    ```
 
-The `--resume` flag skips files that already exist and transfers only the remaining files. It will detect and report partial files that need deletion.
-
-If `--resume` reports "resumed" files, scan the destination to register them:
-```bash
-canon scan /path/to/archive/destination-folder
-```
+Resume mode's classification and its handling of "resumed" and partial files are described above.
 
 If source files changed during apply, refresh the manifest first:
 ```bash
@@ -145,6 +140,6 @@ canon apply manifest.toml
 
 ## Provenance
 
-Every apply is recorded as a [decision](../../concepts/decisions.md), and a **receipt** — every file transferred, with its source root and path, content hash, size, and modification time — is written under the archive root's `.canon-ledger/`, mirroring the destination path so the record sits alongside the content it describes. Add `--reason` to say *why*; when you don't, the manifest's `# === Notes ===` section becomes the reason automatically — the thinking you wrote while assembling travels into the durable record. The global `--no-receipt` flag skips the receipt file for one invocation.
+Every apply is recorded as a [decision](../../concepts/decisions.md), with a receipt listing every file transferred, written under the archive root's `.canon-ledger/` (placement and per-item contents: [Receipts](../../concepts/decisions.md#receipts)). Add `--reason` to record why; when you don't, the manifest's `# === Notes ===` section becomes the reason automatically. The global `--no-receipt` flag skips the receipt file for one invocation.
 
-An apply is also indexed by what it *drew out of* each source root — the [extraction ledger](../../concepts/decisions.md#the-extraction-ledger--the-trails-outbound-direction). Standing at a source location afterwards, [`canon trail`](../query/trail.md) shows what was archived out of that place and whether the originals remain; `canon trail show <id>` gives the full per-root breakdown and the receipt's location on disk.
+An apply is also indexed by what it drew out of each source root: the [extraction ledger](../../concepts/decisions.md#the-extraction-ledger--the-trails-outbound-direction). At a source location afterwards, [`canon trail`](../query/trail.md) shows what was archived out of that place and whether the originals remain; `canon trail show <id>` gives the full per-root breakdown and the receipt's location on disk.

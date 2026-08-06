@@ -52,15 +52,12 @@ Generated manifest: manifest.toml (1,234 sources in manifest.lock)
 ```
 
 **Empty files are never skipped as "already archived".** A zero-byte file is
-[contentless](../../concepts/object.md#empty-files-are-contentless) — its
-identity proves nothing, so archive detection ignores it and the manifest
-carries it with its folder. An archive-everything pass therefore produces a
-faithful copy: folders that owe their meaning partly to empty files (lock
-files, empty logs, markers) keep them without any extra flag.
+[contentless](../../concepts/object.md#empty-files-are-contentless), so
+archive detection ignores it and the manifest carries it with its folder.
 
 **Manifest structure:**
 
-The generated manifest includes a cluster summary, a notes section for your own annotations, and helpful comments listing available pattern variables:
+The generated manifest includes a cluster summary, a notes section for your own annotations, and comments listing available pattern variables:
 
 ```toml
 # === Cluster Summary ===
