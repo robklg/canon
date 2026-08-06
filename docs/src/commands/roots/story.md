@@ -1,18 +1,14 @@
 # `canon roots story`
 
-Reading a root's story is the judgment instrument between passes: *is everything
-resolved here, and am I happy with how and where it ended up?* The trail answers
-that question in events and the retirement review answers it in counts; the story
-answers in **places** — where you acted (and why), and what no decision ever
-touched.
+What's resolved on this root, and where did it end up? The trail answers in events
+and the retirement review answers in counts. The story answers in **places**: where
+you acted and why, and what no decision ever touched.
 
 ```
 canon roots story <id:N|path:/path> [--limit N | --all]
 ```
 
-Read-only in the fullest sense: nothing is recorded, nothing is cached — every run
-reads fresh. Invoke it whenever you like: mid-triage, between sessions, the day
-before retiring.
+Each run reads the index fresh and prints the map.
 
 ## The map of places
 
@@ -61,100 +57,77 @@ Whether this story is complete is yours to judge.
 For the readiness gate: canon roots retire path:/mnt/old-disk --dry-run
 ```
 
-Two more standing lines appear where they apply. `N archived from here` marks
-content you deliberately archived *from this root* whose copy you left standing
-(a copy-mode apply) — told apart from `covered`, which is content that merely
-happens to have identical copies in the archive. And `N empty files (no content
-to cover)` states the
-[contentless](../../concepts/object.md#empty-files-are-contentless) sources
-standing at the place: all shape, no content — outside coverage, never blocking
-retirement. The line reports what stands, not what happened: whether a past
-archive pass carried them is the trail's and the receipts' story (passes made
-before the contentless rule skipped empty files as "already archived").
+## Reading a place
 
-The map is path-ordered — a map of the root, never a leaderboard. A place earns a
-line for one of two reasons: it is **second-guessable** — its standing mix, its act
-mix, or where its covered copies stand diverges from its surroundings — or it
-carries **recorded care**: a note, or a decision you gave a reason. Everything else
-merges into the nearest such place (`· across N folders` hints at the breadth), so
-the output scales with how varied the situation is, not with how many files the
-root holds. Uniformly resolved territory — however vast — is one line.
+Each place shows what you did there, what stands there now, and a handoff to the
+trail.
 
-## Slices
+**Act lines** carry the transition word, the counts, the destination you chose (`→`),
+the decision id, and your reason. The transitions are `archived`, `excluded`, and
+`deleted`; a deletion a scan observed is marked `scan-observed`, so it never reads as
+your act. Repeated decisions at one place aggregate, though acts that went to
+different destinations never merge.
 
-Acts land where they touched. A decision that spanned places renders as **slices**:
-partial counts at each place, all carrying the same `#id`. In the sample, decision
-`#66` archived 5 files at the root and 3 more inside `pictures/italy` — two slices
-of one act, and neither claims to be the decision's total. The place's trail
-handoff tells any decision's whole story.
+One decision touching several places renders as **slices**: partial counts at each
+place, all carrying the same `#id`, none of them the decision's total. `#66` above is
+two slices. A reason is quoted in full at its first slice and cited as a bare `#id`
+after that.
 
-## Deliberate versus never-decided
+**Standing lines** say what is there now, whether or not a decision touched it:
 
-Everything on the map is one of two kinds, and the line between them is structural —
-a deciding stamp exists, or it doesn't. Canon never infers intent.
+| Line | Meaning |
+|---|---|
+| `covered` | content verified present in the archive; `copies stand in` says where |
+| `archived from here` | archived from this root with the copy left standing (a copy-mode apply) |
+| `excluded` | shown when it says something the act lines don't |
+| `unresolved` | neither archived nor excluded; any never-hashed count is called out |
+| `empty files (no content to cover)` | [contentless](../../concepts/object.md#empty-files-are-contentless), outside coverage, never blocking retirement |
 
-- **Acts** render with their what and why: the transition word, the counts, the
-  destination you chose (`→`), the decision id, and your recorded reason. Iterative
-  decisions at one place aggregate — the what compresses, the whys are enumerated
-  per decision, and acts that went to different destinations never merge. A deletion
-  a scan observed reads as an observation (`scan-observed`), never as your act.
-- **What no decision touched** renders at equal standing, marked `no decision
-  here`. **Covered** content states where its copies stand — because nobody ever
-  chose that where. Coverage is evidence by content identity — precise about
-  content, silent about shape and worth — and whether it amounts to *resolved* is
-  yours to judge; "covered in a staging folder you never picked" is exactly what
-  this line exists to catch. Unresolved and never-hashed counts are stated plainly.
+`→` always means *sent there by your act*. `copies stand in` always means *observed
+there today*. The two never mix.
 
-The arrow and the phrase are deliberate and never mix: `→` always means *sent there
-by your act*; `copies stand in` always means *observed there today*.
+A place nobody decided on is marked `no decision here`, and its covered content is
+worth a second look: coverage is content identity alone, so "covered in a staging
+folder you never picked" is exactly what that line exists to catch.
 
-Two wordings keep the record honest at the seams. `#63 — no reason given` names a
-real recorded decision that simply had no `--reason` attached — the id renders
-precisely so it never reads as a missing decision. `N excluded (no recorded
-decision)` is the opposite gap: excluded content whose deciding record is absent
-(excluded before provenance existed, or with recording off) — exclusion is always
-deliberate, so this line states an unrecorded decision rather than pretending
-there was none.
+Notes render verbatim at their place, and a noted place always gets its own line
+however uniform its surroundings.
 
-Notes surface at their places verbatim — your own thinking beside the standings —
-and a noted place always earns its own line, however uniform its surroundings. A
-note on a single file gathers that file's own fate beside the testimony; a noted
-place whose content has all moved on says `nothing stands here now`.
+Every place ends with `→ canon trail <path>`, which tells that place's full event
+story. The story shows the shape; [the trail](../query/trail.md) shows the sequence.
 
-## Each reason renders once
+## Why some folders aren't listed
 
-A reason is recorded care, and the map states it in full exactly once — at the
-decision's **first slice in reading order**. Every later slice cites the bare
-`#id`: in the sample, `#66`'s reason opens the story at the root, and the
-`pictures/italy` slice cites it back. In a shared register the cited ids collapse
-to one line (`· #155, #131`), separate from the reasons quoted in full and from the
-reasonless ids (`— no reason given`) — the three never conflate.
-
-The excluded standing line follows the same discipline: when it would exactly
-restate what the excluded acts already narrate — same count, everything still
-standing — it is omitted (`system-cache` and `downloads` above; `downloads` keeps
-its other standing lines, which say what the acts don't). Any exclusion the acts
-don't account for, or acts whose whole-history count exceeds what still stands,
-keep both registers. Covered, unresolved, and missing lines are never omitted.
-
-## Drilling down
-
-Every place carries its handoff: `→ canon trail <path>` tells that place's full
-event story. The story review shows the shape; [the trail](../query/trail.md) shows
-the sequence.
+The map is path-ordered and lists only places worth a look: those whose standing mix,
+act mix, or covered-copy locations differ from their surroundings, and those carrying
+a note or a decision you gave a reason. Everything else merges into the nearest
+listed place, with `· across N folders` showing the breadth. Uniformly resolved
+territory is one line however vast it is.
 
 ## The gate
 
-The story renders no verdict — no NOT READY, and never "ready". It closes with the
-standing totals and hands the gate to [`canon roots retire
---dry-run`](retire.md), whose review states the same totals as counts. Both are
-lenses over one fetch of the same world, so they cannot disagree.
+The story renders no verdict, neither NOT READY nor ready. It closes with the
+standing totals and hands the gate to [`canon roots retire --dry-run`](retire.md),
+whose review states the same totals as counts.
 
-This live reading is the **judgment voicing** — present tense, open questions,
-trail handoffs, for the reader deciding. At retirement the same story is
-re-voiced for the future reader and bound into the book as
-[`story.md`](../../reference/book-format.md#storymd): plain fate words, no
-handoffs, framed with a beginning and a last page. Same map, two readers.
+At retirement this same map is written again for a future reader and bound into the
+book as [`story.md`](../../reference/book-format.md#storymd), with plain fate words,
+no handoffs, and a beginning and a last page around it.
+
+## Edge cases
+
+- `#63 — no reason given` is a real recorded decision that had no `--reason`
+  attached. The id renders so the line reads as a decision without a reason rather
+  than as a missing decision.
+- `N excluded (no recorded decision)` is the opposite gap: excluded content whose
+  deciding record is absent, either excluded before provenance existed or with
+  recording off.
+- A noted place whose content has all moved on says `nothing stands here now`.
+- The excluded standing line is omitted when it would exactly restate what the act
+  lines already say. Covered, unresolved, and missing lines are never omitted.
+- `empty files` reports what stands there now. Whether a past archive pass carried
+  those files is the trail's and the receipts' story; passes made before the
+  contentless rule skipped empty files as "already archived".
 
 ## Flags
 

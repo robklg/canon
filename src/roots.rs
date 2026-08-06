@@ -454,7 +454,7 @@ pub fn retire(
             summary, warnings, ..
         } => {
             println!("{summary}");
-            println!("The drive is yours to discard.");
+            println!("The storage is yours to discard.");
             for warning in &warnings {
                 eprintln!("{warning}");
             }
