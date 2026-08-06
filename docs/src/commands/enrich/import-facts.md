@@ -1,6 +1,6 @@
 # canon import-facts
 
-Import facts from JSONL on stdin. Designed to receive output from a processor that consumed a worklist.
+Import facts from JSONL on stdin. Receives output from a processor that consumed a worklist.
 
 ```bash
 canon worklist | some-processor | canon import-facts
@@ -27,19 +27,19 @@ The processor must pass through `source_id` and `basis_rev` from the worklist en
 
 ## Fact Namespacing
 
-Facts are automatically namespaced under `content.*`. For example, `mime` becomes `content.mime`.
+Facts are automatically namespaced under `content.*`: `mime` becomes `content.mime`. See [Namespaces](../../concepts/facts.md#namespaces).
 
 The special key `hash.sha256` creates or links an object, enabling deduplication and archive tracking.
 
 ## Type Hints
 
-**Types matter.** Canon stores facts as text, numbers, or timestamps. The type determines what operations work on a fact:
+Canon stores facts as text, numbers, or timestamps (see [Value Types](../../concepts/facts.md#value-types)). The stored type determines what operations work on a fact:
 
 - **Timestamps** enable date modifiers (`|year`, `|month`, `|date`) and date comparisons (`>=2024-01-01`)
 - **Numbers** enable numeric comparisons (`>1000`, `<=5.0`) and the `|bucket` modifier
 - **Text** enables string matching (`=`, `~` glob) and string modifiers (`|lowercase`, `|stem`)
 
-If a datetime like `"2024:07:23 11:06:32"` is stored as text instead of a timestamp, queries like `--where 'DateTimeOriginal|year=2024'` won't work—the modifier expects a timestamp, not a string.
+If a datetime like `"2024:07:23 11:06:32"` is stored as text instead of a timestamp, queries like `--where 'DateTimeOriginal|year=2024'` won't work: the modifier expects a timestamp.
 
 ### Providing Type Hints
 

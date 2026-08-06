@@ -42,7 +42,7 @@ done
 
 ## The canonargs Helper
 
-If you don't want to handle JSONL parsing and output formatting yourself, `canonargs` takes care of that. You only provide a command that extracts data from a single file.
+`canonargs` handles the JSONL parsing and output formatting; you provide a command that extracts data from a single file.
 
 ### Installation
 
@@ -126,35 +126,17 @@ Processors can access previously imported facts via the `--emit` flag on worklis
 
 ## Type Hints
 
-**Important:** The type of a fact determines what operations work on it:
+The stored type of a fact determines what operations work on it: timestamps enable date modifiers and comparisons, numbers enable numeric comparisons and `|bucket`, text enables string matching and string modifiers. If your processor outputs dates as strings, or numbers as quoted strings, add type hints; without them, queries like `--where 'DateTimeOriginal|year=2024'` or `--where 'width>1000'` won't work.
 
-- **Timestamps** enable `|year`, `|month` modifiers and date comparisons (`>=2024-01-01`)
-- **Numbers** enable numeric comparisons (`>1000`) and `|bucket` modifier
-- **Text** enables string matching and `|lowercase`, `|stem` modifiers
-
-If your processor outputs dates as strings or numbers as strings, add type hints:
-
-```json
-{"source_id":123,"basis_rev":0,"facts":{
-  "DateTimeOriginal": {"value": "2024:07:23 11:06:32", "type": "datetime"},
-  "duration": {"value": "1:23:45", "type": "duration"},
-  "width": 1920
-}}
-```
-
-Without `"type": "datetime"`, a date string like `"2024:07:23 11:06:32"` is stored as text and `--where 'DateTimeOriginal|year=2024'` won't work.
-
-Numbers from JSON are automatically stored as numbers. But if your extractor outputs `"width": "1920"` (a string), numeric comparisons like `--where 'width>1000'` won't work as expected.
-
-See [import-facts](import-facts.md#type-hints) for full details.
+See [import-facts](import-facts.md#type-hints) for the hint format and full details.
 
 ## Tagging Files with Finder Tags (macOS)
 
-When you're browsing files during archiving work — previewing photos, deciding what belongs together — you can use macOS Finder tags to classify files on the spot. Canon can then import those tags as facts, making them queryable and usable for clustering.
+While browsing files during archiving work, you can assign macOS Finder tags to classify them on the spot. Canon can then import those tags as facts, making them queryable and usable for clustering.
 
 ### The Workflow
 
-1. **Browse and tag in Finder.** Right-click files (or select multiple) and assign tags — "vacation", "kids", "junk", whatever makes sense in the moment. Finder makes this fast: no command line, no context switch.
+1. **Browse and tag in Finder.** Right-click files (or select multiple) and assign tags such as "vacation", "kids", or "junk".
 
 2. **Import tags into Canon:**
    ```bash
@@ -178,13 +160,11 @@ When you're browsing files during archiving work — previewing photos, deciding
 
 The `tag-worklist.sh` script reads macOS extended attributes (`com.apple.metadata:_kMDItemUserTags`) from each file. Each Finder tag becomes a fact key like `tag.vacation` or `tag.kids`. The tag name is normalized to lowercase with special characters replaced by underscores.
 
-Tags are presence-based: you query them with the `?` (exists) operator, not by value. `tag.vacation?` means "is this file tagged vacation?" — and that composes with AND/OR/NOT like any other filter expression.
+Tags are presence-based: query them with the `?` (exists) operator, not by value. `tag.vacation?` matches files tagged "vacation", and composes with AND/OR/NOT like any other filter expression.
 
 ### Why This Matters
 
-When you survey a location and find a mixed bag of content — different events, different people, different time periods — you need a way to classify before you can archive. The content is all in one folder, but it belongs in different places in your archive.
-
-Finder tags let you do that classification *while you're looking at the files*. You're already previewing photos to decide what's worth keeping. Adding a tag in that moment is nearly zero effort. Then Canon takes those tags and turns them into structured queries that drive the archiving workflow.
+A folder of mixed content often belongs in different places in the archive. Tags let you classify files while previewing them in Finder; the imported tags then drive `--where` filters and clustering to route each part to its destination.
 
 ## Tips
 
