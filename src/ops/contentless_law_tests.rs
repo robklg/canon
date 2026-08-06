@@ -182,6 +182,38 @@ fn set_object_planning_sets_the_empty_file_aside() {
 }
 
 #[test]
+fn survey_counts_the_empty_files_it_sets_aside() {
+    // "Stated, never silent": the index refuses contentless sources, so
+    // empties vanish from overlap, coverage, and only-here — the summary
+    // must count what it set aside, like sweep, compare, and coverage do.
+    let mut c = canary();
+    let root_ids = vec![c.source_root];
+    let all_sources = crate::repo::source::batch_fetch_by_roots(&c.conn, &root_ids).unwrap();
+    let outcome = crate::ops::survey::compute_survey(
+        &mut c.conn,
+        &["/r".to_string()],
+        &[],
+        &crate::ops::survey::SurveyParams {
+            include: Default::default(),
+            compute_affinity: false,
+            compute_overlap_pairs: false,
+            compute_residual: false,
+            compute_archived_pairs: false,
+        },
+        &all_sources,
+        &[],
+        None,
+    )
+    .unwrap();
+    match outcome {
+        crate::ops::survey::SurveyOutcome::Result(result) => {
+            assert_eq!(result.contentless_count, 1, "the empty file is counted");
+        }
+        _ => panic!("expected a survey result"),
+    }
+}
+
+#[test]
 fn set_object_by_path_refuses_the_empty_file() {
     // A path names one file, but its object is the one every empty file
     // shares — refused toward the explicit `--hash` intent.

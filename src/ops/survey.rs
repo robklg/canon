@@ -62,6 +62,11 @@ pub struct SurveyResult {
     pub used_status: filter::UsedStatus,
     /// Count of excluded sources hidden from selection (for visibility hints).
     pub excluded_count: usize,
+    /// Selection-side empty files, set aside from every comparison (the
+    /// contentless law: the index refuses them, so they can create no
+    /// overlap, coverage, or uniqueness) — counted here so the summary can
+    /// state them, never silent.
+    pub contentless_count: usize,
 }
 
 /// A selection-side path paired with its counterpart paths at a location.
@@ -150,6 +155,7 @@ pub fn compute_survey(
 
     // Partition: unhashed vs hashed
     let total_count = selection.len();
+    let contentless_count = selection.iter().filter(|s| s.is_contentless()).count();
     let hashed: Vec<&Source> = selection
         .iter()
         .filter(|s| s.object_id.is_some())
@@ -510,6 +516,7 @@ pub fn compute_survey(
         archived_details,
         used_status,
         excluded_count,
+        contentless_count,
     }))
 }
 

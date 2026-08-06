@@ -86,7 +86,7 @@ Related locations:
 
 The output has three sections:
 
-**Survey header**: Shows your scope, any active filters, and source counts. The unhashed/hashed split tells you how many files can participate in content comparison — unhashed files can't be matched. "Unique here" is the count of content that exists nowhere else in Canon's universe.
+**Survey header**: Shows your scope, any active filters, and source counts. The unhashed/hashed split tells you how many files can participate in content comparison — unhashed files can't be matched. When the selection holds empty files, a counted line states them (`N empty files (no content to compare)`): they are contentless — set aside from overlap, coverage, and uniqueness entirely, never silently. "Unique here" is the count of content that exists nowhere else in Canon's universe.
 
 **Archived**: How many of your files have copies in an archive. The archive paths show *where* in the archive this content lives — the path names often reveal what past-you was thinking when you archived it. Use `--detail overlap --other <archive-path>` to see which specific files are archived at a given location.
 

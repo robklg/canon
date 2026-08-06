@@ -167,7 +167,7 @@ pub fn run(
                         | Some(DetailMode::Residual)
                 );
             if !suppress {
-                print_survey_header(&options.scope, &options.original_filters, 0, 0, 0, None);
+                print_survey_header(&options.scope, &options.original_filters, 0, 0, 0, 0, None);
                 if let Some((ref ctx, ref scope_rel)) = note_context {
                     print_notes_section(ctx, scope_rel, options.verbose);
                 }
@@ -187,6 +187,7 @@ pub fn run(
                     &options.original_filters,
                     total_count,
                     total_count,
+                    0,
                     0,
                     None,
                 );
@@ -212,6 +213,7 @@ pub fn run(
                             result.total_count,
                             result.unhashed_count,
                             result.total_hashed,
+                            result.contentless_count,
                             Some(result.unique_count),
                         );
                         if let Some((ref ctx, ref scope_rel)) = note_context {
@@ -239,6 +241,7 @@ pub fn run(
                         result.total_count,
                         result.unhashed_count,
                         result.total_hashed,
+                        result.contentless_count,
                         Some(result.unique_count),
                     );
                     if let Some((ref ctx, ref scope_rel)) = note_context {
@@ -260,6 +263,7 @@ pub fn run(
                             result.total_count,
                             result.unhashed_count,
                             result.total_hashed,
+                            result.contentless_count,
                             Some(result.unique_count),
                         );
                         if let Some((ref ctx, ref scope_rel)) = note_context {
@@ -289,6 +293,7 @@ pub fn run(
                             result.total_count,
                             result.unhashed_count,
                             result.total_hashed,
+                            result.contentless_count,
                             Some(result.unique_count),
                         );
                         if let Some((ref ctx, ref scope_rel)) = note_context {
@@ -323,6 +328,7 @@ pub fn run(
                         result.total_count,
                         result.unhashed_count,
                         result.total_hashed,
+                        result.contentless_count,
                         Some(result.unique_count),
                     );
                     if let Some((ref ctx, ref scope_rel)) = note_context {
@@ -403,6 +409,7 @@ fn print_survey_header(
     total: usize,
     unhashed: usize,
     hashed: usize,
+    contentless: usize,
     unique_count: Option<usize>,
 ) {
     let mut handle = std::io::stdout().lock();
@@ -419,6 +426,17 @@ fn print_survey_header(
         format_count(unhashed),
         format_count(hashed),
     );
+
+    // The contentless law's "stated, never silent": empty files vanish
+    // from every comparison (the index refuses them), so the summary
+    // counts them — rendered only when present, like its siblings on
+    // sweep, compare, and coverage.
+    if contentless > 0 {
+        println!(
+            "  {} empty files (no content to compare)",
+            format_count(contentless)
+        );
+    }
 
     if let Some(unique) = unique_count {
         println!("  {} unique here", format_count(unique));
