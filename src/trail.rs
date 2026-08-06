@@ -74,7 +74,7 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<()> {
         // error untouched.
         Err(err) => {
             if let Some(statement) = retired_scope_statement(db.conn(), &args.paths)? {
-                print_retired_statement(&statement);
+                emit_retired_statement(&statement, args.jsonl)?;
                 return Ok(());
             }
             match ops::scope::resolve_history_scope(&args.paths, &all_roots) {
@@ -93,7 +93,7 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<()> {
             if let Some(statement) =
                 ops::retire::find_retirement_covering_path(db.conn(), &cleaned.to_string_lossy())?
             {
-                print_retired_statement(&statement);
+                emit_retired_statement(&statement, args.jsonl)?;
                 return Ok(());
             }
         }
@@ -163,7 +163,25 @@ fn retired_scope_statement(
 
 /// The retired-scope statement: this place's story is closed and bound —
 /// stated as fact, pointing at the book (exit 0: the command answered the
-/// question asked).
+/// question asked). Under `--jsonl` the statement is one typed JSON object —
+/// the documented clean-stdout contract holds on this path too.
+fn emit_retired_statement(s: &ops::retire::RetiredScope, jsonl: bool) -> Result<()> {
+    if jsonl {
+        let json = serde_json::to_string(&JsonRetiredScopeEvent {
+            r#type: "retired_scope",
+            root_path: &s.root_path,
+            retired_at: s.retired_at,
+            reason: s.reason.as_deref(),
+            book: &s.book_display,
+            decision_id: s.decision_id,
+        })?;
+        println!("{json}");
+        return Ok(());
+    }
+    print_retired_statement(s);
+    Ok(())
+}
+
 fn print_retired_statement(s: &ops::retire::RetiredScope) {
     match &s.reason {
         Some(reason) => println!(
@@ -996,6 +1014,17 @@ struct JsonNoteEvent<'a> {
     text: &'a str,
 }
 
+#[derive(Serialize)]
+struct JsonRetiredScopeEvent<'a> {
+    r#type: &'static str,
+    root_path: &'a str,
+    retired_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
+    book: &'a str,
+    decision_id: i64,
+}
+
 fn json_extractions(rows: Option<&[DecisionExtraction]>) -> Option<Vec<JsonExtraction<'_>>> {
     rows.map(|rows| {
         rows.iter()
@@ -1080,6 +1109,37 @@ mod tests {
             json,
             r#"{"type":"note","created_at":1000,"root_id":2,"rel_path":"a/b","text":"check the RAW files"}"#
         );
+    }
+
+    #[test]
+    fn jsonl_retired_scope_event_shape() {
+        // Under --jsonl the retired-scope statement is one typed object —
+        // stdout stays machine-clean on this path too.
+        let json = serde_json::to_string(&JsonRetiredScopeEvent {
+            r#type: "retired_scope",
+            root_path: "/vol/gone",
+            retired_at: 1000,
+            reason: Some("drive failing"),
+            book: "/archive/retired/gone",
+            decision_id: 42,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"retired_scope","root_path":"/vol/gone","retired_at":1000,"reason":"drive failing","book":"/archive/retired/gone","decision_id":42}"#
+        );
+
+        // A reasonless retirement omits the field, never nulls it.
+        let json = serde_json::to_string(&JsonRetiredScopeEvent {
+            r#type: "retired_scope",
+            root_path: "/vol/gone",
+            retired_at: 1000,
+            reason: None,
+            book: "/archive/retired/gone",
+            decision_id: 42,
+        })
+        .unwrap();
+        assert!(!json.contains("reason"));
     }
 
     #[test]

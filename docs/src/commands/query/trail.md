@@ -235,7 +235,7 @@ This place is retired: /Volumes/old-drive — retired 2026-08-02, "drive failing
 The story is bound at /archive/retired/old-drive (decision #61).
 ```
 
-That is the answer to the question asked, so the command exits 0. A path that was never retired keeps the normal behavior: an explicit unknown path is still an error, and a working directory outside every root still falls back to the global view. (A root removed with plain `roots rm` has no bound story to point at — its decisions still render with snapshot paths, but there is no retirement to state.)
+That is the answer to the question asked, so the command exits 0. A path that was never retired keeps the normal behavior: an explicit unknown path is still an error, and a working directory outside every root still falls back to the global view. (A root removed with plain `roots rm` has no bound story to point at — its decisions still render with snapshot paths, but there is no retirement to state.) Under `--jsonl` the statement is one JSON object (`"type": "retired_scope"`, with `root_path`, `retired_at`, `reason` when recorded, `book`, `decision_id`) — stdout stays machine-clean on this path too.
 
 ## Machine output
 
