@@ -210,6 +210,8 @@ When one root's draw fanned out across directories, they are listed beneath its 
 
 The marker follows the recorded root, not the path. If you remove a root and later re-add the same path, old extractions still show `(root removed)` — they belong to the root that was removed; the re-added one is a new root that happens to share its path.
 
+A removed origin that left through [`canon roots retire`](../roots/retire.md) points at its book instead: `(root retired — the book: /archive/retired/old-drive)`. The origin reads as bound history — the drive's complete story, openable without Canon — never a dead end. Only a plain `roots rm` (no bound story to point at) keeps the bare `(root removed)`.
+
 No section when the decision drew from nowhere (every other decision kind).
 
 `show` lists where the decision's [receipts](../../concepts/decisions.md) live on disk — including one receipt per source root for deletions. It does not print receipt contents; open the file to see the per-item record. When there is no receipt, the reason is stated (`no receipt (--no-receipt)` or `no receipt recorded`) — absence is never silent. A receipt pointer whose root has since been removed renders as `root #N (removed)/…` — the same honesty as the `drew from:` marker: the receipt was written, but the file now lives on a drive Canon no longer indexes.

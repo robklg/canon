@@ -407,11 +407,12 @@ fn drew_from_lines(extractions: &[ops::trail::ShowExtraction]) -> Vec<String> {
     let mut out = Vec::new();
     for group in extractions {
         // The snapshot path stays primary; a root the index no longer knows
-        // must not read as a live, visitable location.
-        let marker = if group.root_removed {
-            ROOT_REMOVED_MARKER
-        } else {
-            ""
+        // must not read as a live, visitable location. A retired origin
+        // points at its book — bound history, not a dead end.
+        let marker = match (&group.retired_book, group.root_removed) {
+            (Some(book), _) => format!(" (root retired — the book: {book})"),
+            (None, true) => ROOT_REMOVED_MARKER.to_string(),
+            (None, false) => String::new(),
         };
         out.push(format!(
             "    {} — {}{marker}",
@@ -1877,6 +1878,7 @@ mod tests {
         ops::trail::ShowExtraction {
             location: location.to_string(),
             root_removed,
+            retired_book: None,
             files,
             bytes,
             directories: dirs
@@ -1904,6 +1906,14 @@ mod tests {
 
     #[test]
     fn drew_from_marks_removed_roots_on_the_summary_line() {
+        let mut retired = show_group("/Volumes/gone/dcim", 12, None, true, &[]);
+        retired.retired_book = Some("/archive/retired/gone".to_string());
+        let retired_lines = drew_from_lines(&[retired]);
+        assert!(
+            retired_lines[0].contains("(root retired — the book: /archive/retired/gone)"),
+            "{retired_lines:?}"
+        );
+
         let lines = drew_from_lines(&[show_group("/Volumes/gone/dcim", 12, None, true, &[])]);
         assert_eq!(
             lines,

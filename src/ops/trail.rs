@@ -457,6 +457,10 @@ pub struct ShowExtraction {
     /// the group's origin directories.
     pub location: String,
     pub root_removed: bool,
+    /// Where a removed origin root's story lives now, when it was retired:
+    /// the bound book's display path. `None` for a live root or a plain
+    /// `roots rm` (no bound story to point at).
+    pub retired_book: Option<String>,
     pub files: i64,
     /// `None` if any member row lacks a size — never a partial sum.
     pub bytes: Option<i64>,
@@ -577,37 +581,46 @@ pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
         .cloned()
         .map(|row| (row, RowAspect::Extraction))
         .collect();
-    let extractions = aggregate_placement_lines(&tagged)
-        .into_iter()
-        .map(|line| {
-            let mut dirs: Vec<ShowDrewDir> = Vec::new();
-            for row in raw.iter().filter(|r| r.root_path == line.row.root_path) {
-                match dirs.iter_mut().find(|d| d.dir == row.rel_prefix) {
-                    Some(d) => {
-                        d.files += row.files;
-                        d.bytes = match (d.bytes, row.bytes) {
-                            (Some(a), Some(b)) => Some(a + b),
-                            _ => None,
-                        };
-                    }
-                    None => dirs.push(ShowDrewDir {
-                        dir: row.rel_prefix.clone(),
-                        files: row.files,
-                        bytes: row.bytes,
-                    }),
+    let mut extractions = Vec::new();
+    for line in aggregate_placement_lines(&tagged) {
+        let mut dirs: Vec<ShowDrewDir> = Vec::new();
+        for row in raw.iter().filter(|r| r.root_path == line.row.root_path) {
+            match dirs.iter_mut().find(|d| d.dir == row.rel_prefix) {
+                Some(d) => {
+                    d.files += row.files;
+                    d.bytes = match (d.bytes, row.bytes) {
+                        (Some(a), Some(b)) => Some(a + b),
+                        _ => None,
+                    };
                 }
+                None => dirs.push(ShowDrewDir {
+                    dir: row.rel_prefix.clone(),
+                    files: row.files,
+                    bytes: row.bytes,
+                }),
             }
-            ShowExtraction {
-                root_removed: line
-                    .row
-                    .origin_root_removed(roots.iter().map(|r| r.path.as_str())),
-                location: line.row.drawn_from(),
-                files: line.row.files,
-                bytes: line.row.bytes,
-                directories: if dirs.len() > 1 { dirs } else { Vec::new() },
-            }
-        })
-        .collect();
+        }
+        let root_removed = line
+            .row
+            .origin_root_removed(roots.iter().map(|r| r.path.as_str()));
+        // A removed origin root that was retired points at its book —
+        // the origin reads as bound history, not a dead end. DB
+        // projections only, same as every query path.
+        let retired_book = if root_removed {
+            crate::ops::retire::find_retirement_covering_path(conn, &line.row.root_path)?
+                .map(|r| r.book_display)
+        } else {
+            None
+        };
+        extractions.push(ShowExtraction {
+            root_removed,
+            retired_book,
+            location: line.row.drawn_from(),
+            files: line.row.files,
+            bytes: line.row.bytes,
+            directories: if dirs.len() > 1 { dirs } else { Vec::new() },
+        });
+    }
 
     Ok(Some(ShowResult {
         decision,
@@ -2462,6 +2475,46 @@ mod tests {
         assert!(
             !show.extractions[0].root_removed,
             "a live location must not read as removed"
+        );
+    }
+
+    #[test]
+    fn show_points_a_retired_origin_at_its_book() {
+        // A `drew from:` origin whose root was retired reads as bound
+        // history — the book's location — never a dead-end "(root removed)".
+        // A plain-`rm`'d root (no bound retirement) keeps the plain marker.
+        let conn = open_in_memory_for_test();
+        let archive = insert_test_root(&conn, "/archive", "archive", false);
+        let d = insert_decision_at(&conn, "apply", 100);
+        // Origin root id 999: the retired root's old id — no live root has
+        // its path.
+        let row = extraction_row(d, 999, "/vol/gone", "photos", 3, Some(30), "/archive/x");
+        repo::decision::replace_extractions(&conn, &[row]).unwrap();
+
+        // The bound retirement of /vol/gone, artifact reference recorded.
+        conn.execute(
+            "INSERT INTO decisions
+                 (command, command_line, status, canon_version, created_at,
+                  receipt_root_id, receipt_rel_path)
+                 VALUES ('roots_retire', 'canon roots retire', 'completed', 'test', 200,
+                         ?1, 'retired/gone-2026-08-05')",
+            rusqlite::params![archive],
+        )
+        .unwrap();
+        let retire_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO decision_scopes (decision_id, root_id, root_path, rel_prefix)
+                 VALUES (?1, 999, '/vol/gone', '')",
+            rusqlite::params![retire_id],
+        )
+        .unwrap();
+
+        let show = compute_show(&conn, d).unwrap().unwrap();
+        assert_eq!(show.extractions.len(), 1);
+        assert!(show.extractions[0].root_removed);
+        assert_eq!(
+            show.extractions[0].retired_book.as_deref(),
+            Some("/archive/retired/gone-2026-08-05")
         );
     }
 
