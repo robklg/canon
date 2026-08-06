@@ -54,4 +54,4 @@ Precedence: `--canon-home` flag > `CANON_HOME` env var > `~/.canon/`
 canon --help
 ```
 
-You should see the list of available commands. You're ready to start [scanning your files](getting-started.md).
+You should see the list of available commands. Continue with [Getting Started](getting-started.md).

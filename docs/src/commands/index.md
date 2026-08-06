@@ -4,7 +4,7 @@
 
 Most commands that operate on sources share these options:
 
-**Path scope** — Limit a command to a specific directory by passing a path:
+**Path scope**: Limit a command to a specific directory by passing a path:
 
 ```bash
 canon ls /path/to/photos
@@ -12,7 +12,7 @@ canon facts /path/to/photos
 canon coverage /path/to/photos
 ```
 
-**Filters** — Select sources using `--where` with boolean expressions:
+**Filters**: Select sources using `--where` with boolean expressions:
 
 ```bash
 canon ls --where 'source.ext=jpg'
@@ -22,7 +22,7 @@ canon cluster generate --where 'geo.country=Netherlands' --dest /archive
 
 Multiple `--where` flags are combined with AND. See [Filters](../reference/filter.md) for the full syntax.
 
-**`--include`** — By default, query commands (`ls`, `facts`, `coverage`, `worklist`, `compare`) show sources from active source roots, hiding excluded and archived sources. Use `--include` to expand what you see:
+**`--include`**: By default, query commands (`ls`, `facts`, `coverage`, `worklist`, `compare`) show sources from active source roots, hiding excluded and archived sources. Use `--include` to expand what you see:
 
 ```bash
 canon ls --include excluded          # Also show excluded sources
@@ -30,9 +30,9 @@ canon ls --include archived          # Also show sources from archive roots
 canon facts --include all            # Show everything
 ```
 
-This is always safe — `--include` only changes what's displayed, never modifies anything.
+`--include` only changes what's displayed; it never modifies anything.
 
-**`--allow`** — Commands that change state (`cluster generate`, `apply`, `import-facts`) skip certain sources by default (e.g., sources already in an archive). Use `--allow` to acknowledge you want to include them:
+**`--allow`**: Commands that change state (`cluster generate`, `apply`, `import-facts`) skip certain sources by default (e.g., sources already in an archive). Use `--allow` to acknowledge you want to include them:
 
 ```bash
 canon cluster generate --allow archived     # Include sources from archive roots
@@ -47,6 +47,8 @@ The available `--allow` values are specific to each command. See individual comm
 - [Managing Roots](roots/index.md): Add and manage storage locations
   - [scan](roots/scan.md): Scan existing or new roots
   - [roots](roots/roots.md): List, suspend, or remove roots
+  - [roots story](roots/story.md): Read a root's resolution story as a map of places
+  - [roots retire](roots/retire.md): Bind a resolved root's story into a book and release the root
 - [Enriching](enrich/index.md): Import metadata from external tools
   - [worklist](enrich/worklist.md): Output sources for external processing
   - [import-facts](enrich/import-facts.md): Import processor output
@@ -55,8 +57,12 @@ The available `--allow` values are specific to each command. See individual comm
   - [ls](query/ls.md): List sources matching filters
   - [facts](query/facts.md): Discover available metadata
   - [compare](query/compare.md): Compare directories by content
+  - [survey](query/survey.md): Survey a selection for archive status and related locations
+  - [sweep](query/sweep.md): Rank reduction opportunities across all roots
+  - [trail](query/trail.md): Read the decision trail
 - [Managing Sources](manage/index.md): Control which sources are processed
   - [exclude](manage/exclude.md): Mark sources to skip during archiving
+  - [note](manage/note.md): Annotate locations with timestamped notes
 - [Archiving](archive/index.md): Organize files into your canonical archive
   - [coverage](archive/coverage.md): Check archive progress
   - [cluster](archive/cluster.md): Generate a manifest for archiving
@@ -64,3 +70,4 @@ The available `--allow` values are specific to each command. See individual comm
 - [Maintenance](maintain/index.md): Clean up and maintain the database
   - [facts delete](maintain/facts-delete.md): Remove incorrect or unwanted metadata
   - [prune](maintain/prune.md): Clean up stale, orphaned, or excluded data
+  - [ledger reindex](maintain/ledger-reindex.md): Rebuild the extraction ledger from receipts
