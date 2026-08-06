@@ -2,28 +2,20 @@
 
 Scan directories and index files.
 
-When you scan a particular [root](../../concepts/roots.md), Canon will walk the directory tree starting at the given path(s).
-For each file, basic metadata such as last modification time and size is collected, and (by default) the hash is computed.
-After scanning, Canon knows about the existence of all sources in that root.
-If the files were hashed they will be linked to objects.
+When you scan a [root](../../concepts/roots.md), Canon walks the directory tree starting at the given path(s).
+For each file it collects basic metadata, such as last modification time and size, and by default computes the content hash.
+After scanning, Canon knows about the existence of all [sources](../../concepts/source.md) in that root; hashed sources are linked to [objects](../../concepts/object.md).
 
-The hashing process can take quite long, so it is possible to skip that (`--no-hash`).
-Not hashing is an option if your intention is to hash selectively, for instance: you're only interested in certain types of files.
+Collections of files that belong together can be scanned as separate roots. Each root can be given a comment, to recall what it contains or to note what you discovered there.
 
-There is no real limit on how many roots you can add.
-It may be helpful to scan collections of files that belong together as separate roots.
-Each root can be given a comment, so this can help you recall what is contained, but you can also use this to store some notes about what you discovered in these roots.
-
-If you have an already organized location that you want Canon to treat as your canonical archive, scan it with `--role archive` from the start. The role is set when the root is added; to change it, you must remove the root and re-add it with the new role.
-You can add multiple archive roots, for instance one for your music collection and another for your eBooks.
+To have Canon treat an already organized location as your canonical archive, scan it with `--role archive` from the start. The role is set when the root is added; to change it, remove the root and re-add it with the new role.
+You can add multiple archive roots, for instance one for a music collection and another for eBooks.
 
 ## When to run scan
 
-If your filesystem changes regularly, make sure to re-scan your roots with Canon.
-That way Canon can detect change, and you will not miss files for archiving.
-Note that, when archiving, Canon always checks the validity of the files to be archived.
+Re-scan a root after its contents change, so Canon detects the changes and no files are missed for archiving. When archiving, Canon always checks the validity of the files to be archived.
 
-Another use case is periodic integrity verification of your archives. Use `--verify` to recompute hashes for all files and detect corruption. Canon exits with a non-zero status if any mismatches are found, making it suitable for cron jobs that alert on failure.
+Scan also serves periodic integrity verification of your archives: `--verify` recomputes hashes to detect corruption, and Canon exits with a non-zero status if any mismatches are found, making it suitable for cron jobs that alert on failure.
 
 ## Examples
 
@@ -56,11 +48,11 @@ canon scan --verify /Volumes/Archive
 canon scan --missing /path/to/deleted/folder
 ```
 
-**Hash computation:** By default, Canon computes content hashes for new and changed files during scan. This enables deduplication and archive tracking. Use `--no-hash` to skip hashing if you just want to index files quickly.
+**Hash computation:** By default, Canon computes content hashes for new and changed files during scan; hashes enable deduplication and archive tracking. Hashing can take long. Use `--no-hash` to index files without hashing, either for speed or when you intend to hash only certain kinds of files.
 
-**Integrity verification:** Use `--verify` to recompute hashes for all files, even unchanged ones. Run periodically (e.g., via cron) to detect file corruption. If a file's hash changes without its mtime changing, Canon warns about possible corruption and exits with an error.
+**Integrity verification:** `--verify` recomputes hashes for all files, even unchanged ones. If a file's hash changes without its mtime changing, Canon warns about possible corruption and exits with an error.
 
-**Discovering untracked directories:** Use `--candidates` to find directories with files that aren't yet under any root. This is useful when exploring a drive or backup to see what could be added:
+**Discovering untracked directories:** Use `--candidates` to find directories with files that aren't yet under any root, for instance when exploring a drive or backup to see what could be added:
 
 ```bash
 # Find candidate roots to add under a path
@@ -74,26 +66,26 @@ Candidate roots to add:
 
 Directories under existing roots are skipped. When multiple subdirectories share a common ancestor that could be added as a single root, they're rolled up (unless that ancestor contains an existing root).
 
-**Marking deleted paths as missing:** When you delete a folder that was under a scanned root, Canon still thinks those files are present. Normally you'd re-scan the parent to let Canon discover they're gone, but that can be expensive if the parent contains many other files. Use `--missing` to tell Canon directly that a path no longer exists:
+**Marking deleted paths as missing:** When you delete a folder that was under a scanned root, Canon still considers those files present. Re-scanning the parent would let Canon discover they're gone, but that can be expensive when the parent holds many other files. Use `--missing` to tell Canon directly that a path no longer exists:
 
 ```bash
 # Deleted a backup folder — mark its 140 sources as not present
-canon scan --missing /Volumes/share/Backup/old-phone
+canon scan --missing /Volumes/Backup/old-phone
 
 # Works with any path under a known root, including the root itself
-canon scan --missing /Volumes/share/Backup
+canon scan --missing /Volumes/Backup
 ```
 
 The sources are marked as not present but remain in the database with their hashes and metadata intact. If the path reappears later (e.g., storage remounted), a normal scan will reconcile them back. Cannot be combined with `--all` or `--add`.
 
-**Deletions are recorded.** Whether Canon infers a deletion by re-scanning a parent (files that were present but weren't seen this time) or you mark one directly with `--missing`, the disappearance is captured as [decision provenance](../../concepts/decisions.md): each vanished source is linked to the scan decision, and a **source-local receipt** listing exactly what was lost is written to `.canon-ledger/` on the affected drive. Add `--reason` to say *why* — it travels into both the record and the receipt:
+**Deletions are recorded.** Whether Canon infers a deletion by re-scanning a parent (files that were present but weren't seen this time) or you mark one directly with `--missing`, the disappearance is captured as [decision provenance](../../concepts/decisions.md): each vanished source is linked to the scan decision, and a **source-local receipt** listing exactly what was lost is written to `.canon-ledger/` on the affected storage. Add `--reason` to say why; the reason travels into both the record and the receipt:
 
 ```bash
-canon scan --missing /Volumes/share/Backup/old-phone \
+canon scan --missing /Volumes/Backup/old-phone \
   --reason "Phone backed up to archive, originals confirmed"
 ```
 
-This makes deletion a first-class fate alongside archiving and exclusion: you can later reconstruct what a drive held, what you kept, released, or discarded — and why — even from the files alone. A deletion is recorded even when no archive root exists, so culling a drive before archiving still leaves a trail. To suppress the receipt for one run use `--no-receipt`; to disable recording entirely set `recording = "Off"` (see [Decision Provenance](../../concepts/decisions.md)).
+Deletion is a recorded fate alongside archiving and exclusion: what the storage held, what you kept, released, or discarded, and why, stays reconstructible from the files alone. A deletion is recorded even when no archive root exists. To suppress the receipt for one run use `--no-receipt`; to disable recording entirely set `recording = "Off"` (see [Decision Provenance](../../concepts/decisions.md)).
 
 Output shows what was found:
 ```
