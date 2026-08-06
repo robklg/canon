@@ -28,8 +28,8 @@ When querying, the `content.` prefix is optional: `--where 'Make=Apple'` is equi
 ## Value Types
 
 Canon stores facts as:
-- **Text**: Strings like `"Apple"` or `"image/jpeg"`
-- **Numbers**: Integers or decimals like `1024` or `3.14`
-- **Timestamps**: Unix timestamps, enabling date modifiers like `|year` and `|month`
+- **Text**: Strings like `"Apple"` or `"image/jpeg"`; enables string matching (`=`, `~` glob) and string modifiers (`|lowercase`, `|stem`)
+- **Numbers**: Integers or decimals like `1024` or `3.14`; enables numeric comparisons (`>1000`) and the `|bucket` modifier
+- **Timestamps**: Unix timestamps; enables date modifiers (`|year`, `|month`) and date comparisons (`>=2024-01-01`)
 
 Type hints can be provided during import to ensure correct parsing. See [Enriching](../commands/enrich/index.md) for details.

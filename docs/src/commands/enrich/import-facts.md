@@ -33,11 +33,7 @@ The special key `hash.sha256` creates or links an object, enabling deduplication
 
 ## Type Hints
 
-Canon stores facts as text, numbers, or timestamps (see [Value Types](../../concepts/facts.md#value-types)). The stored type determines what operations work on a fact:
-
-- **Timestamps** enable date modifiers (`|year`, `|month`, `|date`) and date comparisons (`>=2024-01-01`)
-- **Numbers** enable numeric comparisons (`>1000`, `<=5.0`) and the `|bucket` modifier
-- **Text** enables string matching (`=`, `~` glob) and string modifiers (`|lowercase`, `|stem`)
+Canon stores facts as text, numbers, or timestamps; the stored type determines which operations work on a fact (see [Value Types](../../concepts/facts.md#value-types) for the mapping).
 
 If a datetime like `"2024:07:23 11:06:32"` is stored as text instead of a timestamp, queries like `--where 'DateTimeOriginal|year=2024'` won't work: the modifier expects a timestamp.
 

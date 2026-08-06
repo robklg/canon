@@ -10,7 +10,7 @@ more. The book answers that after it's gone.
 
 ## Retirement
 
-Retiring a root means *this root is resolved and its index may be removed*.
+Retiring a root means *this root is [resolved](resolution.md) and its index may be removed*.
 
 What counts as resolved is your judgment. Canon says **NOT READY** when sources are
 neither archived nor excluded. When nothing blocks, it reports that it found no

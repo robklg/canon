@@ -14,7 +14,7 @@ Objects are created automatically when sources are hashed during scanning or enr
 
 A zero-byte file has shape but no content. Every empty file shares the one
 empty-content object, so its hash identifies nothing. Canon treats such
-sources as **contentless**: they never count as covered or archived (any
+sources as **contentless**: they never count as [covered](resolution.md#standings) or archived (any
 empty file anywhere would otherwise cover them all), never count as
 unresolved (there is no content to lose), and never block a
 [retirement](retirement.md). They are still ordinary files: `ls` finds them,

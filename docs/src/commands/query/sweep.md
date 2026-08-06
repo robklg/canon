@@ -1,6 +1,6 @@
 # canon sweep
 
-Sweep the whole universe for reduction opportunities: the ranked places where one dismissal decision resolves the most. Every other query command asks you to say *where*; the sweep answers that question itself. The sweep finds places, survey judges one, you decide, and the decision is recorded with `canon exclude`.
+Sweep the whole [universe](../../concepts/resolution.md) for reduction opportunities: the ranked places where one dismissal decision resolves the most. Every other query command asks you to say *where*; the sweep answers that question itself. The sweep finds places, survey judges one, you decide, and the decision is recorded with `canon exclude`.
 
 ```bash
 # The leaderboard: the ten best reduction opportunities, ranked
@@ -34,7 +34,7 @@ The sweep takes no paths and no filters; it is universe-wide, computed fresh fro
 
 - **The subject** (the full path on the first line) is the place the finding is about, the side you might dismiss. The other side is the **counterpart**: where the copies live. A single finding's headline is its *subject*; a hub's headline is the shared *counterpart* (the hub's own "shared counterpart" line states this).
 - **The relation** states how the subject's content connects elsewhere, in survey's vocabulary: a *subset* sits inside a counterpart that holds more; a *mirror* matches its counterpart in both directions. Both percentages matter: a large gap between "by size" and "by count" means many small files carry little weight.
-- **The counterpart line** states the counterpart's *standing* (`archived` or `present`), which is what makes acting on the finding safe or not. The wording is declarative ("inside X", never "keep X"): the relation implies no preferred side; even for a subset, the smaller side can still be the better copy. A counterpart on a suspended root reads `reconnect to verify`: nothing is safe to act on until that root is scanned again. Both sides carry their scan age; the claim rests on the last scan.
+- **The counterpart line** states the counterpart's [*standing*](../../concepts/resolution.md#standings) (`archived` or `present`), which is what makes acting on the finding safe or not. The wording is declarative ("inside X", never "keep X"): the relation implies no preferred side; even for a subset, the smaller side can still be the better copy. A counterpart on a suspended root reads `reconnect to verify`: nothing is safe to act on until that root is scanned again. Both sides carry their scan age; the claim rests on the last scan.
 - **Gain** is what acting on the finding resolves. **Residual** is content existing nowhere else in the universe. `residual: none` means a clean dismissal; a small residual often means one rescue away from a clean one.
 - **The `→` handoff** is the ready-to-run judging command, written as if you `cd` into the subject first. The sweep only ever hands off to judgment, never to a ready-made exclusion.
 

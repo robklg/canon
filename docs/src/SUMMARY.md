@@ -12,6 +12,8 @@
   - [Objects](concepts/object.md)
   - [Sources v. Objects](./concepts/source-object.md)
   - [Facts](concepts/facts.md)
+  - [Exclusion](concepts/exclusion.md)
+  - [Resolution](concepts/resolution.md)
   - [Decision Provenance](concepts/decisions.md)
   - [Retirement, the Book, and the Shelf](concepts/retirement.md)
 - [Commands](commands/index.md)

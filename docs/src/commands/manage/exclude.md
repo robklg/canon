@@ -1,6 +1,6 @@
 # canon exclude
 
-Manage source exclusions. Excluded sources are skipped by most commands.
+Manage source [exclusions](../../concepts/exclusion.md). Excluded sources are skipped by most commands.
 
 ```bash
 # Mark sources as excluded (e.g., small files, temp files)

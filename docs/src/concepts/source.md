@@ -14,7 +14,7 @@ When a source is scanned with hashing enabled (the default), Canon computes its 
 
 ## Exclusion
 
-Sources can be marked as excluded to skip them during archiving. A source is considered excluded if:
+Sources can be marked as [excluded](exclusion.md) to skip them during archiving. A source is considered excluded if:
 
 - The source itself is marked excluded, OR
 - The source's linked object is marked excluded
