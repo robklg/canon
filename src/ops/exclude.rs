@@ -508,8 +508,10 @@ pub fn plan_set_objects(
         if !seen_objects.insert(object_id) {
             continue;
         }
-        // Empty files all share the same hash — skip to prevent excluding all empty files
-        if source.size == 0 {
+        // The contentless law: every empty file shares the one empty-content
+        // object, so an identity-keyed exclusion here would dismiss every
+        // empty file in the universe — set aside, counted, never silent.
+        if source.is_contentless() {
             skipped_empty += 1;
             continue;
         }
@@ -1220,8 +1222,10 @@ pub fn check_set_object_by_file(
         );
     };
 
-    // Safety: refuse to exclude empty files via path lookup
-    if source.size == 0 {
+    // The contentless law: a path names one file, but its object is the one
+    // every empty file shares — an exclusion keyed on it would dismiss them
+    // all. Refused; `--hash` states that intent explicitly.
+    if source.is_contentless() {
         anyhow::bail!(
             "Cannot exclude empty file via path (all empty files share the same hash).\n  \
              Use --hash {} to explicitly exclude all empty files.",

@@ -155,3 +155,43 @@ fn cluster_generate_carries_empty_files_instead_of_skipping_them() {
         "no empty file in the already-archived skip list"
     );
 }
+
+#[test]
+fn set_object_planning_sets_the_empty_file_aside() {
+    // Identity-keyed exclusion over a selection: the empty file's object is
+    // the one every empty file shares, so excluding it would dismiss every
+    // empty file in the universe. Set aside, counted, never silent.
+    let mut c = canary();
+    let plan = crate::ops::exclude::plan_set_objects(
+        &mut c.conn,
+        &crate::ops::exclude::ExcludeSetObjectsParams {
+            scopes: vec![],
+            filters: vec![],
+        },
+    )
+    .unwrap();
+    assert_eq!(plan.skipped_empty, 1, "the empty file is counted aside");
+    assert!(
+        plan.objects.iter().all(|o| o.object_id != c.empty_obj),
+        "the universal empty object is never planned for exclusion"
+    );
+    assert!(
+        plan.objects.iter().any(|o| o.object_id == c.data_obj),
+        "the genuine duplicate still plans"
+    );
+}
+
+#[test]
+fn set_object_by_path_refuses_the_empty_file() {
+    // A path names one file, but its object is the one every empty file
+    // shares — refused toward the explicit `--hash` intent.
+    let c = canary();
+    let err = crate::ops::exclude::check_set_object_by_file(
+        &c.conn,
+        c.source_root,
+        "folder/empty.log",
+        "/r/folder/empty.log",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("empty file"), "{err:#}");
+}
