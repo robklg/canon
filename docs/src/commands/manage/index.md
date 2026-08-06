@@ -1,14 +1,7 @@
 # Managing Sources
 
-After scanning and enriching, you may want to control which sources are included in archiving operations, or annotate locations with observations.
+After scanning and enriching, these commands control which sources archiving operations consider, and annotate locations along the way.
 
-The [`exclude`](exclude.md) command lets you mark sources to skip during `cluster generate` and `apply`. This is useful for:
+[`exclude`](exclude.md) marks sources to skip during `cluster generate` and `apply`: temporary or system files, known duplicates beside a preferred copy, files below a size threshold. Excluding deletes nothing, and exclusions can be cleared at any time.
 
-- Ignoring temporary or system files
-- Skipping known duplicates while keeping a preferred copy
-- Filtering out small files below a size threshold
-- Removing unwanted files from consideration without deleting them
-
-Exclusions are stored directly on sources and can be cleared at any time.
-
-The [`note`](note.md) command lets you annotate locations with timestamped observations during exploration. Notes surface automatically in [`survey`](../query/survey.md) output, serving as breadcrumbs when revisiting locations.
+[`note`](note.md) annotates locations with timestamped observations. Notes surface automatically in [`survey`](../query/survey.md) output when you revisit a location.

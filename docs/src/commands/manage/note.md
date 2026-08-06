@@ -1,6 +1,6 @@
 # canon note
 
-Annotate locations with timestamped notes. Notes are quick observations about a directory scope — "interesting photos from 2016 trip", "possible duplicates of archive set", "needs review". They surface automatically in [`survey`](../query/survey.md) output, serving as breadcrumbs during exploration.
+Annotate locations with timestamped notes. A note is a quick observation about a directory scope: "interesting photos from 2016 trip", "possible duplicates of archive set", "needs review". Notes surface automatically in [`survey`](../query/survey.md) output.
 
 ```bash
 # Add a note to the current directory
@@ -54,9 +54,9 @@ canon note --clear -r --yes
 
 ## The journal model
 
-Notes use an append-only journal model. Each `-m` call adds a new timestamped entry — notes are never replaced or edited in place. Multiple notes can exist at the same scope, forming a chronological log of observations. Clearing is the only way to remove notes.
+Notes use an append-only journal model. Each `-m` call adds a new timestamped entry; notes are never replaced or edited in place. Multiple notes can exist at the same scope, forming a chronological log of observations. Clearing is the only way to remove notes.
 
-This is deliberate: notes capture evolving understanding. "Check for duplicates" and "confirmed: 80% overlap with backup" are two entries that tell a story.
+This is deliberate: notes capture evolving understanding. "Check for duplicates" and "confirmed: 80% overlap with backup" are two entries in the same log.
 
 ## Modes
 
@@ -92,7 +92,7 @@ When CWD is not under any known root, view mode falls back to the global tempora
 
 ### Temporal listing (`--global`, `-r`)
 
-Shows the most recent notes ordered by date — oldest at top, most recent at the bottom (closest to the prompt). Capped at 10 entries by default.
+Shows the most recent notes ordered by date: oldest at top, most recent at the bottom (closest to the prompt). Capped at 10 entries by default.
 
 ```bash
 $ canon note --global
@@ -123,7 +123,7 @@ phone-export/vacation  2026-03-22  unique sunset photos here
 
 ### Spatial listing (`--by-scope`)
 
-Shows one line per location — the most recent note and the total note count for that location. Locations ordered by their most recent note date, capped at 10.
+Shows one line per location: the most recent note and the total note count for that location. Locations ordered by their most recent note date, capped at 10.
 
 ```bash
 $ canon note --global --by-scope
@@ -134,9 +134,9 @@ Photos/2011/vacation   (4)  2026-03-28  beach photos assembled, ready to cluster
 (6 more locations with notes)
 ```
 
-The note count tells you which locations have deep history worth drilling into with `canon note <path>`.
+The note count shows which locations have longer histories; view one in full with `canon note <path>`.
 
-`--by-scope` without `--global` or `-r` inside a root implies `-r` — spatial map of the subtree:
+Inside a root, `--by-scope` without `--global` or `-r` implies `-r`, a spatial map of the subtree:
 
 ```bash
 $ cd /mnt/old-drive
@@ -147,7 +147,7 @@ phone-export/vacation  (1)  2026-03-22  unique sunset photos here
 
 ### Clear (`--clear`)
 
-Without `-r`, clears notes at the exact scope only — no confirmation needed.
+Without `-r`, clears notes at the exact scope only; no confirmation needed.
 
 ```bash
 $ canon note --clear
@@ -165,7 +165,7 @@ Cleared 5 notes
 
 ## CWD defaulting
 
-When no path argument is given, `canon note` uses the current working directory. This follows the same pattern as other Canon commands — you `cd` into a location and work from there.
+When no path argument is given, `canon note` uses the current working directory, the same pattern as other Canon commands.
 
 - **CWD inside a root**: scope resolves to `(root_id, rel_path)` for that location
 - **CWD not in any root**: view mode falls back to global temporal list; add and clear modes error
@@ -186,7 +186,7 @@ Notes surface automatically in [`survey`](../query/survey.md) output, appearing 
 
 ## Notes and the decision trail
 
-Notes and the [decision trail](../query/trail.md) split one story between them: **notes hold thoughts** — note-to-self, questions, hunches ("what did I think about this?") — while **the trail holds actions** — what was scanned, excluded, archived, deleted ("what did I do?"). Don't write notes to record actions; effectful commands record themselves, and `--reason` attaches your why. [`canon trail`](../query/trail.md) shows both voices as one timeline, with notes visually distinct.
+Notes hold thoughts ("what did I think about this?"); the [decision trail](../query/trail.md) holds actions ("what did I do?"). Don't write notes to record actions: effectful commands record themselves, and `--reason` attaches your why. [`canon trail`](../query/trail.md) shows both as one timeline, with notes visually distinct.
 
 ## Distinction from other annotations
 
