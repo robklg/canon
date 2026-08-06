@@ -1,11 +1,10 @@
 # Docs Style
 
-The register charter for the user docs (`docs/src`). It exists because the docs
-drifted into a lyrical register once (the retirement arc, corrected 2026-08-06) and
-nothing pinned the register down. It is written for anyone editing the book, and it
-doubles as the reviewer prompt for docs register passes.
+The style guide for the user docs (`docs/src`), for anyone writing or reviewing
+pages of the book.
 
-The book is a reference. A separate user guide is planned; warmth belongs there.
+The book is a reference: structure, tables, and sample outputs carry the weight,
+and the prose stays plain. A separate user guide is planned; warmth belongs there.
 
 ## Page tiers
 
