@@ -942,7 +942,7 @@ fn fate_part(verb: &str, fate: &FateLine) -> String {
 }
 
 fn format_counts(d: &Decision) -> String {
-    let fmt = |c: Option<i64>| c.map_or("-".to_string(), |n| format_count(n));
+    let fmt = |c: Option<i64>| c.map_or("-".to_string(), format_count);
     format!(
         "attempted {}, completed {}, failed {}, skipped {}",
         fmt(d.count_attempted),
@@ -1516,7 +1516,7 @@ mod tests {
             from_cwd: false,
             auto_include_archived: false,
         };
-        let event = TimelineEvent::Decision(mk_decision(1, Some(vec!["/short".to_string()])));
+        let event = TimelineEvent::Decision(Box::new(mk_decision(1, Some(vec!["/short".to_string()]))));
 
         let mut placements = HashMap::new();
         placements.insert(
@@ -1540,7 +1540,7 @@ mod tests {
             from_cwd: false,
             auto_include_archived: false,
         };
-        let event = TimelineEvent::Decision(mk_decision(1, None));
+        let event = TimelineEvent::Decision(Box::new(mk_decision(1, None)));
         let mut second = mk_extraction_row(None, None);
         second.root_path = "/Volumes/nikon-sd".to_string();
         second.rel_prefix = "dcim".to_string();
@@ -1572,7 +1572,7 @@ mod tests {
             from_cwd: true,
             auto_include_archived: false,
         };
-        let event = TimelineEvent::Decision(mk_decision(1, None));
+        let event = TimelineEvent::Decision(Box::new(mk_decision(1, None)));
         let mut placements = HashMap::new();
         placements.insert(1, vec![(mk_extraction_row(None, None), RowAspect::Arrival)]);
 
@@ -1587,7 +1587,7 @@ mod tests {
             from_cwd: true,
             auto_include_archived: false,
         };
-        let event = TimelineEvent::Decision(mk_decision(1, None));
+        let event = TimelineEvent::Decision(Box::new(mk_decision(1, None)));
         let mut placements = HashMap::new();
         placements.insert(1, vec![(mk_extraction_row(None, None), RowAspect::Arrival)]);
 
@@ -1605,7 +1605,7 @@ mod tests {
             from_cwd: true,
             auto_include_archived: false,
         };
-        let event = TimelineEvent::Decision(mk_decision(1, None));
+        let event = TimelineEvent::Decision(Box::new(mk_decision(1, None)));
         let mut placements = HashMap::new();
         placements.insert(
             1,
@@ -1627,7 +1627,7 @@ mod tests {
             from_cwd: false,
             auto_include_archived: false,
         };
-        let event = TimelineEvent::Decision(mk_decision(1, None));
+        let event = TimelineEvent::Decision(Box::new(mk_decision(1, None)));
         let mut first = mk_extraction_row(None, None);
         first.rel_prefix = "photos/2016/01".to_string();
         let mut second = mk_extraction_row(None, None);
@@ -1654,7 +1654,7 @@ mod tests {
             from_cwd: true,
             auto_include_archived: false,
         };
-        let event = TimelineEvent::Decision(mk_decision(42, None));
+        let event = TimelineEvent::Decision(Box::new(mk_decision(42, None)));
         let inside = mk_extraction_row(None, None);
         let mut outside = mk_extraction_row(None, None);
         outside.root_id = 2;

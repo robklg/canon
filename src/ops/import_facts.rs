@@ -402,8 +402,11 @@ fn try_parse_duration(value: &Value) -> Option<f64> {
     }
 }
 
+/// A classified fact value: (value_text, value_num, value_time).
+type ClassifiedValue = (Option<String>, Option<f64>, Option<i64>);
+
 /// Classify a plain value (no type hint).
-fn classify_value(value: &Value) -> (Option<String>, Option<f64>, Option<i64>) {
+fn classify_value(value: &Value) -> ClassifiedValue {
     match value {
         Value::String(s) => (Some(s.clone()), None, None),
         Value::Number(n) => {
@@ -422,9 +425,7 @@ fn classify_value(value: &Value) -> (Option<String>, Option<f64>, Option<i64>) {
 }
 
 /// Classify a value with optional type hint.
-fn classify_typed_value(
-    typed: &TypedValue,
-) -> Result<(Option<String>, Option<f64>, Option<i64>), String> {
+fn classify_typed_value(typed: &TypedValue) -> Result<ClassifiedValue, String> {
     match typed {
         TypedValue::Plain(v) => Ok(classify_value(v)),
         TypedValue::Hinted { value, type_hint } => match type_hint.as_str() {

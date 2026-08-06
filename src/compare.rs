@@ -146,6 +146,9 @@ pub fn run(
     Ok(is_identical)
 }
 
+/// (object_id -> path map, unhashed count, contentless count, used status, excluded count).
+type ScopeContentMap = (HashMap<i64, String>, usize, usize, UsedStatus, usize);
+
 /// Select sources in scope and build an object_id → path map for content comparison.
 ///
 /// Returns (object_id -> path map, unhashed count, contentless count).
@@ -156,7 +159,7 @@ fn select_and_build_map(
     scope_prefix: &str,
     filters: &[Filter],
     include: &IncludeSet,
-) -> Result<(HashMap<i64, String>, usize, usize, UsedStatus, usize)> {
+) -> Result<ScopeContentMap> {
     let scopes = ScopeMatch::classify_all(&[scope_prefix.to_string()]);
     let params = SelectionParams {
         scopes,

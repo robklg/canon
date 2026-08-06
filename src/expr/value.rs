@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn display_float_num() {
-        assert_eq!(fact_value_to_display(&FactValue::Num(3.14159)), "3.14159");
+        assert_eq!(fact_value_to_display(&FactValue::Num(12.375)), "12.375");
     }
 
     #[test]

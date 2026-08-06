@@ -664,13 +664,18 @@ impl FactTypeTracker {
     }
 }
 
+/// A fully-covered fact: (key, dominant type, description).
+type FullCoverageFact = (String, FactType, String);
+/// A mixed-type warning: (key, type breakdown).
+type MixedTypeWarning = (String, String);
+
 /// Compute facts with 100% coverage and mixed-type warnings.
 ///
 /// Returns (full_coverage_facts, mixed_type_warnings).
 fn compute_full_coverage_facts(
     entries: &[LockEntry],
     all_facts: &HashMap<i64, Vec<FactEntry>>,
-) -> (Vec<(String, FactType, String)>, Vec<(String, String)>) {
+) -> (Vec<FullCoverageFact>, Vec<MixedTypeWarning>) {
     if entries.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -705,7 +710,7 @@ fn compute_full_coverage_facts(
     }
 
     // Collect mixed-type warnings for 100% coverage facts
-    let mut mixed_type_warnings: Vec<(String, String)> = Vec::new();
+    let mut mixed_type_warnings: Vec<MixedTypeWarning> = Vec::new();
     for (key, tracker) in &fact_counts {
         if tracker.count == source_count && tracker.has_mixed_types() {
             mixed_type_warnings.push((key.clone(), tracker.type_breakdown()));
@@ -714,7 +719,7 @@ fn compute_full_coverage_facts(
     mixed_type_warnings.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Filter to only 100% coverage facts
-    let mut full_coverage: Vec<(String, FactType, String)> = fact_counts
+    let mut full_coverage: Vec<FullCoverageFact> = fact_counts
         .into_iter()
         .filter(|(_, tracker)| tracker.count == source_count)
         .map(|(key, tracker)| {

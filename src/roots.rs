@@ -301,6 +301,7 @@ pub fn retired(db: &Db, config: &LedgerConfig) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn retire(
     db: &Db,
     spec: &str,

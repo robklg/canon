@@ -156,8 +156,6 @@ pub fn find_retirement_covering_path(
     }))
 }
 
-/// One line of the retired fleet.
-
 /// The root's complete story, fetched once — the retirement ceremony's one
 /// structural substrate. The readiness review and the book compile are both
 /// lenses over this, so the ceremony fetches once and the gate and the book

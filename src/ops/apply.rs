@@ -3455,7 +3455,7 @@ mod tests {
             .collect();
         assert_eq!(receipt_files.len(), 1, "Expected one .toml receipt file");
 
-        let receipt_content = std::fs::read_to_string(&receipt_files[0].path()).unwrap();
+        let receipt_content = std::fs::read_to_string(receipt_files[0].path()).unwrap();
         assert!(receipt_content.contains("# Canon Decision Receipt"));
         assert!(receipt_content.contains("[meta]"));
         assert!(receipt_content.contains("[[items]]"));
@@ -4381,7 +4381,7 @@ mod tests {
             "Receipt should be finalized even on interrupt"
         );
 
-        let content = std::fs::read_to_string(&receipt_files[0].path()).unwrap();
+        let content = std::fs::read_to_string(receipt_files[0].path()).unwrap();
         // Should contain exactly one [[items]] section
         let items_count = content.matches("[[items]]").count();
         assert_eq!(

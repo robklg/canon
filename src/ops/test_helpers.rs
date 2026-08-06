@@ -80,6 +80,7 @@ pub fn insert_source_with_metadata(
 }
 
 /// Full-control source insertion with all parameters.
+#[allow(clippy::too_many_arguments)]
 pub fn insert_source_full(
     conn: &Connection,
     root_id: i64,

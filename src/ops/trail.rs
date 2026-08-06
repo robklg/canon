@@ -1314,7 +1314,7 @@ mod tests {
         // rollup counts its files alone, not the 1,250-file sum.
         let month = compute_trail(&conn, &params(vec!["/archive/m/03".to_string()])).unwrap();
         assert_eq!(decision_ids(&month.view), vec![here]);
-        assert!(month.placements.get(&elsewhere).is_none());
+        assert!(!month.placements.contains_key(&elsewhere));
         let rollup = month.arrival_rollup.expect("m/03 received content");
         assert_eq!(rollup.files, 1_005);
         assert_eq!(rollup.bytes, Some(10_050));

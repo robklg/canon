@@ -24,6 +24,7 @@ use crate::repo::{self, Connection, Db};
 /// their roots (the one funnel). Pass an empty slice for a global decision. A
 /// prefix under no known root is dropped — a stray non-canonical scope is
 /// unrecordable by construction.
+#[allow(clippy::too_many_arguments)]
 fn make_decision(
     conn: &Connection,
     command: DecisionCommand,
@@ -90,6 +91,7 @@ pub struct ClearOptions {
 // Set Command
 // ============================================================================
 
+#[allow(clippy::too_many_arguments)]
 pub fn set(
     db: &mut Db,
     scope_prefixes: &[String],
@@ -140,7 +142,7 @@ pub fn set(
     let decision = make_decision(
         conn,
         DecisionCommand::ExcludeSet,
-        &scope_prefixes,
+        scope_prefixes,
         command_line,
         config,
         no_receipt,
@@ -158,6 +160,7 @@ pub fn set(
 // Clear Command
 // ============================================================================
 
+#[allow(clippy::too_many_arguments)]
 pub fn clear(
     db: &mut Db,
     scope_prefixes: &[String],
@@ -213,7 +216,7 @@ pub fn clear(
     let decision = make_decision(
         conn,
         DecisionCommand::ExcludeClear,
-        &scope_prefixes,
+        scope_prefixes,
         command_line,
         config,
         no_receipt,
@@ -334,6 +337,7 @@ pub fn set_by_path(
 ///
 /// For each source in scope, we check if there's a duplicate in the prefer path.
 /// If exactly one duplicate exists in prefer, we exclude the scoped source.
+#[allow(clippy::too_many_arguments)]
 pub fn exclude_duplicates(
     db: &mut Db,
     prefer_path: &Path,
@@ -365,8 +369,12 @@ pub fn exclude_duplicates(
     validate_paths_in_roots(&scope_prefixes, &all_roots)?;
     crate::ops::scope::validate_sources_exist(conn, &scope_prefixes, &all_roots)?;
     let prefer_prefix = resolve_path(prefer_path, &all_roots, &cwd)?;
-    validate_paths_in_roots(&[prefer_prefix.clone()], &all_roots)?;
-    crate::ops::scope::validate_sources_exist(conn, &[prefer_prefix.clone()], &all_roots)?;
+    validate_paths_in_roots(std::slice::from_ref(&prefer_prefix), &all_roots)?;
+    crate::ops::scope::validate_sources_exist(
+        conn,
+        std::slice::from_ref(&prefer_prefix),
+        &all_roots,
+    )?;
 
     // Plan
     let scopes = ScopeMatch::classify_all(&scope_prefixes);
@@ -596,6 +604,7 @@ pub fn set_object_by_file(
 }
 
 /// Exclude objects matching the given scope and filters.
+#[allow(clippy::too_many_arguments)]
 pub fn set_objects_by_filter(
     db: &mut Db,
     scope_prefixes: &[String],
@@ -684,7 +693,7 @@ pub fn set_objects_by_filter(
     let decision = make_decision(
         conn,
         DecisionCommand::ExcludeSetObject,
-        &scope_prefixes,
+        scope_prefixes,
         command_line,
         config,
         no_receipt,

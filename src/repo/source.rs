@@ -1134,10 +1134,6 @@ pub fn set_decision_id_by_object(
     Ok(updated as u64)
 }
 
-/// Count sources in a root by hash status.
-///
-/// Returns (total, unhashed) where:
-/// - `total` is the count of present sources in the root
 /// Update a source's location (root and path) after a rename/move operation.
 ///
 /// Used when a source file is relocated to an archive. Updates the root_id,

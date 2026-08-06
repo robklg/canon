@@ -8,6 +8,7 @@ use crate::expr::filter::Filter;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::Db;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     db: &mut Db,
     scope_prefixes: &[String],

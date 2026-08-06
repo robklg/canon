@@ -355,6 +355,7 @@ pub fn fetch_type_map(
 /// * `value_time` - Timestamp value
 /// * `observed_at` - When this fact was observed
 /// * `observed_basis_rev` - For source facts, the basis_rev at observation time
+#[allow(clippy::too_many_arguments)]
 pub fn upsert(
     conn: &Connection,
     entity_type: &str,

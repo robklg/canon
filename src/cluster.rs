@@ -24,6 +24,7 @@ pub struct GenerateOptions {
     pub no_edit: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn generate(
     db: &mut Db,
     scope_prefixes: &[String],
@@ -462,7 +463,7 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
             let lost_entries: Vec<&crate::ops::cluster::StatusEntry> = status
                 .entries
                 .iter()
-                .filter(|e| !e.source_exists && !(e.dest_exists && e.dest_size_match))
+                .filter(|e| !(e.source_exists || e.dest_exists && e.dest_size_match))
                 .collect();
             for entry in &lost_entries {
                 println!(

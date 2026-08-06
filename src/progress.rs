@@ -15,7 +15,7 @@ impl Progress {
     }
 
     pub fn update(&self, i: usize) {
-        if i > 0 && i % self.interval == 0 {
+        if i > 0 && i.is_multiple_of(self.interval) {
             let pct = (i * 100) / self.total;
             eprint!("\r  {}% ({}/{})\x1b[K", pct, i, self.total);
             let _ = std::io::stderr().flush();
@@ -23,7 +23,7 @@ impl Progress {
     }
 
     pub fn update_with_name(&self, i: usize, name: &str) {
-        if i > 0 && i % self.interval == 0 {
+        if i > 0 && i.is_multiple_of(self.interval) {
             let pct = (i * 100) / self.total;
             // Truncate long filenames to keep the line readable
             let display_name = if name.len() > 40 {

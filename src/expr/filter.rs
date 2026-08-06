@@ -136,6 +136,9 @@ impl FactCache {
     }
 }
 
+/// A fact row: (entity_id, value_text, value_num, value_time).
+type FactRow = (i64, Option<String>, Option<f64>, Option<i64>);
+
 /// Prefetch facts for a batch of sources and keys
 fn prefetch_facts(conn: &mut Connection, source_ids: &[i64], keys: &[String]) -> Result<FactCache> {
     let mut cache = FactCache::new();
@@ -201,7 +204,7 @@ fn prefetch_facts(conn: &mut Connection, source_ids: &[i64], keys: &[String]) ->
 
     // Fetch source facts for all keys
     for key in &stored_keys {
-        let facts: Vec<(i64, Option<String>, Option<f64>, Option<i64>)> = conn
+        let facts: Vec<FactRow> = conn
             .prepare(
                 "SELECT ts.id, f.value_text, f.value_num, f.value_time
                  FROM temp_sources ts
@@ -241,7 +244,7 @@ fn prefetch_facts(conn: &mut Connection, source_ids: &[i64], keys: &[String]) ->
         }
 
         for key in &stored_keys {
-            let facts: Vec<(i64, Option<String>, Option<f64>, Option<i64>)> = conn
+            let facts: Vec<FactRow> = conn
                 .prepare(
                     "SELECT t.id, f.value_text, f.value_num, f.value_time
                      FROM temp_objects t

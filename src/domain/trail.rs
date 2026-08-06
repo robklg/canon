@@ -141,7 +141,7 @@ pub fn fate_posture(family: DecisionFamily, aspect: FateAspect) -> Posture {
 
 /// One event on the mixed timeline: an action (decision) or a thought (note).
 pub enum TimelineEvent {
-    Decision(Decision),
+    Decision(Box<Decision>),
     Note(Note),
 }
 
@@ -167,7 +167,7 @@ impl TimelineEvent {
 pub fn merge_events(decisions: Vec<Decision>, notes: Vec<Note>) -> Vec<TimelineEvent> {
     let mut events: Vec<TimelineEvent> = decisions
         .into_iter()
-        .map(TimelineEvent::Decision)
+        .map(|d| TimelineEvent::Decision(Box::new(d)))
         .chain(notes.into_iter().map(TimelineEvent::Note))
         .collect();
     events.sort_by_key(|e| e.sort_key());
@@ -494,7 +494,7 @@ pub fn group_by_day(
             .events
             .iter()
             .filter_map(|e| match e {
-                TimelineEvent::Decision(d) => Some(d),
+                TimelineEvent::Decision(d) => Some(d.as_ref()),
                 TimelineEvent::Note(_) => None,
             })
             .collect();
@@ -1092,9 +1092,9 @@ mod tests {
         let n1 = mk_note(1, 150);
         let stamps = HashMap::from([(1, agg(5, 500, 0, 0)), (2, agg(0, 0, 3, 300))]);
         let dated = vec![
-            (date("2026-07-11"), TimelineEvent::Decision(d1)),
+            (date("2026-07-11"), TimelineEvent::Decision(Box::new(d1))),
             (date("2026-07-11"), TimelineEvent::Note(n1)),
-            (date("2026-07-12"), TimelineEvent::Decision(d2)),
+            (date("2026-07-12"), TimelineEvent::Decision(Box::new(d2))),
         ];
         let groups = group_by_day(dated, &stamps);
         assert_eq!(groups.len(), 2);

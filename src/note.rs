@@ -26,6 +26,7 @@ use crate::ops::note::{NoteListResult, NoteScope, NoteSpatialResult, NoteViewRes
 use crate::ops::scope::resolve_scope;
 use crate::repo::{self, Db};
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     db: &mut Db,
     path: Option<&Path>,

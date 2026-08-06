@@ -8,6 +8,7 @@ use crate::domain::decision::Decision;
 use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
 
 /// Insert the initial "started" decision record. Returns the row ID.
+#[allow(clippy::too_many_arguments)]
 pub fn insert_started(
     conn: &Connection,
     command: &str,
@@ -36,6 +37,7 @@ pub fn insert_started(
 }
 
 /// Update a started record with completion data.
+#[allow(clippy::too_many_arguments)]
 pub fn update_completed(
     conn: &Connection,
     id: i64,

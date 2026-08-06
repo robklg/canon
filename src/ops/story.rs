@@ -133,6 +133,7 @@ mod tests {
     use crate::repo::{insert_test_root, open_in_memory_for_test};
     use rusqlite::Connection as SqlConnection;
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_source(
         conn: &SqlConnection,
         root_id: i64,

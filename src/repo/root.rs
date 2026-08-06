@@ -524,7 +524,7 @@ mod tests {
 
         let counts = fetch_file_counts(&conn, &[root_id]).unwrap();
         // Root with no sources is not in the result
-        assert!(counts.get(&root_id).is_none());
+        assert!(!counts.contains_key(&root_id));
     }
 
     #[test]

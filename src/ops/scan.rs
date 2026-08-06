@@ -158,6 +158,7 @@ pub trait ScanProgress {
 /// 4. Marks missing/disconnected via mark_missing_sources()
 ///
 /// Returns accumulated stats, files needing hashing, and warnings.
+#[allow(clippy::too_many_arguments)]
 pub fn scan_root(
     conn: &Connection,
     root_id: i64,
@@ -428,6 +429,7 @@ struct ReconcileResult {
 
 /// Reconcile a single file: read DB state, determine outcome, compute partial hash if needed.
 /// Does NOT persist — caller decides how to write (batch or individual transaction).
+#[allow(clippy::too_many_arguments)]
 fn reconcile_file(
     conn: &Connection,
     root_id: i64,
@@ -742,6 +744,9 @@ pub fn write_deletion_receipts(
 // Helpers
 // ============================================================================
 
+/// A source's id paired with its classified outcome.
+type SourceOutcomes = Vec<(i64, SourceOutcome)>;
+
 /// Classify sources under an empty directory by comparing stored device to current device.
 /// Returns outcomes and any warnings about disconnected storage.
 fn classify_sources_in_empty_dir(
@@ -749,7 +754,7 @@ fn classify_sources_in_empty_dir(
     root_id: i64,
     rel_prefix: &str,
     current_device: i64,
-) -> Result<(Vec<(i64, SourceOutcome)>, Vec<String>)> {
+) -> Result<(SourceOutcomes, Vec<String>)> {
     let sources = repo::source::fetch_device_info_by_prefix(conn, root_id, rel_prefix)?;
 
     let mut disconnected_count = 0usize;
@@ -1088,6 +1093,7 @@ mod tests {
     }
 
     /// Test helper: reconcile + persist a single file (replicates old process_file behavior).
+    #[allow(clippy::too_many_arguments)]
     fn process_file(
         conn: &Connection,
         root_id: i64,

@@ -57,6 +57,7 @@ impl ops::scan::HashProgress for StderrHashProgress {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     db: &Db,
     paths: &[PathBuf],

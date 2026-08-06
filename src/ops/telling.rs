@@ -562,6 +562,7 @@ fn count_renderable(place: &StoryPlace) -> usize {
     place_renderable(place) as usize + place.children.iter().map(count_renderable).sum::<usize>()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_place(
     place: &StoryPlace,
     depth: usize,

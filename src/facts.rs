@@ -25,6 +25,7 @@ fn get_fact_category(key: &str) -> BuiltinKeyCategory {
         .unwrap_or(BuiltinKeyCategory::Stored)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     db: &mut Db,
     key_arg: Option<&str>,
@@ -442,6 +443,7 @@ pub struct DeleteOptions {
     pub dry_run: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn delete_facts(
     db: &mut Db,
     key: &str,
