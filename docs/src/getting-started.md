@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide walks through a typical Canon workflow: scanning files, enriching with metadata, querying, and archiving.
+This guide walks through a typical Canon workflow: scanning files, enriching with metadata, querying, orienting, archiving, and resolving what remains.
 
 ## Scanning
 
@@ -49,6 +49,22 @@ canon ls --where 'content.geo.city=Bletchley'
 canon ls -0 --where 'content.geo.city=Bletchley' | xargs -0 open -a Preview
 ```
 
+## Orienting
+
+Survey a location to see how it relates to everything else you've indexed:
+
+```bash
+canon survey /Volumes/OldDrive/photos
+```
+
+The summary shows what's archived, which other locations share content, and how much exists only here. When you don't know where to work next, sweep ranks the places where one decision resolves the most:
+
+```bash
+canon sweep
+```
+
+See [survey](commands/query/survey.md) and [sweep](commands/query/sweep.md) for reading the output.
+
 ## Archiving
 
 When you find a collection worth archiving, create a manifest:
@@ -81,6 +97,23 @@ Files are copied to the archive with paths like:
 ```
 /Volumes/Archive/Trips/2023-Amsterdam/2023-06-16/IMG_001.jpg
 ```
+
+## Resolving
+
+Content that isn't worth keeping is [excluded](concepts/exclusion.md) rather than deleted: nothing is destroyed, and the decision is recorded.
+
+```bash
+# This folder's content is verified in the archive; dismiss the redundant copies
+canon exclude set /Volumes/OldDrive/photos --reason "verified archived, originals redundant"
+```
+
+Every action is recorded. Read a place's history back at any time:
+
+```bash
+canon trail /Volumes/OldDrive/photos
+```
+
+When everything on a root is archived or excluded, [retire it](commands/roots/retire.md): its complete story is bound into a plain-text book at the archive, and the storage is free to go.
 
 ## Next Steps
 
