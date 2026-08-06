@@ -63,10 +63,10 @@ Status predicates check computed state: whether a source is in a particular cond
 Status predicates are boolean-only: they work with `?` and `NOT ... ?` but not with comparison operators.
 
 ```bash
-# What still needs archiving? (the treasure hunt)
+# What still needs archiving?
 canon facts --key mime --where 'NOT archived?'
 
-# Orient toward unresolved content
+# Survey unresolved content
 canon survey --where 'NOT archived?'
 
 # Unidentified files

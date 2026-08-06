@@ -45,7 +45,7 @@ Scanned 214 apply decisions.
     #103  destination root #9 no longer known
   malformed:        0
 
-Unreachable receipts are retried on the next run; nothing is concluded from absence.
+Unreachable receipts are retried on the next run.
 ```
 
 `--dry-run` prints the same report with "would index" phrasing and writes nothing.

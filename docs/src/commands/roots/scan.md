@@ -57,8 +57,9 @@ canon scan --missing /path/to/deleted/folder
 ```bash
 # Find candidate roots to add under a path
 canon scan --candidates /Volumes/Backup
+```
 
-# Output shows directories with untracked files
+```
 Candidate roots to add:
   /Volumes/Backup/photos  (3 directories with files)
   /Volumes/Backup/imports  (1 directory with files)
@@ -69,7 +70,7 @@ Directories under existing roots are skipped. When multiple subdirectories share
 **Marking deleted paths as missing:** When you delete a folder that was under a scanned root, Canon still considers those files present. Re-scanning the parent would let Canon discover they're gone, but that can be expensive when the parent holds many other files. Use `--missing` to tell Canon directly that a path no longer exists:
 
 ```bash
-# Deleted a backup folder — mark its 140 sources as not present
+# Deleted a backup folder: mark its 140 sources as not present
 canon scan --missing /Volumes/Backup/old-phone
 
 # Works with any path under a known root, including the root itself

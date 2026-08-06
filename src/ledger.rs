@@ -68,9 +68,7 @@ fn format_report(result: &ReindexResult, dry_run: bool) -> String {
     }
 
     if !result.unreachable.is_empty() {
-        out.push_str(
-            "\nUnreachable receipts are retried on the next run; nothing is concluded from absence.\n",
-        );
+        out.push_str("\nUnreachable receipts are retried on the next run.\n");
     }
 
     out

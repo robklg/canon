@@ -134,10 +134,10 @@ Related locations:
 The summary works without any `--where` filters. Filters narrow what you're looking at:
 
 ```bash
-# What's the story for just the images here?
+# Only the images
 canon survey /mnt/old-drive/exports --where "@image"
 
-# What about content from a specific period?
+# Content from a specific period
 canon survey /mnt/old-drive/exports --where "source.mtime|year=2019"
 ```
 

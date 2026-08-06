@@ -67,7 +67,7 @@ canon exclude set-object /path/to/junk.bin --yes
 # Exclude by content across a scope, with filters
 canon exclude set-object /scope --where 'content.mime=application/octet-stream' --yes
 
-# Exclude by hash directly — the only way to exclude empty files
+# Exclude by hash directly (excluding empty content requires this explicit form)
 canon exclude set-object --hash <content-hash> --yes
 
 # Restore a content-level exclusion (hash as shown by `exclude list-objects`)
