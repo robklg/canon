@@ -47,11 +47,11 @@ The `~` operator supports shell-style glob patterns:
 --where 'filename!~*.tmp'
 ```
 
-Values after operators like `~`, `=`, `!=` accept most characters without quoting — including `/`, `-`, `?`, `*`, `[`, `]`. Quoting (single or double) is still supported for values containing spaces or parentheses.
+Values after operators like `~`, `=`, `!=` accept most characters without quoting, including `/`, `-`, `?`, `*`, `[`, `]`. Quoting (single or double) is still supported for values containing spaces or parentheses.
 
 ## Status Predicates
 
-Status predicates check computed state about a source — not stored data, but whether a source is in a particular condition. They look like fact-existence checks (`key?`) but evaluate differently.
+Status predicates check computed state: whether a source is in a particular condition, rather than the value of a stored fact. They use the same syntax as fact-existence checks (`key?`) but evaluate differently.
 
 | Predicate | True when |
 |-----------|-----------|
@@ -60,7 +60,7 @@ Status predicates check computed state about a source — not stored data, but w
 | `excluded?` | Source or object is excluded |
 | `enriched?` | Has any stored metadata beyond the content hash |
 
-Status predicates are boolean-only — they work with `?` and `NOT ... ?` but not with comparison operators.
+Status predicates are boolean-only: they work with `?` and `NOT ... ?` but not with comparison operators.
 
 ```bash
 # What still needs archiving? (the treasure hunt)
@@ -81,10 +81,10 @@ canon ls --include excluded --where 'excluded?'
 
 **Key distinctions:**
 
-- `archived?` vs `content.hash.sha256?`: `archived?` asks "is this content in an archive?" — `content.hash.sha256?` asks "does this fact value exist?" Both are valid, but `archived?` is the canonical way to check archive status.
+- `archived?` vs `content.hash.sha256?`: `archived?` asks whether the content is in an archive; `content.hash.sha256?` asks whether that fact value exists. `archived?` is the canonical way to check archive status.
 - `hashed?` vs `content.hash.sha256?`: Equivalent results, different paths. `hashed?` is the idiomatic form.
-- `NOT archived?` includes unhashed sources — they are not archived. Use `NOT archived? AND hashed?` to exclude unhashed sources.
-- The set of status predicates is closed — four predicates, not extensible by users.
+- `NOT archived?` includes unhashed sources (they are not archived). Use `NOT archived? AND hashed?` to exclude unhashed sources.
+- The set of status predicates is closed: these four, not extensible by users.
 
 ## Boolean Operators
 
@@ -99,7 +99,7 @@ Operator precedence (highest to lowest): NOT, AND, OR. Use parentheses to overri
 
 ## Aliases
 
-You can define named aliases in `$CANON_HOME/aliases.toml` (by default `~/.canon/aliases.toml`). There are two kinds of aliases, and Canon classifies them automatically — just define the value and use it:
+You can define named aliases in `$CANON_HOME/aliases.toml` (by default `~/.canon/aliases.toml`). There are two kinds of aliases; Canon classifies each automatically by parsing its value:
 
 ### Expression Aliases
 
@@ -121,7 +121,7 @@ canon ls --where '@image AND @tens'
 
 ### Key Aliases
 
-Shorthand for verbose key paths — accessors, modifiers, and namespaces. These are values that are just a key (no operator):
+Shorthand for verbose key paths: accessors, modifiers, and namespaces. These are values that are just a key (no operator):
 
 ```toml
 filename = "source.rel_path[-1]"
@@ -168,7 +168,7 @@ canon ls --where 'NOT @large'
 
 ### How Classification Works
 
-Canon automatically determines whether each alias is a key or an expression by parsing the value. If the value is a valid filter expression (contains an operator), it's an expression alias and gets wrapped in parentheses. If not (it's just a key path), it's a key alias and gets substituted literally. You don't need to think about this — just define your alias and use it.
+Canon determines whether each alias is a key or an expression by parsing the value. If the value is a valid filter expression (contains an operator), it's an expression alias and gets wrapped in parentheses. If not (it's just a key path), it's a key alias and gets substituted literally.
 
 **Rules:**
 - Alias names must start with a letter and can contain letters, digits, underscores, and hyphens

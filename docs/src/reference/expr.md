@@ -12,7 +12,7 @@ Patterns consist of literal path segments and expressions in curly braces:
 {content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{filename}
 ```
 
-This would produce paths like: `2024/07/IMG_001.jpg`
+This produces paths like: `2024/07/IMG_001.jpg`
 
 ## Fact Keys
 
@@ -83,9 +83,9 @@ Example using aliases:
 
 ## Missing Values
 
-Canon requires all facts used in a pattern to have values for every source. If any source is missing a required fact, `canon apply` will refuse to proceed and report which facts are missing.
+Canon requires all facts used in a pattern to have values for every source. If any source is missing a required fact, `canon apply` refuses to proceed and reports which facts are missing.
 
-When you run `canon cluster generate`, the manifest includes comments listing all facts with 100% coverage—these are safe to use in your pattern.
+When you run `canon cluster generate`, the manifest includes comments listing all facts with 100% coverage. These are safe to use in your pattern.
 
 If sources are missing required facts, you can:
 - Filter them out during generation: `--where 'DateTimeOriginal?'`
