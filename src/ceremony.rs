@@ -54,6 +54,13 @@ pub fn edit_in_editor(initial: &str, name: &str) -> Result<Option<String>> {
     let path = std::env::temp_dir().join(format!("canon-{}-{name}", std::process::id()));
     std::fs::write(&path, initial)
         .with_context(|| format!("Could not write the draft to {}", path.display()))?;
+    // The draft may hold personal prose; keep it out of other users' reach
+    // while it sits in the shared temp dir.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
     // The variable may carry arguments ("code --wait"); run it through sh
     // with the path as a positional argument so quoting stays the shell's.
     let status = std::process::Command::new("sh")
@@ -63,11 +70,27 @@ pub fn edit_in_editor(initial: &str, name: &str) -> Result<Option<String>> {
         .arg(&path)
         .status()
         .with_context(|| format!("Could not launch the editor ({editor})"))?;
+    let read_back = std::fs::read_to_string(&path);
     if !status.success() {
-        let _ = std::fs::remove_file(&path);
-        bail!("The editor exited without saving ({status})");
+        // An exit status is not the person's words. If the editor saved
+        // changes before failing (a plugin dying at exit, a crash after
+        // :wq), the saved text is the edit — keep it and say so. Only a
+        // draft the editor left untouched is safe to drop.
+        return match read_back {
+            Ok(text) if text != initial => {
+                let _ = std::fs::remove_file(&path);
+                eprintln!(
+                    "The editor exited with an error ({status}); your saved edits were kept."
+                );
+                Ok(Some(text))
+            }
+            _ => {
+                let _ = std::fs::remove_file(&path);
+                bail!("The editor exited with an error ({status}); the draft is unchanged.")
+            }
+        };
     }
-    let text = std::fs::read_to_string(&path).with_context(|| {
+    let text = read_back.with_context(|| {
         format!(
             "Could not read the edited draft back from {}",
             path.display()
@@ -75,4 +98,33 @@ pub fn edit_in_editor(initial: &str, name: &str) -> Result<Option<String>> {
     })?;
     let _ = std::fs::remove_file(&path);
     Ok(Some(text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One test, scenarios in sequence — `edit_in_editor` reads `$VISUAL`,
+    /// and parallel tests mutating process env would race each other.
+    #[test]
+    fn edit_in_editor_never_destroys_saved_words() {
+        // The editor saves, then exits nonzero (a plugin dying at exit, a
+        // crash after :wq): the saved text is the edit — kept, not lost.
+        std::env::set_var("VISUAL", "sh -c 'printf kept > \"$0\"; exit 3'");
+        let out = edit_in_editor("draft", "test-fail-after-save").unwrap();
+        assert_eq!(out.as_deref(), Some("kept"));
+
+        // The editor fails without touching the draft: an error, and the
+        // message claims no more than it knows — the draft is unchanged.
+        std::env::set_var("VISUAL", "false");
+        let err = edit_in_editor("draft", "test-fail-untouched").unwrap_err();
+        assert!(err.to_string().contains("draft is unchanged"), "{err:#}");
+
+        // A clean edit still round-trips.
+        std::env::set_var("VISUAL", "sh -c 'printf edited > \"$0\"'");
+        let out = edit_in_editor("draft", "test-clean").unwrap();
+        assert_eq!(out.as_deref(), Some("edited"));
+
+        std::env::remove_var("VISUAL");
+    }
 }

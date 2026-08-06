@@ -490,11 +490,15 @@ fn prepare_telling(
 
     println!();
     println!("The book will carry the story as composed — title, foreword slot, and all.");
+    // Re-offers resume from the person's last edit, never the pristine
+    // draft — a refused finalize (emptied page) must not cost the words
+    // that were saved.
+    let mut current = draft;
     loop {
         if !ceremony::ask("Edit the story before it is written into the book?")? {
             return Ok(artifact(composed.clone()));
         }
-        match ceremony::edit_in_editor(&draft, "story.md") {
+        match ceremony::edit_in_editor(&current, "story.md") {
             Ok(None) => {
                 eprintln!("No $VISUAL or $EDITOR is set — the story binds as composed.");
                 return Ok(artifact(composed.clone()));
@@ -502,6 +506,7 @@ fn prepare_telling(
             Ok(Some(edited)) => match ops::telling::finalize_telling(&edited) {
                 Ok(text) => return Ok(artifact(text)),
                 Err(e) => {
+                    current = edited;
                     eprintln!("{e:#}");
                     eprintln!("Nothing was bound — edit again, or answer no to bind the story as composed.");
                 }
