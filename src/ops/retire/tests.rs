@@ -107,6 +107,45 @@ fn find_retirement_prefers_the_newest_of_two_retirements() {
 }
 
 #[test]
+fn a_live_root_is_never_called_retired() {
+    // The liveness gate, both shapes. A bound-not-released ceremony
+    // (declined release / crash during inspection) records the artifact
+    // reference while the root stays indexed — asking about an emptied
+    // subpath must fall through to the caller's history answer, never the
+    // retired statement. Same for a released root re-added at its old path.
+    let conn = open_in_memory_for_test();
+    let archive = insert_test_root(&conn, "/archive", "archive", false);
+    let d = insert_bound_retirement(&conn, "/gone", 100, archive, Some("retired/gone"), None);
+    conn.execute(
+        "UPDATE decisions SET status = 'partial' WHERE id = ?1",
+        rusqlite::params![d],
+    )
+    .unwrap();
+    insert_test_root(&conn, "/gone", "source", false);
+
+    assert!(find_retirement_covering_path(&conn, "/gone")
+        .unwrap()
+        .is_none());
+    assert!(find_retirement_covering_path(&conn, "/gone/emptied/sub")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn a_suspended_root_counts_as_live_for_the_statement() {
+    // A suspended root's index is intact, merely awaiting reconnection —
+    // its place is not retired.
+    let conn = open_in_memory_for_test();
+    let archive = insert_test_root(&conn, "/archive", "archive", false);
+    insert_bound_retirement(&conn, "/gone", 100, archive, Some("retired/gone"), None);
+    insert_test_root(&conn, "/gone", "source", true);
+
+    assert!(find_retirement_covering_path(&conn, "/gone/sub")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn find_retirement_requires_a_bound_decision() {
     // A retire decision that never recorded an artifact reference (no
     // bind happened) cannot claim "the story is bound at" — no match,

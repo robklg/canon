@@ -114,6 +114,22 @@ pub fn find_retirement_covering_path(
     conn: &Connection,
     path: &str,
 ) -> Result<Option<RetiredScope>> {
+    // The liveness gate: a retirement answers only when no indexed root
+    // contains the asked path — the statement must never call a live place
+    // retired. A bound-not-released ceremony (declined release, crash
+    // during inspection) leaves its artifact reference recorded while the
+    // root stays fully indexed, and a released root can be re-added at the
+    // same path. A status filter would be wrong the other way: an
+    // abandoned-bind root later removed by plain `rm` must keep matching
+    // (disk truth — its book stands). Suspended roots count as live: their
+    // index is intact, merely awaiting reconnection.
+    let roots = repo::root::fetch_all(conn)?;
+    if roots
+        .iter()
+        .any(|r| crate::domain::path::path_is_under(path, &r.path))
+    {
+        return Ok(None);
+    }
     let rows =
         repo::decision::fetch_bound_retirements(conn, DecisionCommand::RootsRetire.as_str())?;
     // Newest first — the first hit is the latest retirement of the place
@@ -124,7 +140,6 @@ pub fn find_retirement_covering_path(
     else {
         return Ok(None);
     };
-    let roots = repo::root::fetch_all(conn)?;
     let book_display = match roots.iter().find(|r| r.id == hit.receipt_root_id) {
         Some(root) => format!("{}/{}", root.path, hit.receipt_rel_path),
         None => format!(
