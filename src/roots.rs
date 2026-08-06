@@ -290,6 +290,14 @@ pub fn retired(db: &Db, config: &LedgerConfig) -> Result<()> {
             }
         }
     }
+    // Never silent: a stranded aside is a full book copy from an
+    // interrupted swap — named, so the reader can compare and clean up.
+    for aside in &listing.aside_dirs {
+        println!(
+            "            {aside}/ — a replaced book, set aside by an interrupted swap; \
+             the standing book of the same name is current"
+        );
+    }
     Ok(())
 }
 

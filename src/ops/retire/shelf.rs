@@ -41,6 +41,11 @@ pub struct ShelfListing {
     pub shelf_reachable: bool,
     /// Chronological; unidentified directories last.
     pub lines: Vec<ShelfLine>,
+    /// `.replaced-<name>` directories — a replaced book set aside by a swap
+    /// that never finished (crash between old-aside and old-removed). Each
+    /// is a full standing book copy the fleet must not silently hide;
+    /// fix-forward removes it only when a same-name bind completes.
+    pub aside_dirs: Vec<String>,
 }
 
 /// The listing probe: identify a book for its fleet line. Identification,
@@ -82,6 +87,7 @@ pub fn compute_shelf_listing(conn: &Connection, config: &LedgerConfig) -> Result
 
     let mut lines: Vec<ShelfLine> = Vec::new();
     let mut book_dirs: HashSet<String> = HashSet::new();
+    let mut aside_dirs: Vec<String> = Vec::new();
     let mut shelf_reachable = false;
     if let Some(shelf_path) = &shelf {
         if let Ok(entries) = std::fs::read_dir(shelf_path) {
@@ -91,8 +97,18 @@ pub fn compute_shelf_listing(conn: &Connection, config: &LedgerConfig) -> Result
                 .filter(|e| e.path().is_dir())
                 .filter_map(|e| e.file_name().to_str().map(String::from))
                 // A `.compiling-<name>` temp was never placed — not fleet.
-                .filter(|name| !name.starts_with('.'))
+                // A `.replaced-<name>` aside is a stranded full book copy
+                // (interrupted swap) — not fleet either, but never silent:
+                // counted and named so absence is explained.
+                .filter(|name| {
+                    if name.starts_with(".replaced-") {
+                        aside_dirs.push(name.clone());
+                        return false;
+                    }
+                    !name.starts_with('.')
+                })
                 .collect();
+            aside_dirs.sort();
             dirs.sort();
             for dir_name in dirs {
                 let dir = Path::new(shelf_path).join(&dir_name);
@@ -164,5 +180,6 @@ pub fn compute_shelf_listing(conn: &Connection, config: &LedgerConfig) -> Result
         shelf,
         shelf_reachable,
         lines,
+        aside_dirs,
     })
 }

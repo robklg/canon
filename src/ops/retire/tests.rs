@@ -300,6 +300,23 @@ fn shelf_listing_counts_an_unidentifiable_directory() {
 }
 
 #[test]
+fn shelf_listing_names_a_stranded_replaced_aside() {
+    // A `.replaced-<name>` aside — a swap interrupted between old-aside and
+    // old-removed — is a full standing book copy: not fleet, never silent.
+    // A `.compiling-` temp stays invisible (it was never a placed book).
+    let conn = open_in_memory_for_test();
+    let archive = tempfile::tempdir().unwrap();
+    let shelf = archive.path().join(SHELF_DIR);
+    place_book(&shelf, "gone-2026-08-02", "/gone", 12);
+    std::fs::create_dir_all(shelf.join(".replaced-gone-2026-08-02")).unwrap();
+    std::fs::create_dir_all(shelf.join(".compiling-other")).unwrap();
+
+    let listing = listing_with_archive(&conn, archive.path().to_str().unwrap());
+    assert_eq!(listing.lines.len(), 1, "asides and temps are not fleet");
+    assert_eq!(listing.aside_dirs, vec![".replaced-gone-2026-08-02"]);
+}
+
+#[test]
 fn shelf_listing_falls_back_to_rows_when_the_shelf_is_unreachable() {
     let conn = open_in_memory_for_test();
     insert_bound_retirement(
