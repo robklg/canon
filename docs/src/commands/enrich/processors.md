@@ -124,6 +124,39 @@ canon worklist \
 
 Processors can access previously imported facts via the `--emit` flag on worklist. See [Emitting Existing Facts](worklist.md#emitting-existing-facts) for details.
 
+## Resuming a Pass
+
+A `--where` gate decides which sources a pass still needs. Gate on a fact the processor emits for every file it handles, not on the fact you are after.
+
+A processor that emits a capture time only when the file carries one leaves every other file matching `NOT content.media.capture_datetime?` permanently, so each pass reprocesses them:
+
+```bash
+# Reprocesses files that have no capture time, every run
+canon worklist --where 'NOT content.media.capture_datetime?'
+
+# Converges: this processor emits media.width for every file it reads
+canon worklist --where 'NOT content.media.width?'
+```
+
+Gates are per fact vocabulary, so a processor covering several kinds of file needs one branch per kind:
+
+```bash
+canon worklist --global --include archived --where '
+  ((mime ~ "image/*" OR mime ~ "video/*") AND NOT content.media.width?)
+  OR (mime ~ "audio/*" AND NOT content.audio.duration?)
+'
+```
+
+When no output is unconditional, emit a marker for every file handled, including files nothing was found in:
+
+```json
+{"source_id":123,"basis_rev":0,"facts":{"exif.scanned":"13.55"}}
+```
+
+`NOT content.exif.scanned?` then selects exactly the unprocessed sources, and storing the tool version lets a later pass reselect on it.
+
+The `enriched?` predicate does not serve as a gate: it is true as soon as a source has any fact beyond the content hash, including facts from a different processor.
+
 ## Type Hints
 
 The stored type of a fact determines what operations work on it: timestamps enable date modifiers and comparisons, numbers enable numeric comparisons and `|bucket`, text enables string matching and string modifiers. If your processor outputs dates as strings, or numbers as quoted strings, add type hints; without them, queries like `--where 'DateTimeOriginal|year=2024'` or `--where 'width>1000'` won't work.

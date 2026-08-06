@@ -31,6 +31,8 @@ canon worklist --include all
 canon worklist --emit content.geo.lat --emit content.geo.lon
 ```
 
+Choosing a `--where` gate that a repeated pass converges on is covered in [Writing Processors](processors.md#resuming-a-pass).
+
 ## Output Format
 
 Each line is a JSON object with source metadata:
