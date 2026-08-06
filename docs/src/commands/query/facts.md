@@ -1,6 +1,6 @@
 # canon facts
 
-Discover what metadata you have and check coverage.
+Discover what [facts](../../concepts/facts.md) you have and check coverage.
 
 ```bash
 # Overview of all facts (scoped to current directory when inside a root)
@@ -19,13 +19,13 @@ canon facts --where 'source.ext=jpg'
 canon facts --key content.Make
 
 # With modifiers: group mtime by year-month
-canon facts --key source.mtime|yearmonth
+canon facts --key 'source.mtime|yearmonth'
 
 # With accessors: distribution by top-level directory
 canon facts --key source.rel_path[0]
 
 # Combine accessor and modifier: distribution by filename extension
-canon facts --key source.rel_path[-1]|ext
+canon facts --key 'source.rel_path[-1]|ext'
 
 # Show hidden built-in facts
 canon facts --all

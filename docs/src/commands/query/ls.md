@@ -48,13 +48,13 @@ canon ls -0 --where 'source.ext=jpg' | xargs -0 open -a Preview
 canon ls --where 'NOT archived? AND mime~image/*'
 ```
 
-**Status predicates** (`archived?`, `hashed?`, `excluded?`, `enriched?`) replace the old `--archived`, `--unarchived`, `--unhashed`, `--excluded` filter flags. Status predicates compose freely with other `--where` expressions. See [Filter Syntax](../../reference/filter.md#status-predicates) for details.
+**Status predicates** (`archived?`, `hashed?`, `excluded?`, `enriched?`) compose freely with other `--where` expressions. See [Filter Syntax](../../reference/filter.md#status-predicates) for details.
 
 **`--duplicates`** is a display mode (changes output format to grouped by hash), not a filter. It can be combined with `--where`.
 
-**Status column in long format:** When `--include` is used, `ls -l` shows a status column indicating source state: `E` (source-level exclusion), `X` (object-level exclusion), `A` (archived), or blank.
+**Status column in long format:** When `--include` is used, `ls -l` shows a status column indicating source state: `E` (source-level exclusion), `X` (object-level exclusion), `A` (source in an archive root), or blank.
 
-**Scope display:** When scoped (via CWD or explicit path), `ls` prints `scope: /path` to stderr so you always know what you're looking at. When global, no scope line is printed.
+**Scope display:** When scoped (via CWD or explicit path), `ls` prints `scope: /path` to stderr. When global, no scope line is printed.
 
 **Path display:**
 - CWD-scoped (no explicit path, inside a root) → relative output paths
