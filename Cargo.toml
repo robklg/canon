@@ -12,6 +12,8 @@ readme = "README.md"
 keywords = ["archiving", "archive", "organizing", "asset-management"]
 categories = ["command-line-utilities", "filesystem"]
 edition = "2021"
+# Ship only what the binary needs; docs/ and local tooling stay out of the tarball.
+include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE"]
 
 [[bin]]
 name = "canon"
