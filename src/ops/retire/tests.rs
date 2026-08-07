@@ -912,7 +912,7 @@ fn gather_copies_the_ledger_verbatim() {
 
 #[test]
 fn an_empty_gather_leaves_no_ledger_dir_and_says_so() {
-    // The old-disk shape: a reachable root whose `.canon-ledger/` is empty (or
+    // The empty-drive-ledger shape: a reachable root whose `.canon-ledger/` is empty (or
     // absent). The book lists nothing that doesn't exist — no `ledger/`
     // directory, a README line stating the plain absence and where the
     // archiving/letting-go receipts actually live — and still verifies.

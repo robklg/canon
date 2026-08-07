@@ -1101,7 +1101,7 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
     // what isn't claimed deeper — so the divergence test must compare
     // against what the child would actually fold into, or forced-out
     // siblings dilute the context and same-story children split (the
-    // old-home-dotfolder over-emission caught on first smoke test).
+    // home-dir dotfolder over-emission caught on first smoke test).
     // `res_narratable` counts non-exclusion act files — the act-side
     // question gate (excluded is never a question, in standing or in
     // acts: a child whose acts are exclusion-only has nothing narratable
@@ -2225,7 +2225,7 @@ mod tests {
         // A reasoned sibling forced out of the fold (.tvtime) must not
         // dilute the context: the dotfolders' story is compared against
         // what they would fold into — the parent's residual register —
-        // not the whole subtree (the old-home over-emission).
+        // not the whole subtree (the home-dir over-emission).
         let mut fx = Fixture::new();
         for i in 0..5 {
             fx.present
@@ -2272,18 +2272,21 @@ mod tests {
             ),
         );
         let root = fx.build(&no_dust());
-        let old-home = root
+        let home = root
             .children
             .iter()
             .find(|p| p.rel_path == "old-home")
             .expect("the care anchor forces old-home");
         assert_eq!(
-            child_paths(old-home),
+            child_paths(home),
             vec!["old-home/.tvtime"],
             "only the differently-reasoned act splits; same-story dotfolders fold"
         );
-        let register: i64 = old-home.acts.iter().map(|g| g.files).sum();
-        assert_eq!(register, 40, "the folded slices land in old-home's register");
+        let register: i64 = home.acts.iter().map(|g| g.files).sum();
+        assert_eq!(
+            register, 40,
+            "the folded slices land in old-home's register"
+        );
     }
 
     #[test]

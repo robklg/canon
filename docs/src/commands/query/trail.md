@@ -156,10 +156,10 @@ Decision trail: all roots — today
 
 Saturday 2026-07-12 — deleted 1,350 files (35.0 GB), archived 47 files (3.9 GB), excluded 210 files — and 2 other actions
 
-#63   09:14  /mnt/old-disk             Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
-      09:40  /mnt/old-disk/photos      ~ unsure about the RAW files — revisit
+#63   09:14  /mnt/old-disk         Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
+      09:40  /mnt/old-disk/photos  ~ unsure about the RAW files — revisit
 #64   11:02  ...ive/photos/italy   Applied italy-2016: 47 copied, 0 errors
-#65   11:30  /mnt/old-disk/misc        Excluded 210 duplicates (kept 105) · "redundant backup"
+#65   11:30  /mnt/old-disk/misc    Excluded 210 duplicates (kept 105) · "redundant backup"
 ```
 
 `<when>` accepts `today`, `yesterday`, a weekday name (the most recent one, today included), or a date (`YYYY-MM-DD`). Days follow your local timezone.

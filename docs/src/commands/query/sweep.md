@@ -25,7 +25,7 @@ The sweep takes no paths and no filters; it is universe-wide, computed fresh fro
 ## Reading a finding
 
 ```
-#1  /Volumes/OldBackup/Backup/ARCHIVED/Super8
+#1  /Volumes/OldBackup/ARCHIVED/Super8
     96% inside /Volumes/Archive/Media/Super8  (by size · 89% by count)
     counterpart: archived, scanned 5d ago · subject scanned 2d ago
     gain: 1,204 files · 33.7 GB     residual: 1 file · 3.9 GB nowhere else
@@ -47,7 +47,7 @@ A subject that itself stands on an archive root is marked `(in the archive)`: it
 When no single counterpart concentrates the match, the finding states the spread:
 
 ```
-#4  /Volumes/laptop-import/mixed
+#4  /Volumes/Backup/laptop-import/mixed
     94% exists elsewhere, across 7 locations (2 archived)
     scattered; consolidation candidate · subject scanned 12d ago
 ```
@@ -62,8 +62,8 @@ Many places pointing into one counterpart render as a single leaderboard entry:
 #2  /Volumes/Archive/Media/iphone-backup
     shared counterpart — 36 places hold copies inside it · archived, scanned 5d ago
     total gain: 7,820 files · 41.2 GB
-      /Volumes/OldBackup/old/iphone-2019  98% inside · 402 files · 2.1 GB
-      /Volumes/old-disk/dumps/phone       97% inside · 371 files · 1.9 GB
+      /Volumes/OldBackup/iphone-2019  98% inside · 402 files · 2.1 GB
+      /Volumes/old-disk/dumps/phone   97% inside · 371 files · 1.9 GB
       … 34 more (--all)
     → canon survey /Volumes/Archive/Media/iphone-backup
 ```

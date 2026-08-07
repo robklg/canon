@@ -175,7 +175,7 @@ gathered ledger into it.
 ```
 The retired fleet: 2 books on the shelf (/Volumes/Archive/retired)
 
-2026-08-02  /Volumes/laptop-import/icloud-export — 3,980 entries → icloud-export-2026-08-02
+2026-08-02  /Volumes/Backup/icloud-export — 3,980 entries → icloud-export-2026-08-02
 2026-09-14  /Volumes/old-laptop — 12,404 entries → old-laptop-2026-09-14 · "sold it"
 ```
 

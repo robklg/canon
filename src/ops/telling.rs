@@ -1404,7 +1404,7 @@ mod tests {
 
     #[test]
     fn the_no_record_marker_is_row_grain_not_place_grain() {
-        // The old-disk `data/usr` shape: cited acts at the place AND a stampless
+        // The mixed-place shape: cited acts at the place AND a stampless
         // standing remainder — the marker names exactly the stampless rows.
         let build = || {
             let mut mixed = place("usr");
