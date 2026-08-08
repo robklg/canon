@@ -8,13 +8,13 @@ use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
 use crate::domain::format::{format_date, format_size, format_time_ago};
 use crate::domain::format_count;
-use crate::domain::path::resolve_path;
 use crate::domain::retire::Readiness;
 use crate::domain::scope::DecisionScope;
 use crate::domain::story::StoryParams;
-use crate::domain::{parse_root_spec, parse_root_spec_any, Root};
+use crate::domain::Root;
 use crate::ops;
 use crate::ops::decision::DecisionParams;
+use crate::ops::scope::{parse_root_spec, parse_root_spec_any, resolve_path};
 use crate::repo::{self, Db};
 
 pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {

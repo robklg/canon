@@ -5,12 +5,12 @@ use anyhow::{bail, Result};
 
 use crate::domain;
 use crate::domain::format_count;
-use crate::domain::root::{find_containing_root, parse_root_spec};
+use crate::domain::root::find_containing_root;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::note::format_note_date;
 use crate::ops::note::SurveyNoteContext;
-use crate::ops::scope::ResolvedScope;
+use crate::ops::scope::{parse_root_spec, ResolvedScope};
 use crate::ops::survey::{LocationResult, SurveyOutcome, SurveyParams};
 use crate::repo;
 
@@ -110,7 +110,7 @@ pub fn run(
 
     // Resolve --other paths (same soft resolution as scope paths)
     let other_resolved = if !options.other_paths.is_empty() {
-        let resolved = domain::path::resolve_paths(&options.other_paths, &all_roots)?;
+        let resolved = crate::ops::scope::resolve_paths(&options.other_paths, &all_roots)?;
         crate::ops::scope::validate_sources_exist(conn, &resolved, &all_roots)?;
         resolved
     } else {

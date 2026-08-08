@@ -5,7 +5,6 @@ use std::path::Path;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::format_count;
-use crate::domain::root::resolve_archive_path;
 use crate::domain::scope::{DecisionScope, ScopeMatch};
 use crate::expr::filter::Filter;
 use crate::ops;
@@ -14,6 +13,7 @@ use crate::ops::cluster::{
     ExecuteGenerateParams, ExecuteRefreshParams, ManifestConfig,
 };
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
+use crate::ops::scope::resolve_archive_path;
 use crate::repo::{self, Connection, Db};
 
 pub struct GenerateOptions {

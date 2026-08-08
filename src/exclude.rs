@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::ceremony;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
-use crate::domain::path::{resolve_path, validate_paths_in_roots};
+use crate::domain::path::validate_paths_in_roots;
 use crate::domain::root::find_containing_root;
 use crate::domain::scope::{DecisionScope, ScopeMatch};
 use crate::expr::filter::Filter;
@@ -18,6 +18,7 @@ use crate::ops::exclude::{
     ObjectExclusionCheck, ObjectSourceInfo, SourceExclusionCheck,
 };
 use crate::ops::receipt::{resolve_ledger_root, ReceiptPlacement};
+use crate::ops::scope::resolve_path;
 use crate::repo::{self, Connection, Db};
 
 /// Build the decision params, decomposing the given canonical scope prefixes to

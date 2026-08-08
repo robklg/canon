@@ -1,13 +1,12 @@
 use anyhow::Result;
 
 use crate::domain::format_count;
-use crate::domain::root::parse_root_spec;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::ops;
 use crate::ops::coverage::CoverageStats;
-use crate::ops::scope::ResolvedScope;
+use crate::ops::scope::{parse_root_spec, ResolvedScope};
 use crate::repo::{self, Db};
 
 pub fn run(

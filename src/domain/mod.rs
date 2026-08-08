@@ -39,14 +39,8 @@ pub use format::format_count;
 pub use include::IncludeSet;
 pub use note::Note;
 pub use object::Object;
-pub use path::{
-    canonicalize_maybe_missing, clean_path, path_is_under, path_strip_prefix, resolve_path,
-    resolve_paths,
-};
-pub use root::{
-    find_containing_root, parse_root_spec, parse_root_spec_any, resolve_archive_path,
-    resolve_root_path, resolve_root_path_any, Root, RootSpec,
-};
+pub use path::{clean_path, path_is_under, path_strip_prefix, resolve_path, resolve_paths};
+pub use root::{find_containing_root, Root, RootSpec};
 pub use scan::{find_missing, reconcile, FileObservation, Reconciliation};
 pub use scope::ScopeMatch;
 pub use source::{NewSource, Source};

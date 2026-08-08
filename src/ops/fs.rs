@@ -135,6 +135,40 @@ pub fn dir_exists(path: &Path) -> bool {
     path.is_dir()
 }
 
+/// Canonicalize a path that may not exist yet by finding the nearest existing
+/// ancestor and appending the remaining components.
+pub fn canonicalize_maybe_missing(path: &Path) -> Result<String> {
+    // Try canonicalizing the full path first
+    if let Ok(canon) = fs::canonicalize(path) {
+        return Ok(canon.to_string_lossy().to_string());
+    }
+
+    // Walk up to find existing ancestor
+    let mut existing = path.to_path_buf();
+    let mut missing_parts = Vec::new();
+
+    while !existing.exists() {
+        if let Some(name) = existing.file_name() {
+            missing_parts.push(name.to_os_string());
+        }
+        if !existing.pop() {
+            bail!("Cannot resolve path: {}", path.display());
+        }
+    }
+
+    // Canonicalize the existing part
+    let canon_existing = fs::canonicalize(&existing)
+        .with_context(|| format!("Failed to resolve path: {}", existing.display()))?;
+
+    // Append missing parts
+    let mut result = canon_existing;
+    for part in missing_parts.into_iter().rev() {
+        result.push(part);
+    }
+
+    Ok(result.to_string_lossy().to_string())
+}
+
 /// Create parent directories for a path.
 pub fn ensure_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -441,6 +475,58 @@ mod tests {
         let dest_meta = fs::metadata(dest.path()).unwrap();
         let dest_mtime = FileTime::from_last_modification_time(&dest_meta);
         assert_eq!(dest_mtime, known_mtime);
+    }
+
+    // =========================================================================
+    // canonicalize_maybe_missing
+    // =========================================================================
+
+    #[test]
+    fn canonicalize_maybe_missing_full_path_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = canonicalize_maybe_missing(dir.path()).unwrap();
+        let expected = fs::canonicalize(dir.path())
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn canonicalize_maybe_missing_tolerates_missing_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist-yet");
+        let result = canonicalize_maybe_missing(&missing).unwrap();
+        let expected = fs::canonicalize(dir.path())
+            .unwrap()
+            .join("does-not-exist-yet")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn canonicalize_maybe_missing_tolerates_multiple_missing_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("a").join("b").join("c");
+        let result = canonicalize_maybe_missing(&missing).unwrap();
+        let expected = fs::canonicalize(dir.path())
+            .unwrap()
+            .join("a")
+            .join("b")
+            .join("c")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn canonicalize_maybe_missing_no_existing_ancestor_errors() {
+        // A relative path with no component that exists under the process
+        // cwd runs out of ancestors to pop before finding one that exists.
+        let result =
+            canonicalize_maybe_missing(Path::new("canon-test-no-such-relative-root-3f8a1c/sub"));
+        assert!(result.is_err());
     }
 
     #[test]

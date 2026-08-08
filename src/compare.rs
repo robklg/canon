@@ -2,10 +2,10 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::domain::path::resolve_path;
 use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
 use crate::expr::filter::{Filter, UsedStatus};
+use crate::ops::scope::resolve_path;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Db};
 

@@ -1,13 +1,12 @@
 //! Path utilities for canon.
 //!
-//! This module contains:
-//! - Pure path manipulation functions (no I/O)
-//! - Path canonicalization helpers (filesystem I/O for resolving paths)
+//! Pure path manipulation only — no I/O. Soft-match-then-fallback resolution
+//! against known roots (whose fallback branch touches the filesystem) lives
+//! in `ops::scope`.
 //!
 //! No database dependencies.
 
-use anyhow::{bail, Context, Result};
-use std::fs;
+use anyhow::{bail, Result};
 use std::path::{Component, Path, PathBuf};
 
 use super::root::{find_containing_root, Root};
@@ -63,72 +62,23 @@ pub fn clean_path(path: &Path, cwd: &Path) -> PathBuf {
     components.iter().collect()
 }
 
-/// Resolve a single path against known roots, falling back to fs::canonicalize().
-/// Use for source-querying commands. File-accessing commands (scan) use
-/// fs::canonicalize directly.
-pub fn resolve_path(path: &Path, roots: &[Root], cwd: &Path) -> Result<String> {
+/// Resolve a single path against known roots (pure, offline — no filesystem
+/// access). Returns `None` when the (lexically cleaned) path doesn't match
+/// any known root; a filesystem fallback for unmatched paths lives in
+/// `ops::scope::resolve_path`.
+pub fn resolve_path(path: &Path, roots: &[Root], cwd: &Path) -> Option<String> {
     let cleaned = clean_path(path, cwd);
     let cleaned_str = cleaned.to_string_lossy();
-
-    // Try matching against known roots first (works offline)
     if find_containing_root(&cleaned_str, roots).is_some() {
-        return Ok(cleaned_str.into_owned());
-    }
-
-    // Fall back to fs::canonicalize (requires path to exist on disk)
-    match fs::canonicalize(path) {
-        Ok(canonical) => Ok(canonical.to_string_lossy().into_owned()),
-        Err(_) => bail!(
-            "Failed to resolve path: {}\n\
-             Path does not match any known root and is not accessible \
-             on disk (is the storage attached?)",
-            path.display()
-        ),
+        Some(cleaned_str.into_owned())
+    } else {
+        None
     }
 }
 
-/// Resolve multiple paths against known roots.
-pub fn resolve_paths(paths: &[PathBuf], roots: &[Root]) -> Result<Vec<String>> {
-    let cwd = std::env::current_dir().context("Failed to determine current directory")?;
-    paths.iter().map(|p| resolve_path(p, roots, &cwd)).collect()
-}
-
-// ============================================================================
-// Path Canonicalization (Filesystem I/O)
-// ============================================================================
-
-/// Canonicalize a path that may not exist yet by finding the nearest existing
-/// ancestor and appending the remaining components.
-pub fn canonicalize_maybe_missing(path: &Path) -> Result<String> {
-    // Try canonicalizing the full path first
-    if let Ok(canon) = fs::canonicalize(path) {
-        return Ok(canon.to_string_lossy().to_string());
-    }
-
-    // Walk up to find existing ancestor
-    let mut existing = path.to_path_buf();
-    let mut missing_parts = Vec::new();
-
-    while !existing.exists() {
-        if let Some(name) = existing.file_name() {
-            missing_parts.push(name.to_os_string());
-        }
-        if !existing.pop() {
-            bail!("Cannot resolve path: {}", path.display());
-        }
-    }
-
-    // Canonicalize the existing part
-    let canon_existing = fs::canonicalize(&existing)
-        .with_context(|| format!("Failed to resolve path: {}", existing.display()))?;
-
-    // Append missing parts
-    let mut result = canon_existing;
-    for part in missing_parts.into_iter().rev() {
-        result.push(part);
-    }
-
-    Ok(result.to_string_lossy().to_string())
+/// Resolve multiple paths against known roots (pure, offline).
+pub fn resolve_paths(paths: &[PathBuf], roots: &[Root], cwd: &Path) -> Vec<Option<String>> {
+    paths.iter().map(|p| resolve_path(p, roots, cwd)).collect()
 }
 
 /// Format a path for display: relative when under cwd, absolute otherwise.
@@ -358,13 +308,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_no_match_returns_error() {
+    fn resolve_no_match_returns_none() {
         let roots = vec![make_test_root(1, "/a/b")];
         let result = resolve_path(Path::new("/nonexistent/path"), &roots, Path::new("/any"));
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("not accessible on disk"));
-        assert!(err.contains("is the storage attached?"));
+        assert!(result.is_none());
     }
 
     #[test]

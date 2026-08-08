@@ -1172,7 +1172,7 @@ fn main() -> Result<()> {
             } else {
                 // One path: CWD as side A
                 let cwd = std::env::current_dir()?;
-                let cwd_resolved = domain::path::resolve_path(&cwd, &all_roots, &cwd)?;
+                let cwd_resolved = ops::scope::resolve_path(&cwd, &all_roots, &cwd)?;
                 if domain::root::find_containing_root(&cwd_resolved, &all_roots).is_none() {
                     bail!("Current directory is not under any known root");
                 }

@@ -737,7 +737,7 @@ pub fn filter_by_roots<'a>(
 
     let mut root_ids = std::collections::HashSet::new();
     for spec in root_specs {
-        let id = crate::domain::root::parse_root_spec(all_roots, spec, None)?;
+        let id = crate::ops::scope::parse_root_spec(all_roots, spec, None)?;
         root_ids.insert(id);
     }
 

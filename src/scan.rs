@@ -5,12 +5,12 @@ use walkdir::WalkDir;
 
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
-use crate::domain::resolve_root_path_any;
 use crate::domain::scope::DecisionScope;
 use crate::ops;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::receipt::DeletionReceiptItem;
 use crate::ops::scan::{FileToHash, ScanOptions, ScanStats};
+use crate::ops::scope::resolve_root_path_any;
 use crate::progress::Progress;
 use crate::repo::{self, Connection, Db};
 

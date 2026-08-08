@@ -129,13 +129,9 @@ struct Tier2Entry {
     rule: Rule,
 }
 
-/// Tier 2 — documented-exception allowlist. Exactly 3 entries; each entry's
+/// Tier 2 — documented-exception allowlist. Exactly 2 entries; each entry's
 /// file must have at least one matching violation, or it's stale (delete it).
 const TIER2: &[Tier2Entry] = &[
-    Tier2Entry {
-        file: "domain/path.rs",
-        rule: Rule::DomainNoStdFs,
-    },
     Tier2Entry {
         file: "survey.rs",
         rule: Rule::InterfaceRepoDataMovement,
