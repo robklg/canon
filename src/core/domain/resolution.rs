@@ -86,7 +86,7 @@ impl ResolutionAccount {
 /// judgment, and judgment covers shape too. Contentless second, before any
 /// identity test (including the hash test — an unhashed empty source is
 /// Contentless, never unresolved): identity evidence about no-content is
-/// vacuous (ADR 2026-08-04-contentless-law). Archived over covered: the
+/// vacuous (the contentless law). Archived over covered: the
 /// deliberate act wins mixed evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StandingBucket {

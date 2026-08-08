@@ -85,7 +85,7 @@ pub const STANDING_COVERED: &str = "covered";
 pub const STANDING_PRESENT: &str = "present";
 pub const STANDING_MISSING_UNEXPLAINED: &str = "missing_unexplained";
 /// Empty at retirement — all shape, no content; nothing to cover, nothing
-/// to verify (ADR 2026-08-04-contentless-law).
+/// to verify (the contentless law).
 pub const STANDING_CONTENTLESS: &str = "contentless";
 
 /// The fate of one book entry — what happened to (or presently holds for)
@@ -283,7 +283,7 @@ pub fn build_book_entries(
             // this very path going to that destination — so it wins over
             // the contentless standing: an applied empty file is archived,
             // fate-wise (the law governs identity claims, never
-            // transitions; ADR 2026-08-04, clarification). Without an
+            // transitions; clarified 2026-08-04). Without an
             // origin claim, contentless stands: no act claimed the path,
             // and identity cannot.
             StandingBucket::Contentless => match origin {

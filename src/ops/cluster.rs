@@ -210,7 +210,7 @@ pub fn plan_generate(
     // come back as archived — the archived-ness SQL carries the contentless
     // law, so archive-everything passes carry them with their folders
     // instead of skipping them as "already archived" (a verbatim folder
-    // copy stays faithful; ADR 2026-08-04-contentless-law).
+    // copy stays faithful).
     let archive_paths = repo::object::batch_find_archive_paths(conn, &object_ids)?;
 
     // 5. Collect root paths from sources (before consuming them)

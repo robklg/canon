@@ -9,7 +9,7 @@
 //! sources (visibility, exclusion, role) before building, so different
 //! consumers can reason over different populations while sharing one
 //! structure. It does enforce one *law*: contentless sources are refused at
-//! build (ADR 2026-08-04-contentless-law). An empty file's identity is the
+//! build (the contentless law). An empty file's identity is the
 //! one universal empty object — letting it in would manufacture overlap,
 //! coverage, and uniqueness claims about no-content. The law lives here,
 //! at the chokepoint, so "an empty file creates overlap" is structurally

@@ -23,8 +23,7 @@ use crate::core::domain::resolution::{
 };
 
 /// Named calibratable constants (the sweep discipline). Defaults were
-/// calibrated against the real archive 2026-08-04 across three root shapes
-/// (session journal `.claude/specs/2026-08-04-story-calibration-journal.md`);
+/// calibrated against the real archive 2026-08-04 across three root shapes;
 /// recalibration changes constants, never code paths.
 #[derive(Debug, Clone, Copy)]
 pub struct StoryParams {

@@ -57,8 +57,7 @@ mod repo;
 
 // Feature-first migration: the cross-cutting spine, and subsystems that have
 // moved onto it. Coexists with the layers above until the migration's
-// definition of done empties them (epic: .claude/specs/
-// epic-feature-first-migration.md).
+// definition of done empties them.
 mod core;
 mod retire;
 

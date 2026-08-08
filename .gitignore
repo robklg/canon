@@ -2,8 +2,8 @@
 .idea/
 docs/book/
 
-# Personal planning layer — references local ~/store/ artifacts (vision, designs,
-# ADRs, reviews). Loaded from disk regardless of git tracking. Kept local on purpose.
+# Personal planning layer — references machine-local material. Loaded from
+# disk regardless of git tracking. Kept local on purpose.
 CLAUDE.md
 /.claude/specs/
 /.claude/local/

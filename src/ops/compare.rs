@@ -137,8 +137,7 @@ fn select_and_build_map(
     // Build object_id → path map, counting unhashed and contentless sources.
     // The contentless law: every empty file shares the one universal empty
     // object, so "match by content" between empty files is a claim about
-    // nothing — they leave the comparison and are counted, never silent
-    // (ADR 2026-08-04-contentless-law).
+    // nothing — they leave the comparison and are counted, never silent.
     let mut result: HashMap<i64, String> = HashMap::new();
     let mut unhashed = 0;
     let mut contentless = 0;

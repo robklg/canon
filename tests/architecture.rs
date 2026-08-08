@@ -1,11 +1,12 @@
 //! Deny-by-default architecture test.
 //!
-//! Enforces the layering rules in CLAUDE.md's "Layered Architecture" section by
-//! statically scanning every `.rs` file under `src/`. Governing specs:
-//! `.claude/specs/2026-08-07-architecture-test.md` (ADR: feature-first-structure,
-//! Step-Zero Rule Tiers amendment) and `.claude/specs/2026-08-08-syn-scanner-migration.md`
-//! (scanner rewritten on `syn`'s AST — see the visitor spec there for how use
-//! trees, inline paths, and macro/attribute token streams are walked).
+//! Statically scans every `.rs` file under `src/` and asserts the project's
+//! layering rules: domain stays pure, the interface never moves data through
+//! repo, and references between feature subsystems stay on declared surfaces.
+//! Three rule tiers (sanctioned plumbing, documented exceptions, a drift
+//! baseline matched both directions) keep the net deny-by-default. The
+//! scanner is built on `syn`'s AST; use trees, inline paths, and
+//! macro/attribute token streams are all walked.
 
 use std::fs;
 use std::path::{Path, PathBuf};
