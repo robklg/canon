@@ -129,18 +129,12 @@ struct Tier2Entry {
     rule: Rule,
 }
 
-/// Tier 2 — documented-exception allowlist. Exactly 2 entries; each entry's
+/// Tier 2 — documented-exception allowlist. Exactly 1 entry; each entry's
 /// file must have at least one matching violation, or it's stale (delete it).
-const TIER2: &[Tier2Entry] = &[
-    Tier2Entry {
-        file: "survey.rs",
-        rule: Rule::InterfaceRepoDataMovement,
-    },
-    Tier2Entry {
-        file: "compare.rs",
-        rule: Rule::InterfaceRepoDataMovement,
-    },
-];
+const TIER2: &[Tier2Entry] = &[Tier2Entry {
+    file: "compare.rs",
+    rule: Rule::InterfaceRepoDataMovement,
+}];
 
 struct Tier3Entry {
     file: &'static str,
@@ -245,6 +239,11 @@ const TIER3: &[Tier3Entry] = &[
     },
     Tier3Entry {
         file: "exclude.rs",
+        reference: "repo::Db::from_connection",
+        severity: Severity::TestOnly,
+    },
+    Tier3Entry {
+        file: "survey.rs",
         reference: "repo::Db::from_connection",
         severity: Severity::TestOnly,
     },

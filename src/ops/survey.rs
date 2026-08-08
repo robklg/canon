@@ -3,11 +3,14 @@
 //! Computes archive status, overlap detection, scope discovery, location
 //! classification, and detail views (complement, unique, overlap, residual).
 //! Uses custom selection logic (not `select_sources()`) to support the
-//! asymmetric visibility model.
+//! asymmetric visibility model. `run_survey` owns the whole fetch — scope
+//! roots, note context, `--other`/`--archive` resolution, sources — so the
+//! interface layer is left with CLI-shape validation and formatting only.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use crate::domain;
 use crate::domain::object_index::{ArchivePresence, ObjectIndex};
@@ -15,6 +18,7 @@ use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::domain::IncludeSet;
 use crate::expr::filter::{self, Filter};
+use crate::ops::note::SurveyNoteContext;
 
 const SUPERSET_THRESHOLD: f64 = 0.8;
 
@@ -53,7 +57,8 @@ pub struct SurveyResult {
     pub unique_paths: Vec<String>,
     pub is_other_mode: bool,
     /// Display label when --archive is specified (e.g., "in /archive/photos").
-    /// Set by the interface after return — ops always returns None.
+    /// Set by `run_survey` (compute_survey always returns None — it has no
+    /// access to root paths, only the pre-resolved `archive_root_id`).
     pub archive_label: Option<String>,
     /// File-level archive detail: selection sources grouped by archive location
     /// with counterpart paths. Only populated when compute_archived_pairs is true.
@@ -512,7 +517,7 @@ pub fn compute_survey(
         unique_count,
         unique_paths,
         is_other_mode,
-        archive_label: None, // set by run() after return
+        archive_label: None, // set by run_survey() after return
         archived_details,
         used_status,
         excluded_count,
@@ -520,11 +525,166 @@ pub fn compute_survey(
     }))
 }
 
+// =============================================================================
+// Orchestration — the fetch, resolution, and note-context wiring around
+// compute_survey(). See CLAUDE.md's Sweep conventions: "ops owns the fetch"
+// is the established pattern (compute_sweep, fetch_root_story, compute_story);
+// this closes survey as the last documented interface-side exception.
+// =============================================================================
+
+/// Raw, unresolved orchestration inputs — everything `run_survey` needs
+/// beyond `SurveyParams` (which stays `compute_survey`'s pure-computation,
+/// pre-resolved input).
+pub struct SurveyOrchestration {
+    /// Compare against specific locations instead of discovering them.
+    pub other_paths: Vec<PathBuf>,
+    /// `--archive` root spec (must resolve to an archive-role root).
+    pub archive: Option<String>,
+    /// Whether to compute per-location note counts — only the default
+    /// detail view displays them; other views skip the query entirely.
+    pub want_location_note_counts: bool,
+}
+
+/// Outcome of `run_survey`: the computed survey plus orchestration-provided
+/// extras that don't belong on `compute_survey`'s pure-computation output.
+///
+/// Note context travels outside `SurveyOutcome` because it applies to all
+/// three variants (`Empty`, `AllUnhashed`, `Result`) — the interface prints
+/// it regardless of which one comes back. Location note counts stay off
+/// `SurveyResult` too — they're default-view-only display data, not
+/// something `compute_survey` (or any other caller of it, like the
+/// contentless-law canary) needs to carry.
+pub struct SurveyRun {
+    pub outcome: SurveyOutcome,
+    pub note_context: Option<(SurveyNoteContext, String)>,
+    /// Note counts per related location (absolute path). Empty unless
+    /// `orchestration.want_location_note_counts` was set and the outcome
+    /// was `Result`.
+    pub location_note_counts: HashMap<String, usize>,
+}
+
+/// Fetch inputs, resolve `--other`/`--archive`, and compute a survey.
+///
+/// Takes raw scope prefixes and filter strings (scope prefixes are already
+/// resolved by the caller via `ops::scope::resolve_scope()`; filter strings
+/// are parsed here). Reproduces the same order of fallible operations the
+/// interface used to run, in order: roots → note context → `--other`
+/// resolve/validate → `--archive` resolve → sources → compute.
+pub fn run_survey(
+    conn: &mut Connection,
+    scope_prefixes: &[String],
+    filter_strs: &[String],
+    orchestration: &SurveyOrchestration,
+    params: &SurveyParams,
+) -> Result<SurveyRun> {
+    let filters: Vec<Filter> = filter_strs
+        .iter()
+        .map(|f| Filter::parse(f))
+        .collect::<Result<Vec<_>>>()?;
+
+    let all_roots = crate::repo::root::fetch_all(conn)?;
+
+    let note_context = if scope_prefixes.len() == 1 {
+        if let Some((root_id, _, _, rel_path)) =
+            domain::root::find_containing_root(&scope_prefixes[0], &all_roots)
+        {
+            Some((
+                crate::ops::note::survey_note_context(conn, root_id, &rel_path)?,
+                rel_path,
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let other_resolved = if !orchestration.other_paths.is_empty() {
+        let resolved = crate::ops::scope::resolve_paths(&orchestration.other_paths, &all_roots)?;
+        crate::ops::scope::validate_sources_exist(conn, &resolved, &all_roots)?;
+        resolved
+    } else {
+        Vec::new()
+    };
+
+    for other_path in &other_resolved {
+        if scope_prefixes.contains(other_path) {
+            bail!("Error: --other location is identical to the surveyed scope. Comparing a location to itself is not meaningful.");
+        }
+    }
+
+    let archive_root_id = if let Some(ref spec) = orchestration.archive {
+        Some(crate::ops::scope::parse_root_spec(
+            &all_roots,
+            spec,
+            Some("archive"),
+        )?)
+    } else {
+        None
+    };
+    let archive_label = archive_root_id.map(|id| {
+        let root = all_roots.iter().find(|r| r.id == id).unwrap();
+        format!("in {}", root.path)
+    });
+
+    let root_ids: Vec<i64> = all_roots.iter().map(|r| r.id).collect();
+    let all_sources = crate::repo::source::batch_fetch_by_roots(conn, &root_ids)?;
+
+    let mut outcome = compute_survey(
+        conn,
+        scope_prefixes,
+        &filters,
+        params,
+        &all_sources,
+        &other_resolved,
+        archive_root_id,
+    )?;
+
+    let mut location_note_counts = HashMap::new();
+    if let SurveyOutcome::Result(ref mut result) = outcome {
+        result.archive_label = archive_label;
+
+        if orchestration.want_location_note_counts {
+            let location_scopes: Vec<(i64, String)> = result
+                .location_results
+                .iter()
+                .filter_map(|loc| {
+                    domain::root::find_containing_root(&loc.path, &all_roots)
+                        .map(|(root_id, _, _, rel_path)| (root_id, rel_path))
+                })
+                .collect();
+            let counts = crate::repo::note::batch_count_subtree(conn, &location_scopes)?;
+            location_note_counts = location_scopes
+                .iter()
+                .filter_map(|(root_id, rel_path)| {
+                    let key = (*root_id, rel_path.clone());
+                    counts.get(&key).map(|count| {
+                        let root = all_roots.iter().find(|r| r.id == *root_id).unwrap();
+                        let abs_path = if rel_path.is_empty() {
+                            root.path.clone()
+                        } else {
+                            format!("{}/{}", root.path, rel_path)
+                        };
+                        (abs_path, *count)
+                    })
+                })
+                .collect();
+        }
+    }
+
+    Ok(SurveyRun {
+        outcome,
+        note_context,
+        location_note_counts,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ops::test_helpers::{
-        insert_object, insert_root, insert_source, insert_source_excluded, setup_test_db,
+        insert_note, insert_object, insert_root, insert_source, insert_source_excluded,
+        setup_test_db,
     };
 
     fn test_params() -> SurveyParams {
@@ -2869,6 +3029,296 @@ mod tests {
                 let relative =
                     crate::domain::path::format_path(&result.unique_paths[0], Some("/mnt/drive"));
                 assert_eq!(relative, "photos/sub/unique.jpg");
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    // =========================================================================
+    // run_survey — orchestration
+    // =========================================================================
+
+    fn test_orchestration() -> SurveyOrchestration {
+        SurveyOrchestration {
+            other_paths: Vec::new(),
+            archive: None,
+            want_location_note_counts: false,
+        }
+    }
+
+    #[test]
+    fn run_survey_returns_note_context_for_single_prefix_scope() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/mnt/drive", "source", false);
+        let obj = insert_object(&conn, "hash_001", false);
+        insert_source(&conn, root, "photos/a.jpg", Some(obj));
+        insert_note(&conn, root, "photos", "worth revisiting", 100);
+
+        let params = test_params();
+        let orchestration = test_orchestration();
+        let run = run_survey(
+            &mut conn,
+            &["/mnt/drive/photos".to_string()],
+            &[],
+            &orchestration,
+            &params,
+        )
+        .unwrap();
+
+        let (ctx, scope_rel) = run
+            .note_context
+            .expect("note context expected for a single-prefix scope");
+        assert_eq!(scope_rel, "photos");
+        assert_eq!(ctx.subtree_notes.len(), 1);
+        assert_eq!(ctx.subtree_notes[0].text, "worth revisiting");
+    }
+
+    #[test]
+    fn run_survey_omits_note_context_for_multi_prefix_scope() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/mnt/drive", "source", false);
+        let obj = insert_object(&conn, "hash_001", false);
+        insert_source(&conn, root, "a.jpg", Some(obj));
+        insert_source(&conn, root, "b.jpg", Some(obj));
+        insert_note(&conn, root, "", "a root-level note", 100);
+
+        let params = test_params();
+        let orchestration = test_orchestration();
+        let run = run_survey(
+            &mut conn,
+            &[
+                "/mnt/drive/a.jpg".to_string(),
+                "/mnt/drive/b.jpg".to_string(),
+            ],
+            &[],
+            &orchestration,
+            &params,
+        )
+        .unwrap();
+
+        assert!(
+            run.note_context.is_none(),
+            "note context is only built for a single-prefix scope"
+        );
+    }
+
+    #[test]
+    fn run_survey_note_context_survives_empty_outcome() {
+        // Note context is independent of the selection's size — it must
+        // still surface for an empty selection, not just a populated one.
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/mnt/drive", "source", false);
+        let obj = insert_object(&conn, "hash_001", false);
+        insert_source(&conn, root, "photos/a.jpg", Some(obj));
+        insert_note(&conn, root, "other", "a note on an empty scope", 100);
+
+        let params = test_params();
+        let orchestration = test_orchestration();
+        let run = run_survey(
+            &mut conn,
+            &["/mnt/drive/other".to_string()],
+            &[],
+            &orchestration,
+            &params,
+        )
+        .unwrap();
+
+        assert!(matches!(run.outcome, SurveyOutcome::Empty));
+        let (ctx, _) = run
+            .note_context
+            .expect("note context must survive an empty-selection early exit");
+        assert_eq!(ctx.subtree_notes.len(), 1);
+    }
+
+    #[test]
+    fn run_survey_note_context_survives_all_unhashed_outcome() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/mnt/drive", "source", false);
+        insert_source(&conn, root, "a.jpg", None);
+        insert_note(&conn, root, "", "a note on an unhashed scope", 100);
+
+        let params = test_params();
+        let orchestration = test_orchestration();
+        let run = run_survey(
+            &mut conn,
+            &["/mnt/drive".to_string()],
+            &[],
+            &orchestration,
+            &params,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            run.outcome,
+            SurveyOutcome::AllUnhashed { total_count: 1 }
+        ));
+        let (ctx, _) = run
+            .note_context
+            .expect("note context must survive an all-unhashed early exit");
+        assert_eq!(ctx.subtree_notes.len(), 1);
+    }
+
+    #[test]
+    fn run_survey_rejects_other_identical_to_scope() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/mnt/drive", "source", false);
+        let obj = insert_object(&conn, "hash_001", false);
+        insert_source(&conn, root, "a.jpg", Some(obj));
+
+        let params = test_params();
+        let orchestration = SurveyOrchestration {
+            other_paths: vec![PathBuf::from("/mnt/drive")],
+            ..test_orchestration()
+        };
+        let err = match run_survey(
+            &mut conn,
+            &["/mnt/drive".to_string()],
+            &[],
+            &orchestration,
+            &params,
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("expected --other == scope to be rejected"),
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "Error: --other location is identical to the surveyed scope. \
+             Comparing a location to itself is not meaningful."
+        );
+    }
+
+    #[test]
+    fn run_survey_sets_archive_label_from_archive_spec() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/mnt/drive", "source", false);
+        let archive = insert_root(&conn, "/archive/photos", "archive", false);
+        let obj = insert_object(&conn, "hash_001", false);
+        insert_source(&conn, root, "a.jpg", Some(obj));
+        insert_source(&conn, archive, "2024/a.jpg", Some(obj));
+
+        let params = test_params();
+        let orchestration = SurveyOrchestration {
+            archive: Some(format!("id:{archive}")),
+            ..test_orchestration()
+        };
+        let run = run_survey(
+            &mut conn,
+            &["/mnt/drive".to_string()],
+            &[],
+            &orchestration,
+            &params,
+        )
+        .unwrap();
+
+        match run.outcome {
+            SurveyOutcome::Result(result) => {
+                assert_eq!(result.archive_label.as_deref(), Some("in /archive/photos"));
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    #[test]
+    fn run_survey_archive_spec_rejects_non_archive_root() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/mnt/drive", "source", false);
+        let other_source = insert_root(&conn, "/mnt/backup", "source", false);
+        let obj = insert_object(&conn, "hash_001", false);
+        insert_source(&conn, root, "a.jpg", Some(obj));
+
+        let params = test_params();
+        let orchestration = SurveyOrchestration {
+            archive: Some(format!("id:{other_source}")),
+            ..test_orchestration()
+        };
+        let err = match run_survey(
+            &mut conn,
+            &["/mnt/drive".to_string()],
+            &[],
+            &orchestration,
+            &params,
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("expected a non-archive root to be rejected"),
+        };
+
+        assert!(err.to_string().contains("expected 'archive'"), "{err:#}");
+    }
+
+    #[test]
+    fn run_survey_computes_location_note_counts_when_requested() {
+        let mut conn = setup_test_db();
+        let root_a = insert_root(&conn, "/mnt/drive-a", "source", false);
+        let root_b = insert_root(&conn, "/mnt/backup", "source", false);
+        let obj1 = insert_object(&conn, "hash_001", false);
+        insert_source(&conn, root_a, "photos/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_b, "vacation/IMG_001.jpg", Some(obj1));
+        insert_note(
+            &conn,
+            root_b,
+            "vacation",
+            "a note at the related location",
+            100,
+        );
+
+        let params = test_params();
+        let orchestration = SurveyOrchestration {
+            want_location_note_counts: true,
+            ..test_orchestration()
+        };
+        let run = run_survey(
+            &mut conn,
+            &["/mnt/drive-a".to_string()],
+            &[],
+            &orchestration,
+            &params,
+        )
+        .unwrap();
+
+        match run.outcome {
+            SurveyOutcome::Result(result) => {
+                assert_eq!(result.location_results.len(), 1);
+                assert_eq!(result.location_results[0].path, "/mnt/backup/vacation");
+                assert_eq!(
+                    run.location_note_counts.get("/mnt/backup/vacation"),
+                    Some(&1)
+                );
+            }
+            _ => panic!("Expected SurveyOutcome::Result"),
+        }
+    }
+
+    #[test]
+    fn run_survey_skips_location_note_counts_when_not_requested() {
+        let mut conn = setup_test_db();
+        let root_a = insert_root(&conn, "/mnt/drive-a", "source", false);
+        let root_b = insert_root(&conn, "/mnt/backup", "source", false);
+        let obj1 = insert_object(&conn, "hash_001", false);
+        insert_source(&conn, root_a, "photos/IMG_001.jpg", Some(obj1));
+        insert_source(&conn, root_b, "vacation/IMG_001.jpg", Some(obj1));
+        insert_note(
+            &conn,
+            root_b,
+            "vacation",
+            "a note at the related location",
+            100,
+        );
+
+        let params = test_params();
+        let orchestration = test_orchestration(); // want_location_note_counts: false
+        let run = run_survey(
+            &mut conn,
+            &["/mnt/drive-a".to_string()],
+            &[],
+            &orchestration,
+            &params,
+        )
+        .unwrap();
+
+        match run.outcome {
+            SurveyOutcome::Result(_) => {
+                assert!(run.location_note_counts.is_empty());
             }
             _ => panic!("Expected SurveyOutcome::Result"),
         }

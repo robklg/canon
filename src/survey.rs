@@ -5,13 +5,13 @@ use anyhow::{bail, Result};
 
 use crate::domain;
 use crate::domain::format_count;
-use crate::domain::root::find_containing_root;
 use crate::domain::IncludeSet;
-use crate::expr::filter::Filter;
 use crate::note::format_note_date;
 use crate::ops::note::SurveyNoteContext;
-use crate::ops::scope::{parse_root_spec, ResolvedScope};
-use crate::ops::survey::{LocationResult, SurveyOutcome, SurveyParams};
+use crate::ops::scope::ResolvedScope;
+use crate::ops::survey::{
+    LocationResult, SurveyOrchestration, SurveyOutcome, SurveyParams, SurveyRun,
+};
 use crate::repo;
 
 const DETAIL_SAMPLE_SIZE: usize = 5;
@@ -79,64 +79,9 @@ pub fn run(
         bail!("`--affinity` requires `--where` filters.");
     }
 
-    // Parse expanded filter strings
-    let filters: Vec<Filter> = filter_strs
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
-
     let conn = db.conn_mut();
 
-    // Fetch all roots and sources upfront
-    let all_roots = repo::root::fetch_all(conn)?;
-
     // Scope is already resolved by the caller via scope::resolve_scope().
-
-    // Fetch note context for scope (before compute_survey borrows conn)
-    let note_context = if scope_prefixes.len() == 1 {
-        if let Some((root_id, _, _, rel_path)) =
-            find_containing_root(&scope_prefixes[0], &all_roots)
-        {
-            Some((
-                crate::ops::note::survey_note_context(conn, root_id, &rel_path)?,
-                rel_path,
-            ))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // Resolve --other paths (same soft resolution as scope paths)
-    let other_resolved = if !options.other_paths.is_empty() {
-        let resolved = crate::ops::scope::resolve_paths(&options.other_paths, &all_roots)?;
-        crate::ops::scope::validate_sources_exist(conn, &resolved, &all_roots)?;
-        resolved
-    } else {
-        Vec::new()
-    };
-
-    // Validate that --other doesn't match the surveyed scope
-    for other_path in &other_resolved {
-        if scope_prefixes.contains(other_path) {
-            bail!("Error: --other location is identical to the surveyed scope. Comparing a location to itself is not meaningful.");
-        }
-    }
-
-    // Resolve --archive spec (must be archive role)
-    let archive_root_id = if let Some(ref spec) = options.archive {
-        Some(parse_root_spec(&all_roots, spec, Some("archive"))?)
-    } else {
-        None
-    };
-    let archive_label = archive_root_id.map(|id| {
-        let root = all_roots.iter().find(|r| r.id == id).unwrap();
-        format!("in {}", root.path)
-    });
-
-    let root_ids: Vec<i64> = all_roots.iter().map(|r| r.id).collect();
-    let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 
     // Build computation params from options
     let compute_affinity =
@@ -148,16 +93,19 @@ pub fn run(
         compute_residual: options.detail == Some(DetailMode::Residual),
         compute_archived_pairs: options.detail == Some(DetailMode::Archived),
     };
+    let orchestration = SurveyOrchestration {
+        other_paths: options.other_paths.clone(),
+        archive: options.archive.clone(),
+        want_location_note_counts: options.detail.is_none(),
+    };
 
-    match crate::ops::survey::compute_survey(
-        conn,
-        scope_prefixes,
-        &filters,
-        &params,
-        &all_sources,
-        &other_resolved,
-        archive_root_id,
-    )? {
+    let SurveyRun {
+        outcome,
+        note_context,
+        location_note_counts,
+    } = crate::ops::survey::run_survey(conn, scope_prefixes, filter_strs, &orchestration, &params)?;
+
+    match outcome {
         SurveyOutcome::Empty => {
             let suppress = options.null_delim
                 && matches!(
@@ -199,8 +147,7 @@ pub fn run(
                 println!("Run `canon scan` to hash these sources.");
             }
         }
-        SurveyOutcome::Result(mut result) => {
-            result.archive_label = archive_label;
+        SurveyOutcome::Result(result) => {
             let display_cwd = std::env::current_dir()
                 .ok()
                 .and_then(|p| p.to_str().map(|s| s.to_string()));
@@ -346,39 +293,12 @@ pub fn run(
                         println!();
                     }
 
-                    // Fetch note counts for related locations
-                    let location_scopes: Vec<(i64, String)> = result
-                        .location_results
-                        .iter()
-                        .filter_map(|loc| {
-                            find_containing_root(&loc.path, &all_roots)
-                                .map(|(root_id, _, _, rel_path)| (root_id, rel_path))
-                        })
-                        .collect();
-                    let location_note_counts =
-                        repo::note::batch_count_subtree(conn, &location_scopes)?;
-                    let location_note_map: HashMap<String, usize> = location_scopes
-                        .iter()
-                        .filter_map(|(root_id, rel_path)| {
-                            let key = (*root_id, rel_path.clone());
-                            location_note_counts.get(&key).map(|count| {
-                                let root = all_roots.iter().find(|r| r.id == *root_id).unwrap();
-                                let abs_path = if rel_path.is_empty() {
-                                    root.path.clone()
-                                } else {
-                                    format!("{}/{}", root.path, rel_path)
-                                };
-                                (abs_path, *count)
-                            })
-                        })
-                        .collect();
-
                     print_related_locations(
                         &result.location_results,
                         result.total_hashed,
                         result.is_other_mode,
                         options.verbose,
-                        &location_note_map,
+                        &location_note_counts,
                     );
                 }
             }
