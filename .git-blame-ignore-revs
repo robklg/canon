@@ -1,0 +1,7 @@
+# Commits whose dominant content is file relocation (feature-first
+# migration move stories). Listing them here lets git blame attribute
+# moved lines to their original authors instead of the move:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Carve core and move retire onto the feature-first tree
+4635b15873e929efb47cdb13a42bb26ded1eda53
