@@ -129,12 +129,10 @@ struct Tier2Entry {
     rule: Rule,
 }
 
-/// Tier 2 — documented-exception allowlist. Exactly 1 entry; each entry's
-/// file must have at least one matching violation, or it's stale (delete it).
-const TIER2: &[Tier2Entry] = &[Tier2Entry {
-    file: "compare.rs",
-    rule: Rule::InterfaceRepoDataMovement,
-}];
+/// Tier 2 — documented-exception allowlist, currently empty. Each entry's
+/// file must have at least one matching violation, or it's stale (delete
+/// it) — kept non-empty-capable for any future documented exception.
+const TIER2: &[Tier2Entry] = &[];
 
 struct Tier3Entry {
     file: &'static str,

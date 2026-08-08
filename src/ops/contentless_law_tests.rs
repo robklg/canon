@@ -214,6 +214,31 @@ fn survey_counts_the_empty_files_it_sets_aside() {
 }
 
 #[test]
+fn compare_counts_the_empty_files_it_sets_aside() {
+    // Mirrors survey_counts_the_empty_files_it_sets_aside: compare builds
+    // its own object maps rather than routing through the SQL or the
+    // index, so it must do its own contentless accounting — this pins that
+    // it does, matching the "stated, never silent" rule every other law
+    // site follows.
+    let mut c = canary();
+    let run = crate::ops::compare::run_compare(
+        &mut c.conn,
+        std::path::Path::new("/r"),
+        std::path::Path::new("/archive"),
+        &[],
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.total_contentless, 2,
+        "one empty file set aside on each side"
+    );
+    assert_eq!(run.in_both_count, 1, "the data object matches by content");
+    assert!(run.only_in_a_paths.is_empty());
+    assert!(run.only_in_b_paths.is_empty());
+}
+
+#[test]
 fn set_object_by_path_refuses_the_empty_file() {
     // A path names one file, but its object is the one every empty file
     // shares — refused toward the explicit `--hash` intent.
