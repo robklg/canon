@@ -16,9 +16,11 @@ use super::extraction::{DecisionExtraction, OriginDisposition};
 use super::folder_tree::FolderTree;
 use super::note::Note;
 use super::path::path_is_under;
-use super::retire::{classify_absent, classify_present, AbsentBucket, StandingBucket};
 use super::source::Source;
 use super::trail::{fate_posture, fate_transition, DecisionFamily, FateAspect, Posture};
+use crate::core::domain::resolution::{
+    classify_absent, classify_present, AbsentBucket, StandingBucket,
+};
 
 /// Named calibratable constants (the sweep discipline). Defaults were
 /// calibrated against the real archive 2026-08-04 across three root shapes
@@ -1664,7 +1666,7 @@ mod tests {
 
     // ---- the splitter ----
 
-    use crate::domain::retire::build_account;
+    use crate::core::domain::resolution::build_account;
 
     fn src(id: i64, rel: &str, object_id: Option<i64>) -> Source {
         Source {

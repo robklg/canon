@@ -442,7 +442,7 @@ pub fn compose_reference_telling(report: &StoryReport, frame: &TellingFrame) -> 
 /// and a plain-words fate, one line per non-zero bucket — zero buckets are
 /// omitted, never ceremonially stated.
 fn tally_lines(
-    account: &crate::domain::retire::ResolutionAccount,
+    account: &crate::core::domain::resolution::ResolutionAccount,
     archived_destinations: &LocationAggregate,
 ) -> Vec<String> {
     let mut cells: Vec<(String, Vec<String>)> = Vec::new();
@@ -517,7 +517,7 @@ fn tally_lines(
 
 /// The gaps stated as prose, immediately under the tally: left open on
 /// purpose — seen, weighed, and accepted. Zero gaps → no paragraph.
-fn gaps_paragraph(account: &crate::domain::retire::ResolutionAccount) -> Vec<String> {
+fn gaps_paragraph(account: &crate::core::domain::resolution::ResolutionAccount) -> Vec<String> {
     let missing = account.unexplained_missing;
     let unresolved = account.unresolved;
     if missing == 0 && unresolved == 0 {
@@ -955,9 +955,11 @@ pub fn trail_handoff(abs_path: &str) -> (String, Vec<String>) {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::*;
+    use crate::core::domain::resolution::ResolutionAccount;
     use crate::domain::note::Note;
-    use crate::domain::retire::ResolutionAccount;
     use crate::domain::root::Root;
     use crate::domain::story::{
         ActDecision, ActGroup, LocationAggregate, LocationCount, PlaceStanding, StoryPlace,
@@ -1958,5 +1960,18 @@ mod tests {
             "For the readiness gate: canon roots retire path:/r --dry-run",
         ];
         assert_eq!(lines, expected);
+    }
+
+    #[test]
+    fn trail_handoff_round_trips_through_the_real_cli() {
+        // The handoff-law discipline: CLI drift is a test failure.
+        for path in ["/r/photos", "/r/with space/x"] {
+            let (display, argv) = trail_handoff(path);
+            assert!(display.starts_with("→ canon trail "), "{display}");
+            crate::Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("handoff must parse: {display}\n{e}"));
+        }
+        let (display, _) = trail_handoff("/r/with space/x");
+        assert!(display.contains("'/r/with space/x'"), "{display}");
     }
 }

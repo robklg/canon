@@ -13,28 +13,26 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
+use crate::core::domain::resolution::{build_account, ResolutionAccount};
+use crate::core::ops::root_story::{fetch_root_story, RootStory};
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::{Decision, DecisionCommand, DecisionStatus};
-use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
+use crate::domain::extraction::OriginDisposition;
 use crate::domain::format::format_size;
 use crate::domain::note::note_display_path;
-use crate::domain::retire::{
-    book_dir_name, build_account, build_book_entries, derive_posture, derive_readiness,
-    disposition_word, ApplyOrigin, BookEntry, FateContext, Readiness, ResolutionAccount,
-    SourceFate, VerificationPosture, STANDING_CONTENTLESS, STANDING_COVERED,
-    STANDING_MISSING_UNEXPLAINED, STANDING_PRESENT,
-};
 use crate::domain::scope::DecisionScope;
-use crate::domain::trail::{
-    decision_family, fate_transition, DecisionFamily, FateAspect, TimelineEvent,
-};
-use crate::domain::{format_count, Note, Root, Source};
+use crate::domain::trail::{fate_transition, DecisionFamily, FateAspect, TimelineEvent};
+use crate::domain::{format_count, Note, Root};
 use crate::ops;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::ledger::{read_apply_receipt, ReceiptRead};
 use crate::ops::trail::{TrailParams, TrailResult, TrailView};
 use crate::repo;
-use crate::repo::decision::DecisionScopeRow;
+use crate::retire::domain::{
+    book_dir_name, build_book_entries, derive_posture, derive_readiness, disposition_word,
+    ApplyOrigin, BookEntry, FateContext, Readiness, SourceFate, VerificationPosture,
+    STANDING_CONTENTLESS, STANDING_COVERED, STANDING_MISSING_UNEXPLAINED, STANDING_PRESENT,
+};
 
 /// Facts the review states beside the account — facts, never warnings, and
 /// none of them block. Unexplained-missing and unhashed counts render from
@@ -156,102 +154,6 @@ pub fn find_retirement_covering_path(
     }))
 }
 
-/// The root's complete story, fetched once — the retirement ceremony's one
-/// structural substrate. The readiness review and the book compile are both
-/// lenses over this, so the ceremony fetches once and the gate and the book
-/// read the same world by construction.
-pub struct RootStory {
-    pub root: Root,
-    /// The full fleet — receipt-locus resolution (the compile) and shelf
-    /// placement (the ceremony) both need roots beyond the retiring one.
-    pub roots: Vec<Root>,
-    pub present: Vec<Source>,
-    pub absent: Vec<Source>,
-    /// Object ids among the present rows verified present in the archive.
-    pub archived: HashSet<i64>,
-    /// Subset archived *from this root*: an archive copy stands stamped by a
-    /// decision whose extraction rows draw from here (object-grain, DB
-    /// projections only — apply stamps the destination rows, so the archive
-    /// side carries the apply id and the ledger names its origin).
-    pub archived_from_here: HashSet<i64>,
-    /// Extraction rows whose origin is this root.
-    pub extractions: Vec<DecisionExtraction>,
-    pub scope_rows: Vec<DecisionScopeRow>,
-    /// Every decision touching the root (stamps, scopes, extractions),
-    /// deduped, ascending by id.
-    pub decisions: Vec<Decision>,
-    pub stamp_families: HashMap<i64, DecisionFamily>,
-    /// Fetch-time observation: whether the root's path is a reachable
-    /// directory. An unreachable root retires on faith — surfaced, never
-    /// refused.
-    pub reachable: bool,
-    /// When the earliest surviving row was first indexed (min `scanned_at`,
-    /// present + absent) — identity evidence that predates decision
-    /// recording. A scan-decision date would overclaim on any root older
-    /// than the trail.
-    pub first_indexed: Option<i64>,
-    /// Highest decision id seen touching the root — computed over the raw
-    /// referenced ids at fetch time, not over `decisions` (a stamped id may
-    /// no longer resolve to a row and must still count as world state).
-    pub max_decision_id: Option<i64>,
-}
-
-pub fn fetch_root_story(conn: &Connection, root_id: i64) -> Result<RootStory> {
-    let roots = repo::root::fetch_all(conn)?;
-    let root = roots
-        .iter()
-        .find(|r| r.id == root_id)
-        .ok_or_else(|| anyhow::anyhow!("Root {root_id} not found"))?
-        .clone();
-
-    let present = repo::source::batch_fetch_by_roots(conn, &[root_id])?;
-    let absent = repo::source::fetch_absent_by_roots(conn, &[root_id])?;
-
-    let present_object_ids: Vec<i64> = present.iter().filter_map(|s| s.object_id).collect();
-    let archived = repo::object::batch_check_archived(conn, &present_object_ids, None)?;
-    let archived_from_here =
-        repo::object::batch_check_archived_from_root(conn, &present_object_ids, root_id)?;
-
-    let extractions = repo::decision::fetch_extractions_by_origin_root(conn, root_id)?;
-    let scope_rows = repo::decision::fetch_scope_rows_by_roots(conn, &[root_id])?;
-
-    // One decision fetch serves every consumer: the absent rows' stamp
-    // families, first-scan, the open-intentions comparison, and (for the
-    // compile) the per-decision reasons.
-    let mut decision_ids: Vec<i64> = absent.iter().filter_map(|s| s.decision_id).collect();
-    decision_ids.extend(present.iter().filter_map(|s| s.decision_id));
-    decision_ids.extend(scope_rows.iter().map(|r| r.decision_id));
-    decision_ids.extend(extractions.iter().map(|r| r.decision_id));
-    decision_ids.sort_unstable();
-    decision_ids.dedup();
-    let decisions = repo::decision::fetch_by_ids(conn, &decision_ids)?;
-
-    let stamp_families: HashMap<i64, DecisionFamily> = decisions
-        .iter()
-        .map(|d| (d.id, decision_family(&d.command)))
-        .collect();
-
-    let reachable = ops::fs::dir_exists(Path::new(&root.path));
-    let max_decision_id = decision_ids.last().copied();
-    let first_indexed = repo::source::min_scanned_at_by_root(conn, root_id)?;
-
-    Ok(RootStory {
-        root,
-        roots,
-        present,
-        absent,
-        archived,
-        archived_from_here,
-        extractions,
-        scope_rows,
-        decisions,
-        stamp_families,
-        reachable,
-        first_indexed,
-        max_decision_id,
-    })
-}
-
 /// The readiness review as a pure lens over the fetched story.
 pub fn readiness_lens(story: &RootStory) -> ReadinessReview {
     let by_id: HashMap<i64, &Decision> = story.decisions.iter().map(|d| (d.id, d)).collect();
@@ -334,11 +236,14 @@ pub const SHELF_DIR: &str = "retired";
 mod ceremony;
 mod compile;
 mod shelf;
+pub mod telling;
 #[cfg(test)]
 mod tests;
 
-// Glob re-exports: the split is internal — `ops::retire::*` keeps exactly
-// the surface the single file had.
+// Glob re-exports: the split is internal — `retire::ops::*` keeps exactly
+// the surface the single file had. `telling` stays a named submodule (its
+// own voicing/frame concern, distinct from the ceremony/compile/shelf
+// split) — callers reach it as `retire::ops::telling::*`.
 pub use ceremony::*;
 pub use compile::*;
 pub use shelf::*;

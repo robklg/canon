@@ -1,7 +1,7 @@
 use super::*;
-use crate::ops::telling::TellingArtifact;
 use crate::repo::db::open_in_memory_for_test;
 use crate::repo::insert_test_root;
+use crate::retire::ops::telling::TellingArtifact;
 
 fn test_telling() -> TellingArtifact {
     TellingArtifact {

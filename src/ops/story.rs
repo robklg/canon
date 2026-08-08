@@ -11,12 +11,12 @@ use anyhow::{bail, Result};
 use rusqlite::Connection;
 use std::collections::HashMap;
 
-use crate::domain::retire::{build_account, ResolutionAccount};
+use crate::core::domain::resolution::{build_account, ResolutionAccount};
+use crate::core::ops::root_story::{fetch_root_story, RootStory};
 use crate::domain::root::Root;
 use crate::domain::story::{
     assign_reason_sites, build_places, DecisionInfo, StoryInputs, StoryParams, StoryPlace,
 };
-use crate::ops;
 use crate::repo;
 
 /// Everything the interface renders — it classifies nothing.
@@ -42,7 +42,7 @@ pub struct StoryReport {
 /// letting-go judgment on source roots; the archive side is `canon trail`'s
 /// and the composition card's. A suspended or unreachable root reads fine.
 pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> Result<StoryReport> {
-    let story = ops::retire::fetch_root_story(conn, root_id)?;
+    let story = fetch_root_story(conn, root_id)?;
     if story.root.role == "archive" {
         bail!(
             "Cannot read the story of {}: an archive root is where stories end up — its places are served by canon trail. The story review reads a source root toward letting go.",
@@ -60,7 +60,7 @@ pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> R
 /// is already validated by `validate_retire_target`.
 pub fn report_over(
     conn: &Connection,
-    story: &ops::retire::RootStory,
+    story: &RootStory,
     params: &StoryParams,
 ) -> Result<StoryReport> {
     let notes = repo::note::fetch_by_roots(conn, &[story.root.id])?;
@@ -364,12 +364,12 @@ mod tests {
         insert_source(&conn, root, "old/setup.exe", None, 100, true, true, Some(d));
         insert_scope(&conn, d, root, "/r", "old");
 
-        let fetched = ops::retire::fetch_root_story(&conn, root).unwrap();
+        let fetched = fetch_root_story(&conn, root).unwrap();
         let via_lens = report_over(&conn, &fetched, &no_dust()).unwrap();
         let via_command = compute_story(&conn, root, &no_dust()).unwrap();
         assert_eq!(
-            ops::telling::story_lines(&via_lens, usize::MAX, 0),
-            ops::telling::story_lines(&via_command, usize::MAX, 0),
+            crate::retire::ops::telling::story_lines(&via_lens, usize::MAX, 0),
+            crate::retire::ops::telling::story_lines(&via_command, usize::MAX, 0),
         );
     }
 

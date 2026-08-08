@@ -3,7 +3,7 @@
 use super::*;
 
 use crate::domain::story::StoryParams;
-use crate::ops::telling::TellingArtifact;
+use crate::retire::ops::telling::{self, TellingArtifact};
 
 // ---------------------------------------------------------------------------
 // The ceremony — plan, begin, bind
@@ -214,8 +214,8 @@ impl RetireCeremony {
         } else {
             None
         };
-        let frame = ops::telling::TellingFrame {
-            title: ops::telling::suggested_title(
+        let frame = telling::TellingFrame {
+            title: telling::suggested_title(
                 &self.story.root.path,
                 self.story.root.comment.as_deref(),
             ),
@@ -229,7 +229,7 @@ impl RetireCeremony {
             ),
             drive_ledger,
         };
-        Ok(ops::telling::compose_reference_telling(&report, &frame))
+        Ok(telling::compose_reference_telling(&report, &frame))
     }
 
     /// The bind movement: shelf, compile to temp, verify, place, pointer.

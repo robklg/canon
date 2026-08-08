@@ -55,6 +55,13 @@ mod expr;
 mod ops;
 mod repo;
 
+// Feature-first migration: the cross-cutting spine, and subsystems that have
+// moved onto it. Coexists with the layers above until the migration's
+// definition of done empties them (epic: .claude/specs/
+// epic-feature-first-migration.md).
+mod core;
+mod retire;
+
 // Utilities
 mod alias;
 mod ceremony;
@@ -1541,7 +1548,7 @@ fn main() -> Result<()> {
                 roots::unsuspend(&db, &spec, &command_line, &config, cli.no_receipt)?;
             }
             Some(RootsAction::Retired) => {
-                roots::retired(&db, &config)?;
+                retire::cli::retired(&db, &config)?;
             }
             Some(RootsAction::Story { spec, limit, all }) => {
                 roots::story(&db, &spec, limit, all)?;
@@ -1554,7 +1561,7 @@ fn main() -> Result<()> {
                 yes,
             }) => {
                 let allow_unresolved = allow.contains(&RetireAllow::Unresolved);
-                roots::retire(
+                retire::cli::retire(
                     &db,
                     &spec,
                     dry_run,
