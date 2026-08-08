@@ -1516,7 +1516,8 @@ mod tests {
             from_cwd: false,
             auto_include_archived: false,
         };
-        let event = TimelineEvent::Decision(Box::new(mk_decision(1, Some(vec!["/short".to_string()]))));
+        let event =
+            TimelineEvent::Decision(Box::new(mk_decision(1, Some(vec!["/short".to_string()]))));
 
         let mut placements = HashMap::new();
         placements.insert(
