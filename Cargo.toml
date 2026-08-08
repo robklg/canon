@@ -46,3 +46,5 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.24.0"
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
