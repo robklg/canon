@@ -1,9 +1,26 @@
 //! The ceremony: plan, begin, bind, release — ops owns the ordering.
 
-use super::*;
+use std::path::{Path, PathBuf};
 
+use anyhow::{bail, Context, Result};
+use rusqlite::{Connection, Transaction, TransactionBehavior};
+use serde::Deserialize;
+
+use crate::core::ops::root_story::RootStory;
+use crate::domain::config::{LedgerConfig, RecordingMode};
+use crate::domain::decision::{DecisionCommand, DecisionStatus};
+use crate::domain::format_count;
+use crate::domain::scope::DecisionScope;
 use crate::domain::story::StoryParams;
+use crate::ops;
+use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
+use crate::repo;
+use crate::retire::domain::book_dir_name;
 use crate::retire::ops::telling::{self, TellingArtifact};
+
+use super::compile::{compile_book, CompileParams};
+use super::verify::{count_files, verify_book};
+use super::{iso_date, ReadinessReview, SHELF_DIR};
 
 // ---------------------------------------------------------------------------
 // The ceremony — plan, begin, bind
@@ -208,7 +225,7 @@ impl RetireCeremony {
         // source the bind's gather reads, so the paragraph never claims
         // receipts the gather won't find.
         let drive_ledger = if self.story.reachable {
-            Some(super::compile::count_files(
+            Some(count_files(
                 &Path::new(&self.story.root.path).join(".canon-ledger"),
             )?)
         } else {

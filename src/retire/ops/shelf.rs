@@ -1,6 +1,18 @@
 //! The shelf listing: the retired fleet, disk-primary.
 
-use super::*;
+use std::collections::HashSet;
+use std::path::Path;
+
+use anyhow::Result;
+use rusqlite::Connection;
+use serde::Deserialize;
+
+use crate::domain::config::LedgerConfig;
+use crate::domain::decision::DecisionCommand;
+use crate::ops;
+use crate::repo;
+
+use super::{iso_date, SHELF_DIR};
 
 pub enum ShelfLine {
     /// A book standing on the shelf, enriched from its decision row when one

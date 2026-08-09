@@ -90,10 +90,9 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<()> {
     if !args.global && args.paths.is_empty() && resolved.is_global() {
         if let Ok(cwd) = std::env::current_dir() {
             let cleaned = crate::domain::path::clean_path(&cwd, &cwd);
-            if let Some(statement) = crate::retire::ops::find_retirement_covering_path(
-                db.conn(),
-                &cleaned.to_string_lossy(),
-            )? {
+            if let Some(statement) =
+                crate::retire::find_retirement_covering_path(db.conn(), &cleaned.to_string_lossy())?
+            {
                 emit_retired_statement(&statement, args.jsonl)?;
                 return Ok(());
             }
@@ -149,12 +148,12 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<()> {
 fn retired_scope_statement(
     conn: &rusqlite::Connection,
     paths: &[PathBuf],
-) -> Result<Option<crate::retire::ops::RetiredScope>> {
+) -> Result<Option<crate::retire::RetiredScope>> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     for path in paths {
         let cleaned = crate::domain::path::clean_path(path, &cwd);
         if let Some(statement) =
-            crate::retire::ops::find_retirement_covering_path(conn, &cleaned.to_string_lossy())?
+            crate::retire::find_retirement_covering_path(conn, &cleaned.to_string_lossy())?
         {
             return Ok(Some(statement));
         }
@@ -166,7 +165,7 @@ fn retired_scope_statement(
 /// stated as fact, pointing at the book (exit 0: the command answered the
 /// question asked). Under `--jsonl` the statement is one typed JSON object —
 /// the documented clean-stdout contract holds on this path too.
-fn emit_retired_statement(s: &crate::retire::ops::RetiredScope, jsonl: bool) -> Result<()> {
+fn emit_retired_statement(s: &crate::retire::RetiredScope, jsonl: bool) -> Result<()> {
     if jsonl {
         let json = serde_json::to_string(&JsonRetiredScopeEvent {
             r#type: "retired_scope",
@@ -183,7 +182,7 @@ fn emit_retired_statement(s: &crate::retire::ops::RetiredScope, jsonl: bool) -> 
     Ok(())
 }
 
-fn print_retired_statement(s: &crate::retire::ops::RetiredScope) {
+fn print_retired_statement(s: &crate::retire::RetiredScope) {
     match &s.reason {
         Some(reason) => println!(
             "This place is retired: {} — retired {}, \"{}\".",

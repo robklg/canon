@@ -607,7 +607,7 @@ pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
         // the origin reads as bound history, not a dead end. DB
         // projections only, same as every query path.
         let retired_book = if root_removed {
-            crate::retire::ops::find_retirement_covering_path(conn, &line.row.root_path)?
+            crate::retire::find_retirement_covering_path(conn, &line.row.root_path)?
                 .map(|r| r.book_display)
         } else {
             None

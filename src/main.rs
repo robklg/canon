@@ -1547,7 +1547,7 @@ fn main() -> Result<()> {
                 roots::unsuspend(&db, &spec, &command_line, &config, cli.no_receipt)?;
             }
             Some(RootsAction::Retired) => {
-                retire::cli::retired(&db, &config)?;
+                retire::retired(&db, &config)?;
             }
             Some(RootsAction::Story { spec, limit, all }) => {
                 roots::story(&db, &spec, limit, all)?;
@@ -1560,7 +1560,7 @@ fn main() -> Result<()> {
                 yes,
             }) => {
                 let allow_unresolved = allow.contains(&RetireAllow::Unresolved);
-                retire::cli::retire(
+                retire::retire(
                     &db,
                     &spec,
                     dry_run,

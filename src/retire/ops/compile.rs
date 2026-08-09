@@ -1,10 +1,31 @@
-//! The book compile: the second lens over `RootStory`, and its verification.
+//! The book compile: the second lens over `RootStory`.
 
-use super::*;
+use std::collections::{HashMap, HashSet};
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 
-// ---------------------------------------------------------------------------
-// The book compile — the second lens over the story
-// ---------------------------------------------------------------------------
+use anyhow::{Context, Result};
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+
+use crate::core::domain::resolution::{build_account, ResolutionAccount};
+use crate::core::ops::root_story::RootStory;
+use crate::domain::decision::Decision;
+use crate::domain::extraction::OriginDisposition;
+use crate::domain::format::format_size;
+use crate::domain::note::note_display_path;
+use crate::domain::trail::TimelineEvent;
+use crate::domain::{format_count, Note, Root};
+use crate::ops;
+use crate::ops::ledger::{read_apply_receipt, ReceiptRead};
+use crate::ops::trail::{TrailParams, TrailResult, TrailView};
+use crate::repo;
+use crate::retire::domain::{
+    build_book_entries, derive_posture, disposition_word, ApplyOrigin, BookEntry, FateContext,
+    SourceFate, VerificationPosture,
+};
+
+use super::{iso_date, iso_utc, strip_hash_prefix};
 
 pub struct CompileParams {
     /// The user's `--reason`, bound onto the identity page.
@@ -547,26 +568,31 @@ struct MetaPosture {
     reason: Option<&'static str>,
 }
 
+/// Shared with `verify.rs`: the writer builds it (`fate_counts`), the reader
+/// recounts the inventory into a fresh one and compares — the round-trip
+/// law's subject.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct MetaCounts {
-    entries: i64,
-    archived_from_here: i64,
-    covered: i64,
-    excluded: i64,
-    deleted: i64,
-    present: i64,
+pub(super) struct MetaCounts {
+    pub(super) entries: i64,
+    pub(super) archived_from_here: i64,
+    pub(super) covered: i64,
+    pub(super) excluded: i64,
+    pub(super) deleted: i64,
+    pub(super) present: i64,
     /// Empty at retirement — additive within format v1; `default` so books
     /// bound before the contentless standing still parse (their inventories
     /// hold no contentless entries, so the recount agrees at 0).
     #[serde(default)]
-    contentless: i64,
-    missing_unexplained: i64,
+    pub(super) contentless: i64,
+    pub(super) missing_unexplained: i64,
 }
 
+/// Shared with `verify.rs`: the writer states what it gathered, the reader
+/// cross-checks it against the standing `ledger/` directory.
 #[derive(Serialize, Deserialize)]
-struct MetaLedger {
-    gathered: bool,
-    files: usize,
+pub(super) struct MetaLedger {
+    pub(super) gathered: bool,
+    pub(super) files: usize,
 }
 
 /// The telling's claim: the artifact verification requires, plus the
@@ -840,167 +866,4 @@ fn write_readme(
 
     std::fs::write(dir.join("README.md"), out)?;
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Book verification — the hinge the release movement's safety hangs on
-// ---------------------------------------------------------------------------
-
-/// Lenient read side of `meta.toml` for verification. Identity and account
-/// are prose for the future reader; verification needs only the claims it
-/// can check against the directory.
-#[derive(Deserialize)]
-struct MetaDoc {
-    version: u32,
-    #[serde(default)]
-    gaps: Vec<String>,
-    counts: MetaCounts,
-    ledger: MetaLedger,
-    /// Absent on books bound before the telling — they verify unchanged.
-    #[serde(default)]
-    story: Option<MetaStoryDoc>,
-}
-
-#[derive(Deserialize)]
-struct MetaStoryDoc {
-    file: String,
-}
-
-#[derive(Deserialize)]
-struct InventoryLineDoc {
-    fate: String,
-}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct BookVerification {
-    pub entries: i64,
-}
-
-/// Structural verification of a compiled book: parse `meta.toml` back,
-/// stream-count the inventory per fate, and require every artifact the meta
-/// claims. Deliberately not an existence test — a book that fails here is
-/// partial or tampered, and the removal movement must not proceed on it.
-pub fn verify_book(dir: &Path) -> Result<BookVerification> {
-    let meta_path = dir.join("meta.toml");
-    let meta_raw = std::fs::read_to_string(&meta_path)
-        .with_context(|| format!("Book meta missing or unreadable: {}", meta_path.display()))?;
-    let meta: MetaDoc = toml::from_str(&meta_raw).context("Book meta failed to parse")?;
-    if meta.version != 1 {
-        bail!(
-            "Book meta version {} is not supported by this canon (expected 1)",
-            meta.version
-        );
-    }
-
-    for file in ["README.md", "timeline.md", "notes.md"] {
-        if !dir.join(file).is_file() {
-            bail!("Book is incomplete: {file} is missing");
-        }
-    }
-
-    let inventory = std::fs::File::open(dir.join("inventory.jsonl"))
-        .context("Book is incomplete: inventory.jsonl is missing")?;
-    let reader = std::io::BufReader::new(inventory);
-    let mut counted = MetaCounts {
-        entries: 0,
-        archived_from_here: 0,
-        covered: 0,
-        excluded: 0,
-        deleted: 0,
-        present: 0,
-        contentless: 0,
-        missing_unexplained: 0,
-    };
-    // The same word derivations the writer used — the never-literal law
-    // holds on the read side too.
-    let archived = fate_transition(DecisionFamily::Archive, FateAspect::Present)
-        .expect("Archive+Present is a registered transition")
-        .as_str();
-    let excluded = fate_transition(DecisionFamily::Exclude, FateAspect::Present)
-        .expect("Exclude is a registered transition")
-        .as_str();
-    let deleted = fate_transition(DecisionFamily::Observe, FateAspect::Absent)
-        .expect("Observe+Absent is a registered transition")
-        .as_str();
-    for (index, line) in std::io::BufRead::lines(reader).enumerate() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let doc: InventoryLineDoc = serde_json::from_str(&line)
-            .with_context(|| format!("inventory.jsonl line {} failed to parse", index + 1))?;
-        counted.entries += 1;
-        match doc.fate.as_str() {
-            w if w == archived => counted.archived_from_here += 1,
-            w if w == excluded => counted.excluded += 1,
-            w if w == deleted => counted.deleted += 1,
-            w if w == STANDING_COVERED => counted.covered += 1,
-            w if w == STANDING_PRESENT => counted.present += 1,
-            w if w == STANDING_CONTENTLESS => counted.contentless += 1,
-            w if w == STANDING_MISSING_UNEXPLAINED => counted.missing_unexplained += 1,
-            other => bail!(
-                "inventory.jsonl line {}: unknown fate word {other:?}",
-                index + 1
-            ),
-        }
-    }
-
-    if counted != meta.counts {
-        bail!(
-            "Book counts disagree with the inventory — meta claims {:?}, the inventory holds {:?}",
-            meta.counts,
-            counted
-        );
-    }
-
-    if meta.ledger.gathered {
-        let found = count_files(&dir.join("ledger"))?;
-        if found != meta.ledger.files {
-            bail!(
-                "Book ledger disagrees — meta claims {} gathered files, ledger/ holds {}",
-                meta.ledger.files,
-                found
-            );
-        }
-    } else if meta.gaps.is_empty() {
-        bail!("Book says the ledger was not gathered but records no gap explaining it");
-    }
-
-    // The telling is a claimed artifact: it must exist and hold text.
-    // Verification anchors on the dossier — the counts recounted above are
-    // the inventory's; the story's prose is the user's (it may be
-    // hand-refined at the binding) and is never recounted.
-    if let Some(story) = &meta.story {
-        let len = std::fs::metadata(dir.join(&story.file))
-            .map(|m| m.len())
-            .unwrap_or(0);
-        if len == 0 {
-            bail!(
-                "Book claims its story at {} but the file is missing or empty",
-                story.file
-            );
-        }
-    }
-
-    Ok(BookVerification {
-        entries: counted.entries,
-    })
-}
-
-pub(super) fn count_files(dir: &Path) -> Result<usize> {
-    if !dir.is_dir() {
-        return Ok(0);
-    }
-    let mut count = 0;
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            count += count_files(&entry.path())?;
-        } else if file_type.is_file() {
-            count += 1;
-        }
-    }
-    Ok(count)
 }

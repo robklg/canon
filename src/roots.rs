@@ -15,7 +15,7 @@ use crate::ops;
 use crate::ops::decision::DecisionParams;
 use crate::ops::scope::{parse_root_spec, parse_root_spec_any, resolve_path};
 use crate::repo::{self, Db};
-use crate::retire::ops::telling;
+use crate::retire::story_lines;
 
 pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
     let conn = db.conn();
@@ -204,7 +204,7 @@ pub fn story(db: &Db, spec: &str, limit: usize, all: bool) -> Result<()> {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let cap = if all { usize::MAX } else { limit };
-    for line in telling::story_lines(&report, cap, now) {
+    for line in story_lines(&report, cap, now) {
         println!("{line}");
     }
     Ok(())

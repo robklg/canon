@@ -368,8 +368,8 @@ mod tests {
         let via_lens = report_over(&conn, &fetched, &no_dust()).unwrap();
         let via_command = compute_story(&conn, root, &no_dust()).unwrap();
         assert_eq!(
-            crate::retire::ops::telling::story_lines(&via_lens, usize::MAX, 0),
-            crate::retire::ops::telling::story_lines(&via_command, usize::MAX, 0),
+            crate::retire::story_lines(&via_lens, usize::MAX, 0),
+            crate::retire::story_lines(&via_command, usize::MAX, 0),
         );
     }
 
