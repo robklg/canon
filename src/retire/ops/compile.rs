@@ -46,7 +46,7 @@ pub struct CompileParams {
     /// `meta.toml`, required by verification. The ceremony always passes
     /// one (its `bind` takes the artifact as a required parameter); `None`
     /// keeps the direct compile testable and matches pre-telling books.
-    pub telling: Option<super::telling::TellingArtifact>,
+    pub telling: Option<super::frame::TellingArtifact>,
 }
 
 #[derive(Debug)]

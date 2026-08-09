@@ -60,6 +60,7 @@ mod repo;
 // definition of done empties them.
 mod core;
 mod retire;
+mod story;
 
 // Utilities
 mod alias;
@@ -1550,7 +1551,7 @@ fn main() -> Result<()> {
                 retire::retired(&db, &config)?;
             }
             Some(RootsAction::Story { spec, limit, all }) => {
-                roots::story(&db, &spec, limit, all)?;
+                story::story(&db, &spec, limit, all)?;
             }
             Some(RootsAction::Retire {
                 spec,

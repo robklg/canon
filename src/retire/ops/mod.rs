@@ -1,5 +1,5 @@
 //! Retirement operations: shared helpers, and the barrel gathering
-//! `review`, `ceremony`, `compile`, `shelf`, and `telling` into
+//! `review`, `ceremony`, `compile`, `shelf`, and `frame` into
 //! `retire::ops`.
 
 /// Receipt hashes are `"sha256:<hex>"`; the object index keys on the bare
@@ -26,21 +26,19 @@ pub const SHELF_DIR: &str = "retired";
 
 mod ceremony;
 mod compile;
+pub mod frame;
 mod review;
 mod shelf;
-pub mod telling;
 #[cfg(test)]
 mod tests;
 mod verify;
 
 // Explicit re-exports: the split is internal — within the subsystem,
-// `retire::ops::*` keeps exactly the surface the single file had. `telling`
-// stays a named submodule (its own voicing/frame concern, distinct from the
+// `retire::ops::*` keeps exactly the surface the single file had. `frame`
+// stays a named submodule (its own diction concern, distinct from the
 // review/ceremony/compile/verify/shelf split) — internal callers reach it
-// as `ops::telling::*`; its one external consumer is named individually
-// through the `retire` barrel instead (`retire::story_lines`, an interim
-// item — the renderer's true home is the future story subsystem; see the
-// barrel's note).
+// as `ops::frame::*`; it has no external consumer of its own (the walk it
+// used to carry now lives in the story subsystem and renders itself).
 pub use ceremony::{
     begin_ceremony, plan_bind, AbandonResult, BindPlan, BoundBook, CeremonyParams, ReleaseOutcome,
     RetireCeremony,

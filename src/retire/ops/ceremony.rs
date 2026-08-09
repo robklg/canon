@@ -11,12 +11,12 @@ use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::format_count;
 use crate::domain::scope::DecisionScope;
-use crate::domain::story::StoryParams;
 use crate::ops;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::repo;
 use crate::retire::domain::book_dir_name;
-use crate::retire::ops::telling::{self, TellingArtifact};
+use crate::retire::ops::frame::{self, TellingArtifact};
+use crate::story::StoryParams;
 
 use super::compile::{compile_book, CompileParams};
 use super::verify::{count_files, verify_book};
@@ -205,7 +205,7 @@ impl RetireCeremony {
     /// editor before binding; the finalized text comes back through `bind`.
     pub fn compose_telling(&self, conn: &Connection) -> Result<String> {
         let params = StoryParams::default();
-        let report = ops::story::report_over(conn, &self.story, &params)?;
+        let report = crate::story::report_over(conn, &self.story, &params)?;
         // Where the chosen content lives now: the recorded destinations,
         // aggregated the same way every "where" line is.
         let dirs: Vec<(&str, i64)> = self
@@ -231,22 +231,22 @@ impl RetireCeremony {
         } else {
             None
         };
-        let frame = telling::TellingFrame {
-            title: telling::suggested_title(
+        let frame = frame::TellingFrame {
+            title: frame::suggested_title(
                 &self.story.root.path,
                 self.story.root.comment.as_deref(),
             ),
             retirement_reason: self.reason.clone(),
             bound_on: self.now,
             canon_version: env!("CARGO_PKG_VERSION").to_string(),
-            archived_destinations: crate::domain::story::aggregate_locations(
+            archived_destinations: crate::story::aggregate_locations(
                 &dirs,
                 &bases,
                 params.where_cap,
             ),
             drive_ledger,
         };
-        Ok(telling::compose_reference_telling(&report, &frame))
+        Ok(frame::compose_reference_telling(&report, &frame))
     }
 
     /// The bind movement: shelf, compile to temp, verify, place, pointer.

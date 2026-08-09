@@ -6,10 +6,10 @@ use crate::ceremony;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::format::{format_date, format_size, format_time_ago};
 use crate::domain::format_count;
-use crate::domain::story::StoryParams;
 use crate::ops::scope::parse_root_spec_any;
 use crate::repo::{self, Db};
 use crate::retire::domain::Readiness;
+use crate::story::StoryParams;
 
 /// `canon roots retired` — the retired fleet, one line per book.
 pub fn retired(db: &Db, config: &LedgerConfig) -> Result<()> {
@@ -305,12 +305,12 @@ fn prepare_telling(
     ceremony_state: &super::ops::RetireCeremony,
     conn: &rusqlite::Connection,
     yes: bool,
-) -> Result<super::ops::telling::TellingArtifact> {
+) -> Result<super::ops::frame::TellingArtifact> {
     let draft = ceremony_state.compose_telling(conn)?;
-    let composed = super::ops::telling::finalize_telling(&draft)?;
+    let composed = super::ops::frame::finalize_telling(&draft)?;
     let artifact = |text: String| {
         let hand_edited = text != composed;
-        super::ops::telling::TellingArtifact {
+        super::ops::frame::TellingArtifact {
             text,
             hand_edited,
             params: StoryParams::default(),
@@ -335,7 +335,7 @@ fn prepare_telling(
                 eprintln!("No $VISUAL or $EDITOR is set — the story binds as composed.");
                 return Ok(artifact(composed.clone()));
             }
-            Ok(Some(edited)) => match super::ops::telling::finalize_telling(&edited) {
+            Ok(Some(edited)) => match super::ops::frame::finalize_telling(&edited) {
                 Ok(text) => return Ok(artifact(text)),
                 Err(e) => {
                     current = edited;

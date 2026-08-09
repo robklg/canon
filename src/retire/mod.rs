@@ -13,10 +13,3 @@ mod ops;
 
 pub use cli::{retire, retired};
 pub use ops::{find_retirement_covering_path, RetiredScope};
-// Interim re-export: `story_lines` renders the story reading for
-// `canon roots story` — a rendering that belongs to the story subsystem,
-// not to retire. It rides this barrel only until the story subsystem
-// exists as a module of its own; when it does, the place-walk renderer
-// moves there, story renders itself, and this item disappears. Do not
-// read it as a deliberate piece of retire's surface.
-pub use ops::telling::story_lines;

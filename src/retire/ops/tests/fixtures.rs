@@ -9,15 +9,15 @@ use rusqlite::Connection;
 use crate::core::ops::root_story::fetch_root_story;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
-use crate::domain::story::StoryParams;
 use crate::repo;
 use crate::repo::db::open_in_memory_for_test;
 use crate::repo::insert_test_root;
-use crate::retire::ops::telling::TellingArtifact;
+use crate::retire::ops::frame::TellingArtifact;
 use crate::retire::ops::{
     begin_ceremony, compile_book, plan_bind, readiness_lens, CeremonyParams, CompileParams,
     CompiledBook, RetireCeremony,
 };
+use crate::story::StoryParams;
 
 pub(super) fn test_telling() -> TellingArtifact {
     TellingArtifact {

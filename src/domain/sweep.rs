@@ -71,7 +71,7 @@ pub struct SweepStats {
     pub below_floor_subjects: usize,
 }
 
-pub use crate::domain::folder_tree::FolderTree;
+pub use crate::core::domain::folder_tree::FolderTree;
 
 /// One root's folders and content, indexed by folder id.
 pub struct RootData {

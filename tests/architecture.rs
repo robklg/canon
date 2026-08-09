@@ -49,6 +49,9 @@ fn classify_layer(rel_path: &str) -> Layer {
     if let Some(rest) = rel_path.strip_prefix("retire/") {
         return classify_subsystem_stratum(rest);
     }
+    if let Some(rest) = rel_path.strip_prefix("story/") {
+        return classify_subsystem_stratum(rest);
+    }
     if rel_path.starts_with("domain/") {
         Layer::Domain
     } else if rel_path.starts_with("repo/") {
@@ -308,6 +311,11 @@ const TIER3: &[Tier3Entry] = &[
         file: "roots.rs",
         reference: "repo::root::set_comment",
         severity: Severity::Write,
+    },
+    Tier3Entry {
+        file: "story/cli.rs",
+        reference: "repo::root::fetch_all",
+        severity: Severity::Read,
     },
     Tier3Entry {
         file: "scan.rs",
@@ -1437,7 +1445,7 @@ mod self_tests {
     }
 
     #[test]
-    fn classify_layer_recognizes_core_and_retire_strata() {
+    fn classify_layer_recognizes_core_retire_and_story_strata() {
         assert_eq!(classify_layer("core/domain/resolution.rs"), Layer::Domain);
         assert_eq!(classify_layer("core/repo/decision.rs"), Layer::Repo);
         assert_eq!(classify_layer("core/ops/root_story.rs"), Layer::Ops);
@@ -1445,6 +1453,9 @@ mod self_tests {
         assert_eq!(classify_layer("retire/domain.rs"), Layer::Domain);
         assert_eq!(classify_layer("retire/ops/ceremony.rs"), Layer::Ops);
         assert_eq!(classify_layer("retire/cli.rs"), Layer::Interface);
+        assert_eq!(classify_layer("story/domain/place.rs"), Layer::Domain);
+        assert_eq!(classify_layer("story/ops/report.rs"), Layer::Ops);
+        assert_eq!(classify_layer("story/mod.rs"), Layer::Interface);
     }
 
     #[test]

@@ -14,10 +14,11 @@ use std::collections::HashMap;
 use crate::core::domain::resolution::{build_account, ResolutionAccount};
 use crate::core::ops::root_story::{fetch_root_story, RootStory};
 use crate::domain::root::Root;
-use crate::domain::story::{
-    assign_reason_sites, build_places, DecisionInfo, StoryInputs, StoryParams, StoryPlace,
-};
 use crate::repo;
+use crate::story::domain::place::{
+    assign_reason_sites, DecisionInfo, StoryInputs, StoryParams, StoryPlace,
+};
+use crate::story::domain::splitter::build_places;
 
 /// Everything the interface renders — it classifies nothing.
 #[derive(Debug)]
@@ -129,8 +130,8 @@ pub fn report_over(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::story::StoryPlace;
     use crate::repo::{insert_test_root, open_in_memory_for_test};
+    use crate::story::domain::place::StoryPlace;
     use rusqlite::Connection as SqlConnection;
 
     #[allow(clippy::too_many_arguments)]
@@ -368,8 +369,8 @@ mod tests {
         let via_lens = report_over(&conn, &fetched, &no_dust()).unwrap();
         let via_command = compute_story(&conn, root, &no_dust()).unwrap();
         assert_eq!(
-            crate::retire::story_lines(&via_lens, usize::MAX, 0),
-            crate::retire::story_lines(&via_command, usize::MAX, 0),
+            crate::story::ops::render::story_lines(&via_lens, usize::MAX, 0),
+            crate::story::ops::render::story_lines(&via_command, usize::MAX, 0),
         );
     }
 
@@ -508,7 +509,7 @@ mod tests {
         assert_eq!(report.account.covered, 1100);
         assert_eq!(
             report.places.covered_where.locations,
-            vec![crate::domain::story::LocationCount {
+            vec![crate::story::domain::locations::LocationCount {
                 path: "/archive/media".into(),
                 files: 1100
             }]

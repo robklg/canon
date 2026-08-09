@@ -1,13 +1,13 @@
 use crate::core::ops::root_story::fetch_root_story;
 use crate::domain::config::RecordingMode;
-use crate::domain::story::StoryParams;
 use crate::repo;
 use crate::repo::db::open_in_memory_for_test;
 use crate::repo::insert_test_root;
-use crate::retire::ops::telling::TellingArtifact;
+use crate::retire::ops::frame::TellingArtifact;
 use crate::retire::ops::{
     compile_book, readiness_lens, verify_book, CompileParams, ReleaseOutcome,
 };
+use crate::story::StoryParams;
 
 use super::fixtures::{
     begin_with, compile_to, every_fate_fixture, insert_object, insert_source, test_telling,
