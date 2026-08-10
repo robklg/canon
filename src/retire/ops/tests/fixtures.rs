@@ -12,10 +12,10 @@ use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::repo;
 use crate::repo::db::open_in_memory_for_test;
 use crate::repo::insert_test_root;
+use crate::retire::ops::compile::{compile_book, CompileParams, CompiledBook};
 use crate::retire::ops::frame::TellingArtifact;
 use crate::retire::ops::{
-    begin_ceremony, compile_book, plan_bind, readiness_lens, CeremonyParams, CompileParams,
-    CompiledBook, RetireCeremony,
+    begin_ceremony, plan_bind, readiness_lens, CeremonyParams, RetireCeremony,
 };
 use crate::story::StoryParams;
 

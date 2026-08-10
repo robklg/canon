@@ -8,9 +8,9 @@ use crate::repo;
 use crate::repo::db::open_in_memory_for_test;
 use crate::repo::insert_test_root;
 use crate::retire::domain::book_dir_name;
-use crate::retire::ops::{
-    iso_date, plan_bind, verify_book, BindPlan, ReleaseOutcome, RetireCeremony, SHELF_DIR,
-};
+use crate::retire::ops::ceremony::BindPlan;
+use crate::retire::ops::verify::verify_book;
+use crate::retire::ops::{iso_date, plan_bind, ReleaseOutcome, RetireCeremony, SHELF_DIR};
 
 use super::fixtures::{
     begin_with, compile_to, every_fate_fixture, insert_decision, insert_source, ledger_config,

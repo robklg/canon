@@ -2,9 +2,8 @@ use crate::repo;
 use crate::repo::db::open_in_memory_for_test;
 use crate::repo::insert_test_root;
 use crate::retire::domain::Readiness;
-use crate::retire::ops::{
-    compute_readiness, find_retirement_covering_path, validate_retire_target,
-};
+use crate::retire::ops::review::compute_readiness;
+use crate::retire::ops::{find_retirement_covering_path, validate_retire_target};
 
 use super::fixtures::{
     extraction_from, insert_bound_retirement, insert_decision, insert_object, insert_source,

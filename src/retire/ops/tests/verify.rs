@@ -3,10 +3,10 @@ use crate::domain::config::RecordingMode;
 use crate::repo;
 use crate::repo::db::open_in_memory_for_test;
 use crate::repo::insert_test_root;
+use crate::retire::ops::compile::{compile_book, CompileParams};
 use crate::retire::ops::frame::TellingArtifact;
-use crate::retire::ops::{
-    compile_book, readiness_lens, verify_book, CompileParams, ReleaseOutcome,
-};
+use crate::retire::ops::verify::verify_book;
+use crate::retire::ops::{readiness_lens, ReleaseOutcome};
 use crate::story::StoryParams;
 
 use super::fixtures::{

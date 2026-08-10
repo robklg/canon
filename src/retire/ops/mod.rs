@@ -39,14 +39,9 @@ mod verify;
 // review/ceremony/compile/verify/shelf split) — internal callers reach it
 // as `ops::frame::*`; it has no external consumer of its own (the walk it
 // used to carry now lives in the story subsystem and renders itself).
-pub use ceremony::{
-    begin_ceremony, plan_bind, AbandonResult, BindPlan, BoundBook, CeremonyParams, ReleaseOutcome,
-    RetireCeremony,
-};
-pub use compile::{compile_book, CompileParams, CompiledBook};
+pub use ceremony::{begin_ceremony, plan_bind, CeremonyParams, ReleaseOutcome, RetireCeremony};
 pub use review::{
-    compute_readiness, find_retirement_covering_path, readiness_lens, validate_retire_target,
-    GapFacts, ReadinessReview, RetiredScope,
+    find_retirement_covering_path, readiness_lens, validate_retire_target, ReadinessReview,
+    RetiredScope,
 };
-pub use shelf::{compute_shelf_listing, ShelfLine, ShelfListing};
-pub use verify::{verify_book, BookVerification};
+pub use shelf::{compute_shelf_listing, ShelfLine};
