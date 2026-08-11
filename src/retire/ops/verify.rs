@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use crate::domain::trail::{fate_transition, DecisionFamily, FateAspect};
+use crate::core::domain::fate::{fate_transition, DecisionFamily, FateAspect};
 use crate::retire::domain::{
     STANDING_CONTENTLESS, STANDING_COVERED, STANDING_MISSING_UNEXPLAINED, STANDING_PRESENT,
 };

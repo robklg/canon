@@ -2,5 +2,7 @@
 //! Same purity law as the pre-migration `domain/` layer — this is a
 //! narrower, subsystem-crossing slice of it, not a different rule.
 
+pub mod extraction;
+pub mod fate;
 pub mod folder_tree;
 pub mod resolution;

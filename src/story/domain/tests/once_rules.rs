@@ -1,7 +1,7 @@
 //! Reason-site tests (the once-rule, through the real splitter) and the
 //! standing-coincidence law confirmed end-to-end.
 
-use crate::domain::trail::DecisionFamily;
+use crate::core::domain::fate::DecisionFamily;
 use crate::story::domain::place::assign_reason_sites;
 
 use super::fixtures::{child, dinfo, excluded_src, no_dust, note_at, Fixture};

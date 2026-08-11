@@ -9,14 +9,16 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use super::acts::{group_acts, ActAtom};
 use super::locations::{aggregate_locations, aggregate_locations_expanded};
 use super::place::{PlaceStanding, StoryInputs, StoryParams, StoryPlace};
+use crate::core::domain::extraction::OriginDisposition;
+use crate::core::domain::fate::{
+    fate_posture, fate_transition, DecisionFamily, FateAspect, Posture,
+};
 use crate::core::domain::folder_tree::FolderTree;
 use crate::core::domain::resolution::{
     classify_absent, classify_present, AbsentBucket, StandingBucket,
 };
-use crate::domain::extraction::OriginDisposition;
 use crate::domain::note::Note;
 use crate::domain::path::path_is_under;
-use crate::domain::trail::{fate_posture, fate_transition, DecisionFamily, FateAspect, Posture};
 
 /// Per-node accumulation for the walk: direct, then subtree by a reverse
 /// pass (ids are parents-first).

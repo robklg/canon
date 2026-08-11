@@ -11,11 +11,11 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
 
+use crate::core::domain::extraction::DecisionExtraction;
+use crate::core::domain::fate::{decision_family, DecisionFamily};
 use crate::domain::decision::Decision;
-use crate::domain::extraction::DecisionExtraction;
 use crate::domain::root::Root;
 use crate::domain::source::Source;
-use crate::domain::trail::{decision_family, DecisionFamily};
 use crate::ops;
 use crate::repo;
 use crate::repo::decision::DecisionScopeRow;

@@ -24,9 +24,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
+use super::extraction::{DecisionExtraction, OriginDisposition};
+use super::fate::DecisionFamily;
 use crate::domain::source::Source;
-use crate::domain::trail::DecisionFamily;
 
 /// The two-register resolution account of a root.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

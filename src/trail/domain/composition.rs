@@ -11,12 +11,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::decision::Decision;
-use super::extraction::DecisionExtraction;
-use super::path_is_under;
-use super::trail::{
-    classify_row, decision_family, fate_transition, DecisionFamily, FateAspect, RowAspect,
-};
+use crate::core::domain::extraction::DecisionExtraction;
+use crate::core::domain::fate::{decision_family, fate_transition, DecisionFamily, FateAspect};
+use crate::domain::decision::Decision;
+use crate::domain::path::path_is_under;
+
+use super::placement::{classify_row, RowAspect};
 
 /// Files/bytes for one bucket of the card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

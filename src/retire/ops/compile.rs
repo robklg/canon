@@ -8,22 +8,22 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
+use crate::core::domain::extraction::OriginDisposition;
 use crate::core::domain::resolution::{build_account, ResolutionAccount};
 use crate::core::ops::root_story::RootStory;
 use crate::domain::decision::Decision;
-use crate::domain::extraction::OriginDisposition;
 use crate::domain::format::format_size;
 use crate::domain::note::note_display_path;
-use crate::domain::trail::TimelineEvent;
 use crate::domain::{format_count, Note, Root};
 use crate::ops;
 use crate::ops::ledger::{read_apply_receipt, ReceiptRead};
-use crate::ops::trail::{TrailParams, TrailResult, TrailView};
 use crate::repo;
 use crate::retire::domain::{
     build_book_entries, derive_posture, disposition_word, ApplyOrigin, BookEntry, FateContext,
     SourceFate, VerificationPosture,
 };
+use crate::trail::TimelineEvent;
+use crate::trail::{TrailParams, TrailResult, TrailView};
 
 use super::{iso_date, iso_utc, strip_hash_prefix};
 
@@ -83,7 +83,7 @@ pub fn compile_book(
 
     // Compile-only fetches on top of the substrate.
     let notes = repo::note::fetch_by_roots(conn, &[story.root.id])?;
-    let trail = ops::trail::compute_trail(
+    let trail = crate::trail::compute_trail(
         conn,
         &TrailParams {
             prefixes: vec![story.root.path.clone()],

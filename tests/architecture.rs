@@ -52,6 +52,9 @@ fn classify_layer(rel_path: &str) -> Layer {
     if let Some(rest) = rel_path.strip_prefix("story/") {
         return classify_subsystem_stratum(rest);
     }
+    if let Some(rest) = rel_path.strip_prefix("trail/") {
+        return classify_subsystem_stratum(rest);
+    }
     if rel_path.starts_with("domain/") {
         Layer::Domain
     } else if rel_path.starts_with("repo/") {
@@ -333,7 +336,7 @@ const TIER3: &[Tier3Entry] = &[
         severity: Severity::Write,
     },
     Tier3Entry {
-        file: "trail.rs",
+        file: "trail/cli.rs",
         reference: "repo::root::fetch_all",
         severity: Severity::Read,
     },
@@ -913,8 +916,17 @@ fn evaluate_violations(
 fn architecture_rules_hold() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let src_root = Path::new(&manifest_dir).join("src");
-    let interface_modules = interface_module_names(&src_root);
     let subsystem_names = subsystem_dir_names(&src_root);
+    // A name can be both a flat interface file and a subsystem directory
+    // during the coexistence window before the interface stratum itself
+    // moves (`trail.rs` alongside `trail/`, until the CLI split retires the
+    // flat file) — the subsystem-boundary rule already governs references
+    // into the directory, so the name must not also trip the flat-file
+    // upward-dependency check below.
+    let interface_modules: Vec<String> = interface_module_names(&src_root)
+        .into_iter()
+        .filter(|n| !subsystem_names.contains(n))
+        .collect();
 
     let files = collect_rs_files(&src_root);
     let mut all_violations = Vec::new();
@@ -1285,6 +1297,27 @@ mod self_tests {
     }
 
     #[test]
+    fn retire_may_reference_trail_public_surface_one_segment_deep() {
+        // Stands in for the real `retire/ops/compile.rs` -> `trail::{compute_trail,
+        // TrailParams, TrailResult, TrailView, TimelineEvent}` dependency — the
+        // book's timeline page composes over trail's finished report through its
+        // declared one-segment barrel, never trail's internals.
+        let text =
+            "use crate::trail::{compute_trail, TrailParams, TrailResult, TrailView, TimelineEvent};\n";
+        let subsystems = vec!["retire".to_string(), "trail".to_string()];
+        let violations = scan_file(
+            Layer::Ops,
+            &Home::Subsystem("retire".to_string()),
+            "retire/ops/compile.rs",
+            text,
+            &[],
+            &subsystems,
+        )
+        .unwrap();
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    #[test]
     fn subsystem_must_not_reference_sibling_internals_two_segments_deep() {
         let text = "use crate::story::domain::internal_helper;\n";
         let subsystems = vec!["retire".to_string(), "story".to_string()];
@@ -1456,6 +1489,9 @@ mod self_tests {
         assert_eq!(classify_layer("story/domain/place.rs"), Layer::Domain);
         assert_eq!(classify_layer("story/ops/report.rs"), Layer::Ops);
         assert_eq!(classify_layer("story/mod.rs"), Layer::Interface);
+        // A bare `repo.rs` (no `repo/` directory) classifies as Repo, same as
+        // the single-file `domain.rs`/`ops.rs` pattern above.
+        assert_eq!(classify_layer("trail/repo.rs"), Layer::Repo);
     }
 
     #[test]
@@ -1467,5 +1503,113 @@ mod self_tests {
         );
         assert_eq!(classify_home("domain/retire.rs"), Home::OldTree);
         assert_eq!(classify_home("main.rs"), Home::OldTree);
+    }
+
+    // ========================================================================
+    // Barrel-surface sealing, scoped to trail/ — retire/ and story/ have the
+    // same unverified-sealing gap but are not asserted here.
+    // ========================================================================
+
+    /// `trail.rs`'s complete public surface: the finished-report items an
+    /// in-crate consumer names today (CLI entry points, retire's book
+    /// compile), plus the pub-field/variant types of that report riding for
+    /// crate-readiness — a future crate boundary can't expose a public field
+    /// of a private type.
+    const TRAIL_BARREL_ITEMS: &[&str] = &[
+        "run",
+        "run_show",
+        "TrailArgs",
+        "RowAspect",
+        "DayGroup",
+        "DayRollup",
+        "FateLine",
+        "TimelineEvent",
+        "WhenValue",
+        "compute_trail",
+        "TrailParams",
+        "TrailResult",
+        "TrailView",
+        "ArrivalRollup",
+        "ExtractionRollup",
+        "RearrangementRollup",
+    ];
+
+    #[test]
+    fn trail_barrel_seals_to_exactly_sixteen_items() {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+        let src_root = Path::new(&manifest_dir).join("src");
+
+        let trail_rs_text =
+            fs::read_to_string(src_root.join("trail.rs")).expect("failed to read trail.rs");
+        let trail_rs_file = syn::parse_file(&trail_rs_text).expect("failed to parse trail.rs");
+
+        let mut exported = Vec::new();
+        for item in &trail_rs_file.items {
+            if let syn::Item::Use(item_use) = item {
+                if matches!(item_use.vis, syn::Visibility::Public(_)) {
+                    let mut leaves = Vec::new();
+                    expand_use_tree(&item_use.tree, &[], &mut leaves);
+                    for (path, _, _) in leaves {
+                        let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
+                        exported.push(leaf);
+                    }
+                }
+            }
+        }
+        exported.sort();
+        exported.dedup();
+        let mut expected: Vec<String> = TRAIL_BARREL_ITEMS.iter().map(|s| s.to_string()).collect();
+        expected.sort();
+        assert_eq!(
+            exported, expected,
+            "trail.rs's `pub use` surface no longer matches its declared 16-item barrel"
+        );
+
+        // The stratum front doors trail.rs declares must never be pub — the
+        // barrel's `pub use` list is the only public surface.
+        for item in &trail_rs_file.items {
+            if let syn::Item::Mod(item_mod) = item {
+                assert!(
+                    !matches!(item_mod.vis, syn::Visibility::Public(_)),
+                    "trail.rs's `mod {}` must not be pub",
+                    item_mod.ident
+                );
+            }
+        }
+
+        // Every mod declaration anywhere inside the stratum must stay sealed
+        // too: never bare `pub`, never `pub(in ...)` — private or
+        // `pub(super)` only (item-level `pub` below a sealed mod is still
+        // needed for multi-hop re-exports to compile, so this checks module
+        // front doors, not every item).
+        for path in collect_rs_files(&src_root.join("trail")) {
+            let raw = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+            let file = syn::parse_file(&raw)
+                .unwrap_or_else(|e| panic!("failed to parse {}: {}", path.display(), e));
+            let rel = path
+                .strip_prefix(&src_root)
+                .expect("file under src_root")
+                .display()
+                .to_string();
+            for item in &file.items {
+                if let syn::Item::Mod(item_mod) = item {
+                    match &item_mod.vis {
+                        syn::Visibility::Public(_) => panic!(
+                            "{rel}: `mod {}` is bare pub — stratum mods must stay sealed \
+                             (pub(super) at most)",
+                            item_mod.ident
+                        ),
+                        syn::Visibility::Restricted(r) => assert!(
+                            r.in_token.is_none(),
+                            "{rel}: `mod {}` uses `pub(in ...)` — not permitted, use \
+                             `pub(super)` instead",
+                            item_mod.ident
+                        ),
+                        syn::Visibility::Inherited => {}
+                    }
+                }
+            }
+        }
     }
 }

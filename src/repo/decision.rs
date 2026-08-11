@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::db::Connection;
 use super::source::BATCH_SIZE;
+use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::domain::decision::Decision;
-use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
 
 /// Insert the initial "started" decision record. Returns the row ID.
 #[allow(clippy::too_many_arguments)]
@@ -213,26 +213,6 @@ pub fn fetch_by_ids(conn: &Connection, ids: &[i64]) -> Result<Vec<Decision>> {
     Ok(decisions)
 }
 
-/// Fetch the most recent decisions, newest first. `limit: None` fetches all.
-pub fn fetch_recent(conn: &Connection, limit: Option<usize>) -> Result<Vec<Decision>> {
-    let sql = match limit {
-        Some(n) => format!(
-            "SELECT {DECISION_COLUMNS} FROM decisions
-             ORDER BY created_at DESC, id DESC LIMIT {n}"
-        ),
-        None => {
-            format!("SELECT {DECISION_COLUMNS} FROM decisions ORDER BY created_at DESC, id DESC")
-        }
-    };
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], decision_from_row)?;
-    let mut decisions = Vec::new();
-    for row in rows {
-        decisions.push(row?);
-    }
-    Ok(decisions)
-}
-
 /// Fetch every decision with the given command identifier, oldest first.
 /// Used by `ledger reindex` to walk all `apply` decisions for backfill.
 pub fn fetch_by_command(conn: &Connection, command: &str) -> Result<Vec<Decision>> {
@@ -240,21 +220,6 @@ pub fn fetch_by_command(conn: &Connection, command: &str) -> Result<Vec<Decision
         "SELECT {DECISION_COLUMNS} FROM decisions WHERE command = ? ORDER BY id ASC"
     ))?;
     let rows = stmt.query_map([command], decision_from_row)?;
-    let mut decisions = Vec::new();
-    for row in rows {
-        decisions.push(row?);
-    }
-    Ok(decisions)
-}
-
-/// Fetch decisions with `start <= created_at < end`, oldest first.
-pub fn fetch_in_range(conn: &Connection, start: i64, end: i64) -> Result<Vec<Decision>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {DECISION_COLUMNS} FROM decisions
-         WHERE created_at >= ? AND created_at < ?
-         ORDER BY created_at ASC, id ASC"
-    ))?;
-    let rows = stmt.query_map([start, end], decision_from_row)?;
     let mut decisions = Vec::new();
     for row in rows {
         decisions.push(row?);
@@ -303,20 +268,6 @@ pub fn fetch_scope_rows_by_roots(
         for row in rows {
             rows_out.push(row?);
         }
-    }
-    Ok(rows_out)
-}
-
-/// Fetch the scope-index rows of one decision (per-root receipt pointers).
-pub fn fetch_scope_rows(conn: &Connection, decision_id: i64) -> Result<Vec<DecisionScopeRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT decision_id, root_id, root_path, rel_prefix, receipt_rel_path
-         FROM decision_scopes WHERE decision_id = ? ORDER BY root_id, rel_prefix",
-    )?;
-    let rows = stmt.query_map([decision_id], scope_row_from_row)?;
-    let mut rows_out = Vec::new();
-    for row in rows {
-        rows_out.push(row?);
     }
     Ok(rows_out)
 }
@@ -435,22 +386,6 @@ pub fn count_all(conn: &Connection) -> Result<i64> {
     Ok(count)
 }
 
-/// Count decisions with no scope-index rows (global operations), optionally
-/// restricted to `start <= created_at < end`.
-pub fn count_unscoped(conn: &Connection, range: Option<(i64, i64)>) -> Result<i64> {
-    let base = "SELECT COUNT(*) FROM decisions d
-                WHERE NOT EXISTS (SELECT 1 FROM decision_scopes s WHERE s.decision_id = d.id)";
-    let count = match range {
-        Some((start, end)) => conn.query_row(
-            &format!("{base} AND d.created_at >= ? AND d.created_at < ?"),
-            [start, end],
-            |row| row.get(0),
-        )?,
-        None => conn.query_row(base, [], |row| row.get(0))?,
-    };
-    Ok(count)
-}
-
 // ============================================================================
 // Extraction ledger (the trail's outbound direction)
 // ============================================================================
@@ -513,25 +448,6 @@ pub fn replace_extractions(conn: &Connection, rows: &[DecisionExtraction]) -> Re
     Ok(())
 }
 
-/// Fetch every extraction row. The table is aggregate-only (one row per apply
-/// x source root) — tiny by construction, so a full scan keeps path
-/// comparison out of SQL (the path-handling law): the caller classifies each
-/// row's recorded locations against the viewed scope in domain code. Ordered
-/// by `(decision_id, root_id)` so a multi-root decision's lines render in a
-/// stable order run to run.
-pub fn fetch_all_extractions(conn: &Connection) -> Result<Vec<DecisionExtraction>> {
-    let sql = format!(
-        "SELECT {EXTRACTION_COLUMNS} FROM decision_extractions ORDER BY decision_id, root_id"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], extraction_from_row)?;
-    let mut rows_out = Vec::new();
-    for row in rows {
-        rows_out.push(row?);
-    }
-    Ok(rows_out)
-}
-
 /// Fetch every extraction row whose *origin* is the given root — what was
 /// archived from there. Serves the retirement account's event register.
 pub fn fetch_extractions_by_origin_root(
@@ -576,29 +492,6 @@ pub fn fetch_extractions_by_decisions(
         }
     }
     Ok(rows_out)
-}
-
-/// Of the given decision ids, return those with no `decision_scopes` row
-/// (chunked). Serves the scoped-trail footer adjustment: decisions surfaced
-/// via an extraction row must not also be double-counted as "not shown".
-pub fn filter_unscoped_ids(conn: &Connection, ids: &[i64]) -> Result<Vec<i64>> {
-    let mut out = Vec::new();
-    for chunk in ids.chunks(BATCH_SIZE) {
-        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        let sql = format!(
-            "SELECT id FROM decisions WHERE id IN ({}) AND NOT EXISTS
-             (SELECT 1 FROM decision_scopes s WHERE s.decision_id = decisions.id)",
-            placeholders.join(",")
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
-            row.get::<_, i64>(0)
-        })?;
-        for row in rows {
-            out.push(row?);
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -1354,20 +1247,6 @@ mod tests {
     }
 
     #[test]
-    fn fetch_recent_orders_and_limits() {
-        let conn = setup_test_db();
-        let a = insert_decision_at(&conn, "scan", 100);
-        let b = insert_decision_at(&conn, "apply", 300);
-        let c = insert_decision_at(&conn, "scan", 200);
-
-        let all = fetch_recent(&conn, None).unwrap();
-        assert_eq!(all.iter().map(|d| d.id).collect::<Vec<_>>(), vec![b, c, a]);
-
-        let top = fetch_recent(&conn, Some(2)).unwrap();
-        assert_eq!(top.iter().map(|d| d.id).collect::<Vec<_>>(), vec![b, c]);
-    }
-
-    #[test]
     fn fetch_by_command_filters_and_orders() {
         let conn = setup_test_db();
         let a = insert_decision_at(&conn, "apply", 100);
@@ -1386,18 +1265,6 @@ mod tests {
     }
 
     #[test]
-    fn fetch_in_range_boundaries() {
-        let conn = setup_test_db();
-        insert_decision_at(&conn, "scan", 99);
-        let b = insert_decision_at(&conn, "scan", 100);
-        let c = insert_decision_at(&conn, "scan", 150);
-        insert_decision_at(&conn, "scan", 200); // end is exclusive
-
-        let hits = fetch_in_range(&conn, 100, 200).unwrap();
-        assert_eq!(hits.iter().map(|d| d.id).collect::<Vec<_>>(), vec![b, c]);
-    }
-
-    #[test]
     fn fetch_by_ids_chunks_over_batch_size() {
         let conn = setup_test_db();
         let ids: Vec<i64> = (0..1100)
@@ -1411,50 +1278,6 @@ mod tests {
     fn fetch_by_ids_empty() {
         let conn = setup_test_db();
         assert!(fetch_by_ids(&conn, &[]).unwrap().is_empty());
-    }
-
-    #[test]
-    fn count_unscoped_ignores_scoped_decisions() {
-        let conn = setup_test_db();
-        let scoped = insert_decision_at(&conn, "scan", 100);
-        insert_scopes(&conn, scoped, &[(1, "/vol/j".to_string(), String::new())]).unwrap();
-        insert_decision_at(&conn, "import_facts", 150);
-        insert_decision_at(&conn, "import_facts", 250);
-
-        assert_eq!(count_unscoped(&conn, None).unwrap(), 2);
-        assert_eq!(count_unscoped(&conn, Some((100, 200))).unwrap(), 1);
-        assert_eq!(count_all(&conn).unwrap(), 3);
-    }
-
-    #[test]
-    fn scope_rows_round_trip_with_receipt_path() {
-        let conn = setup_test_db();
-        let d = insert_decision_at(&conn, "scan", 100);
-        insert_scopes(
-            &conn,
-            d,
-            &[
-                (1, "/vol/k".to_string(), "a/b".to_string()),
-                (2, "/vol/l".to_string(), String::new()),
-            ],
-        )
-        .unwrap();
-        set_scope_receipt(&conn, d, 2, "/vol/l", ".canon-ledger/000001-scan.toml").unwrap();
-
-        let by_root = fetch_scope_rows_by_roots(&conn, &[2]).unwrap();
-        assert_eq!(by_root.len(), 1);
-        assert_eq!(by_root[0].decision_id, d);
-        assert_eq!(by_root[0].rel_prefix, "");
-        assert_eq!(
-            by_root[0].receipt_rel_path.as_deref(),
-            Some(".canon-ledger/000001-scan.toml")
-        );
-
-        let for_decision = fetch_scope_rows(&conn, d).unwrap();
-        assert_eq!(for_decision.len(), 2);
-        assert_eq!(for_decision[0].root_id, 1);
-        assert_eq!(for_decision[0].rel_prefix, "a/b");
-        assert!(for_decision[0].receipt_rel_path.is_none());
     }
 
     // ------------------------------------------------------------------
@@ -1566,7 +1389,6 @@ mod tests {
             fetch_extractions_by_decisions(&conn, &[d]).unwrap().len(),
             2
         );
-        assert_eq!(fetch_all_extractions(&conn).unwrap().len(), 2);
     }
 
     #[test]
@@ -1603,36 +1425,6 @@ mod tests {
             fetch_extractions_by_decisions(&conn, &[d]).unwrap().len(),
             1100
         );
-    }
-
-    #[test]
-    fn fetch_all_extractions_returns_every_row_ordered() {
-        let conn = setup_test_db();
-        let d1 = insert_decision_at(&conn, "apply", 100);
-        let d2 = insert_decision_at(&conn, "apply", 200);
-        replace_extractions(&conn, &[mk_extraction(d1, 2), mk_extraction(d1, 1)]).unwrap();
-        replace_extractions(&conn, &[mk_extraction(d2, 1)]).unwrap();
-
-        let rows = fetch_all_extractions(&conn).unwrap();
-        let pairs: Vec<(i64, i64)> = rows.iter().map(|r| (r.decision_id, r.root_id)).collect();
-        assert_eq!(pairs, vec![(d1, 1), (d1, 2), (d2, 1)]);
-    }
-
-    #[test]
-    fn fetch_all_extractions_empty_table() {
-        let conn = setup_test_db();
-        assert!(fetch_all_extractions(&conn).unwrap().is_empty());
-    }
-
-    #[test]
-    fn filter_unscoped_ids_against_mixed_decisions() {
-        let conn = setup_test_db();
-        let scoped = insert_decision_at(&conn, "exclude_set", 100);
-        insert_scopes(&conn, scoped, &[(1, "/vol/m".to_string(), String::new())]).unwrap();
-        let unscoped = insert_decision_at(&conn, "apply", 200);
-
-        let result = filter_unscoped_ids(&conn, &[scoped, unscoped]).unwrap();
-        assert_eq!(result, vec![unscoped]);
     }
 
     #[test]

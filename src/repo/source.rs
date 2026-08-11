@@ -29,7 +29,6 @@ use rusqlite::OptionalExtension;
 use super::db::Connection;
 use crate::domain::scan::{FileObservation, Reconciliation};
 use crate::domain::source::{NewSource, Source};
-use crate::domain::trail::StampAgg;
 
 /// Batch size for SQL IN clauses. Consistent across all repositories.
 pub const BATCH_SIZE: usize = 1000;
@@ -215,47 +214,6 @@ pub fn batch_fetch_by_ids(conn: &Connection, source_ids: &[i64]) -> Result<HashM
     }
 
     Ok(sources)
-}
-
-/// Aggregate stamped sources per decision, split by the presence axis
-/// (chunked). A decision's stamp-set can mix transitions — scan stamps both
-/// newly indexed (present) and deleted (absent) sources — so the split is
-/// what lets the trail's rollups read each bucket for the right fate.
-pub fn aggregate_stamped_by_decisions(
-    conn: &Connection,
-    decision_ids: &[i64],
-) -> Result<HashMap<i64, StampAgg>> {
-    let mut aggs: HashMap<i64, StampAgg> = HashMap::new();
-    for chunk in decision_ids.chunks(BATCH_SIZE) {
-        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        let sql = format!(
-            "SELECT decision_id, present, COUNT(*), COALESCE(SUM(size), 0)
-             FROM sources WHERE decision_id IN ({})
-             GROUP BY decision_id, present",
-            placeholders.join(",")
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })?;
-        for row in rows {
-            let (decision_id, present, count, bytes) = row?;
-            let agg = aggs.entry(decision_id).or_default();
-            if present == 1 {
-                agg.present_count += count;
-                agg.present_bytes += bytes;
-            } else {
-                agg.absent_count += count;
-                agg.absent_bytes += bytes;
-            }
-        }
-    }
-    Ok(aggs)
 }
 
 /// Fetch all sources that share the given object IDs, grouped by object_id.
@@ -3706,49 +3664,5 @@ mod tests {
 
         // Root with no sources
         assert!(!sources_exist_at_scope(&conn, root_id, "").unwrap());
-    }
-
-    fn stamp_source(conn: &Connection, source_id: i64, decision_id: i64, present: i64) {
-        conn.execute(
-            "UPDATE sources SET decision_id = ?, present = ? WHERE id = ?",
-            rusqlite::params![decision_id, present, source_id],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn aggregate_stamped_splits_by_presence() {
-        let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
-        // Decision 7: one scan stamping a new file (present) and two deletions.
-        let a = insert_test_source(&conn, root_id, "new.jpg", 1, 1, 100, 0);
-        let b = insert_test_source(&conn, root_id, "gone1.jpg", 1, 2, 200, 0);
-        let c = insert_test_source(&conn, root_id, "gone2.jpg", 1, 3, 300, 0);
-        stamp_source(&conn, a, 7, 1);
-        stamp_source(&conn, b, 7, 0);
-        stamp_source(&conn, c, 7, 0);
-        // Decision 8: an apply stamping one destination.
-        let d = insert_test_source(&conn, root_id, "dest.jpg", 1, 4, 400, 0);
-        stamp_source(&conn, d, 8, 1);
-
-        let aggs = aggregate_stamped_by_decisions(&conn, &[7, 8, 9]).unwrap();
-        let seven = &aggs[&7];
-        assert_eq!(seven.present_count, 1);
-        assert_eq!(seven.present_bytes, 100);
-        assert_eq!(seven.absent_count, 2);
-        assert_eq!(seven.absent_bytes, 500);
-        let eight = &aggs[&8];
-        assert_eq!(eight.present_count, 1);
-        assert_eq!(eight.present_bytes, 400);
-        // Decision 9 stamped nothing — absent from the map, not zeroed.
-        assert!(!aggs.contains_key(&9));
-    }
-
-    #[test]
-    fn aggregate_stamped_empty_ids() {
-        let conn = setup_test_db();
-        assert!(aggregate_stamped_by_decisions(&conn, &[])
-            .unwrap()
-            .is_empty());
     }
 }

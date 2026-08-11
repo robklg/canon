@@ -8,7 +8,6 @@
 pub mod apply;
 pub mod cluster;
 pub mod compare;
-pub mod composition;
 pub mod coverage;
 pub mod decision;
 pub mod exclude;
@@ -25,7 +24,6 @@ pub mod scope;
 pub mod selection;
 pub mod survey;
 pub mod sweep;
-pub mod trail;
 pub mod worklist;
 
 #[cfg(test)]

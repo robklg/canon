@@ -20,8 +20,8 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Deserialize;
 
+use crate::core::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
 use crate::domain::decision::{Decision, DecisionCommand};
-use crate::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
 use crate::domain::Root;
 use crate::repo::{self, Connection};
 
@@ -422,7 +422,7 @@ mod tests {
     fn fetch_rows(
         conn: &Connection,
         decision_id: i64,
-    ) -> Vec<crate::domain::extraction::DecisionExtraction> {
+    ) -> Vec<crate::core::domain::extraction::DecisionExtraction> {
         repo::decision::fetch_extractions_by_decisions(conn, &[decision_id]).unwrap()
     }
 
@@ -808,7 +808,7 @@ mtime = 0
         .unwrap();
 
         // The legacy coarse row, as the old collapse would have written it.
-        let coarse = crate::domain::extraction::DecisionExtraction {
+        let coarse = crate::core::domain::extraction::DecisionExtraction {
             decision_id,
             root_id: src_root,
             root_path: "/vol/sd".to_string(),

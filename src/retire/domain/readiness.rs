@@ -59,10 +59,10 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::*;
+    use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
+    use crate::core::domain::fate::DecisionFamily;
     use crate::core::domain::resolution::build_account;
-    use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
     use crate::domain::source::Source;
-    use crate::domain::trail::DecisionFamily;
 
     fn source(id: i64, object_id: Option<i64>, excluded: bool, object_excluded: bool) -> Source {
         Source {

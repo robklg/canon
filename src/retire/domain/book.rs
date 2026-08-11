@@ -2,12 +2,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::core::domain::extraction::OriginDisposition;
+use crate::core::domain::fate::{fate_transition, DecisionFamily, FateAspect};
 use crate::core::domain::resolution::{
     classify_absent, classify_present, AbsentBucket, StandingBucket,
 };
-use crate::domain::extraction::OriginDisposition;
 use crate::domain::source::Source;
-use crate::domain::trail::{fate_transition, DecisionFamily, FateAspect};
 
 /// Standing words for book entries whose state is not a transition. The
 /// never-literal law covers *transition* words (always derived through
@@ -412,8 +412,8 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::*;
+    use crate::core::domain::fate::FateAspect;
     use crate::core::domain::resolution::build_account;
-    use crate::domain::trail::FateAspect;
 
     // These fixtures (`source`, `stamped`, `archived_set`) are duplicated
     // between `book.rs`'s and `readiness.rs`'s test modules — deliberately:

@@ -12,10 +12,10 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
-use crate::domain::composition::{build_card, BucketCount, CompositionCard};
 use crate::domain::path::path_is_under;
 use crate::domain::root::find_containing_root;
 use crate::repo::{self, Connection};
+use crate::trail::domain::composition::{build_card, BucketCount, CompositionCard};
 
 /// Compute the composition card for a scope.
 ///
@@ -70,7 +70,7 @@ pub fn compute_composition(
 
     let mut extractions_by_decision: HashMap<
         i64,
-        Vec<crate::domain::extraction::DecisionExtraction>,
+        Vec<crate::core::domain::extraction::DecisionExtraction>,
     > = HashMap::new();
     for row in repo::decision::fetch_extractions_by_decisions(conn, &decision_ids)? {
         extractions_by_decision
@@ -99,10 +99,10 @@ pub fn compute_composition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::composition::OriginLine;
     use crate::repo::db::open_in_memory_for_test;
     use crate::repo::insert_test_root;
     use crate::repo::source::insert_test_source;
+    use crate::trail::domain::composition::OriginLine;
 
     fn insert_decision_at(conn: &Connection, command: &str, created_at: i64) -> i64 {
         conn.execute(
@@ -130,7 +130,7 @@ mod tests {
         let apply = insert_decision_at(&conn, "apply", 100);
         repo::decision::replace_extractions(
             &conn,
-            &[crate::domain::extraction::DecisionExtraction {
+            &[crate::core::domain::extraction::DecisionExtraction {
                 decision_id: apply,
                 root_id: source_root,
                 root_path: "/a".to_string(),
@@ -174,7 +174,7 @@ mod tests {
         let apply = insert_decision_at(&conn, "apply", 100);
         repo::decision::replace_extractions(
             &conn,
-            &[crate::domain::extraction::DecisionExtraction {
+            &[crate::core::domain::extraction::DecisionExtraction {
                 decision_id: apply,
                 root_id: source_root,
                 root_path: "/a".to_string(),
@@ -255,7 +255,7 @@ mod tests {
         let apply = insert_decision_at(&conn, "apply", 100);
         repo::decision::replace_extractions(
             &conn,
-            &[crate::domain::extraction::DecisionExtraction {
+            &[crate::core::domain::extraction::DecisionExtraction {
                 decision_id: apply,
                 root_id: source_root,
                 root_path: "/a".to_string(),
@@ -293,7 +293,7 @@ mod tests {
         let apply = insert_decision_at(&conn, "apply", 100);
         repo::decision::replace_extractions(
             &conn,
-            &[crate::domain::extraction::DecisionExtraction {
+            &[crate::core::domain::extraction::DecisionExtraction {
                 decision_id: apply,
                 root_id: archive_root,
                 root_path: "/archive".to_string(),
@@ -353,7 +353,7 @@ mod tests {
         // as if it was removed after the apply completed.
         repo::decision::replace_extractions(
             &conn,
-            &[crate::domain::extraction::DecisionExtraction {
+            &[crate::core::domain::extraction::DecisionExtraction {
                 decision_id: apply,
                 root_id: 999,
                 root_path: "/Volumes/gone".to_string(),

@@ -17,8 +17,8 @@ use super::cluster::LockEntry;
 use super::fs::{
     compute_partial_hash, copy_file, ensure_parent_dir, move_file, rename_file, MoveOutcome,
 };
+use crate::core::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
 use crate::domain::decision::DecisionStatus;
-use crate::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
 use crate::domain::fact::FactEntry;
 use crate::domain::path::path_strip_prefix;
 use crate::domain::source::NewSource;

@@ -6,9 +6,9 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::core::ops::root_story::fetch_root_story;
 use crate::domain::config::{LedgerConfig, RecordingMode};
-use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::repo;
 use crate::repo::db::open_in_memory_for_test;
 use crate::repo::insert_test_root;

@@ -212,7 +212,7 @@ mod tests {
     ) {
         crate::repo::decision::replace_extractions(
             conn,
-            &[crate::domain::extraction::DecisionExtraction {
+            &[crate::core::domain::extraction::DecisionExtraction {
                 decision_id,
                 root_id,
                 root_path: "/r".to_string(),
@@ -221,7 +221,7 @@ mod tests {
                 bytes: Some(files * 100),
                 destination_root_id: Some(999),
                 destination_path: destination.to_string(),
-                disposition: Some(crate::domain::extraction::OriginDisposition::Relocated),
+                disposition: Some(crate::core::domain::extraction::OriginDisposition::Relocated),
             }],
         )
         .unwrap();

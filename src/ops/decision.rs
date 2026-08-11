@@ -3,10 +3,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use crate::core::domain::fate::{fate_posture, fate_transition};
 use crate::domain::config::LedgerConfig;
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::scope::DecisionScope;
-use crate::domain::trail::{fate_posture, fate_transition};
 use crate::ops::receipt::{
     compute_ledger_root_receipt_rel_path, compute_targeted_receipt_rel_path, finalize_receipt,
     write_receipt, ReceiptKind, ReceiptLocus, ReceiptMeta, ReceiptPlacement, ReceiptRef,

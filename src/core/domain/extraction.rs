@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use super::root::Root;
+use crate::domain::root::Root;
 
 /// The origin's fate after an apply transfer — registered vocabulary (receipt
 /// `origin_disposition`). `None` on backfilled rows from pre-vocabulary

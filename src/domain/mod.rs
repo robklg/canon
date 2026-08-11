@@ -9,11 +9,9 @@
 // Re-exports are intentional for public API convenience
 #![allow(unused_imports)]
 
-pub mod composition;
 pub mod config;
 pub mod decision;
 pub mod exclusion;
-pub mod extraction;
 pub mod fact;
 pub mod format;
 pub mod include;
@@ -27,7 +25,6 @@ pub mod scope;
 pub mod source;
 pub mod survey;
 pub mod sweep;
-pub mod trail;
 
 // Re-export primary types for convenient access
 pub use exclusion::{find_excludable_duplicates, ExcludableDuplicatesResult};

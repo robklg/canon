@@ -3,10 +3,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::domain::extraction::{DecisionExtraction, OriginDisposition};
+use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
+use crate::core::domain::fate::DecisionFamily;
 use crate::domain::note::Note;
 use crate::domain::source::Source;
-use crate::domain::trail::DecisionFamily;
 use crate::story::domain::place::{DecisionInfo, StoryInputs, StoryParams, StoryPlace};
 use crate::story::domain::splitter::build_places;
 

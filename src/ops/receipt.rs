@@ -9,9 +9,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::core::domain::fate::{DecisionFamily, FateAspect};
 use crate::domain::config::{LedgerConfig, ReceiptLayout};
 use crate::domain::root::Root;
-use crate::domain::trail::{DecisionFamily, FateAspect};
 use crate::ops::apply::TransferMode;
 use crate::ops::fs::{finalize_file, write_file_incomplete};
 
@@ -963,7 +963,7 @@ mod tests {
     /// this fails to compile.
     #[test]
     fn receipt_kind_transition_and_posture_match_the_trail_derivation() {
-        use crate::domain::trail::{decision_family, fate_posture, fate_transition};
+        use crate::core::domain::fate::{decision_family, fate_posture, fate_transition};
 
         let all = [
             ReceiptKind::Apply(TransferMode::Copy),
