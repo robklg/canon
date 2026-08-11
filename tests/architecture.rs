@@ -1506,107 +1506,176 @@ mod self_tests {
     }
 
     // ========================================================================
-    // Barrel-surface sealing, scoped to trail/ — retire/ and story/ have the
-    // same unverified-sealing gap but are not asserted here.
+    // Barrel-surface sealing — every subsystem's public surface is pinned
     // ========================================================================
 
-    /// `trail.rs`'s complete public surface: the finished-report items an
-    /// in-crate consumer names today (CLI entry points, retire's book
-    /// compile), plus the pub-field/variant types of that report riding for
-    /// crate-readiness — a future crate boundary can't expose a public field
-    /// of a private type.
-    const TRAIL_BARREL_ITEMS: &[&str] = &[
-        "run",
-        "run_show",
-        "TrailArgs",
-        "RowAspect",
-        "DayGroup",
-        "DayRollup",
-        "FateLine",
-        "TimelineEvent",
-        "WhenValue",
-        "compute_trail",
-        "TrailParams",
-        "TrailResult",
-        "TrailView",
-        "ArrivalRollup",
-        "ExtractionRollup",
-        "RearrangementRollup",
+    /// Each subsystem's complete public surface: the `pub use` items its
+    /// front door re-exports — CLI entry points, the finished-result items
+    /// siblings consume, and pub-field/variant types riding for
+    /// crate-readiness (a future crate boundary can't expose a public field
+    /// of a private type). Changing a barrel means editing its pin here in
+    /// the same commit: a surface change is a deliberate, reviewable act.
+    const SUBSYSTEM_BARREL_ITEMS: &[(&str, &[&str])] = &[
+        (
+            "retire",
+            &[
+                "retire",
+                "retired",
+                "find_retirement_covering_path",
+                "RetiredScope",
+            ],
+        ),
+        (
+            "story",
+            &[
+                "story",
+                "ActDecision",
+                "ActGroup",
+                "ReasonSummary",
+                "aggregate_locations",
+                "LocationAggregate",
+                "LocationCount",
+                "PlaceStanding",
+                "StoryParams",
+                "StoryPlace",
+                "file_noun",
+                "fmt_locations",
+                "reference_place_lines",
+                "report_over",
+                "StoryReport",
+            ],
+        ),
+        (
+            "trail",
+            &[
+                "run",
+                "run_show",
+                "TrailArgs",
+                "RowAspect",
+                "DayGroup",
+                "DayRollup",
+                "FateLine",
+                "TimelineEvent",
+                "WhenValue",
+                "compute_trail",
+                "TrailParams",
+                "TrailResult",
+                "TrailView",
+                "ArrivalRollup",
+                "ExtractionRollup",
+                "RearrangementRollup",
+            ],
+        ),
     ];
 
     #[test]
-    fn trail_barrel_seals_to_exactly_sixteen_items() {
+    fn subsystem_barrels_seal_to_their_pinned_surfaces() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let src_root = Path::new(&manifest_dir).join("src");
 
-        let trail_rs_text =
-            fs::read_to_string(src_root.join("trail.rs")).expect("failed to read trail.rs");
-        let trail_rs_file = syn::parse_file(&trail_rs_text).expect("failed to parse trail.rs");
+        // Deny-by-default on the table itself: every subsystem directory
+        // needs a pin row (a new subsystem cannot arrive unsealed), and
+        // every row must name a live subsystem (a stale pin is deleted with
+        // its subsystem, never left dangling).
+        let dirs = subsystem_dir_names(&src_root);
+        let pinned: Vec<&str> = SUBSYSTEM_BARREL_ITEMS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        for dir in &dirs {
+            assert!(
+                pinned.contains(&dir.as_str()),
+                "subsystem `{dir}` has no pinned barrel surface — add its row to \
+                 SUBSYSTEM_BARREL_ITEMS"
+            );
+        }
+        for name in &pinned {
+            assert!(
+                dirs.iter().any(|d| d == name),
+                "pinned subsystem `{name}` has no directory under src/ — delete its stale row"
+            );
+        }
 
-        let mut exported = Vec::new();
-        for item in &trail_rs_file.items {
-            if let syn::Item::Use(item_use) = item {
-                if matches!(item_use.vis, syn::Visibility::Public(_)) {
-                    let mut leaves = Vec::new();
-                    expand_use_tree(&item_use.tree, &[], &mut leaves);
-                    for (path, _, _) in leaves {
-                        let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
-                        exported.push(leaf);
+        for (name, items) in SUBSYSTEM_BARREL_ITEMS {
+            // The front door is `src/<name>/mod.rs`, or the flat
+            // `src/<name>.rs` while a subsystem coexists with its
+            // same-named interface file.
+            let mod_rs = src_root.join(name).join("mod.rs");
+            let front_door = if mod_rs.exists() {
+                mod_rs
+            } else {
+                src_root.join(format!("{name}.rs"))
+            };
+            let text = fs::read_to_string(&front_door)
+                .unwrap_or_else(|e| panic!("failed to read {}: {}", front_door.display(), e));
+            let file = syn::parse_file(&text)
+                .unwrap_or_else(|e| panic!("failed to parse {}: {}", front_door.display(), e));
+
+            let mut exported = Vec::new();
+            for item in &file.items {
+                if let syn::Item::Use(item_use) = item {
+                    if matches!(item_use.vis, syn::Visibility::Public(_)) {
+                        let mut leaves = Vec::new();
+                        expand_use_tree(&item_use.tree, &[], &mut leaves);
+                        for (path, _, _) in leaves {
+                            let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
+                            exported.push(leaf);
+                        }
                     }
                 }
             }
-        }
-        exported.sort();
-        exported.dedup();
-        let mut expected: Vec<String> = TRAIL_BARREL_ITEMS.iter().map(|s| s.to_string()).collect();
-        expected.sort();
-        assert_eq!(
-            exported, expected,
-            "trail.rs's `pub use` surface no longer matches its declared 16-item barrel"
-        );
+            exported.sort();
+            exported.dedup();
+            let mut expected: Vec<String> = items.iter().map(|s| s.to_string()).collect();
+            expected.sort();
+            assert_eq!(
+                exported, expected,
+                "{name}'s `pub use` surface no longer matches its pinned barrel"
+            );
 
-        // The stratum front doors trail.rs declares must never be pub — the
-        // barrel's `pub use` list is the only public surface.
-        for item in &trail_rs_file.items {
-            if let syn::Item::Mod(item_mod) = item {
-                assert!(
-                    !matches!(item_mod.vis, syn::Visibility::Public(_)),
-                    "trail.rs's `mod {}` must not be pub",
-                    item_mod.ident
-                );
-            }
-        }
-
-        // Every mod declaration anywhere inside the stratum must stay sealed
-        // too: never bare `pub`, never `pub(in ...)` — private or
-        // `pub(super)` only (item-level `pub` below a sealed mod is still
-        // needed for multi-hop re-exports to compile, so this checks module
-        // front doors, not every item).
-        for path in collect_rs_files(&src_root.join("trail")) {
-            let raw = fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
-            let file = syn::parse_file(&raw)
-                .unwrap_or_else(|e| panic!("failed to parse {}: {}", path.display(), e));
-            let rel = path
-                .strip_prefix(&src_root)
-                .expect("file under src_root")
-                .display()
-                .to_string();
+            // The front door's mod declarations must never be pub — the
+            // barrel's `pub use` list is the only public surface.
             for item in &file.items {
                 if let syn::Item::Mod(item_mod) = item {
-                    match &item_mod.vis {
-                        syn::Visibility::Public(_) => panic!(
-                            "{rel}: `mod {}` is bare pub — stratum mods must stay sealed \
-                             (pub(super) at most)",
-                            item_mod.ident
-                        ),
-                        syn::Visibility::Restricted(r) => assert!(
-                            r.in_token.is_none(),
-                            "{rel}: `mod {}` uses `pub(in ...)` — not permitted, use \
-                             `pub(super)` instead",
-                            item_mod.ident
-                        ),
-                        syn::Visibility::Inherited => {}
+                    assert!(
+                        !matches!(item_mod.vis, syn::Visibility::Public(_)),
+                        "{name}'s front door: `mod {}` must not be pub",
+                        item_mod.ident
+                    );
+                }
+            }
+
+            // Every mod declaration anywhere inside the stratum must stay
+            // sealed too: never bare `pub`, never `pub(in ...)` — private or
+            // `pub(super)` only (item-level `pub` below a sealed mod is
+            // still needed for multi-hop re-exports to compile, so this
+            // checks module front doors, not every item).
+            for path in collect_rs_files(&src_root.join(name)) {
+                let raw = fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+                let file = syn::parse_file(&raw)
+                    .unwrap_or_else(|e| panic!("failed to parse {}: {}", path.display(), e));
+                let rel = path
+                    .strip_prefix(&src_root)
+                    .expect("file under src_root")
+                    .display()
+                    .to_string();
+                for item in &file.items {
+                    if let syn::Item::Mod(item_mod) = item {
+                        match &item_mod.vis {
+                            syn::Visibility::Public(_) => panic!(
+                                "{rel}: `mod {}` is bare pub — stratum mods must stay sealed \
+                                 (pub(super) at most)",
+                                item_mod.ident
+                            ),
+                            syn::Visibility::Restricted(r) => assert!(
+                                r.in_token.is_none(),
+                                "{rel}: `mod {}` uses `pub(in ...)` — not permitted, use \
+                                 `pub(super)` instead",
+                                item_mod.ident
+                            ),
+                            syn::Visibility::Inherited => {}
+                        }
                     }
                 }
             }

@@ -1,2 +1,2 @@
-pub mod render;
-pub mod report;
+pub(super) mod render;
+pub(super) mod report;

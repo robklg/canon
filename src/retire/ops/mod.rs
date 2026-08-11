@@ -26,7 +26,7 @@ pub const SHELF_DIR: &str = "retired";
 
 mod ceremony;
 mod compile;
-pub mod frame;
+pub(super) mod frame;
 mod review;
 mod shelf;
 #[cfg(test)]
