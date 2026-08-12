@@ -55,6 +55,9 @@ fn classify_layer(rel_path: &str) -> Layer {
     if let Some(rest) = rel_path.strip_prefix("trail/") {
         return classify_subsystem_stratum(rest);
     }
+    if let Some(rest) = rel_path.strip_prefix("sweep/") {
+        return classify_subsystem_stratum(rest);
+    }
     if rel_path.starts_with("domain/") {
         Layer::Domain
     } else if rel_path.starts_with("repo/") {
@@ -1566,6 +1569,7 @@ mod self_tests {
                 "RearrangementRollup",
             ],
         ),
+        ("sweep", &["run"]),
     ];
 
     #[test]

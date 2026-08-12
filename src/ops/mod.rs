@@ -23,7 +23,6 @@ pub mod scan;
 pub mod scope;
 pub mod selection;
 pub mod survey;
-pub mod sweep;
 pub mod worklist;
 
 #[cfg(test)]

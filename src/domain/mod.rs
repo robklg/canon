@@ -24,7 +24,6 @@ pub mod scan;
 pub mod scope;
 pub mod source;
 pub mod survey;
-pub mod sweep;
 
 // Re-export primary types for convenient access
 pub use exclusion::{find_excludable_duplicates, ExcludableDuplicatesResult};

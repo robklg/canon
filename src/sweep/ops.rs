@@ -14,11 +14,11 @@ use anyhow::Result;
 use crate::domain::note::Note;
 use crate::domain::path::path_is_under;
 use crate::domain::source::Source;
-use crate::domain::sweep::{
+use crate::repo::{self, Connection};
+use crate::sweep::domain::{
     compute_structural, reduction_lens, LeaderboardEntry, Location, RelationShape, SweepParams,
     SweepStats,
 };
-use crate::repo::{self, Connection};
 
 /// Default number of leaderboard entries shown; a hub occupies one.
 pub const DEFAULT_ENTRY_CAP: usize = 10;
