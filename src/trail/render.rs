@@ -778,6 +778,10 @@ mod tests {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Day rollup (time lens)
+    // ------------------------------------------------------------------
+
     #[test]
     fn rollup_line_composition() {
         let rollup = DayRollup {
@@ -802,27 +806,6 @@ mod tests {
     }
 
     #[test]
-    fn relativize_against_single_prefix() {
-        let scoped = ResolvedScope {
-            prefixes: vec!["/photos".to_string()],
-            from_cwd: true,
-            auto_include_archived: false,
-        };
-        assert_eq!(relativize("/photos", &scoped), ".");
-        assert_eq!(relativize("/photos/italy", &scoped), "italy");
-        // Ancestor of the view and unrelated paths stay absolute.
-        assert_eq!(relativize("/", &scoped), "/");
-        assert_eq!(relativize("/other", &scoped), "/other");
-
-        let global = ResolvedScope {
-            prefixes: Vec::new(),
-            from_cwd: false,
-            auto_include_archived: false,
-        };
-        assert_eq!(relativize("/photos/italy", &global), "/photos/italy");
-    }
-
-    #[test]
     fn rollup_line_only_other_actions() {
         let rollup = DayRollup {
             deleted: FateLine {
@@ -843,151 +826,28 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Extraction aspect line + rollup footer composition
+    // Scope cells + event cells
     // ------------------------------------------------------------------
 
     #[test]
-    fn extraction_narration_retained_wording() {
-        let row = mk_extraction_row(Some(3_900_000_000), Some(OriginDisposition::Retained));
-        assert_eq!(
-            extraction_narration(&row),
-            "\u{2192} 47 files (3.9 GB) to /Archive/Media/2016/Italy (copied; originals remain)"
-        );
-    }
+    fn relativize_against_single_prefix() {
+        let scoped = ResolvedScope {
+            prefixes: vec!["/photos".to_string()],
+            from_cwd: true,
+            auto_include_archived: false,
+        };
+        assert_eq!(relativize("/photos", &scoped), ".");
+        assert_eq!(relativize("/photos/italy", &scoped), "italy");
+        // Ancestor of the view and unrelated paths stay absolute.
+        assert_eq!(relativize("/", &scoped), "/");
+        assert_eq!(relativize("/other", &scoped), "/other");
 
-    #[test]
-    fn extraction_narration_relocated_wording() {
-        let row = mk_extraction_row(Some(1_000), Some(OriginDisposition::Relocated));
-        assert_eq!(
-            extraction_narration(&row),
-            "\u{2192} 47 files (1.0 KB) to /Archive/Media/2016/Italy (moved)"
-        );
-    }
-
-    #[test]
-    fn extraction_narration_bytes_none_omits_size() {
-        let row = mk_extraction_row(None, Some(OriginDisposition::Retained));
-        assert_eq!(
-            extraction_narration(&row),
-            "\u{2192} 47 files to /Archive/Media/2016/Italy (copied; originals remain)"
-        );
-    }
-
-    #[test]
-    fn extraction_narration_disposition_none_omits_parenthetical() {
-        // Pre-vocabulary backfilled rows: rendered neutrally, never guessed.
-        let row = mk_extraction_row(Some(100), None);
-        assert_eq!(
-            extraction_narration(&row),
-            "\u{2192} 47 files (100 B) to /Archive/Media/2016/Italy"
-        );
-    }
-
-    #[test]
-    fn extraction_narration_singular_file() {
-        let mut row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
-        row.files = 1;
-        assert_eq!(
-            extraction_narration(&row),
-            "\u{2192} 1 file (10 B) to /Archive/Media/2016/Italy (copied; originals remain)"
-        );
-    }
-
-    #[test]
-    fn extraction_narration_with_destination_overrides_display_only() {
-        // Intra-view relocation: same shape as extraction_narration, but the
-        // destination text is whatever the caller passes (a view-relative
-        // path), not the row's absolute snapshot.
-        let row = mk_extraction_row(Some(1_000), Some(OriginDisposition::Retained));
-        assert_eq!(
-            extraction_narration_with_destination(&row, "."),
-            "\u{2192} 47 files (1.0 KB) to . (copied; originals remain)"
-        );
-    }
-
-    // ------------------------------------------------------------------
-    // Arrival aspect narration + removed-root marker
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn arrival_narration_copied_in_wording() {
-        let row = mk_extraction_row(Some(3_900_000_000), Some(OriginDisposition::Retained));
-        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
-        assert_eq!(
-            arrival_narration(&row, &roots),
-            "\u{2190} 47 files (3.9 GB) from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain)"
-        );
-    }
-
-    #[test]
-    fn arrival_narration_moved_in_wording() {
-        let row = mk_extraction_row(Some(1_000), Some(OriginDisposition::Relocated));
-        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
-        assert_eq!(
-            arrival_narration(&row, &roots),
-            "\u{2190} 47 files (1.0 KB) from /Volumes/old-laptop/photos/2016/italy (moved in)"
-        );
-    }
-
-    #[test]
-    fn arrival_narration_bytes_none_omits_size() {
-        let row = mk_extraction_row(None, Some(OriginDisposition::Retained));
-        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
-        assert_eq!(
-            arrival_narration(&row, &roots),
-            "\u{2190} 47 files from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain)"
-        );
-    }
-
-    #[test]
-    fn arrival_narration_disposition_none_omits_parenthetical() {
-        // Pre-vocabulary backfilled rows: rendered neutrally, never guessed.
-        let row = mk_extraction_row(Some(100), None);
-        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
-        assert_eq!(
-            arrival_narration(&row, &roots),
-            "\u{2190} 47 files (100 B) from /Volumes/old-laptop/photos/2016/italy"
-        );
-    }
-
-    #[test]
-    fn arrival_narration_singular_file() {
-        let mut row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
-        row.files = 1;
-        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
-        assert_eq!(
-            arrival_narration(&row, &roots),
-            "\u{2190} 1 file (10 B) from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain)"
-        );
-    }
-
-    #[test]
-    fn arrival_narration_marks_removed_origin_root() {
-        let row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
-        // The origin's source root is absent from the live roots map.
-        let roots: HashMap<i64, Root> = HashMap::new();
-        assert_eq!(
-            arrival_narration(&row, &roots),
-            "\u{2190} 47 files (10 B) from /Volumes/old-laptop/photos/2016/italy (root removed) (copied in; originals remain)"
-        );
-    }
-
-    #[test]
-    fn arrival_narration_no_marker_when_origin_root_present() {
-        let row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
-        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
-        assert!(!arrival_narration(&row, &roots).contains(ROOT_REMOVED_MARKER));
-    }
-
-    #[test]
-    fn arrival_narration_no_marker_when_origin_root_was_re_added() {
-        // The row's snapshot id predates a remove-and-re-add, so the live
-        // map holds the same location under a different id. Matching on ids
-        // would call a drive that's plugged in "removed".
-        let row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
-        assert_eq!(row.root_id, 1);
-        let roots = HashMap::from([(77, mk_root(77, "/Volumes/old-laptop"))]);
-        assert!(!arrival_narration(&row, &roots).contains(ROOT_REMOVED_MARKER));
+        let global = ResolvedScope {
+            prefixes: Vec::new(),
+            from_cwd: false,
+            auto_include_archived: false,
+        };
+        assert_eq!(relativize("/photos/italy", &global), "/photos/italy");
     }
 
     #[test]
@@ -1161,6 +1021,158 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // Extraction aspect narration
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn extraction_narration_retained_wording() {
+        let row = mk_extraction_row(Some(3_900_000_000), Some(OriginDisposition::Retained));
+        assert_eq!(
+            extraction_narration(&row),
+            "\u{2192} 47 files (3.9 GB) to /Archive/Media/2016/Italy (copied; originals remain)"
+        );
+    }
+
+    #[test]
+    fn extraction_narration_relocated_wording() {
+        let row = mk_extraction_row(Some(1_000), Some(OriginDisposition::Relocated));
+        assert_eq!(
+            extraction_narration(&row),
+            "\u{2192} 47 files (1.0 KB) to /Archive/Media/2016/Italy (moved)"
+        );
+    }
+
+    #[test]
+    fn extraction_narration_bytes_none_omits_size() {
+        let row = mk_extraction_row(None, Some(OriginDisposition::Retained));
+        assert_eq!(
+            extraction_narration(&row),
+            "\u{2192} 47 files to /Archive/Media/2016/Italy (copied; originals remain)"
+        );
+    }
+
+    #[test]
+    fn extraction_narration_disposition_none_omits_parenthetical() {
+        // Pre-vocabulary backfilled rows: rendered neutrally, never guessed.
+        let row = mk_extraction_row(Some(100), None);
+        assert_eq!(
+            extraction_narration(&row),
+            "\u{2192} 47 files (100 B) to /Archive/Media/2016/Italy"
+        );
+    }
+
+    #[test]
+    fn extraction_narration_singular_file() {
+        let mut row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
+        row.files = 1;
+        assert_eq!(
+            extraction_narration(&row),
+            "\u{2192} 1 file (10 B) to /Archive/Media/2016/Italy (copied; originals remain)"
+        );
+    }
+
+    #[test]
+    fn extraction_narration_with_destination_overrides_display_only() {
+        // Intra-view relocation: same shape as extraction_narration, but the
+        // destination text is whatever the caller passes (a view-relative
+        // path), not the row's absolute snapshot.
+        let row = mk_extraction_row(Some(1_000), Some(OriginDisposition::Retained));
+        assert_eq!(
+            extraction_narration_with_destination(&row, "."),
+            "\u{2192} 47 files (1.0 KB) to . (copied; originals remain)"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Arrival aspect narration + removed-root marker
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn arrival_narration_copied_in_wording() {
+        let row = mk_extraction_row(Some(3_900_000_000), Some(OriginDisposition::Retained));
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
+        assert_eq!(
+            arrival_narration(&row, &roots),
+            "\u{2190} 47 files (3.9 GB) from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain)"
+        );
+    }
+
+    #[test]
+    fn arrival_narration_moved_in_wording() {
+        let row = mk_extraction_row(Some(1_000), Some(OriginDisposition::Relocated));
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
+        assert_eq!(
+            arrival_narration(&row, &roots),
+            "\u{2190} 47 files (1.0 KB) from /Volumes/old-laptop/photos/2016/italy (moved in)"
+        );
+    }
+
+    #[test]
+    fn arrival_narration_bytes_none_omits_size() {
+        let row = mk_extraction_row(None, Some(OriginDisposition::Retained));
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
+        assert_eq!(
+            arrival_narration(&row, &roots),
+            "\u{2190} 47 files from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain)"
+        );
+    }
+
+    #[test]
+    fn arrival_narration_disposition_none_omits_parenthetical() {
+        // Pre-vocabulary backfilled rows: rendered neutrally, never guessed.
+        let row = mk_extraction_row(Some(100), None);
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
+        assert_eq!(
+            arrival_narration(&row, &roots),
+            "\u{2190} 47 files (100 B) from /Volumes/old-laptop/photos/2016/italy"
+        );
+    }
+
+    #[test]
+    fn arrival_narration_singular_file() {
+        let mut row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
+        row.files = 1;
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
+        assert_eq!(
+            arrival_narration(&row, &roots),
+            "\u{2190} 1 file (10 B) from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain)"
+        );
+    }
+
+    #[test]
+    fn arrival_narration_marks_removed_origin_root() {
+        let row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
+        // The origin's source root is absent from the live roots map.
+        let roots: HashMap<i64, Root> = HashMap::new();
+        assert_eq!(
+            arrival_narration(&row, &roots),
+            "\u{2190} 47 files (10 B) from /Volumes/old-laptop/photos/2016/italy (root removed) (copied in; originals remain)"
+        );
+    }
+
+    #[test]
+    fn arrival_narration_no_marker_when_origin_root_present() {
+        let row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
+        assert!(!arrival_narration(&row, &roots).contains(ROOT_REMOVED_MARKER));
+    }
+
+    #[test]
+    fn arrival_narration_no_marker_when_origin_root_was_re_added() {
+        // The row's snapshot id predates a remove-and-re-add, so the live
+        // map holds the same location under a different id. Matching on ids
+        // would call a drive that's plugged in "removed".
+        let row = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
+        assert_eq!(row.root_id, 1);
+        let roots = HashMap::from([(77, mk_root(77, "/Volumes/old-laptop"))]);
+        assert!(!arrival_narration(&row, &roots).contains(ROOT_REMOVED_MARKER));
+    }
+
+    // ------------------------------------------------------------------
+    // Rollup footer composition
+    // ------------------------------------------------------------------
+
     #[test]
     fn extraction_rollup_footer_composition() {
         let rollup = ExtractionRollup {
@@ -1305,6 +1317,52 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Shared wording substrate
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn plural_and_count_of_agree() {
+        assert_eq!(plural(1, "origin"), "origin");
+        assert_eq!(plural(0, "origin"), "origins");
+        assert_eq!(plural(2, "origin"), "origins");
+        assert_eq!(count_of(1, "destination"), "1 destination");
+        assert_eq!(count_of(1_251, "destination"), "1,251 destinations");
+    }
+
+    #[test]
+    fn files_with_size_omits_an_unknown_size() {
+        // The "never guess a size" rule, now enforced in one place for every
+        // count the trail renders.
+        assert_eq!(files_with_size(1, Some(10)), "1 file (10 B)");
+        assert_eq!(
+            files_with_size(1_251, Some(22_100_000_000)),
+            "1,251 files (22.1 GB)"
+        );
+        assert_eq!(files_with_size(1, None), "1 file");
+        assert_eq!(files_with_size(47, None), "47 files");
+    }
+
+    #[test]
+    fn disposition_suffix_omits_when_the_row_cannot_say() {
+        assert_eq!(
+            disposition_suffix(Some(OriginDisposition::Retained), "kept", "gone"),
+            " (kept)"
+        );
+        assert_eq!(
+            disposition_suffix(Some(OriginDisposition::Relocated), "kept", "gone"),
+            " (gone)"
+        );
+        // Pre-vocabulary backfilled rows add nothing at all — not "()".
+        assert_eq!(disposition_suffix(None, "kept", "gone"), "");
+    }
+
+    #[test]
+    fn format_bucket_singular_and_plural() {
+        assert_eq!(format_bucket(1, 10), "1 file (10 B)");
+        assert_eq!(format_bucket(2, 2_000), "2 files (2.0 KB)");
+    }
+
+    // ------------------------------------------------------------------
     // Composition card rendering
     // ------------------------------------------------------------------
 
@@ -1340,137 +1398,6 @@ mod tests {
             .single()
             .unwrap()
             .timestamp()
-    }
-
-    #[test]
-    fn plural_and_count_of_agree() {
-        assert_eq!(plural(1, "origin"), "origin");
-        assert_eq!(plural(0, "origin"), "origins");
-        assert_eq!(plural(2, "origin"), "origins");
-        assert_eq!(count_of(1, "destination"), "1 destination");
-        assert_eq!(count_of(1_251, "destination"), "1,251 destinations");
-    }
-
-    // drew_from_lines
-
-    fn show_group(
-        location: &str,
-        files: i64,
-        bytes: Option<i64>,
-        root_removed: bool,
-        dirs: &[(&str, i64)],
-    ) -> ShowExtraction {
-        ShowExtraction {
-            location: location.to_string(),
-            root_removed,
-            retired_book: None,
-            files,
-            bytes,
-            directories: dirs
-                .iter()
-                .map(|(dir, files)| crate::trail::ops::show::ShowDrewDir {
-                    dir: dir.to_string(),
-                    files: *files,
-                    bytes: None,
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn drew_from_single_directory_group_is_one_line() {
-        let lines = drew_from_lines(&[show_group(
-            "/a/photos/2016/italy",
-            47,
-            Some(3_900_000),
-            false,
-            &[],
-        )]);
-        assert_eq!(lines, vec!["    /a/photos/2016/italy — 47 files (3.9 MB)"]);
-    }
-
-    #[test]
-    fn drew_from_marks_removed_roots_on_the_summary_line() {
-        let mut retired = show_group("/Volumes/gone/dcim", 12, None, true, &[]);
-        retired.retired_book = Some("/archive/retired/gone".to_string());
-        let retired_lines = drew_from_lines(&[retired]);
-        assert!(
-            retired_lines[0].contains("(root retired — the book: /archive/retired/gone)"),
-            "{retired_lines:?}"
-        );
-
-        let lines = drew_from_lines(&[show_group("/Volumes/gone/dcim", 12, None, true, &[])]);
-        assert_eq!(
-            lines,
-            vec![format!(
-                "    /Volumes/gone/dcim — 12 files{ROOT_REMOVED_MARKER}"
-            )]
-        );
-    }
-
-    #[test]
-    fn drew_from_lists_directories_under_the_summary() {
-        let lines = drew_from_lines(&[show_group(
-            "/a/m",
-            245,
-            None,
-            false,
-            &[("m/01", 105), ("m/02", 140)],
-        )]);
-        assert_eq!(
-            lines,
-            vec![
-                "    /a/m — 245 files",
-                "      m/01 — 105 files",
-                "      m/02 — 140 files",
-            ]
-        );
-    }
-
-    #[test]
-    fn drew_from_caps_directories_with_an_explicit_remainder() {
-        let dirs: Vec<(String, i64)> = (1..=7).map(|i| (format!("m/{i:02}"), i)).collect();
-        let dir_refs: Vec<(&str, i64)> = dirs.iter().map(|(d, f)| (d.as_str(), *f)).collect();
-        let lines = drew_from_lines(&[show_group("/a/m", 28, None, false, &dir_refs)]);
-        // Summary + 5 listed + remainder — never a silent truncation.
-        assert_eq!(lines.len(), 7);
-        assert_eq!(lines[6], "      \u{2026} and 2 more directories");
-        // A root-level directory renders as ".", not an empty cell.
-        let dot = drew_from_lines(&[show_group("/a", 3, None, false, &[("", 1), ("x", 2)])]);
-        assert_eq!(dot[1], "      . — 1 file");
-    }
-
-    #[test]
-    fn files_with_size_omits_an_unknown_size() {
-        // The "never guess a size" rule, now enforced in one place for every
-        // count the trail renders.
-        assert_eq!(files_with_size(1, Some(10)), "1 file (10 B)");
-        assert_eq!(
-            files_with_size(1_251, Some(22_100_000_000)),
-            "1,251 files (22.1 GB)"
-        );
-        assert_eq!(files_with_size(1, None), "1 file");
-        assert_eq!(files_with_size(47, None), "47 files");
-    }
-
-    #[test]
-    fn disposition_suffix_omits_when_the_row_cannot_say() {
-        assert_eq!(
-            disposition_suffix(Some(OriginDisposition::Retained), "kept", "gone"),
-            " (kept)"
-        );
-        assert_eq!(
-            disposition_suffix(Some(OriginDisposition::Relocated), "kept", "gone"),
-            " (gone)"
-        );
-        // Pre-vocabulary backfilled rows add nothing at all — not "()".
-        assert_eq!(disposition_suffix(None, "kept", "gone"), "");
-    }
-
-    #[test]
-    fn format_bucket_singular_and_plural() {
-        assert_eq!(format_bucket(1, 10), "1 file (10 B)");
-        assert_eq!(format_bucket(2, 2_000), "2 files (2.0 KB)");
     }
 
     #[test]
@@ -1660,5 +1587,96 @@ mod tests {
         assert!(arrived_line.contains("5 files"));
         assert!(standing_line.contains("3 files"));
         assert_ne!(arrived_line, standing_line);
+    }
+
+    // ------------------------------------------------------------------
+    // drew_from_lines — trail show detail
+    // ------------------------------------------------------------------
+
+    fn show_group(
+        location: &str,
+        files: i64,
+        bytes: Option<i64>,
+        root_removed: bool,
+        dirs: &[(&str, i64)],
+    ) -> ShowExtraction {
+        ShowExtraction {
+            location: location.to_string(),
+            root_removed,
+            retired_book: None,
+            files,
+            bytes,
+            directories: dirs
+                .iter()
+                .map(|(dir, files)| crate::trail::ops::show::ShowDrewDir {
+                    dir: dir.to_string(),
+                    files: *files,
+                    bytes: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn drew_from_single_directory_group_is_one_line() {
+        let lines = drew_from_lines(&[show_group(
+            "/a/photos/2016/italy",
+            47,
+            Some(3_900_000),
+            false,
+            &[],
+        )]);
+        assert_eq!(lines, vec!["    /a/photos/2016/italy — 47 files (3.9 MB)"]);
+    }
+
+    #[test]
+    fn drew_from_marks_removed_roots_on_the_summary_line() {
+        let mut retired = show_group("/Volumes/gone/dcim", 12, None, true, &[]);
+        retired.retired_book = Some("/archive/retired/gone".to_string());
+        let retired_lines = drew_from_lines(&[retired]);
+        assert!(
+            retired_lines[0].contains("(root retired — the book: /archive/retired/gone)"),
+            "{retired_lines:?}"
+        );
+
+        let lines = drew_from_lines(&[show_group("/Volumes/gone/dcim", 12, None, true, &[])]);
+        assert_eq!(
+            lines,
+            vec![format!(
+                "    /Volumes/gone/dcim — 12 files{ROOT_REMOVED_MARKER}"
+            )]
+        );
+    }
+
+    #[test]
+    fn drew_from_lists_directories_under_the_summary() {
+        let lines = drew_from_lines(&[show_group(
+            "/a/m",
+            245,
+            None,
+            false,
+            &[("m/01", 105), ("m/02", 140)],
+        )]);
+        assert_eq!(
+            lines,
+            vec![
+                "    /a/m — 245 files",
+                "      m/01 — 105 files",
+                "      m/02 — 140 files",
+            ]
+        );
+    }
+
+    #[test]
+    fn drew_from_caps_directories_with_an_explicit_remainder() {
+        let dirs: Vec<(String, i64)> = (1..=7).map(|i| (format!("m/{i:02}"), i)).collect();
+        let dir_refs: Vec<(&str, i64)> = dirs.iter().map(|(d, f)| (d.as_str(), *f)).collect();
+        let lines = drew_from_lines(&[show_group("/a/m", 28, None, false, &dir_refs)]);
+        // Summary + 5 listed + remainder — never a silent truncation.
+        assert_eq!(lines.len(), 7);
+        assert_eq!(lines[6], "      \u{2026} and 2 more directories");
+        // A root-level directory renders as ".", not an empty cell.
+        let dot = drew_from_lines(&[show_group("/a", 3, None, false, &[("", 1), ("x", 2)])]);
+        assert_eq!(dot[1], "      . — 1 file");
     }
 }
