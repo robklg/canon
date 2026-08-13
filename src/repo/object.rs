@@ -42,10 +42,15 @@ use crate::domain::object::Object;
 pub const BATCH_SIZE: usize = 1000;
 
 /// The columns we SELECT for Object construction.
-const OBJECT_COLUMNS: &str = "id, hash_type, hash_value, excluded";
+///
+/// `pub(crate)`, not private: `exclude::repo::object::fetch_excluded` reuses
+/// it rather than duplicating the column list.
+pub(crate) const OBJECT_COLUMNS: &str = "id, hash_type, hash_value, excluded";
 
 /// Construct an Object from a row. Column order must match OBJECT_COLUMNS.
-fn object_from_row(row: &rusqlite::Row) -> rusqlite::Result<Object> {
+///
+/// `pub(crate)` for the same reason as `OBJECT_COLUMNS` above.
+pub(crate) fn object_from_row(row: &rusqlite::Row) -> rusqlite::Result<Object> {
     Ok(Object {
         id: row.get(0)?,
         hash_type: row.get(1)?,
@@ -366,38 +371,6 @@ pub fn batch_find_archive_info_by_hash(
     }
 
     Ok(result)
-}
-
-/// Set the exclusion flag for an object.
-///
-/// # Behavior
-/// - Updates `excluded` column to the specified value
-/// - No error if object doesn't exist (0 rows affected)
-/// - Affects all sources linked to this object (via Source::is_excluded() predicate)
-///
-/// # Returns
-/// Ok(()) on success.
-pub fn set_excluded(conn: &Connection, object_id: i64, excluded: bool) -> Result<()> {
-    conn.execute(
-        "UPDATE objects SET excluded = ? WHERE id = ?",
-        rusqlite::params![excluded as i64, object_id],
-    )?;
-    Ok(())
-}
-
-/// Fetch all excluded objects.
-///
-/// Returns a Vec of Object structs where excluded = 1, ordered by id.
-/// Used by `exclude list --objects` to show all excluded objects.
-pub fn fetch_excluded(conn: &Connection) -> Result<Vec<Object>> {
-    let sql = format!("SELECT {OBJECT_COLUMNS} FROM objects WHERE excluded = 1 ORDER BY id");
-
-    let mut stmt = conn.prepare(&sql)?;
-    let objects = stmt
-        .query_map([], object_from_row)?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(objects)
 }
 
 // ============================================================================
@@ -1195,77 +1168,6 @@ mod tests {
     }
 
     // =========================================================================
-    // set_excluded tests
-    // =========================================================================
-
-    #[test]
-    fn set_excluded_marks_object() {
-        let conn = setup_test_db();
-        let obj_id = insert_object(&conn, "abc123", false);
-
-        // Verify initially not excluded
-        let excluded: i64 = conn
-            .query_row(
-                "SELECT excluded FROM objects WHERE id = ?",
-                rusqlite::params![obj_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(excluded, 0);
-
-        // Set excluded
-        set_excluded(&conn, obj_id, true).unwrap();
-
-        // Verify now excluded
-        let excluded: i64 = conn
-            .query_row(
-                "SELECT excluded FROM objects WHERE id = ?",
-                rusqlite::params![obj_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(excluded, 1);
-    }
-
-    #[test]
-    fn set_excluded_clears_object() {
-        let conn = setup_test_db();
-        let obj_id = insert_object(&conn, "abc123", true); // starts excluded
-
-        // Verify initially excluded
-        let excluded: i64 = conn
-            .query_row(
-                "SELECT excluded FROM objects WHERE id = ?",
-                rusqlite::params![obj_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(excluded, 1);
-
-        // Clear excluded
-        set_excluded(&conn, obj_id, false).unwrap();
-
-        // Verify now not excluded
-        let excluded: i64 = conn
-            .query_row(
-                "SELECT excluded FROM objects WHERE id = ?",
-                rusqlite::params![obj_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(excluded, 0);
-    }
-
-    #[test]
-    fn set_excluded_nonexistent_object() {
-        let conn = setup_test_db();
-
-        // Should not error when object doesn't exist
-        let result = set_excluded(&conn, 99999, true);
-        assert!(result.is_ok());
-    }
-
-    // =========================================================================
     // fetch_by_hash tests
     // =========================================================================
 
@@ -1303,36 +1205,6 @@ mod tests {
         assert!(result.is_some());
         let obj = result.unwrap();
         assert!(obj.excluded);
-    }
-
-    #[test]
-    fn fetch_excluded_returns_only_excluded() {
-        let conn = setup_test_db();
-
-        // Insert mix of excluded and non-excluded
-        insert_object(&conn, "excluded1", true);
-        insert_object(&conn, "not_excluded", false);
-        insert_object(&conn, "excluded2", true);
-
-        let result = fetch_excluded(&conn).unwrap();
-
-        assert_eq!(result.len(), 2);
-        assert!(result.iter().all(|o| o.excluded));
-        // Ordered by id
-        assert_eq!(result[0].hash_value, "excluded1");
-        assert_eq!(result[1].hash_value, "excluded2");
-    }
-
-    #[test]
-    fn fetch_excluded_empty_when_none_excluded() {
-        let conn = setup_test_db();
-
-        insert_object(&conn, "not_excluded1", false);
-        insert_object(&conn, "not_excluded2", false);
-
-        let result = fetch_excluded(&conn).unwrap();
-
-        assert!(result.is_empty());
     }
 
     // =========================================================================

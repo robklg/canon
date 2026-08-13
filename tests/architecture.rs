@@ -61,6 +61,9 @@ fn classify_layer(rel_path: &str) -> Layer {
     if let Some(rest) = rel_path.strip_prefix("survey/") {
         return classify_subsystem_stratum(rest);
     }
+    if let Some(rest) = rel_path.strip_prefix("exclude/") {
+        return classify_subsystem_stratum(rest);
+    }
     if rel_path.starts_with("domain/") {
         Layer::Domain
     } else if rel_path.starts_with("repo/") {
@@ -277,7 +280,7 @@ const TIER3: &[Tier3Entry] = &[
         severity: Severity::Read,
     },
     Tier3Entry {
-        file: "exclude.rs",
+        file: "exclude/cli.rs",
         reference: "repo::root::fetch_all",
         severity: Severity::Read,
     },
@@ -357,7 +360,7 @@ const TIER3: &[Tier3Entry] = &[
         severity: Severity::Read,
     },
     Tier3Entry {
-        file: "exclude.rs",
+        file: "exclude/cli.rs",
         reference: "repo::Db::from_connection",
         severity: Severity::TestOnly,
     },
@@ -1585,6 +1588,26 @@ mod self_tests {
                 "SurveyParams",
                 "compute_survey",
                 "run",
+            ],
+        ),
+        (
+            "exclude",
+            &[
+                "set",
+                "set_by_id",
+                "set_by_path",
+                "clear",
+                "exclude_duplicates",
+                "set_object_by_hash",
+                "set_object_by_file",
+                "set_objects_by_filter",
+                "clear_object",
+                "list_objects",
+                "SetOptions",
+                "ClearOptions",
+                "plan_set_objects",
+                "ExcludeSetObjectsParams",
+                "check_set_object_by_file",
             ],
         ),
     ];

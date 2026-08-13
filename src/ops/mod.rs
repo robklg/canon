@@ -10,7 +10,6 @@ pub mod cluster;
 pub mod compare;
 pub mod coverage;
 pub mod decision;
-pub mod exclude;
 pub mod facts;
 pub mod fs;
 pub mod import_facts;

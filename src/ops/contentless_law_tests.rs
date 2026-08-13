@@ -162,9 +162,9 @@ fn set_object_planning_sets_the_empty_file_aside() {
     // the one every empty file shares, so excluding it would dismiss every
     // empty file in the universe. Set aside, counted, never silent.
     let mut c = canary();
-    let plan = crate::ops::exclude::plan_set_objects(
+    let plan = crate::exclude::plan_set_objects(
         &mut c.conn,
-        &crate::ops::exclude::ExcludeSetObjectsParams {
+        &crate::exclude::ExcludeSetObjectsParams {
             scopes: vec![],
             filters: vec![],
         },
@@ -243,7 +243,7 @@ fn set_object_by_path_refuses_the_empty_file() {
     // A path names one file, but its object is the one every empty file
     // shares — refused toward the explicit `--hash` intent.
     let c = canary();
-    let err = crate::ops::exclude::check_set_object_by_file(
+    let err = crate::exclude::check_set_object_by_file(
         &c.conn,
         c.source_root,
         "folder/empty.log",

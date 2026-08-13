@@ -12,18 +12,18 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use canon::domain::exclusion::find_excludable_duplicates;
+//! use canon::exclude::domain::find_excludable_duplicates;
 //!
 //! let result = find_excludable_duplicates(&scope_sources, &sources_by_object, "/archive");
 //! for source_id in result.to_exclude {
-//!     repo::source::set_excluded(conn, source_id, true, decision_id)?;
+//!     canon::exclude::repo::set_excluded(conn, source_id, true, decision_id)?;
 //! }
 //! ```
 
 use std::collections::HashMap;
 
-use super::path::path_is_under;
-use super::source::Source;
+use crate::domain::path::path_is_under;
+use crate::domain::source::Source;
 
 /// Result of analyzing sources for excludable duplicates.
 ///

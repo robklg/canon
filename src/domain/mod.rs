@@ -4,14 +4,13 @@
 //! - Structs: `Source`, `Root`, `Object`, `FactEntry`, `FileObservation`, `Reconciliation`
 //! - Predicates: `is_excluded()`, `is_active()`, `matches_scope()`, etc.
 //! - Pure utilities: path manipulation, scope matching
-//! - Pure functions: `reconcile()`, `find_missing()`, `find_excludable_duplicates()`
+//! - Pure functions: `reconcile()`, `find_missing()`
 
 // Re-exports are intentional for public API convenience
 #![allow(unused_imports)]
 
 pub mod config;
 pub mod decision;
-pub mod exclusion;
 pub mod fact;
 pub mod format;
 pub mod include;
@@ -24,7 +23,6 @@ pub mod scope;
 pub mod source;
 
 // Re-export primary types for convenient access
-pub use exclusion::{find_excludable_duplicates, ExcludableDuplicatesResult};
 pub use fact::{FactEntry, FactType, FactValue};
 pub use format::format_count;
 pub use include::IncludeSet;
