@@ -2782,6 +2782,35 @@ mod tests {
         assert!(rows.is_empty());
     }
 
+    #[test]
+    fn fetch_for_receipt_handles_large_batch() {
+        // More ids than BATCH_SIZE, so the chunking loop runs more than once.
+        // Every call site so far passes a short list, leaving the loop
+        // unexercised — but a deleted folder easily exceeds the limit, and all
+        // of its sources flow through here to build the deletion receipt.
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let ids: Vec<i64> = (0..2500)
+            .map(|i| insert_source(&conn, root_id, &format!("f{i}.jpg"), None, true, false))
+            .collect();
+
+        let rows = fetch_for_receipt(&conn, &ids).unwrap();
+
+        assert_eq!(rows.len(), 2500);
+
+        // Rows come back in no particular order, so index by path and sample
+        // from each chunk — a chunk that never ran leaves a hole here.
+        let paths: std::collections::HashSet<String> =
+            rows.into_iter().map(|r| r.rel_path).collect();
+        for idx in [0usize, 1500, 2499] {
+            assert!(
+                paths.contains(&format!("f{idx}.jpg")),
+                "source at index {idx} missing from the result"
+            );
+        }
+    }
+
     // =========================================================================
     // fetch_source_ids_for_root tests
     // =========================================================================
