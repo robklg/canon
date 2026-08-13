@@ -2998,6 +2998,86 @@ mod tests {
     }
 
     // =========================================================================
+    // fetch_object_sharers_for_receipt tests
+    // =========================================================================
+
+    #[test]
+    fn fetch_object_sharers_for_receipt_handles_large_batch() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+        // More than BATCH_SIZE objects, so the chunking loop runs more than once.
+        let mut object_ids = Vec::new();
+        for i in 0..1050 {
+            let object_id = insert_object(&conn, &format!("hash_{i}"), false);
+            insert_source(
+                &conn,
+                root_id,
+                &format!("file_{i}.jpg"),
+                Some(object_id),
+                true,
+                false,
+            );
+            object_ids.push(object_id);
+        }
+
+        let sharers = fetch_object_sharers_for_receipt(&conn, &object_ids).unwrap();
+
+        assert_eq!(sharers.len(), 1050);
+
+        // Sample from each chunk — a chunk that never ran leaves a hole here.
+        for idx in [0usize, 500, 1049] {
+            let group = sharers
+                .get(&object_ids[idx])
+                .unwrap_or_else(|| panic!("object at index {idx} missing from the result"));
+            assert_eq!(group.len(), 1);
+            assert_eq!(group[0].rel_path, format!("file_{idx}.jpg"));
+        }
+    }
+
+    #[test]
+    fn fetch_object_sharers_for_receipt_groups_by_object() {
+        let conn = setup_test_db();
+
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let obj_a = insert_object(&conn, "hash_a", false);
+        let obj_b = insert_object(&conn, "hash_b", false);
+
+        insert_source(&conn, root_id, "a1.jpg", Some(obj_a), true, false);
+        // A tombstone sharer: the object-level stamp touches it, so it belongs
+        // in its object's group like any present row.
+        insert_source(&conn, root_id, "a2.jpg", Some(obj_a), false, false);
+        insert_source(&conn, root_id, "b1.jpg", Some(obj_b), true, false);
+        insert_source(&conn, root_id, "b2.jpg", Some(obj_b), true, false);
+
+        let sharers = fetch_object_sharers_for_receipt(&conn, &[obj_a, obj_b]).unwrap();
+
+        assert_eq!(sharers.len(), 2);
+
+        // Each group holds its own object's sharers and no other's.
+        let mut group_a: Vec<&str> = sharers[&obj_a]
+            .iter()
+            .map(|s| s.rel_path.as_str())
+            .collect();
+        group_a.sort_unstable();
+        assert_eq!(group_a, ["a1.jpg", "a2.jpg"]);
+
+        let mut group_b: Vec<&str> = sharers[&obj_b]
+            .iter()
+            .map(|s| s.rel_path.as_str())
+            .collect();
+        group_b.sort_unstable();
+        assert_eq!(group_b, ["b1.jpg", "b2.jpg"]);
+
+        let tombstone = sharers[&obj_a]
+            .iter()
+            .find(|s| s.rel_path == "a2.jpg")
+            .unwrap();
+        assert!(!tombstone.present);
+    }
+
+    // =========================================================================
     // set_excluded tests
     // =========================================================================
 
