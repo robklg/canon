@@ -296,6 +296,68 @@ mod tests {
     }
 
     // ========================================================================
+    // check_no_overlap() tests
+    // ========================================================================
+
+    #[test]
+    fn check_no_overlap_empty_roots_ok() {
+        let roots: Vec<Root> = vec![];
+        assert!(check_no_overlap(&roots, Path::new("/a/b")).is_ok());
+    }
+
+    #[test]
+    fn check_no_overlap_accepts_disjoint_paths() {
+        let roots = vec![
+            make_root_with(1, "/a", "source"),
+            make_root_with(2, "/b", "archive"),
+        ];
+        assert!(check_no_overlap(&roots, Path::new("/c")).is_ok());
+    }
+
+    #[test]
+    fn check_no_overlap_rejects_new_under_existing() {
+        let roots = vec![make_root_with(1, "/a/b", "source")];
+        let err = check_no_overlap(&roots, Path::new("/a/b/c"))
+            .expect_err("a path inside an existing root must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("/a/b/c"), "message names the new path: {msg}");
+        assert!(
+            msg.contains("/a/b"),
+            "message names the existing root: {msg}"
+        );
+    }
+
+    #[test]
+    fn check_no_overlap_rejects_existing_under_new() {
+        // The other direction: adding a parent of an existing root would nest
+        // them just the same.
+        let roots = vec![make_root_with(1, "/a/b", "source")];
+        let err = check_no_overlap(&roots, Path::new("/a"))
+            .expect_err("a path containing an existing root must be refused");
+        assert!(err.to_string().contains("/a/b"));
+    }
+
+    #[test]
+    fn check_no_overlap_allows_identical_path() {
+        // Re-adding the same path is not an overlap — it is handled elsewhere
+        // as a no-op or a separate error.
+        let roots = vec![make_root_with(1, "/a/b", "source")];
+        assert!(check_no_overlap(&roots, Path::new("/a/b")).is_ok());
+    }
+
+    #[test]
+    fn check_no_overlap_sibling_prefix_is_not_overlap() {
+        // /a/bc is NOT under /a/b — the same component-boundary rule
+        // find_containing_root follows. A string-prefix test would refuse this
+        // pair and block a legitimate root.
+        let roots = vec![make_root_with(1, "/a/b", "source")];
+        assert!(check_no_overlap(&roots, Path::new("/a/bc")).is_ok());
+
+        let roots = vec![make_root_with(1, "/a/bc", "source")];
+        assert!(check_no_overlap(&roots, Path::new("/a/b")).is_ok());
+    }
+
+    // ========================================================================
     // Root struct and predicates tests
     // ========================================================================
 
