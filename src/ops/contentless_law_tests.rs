@@ -12,10 +12,10 @@
 use std::collections::HashSet;
 
 use crate::core::domain::resolution::{classify_present, StandingBucket};
-use crate::domain::object_index::ObjectIndex;
 use crate::ops::cluster::{plan_generate, ClusterGenerateParams};
 use crate::ops::test_helpers::*;
 use crate::repo;
+use crate::survey::ObjectIndex;
 
 struct Canary {
     conn: crate::repo::Connection,
@@ -189,11 +189,11 @@ fn survey_counts_the_empty_files_it_sets_aside() {
     let mut c = canary();
     let root_ids = vec![c.source_root];
     let all_sources = crate::repo::source::batch_fetch_by_roots(&c.conn, &root_ids).unwrap();
-    let outcome = crate::ops::survey::compute_survey(
+    let outcome = crate::survey::compute_survey(
         &mut c.conn,
         &["/r".to_string()],
         &[],
-        &crate::ops::survey::SurveyParams {
+        &crate::survey::SurveyParams {
             include: Default::default(),
             compute_affinity: false,
             compute_overlap_pairs: false,
@@ -206,7 +206,7 @@ fn survey_counts_the_empty_files_it_sets_aside() {
     )
     .unwrap();
     match outcome {
-        crate::ops::survey::SurveyOutcome::Result(result) => {
+        crate::survey::SurveyOutcome::Result(result) => {
             assert_eq!(result.contentless_count, 1, "the empty file is counted");
         }
         _ => panic!("expected a survey result"),

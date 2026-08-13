@@ -6,8 +6,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::path::path_is_under;
-use super::source::Source;
+use crate::domain::path::path_is_under;
+use crate::domain::source::Source;
 
 /// Result of scope discovery for a single root.
 pub struct DiscoveredScope {

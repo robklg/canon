@@ -17,13 +17,11 @@ pub mod format;
 pub mod include;
 pub mod note;
 pub mod object;
-pub mod object_index;
 pub mod path;
 pub mod root;
 pub mod scan;
 pub mod scope;
 pub mod source;
-pub mod survey;
 
 // Re-export primary types for convenient access
 pub use exclusion::{find_excludable_duplicates, ExcludableDuplicatesResult};
@@ -37,7 +35,3 @@ pub use root::{find_containing_root, Root, RootSpec};
 pub use scan::{find_missing, reconcile, FileObservation, Reconciliation};
 pub use scope::ScopeMatch;
 pub use source::{NewSource, Source};
-pub use survey::{
-    classify_location, count_only_here, discover_scopes, discover_scopes_by_root, DiscoveredScope,
-    LocationKind,
-};

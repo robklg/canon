@@ -58,6 +58,9 @@ fn classify_layer(rel_path: &str) -> Layer {
     if let Some(rest) = rel_path.strip_prefix("sweep/") {
         return classify_subsystem_stratum(rest);
     }
+    if let Some(rest) = rel_path.strip_prefix("survey/") {
+        return classify_subsystem_stratum(rest);
+    }
     if rel_path.starts_with("domain/") {
         Layer::Domain
     } else if rel_path.starts_with("repo/") {
@@ -359,7 +362,7 @@ const TIER3: &[Tier3Entry] = &[
         severity: Severity::TestOnly,
     },
     Tier3Entry {
-        file: "survey.rs",
+        file: "survey/cli.rs",
         reference: "repo::Db::from_connection",
         severity: Severity::TestOnly,
     },
@@ -1570,6 +1573,20 @@ mod self_tests {
             ],
         ),
         ("sweep", &["run"]),
+        // main.rs reaches DetailMode/SurveyOptions/run for the survey
+        // command; the contentless-law canary reaches the rest.
+        (
+            "survey",
+            &[
+                "DetailMode",
+                "ObjectIndex",
+                "SurveyOptions",
+                "SurveyOutcome",
+                "SurveyParams",
+                "compute_survey",
+                "run",
+            ],
+        ),
     ];
 
     #[test]

@@ -22,7 +22,6 @@ pub mod roots;
 pub mod scan;
 pub mod scope;
 pub mod selection;
-pub mod survey;
 pub mod worklist;
 
 #[cfg(test)]
