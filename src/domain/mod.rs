@@ -18,7 +18,6 @@ pub mod note;
 pub mod object;
 pub mod path;
 pub mod root;
-pub mod scan;
 pub mod scope;
 pub mod source;
 
@@ -30,6 +29,5 @@ pub use note::Note;
 pub use object::Object;
 pub use path::{clean_path, path_is_under, path_strip_prefix, resolve_path, resolve_paths};
 pub use root::{find_containing_root, Root, RootSpec};
-pub use scan::{find_missing, reconcile, FileObservation, Reconciliation};
 pub use scope::ScopeMatch;
 pub use source::{NewSource, Source};

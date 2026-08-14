@@ -17,7 +17,7 @@ pub(crate) mod source {
     use crate::repo::source::BATCH_SIZE;
 
     /// A source sharing an object's content, captured for an object-exclusion
-    /// receipt. Unlike [`crate::repo::source::ReceiptSource`] (and every
+    /// receipt. Unlike [`crate::scan::repo::source::ReceiptSource`] (and every
     /// [`crate::domain::source::Source`] fetch in `repo::source`), this
     /// includes non-present tombstone rows: the object-level stamp
     /// (`set_decision_id_by_object`) touches every sharer, present or not, and

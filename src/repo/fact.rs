@@ -268,35 +268,6 @@ fn fact_value_from_columns(
     }
 }
 
-/// Store a fact for an object (upsert).
-///
-/// Used to record content-derived facts like `content.hash.sha256`.
-/// If the fact already exists, it is updated with the new value and timestamp.
-///
-/// # Arguments
-/// * `conn` - Database connection
-/// * `object_id` - ID of the object
-/// * `key` - Fact key (e.g., "content.hash.sha256")
-/// * `value` - Fact value (text)
-/// * `timestamp` - When the fact was observed
-pub fn store_object_fact(
-    conn: &Connection,
-    object_id: i64,
-    key: &str,
-    value: &str,
-    timestamp: i64,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at)
-         VALUES ('object', ?, ?, ?, ?)
-         ON CONFLICT(entity_type, entity_id, key) DO UPDATE SET
-           value_text = excluded.value_text,
-           observed_at = excluded.observed_at",
-        rusqlite::params![object_id, key, value, timestamp],
-    )?;
-    Ok(())
-}
-
 /// Fetch the type map for all existing facts.
 ///
 /// Returns a map from fact key to its storage type (Text, Num, or Time).
@@ -1107,74 +1078,6 @@ mod tests {
         let mime = result.iter().find(|(k, _, _)| k == "content.mime").unwrap();
         // Must be 1, not 2 — one source, one key
         assert_eq!(mime.1, 1);
-    }
-
-    // =========================================================================
-    // store_object_fact tests
-    // =========================================================================
-
-    #[test]
-    fn store_object_fact_inserts_new() {
-        let conn = setup_test_db();
-        insert_object(&conn, 100, "abc123");
-
-        store_object_fact(&conn, 100, "content.hash.sha256", "abc123", 1700000000).unwrap();
-
-        // Verify fact was created
-        let value: String = conn.query_row(
-            "SELECT value_text FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.hash.sha256'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
-        assert_eq!(value, "abc123");
-    }
-
-    #[test]
-    fn store_object_fact_upserts_existing() {
-        let conn = setup_test_db();
-        insert_object(&conn, 100, "abc123");
-
-        // Insert initial fact
-        store_object_fact(&conn, 100, "content.hash.sha256", "old_hash", 1700000000).unwrap();
-
-        // Upsert with new value
-        store_object_fact(&conn, 100, "content.hash.sha256", "new_hash", 1700000001).unwrap();
-
-        // Verify fact was updated
-        let (value, timestamp): (String, i64) = conn.query_row(
-            "SELECT value_text, observed_at FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.hash.sha256'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
-        assert_eq!(value, "new_hash");
-        assert_eq!(timestamp, 1700000001);
-
-        // Verify only one fact exists
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE entity_type = 'object' AND entity_id = 100 AND key = 'content.hash.sha256'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn store_object_fact_different_keys() {
-        let conn = setup_test_db();
-        insert_object(&conn, 100, "abc123");
-
-        store_object_fact(&conn, 100, "content.hash.sha256", "hash1", 1700000000).unwrap();
-        store_object_fact(&conn, 100, "content.Make", "Canon", 1700000000).unwrap();
-
-        // Verify both facts exist
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM facts WHERE entity_type = 'object' AND entity_id = 100",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 2);
     }
 
     // =========================================================================

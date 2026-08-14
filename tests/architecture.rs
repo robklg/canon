@@ -64,6 +64,9 @@ fn classify_layer(rel_path: &str) -> Layer {
     if let Some(rest) = rel_path.strip_prefix("exclude/") {
         return classify_subsystem_stratum(rest);
     }
+    if let Some(rest) = rel_path.strip_prefix("scan/") {
+        return classify_subsystem_stratum(rest);
+    }
     if rel_path.starts_with("domain/") {
         Layer::Domain
     } else if rel_path.starts_with("repo/") {
@@ -330,19 +333,9 @@ const TIER3: &[Tier3Entry] = &[
         severity: Severity::Read,
     },
     Tier3Entry {
-        file: "scan.rs",
+        file: "scan/cli.rs",
         reference: "repo::root::fetch_all",
         severity: Severity::Read,
-    },
-    Tier3Entry {
-        file: "scan.rs",
-        reference: "repo::root::create",
-        severity: Severity::Write,
-    },
-    Tier3Entry {
-        file: "scan.rs",
-        reference: "repo::root::update_last_scanned_at",
-        severity: Severity::Write,
     },
     Tier3Entry {
         file: "trail/cli.rs",
@@ -370,7 +363,7 @@ const TIER3: &[Tier3Entry] = &[
         severity: Severity::TestOnly,
     },
     Tier3Entry {
-        file: "scan.rs",
+        file: "scan/cli.rs",
         reference: "repo::insert_test_root",
         severity: Severity::TestOnly,
     },
@@ -1610,6 +1603,7 @@ mod self_tests {
                 "check_set_object_by_file",
             ],
         ),
+        ("scan", &["run", "find_candidates"]),
     ];
 
     #[test]

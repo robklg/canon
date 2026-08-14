@@ -1,151 +1,28 @@
-//! Scan pipeline: observe→reconcile→persist.
+//! The walk pipeline: observe→reconcile→persist.
 //!
 //! The interface creates the directory walker and passes entries here.
 //! This module processes each entry through the pipeline, detects missing
 //! sources, and returns typed results. A `ScanProgress` trait provides
 //! per-file observability without writing to stderr.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{Transaction, TransactionBehavior};
 
-use crate::domain::decision::DecisionStatus;
-use crate::domain::scan::{find_missing, reconcile, FileObservation, Reconciliation};
-use crate::ops::decision::{DecisionParams, DecisionRecorder};
 use crate::ops::fs::compute_partial_hash;
-use crate::ops::receipt::{DeletionReceipt, DeletionReceiptItem, ReceiptKind, ReceiptPlacement};
+use crate::ops::receipt::DeletionReceiptItem;
 use crate::repo::{self, Connection};
+use crate::scan::domain::{find_missing, reconcile, FileObservation, Reconciliation};
+use crate::scan::repo as scan_repo;
 
-// ============================================================================
-// Types
-// ============================================================================
-
-/// Classification of a source's fate during scan.
-pub enum SourceOutcome {
-    Seen,
-    Missing,
-    Disconnected,
-}
-
-/// Action taken for a processed file.
-pub enum FileAction {
-    New,
-    Modified,
-    Moved,
-    Unchanged,
-}
-
-/// Accumulated scan statistics.
-#[derive(Default)]
-pub struct ScanStats {
-    pub scanned: u64,
-    pub new: u64,
-    pub updated: u64,
-    pub moved: u64,
-    pub unchanged: u64,
-    pub missing: u64,
-    pub disconnected: u64,
-    pub skipped: u64,
-    pub hashed: u64,
-    pub unexpected_hash_changes: u64,
-    /// Number of walk roots where missing detection was skipped (mount guard).
-    /// Counted in the stats — and thus the durable decision summary — so a scan
-    /// that *couldn't verify* absence is distinguishable from one that verified
-    /// nothing was missing.
-    pub missing_detection_skipped: u64,
-}
-
-impl ScanStats {
-    /// Compose the scan summary message.
-    pub fn compose_summary(&self) -> String {
-        let mut summary = format!(
-            "Scanned {} files: {} new, {} updated, {} moved, {} unchanged, {} missing",
-            self.scanned, self.new, self.updated, self.moved, self.unchanged, self.missing
-        );
-        if self.missing_detection_skipped == 1 {
-            summary.push_str(", missing detection skipped (mount unstable)");
-        } else if self.missing_detection_skipped > 1 {
-            summary.push_str(&format!(
-                ", missing detection skipped on {} roots (mount unstable)",
-                self.missing_detection_skipped
-            ));
-        }
-        if self.skipped > 0 {
-            summary.push_str(&format!(", {} skipped (read errors)", self.skipped));
-        }
-        if self.disconnected > 0 {
-            summary.push_str(&format!(", {} skipped (disconnected)", self.disconnected));
-        }
-        if self.hashed > 0 {
-            summary.push_str(&format!("\nHashed {} files", self.hashed));
-        }
-        summary
-    }
-}
-
-/// A file that needs full hashing after the walk completes.
-pub struct FileToHash {
-    pub source_id: i64,
-    pub full_path: PathBuf,
-    pub old_object_id: Option<i64>,
-    pub basis_changed: bool,
-}
-
-/// Result of scanning a single root.
-pub struct ScanRootResult {
-    pub stats: ScanStats,
-    pub files_to_hash: Vec<FileToHash>,
-    /// Sources that went missing during this scan, captured before the
-    /// `present → absent` flip for the deletion receipt. Empty when receipt
-    /// capture is off (`capture_deletions = false`) or nothing was deleted.
-    pub deleted_items: Vec<DeletionReceiptItem>,
-    /// Warnings collected during scan (disconnected storage, errors).
-    pub warnings: Vec<String>,
-}
-
-/// Result of marking a path's sources deleted via `--missing`.
-#[derive(Debug)]
-pub struct MarkMissingPathResult {
-    /// The root that contained the deleted sources.
-    pub root_id: i64,
-    /// Absolute path of that root (for source-local receipt placement).
-    pub root_path: String,
-    /// How many present sources were flipped to absent.
-    pub missing_count: u64,
-    /// Deletion-receipt items captured before the flip. Empty when receipt
-    /// capture is off (`capture_deletions = false`) or nothing was present.
-    pub deleted_items: Vec<DeletionReceiptItem>,
-}
-
-/// Parameters controlling scan behavior.
-pub struct ScanOptions {
-    /// Whether to compute partial hashes during the walk.
-    pub hash: bool,
-    /// Whether to re-hash files that already have a hash.
-    pub hash_all: bool,
-    /// Whether to treat device ID mismatches as missing (--ignore-device-id).
-    pub ignore_device_id: bool,
-}
-
-/// Observability for the scan pipeline. The interface implements this
-/// to update progress bars, emit warnings, etc.
-pub trait ScanProgress {
-    /// Called after each file is processed.
-    fn on_file(&self, path: &str, action: &FileAction);
-    /// Called when a walk error is encountered (e.g., permission denied).
-    fn on_walk_error(&self, error: &str);
-    /// Called when process_file fails for a specific file.
-    fn on_process_error(&self, path: &str, error: &str);
-}
-
-// ============================================================================
-// Pipeline functions
-// ============================================================================
+use super::types::{
+    FileAction, FileToHash, MarkMissingPathResult, ScanOptions, ScanProgress, ScanRootResult,
+    ScanStats, SourceOutcome,
+};
 
 /// Scan a root directory, processing each entry through the
 /// observe→reconcile→persist pipeline.
@@ -154,7 +31,7 @@ pub trait ScanProgress {
 /// This function:
 /// 1. Fetches expected source IDs (for missing detection)
 /// 2. Processes each entry via process_file()
-/// 3. Detects missing sources via domain::scan::find_missing()
+/// 3. Detects missing sources via scan::domain::find_missing()
 /// 4. Marks missing/disconnected via mark_missing_sources()
 ///
 /// Returns accumulated stats, files needing hashing, and warnings.
@@ -198,7 +75,7 @@ pub fn scan_root(
 
     // Fetch expected source IDs at start (for missing detection via pure function)
     let expected_ids: HashSet<i64> =
-        repo::source::fetch_source_ids_for_root(conn, root_id, scan_prefix)?
+        scan_repo::source::fetch_source_ids_for_root(conn, root_id, scan_prefix)?
             .into_iter()
             .collect();
 
@@ -261,7 +138,7 @@ pub fn scan_root(
 
         stats.scanned += 1;
 
-        // Phase 1: Reconcile (read DB state, determine outcome, compute partial hash)
+        // Reconcile: read DB state, determine outcome, compute partial hash
         let reconciled = match reconcile_file(
             conn,
             root_id,
@@ -280,7 +157,7 @@ pub fn scan_root(
             }
         };
 
-        // Phase 2: Persist — unchanged files are batched, others get individual transactions
+        // Persist: unchanged files are batched, others get individual transactions
         let (action, source_id, old_object_id) = match &reconciled.reconciliation {
             Reconciliation::Unchanged { source_id } => {
                 unchanged_batch.push((*source_id, device, inode));
@@ -451,7 +328,7 @@ fn reconcile_file(
     };
 
     let source_at_path = repo::source::fetch_by_path(conn, root_id, rel_path)?;
-    let source_by_inode = repo::source::fetch_by_inode(conn, device as u64, inode as u64)?;
+    let source_by_inode = scan_repo::source::fetch_by_inode(conn, device as u64, inode as u64)?;
 
     let reconciliation = reconcile(
         &observation,
@@ -481,8 +358,13 @@ fn persist_file(
     decision_id: Option<i64>,
 ) -> Result<crate::domain::source::Source> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let source =
-        repo::source::apply_reconciliation(&tx, observation, reconciliation, now, decision_id)?;
+    let source = scan_repo::source::apply_reconciliation(
+        &tx,
+        observation,
+        reconciliation,
+        now,
+        decision_id,
+    )?;
     tx.commit()?;
     Ok(source)
 }
@@ -493,7 +375,7 @@ fn flush_unchanged(conn: &Connection, batch: &[(i64, i64, i64)], now: i64) -> Re
         return Ok(());
     }
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    repo::source::batch_update_unchanged(&tx, batch, now)?;
+    scan_repo::source::batch_update_unchanged(&tx, batch, now)?;
     tx.commit()?;
     Ok(())
 }
@@ -569,16 +451,17 @@ fn capture_deletion_items(
     if missing_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut items: Vec<DeletionReceiptItem> = repo::source::fetch_for_receipt(conn, missing_ids)?
-        .into_iter()
-        .map(|s| DeletionReceiptItem {
-            rel_path: s.rel_path,
-            hash: s.hash,
-            size: s.size,
-            mtime: s.mtime,
-            previous_decision_id: s.previous_decision_id,
-        })
-        .collect();
+    let mut items: Vec<DeletionReceiptItem> =
+        scan_repo::source::fetch_for_receipt(conn, missing_ids)?
+            .into_iter()
+            .map(|s| DeletionReceiptItem {
+                rel_path: s.rel_path,
+                hash: s.hash,
+                size: s.size,
+                mtime: s.mtime,
+                previous_decision_id: s.previous_decision_id,
+            })
+            .collect();
     items.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     Ok(items)
 }
@@ -595,6 +478,8 @@ fn capture_deletion_items(
 /// `path` must resolve to a known root (relative paths are cleaned against `cwd`);
 /// otherwise this errors. A path that matches a root but has no present sources
 /// returns `missing_count = 0` and no items — the caller decides how to report it.
+///
+/// [`write_deletion_receipts`]: super::receipt::write_deletion_receipts
 pub fn mark_missing_path(
     conn: &Connection,
     path: &Path,
@@ -621,7 +506,7 @@ pub fn mark_missing_path(
     } else {
         Some(rel_prefix.as_str())
     };
-    let source_ids = repo::source::fetch_source_ids_for_root(conn, root_id, prefix_arg)?;
+    let source_ids = scan_repo::source::fetch_source_ids_for_root(conn, root_id, prefix_arg)?;
 
     // Capture receipt items before the flip so each item's previous_decision_id
     // is the pre-flip value (stamp-set = receipt-set).
@@ -641,109 +526,6 @@ pub fn mark_missing_path(
     })
 }
 
-/// Merge deletion entries that share a root so each root yields one receipt.
-/// Items are concatenated in the order roots were first seen and re-sorted by
-/// rel_path for a stable receipt. Sources can't appear twice across a root's
-/// entries: each is captured only while present, and each capture flips it, so a
-/// later capture for the same root never re-sees it.
-fn coalesce_by_root(
-    per_root: Vec<(i64, String, Vec<DeletionReceiptItem>)>,
-) -> Vec<(i64, String, Vec<DeletionReceiptItem>)> {
-    let mut order: Vec<i64> = Vec::new();
-    let mut by_root: HashMap<i64, (String, Vec<DeletionReceiptItem>)> = HashMap::new();
-    for (root_id, root_path, items) in per_root {
-        match by_root.entry(root_id) {
-            std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().1.extend(items),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                order.push(root_id);
-                e.insert((root_path, items));
-            }
-        }
-    }
-    order
-        .into_iter()
-        .map(|root_id| {
-            let (root_path, mut items) = by_root.remove(&root_id).expect("root_id was recorded");
-            items.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-            (root_id, root_path, items)
-        })
-        .collect()
-}
-
-/// Write source-local deletion receipts — one per root that lost sources — under
-/// the single scan decision.
-///
-/// Placement and existence are known only after the walk, so this runs at
-/// completion. Gated on `params.receipt_enabled` and a live decision id; a root
-/// with no deleted items is skipped, so a scan that deletes nothing writes no
-/// receipt. Each receipt lands at its own root's `.canon-ledger/` — the loss
-/// travels with that drive. Every written receipt is linked to its root in the
-/// scope index (`decision_scopes.receipt_rel_path`) so a by-root query recovers
-/// the decision and its receipt — the many-receipts-per-decision case the single
-/// `decisions.receipt_*` columns can't hold. Write and index failures are
-/// collected as recorder warnings, never halting the scan.
-///
-/// Entries that share a root are coalesced into one receipt: a single scan can
-/// lose files in one root through both the sweep and a `--missing` path, and
-/// multiple `--missing` paths can name subtrees of the same root. Each root still
-/// gets exactly one receipt listing everything it lost.
-pub fn write_deletion_receipts(
-    conn: &Connection,
-    recorder: &mut DecisionRecorder,
-    params: &DecisionParams,
-    per_root: Vec<(i64, String, Vec<DeletionReceiptItem>)>,
-    summary: &str,
-) {
-    if !params.receipt_enabled {
-        return;
-    }
-    let Some(decision_id) = recorder.decision_id() else {
-        return;
-    };
-    let command = params.command.as_str();
-
-    for (root_id, root_path, items) in coalesce_by_root(per_root) {
-        if items.is_empty() {
-            continue;
-        }
-        let receipt = DeletionReceipt {
-            meta: params.receipt_meta(
-                decision_id,
-                DecisionStatus::Completed,
-                summary,
-                (root_id, root_path.as_str()),
-                ReceiptKind::Deletion,
-                None,
-            ),
-            items,
-        };
-        let placement = ReceiptPlacement::LedgerRoot {
-            root_id,
-            root_path: root_path.clone(),
-        };
-        if let Some(receipt_ref) =
-            recorder.write_placed_receipt(&placement, command, &receipt, summary)
-        {
-            if let Err(e) = repo::decision::set_scope_receipt(
-                conn,
-                decision_id,
-                receipt_ref.root_id,
-                &root_path,
-                &receipt_ref.rel_path,
-            ) {
-                recorder.push_warning(format!(
-                    "Warning: failed to index deletion receipt for root {}: {e}",
-                    receipt_ref.root_id
-                ));
-            }
-        }
-    }
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
 /// A source's id paired with its classified outcome.
 type SourceOutcomes = Vec<(i64, SourceOutcome)>;
 
@@ -755,7 +537,7 @@ fn classify_sources_in_empty_dir(
     rel_prefix: &str,
     current_device: i64,
 ) -> Result<(SourceOutcomes, Vec<String>)> {
-    let sources = repo::source::fetch_device_info_by_prefix(conn, root_id, rel_prefix)?;
+    let sources = scan_repo::source::fetch_device_info_by_prefix(conn, root_id, rel_prefix)?;
 
     let mut disconnected_count = 0usize;
     let results: Vec<_> = sources
@@ -799,252 +581,15 @@ fn is_empty_dir(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-// ============================================================================
-// Root candidate discovery
-// ============================================================================
-
-/// A candidate root directory discovered by scanning for untracked files.
-pub struct RootCandidate {
-    /// Absolute path to the candidate directory.
-    pub path: PathBuf,
-    /// Number of directories with files under this candidate.
-    pub dir_count: usize,
-}
-
-/// Result of scanning for untracked root candidates.
-pub struct CandidateResult {
-    /// Candidate root directories, sorted by path.
-    pub candidates: Vec<RootCandidate>,
-    /// Warnings encountered during filesystem walk (e.g., permission errors).
-    pub warnings: Vec<String>,
-}
-
-/// Scan a scope directory for untracked files not under any known root,
-/// then collapse the results into candidate root directories.
-///
-/// `root_paths` should contain only active (non-suspended) root paths.
-pub fn find_root_candidates(scope: &Path, root_paths: &[PathBuf]) -> Result<CandidateResult> {
-    let mut dirs_with_files: HashSet<PathBuf> = HashSet::new();
-    let mut warnings: Vec<String> = Vec::new();
-
-    scan_for_untracked(scope, root_paths, &mut dirs_with_files, &mut warnings)?;
-
-    let candidates = find_common_ancestors(&dirs_with_files, root_paths, scope)
-        .into_iter()
-        .map(|(path, dir_count)| RootCandidate { path, dir_count })
-        .collect();
-
-    Ok(CandidateResult {
-        candidates,
-        warnings,
-    })
-}
-
-/// Recursively scan for directories with files not under any root.
-fn scan_for_untracked(
-    dir: &Path,
-    roots: &[PathBuf],
-    result: &mut HashSet<PathBuf>,
-    warnings: &mut Vec<String>,
-) -> Result<()> {
-    // Skip if this directory is under an existing root
-    if roots
-        .iter()
-        .any(|root| dir == root || dir.starts_with(root))
-    {
-        return Ok(());
-    }
-
-    let entries: Vec<_> = match fs::read_dir(dir) {
-        Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
-        Err(e) => {
-            warnings.push(format!("cannot read {}: {e}", dir.display()));
-            return Ok(());
-        }
-    };
-
-    // Check if this directory has any files (stop at first one found)
-    let has_file = entries
-        .iter()
-        .any(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false));
-
-    // Check if this directory contains any root (can't be added as a root — invariant)
-    let contains_root = roots
-        .iter()
-        .any(|root| root.starts_with(dir) && root != dir);
-
-    if has_file && !contains_root {
-        result.insert(dir.to_path_buf());
-    } else {
-        for entry in entries {
-            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                scan_for_untracked(&entry.path(), roots, result, warnings)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Find shortest common ancestors for a set of directories,
-/// bounded by scope and not crossing root boundaries.
-fn find_common_ancestors(
-    dirs_with_files: &HashSet<PathBuf>,
-    roots: &[PathBuf],
-    scope: &Path,
-) -> Vec<(PathBuf, usize)> {
-    let mut ancestors: HashMap<PathBuf, usize> = HashMap::new();
-
-    for dir in dirs_with_files {
-        let mut current = dir.clone();
-        let mut highest_untracked = dir.clone();
-
-        while let Some(parent) = current.parent() {
-            if parent == scope || !parent.starts_with(scope) {
-                break;
-            }
-            if roots
-                .iter()
-                .any(|root| parent == root || parent.starts_with(root))
-            {
-                break;
-            }
-            if roots.iter().any(|root| root.starts_with(parent)) {
-                break;
-            }
-
-            highest_untracked = parent.to_path_buf();
-            current = parent.to_path_buf();
-        }
-
-        *ancestors.entry(highest_untracked).or_insert(0) += 1;
-    }
-
-    let mut result: Vec<_> = ancestors.into_iter().collect();
-    result.sort_by(|a, b| a.0.cmp(&b.0));
-    result
-}
-
-pub fn current_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64
-}
-
-// ============================================================================
-// Hash pipeline
-// ============================================================================
-
-/// Observability for the hash pipeline. The interface implements this
-/// to display progress bars, emit warnings, etc.
-pub trait HashProgress {
-    fn on_start(&self, total: usize);
-    fn on_hash(&self, index: usize, path: &Path);
-    fn on_hash_error(&self, path: &Path, error: &str);
-    fn on_unexpected_change(&self, path: &Path);
-    fn on_finish(&self);
-}
-
-/// Result of the hash pipeline.
-#[derive(Default)]
-pub struct HashStats {
-    pub hashed: u64,
-    pub unexpected_hash_changes: u64,
-    pub errors: u64,
-}
-
-/// Hash files collected during scan, linking each to its content object.
-///
-/// For each file: computes full SHA256, creates/looks up the object,
-/// links the source, stores the hash fact. Each file is wrapped in its
-/// own Immediate transaction for atomicity without blocking concurrent
-/// processes for long periods.
-///
-/// Individual hash I/O errors are reported via `progress` and skipped
-/// (not fatal). DB/transaction errors propagate as `Err`.
-pub fn hash_files(
-    conn: &Connection,
-    files: &[FileToHash],
-    progress: &dyn HashProgress,
-) -> Result<HashStats> {
-    if files.is_empty() {
-        return Ok(HashStats::default());
-    }
-
-    progress.on_start(files.len());
-
-    let mut stats = HashStats::default();
-
-    for (i, file) in files.iter().enumerate() {
-        progress.on_hash(i, &file.full_path);
-
-        // Compute full SHA256 hash
-        let hash_value = match crate::ops::fs::compute_full_hash(&file.full_path) {
-            Ok(h) => h,
-            Err(e) => {
-                progress.on_hash_error(&file.full_path, &format!("{:#}", e));
-                stats.errors += 1;
-                continue;
-            }
-        };
-
-        // Wrap object creation + source linking + fact storage in a single
-        // transaction for atomicity. Uses Immediate for reliable busy-handler
-        // support under concurrency.
-        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-
-        let new_object = get_or_create_object(&tx, "sha256", &hash_value)?;
-
-        // Check for unexpected hash change (only if basis didn't change and file had existing hash)
-        if !file.basis_changed {
-            if let Some(old_oid) = file.old_object_id {
-                if old_oid != new_object.id {
-                    progress.on_unexpected_change(&file.full_path);
-                    stats.unexpected_hash_changes += 1;
-                }
-            }
-        }
-
-        repo::source::set_object_id(&tx, file.source_id, new_object.id)?;
-
-        repo::fact::store_object_fact(
-            &tx,
-            new_object.id,
-            "content.hash.sha256",
-            &hash_value,
-            current_timestamp(),
-        )?;
-
-        tx.commit()?;
-
-        stats.hashed += 1;
-    }
-
-    progress.on_finish();
-
-    Ok(stats)
-}
-
-/// Get or create an object by hash, returning the Object.
-pub fn get_or_create_object(
-    conn: &Connection,
-    hash_type: &str,
-    hash_value: &str,
-) -> Result<crate::domain::object::Object> {
-    repo::object::get_or_create(conn, hash_type, hash_value)
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Write;
+    use std::path::PathBuf;
     use tempfile::TempDir;
+
+    use super::super::types::current_timestamp;
 
     /// No-op progress implementation for tests.
     struct NoopProgress;
@@ -1052,33 +597,6 @@ mod tests {
         fn on_file(&self, _path: &str, _action: &FileAction) {}
         fn on_walk_error(&self, _error: &str) {}
         fn on_process_error(&self, _path: &str, _error: &str) {}
-    }
-
-    #[test]
-    fn compose_summary_records_missing_detection_skip() {
-        // The skip must reach the durable decision summary — a scan that
-        // couldn't verify absence must not read like one that verified
-        // nothing was missing.
-        let stats = ScanStats {
-            scanned: 10,
-            missing_detection_skipped: 1,
-            ..Default::default()
-        };
-        assert!(stats
-            .compose_summary()
-            .contains("missing detection skipped (mount unstable)"));
-
-        let stats = ScanStats {
-            missing_detection_skipped: 2,
-            ..Default::default()
-        };
-        assert!(stats
-            .compose_summary()
-            .contains("missing detection skipped on 2 roots (mount unstable)"));
-
-        assert!(!ScanStats::default()
-            .compose_summary()
-            .contains("missing detection"));
     }
 
     /// Test result from process_file helper.
@@ -1161,7 +679,7 @@ mod tests {
             meta.len() as i64,
             meta.modified()
                 .unwrap()
-                .duration_since(UNIX_EPOCH)
+                .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs() as i64,
         )
@@ -1611,12 +1129,9 @@ mod tests {
     }
 
     // =========================================================================
-    // Deletion receipt capture + writing
+    // Deletion capture before the flip (scan_root)
     // =========================================================================
 
-    use crate::domain::config::{LedgerConfig, RecordingMode};
-    use crate::domain::decision::DecisionCommand;
-    use crate::ops::decision::DecisionCounts;
     use walkdir::WalkDir;
 
     /// Build a `.canon-ledger`-filtered walker over `root`, like the interface does.
@@ -1763,233 +1278,6 @@ mod tests {
             present, 1,
             "source must not be marked missing on unstable mount"
         );
-    }
-
-    fn scan_params(recording: RecordingMode, no_receipt: bool) -> DecisionParams {
-        DecisionParams {
-            command: DecisionCommand::Scan,
-            scope: Vec::new(),
-            command_line: "canon scan".to_string(),
-            reason: None,
-            record_enabled: recording != RecordingMode::Off,
-            receipt_enabled: recording == RecordingMode::Full && !no_receipt,
-            ledger_config: LedgerConfig {
-                recording,
-                ..LedgerConfig::default()
-            },
-        }
-    }
-
-    fn sample_items() -> Vec<DeletionReceiptItem> {
-        vec![DeletionReceiptItem {
-            rel_path: "gone.txt".to_string(),
-            hash: None,
-            size: 100,
-            mtime: 1000,
-            previous_decision_id: Some(3),
-        }]
-    }
-
-    #[test]
-    fn write_deletion_receipts_writes_source_local_file() {
-        let conn = repo::open_in_memory_for_test();
-        let temp = TempDir::new().unwrap();
-        let root_path = temp.path().to_str().unwrap().to_string();
-        let params = scan_params(RecordingMode::Full, false);
-        let mut recorder = DecisionRecorder::start(&conn, &params, None);
-        let id = recorder.decision_id().unwrap();
-
-        write_deletion_receipts(
-            &conn,
-            &mut recorder,
-            &params,
-            vec![(1, root_path.clone(), sample_items())],
-            "Scanned 0 files: 0 new, 0 updated, 0 moved, 0 unchanged, 1 missing",
-        );
-
-        let receipt = temp
-            .path()
-            .join(".canon-ledger")
-            .join(format!("{id:06}-scan.toml"));
-        assert!(receipt.exists(), "receipt should land on the drive");
-        let body = std::fs::read_to_string(&receipt).unwrap();
-        assert!(body.contains("command = \"scan\""));
-        assert!(body.contains("rel_path = \"gone.txt\""));
-        // The what + posture: a scan witnessed a loss, it did not perform one.
-        assert!(body.contains("transition = \"deleted\""));
-        assert!(body.contains("posture = \"observed\""));
-        // The where: this drive's root identity, from placement.
-        let locus = &body[body.find("[meta.locus]").expect("locus table present")..];
-        assert!(locus.contains(&format!("path = \"{root_path}\"")));
-        assert!(locus.contains("id = 1"));
-        assert!(recorder.take_warnings().is_empty());
-    }
-
-    #[test]
-    fn write_deletion_receipts_skipped_when_receipts_disabled() {
-        // Records mode: DB row yes, receipt file no.
-        let conn = repo::open_in_memory_for_test();
-        let temp = TempDir::new().unwrap();
-        let root_path = temp.path().to_str().unwrap().to_string();
-        let params = scan_params(RecordingMode::Records, false);
-        let mut recorder = DecisionRecorder::start(&conn, &params, None);
-
-        write_deletion_receipts(
-            &conn,
-            &mut recorder,
-            &params,
-            vec![(1, root_path, sample_items())],
-            "summary",
-        );
-
-        assert!(!temp.path().join(".canon-ledger").exists());
-    }
-
-    #[test]
-    fn write_deletion_receipts_zero_deletions_no_file_but_decision_row_exists() {
-        let conn = repo::open_in_memory_for_test();
-        let temp = TempDir::new().unwrap();
-        let params = scan_params(RecordingMode::Full, false);
-        let mut recorder = DecisionRecorder::start(&conn, &params, None);
-        let id = recorder.decision_id().unwrap();
-
-        // No deletions this scan.
-        write_deletion_receipts(&conn, &mut recorder, &params, Vec::new(), "summary");
-        recorder.complete(
-            &conn,
-            DecisionStatus::Completed,
-            DecisionCounts {
-                attempted: Some(0),
-                completed: Some(0),
-                failed: None,
-                skipped: Some(0),
-            },
-            "summary",
-        );
-
-        assert!(
-            !temp.path().join(".canon-ledger").exists(),
-            "no receipt for a scan that deleted nothing"
-        );
-        let d = repo::decision::fetch_by_id(&conn, id).unwrap().unwrap();
-        assert_eq!(d.status, "completed");
-    }
-
-    #[test]
-    fn write_deletion_receipts_multi_root_writes_and_indexes_each() {
-        // One scan decision, deletions in two roots → one source-local receipt per
-        // root, each indexed in decision_scopes for a by-root lookup.
-        let conn = repo::open_in_memory_for_test();
-        let temp_a = TempDir::new().unwrap();
-        let temp_b = TempDir::new().unwrap();
-        let root_a = temp_a.path().to_str().unwrap().to_string();
-        let root_b = temp_b.path().to_str().unwrap().to_string();
-        let params = scan_params(RecordingMode::Full, false);
-        let mut recorder = DecisionRecorder::start(&conn, &params, None);
-        let id = recorder.decision_id().unwrap();
-
-        write_deletion_receipts(
-            &conn,
-            &mut recorder,
-            &params,
-            vec![
-                (11, root_a.clone(), sample_items()),
-                (22, root_b.clone(), sample_items()),
-            ],
-            "summary",
-        );
-
-        // Each receipt lands on its own drive.
-        let name = format!("{id:06}-scan.toml");
-        assert!(temp_a.path().join(".canon-ledger").join(&name).exists());
-        assert!(temp_b.path().join(".canon-ledger").join(&name).exists());
-
-        // Each per-root receipt carries *its own* locus identity — the whole
-        // point for a receipt read after its drive is gone. A shared meta.scope
-        // could not disambiguate the two.
-        let body_a =
-            std::fs::read_to_string(temp_a.path().join(".canon-ledger").join(&name)).unwrap();
-        let locus_a = &body_a[body_a.find("[meta.locus]").unwrap()..];
-        assert!(locus_a.contains(&format!("path = \"{root_a}\"")));
-        assert!(locus_a.contains("id = 11"));
-        let body_b =
-            std::fs::read_to_string(temp_b.path().join(".canon-ledger").join(&name)).unwrap();
-        let locus_b = &body_b[body_b.find("[meta.locus]").unwrap()..];
-        assert!(locus_b.contains(&format!("path = \"{root_b}\"")));
-        assert!(locus_b.contains("id = 22"));
-
-        // The indexed rel_path is relative to the root (includes .canon-ledger/),
-        // matching decisions.receipt_rel_path semantics.
-        let rel_path = format!(".canon-ledger/{name}");
-
-        // Both roots are indexed; the retirement query (WHERE root_id = ?) recovers
-        // the decision and its receipt for each.
-        for root_id in [11_i64, 22] {
-            let (did, receipt): (i64, String) = conn
-                .query_row(
-                    "SELECT decision_id, receipt_rel_path FROM decision_scopes
-                     WHERE root_id = ? AND receipt_rel_path IS NOT NULL",
-                    [root_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .unwrap();
-            assert_eq!(did, id);
-            assert_eq!(receipt, rel_path);
-        }
-        assert!(recorder.take_warnings().is_empty());
-    }
-
-    #[test]
-    fn write_deletion_receipts_coalesces_same_root() {
-        // Two entries for the same root (a sweep plus a --missing subtree, say)
-        // merge into one receipt listing all of that root's lost sources.
-        let conn = repo::open_in_memory_for_test();
-        let temp = TempDir::new().unwrap();
-        let root_path = temp.path().to_str().unwrap().to_string();
-        let params = scan_params(RecordingMode::Full, false);
-        let mut recorder = DecisionRecorder::start(&conn, &params, None);
-        let id = recorder.decision_id().unwrap();
-
-        let item = |rel: &str| DeletionReceiptItem {
-            rel_path: rel.to_string(),
-            hash: None,
-            size: 1,
-            mtime: 1,
-            previous_decision_id: None,
-        };
-
-        write_deletion_receipts(
-            &conn,
-            &mut recorder,
-            &params,
-            vec![
-                (7, root_path.clone(), vec![item("work/a.txt")]),
-                (7, root_path, vec![item("vacation/b.txt")]),
-            ],
-            "summary",
-        );
-
-        // One receipt file for the root, listing both items sorted by rel_path.
-        let receipt = temp
-            .path()
-            .join(".canon-ledger")
-            .join(format!("{id:06}-scan.toml"));
-        let body = std::fs::read_to_string(&receipt).unwrap();
-        let vac = body.find("vacation/b.txt").expect("vacation item present");
-        let work = body.find("work/a.txt").expect("work item present");
-        assert!(vac < work, "merged items should be sorted by rel_path");
-
-        // Only one scope row is indexed for the root — a single receipt.
-        let indexed: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM decision_scopes
-                 WHERE root_id = 7 AND receipt_rel_path IS NOT NULL",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(indexed, 1);
-        assert!(recorder.take_warnings().is_empty());
     }
 
     // =========================================================================
@@ -2251,214 +1539,5 @@ mod tests {
             .unwrap();
         assert_eq!(present, 0);
         assert_eq!(did, Some(99));
-    }
-
-    // =========================================================================
-    // Hash pipeline tests
-    // =========================================================================
-
-    /// Records every `HashProgress` callback so tests can assert the pipeline
-    /// reported what it did.
-    #[derive(Default)]
-    struct RecordingHashProgress {
-        started: std::cell::Cell<usize>,
-        hashed: std::cell::Cell<usize>,
-        errors: std::cell::Cell<usize>,
-        unexpected: std::cell::Cell<usize>,
-        finished: std::cell::Cell<bool>,
-    }
-
-    impl HashProgress for RecordingHashProgress {
-        fn on_start(&self, total: usize) {
-            self.started.set(total);
-        }
-        fn on_hash(&self, _index: usize, _path: &Path) {
-            self.hashed.set(self.hashed.get() + 1);
-        }
-        fn on_hash_error(&self, _path: &Path, _error: &str) {
-            self.errors.set(self.errors.get() + 1);
-        }
-        fn on_unexpected_change(&self, _path: &Path) {
-            self.unexpected.set(self.unexpected.get() + 1);
-        }
-        fn on_finish(&self) {
-            self.finished.set(true);
-        }
-    }
-
-    /// Root + one indexed source backed by a real file, ready to hash.
-    fn hashable_source(
-        conn: &Connection,
-        temp: &TempDir,
-        name: &str,
-        content: &str,
-    ) -> (i64, PathBuf) {
-        let root_path = temp.path().to_str().unwrap();
-        let root_id = repo::insert_test_root(conn, root_path, "source", false);
-        let path = temp.path().join(name);
-        std::fs::write(&path, content).unwrap();
-        // The hash pass reads only the source id and the path; the location
-        // metadata is placeholder, so these tests stay independent of the
-        // walk's own fixtures.
-        let source_id = repo::insert_test_source(conn, root_id, name, 1, 1, 0, 0);
-        (source_id, path)
-    }
-
-    #[test]
-    fn hash_files_empty_input_returns_default() {
-        // Nothing to hash means no work and no progress chatter — the caller
-        // must not see a 0-of-0 progress bar start and finish.
-        let conn = repo::open_in_memory_for_test();
-        let progress = RecordingHashProgress::default();
-
-        let stats = hash_files(&conn, &[], &progress).unwrap();
-
-        assert_eq!(stats.hashed, 0);
-        assert_eq!(stats.errors, 0);
-        assert_eq!(stats.unexpected_hash_changes, 0);
-        assert_eq!(progress.started.get(), 0);
-        assert!(!progress.finished.get());
-    }
-
-    #[test]
-    fn hash_files_links_object_and_stores_fact() {
-        let conn = repo::open_in_memory_for_test();
-        let temp = TempDir::new().unwrap();
-        let (source_id, full_path) = hashable_source(&conn, &temp, "photo.jpg", "content");
-        let expected = crate::ops::fs::compute_full_hash(&full_path).unwrap();
-        let progress = RecordingHashProgress::default();
-
-        let stats = hash_files(
-            &conn,
-            &[FileToHash {
-                source_id,
-                full_path,
-                old_object_id: None,
-                basis_changed: true,
-            }],
-            &progress,
-        )
-        .unwrap();
-
-        assert_eq!(stats.hashed, 1);
-        assert_eq!(stats.errors, 0);
-        assert_eq!(stats.unexpected_hash_changes, 0);
-        assert_eq!(progress.started.get(), 1);
-        assert_eq!(progress.hashed.get(), 1);
-        assert!(progress.finished.get());
-
-        // The source is linked to an object carrying the computed hash...
-        let (object_id, hash_type, hash_value): (i64, String, String) = conn
-            .query_row(
-                "SELECT o.id, o.hash_type, o.hash_value
-                 FROM sources s JOIN objects o ON s.object_id = o.id
-                 WHERE s.id = ?",
-                [source_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(hash_type, "sha256");
-        assert_eq!(hash_value, expected);
-
-        // ...and the same hash is stored as an object fact.
-        let fact: String = conn
-            .query_row(
-                "SELECT value_text FROM facts
-                 WHERE entity_type = 'object' AND entity_id = ? AND key = 'content.hash.sha256'",
-                [object_id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(fact, expected);
-    }
-
-    #[test]
-    fn hash_files_detects_unexpected_change() {
-        // The file's content hash differs from the object it was linked to, and
-        // nothing about its basis (size/mtime) changed to explain it — silent
-        // corruption or an out-of-band edit, which the user must hear about.
-        let conn = repo::open_in_memory_for_test();
-        let temp = TempDir::new().unwrap();
-        let (source_id, full_path) = hashable_source(&conn, &temp, "photo.jpg", "content");
-        let stale = repo::object::get_or_create(&conn, "sha256", "stalehash").unwrap();
-        let progress = RecordingHashProgress::default();
-
-        let stats = hash_files(
-            &conn,
-            &[FileToHash {
-                source_id,
-                full_path,
-                old_object_id: Some(stale.id),
-                basis_changed: false,
-            }],
-            &progress,
-        )
-        .unwrap();
-
-        assert_eq!(stats.hashed, 1);
-        assert_eq!(stats.unexpected_hash_changes, 1);
-        assert_eq!(progress.unexpected.get(), 1);
-    }
-
-    #[test]
-    fn hash_files_no_unexpected_change_when_basis_changed() {
-        // Same mismatch, but the file's size/mtime moved — a new hash is exactly
-        // what a modified file should produce, so it is not reported.
-        let conn = repo::open_in_memory_for_test();
-        let temp = TempDir::new().unwrap();
-        let (source_id, full_path) = hashable_source(&conn, &temp, "photo.jpg", "content");
-        let stale = repo::object::get_or_create(&conn, "sha256", "stalehash").unwrap();
-        let progress = RecordingHashProgress::default();
-
-        let stats = hash_files(
-            &conn,
-            &[FileToHash {
-                source_id,
-                full_path,
-                old_object_id: Some(stale.id),
-                basis_changed: true,
-            }],
-            &progress,
-        )
-        .unwrap();
-
-        assert_eq!(stats.hashed, 1);
-        assert_eq!(stats.unexpected_hash_changes, 0);
-        assert_eq!(progress.unexpected.get(), 0);
-    }
-
-    #[test]
-    fn hash_files_io_error_is_counted_not_fatal() {
-        // A file that vanished between the walk and the hash pass is reported and
-        // skipped; the rest of the batch still gets hashed.
-        let conn = repo::open_in_memory_for_test();
-        let temp = TempDir::new().unwrap();
-        let (source_id, full_path) = hashable_source(&conn, &temp, "photo.jpg", "content");
-        let progress = RecordingHashProgress::default();
-
-        let stats = hash_files(
-            &conn,
-            &[
-                FileToHash {
-                    source_id,
-                    full_path: temp.path().join("vanished.jpg"),
-                    old_object_id: None,
-                    basis_changed: true,
-                },
-                FileToHash {
-                    source_id,
-                    full_path,
-                    old_object_id: None,
-                    basis_changed: true,
-                },
-            ],
-            &progress,
-        )
-        .unwrap();
-
-        assert_eq!(stats.errors, 1);
-        assert_eq!(stats.hashed, 1);
-        assert_eq!(progress.errors.get(), 1);
-        assert!(progress.finished.get());
     }
 }

@@ -5,6 +5,7 @@
 //! - `Reconciliation`: The outcome of comparing an observation to database state
 //! - `reconcile()`: Pure function encoding the reconciliation rules
 //! - `find_missing()`: Pure function for detecting missing files
+//! - `check_no_overlap()`: Pure predicate guarding new-root creation
 //!
 //! ## Design Principles
 //!
@@ -13,8 +14,11 @@
 //! 3. **Domain describes "what happened"**: Not how to persist it
 //! 4. **Command layer applies policy**: User config affects behavior via parameters
 
-use super::source::Source;
+use crate::domain::root::Root;
+use crate::domain::source::Source;
+use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
+use std::path::Path;
 
 /// What scan observes about a file on disk.
 ///
@@ -202,6 +206,41 @@ pub fn reconcile(
 /// so they won't appear in the missing list.
 pub fn find_missing(expected_ids: &HashSet<i64>, seen_ids: &HashSet<i64>) -> Vec<i64> {
     expected_ids.difference(seen_ids).copied().collect()
+}
+
+/// Check that a new root path does not overlap with any existing root.
+///
+/// Two roots overlap if one is a parent of the other. The same path is
+/// allowed (handled elsewhere as a no-op or error). This is a pure
+/// predicate — no I/O.
+pub fn check_no_overlap(roots: &[Root], new_path: &Path) -> Result<()> {
+    let new_path_str = new_path.to_str().context("Path is not valid UTF-8")?;
+
+    for root in roots {
+        if root.path == new_path_str {
+            continue; // Same path, not overlapping
+        }
+
+        let existing_path = Path::new(&root.path);
+
+        if new_path.starts_with(existing_path) {
+            bail!(
+                "Path {} overlaps with existing root {}",
+                new_path.display(),
+                root.path
+            );
+        }
+
+        if existing_path.starts_with(new_path) {
+            bail!(
+                "Path {} overlaps with existing root {}",
+                new_path.display(),
+                root.path
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -531,5 +570,79 @@ mod tests {
         let seen: HashSet<i64> = [1, 2, 99, 100].into_iter().collect();
         let result = find_missing(&expected, &seen);
         assert!(result.is_empty());
+    }
+
+    // =========================================================================
+    // check_no_overlap() tests
+    // =========================================================================
+
+    /// Helper to create a Root with a specific id, path, and role.
+    fn make_root_with(id: i64, path: &str, role: &str) -> Root {
+        Root {
+            id,
+            path: path.to_string(),
+            role: role.to_string(),
+            comment: None,
+            last_scanned_at: None,
+            suspended: false,
+        }
+    }
+
+    #[test]
+    fn check_no_overlap_empty_roots_ok() {
+        let roots: Vec<Root> = vec![];
+        assert!(check_no_overlap(&roots, Path::new("/a/b")).is_ok());
+    }
+
+    #[test]
+    fn check_no_overlap_accepts_disjoint_paths() {
+        let roots = vec![
+            make_root_with(1, "/a", "source"),
+            make_root_with(2, "/b", "archive"),
+        ];
+        assert!(check_no_overlap(&roots, Path::new("/c")).is_ok());
+    }
+
+    #[test]
+    fn check_no_overlap_rejects_new_under_existing() {
+        let roots = vec![make_root_with(1, "/a/b", "source")];
+        let err = check_no_overlap(&roots, Path::new("/a/b/c"))
+            .expect_err("a path inside an existing root must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("/a/b/c"), "message names the new path: {msg}");
+        assert!(
+            msg.contains("/a/b"),
+            "message names the existing root: {msg}"
+        );
+    }
+
+    #[test]
+    fn check_no_overlap_rejects_existing_under_new() {
+        // The other direction: adding a parent of an existing root would nest
+        // them just the same.
+        let roots = vec![make_root_with(1, "/a/b", "source")];
+        let err = check_no_overlap(&roots, Path::new("/a"))
+            .expect_err("a path containing an existing root must be refused");
+        assert!(err.to_string().contains("/a/b"));
+    }
+
+    #[test]
+    fn check_no_overlap_allows_identical_path() {
+        // Re-adding the same path is not an overlap — it is handled elsewhere
+        // as a no-op or a separate error.
+        let roots = vec![make_root_with(1, "/a/b", "source")];
+        assert!(check_no_overlap(&roots, Path::new("/a/b")).is_ok());
+    }
+
+    #[test]
+    fn check_no_overlap_sibling_prefix_is_not_overlap() {
+        // /a/bc is NOT under /a/b — the same component-boundary rule
+        // find_containing_root follows. A string-prefix test would refuse this
+        // pair and block a legitimate root.
+        let roots = vec![make_root_with(1, "/a/b", "source")];
+        assert!(check_no_overlap(&roots, Path::new("/a/bc")).is_ok());
+
+        let roots = vec![make_root_with(1, "/a/bc", "source")];
+        assert!(check_no_overlap(&roots, Path::new("/a/b")).is_ok());
     }
 }
