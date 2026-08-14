@@ -321,6 +321,9 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
                       // already reads it as unexplained)
         };
         match info.family {
+            // Apply stamps its own rows; the extraction row already narrates
+            // this archival — narrating the stamp too would count the same
+            // files twice.
             DecisionFamily::Archive => continue,
             DecisionFamily::Observe => {
                 // A deletion is narrated where it happened — the absent
@@ -415,6 +418,9 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
     for (id, pool) in &dest_pool {
         let mut dirs: Vec<(&str, i64)> = pool.iter().map(|(d, f)| (*d, *f)).collect();
         dirs.sort();
+        // Uncapped on purpose: this aggregate is a comparison key, not a
+        // line. The display cap may drop groups; a key that drops groups
+        // makes different stories compare equal.
         let agg = aggregate_locations(&dirs, &bases, usize::MAX);
         let key = agg
             .locations
@@ -650,6 +656,9 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
                         .iter()
                         .map(|(d, f)| (*d, *f))
                         .collect();
+                    // Uncapped on purpose: this aggregate is a comparison key,
+                    // not a line. The display cap may drop groups; a key that
+                    // drops groups makes different stories compare equal.
                     let agg = aggregate_locations(&dirs, &bases, usize::MAX);
                     let groups: Vec<String> = agg.locations.into_iter().map(|l| l.path).collect();
                     let multi = groups.len() > 1;

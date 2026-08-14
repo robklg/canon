@@ -181,7 +181,10 @@ pub fn compute_survey(
     let sel_object_ids: HashSet<i64> = hashed.iter().filter_map(|s| s.object_id).collect();
     let sel_source_ids: HashSet<i64> = selection.iter().map(|s| s.id).collect();
 
-    // Build object index from ALL active, non-excluded sources
+    // Build object index from ALL active, non-excluded sources.
+    // The outward side never widens with --include excluded: what a survey
+    // compares against is the visible world, so an excluded copy elsewhere is
+    // not evidence that selection content exists elsewhere.
     let index = ObjectIndex::build(
         all_sources
             .iter()
@@ -258,7 +261,10 @@ pub fn compute_survey(
 
         // Total hashed sources at location (not excluding selection sources).
         // Same visibility rules as shared_count: source-role only in default mode,
-        // all roles in --other mode.
+        // all roles in --other mode. Deliberately unfiltered by --where: "is
+        // this location a subset of my selection?" must be measured against
+        // everything that stands there, not just the content that matched the
+        // filter.
         let total_count: usize = all_sources
             .iter()
             .filter(|s| s.is_active())

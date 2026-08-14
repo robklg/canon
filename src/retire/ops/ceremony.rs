@@ -306,6 +306,9 @@ impl RetireCeremony {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        // Recorded now, while the decision is still open: a ceremony abandoned
+        // or interrupted after this point must still lead back to the book it
+        // bound.
         self.recorder.record_artifact_pointer(
             conn,
             self.plan.ledger_root_id,

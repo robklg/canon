@@ -428,6 +428,9 @@ fn print_event(
                 .map(|rows| aggregate_placement_lines(rows))
                 .unwrap_or_default();
             if !lines.is_empty() {
+                // Both sides aggregate the same rows the same way, so the
+                // counts match; if that ever stops being true, zip drops
+                // lines instead of complaining.
                 for (placement, cell) in lines.iter().zip(&cells) {
                     let row = &placement.row;
                     let narration = match placement.aspect {

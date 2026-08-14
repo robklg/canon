@@ -504,6 +504,10 @@ pub fn set_object_by_hash(
             hash,
             sources,
         } => {
+            // Object exclusion has no confirmation prompt: the command has no
+            // --dry-run flag, so a plain run is always this preview and --yes
+            // is what executes. Keep both halves — dropping either one turns a
+            // preview into a universe-wide dismissal.
             if options.dry_run {
                 println!("Would exclude object: {hash_prefix}...");
                 print_source_locations(&sources, options.verbose);
@@ -575,6 +579,10 @@ pub fn set_object_by_file(
             hash,
             sources,
         } => {
+            // Object exclusion has no confirmation prompt: the command has no
+            // --dry-run flag, so a plain run is always this preview and --yes
+            // is what executes. Keep both halves — dropping either one turns a
+            // preview into a universe-wide dismissal.
             if options.dry_run {
                 println!("Would exclude object: {hash_prefix}...");
                 print_source_locations(&sources, options.verbose);
@@ -654,6 +662,10 @@ pub fn set_objects_by_filter(
 
     let total_in_source_roots = plan.total_source_count - plan.total_archive_count;
 
+    // Object exclusion has no confirmation prompt: the command has no
+    // --dry-run flag, so a plain run is always this preview and --yes is what
+    // executes. Keep both halves — dropping either one turns a preview into a
+    // universe-wide dismissal.
     if options.dry_run {
         println!(
             "Would exclude {} objects affecting {} sources ({} in source roots, {} in archives):",

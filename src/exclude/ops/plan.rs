@@ -30,6 +30,10 @@ pub fn plan_set(conn: &mut Connection, params: &ExcludeSetParams) -> Result<Excl
         scopes: params.scopes.clone(),
         include: IncludeSet::default(),
         filters: params.filters.clone(),
+        // Source roots only, and not just for tidiness: clearing an exclusion
+        // only ever looks at source-role roots, so an exclusion that lands on
+        // an archive-role source could never be undone. The same policy guards
+        // the sibling plan functions below.
         role_policy: RolePolicy::SourceOnly,
     };
     let selection = selection::select_sources(conn, &sel_params)?;
@@ -220,6 +224,10 @@ pub fn plan_duplicates(
             .get(&oid)
             .map(|o| format!("{}:{}", o.hash_type, o.hash_value))
             .unwrap_or_default();
+        // The kept copies are re-derived here with the same test the duplicate
+        // rule uses to count them. If that rule changes, this must change with
+        // it — the receipt states which copies survived, and a stale rule here
+        // misstates it.
         let mut kept: Vec<ExcludeItemData> = sources_by_object
             .get(&oid)
             .map(|ss| {

@@ -244,6 +244,10 @@ fn relocate_pointer(
         };
     };
     let book_path = format!("{}/{}", book_root.path, book_rel);
+    // This mirrors, by hand, the layout the retirement gather writes
+    // (ledger files moved from ".canon-ledger/" into the book's "ledger/");
+    // if the gather's destination directory ever changes, this redirect
+    // silently stops finding the copy and misreports it as not gathered.
     let gathered_rel = receipt_rel
         .strip_prefix(".canon-ledger/")
         .unwrap_or(receipt_rel);

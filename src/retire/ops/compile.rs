@@ -89,6 +89,8 @@ pub fn compile_book(
             prefixes: vec![story.root.path.clone()],
             timeframe: None,
             include_notes: false,
+            // Uncapped on purpose: the book's timeline claims every decision
+            // this root ever saw, oldest first.
             limit: None,
         },
     )?;

@@ -185,6 +185,9 @@ fn print_finding(
             );
         }
     }
+    // Only when it would read below 100%: the threshold is where the
+    // percentage below rounds up, and "compared on 100%" is a line that
+    // says nothing.
     if finding.hash_coverage_pct < 0.9995 {
         println!("    compared on {} by size", pct(finding.hash_coverage_pct));
     }
@@ -217,6 +220,9 @@ fn print_hub(
     all: bool,
     handoff_line: &str,
 ) {
+    // A hub's headline is the shared counterpart, not any one subject — the
+    // reverse of a single finding, and the line below states that out loud
+    // because readers assume the subject otherwise.
     println!("#{rank}  {}", abs_path(&hub.counterpart));
     let status = if hub.counterpart_suspended {
         format!(

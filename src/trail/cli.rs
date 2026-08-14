@@ -116,6 +116,8 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<()> {
 
     let roots_map: HashMap<i64, Root> = all_roots.into_iter().map(|r| (r.id, r)).collect();
     if args.jsonl {
+        // Scope goes to stderr on this branch only: stdout under --jsonl
+        // carries nothing but the event stream.
         crate::scope::print_list_scope(&resolved);
         print_jsonl(&result)?;
     } else {

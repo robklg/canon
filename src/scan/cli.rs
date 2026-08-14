@@ -105,6 +105,8 @@ pub fn run(
 
         if filtered.is_empty() {
             println!("No roots to scan.");
+            // Returning before the recorder starts is deliberate: a scan with
+            // nothing to walk records no decision.
             return Ok(());
         }
 
@@ -152,6 +154,9 @@ pub fn run(
         let canonical = match fs::canonicalize(path) {
             Ok(p) => p,
             Err(e) => {
+                // Reaching this arm is the condition for --missing: the path
+                // could not be resolved, so it cannot be walked. Handling
+                // --missing anywhere else would mark live files deleted.
                 if missing {
                     // The folder is gone, so it can't be walked — mark its sources
                     // deleted directly, with the same stamp + source-local receipt
@@ -352,7 +357,9 @@ pub fn run(
         eprintln!("{w}");
     }
 
-    // Exit with error if there were unexpected hash changes (possible corruption)
+    // Exit with error if there were unexpected hash changes (possible corruption).
+    // Raised only after the decision and its receipts are finalized above —
+    // the scan's observations must be recorded even when it exits non-zero.
     if total_stats.unexpected_hash_changes > 0 {
         bail!(
             "{} files have unexpected hash changes (file may be corrupted or was modified without mtime change)",

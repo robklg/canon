@@ -164,6 +164,8 @@ pub fn retire(
     }
     println!("{}", story_pointer(&review.root.path));
 
+    // The report exits 0 even on a NOT READY verdict; only a real run turns
+    // that verdict into the non-zero exit below.
     if dry_run {
         return Ok(());
     }
@@ -201,6 +203,8 @@ pub fn retire(
         return Ok(());
     }
 
+    // The decision row starts here, after the confirmation — a declined
+    // prompt must leave no record of a retirement that never happened.
     let mut ceremony_state = super::ops::begin_ceremony(
         conn,
         story,

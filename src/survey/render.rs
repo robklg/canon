@@ -193,6 +193,8 @@ pub(super) fn print_archived_detail(
             for pair in &detail.pairs {
                 if seen.insert(&pair.selection_path) {
                     let display = crate::domain::path::format_path(&pair.selection_path, cwd);
+                    // Ignore write errors: a closed pipe (piped to head, say)
+                    // must end the command quietly, not panic.
                     let _ = write!(handle, "{}\0", display);
                 }
             }
