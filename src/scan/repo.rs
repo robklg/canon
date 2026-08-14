@@ -259,8 +259,8 @@ pub(crate) mod source {
     /// # Arguments
     /// - `conn`: Database connection
     /// - `root_id`: The root to fetch sources for
-    /// - `scan_prefix`: Optional path prefix to filter sources (e.g., "photos/" only returns
-    ///   sources whose rel_path starts with "photos/")
+    /// - `scan_prefix`: Optional path prefix bounding the scan ("photos" returns only
+    ///   sources at or under "photos/"; a trailing slash is accepted and means the same)
     pub fn fetch_source_ids_for_root(
         conn: &Connection,
         root_id: i64,
@@ -268,11 +268,17 @@ pub(crate) mod source {
     ) -> Result<Vec<i64>> {
         let ids: Vec<i64> = match scan_prefix {
             Some(prefix) => {
-                let pattern = format!("{prefix}%");
+                // The expected set feeds missing detection, so it must stop at the
+                // path separator: a scan scoped to "vacation" must never sweep a
+                // sibling like "vacation-2023" into deletion. Same boundary shape
+                // as the shared path-membership queries: the path itself, or
+                // anything under "{prefix}/".
+                let prefix = prefix.trim_end_matches('/');
                 conn.prepare(
-                    "SELECT id FROM sources WHERE root_id = ? AND present = 1 AND rel_path LIKE ?",
+                    "SELECT id FROM sources WHERE root_id = ? AND present = 1 \
+                     AND (rel_path = ? OR rel_path LIKE ? || '/%')",
                 )?
-                .query_map(rusqlite::params![root_id, pattern], |row| row.get(0))?
+                .query_map(rusqlite::params![root_id, prefix, prefix], |row| row.get(0))?
                 .collect::<Result<Vec<_>, _>>()?
             }
             None => conn
@@ -1162,6 +1168,26 @@ pub(crate) mod source {
             let all_ids = fetch_source_ids_for_root(&conn, root_id, None).unwrap();
             assert_eq!(all_ids.len(), 3);
             assert!(all_ids.contains(&id3));
+        }
+
+        #[test]
+        fn fetch_source_ids_for_root_prefix_stops_at_the_path_boundary() {
+            let conn = setup_test_db();
+
+            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let inside = insert_source(&conn, root_id, "alpha/a.jpg", None, true, false);
+            let dash_sibling = insert_source(&conn, root_id, "alpha-beta/b.jpg", None, true, false);
+            let run_on_sibling = insert_source(&conn, root_id, "alphabet/c.jpg", None, true, false);
+
+            // "alpha" bounds at the separator: neither string-prefix sibling matches.
+            let ids = fetch_source_ids_for_root(&conn, root_id, Some("alpha")).unwrap();
+            assert_eq!(ids, vec![inside]);
+            assert!(!ids.contains(&dash_sibling));
+            assert!(!ids.contains(&run_on_sibling));
+
+            // The trailing-slash spelling names the same scope.
+            let ids_slash = fetch_source_ids_for_root(&conn, root_id, Some("alpha/")).unwrap();
+            assert_eq!(ids_slash, vec![inside]);
         }
 
         // =========================================================================

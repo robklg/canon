@@ -1241,6 +1241,48 @@ mod tests {
     }
 
     #[test]
+    fn scan_root_scoped_prefix_does_not_sweep_string_prefix_siblings() {
+        // A scan scoped to "alpha" must not treat sources under "alpha-beta" —
+        // a sibling directory sharing "alpha" as a string prefix — as expected
+        // and then missing. The sibling's file stands on disk untouched the
+        // whole time; only the path boundary separates it from a false deletion.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_path = temp.path().to_str().unwrap();
+        let root_id = repo::insert_test_root(&conn, root_path, "source", false);
+
+        std::fs::create_dir(temp.path().join("alpha")).unwrap();
+        std::fs::create_dir(temp.path().join("alpha-beta")).unwrap();
+        std::fs::write(temp.path().join("alpha").join("a.txt"), "a").unwrap();
+        std::fs::write(temp.path().join("alpha-beta").join("b.txt"), "b").unwrap();
+        let sibling = repo::insert_test_source(&conn, root_id, "alpha-beta/b.txt", 1, 1, 1, 1000);
+
+        let now = current_timestamp();
+        let result = scan_root(
+            &conn,
+            root_id,
+            root_path,
+            Some("alpha"),
+            walk(&temp.path().join("alpha")),
+            &no_hash_options(),
+            &NoopProgress,
+            now,
+            Some(9),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(result.stats.missing, 0);
+        assert!(result.deleted_items.is_empty());
+        let present: i64 = conn
+            .query_row("SELECT present FROM sources WHERE id = ?", [sibling], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(present, 1);
+    }
+
+    #[test]
     fn scan_root_unstable_mount_records_no_deletion() {
         // When the walk root's device is unavailable (an unstable mount), missing
         // detection is skipped, so a pre-inserted source is neither marked missing
@@ -1399,6 +1441,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(work_present, 2);
+    }
+
+    #[test]
+    fn mark_missing_path_stops_at_the_path_boundary() {
+        // Marking "vacation" missing must not touch "vacation-2023" — a sibling
+        // directory sharing the name as a string prefix is outside the scope.
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        repo::insert_test_source(&conn, root_id, "vacation/img.jpg", 1, 200, 1000, 1000);
+        let sibling =
+            repo::insert_test_source(&conn, root_id, "vacation-2023/img.jpg", 1, 201, 1000, 1000);
+
+        let result = mark_missing_path(
+            &conn,
+            Path::new("/photos/vacation"),
+            &all_roots(&conn),
+            Path::new("/"),
+            9999,
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.missing_count, 1);
+        let present: i64 = conn
+            .query_row("SELECT present FROM sources WHERE id = ?", [sibling], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(present, 1);
     }
 
     #[test]
