@@ -186,6 +186,7 @@ mod tests {
         insert_object, insert_root, insert_source, insert_source_excluded, insert_source_with_size,
         setup_test_db,
     };
+    use crate::sweep::domain::structural::FindingNature;
 
     /// Two roots with one 20 MB duplicated folder (`big` ↔ `q`) and unique
     /// noise keeping the subjects from lifting to the whole root.
@@ -256,6 +257,36 @@ mod tests {
             compute_sweep(&conn, &default_options()).unwrap(),
             SweepOutcome::NoHashedContent
         ));
+    }
+
+    #[test]
+    fn suspended_counterpart_stays_in_the_universe_as_verify() {
+        // The sweep deliberately keeps suspended roots in its universe — the
+        // one inclusion policy that diverges from the query surfaces' active-
+        // only convention. Unifying it would delete the whole reconnect-to-
+        // verify surface, and worse: the residual would stop counting the
+        // suspended drive's copies, so content that exists elsewhere would
+        // read as unique. This drives the policy through compute_sweep's own
+        // fetch, which the domain-level suspension tests bypass.
+        let conn = setup_test_db();
+        let r1 = insert_root(&conn, "/r1", "source", false);
+        let r2 = insert_root(&conn, "/r2", "source", true);
+        let obj = insert_object(&conn, "dup", false);
+        insert_source_with_size(&conn, r1, "big/f", Some(obj), 20_000_000);
+        insert_source_with_size(&conn, r2, "q/f", Some(obj), 20_000_000);
+        let noise = insert_object(&conn, "noise", false);
+        insert_source_with_size(&conn, r1, "noise/u", Some(noise), 5_000_000);
+
+        let report = report(&conn, &default_options());
+        assert!(subject_prefixes(&report).contains(&("/r1".to_string(), "big".to_string())));
+        let verify = report.entries.iter().any(|e| match e {
+            LeaderboardEntry::Single(f) => f.nature == FindingNature::Verify,
+            LeaderboardEntry::Hub(h) => h.counterpart_suspended,
+        });
+        assert!(
+            verify,
+            "the suspended counterpart's finding must flag Verify"
+        );
     }
 
     #[test]
