@@ -129,6 +129,60 @@ fn verify_book_catches_a_missing_gathered_ledger() {
 }
 
 #[test]
+fn verify_book_accepts_an_ungathered_ledger_only_with_its_gap_stated() {
+    // The disconnected-drive book: the ledger was not gathered and the book
+    // says why. Verification accepts exactly that pairing — and refuses the
+    // same book with the explanation stripped, so the gap push and the
+    // gathered flag cannot drift apart without the bind failing.
+    let conn = open_in_memory_for_test();
+    let book_dir = tempfile::tempdir().unwrap();
+    let root_id = insert_test_root(&conn, "/definitely/not/a/real/path", "source", false);
+    insert_test_root(&conn, "/archive", "archive", false);
+    insert_source(&conn, root_id, "a.jpg", None, true, false, None);
+
+    let dest = book_dir.path().join("book");
+    compile_to(&conn, root_id, &dest);
+    verify_book(&dest).unwrap();
+
+    let meta_path = dest.join("meta.toml");
+    let mut meta: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+    meta["gaps"] = toml::Value::Array(vec![]);
+    std::fs::write(&meta_path, toml::to_string(&meta).unwrap()).unwrap();
+    let err = verify_book(&dest).unwrap_err();
+    assert!(err.to_string().contains("records no gap"));
+}
+
+#[test]
+fn verify_book_recounts_a_populated_gathered_ledger() {
+    // The gathered count is written from the copy and independently recounted
+    // from disk at verification; this takes the agreement at more than zero
+    // files, nested receipt paths included — the two counters must keep
+    // counting the same things.
+    let conn = open_in_memory_for_test();
+    let src_dir = tempfile::tempdir().unwrap();
+    let book_dir = tempfile::tempdir().unwrap();
+    let root_id = insert_test_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+    insert_test_root(&conn, "/archive", "archive", false);
+    std::fs::create_dir_all(src_dir.path().join(".canon-ledger/sub")).unwrap();
+    std::fs::write(src_dir.path().join(".canon-ledger/000009-scan.toml"), b"a").unwrap();
+    std::fs::write(
+        src_dir.path().join(".canon-ledger/sub/000010-scan.toml"),
+        b"b",
+    )
+    .unwrap();
+
+    let dest = book_dir.path().join("book");
+    let book = compile_to(&conn, root_id, &dest);
+    assert_eq!(book.ledger_files, Some(2));
+    verify_book(&dest).unwrap();
+
+    let meta: toml::Value =
+        toml::from_str(&std::fs::read_to_string(dest.join("meta.toml")).unwrap()).unwrap();
+    assert_eq!(meta["ledger"]["files"].as_integer(), Some(2));
+}
+
+#[test]
 fn the_compile_binds_and_claims_the_story() {
     let (conn, _src, _arch, root_id) = every_fate_fixture();
     let book_dir = tempfile::tempdir().unwrap();
