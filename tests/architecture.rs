@@ -67,6 +67,9 @@ fn classify_layer(rel_path: &str) -> Layer {
     if let Some(rest) = rel_path.strip_prefix("scan/") {
         return classify_subsystem_stratum(rest);
     }
+    if let Some(rest) = rel_path.strip_prefix("roots/") {
+        return classify_subsystem_stratum(rest);
+    }
     if rel_path.starts_with("domain/") {
         Layer::Domain
     } else if rel_path.starts_with("repo/") {
@@ -313,19 +316,9 @@ const TIER3: &[Tier3Entry] = &[
         severity: Severity::Read,
     },
     Tier3Entry {
-        file: "roots.rs",
+        file: "roots/cli.rs",
         reference: "repo::root::fetch_all",
         severity: Severity::Read,
-    },
-    Tier3Entry {
-        file: "roots.rs",
-        reference: "repo::root::fetch_file_counts",
-        severity: Severity::Read,
-    },
-    Tier3Entry {
-        file: "roots.rs",
-        reference: "repo::root::set_comment",
-        severity: Severity::Write,
     },
     Tier3Entry {
         file: "story/cli.rs",
@@ -379,6 +372,21 @@ const TIER3: &[Tier3Entry] = &[
     },
     Tier3Entry {
         file: "repo/note.rs",
+        reference: "crate::ops::test_helpers::setup_test_db",
+        severity: Severity::TestOnly,
+    },
+    Tier3Entry {
+        file: "roots/repo.rs",
+        reference: "crate::ops::test_helpers::insert_note",
+        severity: Severity::TestOnly,
+    },
+    Tier3Entry {
+        file: "roots/repo.rs",
+        reference: "crate::ops::test_helpers::insert_root",
+        severity: Severity::TestOnly,
+    },
+    Tier3Entry {
+        file: "roots/repo.rs",
         reference: "crate::ops::test_helpers::setup_test_db",
         severity: Severity::TestOnly,
     },
@@ -1604,6 +1612,18 @@ mod self_tests {
             ],
         ),
         ("scan", &["run", "find_candidates"]),
+        (
+            "roots",
+            &[
+                "list",
+                "remove",
+                "set_comment",
+                "suspend",
+                "unsuspend",
+                "remove_root_data",
+                "plan_remove",
+            ],
+        ),
     ];
 
     #[test]

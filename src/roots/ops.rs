@@ -5,12 +5,12 @@ use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::format_count;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::repo;
+use crate::roots::repo as roots_repo;
 
 // =============================================================================
 // roots rm: plan/execute
 // =============================================================================
 
-#[allow(dead_code)]
 pub struct RemoveRootPlan {
     pub root_id: i64,
     pub root_path: String,
@@ -37,6 +37,8 @@ pub struct RemovedRootData {
     pub deleted_notes: usize,
 }
 
+/// The removal's typed account. Only `summary` is printed today; the counts
+/// are the operation's result, kept for callers that report rather than echo.
 #[allow(dead_code)]
 pub struct RemoveRootResult {
     pub deleted_sources: i64,
@@ -101,8 +103,8 @@ pub fn plan_remove(conn: &Connection, root_id: i64) -> Result<RemoveRootPlan> {
 /// mechanics under rm's and retire's different decisions. No transaction
 /// management here; callers establish scope.
 pub fn remove_root_data(conn: &Connection, root_id: i64) -> Result<RemovedRootData> {
-    let deleted_notes = repo::note::delete_by_root(conn, root_id)?;
-    let deleted_sources = repo::root::remove(conn, root_id)?;
+    let deleted_notes = roots_repo::note::delete_by_root(conn, root_id)?;
+    let deleted_sources = roots_repo::root::remove(conn, root_id)?;
     Ok(RemovedRootData {
         deleted_sources,
         deleted_notes,
@@ -110,6 +112,11 @@ pub fn remove_root_data(conn: &Connection, root_id: i64) -> Result<RemovedRootDa
 }
 
 /// Execute the removal. Deletes notes, facts, sources, and the root.
+///
+/// Runs outside a transaction: the four deletes are separate statements, so an
+/// interruption partway can leave a root with some of its rows already gone.
+/// Retirement's release performs the same deletion inside one transaction —
+/// this path does not, and closing that gap is its own change.
 pub fn execute_remove(
     conn: &Connection,
     plan: &RemoveRootPlan,
@@ -150,6 +157,9 @@ pub fn execute_remove(
 // suspend/unsuspend: simple operations
 // =============================================================================
 
+/// The flip's typed account. Only `summary` is printed today; the identity
+/// and count are the operation's result, kept for callers that report rather
+/// than echo.
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct SuspendResult {
@@ -171,14 +181,18 @@ pub fn execute_suspend(
         .find(|r| r.id == root_id)
         .ok_or_else(|| anyhow::anyhow!("Root {} not found", root_id))?;
 
+    // "already suspended" is load-bearing text, not just a message: the caller
+    // matches on it to report a no-op as information rather than a failure.
     if root.is_suspended() {
         bail!("Root {} is already suspended: {}", root_id, root.path);
     }
 
+    // The recorder starts only past that check, so a no-op records nothing.
+
     let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
-    repo::root::set_suspended(conn, root_id, true)?;
-    let counts = repo::root::fetch_file_counts(conn, &[root_id])?;
+    roots_repo::root::set_suspended(conn, root_id, true)?;
+    let counts = roots_repo::root::fetch_file_counts(conn, &[root_id])?;
     let source_count = counts.get(&root_id).copied().unwrap_or(0);
 
     let summary = format!(
@@ -222,14 +236,18 @@ pub fn execute_unsuspend(
         .find(|r| r.id == root_id)
         .ok_or_else(|| anyhow::anyhow!("Root {} not found", root_id))?;
 
+    // "not suspended" is load-bearing text, matched by the caller the same way
+    // the suspend message is.
     if !root.is_suspended() {
         bail!("Root {} is not suspended: {}", root_id, root.path);
     }
 
+    // The recorder starts only past that check, so a no-op records nothing.
+
     let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
-    repo::root::set_suspended(conn, root_id, false)?;
-    let counts = repo::root::fetch_file_counts(conn, &[root_id])?;
+    roots_repo::root::set_suspended(conn, root_id, false)?;
+    let counts = roots_repo::root::fetch_file_counts(conn, &[root_id])?;
     let source_count = counts.get(&root_id).copied().unwrap_or(0);
 
     let summary = format!(
@@ -523,6 +541,8 @@ mod tests {
 
         let result = execute_suspend(&conn, root_id, None);
         assert!(result.is_err());
+        // The substring, not just the failure: the command surface matches on
+        // it to report the no-op as information instead of an error.
         assert!(result
             .unwrap_err()
             .to_string()
@@ -569,6 +589,7 @@ mod tests {
 
         let result = execute_unsuspend(&conn, root_id, None);
         assert!(result.is_err());
+        // The substring is matched by the command surface, same as suspend's.
         assert!(result.unwrap_err().to_string().contains("not suspended"));
     }
 

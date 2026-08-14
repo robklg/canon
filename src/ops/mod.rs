@@ -17,7 +17,6 @@ pub mod ledger;
 pub mod ls;
 pub mod note;
 pub mod receipt;
-pub mod roots;
 pub mod scope;
 pub mod selection;
 pub mod worklist;

@@ -391,7 +391,7 @@ fn abandon_after_bind_leaves_root_and_book_standing() {
     assert_eq!(decision.status, "partial");
 
     // The rm guard now reads the pointer: the story is already bound.
-    let plan = ops::roots::plan_remove(&conn, root_id).unwrap();
+    let plan = crate::roots::plan_remove(&conn, root_id).unwrap();
     let pointer = plan.retirement.expect("retirement pointer");
     assert!(pointer.artifact_display.contains("retired/"));
 }

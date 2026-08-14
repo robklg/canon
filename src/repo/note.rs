@@ -470,15 +470,6 @@ pub fn clear_subtree(conn: &Connection, root_id: i64, rel_path: &str) -> Result<
     Ok(deleted)
 }
 
-/// Delete all notes for a root. For use in roots rm.
-pub fn delete_by_root(conn: &Connection, root_id: i64) -> Result<usize> {
-    let deleted = conn.execute(
-        "DELETE FROM notes WHERE root_id = ?",
-        rusqlite::params![root_id],
-    )?;
-    Ok(deleted)
-}
-
 /// Count notes under each scope. Returns only non-zero counts.
 pub fn batch_count_subtree(
     conn: &Connection,
@@ -851,28 +842,6 @@ mod tests {
 
         let remaining = fetch_all(&conn).unwrap();
         assert_eq!(remaining.len(), 2);
-    }
-
-    // =========================================================================
-    // delete_by_root tests
-    // =========================================================================
-
-    #[test]
-    fn delete_by_root_removes_all_notes() {
-        let conn = setup_test_db();
-        let root1 = insert_root(&conn, "/photos", "source", false);
-        let root2 = insert_root(&conn, "/archive", "archive", false);
-
-        insert_note(&conn, root1, "a", "root1 note", 100);
-        insert_note(&conn, root1, "b", "root1 note2", 200);
-        insert_note(&conn, root2, "c", "root2 note", 300);
-
-        let count = delete_by_root(&conn, root1).unwrap();
-        assert_eq!(count, 2);
-
-        let remaining = fetch_all(&conn).unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].root_id, root2);
     }
 
     // =========================================================================

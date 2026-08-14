@@ -353,7 +353,7 @@ impl RetireCeremony {
             });
         }
 
-        let removed = ops::roots::remove_root_data(&tx, self.story.root.id)?;
+        let removed = crate::roots::remove_root_data(&tx, self.story.root.id)?;
         let summary = format!(
             "Retired {}: {} sources released; the story is bound at {book_display}",
             self.story.root.path,
