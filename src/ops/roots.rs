@@ -586,4 +586,122 @@ mod tests {
             format!("Unsuspended root {}: /mnt/drive (3 sources)", root_id)
         );
     }
+
+    // =========================================================================
+    // decision recording
+    // =========================================================================
+
+    /// DB-only recording: `roots` writes no receipt file, so no ledger root
+    /// needs to exist and nothing touches the filesystem.
+    fn recording_params(command: DecisionCommand, root_id: i64, root_path: &str) -> DecisionParams {
+        DecisionParams {
+            command,
+            scope: vec![crate::domain::scope::DecisionScope::new(
+                root_id,
+                root_path.to_string(),
+                String::new(),
+            )],
+            command_line: "canon roots".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: false,
+            ledger_config: crate::domain::config::LedgerConfig::default(),
+        }
+    }
+
+    fn decision_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn execute_remove_records_a_completed_decision() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "a.jpg");
+        insert_source(&conn, root_id, "b.jpg");
+
+        let plan = plan_remove(&conn, root_id).unwrap();
+        let params = recording_params(DecisionCommand::RootsRm, root_id, "/photos");
+        execute_remove(&conn, &plan, Some(&params)).unwrap();
+
+        assert_eq!(decision_count(&conn), 1);
+        let (command, status, attempted, completed): (String, String, i64, i64) = conn
+            .query_row(
+                "SELECT command, status, count_attempted, count_completed FROM decisions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(command, "roots_rm");
+        assert_eq!(status, "completed");
+        assert_eq!(attempted, 2);
+        assert_eq!(completed, 2);
+    }
+
+    #[test]
+    fn execute_suspend_records_a_completed_decision() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        let params = recording_params(DecisionCommand::RootsSuspend, root_id, "/photos");
+        execute_suspend(&conn, root_id, Some(&params)).unwrap();
+
+        assert_eq!(decision_count(&conn), 1);
+        let (command, status): (String, String) = conn
+            .query_row("SELECT command, status FROM decisions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(command, "roots_suspend");
+        assert_eq!(status, "completed");
+    }
+
+    #[test]
+    fn suspend_of_a_suspended_root_records_nothing() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+
+        let params = recording_params(DecisionCommand::RootsSuspend, root_id, "/photos");
+        assert!(execute_suspend(&conn, root_id, Some(&params)).is_err());
+
+        assert_eq!(
+            decision_count(&conn),
+            0,
+            "a root already in the asked-for state changes nothing, so there is nothing to record"
+        );
+    }
+
+    #[test]
+    fn execute_unsuspend_records_a_completed_decision() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+
+        let params = recording_params(DecisionCommand::RootsUnsuspend, root_id, "/photos");
+        execute_unsuspend(&conn, root_id, Some(&params)).unwrap();
+
+        assert_eq!(decision_count(&conn), 1);
+        let (command, status): (String, String) = conn
+            .query_row("SELECT command, status FROM decisions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(command, "roots_unsuspend");
+        assert_eq!(status, "completed");
+    }
+
+    #[test]
+    fn unsuspend_of_an_active_root_records_nothing() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        let params = recording_params(DecisionCommand::RootsUnsuspend, root_id, "/photos");
+        assert!(execute_unsuspend(&conn, root_id, Some(&params)).is_err());
+
+        assert_eq!(
+            decision_count(&conn),
+            0,
+            "a root already in the asked-for state changes nothing, so there is nothing to record"
+        );
+    }
 }
