@@ -900,6 +900,61 @@ mod tests {
     }
 
     #[test]
+    fn the_cap_never_leaves_a_reason_citation_dangling() {
+        // The once-rule renders a decision's full reason at its first slice
+        // in render order and cites the bare id everywhere else; the cap
+        // truncates in that same order, as a prefix cut. Together they
+        // guarantee a rendered citation always has its reason rendered in
+        // the same output — reorder the walk or change the cap's shape and
+        // the site place can drop while a citing slice survives, leaving a
+        // bare id that points at nothing.
+        let reason = "duplicates of the album";
+        let build = || {
+            let mut early = place("a-early");
+            early
+                .acts
+                .push(act("excluded", 2, vec![(31, Some(reason))]));
+            let mut late = place("z-late");
+            let mut cited = act("excluded", 3, vec![(31, Some(reason))]);
+            cited.decisions[0].reason_here = false;
+            late.acts.push(cited);
+            let mut root = place("");
+            root.children.push(early);
+            root.children.push(late);
+            root
+        };
+
+        for cap in [1, 2] {
+            let lines = story_lines(&report(build()), cap, 0);
+            let has_bare_cite = lines
+                .iter()
+                .any(|l| l.contains("#31") && !l.contains(reason));
+            if has_bare_cite {
+                assert!(
+                    lines.iter().any(|l| l.contains(reason)),
+                    "citation #31 dangles at cap {cap} in:\n{}",
+                    lines.join("\n")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn judgment_keeps_the_historical_fixed_plural_on_one_file() {
+        // The judgment act line is a fixed plural by the byte-parity pin —
+        // "excluded 1 files" is the historical wording. Routing it through
+        // the reference voicing's file_noun would silently change pinned
+        // output; this pins the singular case the golden fixture misses.
+        let mut lone = place("lone");
+        lone.acts.push(act("excluded", 1, vec![(7, None)]));
+        let mut root = place("");
+        root.children.push(lone);
+
+        let lines = story_lines(&report(root), usize::MAX, 0);
+        assert_has_line(&lines, "excluded 1 files");
+    }
+
+    #[test]
     fn a_bare_root_still_tells_its_empty_story() {
         let lines = story_lines(&report(place("")), usize::MAX, 0);
         assert_has_line(&lines, "  (root)");

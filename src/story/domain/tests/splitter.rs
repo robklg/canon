@@ -13,6 +13,34 @@ use super::fixtures::{
 };
 
 #[test]
+fn archive_stamped_row_does_not_double_count_the_extraction() {
+    // A cross-device move marks the origin row absent with apply's own
+    // decision stamp; the extraction row already narrates that archival.
+    // The stamp must narrate nothing — one more atom under the same
+    // (decision, transition) key would merge with the extraction's and
+    // claim the files twice, in the live story and in the book.
+    let mut f = Fixture::new();
+    f.absent.push(stamped(1, "some/dir/a.jpg", Some(1001), 50));
+    f.extractions
+        .push(extraction(50, "some/dir", 1, "/archive/photos"));
+    f.decisions
+        .insert(50, dinfo(DecisionFamily::Archive, 500, None));
+
+    let root = f.build(&no_dust());
+
+    fn archived_files(place: &StoryPlace) -> i64 {
+        place
+            .acts
+            .iter()
+            .filter(|g| g.transition == "archived")
+            .map(|g| g.files)
+            .sum::<i64>()
+            + place.children.iter().map(archived_files).sum::<i64>()
+    }
+    assert_eq!(archived_files(&root), 1);
+}
+
+#[test]
 fn empty_root_is_a_bare_root_place() {
     let fx = Fixture::new();
     let root = fx.build(&no_dust());
