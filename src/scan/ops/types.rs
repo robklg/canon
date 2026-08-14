@@ -40,6 +40,11 @@ pub struct ScanStats {
     /// that *couldn't verify* absence is distinguishable from one that verified
     /// nothing was missing.
     pub missing_detection_skipped: u64,
+    /// Number of walk entries that could not be read (permissions, I/O). A
+    /// non-zero count gates missing detection for the affected root — part of
+    /// the tree went unseen, and unseen must never read as deleted — and lands
+    /// in the durable decision summary like the mount-guard skip.
+    pub walk_errors: u64,
 }
 
 impl ScanStats {
@@ -55,6 +60,12 @@ impl ScanStats {
             summary.push_str(&format!(
                 ", missing detection skipped on {} roots (mount unstable)",
                 self.missing_detection_skipped
+            ));
+        }
+        if self.walk_errors > 0 {
+            summary.push_str(&format!(
+                ", {} walk errors (missing detection skipped)",
+                self.walk_errors
             ));
         }
         if self.skipped > 0 {
@@ -161,5 +172,22 @@ mod tests {
         assert!(!ScanStats::default()
             .compose_summary()
             .contains("missing detection"));
+    }
+
+    #[test]
+    fn compose_summary_records_walk_errors() {
+        // Walk errors reach the durable summary with the skip stated — an
+        // incomplete walk must not read like a complete one.
+        let stats = ScanStats {
+            scanned: 5,
+            walk_errors: 3,
+            ..Default::default()
+        };
+        assert!(stats
+            .compose_summary()
+            .contains("3 walk errors (missing detection skipped)"));
+        assert!(!ScanStats::default()
+            .compose_summary()
+            .contains("walk errors"));
     }
 }

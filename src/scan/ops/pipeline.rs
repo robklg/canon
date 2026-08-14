@@ -83,6 +83,10 @@ pub fn scan_root(
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
+                // Counted, not just warned: an unreadable entry means part of
+                // the tree went unseen, which gates missing detection below —
+                // unseen must never read as deleted.
+                stats.walk_errors += 1;
                 progress.on_walk_error(&e.to_string());
                 continue;
             }
@@ -248,7 +252,7 @@ pub fn scan_root(
         && post_walk_device.is_some()
         && pre_walk_device == post_walk_device;
 
-    if mount_stable {
+    if mount_stable && stats.walk_errors == 0 {
         // Identify sources that are truly missing using pure domain function
         // Sources not seen during walk AND not handled by empty-dir logic are missing
         let all_accounted: HashSet<i64> = seen_source_ids.union(&handled_ids).copied().collect();
@@ -257,19 +261,32 @@ pub fn scan_root(
             outcomes.push((id, SourceOutcome::Missing));
         }
     } else {
-        // The skip is counted in the stats — not just warned about — so the
-        // decision summary durably records that this scan could not verify
-        // absence (a scan that couldn't observe deletions must be
-        // distinguishable in the trail from one that observed none).
-        stats.missing_detection_skipped = 1;
-        let detail = if pre_walk_device != post_walk_device {
-            "Mount changed during scan"
+        // Inferred absence cannot be trusted on an unstable or incomplete
+        // walk: unseen is not evidence of gone. Every inferred Missing is
+        // discarded — the post-walk difference is never computed, and Missing
+        // classifications from empty directories are dropped too (their
+        // Disconnected siblings stand; those never mark deletion by
+        // themselves). The skip is counted in the stats — not just warned
+        // about — so the decision summary durably records that this scan
+        // could not verify absence (a scan that couldn't observe deletions
+        // must be distinguishable in the trail from one that observed none).
+        outcomes.retain(|(_, outcome)| !matches!(outcome, SourceOutcome::Missing));
+        if !mount_stable {
+            stats.missing_detection_skipped = 1;
+            let detail = if pre_walk_device != post_walk_device {
+                "Mount changed during scan"
+            } else {
+                "Mount device could not be verified"
+            };
+            warnings.push(format!(
+                "{detail} — skipping missing detection to avoid data loss"
+            ));
         } else {
-            "Mount device could not be verified"
-        };
-        warnings.push(format!(
-            "{detail} — skipping missing detection to avoid data loss"
-        ));
+            warnings.push(format!(
+                "{} walk errors — skipping missing detection to avoid data loss",
+                stats.walk_errors
+            ));
+        }
     }
 
     // Mark missing/disconnected files based on outcomes. Deletion receipt items
@@ -1331,6 +1348,125 @@ mod tests {
     /// placeholder (`/`).
     fn all_roots(conn: &Connection) -> Vec<crate::domain::root::Root> {
         repo::root::fetch_all(conn).unwrap()
+    }
+
+    #[test]
+    fn scan_root_walk_error_skips_missing_detection() {
+        // An unreadable directory means part of the tree went unseen; a source
+        // that merely wasn't seen must not be marked deleted on such a walk.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_path = temp.path().to_str().unwrap();
+        let root_id = repo::insert_test_root(&conn, root_path, "source", false);
+        let unseen = repo::insert_test_source(&conn, root_id, "sub/gone.txt", 1, 1, 100, 1000);
+        std::fs::write(temp.path().join("here.txt"), "data").unwrap();
+
+        // A real walk error, produced by walking a path that does not exist,
+        // chained after the real entries.
+        let err = WalkDir::new(temp.path().join("no-such-dir"))
+            .into_iter()
+            .next()
+            .unwrap()
+            .unwrap_err();
+        let entries = walk(temp.path()).chain(std::iter::once(Err(err)));
+
+        let now = current_timestamp();
+        let result = scan_root(
+            &conn,
+            root_id,
+            root_path,
+            None,
+            entries,
+            &no_hash_options(),
+            &NoopProgress,
+            now,
+            Some(5),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(result.stats.walk_errors, 1);
+        assert_eq!(result.stats.missing, 0);
+        assert_eq!(result.stats.missing_detection_skipped, 0);
+        assert!(result.deleted_items.is_empty());
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("walk errors — skipping missing detection")));
+        let present: i64 = conn
+            .query_row("SELECT present FROM sources WHERE id = ?", [unseen], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(present, 1);
+    }
+
+    #[test]
+    fn scan_root_unstable_mount_discards_empty_dir_missing() {
+        // Missing classifications from empty directories obey the mount guard
+        // too: a walk whose device story cannot be verified must not delete —
+        // otherwise one scan could both say "missing detection skipped" and
+        // still write a deletion record.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_path = temp.path().to_str().unwrap();
+        let root_id = repo::insert_test_root(&conn, root_path, "source", false);
+
+        // The scan is scoped to "vanishing", which holds an empty dir whose
+        // DB source sits on the same device — the empty-dir classifier will
+        // mark it Missing mid-walk.
+        let scoped = temp.path().join("vanishing");
+        std::fs::create_dir(&scoped).unwrap();
+        std::fs::create_dir(scoped.join("emptied")).unwrap();
+        let device = get_dir_device(temp.path()).unwrap();
+        let gone = repo::insert_test_source(
+            &conn,
+            root_id,
+            "vanishing/emptied/gone.txt",
+            device,
+            7,
+            100,
+            1000,
+        );
+
+        // An extra entry outside the scoped dir, captured up front; yielding
+        // it removes the scoped dir so the post-walk device check fails.
+        std::fs::create_dir(temp.path().join("other")).unwrap();
+        std::fs::write(temp.path().join("other").join("x.txt"), "x").unwrap();
+        let extra = WalkDir::new(temp.path().join("other"))
+            .into_iter()
+            .nth(1)
+            .unwrap();
+        let scoped_clone = scoped.clone();
+        let entries = walk(&scoped).chain(std::iter::once_with(move || {
+            std::fs::remove_dir_all(&scoped_clone).unwrap();
+            extra
+        }));
+
+        let now = current_timestamp();
+        let result = scan_root(
+            &conn,
+            root_id,
+            root_path,
+            Some("vanishing"),
+            entries,
+            &no_hash_options(),
+            &NoopProgress,
+            now,
+            Some(5),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(result.stats.missing_detection_skipped, 1);
+        assert_eq!(result.stats.missing, 0);
+        assert!(result.deleted_items.is_empty());
+        let present: i64 = conn
+            .query_row("SELECT present FROM sources WHERE id = ?", [gone], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(present, 1);
     }
 
     #[test]
