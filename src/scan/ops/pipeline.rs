@@ -518,6 +518,16 @@ pub fn mark_missing_path(
             ),
         };
 
+    // The same suspended-root refusal the walk path makes. It matters most
+    // here: a suspended root is precisely one whose path fails to
+    // canonicalize, so --missing is the arm that would otherwise reach it
+    // and mark a disconnected drive's sources deleted.
+    if let Some(root) = roots.iter().find(|r| r.id == root_id) {
+        if root.is_suspended() {
+            bail!("Root '{root_path}' is suspended. Use 'canon roots unsuspend' to reactivate.");
+        }
+    }
+
     let prefix_arg = if rel_prefix.is_empty() {
         None
     } else {
@@ -1506,6 +1516,38 @@ mod tests {
             )
             .unwrap();
         assert_eq!(present, 0);
+    }
+
+    #[test]
+    fn mark_missing_path_refuses_a_suspended_root() {
+        // A suspended root's path is exactly one that fails to canonicalize,
+        // so --missing lands here — without the refusal it would mark a
+        // disconnected drive's sources deleted.
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", true);
+        let src = repo::insert_test_source(&conn, root_id, "vacation/img.jpg", 1, 100, 1000, 1000);
+
+        let result = mark_missing_path(
+            &conn,
+            Path::new("/photos/vacation"),
+            &all_roots(&conn),
+            Path::new("/"),
+            9999,
+            None,
+            false,
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("suspended"));
+        let present: i64 = conn
+            .query_row("SELECT present FROM sources WHERE id = ?", [src], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            present, 1,
+            "no source on a suspended root is marked deleted"
+        );
     }
 
     #[test]
