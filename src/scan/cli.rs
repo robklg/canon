@@ -266,10 +266,7 @@ pub fn run(
             Some(prefix) => root_path.join(prefix),
             None => root_path.clone(),
         };
-        let walker = WalkDir::new(&walk_path)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| !(e.file_type().is_dir() && e.file_name() == ".canon-ledger"));
+        let walker = scan_walker(&walk_path);
 
         let result = scan_root(
             conn,
@@ -461,6 +458,18 @@ pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The scan's directory walker. The `.canon-ledger` filter here is the only
+/// thing keeping receipt files out of the index — without it, canon would
+/// index its own ledger as sources.
+fn scan_walker(
+    path: &std::path::Path,
+) -> impl Iterator<Item = Result<walkdir::DirEntry, walkdir::Error>> {
+    WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| !(e.file_type().is_dir() && e.file_name() == ".canon-ledger"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,7 +483,6 @@ mod tests {
     // =========================================================================
 
     use std::fs;
-    use walkdir::WalkDir;
 
     struct NoopProgress;
     impl ScanProgress for NoopProgress {
@@ -494,10 +502,9 @@ mod tests {
         };
         let now = current_timestamp();
 
-        let walker = WalkDir::new(root_path)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| !(e.file_type().is_dir() && e.file_name() == ".canon-ledger"));
+        // The production walker itself, not a copy of its filter — deleting
+        // the filter from scan_walker must fail these tests.
+        let walker = scan_walker(root_path);
 
         scan_root(
             &conn,
