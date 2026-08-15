@@ -86,39 +86,6 @@ pub fn fetch_subtree(conn: &Connection, root_id: i64, rel_path: &str) -> Result<
     Ok(notes)
 }
 
-/// Fetch notes for scope + descendants, ordered by path then chronologically (ASC).
-#[allow(dead_code)]
-pub fn fetch_subtree_chronological(
-    conn: &Connection,
-    root_id: i64,
-    rel_path: &str,
-) -> Result<Vec<Note>> {
-    let sql = if rel_path.is_empty() {
-        format!("SELECT {NOTE_COLUMNS} FROM notes WHERE root_id = ? ORDER BY rel_path, created_at")
-    } else {
-        format!(
-            "SELECT {NOTE_COLUMNS} FROM notes WHERE root_id = ? AND {} ORDER BY rel_path, created_at",
-            crate::repo::db::path_at_or_under_sql("rel_path")
-        )
-    };
-
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = if rel_path.is_empty() {
-        stmt.query_map(rusqlite::params![root_id], note_from_row)?
-    } else {
-        stmt.query_map(
-            rusqlite::params![root_id, rel_path, rel_path, rel_path],
-            note_from_row,
-        )?
-    };
-
-    let mut notes = Vec::new();
-    for row in rows {
-        notes.push(row?);
-    }
-    Ok(notes)
-}
-
 /// Fetch all notes on the given roots (chunked). Prefix filtering against a
 /// viewed scope is domain logic — SQL never compares paths.
 pub fn fetch_by_roots(conn: &Connection, root_ids: &[i64]) -> Result<Vec<Note>> {
