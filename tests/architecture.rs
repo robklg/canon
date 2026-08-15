@@ -73,6 +73,9 @@ fn classify_layer(rel_path: &str) -> Layer {
     if let Some(rest) = rel_path.strip_prefix("notes/") {
         return classify_subsystem_stratum(rest);
     }
+    if let Some(rest) = rel_path.strip_prefix("facts/") {
+        return classify_subsystem_stratum(rest);
+    }
     if rel_path.starts_with("domain/") {
         Layer::Domain
     } else if rel_path.starts_with("repo/") {
@@ -292,12 +295,12 @@ const TIER3: &[Tier3Entry] = &[
         severity: Severity::Read,
     },
     Tier3Entry {
-        file: "facts.rs",
+        file: "facts/cli.rs",
         reference: "repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
-        file: "import_facts.rs",
+        file: "facts/cli/import.rs",
         reference: "repo::root::fetch_all",
         severity: Severity::Read,
     },
@@ -1635,6 +1638,19 @@ mod self_tests {
                 "survey_note_context",
                 "SurveyNoteContext",
                 "format_note_date",
+            ],
+        ),
+        (
+            "facts",
+            &[
+                "run",
+                "import_run",
+                "delete_facts",
+                "DeleteOptions",
+                "prune_stale",
+                "prune_orphaned_objects",
+                "prune_excluded_facts",
+                "show_aliases",
             ],
         ),
     ];

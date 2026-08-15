@@ -75,7 +75,6 @@ mod compare;
 mod coverage;
 mod exclude;
 mod facts;
-mod import_facts;
 mod ledger;
 mod ls;
 mod notes;
@@ -937,7 +936,7 @@ fn main() -> Result<()> {
         }
         Commands::ImportFacts { allow, verbose } => {
             let allow_archived = allow.contains(&ImportFactsAllow::Archived);
-            import_facts::run(
+            facts::import_run(
                 &mut db,
                 allow_archived,
                 verbose,

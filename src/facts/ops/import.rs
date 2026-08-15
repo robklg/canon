@@ -14,7 +14,8 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::domain::fact::{is_content_fact, normalize_fact_key, FactValueType};
+use crate::facts::domain::{is_content_fact, normalize_fact_key, FactValueType};
+use crate::facts::repo as facts_repo;
 use crate::repo::{self, Connection};
 
 // ============================================================================
@@ -97,7 +98,7 @@ pub struct RecordOutcome {
 
 /// Initialize import state by loading the existing fact type map from the database.
 pub fn init_state(conn: &Connection) -> Result<ImportState> {
-    let fact_type_map = repo::fact::fetch_type_map(conn)?;
+    let fact_type_map = facts_repo::fetch_type_map(conn)?;
     Ok(ImportState {
         fact_type_map,
         type_mismatch_keys: HashMap::new(),
@@ -250,7 +251,7 @@ pub fn process_record(
             outcome
                 .verbose_lines
                 .push(format!("  {key}: {value} (on object)"));
-            repo::fact::upsert(
+            facts_repo::upsert(
                 conn,
                 "object",
                 oid,
@@ -267,7 +268,7 @@ pub fn process_record(
             outcome
                 .verbose_lines
                 .push(format!("  {key}: {value} (on source)"));
-            repo::fact::upsert(
+            facts_repo::upsert(
                 conn,
                 "source",
                 record.source_id,
@@ -517,13 +518,13 @@ fn get_typed_value_type(typed: &TypedValue) -> Option<FactValueType> {
 /// The counter follows the insert, not the delete — it counts facts the object
 /// gained, not source rows removed.
 fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> Result<u64> {
-    let facts = repo::fact::fetch_source_facts(conn, source_id)?;
+    let facts = facts_repo::fetch_source_facts(conn, source_id)?;
 
     let mut promoted = 0u64;
     for fact in facts {
         if is_content_fact(&fact.key) {
-            if !repo::fact::object_has_fact(conn, object_id, &fact.key)? {
-                repo::fact::insert_object_fact(
+            if !facts_repo::object_has_fact(conn, object_id, &fact.key)? {
+                facts_repo::insert_object_fact(
                     conn,
                     object_id,
                     &fact.key,
@@ -534,7 +535,7 @@ fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> R
                 )?;
                 promoted += 1;
             }
-            repo::fact::delete_by_id(conn, fact.id)?;
+            facts_repo::delete_by_id(conn, fact.id)?;
         }
     }
 
@@ -920,7 +921,7 @@ mod tests {
         let obj = insert_object(&conn, "hash1", false);
         let src = insert_source(&conn, root, "photo.jpg", Some(obj));
         crate::ops::test_helpers::insert_fact(&conn, src, "content.Make", "Nikon");
-        repo::fact::insert_object_fact(&conn, obj, "content.Make", Some("Canon"), None, None, 0)
+        facts_repo::insert_object_fact(&conn, obj, "content.Make", Some("Canon"), None, None, 0)
             .unwrap();
 
         let promoted = promote_content_facts(&conn, src, obj).unwrap();

@@ -4,12 +4,12 @@ use std::io::{self, BufRead};
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::scope::DecisionScope;
-use crate::ops;
+use crate::facts::ops::import as facts_import;
+use crate::facts::ops::import::ImportRecord;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
-use crate::ops::import_facts::ImportRecord;
 use crate::repo::{self, Db};
 
-pub fn run(
+pub fn import_run(
     db: &mut Db,
     allow_archived: bool,
     verbose: bool,
@@ -18,7 +18,7 @@ pub fn run(
     no_receipt: bool,
 ) -> Result<()> {
     let conn = db.conn_mut();
-    let mut state = ops::import_facts::init_state(conn)?;
+    let mut state = facts_import::init_state(conn)?;
 
     let decision = DecisionParams {
         command: DecisionCommand::ImportFacts,
@@ -51,7 +51,7 @@ pub fn run(
             }
         };
 
-        match ops::import_facts::process_record(conn, &record, &mut state, allow_archived) {
+        match facts_import::process_record(conn, &record, &mut state, allow_archived) {
             Ok(outcome) => {
                 for warning in &outcome.warnings {
                     eprintln!("Warning: {warning}");
