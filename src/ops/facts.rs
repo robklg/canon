@@ -652,6 +652,14 @@ pub struct DeleteResult {
 }
 
 /// Execute fact deletion.
+///
+/// Records unconditionally: every caller checks the plan first and returns
+/// early on an empty one, so a decision row here always describes a real
+/// deletion. A caller that skipped that check would record an empty act.
+///
+/// The summary and counts come from the plan, not from the delete's own
+/// return — they describe what was counted, which is the same thing only as
+/// long as nothing changed the facts in between.
 pub fn execute_delete(
     conn: &mut Connection,
     source_ids: &[i64],
@@ -707,6 +715,9 @@ pub struct PruneStaleResult {
 }
 
 /// Execute stale fact pruning.
+///
+/// Records unconditionally — the caller's empty-plan check is what keeps a
+/// decision row from describing nothing.
 pub fn execute_prune_stale(
     conn: &Connection,
     decision: Option<&DecisionParams>,
@@ -749,6 +760,9 @@ pub struct PruneOrphanedResult {
 }
 
 /// Execute orphaned object pruning. Owns the transaction for atomicity.
+///
+/// Records unconditionally — the caller's empty-plan check is what keeps a
+/// decision row from describing nothing.
 pub fn execute_prune_orphaned(
     db: &mut Db,
     decision: Option<&DecisionParams>,
@@ -815,6 +829,11 @@ pub struct PruneExcludedResult {
 }
 
 /// Execute excluded fact pruning.
+///
+/// Records unconditionally — the caller's empty-plan check is what keeps a
+/// decision row from describing nothing. Note that a delete finding nothing
+/// composes an empty summary here, which is why the caller checks before
+/// printing it.
 pub fn execute_prune_excluded(
     conn: &Connection,
     scope: &str,
@@ -1170,5 +1189,148 @@ mod tests {
         assert!(validate_prune_excluded_scope("object").is_ok());
         assert!(validate_prune_excluded_scope("invalid").is_err());
         assert!(validate_prune_excluded_scope("").is_err());
+    }
+
+    // =========================================================================
+    // Decision recording on the execute paths
+    // =========================================================================
+
+    /// A decision with recording on and receipts off — fact maintenance leaves
+    /// a decision row and never a receipt (facts are the user's scaffolding,
+    /// not content, so no fate is being recorded).
+    fn recording_decision(command: crate::domain::decision::DecisionCommand) -> DecisionParams {
+        DecisionParams {
+            command,
+            scope: Vec::new(),
+            command_line: "canon facts".to_string(),
+            reason: None,
+            record_enabled: true,
+            receipt_enabled: false,
+            ledger_config: crate::domain::config::LedgerConfig::default(),
+        }
+    }
+
+    /// The one decision row: command, status, attempted/completed, summary.
+    fn only_decision(conn: &Connection) -> (String, String, i64, i64, String) {
+        conn.query_row(
+            "SELECT command, status, count_attempted, count_completed, summary FROM decisions",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn execute_delete_records_the_decision() {
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "h1", false);
+        let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj));
+        crate::ops::test_helpers::insert_fact(&conn, s1, "content.Make", "Canon");
+
+        let plan = plan_delete(&mut conn, &[s1], "content.Make", "source", None).unwrap();
+        let decision = recording_decision(crate::domain::decision::DecisionCommand::FactsDelete);
+        let result = execute_delete(
+            &mut conn,
+            &[s1],
+            "content.Make",
+            "source",
+            None,
+            &plan,
+            Some(&decision),
+        )
+        .unwrap();
+
+        let (command, status, attempted, completed, summary) = only_decision(&conn);
+        assert_eq!(command, "facts_delete");
+        assert_eq!(status, "completed");
+        assert_eq!(attempted, 1);
+        assert_eq!(completed, 1);
+        assert_eq!(summary, result.summary);
+        assert!(!summary.is_empty());
+    }
+
+    #[test]
+    fn execute_prune_stale_records_the_decision() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "h1", false);
+        let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj));
+        // A fact observed against an older basis than the source now carries.
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at,
+                                observed_basis_rev)
+             VALUES ('source', ?1, 'content.Make', 'Canon', 0, 1)",
+            rusqlite::params![s1],
+        )
+        .unwrap();
+        conn.execute("UPDATE sources SET basis_rev = 2 WHERE id = ?1", [s1])
+            .unwrap();
+
+        assert_eq!(plan_prune_stale(&conn).unwrap().stale_count, 1);
+
+        let decision = recording_decision(crate::domain::decision::DecisionCommand::Prune);
+        let result = execute_prune_stale(&conn, Some(&decision)).unwrap();
+
+        let (command, status, attempted, completed, summary) = only_decision(&conn);
+        assert_eq!(command, "prune");
+        assert_eq!(status, "completed");
+        assert_eq!(attempted, 1);
+        assert_eq!(completed, 1);
+        assert_eq!(summary, result.summary);
+    }
+
+    #[test]
+    fn execute_prune_orphaned_records_the_decision() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "gone", false);
+        let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj));
+        // The source is no longer present, so its object is orphaned.
+        conn.execute("UPDATE sources SET present = 0 WHERE id = ?1", [s1])
+            .unwrap();
+
+        let mut db = crate::repo::Db::from_connection(conn);
+        let decision = recording_decision(crate::domain::decision::DecisionCommand::Prune);
+        let result = execute_prune_orphaned(&mut db, Some(&decision)).unwrap();
+        assert_eq!(result.stats.object_count, 1);
+
+        let (command, status, attempted, completed, summary) = only_decision(db.conn());
+        assert_eq!(command, "prune");
+        assert_eq!(status, "completed");
+        assert_eq!(attempted, completed);
+        assert_eq!(summary, result.summary);
+    }
+
+    #[test]
+    fn execute_prune_excluded_records_the_decision() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "h1", false);
+        let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj));
+        conn.execute("UPDATE sources SET excluded = 1 WHERE id = ?1", [s1])
+            .unwrap();
+        crate::ops::test_helpers::insert_fact(&conn, s1, "content.Make", "Canon");
+
+        assert_eq!(plan_prune_excluded(&conn, "all").unwrap().total_count(), 1);
+
+        let decision = recording_decision(crate::domain::decision::DecisionCommand::Prune);
+        let result = execute_prune_excluded(&conn, "all", Some(&decision)).unwrap();
+
+        let (command, status, attempted, completed, summary) = only_decision(&conn);
+        assert_eq!(command, "prune");
+        assert_eq!(status, "completed");
+        assert_eq!(attempted, 1);
+        assert_eq!(completed, 1);
+        assert_eq!(summary, result.summary);
+        assert!(!summary.is_empty());
     }
 }
