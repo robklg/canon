@@ -3,7 +3,8 @@ use rusqlite::Connection;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::ops::test_helpers::{
-    insert_object, insert_root, insert_source, insert_source_excluded, setup_test_db,
+    insert_object, insert_root, insert_source, insert_source_excluded, insert_source_with_size,
+    setup_test_db,
 };
 use crate::survey::domain::analysis::LocationKind;
 use crate::survey::ops::compute::{compute_survey, SurveyOutcome, SurveyParams};
@@ -745,6 +746,103 @@ fn test_other_basic() {
             assert_eq!(loc.complementary_count, Some(2));
             assert_eq!(loc.only_here_count, Some(2));
             assert_eq!(loc.kind, Some(LocationKind::Lead));
+        }
+        _ => panic!("Expected SurveyOutcome::Result"),
+    }
+}
+
+#[test]
+fn test_other_never_reads_empty_files_as_shared_or_unique() {
+    // The contentless law at the --other direct reads: every empty file
+    // shares the one empty-content object, so an empty file on each side
+    // must create no shared content, no uniqueness, and no location total.
+    let mut conn = setup_test_db();
+
+    let root_a = insert_root(&conn, "/mnt/drive-a", "source", false);
+    let root_b = insert_root(&conn, "/mnt/backup", "source", false);
+
+    let obj1 = insert_object(&conn, "hash_001", false);
+    let empty_obj = insert_object(&conn, "hash_empty", false);
+
+    insert_source_with_size(&conn, root_a, "photos/IMG_001.jpg", Some(obj1), 100);
+    insert_source_with_size(&conn, root_a, "photos/empty.jpg", Some(empty_obj), 0);
+
+    insert_source_with_size(&conn, root_b, "trip/IMG_001.jpg", Some(obj1), 100);
+    insert_source_with_size(&conn, root_b, "trip/empty.jpg", Some(empty_obj), 0);
+
+    let params = test_params();
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive-a"],
+        &params,
+        &[],
+        &["/mnt/backup/trip"],
+        None,
+    );
+
+    match outcome {
+        SurveyOutcome::Result(result) => {
+            assert_eq!(result.contentless_count, 1);
+            let loc = &result.location_results[0];
+            assert_eq!(loc.shared_count, 1, "the empty pair is not shared content");
+            assert_eq!(
+                loc.total_count, 1,
+                "the location total counts no empty file"
+            );
+            assert_eq!(result.unique_count, 0, "the empty file never counts unique");
+        }
+        _ => panic!("Expected SurveyOutcome::Result"),
+    }
+}
+
+#[test]
+fn test_affinity_never_reads_empty_files_as_complementary() {
+    // The contentless law at the affinity direct read: an empty file at the
+    // compared location must not count as complementary content, nor —
+    // being absent from the index — as vacuously "only here".
+    let mut conn = setup_test_db();
+
+    let root_a = insert_root(&conn, "/mnt/drive-a", "source", false);
+    let root_b = insert_root(&conn, "/mnt/backup", "source", false);
+
+    let obj1 = insert_object(&conn, "hash_001", false);
+    let obj2 = insert_object(&conn, "hash_002", false);
+    let empty_obj = insert_object(&conn, "hash_empty", false);
+
+    insert_source_with_size(&conn, root_a, "photos/IMG_001.jpg", Some(obj1), 100);
+
+    insert_source_with_size(&conn, root_b, "trip/IMG_001.jpg", Some(obj1), 100);
+    insert_source_with_size(&conn, root_b, "trip/IMG_002.jpg", Some(obj2), 100);
+    insert_source_with_size(&conn, root_b, "trip/empty.jpg", Some(empty_obj), 0);
+
+    let params = SurveyParams {
+        compute_affinity: true,
+        ..test_params()
+    };
+    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive-a"],
+        &params,
+        &filters,
+        &["/mnt/backup/trip"],
+        None,
+    );
+
+    match outcome {
+        SurveyOutcome::Result(result) => {
+            let loc = &result.location_results[0];
+            assert_eq!(loc.shared_count, 1);
+            assert_eq!(
+                loc.complementary_count,
+                Some(1),
+                "the empty file is not complementary content"
+            );
+            assert_eq!(
+                loc.only_here_count,
+                Some(1),
+                "the empty file is never \"only here\""
+            );
         }
         _ => panic!("Expected SurveyOutcome::Result"),
     }

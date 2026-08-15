@@ -177,8 +177,17 @@ pub fn compute_survey(
         return Ok(SurveyOutcome::AllUnhashed { total_count });
     }
 
-    // Collect selection identity
-    let sel_object_ids: HashSet<i64> = hashed.iter().filter_map(|s| s.object_id).collect();
+    // Collect selection identity. Contentless sources contribute none (the
+    // law: identity claims about empty content are vacuous) — the one
+    // empty-content object is absent from the index, so left in this set it
+    // would read as vacuously unique; and in --other mode it would read as
+    // shared with any location holding an empty file. Counted in
+    // contentless_count, never compared.
+    let sel_object_ids: HashSet<i64> = hashed
+        .iter()
+        .filter(|s| !s.is_contentless())
+        .filter_map(|s| s.object_id)
+        .collect();
     let sel_source_ids: HashSet<i64> = selection.iter().map(|s| s.id).collect();
 
     // Build object index from ALL active, non-excluded sources.
@@ -241,6 +250,9 @@ pub fn compute_survey(
                 .iter()
                 .filter(|s| s.is_active())
                 .filter(|s| !s.is_excluded())
+                // Direct read past the index — re-apply its contentless
+                // refusal, or an empty file here reads as shared content.
+                .filter(|s| !s.is_contentless())
                 .filter(|s| s.matches_scope(&loc_scope))
                 .filter(|s| !sel_source_ids.contains(&s.id))
                 .filter_map(|s| s.object_id)
@@ -264,11 +276,14 @@ pub fn compute_survey(
         // all roles in --other mode. Deliberately unfiltered by --where: "is
         // this location a subset of my selection?" must be measured against
         // everything that stands there, not just the content that matched the
-        // filter.
+        // filter. Contentless sources are out (coverage's own denominator
+        // precedent): a subset ratio is an identity claim, and empty files
+        // can neither be shared nor make a location less of a subset.
         let total_count: usize = all_sources
             .iter()
             .filter(|s| s.is_active())
             .filter(|s| !s.is_excluded())
+            .filter(|s| !s.is_contentless())
             .filter(|s| s.object_id.is_some())
             .filter(|s| s.matches_scope(&loc_scope))
             .filter(|s| is_other_mode || s.is_from_role("source"))
@@ -279,11 +294,15 @@ pub fn compute_survey(
             .compute_affinity
         {
             // Step 1: Get ALL sources within this location
-            // Active, non-excluded, not in selection
+            // Active, non-excluded, not in selection. Direct read past the
+            // index — re-apply its contentless refusal, or an empty file
+            // here reads as complementary content (and, absent from the
+            // index, as vacuously "only here").
             let loc_sources: Vec<&Source> = all_sources
                 .iter()
                 .filter(|s| s.is_active())
                 .filter(|s| !s.is_excluded())
+                .filter(|s| !s.is_contentless())
                 .filter(|s| s.matches_scope(&loc_scope))
                 .filter(|s| !sel_source_ids.contains(&s.id))
                 .collect();

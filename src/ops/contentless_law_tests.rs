@@ -208,6 +208,14 @@ fn survey_counts_the_empty_files_it_sets_aside() {
     match outcome {
         crate::survey::SurveyOutcome::Result(result) => {
             assert_eq!(result.contentless_count, 1, "the empty file is counted");
+            // Uniqueness is an identity claim: the empty file's shared
+            // object is absent from the index and must never fall through
+            // as vacuously unique. Only the data object counts here.
+            assert_eq!(result.unique_count, 1, "the empty file never counts unique");
+            assert!(
+                result.unique_paths.iter().all(|p| !p.contains("empty.log")),
+                "no empty file in the unique listing"
+            );
         }
         _ => panic!("expected a survey result"),
     }
