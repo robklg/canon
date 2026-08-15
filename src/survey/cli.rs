@@ -27,6 +27,30 @@ pub enum DetailMode {
     Residual,
 }
 
+impl DetailMode {
+    /// Whether this mode renders a machine stream under `-0` (its detail
+    /// printer takes the null flag and emits null-delimited paths). The
+    /// match is exhaustive on purpose: a new mode must answer this here,
+    /// or the early-exit arms below would write the human header into its
+    /// machine stream.
+    fn machine_rendering(self) -> bool {
+        match self {
+            DetailMode::Archived
+            | DetailMode::Unique
+            | DetailMode::Overlap
+            | DetailMode::Residual => true,
+            DetailMode::Complement => false,
+        }
+    }
+}
+
+/// Whether an early-exit outcome (empty or all-unhashed selection) must
+/// suppress its human header: machine mode requested for a detail mode
+/// that renders a machine stream.
+fn suppress_early_exit_header(null_delim: bool, detail: Option<DetailMode>) -> bool {
+    null_delim && detail.is_some_and(DetailMode::machine_rendering)
+}
+
 /// Options controlling survey behavior.
 pub struct SurveyOptions {
     /// Original (pre-expansion) filter strings — for display in selection header.
@@ -100,13 +124,7 @@ pub fn run(
 
     match outcome {
         SurveyOutcome::Empty => {
-            let suppress = options.null_delim
-                && matches!(
-                    options.detail,
-                    Some(DetailMode::Unique)
-                        | Some(DetailMode::Overlap)
-                        | Some(DetailMode::Residual)
-                );
+            let suppress = suppress_early_exit_header(options.null_delim, options.detail);
             if !suppress {
                 render::print_survey_header(
                     &options.scope,
@@ -123,13 +141,7 @@ pub fn run(
             }
         }
         SurveyOutcome::AllUnhashed { total_count } => {
-            let suppress = options.null_delim
-                && matches!(
-                    options.detail,
-                    Some(DetailMode::Unique)
-                        | Some(DetailMode::Overlap)
-                        | Some(DetailMode::Residual)
-                );
+            let suppress = suppress_early_exit_header(options.null_delim, options.detail);
             if !suppress {
                 render::print_survey_header(
                     &options.scope,
@@ -347,6 +359,36 @@ mod tests {
                 auto_include_archived: false,
             },
         }
+    }
+
+    #[test]
+    fn machine_mode_suppresses_the_header_for_every_machine_rendering() {
+        // The header suppression is derived per mode, not hand-listed:
+        // every mode whose detail printer emits a null-delimited stream
+        // must stay silent on an empty selection — archived included,
+        // the entry the old hand-maintained list was missing.
+        for mode in [
+            DetailMode::Archived,
+            DetailMode::Unique,
+            DetailMode::Overlap,
+            DetailMode::Residual,
+        ] {
+            assert!(
+                suppress_early_exit_header(true, Some(mode)),
+                "machine rendering must suppress the human header"
+            );
+        }
+        // Complement has no -0 rendering; its output is always for humans.
+        assert!(!suppress_early_exit_header(
+            true,
+            Some(DetailMode::Complement)
+        ));
+        // Without -0 the header always prints.
+        assert!(!suppress_early_exit_header(
+            false,
+            Some(DetailMode::Archived)
+        ));
+        assert!(!suppress_early_exit_header(true, None));
     }
 
     #[test]
