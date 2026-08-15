@@ -270,16 +270,19 @@ pub(crate) mod source {
             Some(prefix) => {
                 // The expected set feeds missing detection, so it must stop at the
                 // path separator: a scan scoped to "vacation" must never sweep a
-                // sibling like "vacation-2023" into deletion. Same boundary shape
-                // as the shared path-membership queries: the path itself, or
-                // anything under "{prefix}/".
+                // sibling like "vacation-2023" into deletion. The shared boundary
+                // predicate spells that law once — the path itself, or anything
+                // under "{prefix}/", with '_'/'%' in the path matched literally.
                 let prefix = prefix.trim_end_matches('/');
-                conn.prepare(
-                    "SELECT id FROM sources WHERE root_id = ? AND present = 1 \
-                     AND (rel_path = ? OR rel_path LIKE ? || '/%')",
-                )?
-                .query_map(rusqlite::params![root_id, prefix, prefix], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?
+                let sql = format!(
+                    "SELECT id FROM sources WHERE root_id = ? AND present = 1 AND {}",
+                    crate::repo::db::path_at_or_under_sql("rel_path")
+                );
+                conn.prepare(&sql)?
+                    .query_map(rusqlite::params![root_id, prefix, prefix, prefix], |row| {
+                        row.get(0)
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?
             }
             None => conn
                 .prepare("SELECT id FROM sources WHERE root_id = ? AND present = 1")?
@@ -376,17 +379,27 @@ pub(crate) mod source {
         root_id: i64,
         rel_prefix: &str,
     ) -> Result<Vec<(i64, Option<i64>)>> {
-        // Build LIKE pattern: empty prefix matches all, otherwise "prefix/%"
-        let prefix_pattern = if rel_prefix.is_empty() {
-            "%".to_string()
+        // Empty prefix means the whole root; otherwise the shared boundary
+        // predicate (strictly under "{prefix}/", wildcard bytes literal).
+        let sql = if rel_prefix.is_empty() {
+            "SELECT id, device FROM sources WHERE root_id = ? AND present = 1".to_string()
         } else {
-            format!("{rel_prefix}/%")
+            format!(
+                "SELECT id, device FROM sources WHERE root_id = ? AND present = 1 AND {}",
+                crate::repo::db::path_strictly_under_sql("rel_path")
+            )
         };
-
-        let mut stmt = conn.prepare(
-            "SELECT id, device FROM sources WHERE root_id = ? AND rel_path LIKE ? AND present = 1",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![root_id, prefix_pattern], |row| {
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<rusqlite::types::Value> = if rel_prefix.is_empty() {
+            vec![root_id.into()]
+        } else {
+            vec![
+                root_id.into(),
+                rel_prefix.to_string().into(),
+                rel_prefix.to_string().into(),
+            ]
+        };
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
             Ok((row.get(0)?, row.get(1)?))
         })?;
 
@@ -1190,6 +1203,29 @@ pub(crate) mod source {
             assert_eq!(ids_slash, vec![inside]);
         }
 
+        #[test]
+        fn fetch_source_ids_for_root_prefix_wildcard_bytes_are_literal() {
+            let conn = setup_test_db();
+
+            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let under_underscore =
+                insert_source(&conn, root_id, "alpha_beta/a.jpg", None, true, false);
+            let trap_sibling = insert_source(&conn, root_id, "alphaXbeta/b.jpg", None, true, false);
+            let under_percent = insert_source(&conn, root_id, "pct%/c.jpg", None, true, false);
+            let percent_trap = insert_source(&conn, root_id, "pct100/d.jpg", None, true, false);
+
+            // '_' and '%' in a scope path are path bytes, not wildcards. The
+            // expected set feeds missing detection: a trap sibling swept in
+            // here would be flipped absent and receipted as deleted.
+            let ids = fetch_source_ids_for_root(&conn, root_id, Some("alpha_beta")).unwrap();
+            assert_eq!(ids, vec![under_underscore]);
+            assert!(!ids.contains(&trap_sibling));
+
+            let ids = fetch_source_ids_for_root(&conn, root_id, Some("pct%")).unwrap();
+            assert_eq!(ids, vec![under_percent]);
+            assert!(!ids.contains(&percent_trap));
+        }
+
         // =========================================================================
         // fetch_device_info_by_prefix tests
         // =========================================================================
@@ -1230,6 +1266,21 @@ pub(crate) mod source {
             // Prefix "a" matches only files under "a/"
             let results = fetch_device_info_by_prefix(&conn, root_id, "a").unwrap();
             assert_eq!(results.len(), 2);
+        }
+
+        #[test]
+        fn fetch_device_info_by_prefix_wildcard_bytes_are_literal() {
+            let conn = setup_test_db();
+            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+
+            insert_test_source(&conn, root_id, "alpha_beta/1.jpg", 100, 1, 1000, 1700000000);
+            insert_test_source(&conn, root_id, "alphaXbeta/2.jpg", 200, 2, 1000, 1700000000);
+
+            // '_' is a path byte, not a wildcard: the trap sibling's device
+            // must not leak into the mount-stability read for "alpha_beta".
+            let results = fetch_device_info_by_prefix(&conn, root_id, "alpha_beta").unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].1, Some(100));
         }
 
         #[test]

@@ -444,6 +444,23 @@ pub fn populate_temp_sources(conn: &mut Connection, source_ids: &[i64]) -> Resul
     Ok(())
 }
 
+/// The path-boundary membership predicate: the path itself, or anything under
+/// "{path}/". String comparison, never LIKE — '_' and '%' in a real path must
+/// match literally, not as wildcards (a scope of "2023_06" must never reach
+/// "2023X06"). The returned clause binds the prefix THREE times, in order.
+///
+/// This is the one place the boundary is spelled; every path-scoped SQL query
+/// routes through it or its strictly-under sibling.
+pub fn path_at_or_under_sql(column: &str) -> String {
+    format!("({column} = ? OR substr({column}, 1, length(?) + 1) = ? || '/')")
+}
+
+/// Strictly-under variant of [`path_at_or_under_sql`]: anything under
+/// "{path}/", the path itself excluded. Binds the prefix TWICE.
+pub fn path_strictly_under_sql(column: &str) -> String {
+    format!("substr({column}, 1, length(?) + 1) = ? || '/'")
+}
+
 /// Threshold in ms for a query to be considered "slow"
 const SLOW_QUERY_THRESHOLD_MS: f64 = 100.0;
 
@@ -630,6 +647,61 @@ fn get_query_plan(conn: &Connection, sql: &str) -> Option<String> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Evaluate the at-or-under predicate for one (path, prefix) pair.
+    fn at_or_under(conn: &Connection, path: &str, prefix: &str) -> bool {
+        // The column slot is itself a placeholder here, so the clause reads
+        // (path = prefix OR substr(path, 1, length(prefix) + 1) = prefix || '/').
+        let sql = format!("SELECT {}", path_at_or_under_sql("?"));
+        conn.query_row(
+            &sql,
+            rusqlite::params![path, prefix, path, prefix, prefix],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Evaluate the strictly-under predicate for one (path, prefix) pair.
+    fn strictly_under(conn: &Connection, path: &str, prefix: &str) -> bool {
+        let sql = format!("SELECT {}", path_strictly_under_sql("?"));
+        conn.query_row(&sql, rusqlite::params![path, prefix, prefix], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn path_at_or_under_matches_self_and_descendants() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(at_or_under(&conn, "alpha", "alpha"));
+        assert!(at_or_under(&conn, "alpha/a.jpg", "alpha"));
+        assert!(at_or_under(&conn, "alpha/deep/b.jpg", "alpha"));
+    }
+
+    #[test]
+    fn path_at_or_under_stops_at_the_separator() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(!at_or_under(&conn, "alpha-beta/a.jpg", "alpha"));
+        assert!(!at_or_under(&conn, "alphabet", "alpha"));
+    }
+
+    #[test]
+    fn path_at_or_under_treats_wildcard_bytes_literally() {
+        let conn = Connection::open_in_memory().unwrap();
+        // '_' and '%' are LIKE wildcards; a path must never match through them.
+        assert!(!at_or_under(&conn, "alphaXbeta/a.jpg", "alpha_beta"));
+        assert!(at_or_under(&conn, "alpha_beta/a.jpg", "alpha_beta"));
+        assert!(!at_or_under(&conn, "pct100/a.jpg", "pct%"));
+        assert!(at_or_under(&conn, "pct%/a.jpg", "pct%"));
+    }
+
+    #[test]
+    fn path_strictly_under_excludes_the_path_itself() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(!strictly_under(&conn, "alpha", "alpha"));
+        assert!(strictly_under(&conn, "alpha/a.jpg", "alpha"));
+        assert!(!strictly_under(&conn, "alphaXbeta/a.jpg", "alpha_beta"));
+    }
 
     #[test]
     fn open_with_options_enables_wal_mode() {

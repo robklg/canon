@@ -1310,6 +1310,47 @@ mod tests {
     }
 
     #[test]
+    fn scan_root_scoped_prefix_treats_wildcard_bytes_literally() {
+        // '_' in a scope path is a path byte, not a pattern: a scan scoped to
+        // "alpha_beta" must not expect sources under "alphaXbeta" — a sibling
+        // one wildcard-match away — and then sweep them into false deletion.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_path = temp.path().to_str().unwrap();
+        let root_id = repo::insert_test_root(&conn, root_path, "source", false);
+
+        std::fs::create_dir(temp.path().join("alpha_beta")).unwrap();
+        std::fs::create_dir(temp.path().join("alphaXbeta")).unwrap();
+        std::fs::write(temp.path().join("alpha_beta").join("a.txt"), "a").unwrap();
+        std::fs::write(temp.path().join("alphaXbeta").join("b.txt"), "b").unwrap();
+        let sibling = repo::insert_test_source(&conn, root_id, "alphaXbeta/b.txt", 1, 1, 1, 1000);
+
+        let now = current_timestamp();
+        let result = scan_root(
+            &conn,
+            root_id,
+            root_path,
+            Some("alpha_beta"),
+            walk(&temp.path().join("alpha_beta")),
+            &no_hash_options(),
+            &NoopProgress,
+            now,
+            Some(9),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(result.stats.missing, 0);
+        assert!(result.deleted_items.is_empty());
+        let present: i64 = conn
+            .query_row("SELECT present FROM sources WHERE id = ?", [sibling], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(present, 1);
+    }
+
+    #[test]
     fn scan_root_unstable_mount_records_no_deletion() {
         // When the walk root's device is unavailable (an unstable mount), missing
         // detection is skipped, so a pre-inserted source is neither marked missing
