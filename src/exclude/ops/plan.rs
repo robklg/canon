@@ -30,10 +30,12 @@ pub fn plan_set(conn: &mut Connection, params: &ExcludeSetParams) -> Result<Excl
         scopes: params.scopes.clone(),
         include: IncludeSet::default(),
         filters: params.filters.clone(),
-        // Source roots only, and not just for tidiness: clearing an exclusion
-        // only ever looks at source-role roots, so an exclusion that lands on
-        // an archive-role source could never be undone. The same policy guards
-        // the sibling plan functions below.
+        // Source roots only: exclusion is triage's letting-go of source-side
+        // copies, and a scope selection must never offer the archive itself
+        // for dismissal. Explicit single-target set (by id or path) is the
+        // deliberate escape hatch past this policy — which is why plan_clear
+        // below reaches every role: whatever set can reach, clear can undo.
+        // The same policy guards plan_duplicates and plan_set_objects.
         role_policy: RolePolicy::SourceOnly,
     };
     let selection = selection::select_sources(conn, &sel_params)?;
@@ -85,20 +87,24 @@ pub fn plan_set(conn: &mut Connection, params: &ExcludeSetParams) -> Result<Excl
 /// contract from finding visible sources.
 pub fn plan_clear(conn: &mut Connection, params: &ExcludeClearParams) -> Result<ExcludeClearPlan> {
     let roots = repo::root::fetch_all(conn)?;
-    let source_root_ids: Vec<i64> = roots
+    // Every active root, archive role included: single-target set accepts an
+    // archive-role source, so an exclusion can stand there — and whatever set
+    // can reach, clear must be able to undo. A role filter here would strand
+    // those exclusions permanently.
+    let root_ids: Vec<i64> = roots
         .iter()
-        .filter(|r| r.is_active() && r.is_source())
+        .filter(|r| r.is_active())
         .map(|r| r.id)
         .collect();
 
-    if source_root_ids.is_empty() {
+    if root_ids.is_empty() {
         return Ok(ExcludeClearPlan {
             items: Vec::new(),
             root_count: 0,
         });
     }
 
-    let all_sources = repo::source::batch_fetch_by_roots(conn, &source_root_ids)?;
+    let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 
     // Filter for scope match and source-level exclusion only.
     // Uses s.excluded (source-level flag), NOT s.is_excluded() which includes

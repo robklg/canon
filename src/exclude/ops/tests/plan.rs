@@ -301,14 +301,18 @@ fn test_plan_clear_ignores_suspended_roots() {
 }
 
 #[test]
-fn test_plan_clear_ignores_archive_roots() {
+fn test_plan_clear_reaches_archive_role_sources() {
+    // Single-target set accepts an archive-role source, so an exclusion can
+    // stand there — and whatever set can reach, clear must be able to undo.
+    // A role filter in plan_clear would strand such an exclusion permanently.
     let mut conn = setup_test_db();
     let archive = insert_root(&conn, "/archive", "archive", false);
     insert_source_excluded(&conn, archive, "archived.jpg", None);
 
     let plan = plan_clear(&mut conn, &make_clear_params(vec![])).unwrap();
 
-    assert!(plan.source_ids().is_empty());
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(plan.items[0].rel_path, "archived.jpg");
 }
 
 // =========================================================================
