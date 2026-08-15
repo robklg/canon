@@ -6,7 +6,9 @@ the index; what changes is attention. Excluded sources are skipped by default in
 queries and archiving operations, and `--include excluded` shows them again.
 
 An exclusion can be cleared at any time, returning the content to consideration.
-Clearing is itself recorded, as the `restored` transition.
+Clearing is itself recorded, as the `restored` transition. Nothing else lifts a
+dismissal: the exclusion holds through edits, moves, replacement, and a file
+reappearing after an absence.
 
 Redundancy beside the archive is a common reason to let go, not the only one:
 corrupted files, known junk, and content that simply is not worth keeping are all

@@ -89,7 +89,8 @@ pub(crate) mod source {
                 // - If no rows updated, INSERT new record
                 //
                 // decision_id is set on New only — scan UPDATEs (Modified, Moved, Unchanged)
-                // preserve the existing value to maintain provenance.
+                // preserve the existing value to maintain provenance. One carve-out:
+                // a revive of an excluded row preserves it too (see below).
                 let partial_hash = observation.partial_hash.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("partial_hash required for New reconciliation")
                 })?;
@@ -97,11 +98,22 @@ pub(crate) mod source {
                 // Step 1: Try to update any existing record at this path (stale or replaced)
                 // - Stale (present=0): file reappeared at previously-used path
                 // - Replaced (present=1, different inode): old file deleted, new file at same path
+                //
+                // A source exclusion survives both: the dismissal is the user's
+                // judgment about this path, and it holds through replacement and
+                // reappearance just as it holds through in-place modification —
+                // whether an edit lands as Modified (same inode) or as a replace
+                // (atomic-save apps rename a temp file over the path) is invisible
+                // to the user. Undoing a dismissal is exclude clear's recorded act,
+                // never a scan's side effect. An excluded row also keeps its
+                // decision_id: the row must keep pointing at the judgment that
+                // governs it, not at the scan that re-observed the path.
                 let updated = conn.execute(
                     "UPDATE sources SET
                         device = ?, inode = ?, size = ?, mtime = ?, partial_hash = ?,
                         basis_rev = 0, scanned_at = ?, last_seen_at = ?,
-                        present = 1, excluded = 0, object_id = NULL, decision_id = ?
+                        present = 1, object_id = NULL,
+                        decision_id = CASE WHEN excluded = 1 THEN decision_id ELSE ? END
                      WHERE root_id = ? AND rel_path = ?",
                     rusqlite::params![
                         observation.device as i64,
@@ -910,6 +922,143 @@ pub(crate) mod source {
                 apply_reconciliation(&conn, &observation, &Reconciliation::New, 1700000001, None)
                     .unwrap();
             assert_eq!(source.decision_id, None);
+        }
+
+        /// Insert a row at `rel_path` with the given present/excluded state and
+        /// decision_id, for the revive-path tests. Inode is fixed at 100.
+        fn insert_row_for_revive(
+            conn: &RusqliteConnection,
+            root_id: i64,
+            rel_path: &str,
+            present: bool,
+            excluded: bool,
+            decision_id: Option<i64>,
+        ) -> i64 {
+            conn.execute(
+                "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
+                 basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
+                 VALUES (?, ?, 1, 100, 500, 1600000000, 'oldhash', 5, 0, 0, ?, ?, ?)",
+                rusqlite::params![
+                    root_id,
+                    rel_path,
+                    present as i64,
+                    excluded as i64,
+                    decision_id
+                ],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        }
+
+        /// A New observation at `rel_path` with a fresh inode (a replacement or
+        /// a reappeared file, never the tracked inode 100).
+        fn revive_observation(root_id: i64, rel_path: &str) -> FileObservation {
+            FileObservation {
+                root_id,
+                rel_path: rel_path.to_string(),
+                device: 1,
+                inode: 200,
+                size: 1024,
+                mtime: 1700000000,
+                partial_hash: Some("newhash".to_string()),
+            }
+        }
+
+        #[test]
+        fn test_scan_revive_preserves_source_exclusion() {
+            // A file reappearing at an excluded path stays excluded, and the row
+            // keeps pointing at the excluding decision — undoing a dismissal is
+            // exclude clear's recorded act, never a scan's side effect.
+            let conn = setup_test_db();
+            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let row_id =
+                insert_row_for_revive(&conn, root_id, "dismissed.jpg", false, true, Some(42));
+
+            let observation = revive_observation(root_id, "dismissed.jpg");
+            let source = apply_reconciliation(
+                &conn,
+                &observation,
+                &Reconciliation::New,
+                1700000001,
+                Some(99),
+            )
+            .unwrap();
+
+            assert_eq!(source.id, row_id);
+            assert!(source.excluded);
+            assert_eq!(source.decision_id, Some(42));
+            let present: i64 = conn
+                .query_row("SELECT present FROM sources WHERE id = ?", [row_id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(present, 1);
+        }
+
+        #[test]
+        fn test_scan_replacement_preserves_source_exclusion() {
+            // Replacement in place (same path, new inode — the shape every
+            // atomic-save edit takes) keeps the exclusion and its decision_id,
+            // exactly as an in-place Modified edit would.
+            let conn = setup_test_db();
+            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let row_id =
+                insert_row_for_revive(&conn, root_id, "dismissed.jpg", true, true, Some(42));
+
+            let observation = revive_observation(root_id, "dismissed.jpg");
+            let source = apply_reconciliation(
+                &conn,
+                &observation,
+                &Reconciliation::New,
+                1700000001,
+                Some(99),
+            )
+            .unwrap();
+
+            assert_eq!(source.id, row_id);
+            assert!(source.excluded);
+            assert_eq!(source.decision_id, Some(42));
+            // Content identity is unknown until the hash pass re-establishes it.
+            assert_eq!(source.object_id, None);
+        }
+
+        #[test]
+        fn test_scan_revive_excluded_preserves_decision_id_when_disabled() {
+            // With recording off, an excluded row's decision_id is preserved,
+            // not NULLed — same direction as the deletion path's convention.
+            let conn = setup_test_db();
+            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            insert_row_for_revive(&conn, root_id, "dismissed.jpg", false, true, Some(42));
+
+            let observation = revive_observation(root_id, "dismissed.jpg");
+            let source =
+                apply_reconciliation(&conn, &observation, &Reconciliation::New, 1700000001, None)
+                    .unwrap();
+
+            assert!(source.excluded);
+            assert_eq!(source.decision_id, Some(42));
+        }
+
+        #[test]
+        fn test_scan_revive_unexcluded_stamps_decision_id() {
+            // The carve-out is the exclusion's alone: an unexcluded revive is a
+            // fresh state transition and takes the scan's decision_id as before.
+            let conn = setup_test_db();
+            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            insert_row_for_revive(&conn, root_id, "plain.jpg", false, false, Some(42));
+
+            let observation = revive_observation(root_id, "plain.jpg");
+            let source = apply_reconciliation(
+                &conn,
+                &observation,
+                &Reconciliation::New,
+                1700000001,
+                Some(99),
+            )
+            .unwrap();
+
+            assert!(!source.excluded);
+            assert_eq!(source.decision_id, Some(99));
         }
 
         #[test]
