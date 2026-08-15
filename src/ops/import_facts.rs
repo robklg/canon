@@ -510,6 +510,12 @@ fn get_typed_value_type(typed: &TypedValue) -> Option<FactValueType> {
 }
 
 /// Promote content facts from a source to its newly-linked object.
+///
+/// The source copy is deleted whichever way the branch goes: content facts
+/// describe the content, so once the object holds the key the source's row is
+/// redundant, and the object's existing value wins over an arriving duplicate.
+/// The counter follows the insert, not the delete — it counts facts the object
+/// gained, not source rows removed.
 fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> Result<u64> {
     let facts = repo::fact::fetch_source_facts(conn, source_id)?;
 
@@ -864,5 +870,69 @@ mod tests {
         assert!(!outcome.warnings.is_empty());
         assert!(outcome.warnings[0].contains("type mismatch"));
         assert_eq!(state.stats.skipped_type_mismatch, 1);
+    }
+
+    // =========================================================================
+    // promote_content_facts
+    // =========================================================================
+
+    fn source_fact_count(conn: &Connection, source_id: i64) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE entity_type = 'source' AND entity_id = ?1",
+            [source_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn object_fact_value(conn: &Connection, object_id: i64, key: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT value_text FROM facts
+             WHERE entity_type = 'object' AND entity_id = ?1 AND key = ?2",
+            rusqlite::params![object_id, key],
+            |r| r.get(0),
+        )
+        .ok()
+    }
+
+    #[test]
+    fn promote_content_facts_moves_an_absent_content_fact() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "hash1", false);
+        let src = insert_source(&conn, root, "photo.jpg", Some(obj));
+        crate::ops::test_helpers::insert_fact(&conn, src, "content.Make", "Canon");
+
+        let promoted = promote_content_facts(&conn, src, obj).unwrap();
+
+        assert_eq!(promoted, 1);
+        assert_eq!(
+            object_fact_value(&conn, obj, "content.Make").as_deref(),
+            Some("Canon")
+        );
+        assert_eq!(source_fact_count(&conn, src), 0);
+    }
+
+    #[test]
+    fn promote_content_facts_deletes_the_source_copy_when_the_object_already_has_it() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "hash1", false);
+        let src = insert_source(&conn, root, "photo.jpg", Some(obj));
+        crate::ops::test_helpers::insert_fact(&conn, src, "content.Make", "Nikon");
+        repo::fact::insert_object_fact(&conn, obj, "content.Make", Some("Canon"), None, None, 0)
+            .unwrap();
+
+        let promoted = promote_content_facts(&conn, src, obj).unwrap();
+
+        // Nothing was gained, so nothing is counted...
+        assert_eq!(promoted, 0);
+        // ...the object keeps the value it already had...
+        assert_eq!(
+            object_fact_value(&conn, obj, "content.Make").as_deref(),
+            Some("Canon")
+        );
+        // ...and the redundant source copy goes regardless.
+        assert_eq!(source_fact_count(&conn, src), 0);
     }
 }
