@@ -43,6 +43,12 @@ pub fn ancestor_paths(rel_path: &str) -> Vec<String> {
 /// Compute the display path of a note relative to a scope.
 /// Same scope → "."
 /// Descendant → first divergent path segment with trailing "/"
+///
+/// A note outside the scope is a caller error, not an input: the panic below
+/// is the contract. Callers get the guarantee from the query that produced the
+/// notes — the subtree fetch matches path boundaries literally, so everything
+/// it returns is at or under the scope it was asked for. A subtree query that
+/// over-matched (a prefix compared as a pattern, say) would land here.
 pub fn relative_to_scope(note_rel_path: &str, scope_rel_path: &str) -> String {
     if note_rel_path == scope_rel_path {
         return ".".to_string();
@@ -140,5 +146,13 @@ mod tests {
     #[test]
     fn relative_root_level_note() {
         assert_eq!(relative_to_scope("", ""), ".");
+    }
+
+    /// The non-descendant case is a broken precondition, not a display case:
+    /// only a scope query that over-matched could produce it.
+    #[test]
+    #[should_panic(expected = "must be a descendant")]
+    fn relative_to_scope_requires_a_descendant() {
+        relative_to_scope("elsewhere/note", "scope");
     }
 }

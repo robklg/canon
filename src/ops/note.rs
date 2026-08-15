@@ -484,6 +484,35 @@ mod tests {
         assert_eq!(result.ancestor_count, 2);
     }
 
+    /// Survey renders each of these notes relative to the scope, and that
+    /// rendering panics on anything outside it. The guarantee it relies on is
+    /// this one: the context holds descendants only, even when the scope's
+    /// name carries characters a pattern match would treat as wildcards.
+    #[test]
+    fn survey_note_context_returns_only_descendants() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        insert_note(&conn, root_id, "alpha_beta", "in scope", 100);
+        insert_note(&conn, root_id, "alpha_beta/inner", "descendant", 200);
+        insert_note(&conn, root_id, "alphaXbeta", "one wildcard away", 300);
+        insert_note(&conn, root_id, "alphaXbeta/inner", "under it", 350);
+        insert_note(&conn, root_id, "alpha_betaX", "no separator", 400);
+
+        let result = survey_note_context(&conn, root_id, "alpha_beta").unwrap();
+
+        assert_eq!(result.subtree_notes.len(), 2);
+        for note in &result.subtree_notes {
+            assert!(
+                note.rel_path == "alpha_beta" || note.rel_path.starts_with("alpha_beta/"),
+                "context returned a non-descendant: {}",
+                note.rel_path
+            );
+            // Would panic if the note were outside the scope.
+            crate::domain::note::relative_to_scope(&note.rel_path, "alpha_beta");
+        }
+    }
+
     #[test]
     fn list_global_temporal_reverses_to_oldest_first() {
         let conn = setup_test_db();
