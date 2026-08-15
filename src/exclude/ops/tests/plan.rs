@@ -580,6 +580,43 @@ fn test_plan_set_objects_includes_non_excluded() {
 }
 
 #[test]
+fn test_plans_never_offer_archive_role_sources() {
+    // An exclusion landing on an archive-role source could never be undone:
+    // plan_clear only ever looks at source-role roots. So the intake side
+    // holds the same line — even when archive copies are the only in-scope
+    // rows, neither plan_set nor plan_duplicates offers them.
+    let mut conn = setup_test_db();
+    let archive1 = insert_root(&conn, "/archive", "archive", false);
+    let archive2 = insert_root(&conn, "/archive2", "archive", false);
+    let obj = insert_object(&conn, "dup_hash_value", false);
+    insert_source(&conn, archive1, "kept.jpg", Some(obj));
+    insert_source(&conn, archive2, "stray.jpg", Some(obj));
+
+    let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
+    assert!(plan.source_ids().is_empty());
+
+    let dup = plan_duplicates(&mut conn, &make_duplicates_params(vec![], "/archive")).unwrap();
+    assert!(dup.groups.is_empty());
+}
+
+#[test]
+fn test_plan_set_objects_reaches_objects_behind_excluded_sources() {
+    // Excluding an object must reach objects whose only in-scope copies are
+    // already source-excluded — the common flow: a folder dismissed source
+    // by source, then its content dismissed everywhere. The object plan
+    // deliberately widens its selection to excluded sources; harmonizing it
+    // with the sibling plans' default visibility makes these objects
+    // invisible.
+    let mut conn = setup_test_db();
+    let root = insert_root(&conn, "/photos", "source", false);
+    let obj = insert_object(&conn, "behind_excluded_hash", false);
+    insert_source_excluded(&conn, root, "a.jpg", Some(obj));
+
+    let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+    assert_eq!(plan.objects.len(), 1);
+}
+
+#[test]
 fn test_plan_set_objects_skips_already_excluded() {
     let mut conn = setup_test_db();
     let root = insert_root(&conn, "/photos", "source", false);
