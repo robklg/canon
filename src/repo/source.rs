@@ -351,9 +351,11 @@ pub fn sources_exist_at_scope(conn: &Connection, root_id: i64, rel_path: &str) -
         )?
     } else {
         conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sources WHERE root_id = ? \
-             AND (rel_path = ? OR rel_path LIKE ? || '/%'))",
-            rusqlite::params![root_id, rel_path, rel_path],
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM sources WHERE root_id = ? AND {})",
+                crate::repo::db::path_at_or_under_sql("rel_path")
+            ),
+            rusqlite::params![root_id, rel_path, rel_path, rel_path],
             |row| row.get(0),
         )?
     };
@@ -2044,6 +2046,16 @@ mod tests {
 
         // Scope "a" should NOT match "ab/1.jpg"
         assert!(!sources_exist_at_scope(&conn, root_id, "a").unwrap());
+    }
+
+    #[test]
+    fn sources_exist_at_scope_wildcard_bytes_are_literal() {
+        let conn = setup_test_db();
+        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        insert_test_source(&conn, root_id, "alphaXbeta/1.jpg", 1, 1, 1000, 100);
+
+        // '_' in the scope is a path byte, not a wildcard.
+        assert!(!sources_exist_at_scope(&conn, root_id, "alpha_beta").unwrap());
     }
 
     #[test]

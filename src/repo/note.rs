@@ -64,7 +64,8 @@ pub fn fetch_subtree(conn: &Connection, root_id: i64, rel_path: &str) -> Result<
         format!("SELECT {NOTE_COLUMNS} FROM notes WHERE root_id = ? ORDER BY created_at DESC")
     } else {
         format!(
-            "SELECT {NOTE_COLUMNS} FROM notes WHERE root_id = ? AND (rel_path = ? OR rel_path LIKE ? || '/%') ORDER BY created_at DESC"
+            "SELECT {NOTE_COLUMNS} FROM notes WHERE root_id = ? AND {} ORDER BY created_at DESC",
+            crate::repo::db::path_at_or_under_sql("rel_path")
         )
     };
 
@@ -73,7 +74,7 @@ pub fn fetch_subtree(conn: &Connection, root_id: i64, rel_path: &str) -> Result<
         stmt.query_map(rusqlite::params![root_id], note_from_row)?
     } else {
         stmt.query_map(
-            rusqlite::params![root_id, rel_path, rel_path],
+            rusqlite::params![root_id, rel_path, rel_path, rel_path],
             note_from_row,
         )?
     };
@@ -96,7 +97,8 @@ pub fn fetch_subtree_chronological(
         format!("SELECT {NOTE_COLUMNS} FROM notes WHERE root_id = ? ORDER BY rel_path, created_at")
     } else {
         format!(
-            "SELECT {NOTE_COLUMNS} FROM notes WHERE root_id = ? AND (rel_path = ? OR rel_path LIKE ? || '/%') ORDER BY rel_path, created_at"
+            "SELECT {NOTE_COLUMNS} FROM notes WHERE root_id = ? AND {} ORDER BY rel_path, created_at",
+            crate::repo::db::path_at_or_under_sql("rel_path")
         )
     };
 
@@ -105,7 +107,7 @@ pub fn fetch_subtree_chronological(
         stmt.query_map(rusqlite::params![root_id], note_from_row)?
     } else {
         stmt.query_map(
-            rusqlite::params![root_id, rel_path, rel_path],
+            rusqlite::params![root_id, rel_path, rel_path, rel_path],
             note_from_row,
         )?
     };
@@ -333,9 +335,13 @@ fn subtree_where(root_id: i64, rel_path: &str) -> (String, Vec<rusqlite::types::
         )
     } else {
         (
-            "root_id = ? AND (rel_path = ? OR rel_path LIKE ? || '/%')".to_string(),
+            format!(
+                "root_id = ? AND {}",
+                crate::repo::db::path_at_or_under_sql("rel_path")
+            ),
             vec![
                 rusqlite::types::Value::from(root_id),
+                rusqlite::types::Value::from(rel_path.to_string()),
                 rusqlite::types::Value::from(rel_path.to_string()),
                 rusqlite::types::Value::from(rel_path.to_string()),
             ],
@@ -401,8 +407,11 @@ pub fn count_descendant_locations(
         )?
     } else {
         conn.query_row(
-            "SELECT COUNT(DISTINCT rel_path) FROM notes WHERE root_id = ? AND rel_path LIKE ? || '/%'",
-            rusqlite::params![root_id, rel_path],
+            &format!(
+                "SELECT COUNT(DISTINCT rel_path) FROM notes WHERE root_id = ? AND {}",
+                crate::repo::db::path_strictly_under_sql("rel_path")
+            ),
+            rusqlite::params![root_id, rel_path, rel_path],
             |row| row.get(0),
         )?
     };
@@ -419,8 +428,11 @@ pub fn count_subtree_notes(conn: &Connection, root_id: i64, rel_path: &str) -> R
         )?
     } else {
         conn.query_row(
-            "SELECT COUNT(*) FROM notes WHERE root_id = ? AND (rel_path = ? OR rel_path LIKE ? || '/%')",
-            rusqlite::params![root_id, rel_path, rel_path],
+            &format!(
+                "SELECT COUNT(*) FROM notes WHERE root_id = ? AND {}",
+                crate::repo::db::path_at_or_under_sql("rel_path")
+            ),
+            rusqlite::params![root_id, rel_path, rel_path, rel_path],
             |row| row.get(0),
         )?
     };
@@ -437,8 +449,11 @@ pub fn count_subtree_locations(conn: &Connection, root_id: i64, rel_path: &str) 
         )?
     } else {
         conn.query_row(
-            "SELECT COUNT(DISTINCT rel_path) FROM notes WHERE root_id = ? AND (rel_path = ? OR rel_path LIKE ? || '/%')",
-            rusqlite::params![root_id, rel_path, rel_path],
+            &format!(
+                "SELECT COUNT(DISTINCT rel_path) FROM notes WHERE root_id = ? AND {}",
+                crate::repo::db::path_at_or_under_sql("rel_path")
+            ),
+            rusqlite::params![root_id, rel_path, rel_path, rel_path],
             |row| row.get(0),
         )?
     };
@@ -463,8 +478,11 @@ pub fn clear_subtree(conn: &Connection, root_id: i64, rel_path: &str) -> Result<
         )?
     } else {
         conn.execute(
-            "DELETE FROM notes WHERE root_id = ? AND (rel_path = ? OR rel_path LIKE ? || '/%')",
-            rusqlite::params![root_id, rel_path, rel_path],
+            &format!(
+                "DELETE FROM notes WHERE root_id = ? AND {}",
+                crate::repo::db::path_at_or_under_sql("rel_path")
+            ),
+            rusqlite::params![root_id, rel_path, rel_path, rel_path],
         )?
     };
     Ok(deleted)
@@ -842,6 +860,54 @@ mod tests {
 
         let remaining = fetch_all(&conn).unwrap();
         assert_eq!(remaining.len(), 2);
+    }
+
+    #[test]
+    fn clear_subtree_wildcard_bytes_are_literal() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        insert_note(&conn, root_id, "alpha_beta", "scope", 100);
+        insert_note(&conn, root_id, "alpha_beta/a", "child", 200);
+        insert_note(&conn, root_id, "alphaXbeta", "trap sibling", 300);
+        insert_note(&conn, root_id, "alphaXbeta/b", "trap child", 400);
+
+        // '_' in the scope is a path byte, not a wildcard: clearing
+        // "alpha_beta" must never delete the trap sibling's notes.
+        let count = clear_subtree(&conn, root_id, "alpha_beta").unwrap();
+        assert_eq!(count, 2);
+
+        let remaining = fetch_all(&conn).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining
+            .iter()
+            .all(|n| n.rel_path.starts_with("alphaXbeta")));
+    }
+
+    #[test]
+    fn subtree_reads_treat_wildcard_bytes_literally() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        insert_note(&conn, root_id, "alpha_beta/a", "inside", 100);
+        insert_note(&conn, root_id, "alphaXbeta/b", "trap", 200);
+
+        let notes = fetch_subtree(&conn, root_id, "alpha_beta").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].rel_path, "alpha_beta/a");
+
+        assert_eq!(
+            count_subtree_notes(&conn, root_id, "alpha_beta").unwrap(),
+            1
+        );
+        assert_eq!(
+            count_subtree_locations(&conn, root_id, "alpha_beta").unwrap(),
+            1
+        );
+        assert_eq!(
+            count_descendant_locations(&conn, root_id, "alpha_beta").unwrap(),
+            1
+        );
     }
 
     // =========================================================================
