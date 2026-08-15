@@ -74,7 +74,7 @@ pub fn relative_to_scope(note_rel_path: &str, scope_rel_path: &str) -> String {
 }
 
 /// Display path for a note in a timeline listing. Shared by `note list` and
-/// the trail's mixed timeline — one note-identity rendering, two hosts.
+/// the book's notes page — one note-identity rendering, two hosts.
 pub fn note_display_path(
     note: &Note,
     roots: &std::collections::HashMap<i64, super::root::Root>,
