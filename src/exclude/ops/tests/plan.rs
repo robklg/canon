@@ -655,6 +655,24 @@ fn test_plan_set_objects_skips_empty() {
 }
 
 #[test]
+fn test_plan_set_objects_counts_each_skipped_empty_file() {
+    // The interface prints "{n} empty files skipped", so the count must be
+    // per set-aside source — all empty files share the one empty-content
+    // object, and an object-grain count would report any number of them as 1.
+    let mut conn = setup_test_db();
+    let root = insert_root(&conn, "/photos", "source", false);
+    let obj = insert_object(&conn, "empty_hash_value_x", false);
+    insert_source_with_size(&conn, root, "a/empty1.txt", Some(obj), 0);
+    insert_source_with_size(&conn, root, "a/empty2.txt", Some(obj), 0);
+    insert_source_with_size(&conn, root, "b/empty3.txt", Some(obj), 0);
+
+    let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+
+    assert!(plan.objects.is_empty());
+    assert_eq!(plan.skipped_empty, 3);
+}
+
+#[test]
 fn test_plan_set_objects_computes_source_counts() {
     let mut conn = setup_test_db();
     let source_root = insert_root(&conn, "/source", "source", false);

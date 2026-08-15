@@ -179,7 +179,8 @@ pub struct ExcludeSetObjectsPlan {
     pub total_archive_count: usize,
     /// Sources skipped because they have no hash.
     pub skipped_no_hash: usize,
-    /// Empty files skipped (size = 0).
+    /// Empty files skipped (size = 0). Counts sources, not deduped objects —
+    /// the interface reports this as a file count.
     pub skipped_empty: usize,
     /// Objects already excluded.
     pub skipped_already_excluded: usize,

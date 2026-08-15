@@ -306,14 +306,16 @@ pub fn plan_set_objects(
             skipped_no_hash += 1;
             continue;
         };
-        if !seen_objects.insert(object_id) {
-            continue;
-        }
         // The contentless law: every empty file shares the one empty-content
         // object, so an identity-keyed exclusion here would dismiss every
         // empty file in the universe — set aside, counted, never silent.
+        // Checked before the object dedupe: the count is reported as files
+        // ("N empty files skipped"), so every set-aside source must count.
         if source.is_contentless() {
             skipped_empty += 1;
+            continue;
+        }
+        if !seen_objects.insert(object_id) {
             continue;
         }
         object_ids_to_check.push(object_id);
