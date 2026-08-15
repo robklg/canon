@@ -8,8 +8,9 @@ use std::collections::HashMap;
 use anyhow::{bail, Result};
 
 use crate::domain::decision::DecisionStatus;
-use crate::domain::note::{ancestor_paths, LocationEntry, Note};
 use crate::domain::root::Root;
+use crate::notes::domain::{ancestor_paths, LocationEntry, Note};
+use crate::notes::repo as notes_repo;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::repo::{self, Connection};
 
@@ -94,13 +95,13 @@ pub fn resolve_note_scope(path: &str, roots: &[Root]) -> Result<NoteScope> {
 
 /// View notes at an exact scope with spatial context indicators.
 pub fn view_notes(conn: &Connection, scope: &NoteScope) -> Result<NoteViewResult> {
-    let notes = repo::note::fetch_by_scope(conn, scope.root_id, &scope.rel_path)?;
+    let notes = notes_repo::fetch_by_scope(conn, scope.root_id, &scope.rel_path)?;
 
     let ancestors = ancestor_paths(&scope.rel_path);
-    let ancestor_count = repo::note::count_ancestor_notes(conn, scope.root_id, &ancestors)?;
+    let ancestor_count = notes_repo::count_ancestor_notes(conn, scope.root_id, &ancestors)?;
 
     let descendant_location_count =
-        repo::note::count_descendant_locations(conn, scope.root_id, &scope.rel_path)?;
+        notes_repo::count_descendant_locations(conn, scope.root_id, &scope.rel_path)?;
 
     Ok(NoteViewResult {
         scope: scope.clone(),
@@ -118,7 +119,7 @@ const DEFAULT_LIMIT: usize = 10;
 pub fn list_notes_global(conn: &Connection, limit: Option<usize>) -> Result<NoteListResult> {
     let effective = limit.unwrap_or(DEFAULT_LIMIT);
     let (mut notes, total_note_count, total_location_count) =
-        repo::note::fetch_recent(conn, effective)?;
+        notes_repo::fetch_recent(conn, effective)?;
     notes.reverse(); // oldest-first for display
     let all_roots = repo::root::fetch_all(conn)?;
     let roots: HashMap<i64, Root> = all_roots.into_iter().map(|r| (r.id, r)).collect();
@@ -138,7 +139,7 @@ pub fn list_notes_recursive(
 ) -> Result<NoteListResult> {
     let effective = limit.unwrap_or(DEFAULT_LIMIT);
     let (mut notes, total_note_count, total_location_count) =
-        repo::note::fetch_recent_subtree(conn, scope.root_id, &scope.rel_path, effective)?;
+        notes_repo::fetch_recent_subtree(conn, scope.root_id, &scope.rel_path, effective)?;
     notes.reverse(); // oldest-first for display
     let all_roots = repo::root::fetch_all(conn)?;
     let roots: HashMap<i64, Root> = all_roots.into_iter().map(|r| (r.id, r)).collect();
@@ -153,7 +154,7 @@ pub fn list_notes_recursive(
 /// List locations globally, spatial mode.
 pub fn list_locations_global(conn: &Connection, limit: Option<usize>) -> Result<NoteSpatialResult> {
     let effective = limit.unwrap_or(DEFAULT_LIMIT);
-    let (mut locations, total_location_count) = repo::note::fetch_locations(conn, effective)?;
+    let (mut locations, total_location_count) = notes_repo::fetch_locations(conn, effective)?;
     locations.reverse(); // oldest-first for display
     let all_roots = repo::root::fetch_all(conn)?;
     let roots: HashMap<i64, Root> = all_roots.into_iter().map(|r| (r.id, r)).collect();
@@ -172,7 +173,7 @@ pub fn list_locations_recursive(
 ) -> Result<NoteSpatialResult> {
     let effective = limit.unwrap_or(DEFAULT_LIMIT);
     let (mut locations, total_location_count) =
-        repo::note::fetch_locations_subtree(conn, scope.root_id, &scope.rel_path, effective)?;
+        notes_repo::fetch_locations_subtree(conn, scope.root_id, &scope.rel_path, effective)?;
     locations.reverse(); // oldest-first for display
     let all_roots = repo::root::fetch_all(conn)?;
     let roots: HashMap<i64, Root> = all_roots.into_iter().map(|r| (r.id, r)).collect();
@@ -185,8 +186,8 @@ pub fn list_locations_recursive(
 
 /// Plan a recursive clear — compute counts without deleting.
 pub fn plan_clear_recursive(conn: &Connection, scope: &NoteScope) -> Result<ClearPlan> {
-    let note_count = repo::note::count_subtree_notes(conn, scope.root_id, &scope.rel_path)?;
-    let location_count = repo::note::count_subtree_locations(conn, scope.root_id, &scope.rel_path)?;
+    let note_count = notes_repo::count_subtree_notes(conn, scope.root_id, &scope.rel_path)?;
+    let location_count = notes_repo::count_subtree_locations(conn, scope.root_id, &scope.rel_path)?;
     Ok(ClearPlan {
         scope: scope.clone(),
         note_count,
@@ -259,7 +260,7 @@ pub fn execute_clear_recursive(
         conn,
         scope,
         decision,
-        repo::note::clear_subtree,
+        notes_repo::clear_subtree,
         |deleted| format!("Cleared {} notes", deleted),
     )?;
     Ok(ClearRecursiveResult {
@@ -288,7 +289,7 @@ pub fn execute_clear_exact(
         conn,
         scope,
         decision,
-        repo::note::clear_by_scope,
+        notes_repo::clear_by_scope,
         |deleted| {
             if deleted == 0 {
                 format!("No notes at {display}")
@@ -310,9 +311,9 @@ pub fn survey_note_context(
     root_id: i64,
     rel_path: &str,
 ) -> Result<SurveyNoteContext> {
-    let subtree_notes = repo::note::fetch_subtree(conn, root_id, rel_path)?;
+    let subtree_notes = notes_repo::fetch_subtree(conn, root_id, rel_path)?;
     let ancestors = ancestor_paths(rel_path);
-    let ancestor_count = repo::note::count_ancestor_notes(conn, root_id, &ancestors)?;
+    let ancestor_count = notes_repo::count_ancestor_notes(conn, root_id, &ancestors)?;
     Ok(SurveyNoteContext {
         subtree_notes,
         ancestor_count,
@@ -454,7 +455,7 @@ mod tests {
         assert_eq!(plan.location_count, 3);
 
         // Verify nothing was actually deleted
-        let all = repo::note::fetch_all(&conn).unwrap();
+        let all = notes_repo::fetch_all(&conn).unwrap();
         assert_eq!(all.len(), 5);
     }
 
@@ -509,7 +510,7 @@ mod tests {
                 note.rel_path
             );
             // Would panic if the note were outside the scope.
-            crate::domain::note::relative_to_scope(&note.rel_path, "alpha_beta");
+            crate::notes::domain::relative_to_scope(&note.rel_path, "alpha_beta");
         }
     }
 

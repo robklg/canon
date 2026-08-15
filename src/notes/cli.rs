@@ -17,12 +17,13 @@ use chrono::{TimeZone, Utc};
 use crate::ceremony;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
-use crate::domain::note::{note_display_path, LocationEntry};
 use crate::domain::root::Root;
 use crate::domain::scope::DecisionScope;
-use crate::ops;
+use crate::notes::domain::{note_display_path, LocationEntry};
+use crate::notes::ops as notes_ops;
+use crate::notes::ops::{NoteListResult, NoteScope, NoteSpatialResult, NoteViewResult};
+use crate::notes::repo as notes_repo;
 use crate::ops::decision::DecisionParams;
-use crate::ops::note::{NoteListResult, NoteScope, NoteSpatialResult, NoteViewResult};
 use crate::ops::scope::resolve_scope;
 use crate::repo::{self, Db};
 
@@ -52,7 +53,7 @@ pub fn run(
         }
         // Add mode
         let scope = resolve_single_scope(conn, path, false)?;
-        repo::note::insert(conn, scope.root_id, &scope.rel_path, text)?;
+        notes_repo::insert(conn, scope.root_id, &scope.rel_path, text)?;
         eprintln!("Note added: {}", scope.display());
         return Ok(());
     }
@@ -61,7 +62,7 @@ pub fn run(
         let scope = resolve_single_scope(conn, path, false)?;
         if recursive {
             // Clear recursive with confirmation
-            let plan = ops::note::plan_clear_recursive(conn, &scope)?;
+            let plan = notes_ops::plan_clear_recursive(conn, &scope)?;
             if plan.note_count == 0 {
                 eprintln!("No notes to clear under {}", plan.scope.display());
                 return Ok(());
@@ -90,7 +91,7 @@ pub fn run(
                 receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
                 ledger_config: config.clone(),
             };
-            let result = ops::note::execute_clear_recursive(conn, &scope, Some(&decision))?;
+            let result = notes_ops::execute_clear_recursive(conn, &scope, Some(&decision))?;
             eprintln!("{}", result.summary);
             for w in &result.warnings {
                 eprintln!("Warning: {w}");
@@ -110,7 +111,7 @@ pub fn run(
                 receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
                 ledger_config: config.clone(),
             };
-            let result = ops::note::execute_clear_exact(conn, &scope, Some(&decision))?;
+            let result = notes_ops::execute_clear_exact(conn, &scope, Some(&decision))?;
             eprintln!("{}", result.summary);
             for w in &result.warnings {
                 eprintln!("Warning: {w}");
@@ -121,10 +122,10 @@ pub fn run(
 
     if global {
         if by_scope {
-            let result = ops::note::list_locations_global(conn, limit)?;
+            let result = notes_ops::list_locations_global(conn, limit)?;
             print_spatial(&result, true);
         } else {
-            let result = ops::note::list_notes_global(conn, limit)?;
+            let result = notes_ops::list_notes_global(conn, limit)?;
             print_temporal(&result, true);
         }
         return Ok(());
@@ -133,10 +134,10 @@ pub fn run(
     if recursive {
         let scope = resolve_single_scope(conn, path, false)?;
         if by_scope {
-            let result = ops::note::list_locations_recursive(conn, &scope, limit)?;
+            let result = notes_ops::list_locations_recursive(conn, &scope, limit)?;
             print_spatial(&result, false);
         } else {
-            let result = ops::note::list_notes_recursive(conn, &scope, limit)?;
+            let result = notes_ops::list_notes_recursive(conn, &scope, limit)?;
             print_temporal(&result, false);
         }
         return Ok(());
@@ -145,12 +146,12 @@ pub fn run(
     // View mode — try to resolve scope; fall back to global list if not in a root
     match resolve_single_scope_optional(conn, path)? {
         Some(scope) => {
-            let result = ops::note::view_notes(conn, &scope)?;
+            let result = notes_ops::view_notes(conn, &scope)?;
             print_view(&result);
         }
         None => {
             // CWD not in any root, fall back to global temporal list
-            let result = ops::note::list_notes_global(conn, limit)?;
+            let result = notes_ops::list_notes_global(conn, limit)?;
             print_temporal(&result, true);
         }
     }
@@ -178,7 +179,7 @@ fn resolve_single_scope(
         anyhow::bail!("Note operates on a single scope, got multiple paths");
     }
 
-    ops::note::resolve_note_scope(&resolved.prefixes[0], &all_roots)
+    notes_ops::resolve_note_scope(&resolved.prefixes[0], &all_roots)
 }
 
 /// Like resolve_single_scope but returns None when CWD is not under a root
@@ -199,11 +200,11 @@ fn resolve_single_scope_optional(
         anyhow::bail!("Note operates on a single scope, got multiple paths");
     }
 
-    let scope = ops::note::resolve_note_scope(&resolved.prefixes[0], &all_roots)?;
+    let scope = notes_ops::resolve_note_scope(&resolved.prefixes[0], &all_roots)?;
     Ok(Some(scope))
 }
 
-pub(crate) fn format_note_date(timestamp: i64) -> String {
+pub fn format_note_date(timestamp: i64) -> String {
     match Utc.timestamp_opt(timestamp, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
         _ => "????-??-??".to_string(),

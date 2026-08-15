@@ -3,6 +3,7 @@ use rusqlite::Connection;
 
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::format_count;
+use crate::notes::count_subtree_notes;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::repo;
 use crate::roots::repo as roots_repo;
@@ -69,7 +70,7 @@ pub fn plan_remove(conn: &Connection, root_id: i64) -> Result<RemoveRootPlan> {
         .count() as i64;
     let not_in_archive = source_count - in_archive_count;
 
-    let note_count = repo::note::count_subtree_notes(conn, root_id, "")?;
+    let note_count = count_subtree_notes(conn, root_id, "")?;
 
     let retirement = repo::decision::fetch_latest_receipt_for_root(
         conn,

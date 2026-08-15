@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 
 use crate::domain::format::{format_count, format_size, shell_quote};
-use crate::note::format_note_date;
+use crate::notes::format_note_date;
 use crate::repo::Db;
 use crate::sweep::domain::{
     HubEntry, LeaderboardEntry, Location, RelationClass, RelationShape, StructuralFinding,

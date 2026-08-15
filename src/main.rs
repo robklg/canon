@@ -78,7 +78,7 @@ mod facts;
 mod import_facts;
 mod ledger;
 mod ls;
-mod note;
+mod notes;
 mod roots;
 mod scan;
 mod survey;
@@ -1473,7 +1473,7 @@ fn main() -> Result<()> {
             by_scope,
             limit,
         } => {
-            note::run(
+            notes::run(
                 &mut db,
                 path.as_deref(),
                 message.as_deref(),

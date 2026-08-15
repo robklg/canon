@@ -11,7 +11,6 @@
 pub mod db;
 pub mod decision;
 pub mod fact;
-pub mod note;
 pub mod object;
 pub mod root;
 pub mod source;

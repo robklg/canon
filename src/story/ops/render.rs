@@ -557,8 +557,8 @@ mod tests {
 
     use super::*;
     use crate::core::domain::resolution::ResolutionAccount;
-    use crate::domain::note::Note;
     use crate::domain::root::Root;
+    use crate::notes::Note;
     use crate::story::domain::acts::{ActDecision, ActGroup};
     use crate::story::domain::locations::{LocationAggregate, LocationCount};
     use crate::story::domain::place::PlaceStanding;

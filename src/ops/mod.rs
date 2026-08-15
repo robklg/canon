@@ -15,7 +15,6 @@ pub mod fs;
 pub mod import_facts;
 pub mod ledger;
 pub mod ls;
-pub mod note;
 pub mod receipt;
 pub mod scope;
 pub mod selection;

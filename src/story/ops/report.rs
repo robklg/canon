@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use crate::core::domain::resolution::{build_account, ResolutionAccount};
 use crate::core::ops::root_story::{fetch_root_story, RootStory};
 use crate::domain::root::Root;
+use crate::notes::fetch_by_roots;
 use crate::repo;
 use crate::story::domain::place::{
     assign_reason_sites, DecisionInfo, StoryInputs, StoryParams, StoryPlace,
@@ -64,7 +65,7 @@ pub fn report_over(
     story: &RootStory,
     params: &StoryParams,
 ) -> Result<StoryReport> {
-    let notes = repo::note::fetch_by_roots(conn, &[story.root.id])?;
+    let notes = fetch_by_roots(conn, &[story.root.id])?;
 
     // Covered-copy locations for the "copies stand in" lines. Empty objects
     // never come back — the archived-ness SQL carries the contentless law
@@ -130,6 +131,7 @@ pub fn report_over(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notes::insert;
     use crate::repo::{insert_test_root, open_in_memory_for_test};
     use crate::story::domain::place::StoryPlace;
     use rusqlite::Connection as SqlConnection;
@@ -301,7 +303,7 @@ mod tests {
         insert_extraction(&conn, d_apply, root, "photos", 5, "/archive/media");
 
         // A note, and an unexplained absence.
-        repo::note::insert(&conn, root, "keep", "still deciding").unwrap();
+        insert(&conn, root, "keep", "still deciding").unwrap();
         insert_source(&conn, root, "gone/z.jpg", None, 100, false, false, None);
 
         let report = compute_story(&conn, root, &no_dust()).unwrap();

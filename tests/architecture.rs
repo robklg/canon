@@ -70,6 +70,9 @@ fn classify_layer(rel_path: &str) -> Layer {
     if let Some(rest) = rel_path.strip_prefix("roots/") {
         return classify_subsystem_stratum(rest);
     }
+    if let Some(rest) = rel_path.strip_prefix("notes/") {
+        return classify_subsystem_stratum(rest);
+    }
     if rel_path.starts_with("domain/") {
         Layer::Domain
     } else if rel_path.starts_with("repo/") {
@@ -202,7 +205,6 @@ impl Rule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Severity {
     Read,
-    Write,
     TestOnly,
 }
 
@@ -210,7 +212,6 @@ impl Severity {
     fn label(self) -> &'static str {
         match self {
             Severity::Read => "read",
-            Severity::Write => "write",
             Severity::TestOnly => "test-only",
         }
     }
@@ -301,14 +302,9 @@ const TIER3: &[Tier3Entry] = &[
         severity: Severity::Read,
     },
     Tier3Entry {
-        file: "note.rs",
+        file: "notes/cli.rs",
         reference: "repo::root::fetch_all",
         severity: Severity::Read,
-    },
-    Tier3Entry {
-        file: "note.rs",
-        reference: "repo::note::insert",
-        severity: Severity::Write,
     },
     Tier3Entry {
         file: "retire/cli.rs",
@@ -361,17 +357,17 @@ const TIER3: &[Tier3Entry] = &[
         severity: Severity::TestOnly,
     },
     Tier3Entry {
-        file: "repo/note.rs",
+        file: "notes/repo.rs",
         reference: "crate::ops::test_helpers::insert_note",
         severity: Severity::TestOnly,
     },
     Tier3Entry {
-        file: "repo/note.rs",
+        file: "notes/repo.rs",
         reference: "crate::ops::test_helpers::insert_root",
         severity: Severity::TestOnly,
     },
     Tier3Entry {
-        file: "repo/note.rs",
+        file: "notes/repo.rs",
         reference: "crate::ops::test_helpers::setup_test_db",
         severity: Severity::TestOnly,
     },
@@ -1622,6 +1618,23 @@ mod self_tests {
                 "unsuspend",
                 "remove_root_data",
                 "plan_remove",
+            ],
+        ),
+        (
+            "notes",
+            &[
+                "run",
+                "Note",
+                "fetch_by_roots",
+                "fetch_all",
+                "insert",
+                "count_subtree_notes",
+                "batch_count_subtree",
+                "note_display_path",
+                "relative_to_scope",
+                "survey_note_context",
+                "SurveyNoteContext",
+                "format_note_date",
             ],
         ),
     ];

@@ -10,6 +10,7 @@ use chrono::{Duration, Local, NaiveDate, TimeZone};
 
 use crate::core::domain::extraction::DecisionExtraction;
 use crate::domain::root::find_containing_root;
+use crate::notes::{fetch_all, fetch_by_roots};
 use crate::repo::{self, Connection};
 use crate::trail::domain::placement::{placement_in_view, row_aspect, scopes_touch, RowAspect};
 use crate::trail::domain::timeline::{
@@ -116,7 +117,7 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
             None => crate::trail::repo::fetch_recent(conn, None)?,
         };
         let notes = if params.include_notes {
-            repo::note::fetch_all(conn)?
+            fetch_all(conn)?
         } else {
             Vec::new()
         };
@@ -183,7 +184,7 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
         let unscoped = unscoped_raw - unscoped_adjustment;
 
         let notes = if params.include_notes {
-            repo::note::fetch_by_roots(conn, &root_ids)?
+            fetch_by_roots(conn, &root_ids)?
                 .into_iter()
                 .filter(|n| touches(n.root_id, &n.rel_path))
                 .collect()

@@ -125,7 +125,7 @@ pub(super) fn print_jsonl(result: &TrailResult) -> Result<()> {
 mod tests {
     use super::*;
     use crate::core::domain::extraction::OriginDisposition;
-    use crate::domain::note::Note;
+    use crate::notes::Note;
 
     fn mk_note(text: &str) -> Note {
         Note {

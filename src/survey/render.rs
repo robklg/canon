@@ -4,8 +4,7 @@
 use std::collections::HashMap;
 
 use crate::domain::format_count;
-use crate::note::format_note_date;
-use crate::ops::note::SurveyNoteContext;
+use crate::notes::{format_note_date, relative_to_scope, SurveyNoteContext};
 use crate::ops::scope::ResolvedScope;
 use crate::survey::ops::compute::{ArchivedLocationDetail, LocationResult};
 
@@ -74,7 +73,7 @@ pub(super) fn print_notes_section(ctx: &SurveyNoteContext, scope_rel_path: &str,
         // Compute alignment width for relative paths
         let rel_paths: Vec<String> = display_notes
             .iter()
-            .map(|n| crate::domain::note::relative_to_scope(&n.rel_path, scope_rel_path))
+            .map(|n| relative_to_scope(&n.rel_path, scope_rel_path))
             .collect();
         let max_rel_len = rel_paths.iter().map(|p| p.len()).max().unwrap_or(0);
 

@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 
-use super::db::Connection;
-use crate::domain::note::{LocationEntry, Note};
+use crate::notes::domain::{LocationEntry, Note};
+use crate::repo::db::Connection;
 
 /// The columns we SELECT for Note construction.
 const NOTE_COLUMNS: &str = "id, root_id, rel_path, text, created_at";
@@ -90,7 +90,7 @@ pub fn fetch_subtree(conn: &Connection, root_id: i64, rel_path: &str) -> Result<
 /// viewed scope is domain logic — SQL never compares paths.
 pub fn fetch_by_roots(conn: &Connection, root_ids: &[i64]) -> Result<Vec<Note>> {
     let mut notes = Vec::new();
-    for chunk in root_ids.chunks(super::source::BATCH_SIZE) {
+    for chunk in root_ids.chunks(crate::repo::source::BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
         let sql = format!(
             "SELECT {NOTE_COLUMNS} FROM notes WHERE root_id IN ({})",

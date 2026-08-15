@@ -11,9 +11,9 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::domain::note::Note;
 use crate::domain::path::path_is_under;
 use crate::domain::source::Source;
+use crate::notes::{fetch_by_roots, Note};
 use crate::repo::{self, Connection};
 use crate::sweep::domain::{
     compute_structural, reduction_lens, LeaderboardEntry, Location, RelationShape, SweepParams,
@@ -108,7 +108,7 @@ pub fn compute_sweep(conn: &Connection, options: &SweepOptions) -> Result<SweepO
         over
     };
 
-    let all_notes = repo::note::fetch_by_roots(conn, &root_ids)?;
+    let all_notes = fetch_by_roots(conn, &root_ids)?;
     let mut notes: HashMap<Location, Vec<Note>> = HashMap::new();
     let mut excluded_context: HashMap<Location, usize> = HashMap::new();
     for entry in &entries {
@@ -182,6 +182,7 @@ fn subject_locations(entry: &LeaderboardEntry) -> Vec<&Location> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notes::insert;
     use crate::ops::test_helpers::{
         insert_object, insert_root, insert_source, insert_source_excluded, insert_source_with_size,
         setup_test_db,
@@ -391,10 +392,10 @@ mod tests {
     fn notes_attach_to_subject_and_counterpart() {
         let conn = setup_test_db();
         let (r1, r2) = seed_basic(&conn);
-        repo::note::insert(&conn, r1, "big", "check me").unwrap();
-        repo::note::insert(&conn, r1, "big/sub", "deeper").unwrap();
-        repo::note::insert(&conn, r1, "noise", "elsewhere").unwrap();
-        repo::note::insert(&conn, r2, "q", "counterpart side").unwrap();
+        insert(&conn, r1, "big", "check me").unwrap();
+        insert(&conn, r1, "big/sub", "deeper").unwrap();
+        insert(&conn, r1, "noise", "elsewhere").unwrap();
+        insert(&conn, r2, "q", "counterpart side").unwrap();
 
         let report = report(&conn, &default_options());
         let by_prefix = |root_id: i64, root_path: &str, rel: &str| {

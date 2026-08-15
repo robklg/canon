@@ -13,8 +13,8 @@ use crate::core::domain::resolution::{build_account, ResolutionAccount};
 use crate::core::ops::root_story::RootStory;
 use crate::domain::decision::Decision;
 use crate::domain::format::format_size;
-use crate::domain::note::note_display_path;
-use crate::domain::{format_count, Note, Root};
+use crate::domain::{format_count, Root};
+use crate::notes::{fetch_by_roots, note_display_path, Note};
 use crate::ops;
 use crate::ops::ledger::{read_apply_receipt, ReceiptRead};
 use crate::repo;
@@ -82,7 +82,7 @@ pub fn compile_book(
     let mut gaps: Vec<String> = Vec::new();
 
     // Compile-only fetches on top of the substrate.
-    let notes = repo::note::fetch_by_roots(conn, &[story.root.id])?;
+    let notes = fetch_by_roots(conn, &[story.root.id])?;
     let trail = crate::trail::compute_trail(
         conn,
         &TrailParams {

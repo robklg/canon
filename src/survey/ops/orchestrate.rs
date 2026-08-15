@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use crate::domain;
 use crate::expr::filter::Filter;
-use crate::ops::note::SurveyNoteContext;
+use crate::notes::SurveyNoteContext;
 use crate::survey::ops::compute::{compute_survey, SurveyOutcome, SurveyParams};
 
 /// Raw, unresolved orchestration inputs — everything `run_survey` needs
@@ -72,7 +72,7 @@ pub fn run_survey(
             domain::root::find_containing_root(&scope_prefixes[0], &all_roots)
         {
             Some((
-                crate::ops::note::survey_note_context(conn, root_id, &rel_path)?,
+                crate::notes::survey_note_context(conn, root_id, &rel_path)?,
                 rel_path,
             ))
         } else {
@@ -136,7 +136,7 @@ pub fn run_survey(
                         .map(|(root_id, _, _, rel_path)| (root_id, rel_path))
                 })
                 .collect();
-            let counts = crate::repo::note::batch_count_subtree(conn, &location_scopes)?;
+            let counts = crate::notes::batch_count_subtree(conn, &location_scopes)?;
             location_note_counts = location_scopes
                 .iter()
                 .filter_map(|(root_id, rel_path)| {

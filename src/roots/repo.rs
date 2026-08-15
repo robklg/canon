@@ -1,5 +1,5 @@
 //! The roots subsystem's repo stratum: the roots-exclusive SQL carved from
-//! `repo::root`/`repo::note` unchanged in SQL and signature. Kept as two
+//! `repo::root`/`notes::repo` unchanged in SQL and signature. Kept as two
 //! inner `root`/`note` modules mirroring their origin table.
 
 use crate::repo::Connection;
@@ -358,8 +358,8 @@ pub(crate) mod note {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::notes::fetch_all;
         use crate::ops::test_helpers::{insert_note, insert_root, setup_test_db};
-        use crate::repo::note::fetch_all;
 
         #[test]
         fn delete_by_root_removes_all_notes() {

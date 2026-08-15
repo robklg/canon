@@ -1,4 +1,4 @@
-use crate::repo;
+use crate::notes::insert;
 use crate::repo::db::open_in_memory_for_test;
 use crate::repo::insert_test_root;
 use crate::retire::ops::verify::verify_book;
@@ -21,8 +21,8 @@ fn compile_writes_all_artifacts_with_sorted_iso_inventory() {
     set_decision_extras(&conn, scan, Some("Indexed 2 sources"), Some("first gather"));
     insert_source(&conn, root_id, "z/last.jpg", None, true, false, None);
     insert_source(&conn, root_id, "a/first.jpg", None, true, false, None);
-    repo::note::insert(&conn, root_id, "a", "looks like the 2015 batch").unwrap();
-    repo::note::insert(&conn, root_id, "", "ready to retire").unwrap();
+    insert(&conn, root_id, "a", "looks like the 2015 batch").unwrap();
+    insert(&conn, root_id, "", "ready to retire").unwrap();
 
     let dest = book_dir.path().join("book");
     let book = compile_to(&conn, root_id, &dest);
