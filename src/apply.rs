@@ -75,6 +75,9 @@ pub fn run(
     validate_manifest_version(config.meta.version)?;
 
     // Merge manifest [options] with CLI options
+    // Only the duplicates flag is merged. A manifest may also record that
+    // archived sources were allowed, but that governed which sources were
+    // selected when the manifest was made; it has nothing to say here.
     let (_, manifest_duplicates) = parse_manifest_allow(&config.options.allow)?;
     let allow_duplicates = options.allow_duplicates || manifest_duplicates;
     if manifest_duplicates && !options.allow_duplicates {
@@ -117,7 +120,11 @@ pub fn run(
         .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
     let needed_keys = expr::extract_fact_keys(&pattern);
 
-    // Get scope prefix from config if available
+    // Passed to pattern evaluation as a single prefix, deliberately without
+    // splitting — unlike the decision scope further below, which splits the
+    // same field. A manifest covering more than one scope therefore evaluates
+    // patterns against a prefix that matches none of them, and the evaluator
+    // falls back to the full relative path rather than reporting it.
     let scope_prefix = config.meta.scope.as_deref();
 
     // Cache all root paths (single query via repo layer)
@@ -634,6 +641,9 @@ fn compute_sample_destinations(
     let sample_ids: Vec<i64> = sample_sources.iter().map(|s| s.id).collect();
     let mut all_facts: HashMap<i64, Vec<crate::domain::fact::FactEntry>> = HashMap::new();
     for key in needed_keys {
+        // Must list the same namespaces as the fetch and evaluation sites in
+        // the apply operation — a namespace listed in one place and not the
+        // others changes which facts reach pattern evaluation.
         if key.starts_with("source.") || key.starts_with("scope.") || key == "object.hash" {
             continue;
         }

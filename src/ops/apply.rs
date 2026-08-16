@@ -177,6 +177,11 @@ fn build_eval_context(
 
     if let Some(source_facts) = all_facts.get(&source.id) {
         for key in needed_keys {
+            // The same three namespaces are skipped where the facts are
+            // fetched, both here and for the status read and the confirmation
+            // samples. All four lists must agree: a namespace skipped when
+            // fetching but not here lets a stored fact shadow the built-in of
+            // the same name, which silently changes where files land.
             if key.starts_with("source.") || key.starts_with("scope.") || key == "object.hash" {
                 continue;
             }
@@ -207,6 +212,12 @@ pub fn evaluate_pattern(
 }
 
 /// Compute the archive-relative path from base_dir_rel and dest_rel.
+///
+/// This is the path recorded in the database and in the receipt. The path
+/// actually written on disk is built separately, by joining the base
+/// directory onto the archive root. The two must agree on empty and trailing
+/// separators or the records point somewhere the file is not — which would
+/// read back as "not at destination" and invite a second copy.
 fn compute_archive_rel_path(base_dir_rel: &str, dest_rel: &str) -> String {
     if base_dir_rel.is_empty() {
         dest_rel.to_string()
@@ -262,6 +273,8 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     let source_ids: Vec<i64> = params.sources.iter().map(|s| s.id).collect();
     let mut all_facts: HashMap<i64, Vec<FactEntry>> = HashMap::new();
     for key in params.needed_keys {
+        // Must list the same namespaces as the evaluation context builder
+        // above — see the note there.
         if key.starts_with("source.") || key.starts_with("scope.") || key == "object.hash" {
             continue;
         }
@@ -293,6 +306,11 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
                     .get(&source.root_id)
                     .cloned()
                     .unwrap_or_default();
+                // When the root prefix does not match — including the case
+                // where the root path above fell back to empty — this records
+                // an absolute path in a field that otherwise holds a
+                // root-relative one. The receipt is written either way, and
+                // receipts are what the ledger is rebuilt from.
                 let source_rel_path = path_strip_prefix(&source.path, &source_root_path)
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| source.path.clone());
@@ -426,6 +444,12 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
                 })?;
 
         for transfer in &transfers {
+            // This catches a destination that is absolute or otherwise
+            // rooted elsewhere. It cannot catch a parent-directory step: the
+            // check compares path components without normalising, so a path
+            // descending through `..` still reads as being under the archive
+            // root. Removing `..` from an expanded pattern happens in the
+            // expression evaluator; this is not a second guard for it.
             let full_dest = format!("{}/{}", archive_root_path, transfer.archive_rel_path);
             if !crate::domain::path::path_is_under(&full_dest, archive_root_path) {
                 violations
@@ -937,6 +961,14 @@ pub fn execute_apply(
     progress.on_finish();
 
     // --- Resume mode: register "already there" entries in DB ---
+    //
+    // These rows are stamped with this decision, but no receipt item is added
+    // for them and they are not counted into the extraction ledger below —
+    // the transfer that put the files there belongs to an earlier decision,
+    // whose receipt already lists them. One consequence is worth knowing
+    // before changing either side: rebuilding the ledger from receipts on
+    // disk cannot re-derive these rows, because this decision's receipt does
+    // not mention them.
     if params.resume && !plan.resume_already_there.is_empty() {
         for transfer in &plan.resume_already_there {
             let new_source = build_new_source_from_lock(
@@ -1116,6 +1148,9 @@ fn record_extractions(
     // Delete-then-insert as one atomic pair: a concurrent `canon trail` must
     // never read a half-replaced decision. The apply flow itself stays
     // non-transactional (fix-forward); this brackets only the index write.
+    // This opens its own transaction, so a caller must not already hold one:
+    // the nested begin would fail, and the failure is downgraded to a warning
+    // below, leaving the index quietly unwritten.
     let write = || -> anyhow::Result<()> {
         let tx = conn.unchecked_transaction()?;
         repo::decision::replace_extractions(&tx, &rows)?;
@@ -1233,6 +1268,10 @@ fn execute_single_transfer(
                 Ok((TransferOutcome::Renamed, prev_decision_id))
             }
             MoveOutcome::CopiedAndDeleted => {
+                // Clear the origin before registering the destination. A crash
+                // between the two then reports the file at neither end, which a
+                // later scan heals. The other order would report it at both,
+                // which reads as a duplicate and invites acting on it.
                 mark_source_not_present(conn, transfer.source_id, decision_id)?;
                 let new_source = build_new_source(
                     &dest_path,

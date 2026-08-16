@@ -105,6 +105,10 @@ pub fn generate(
         receipt_enabled: ledger.recording == RecordingMode::Full && !no_receipt,
         ledger_config: ledger.clone(),
     };
+    // The receipt context is None on purpose, and that — not the flag
+    // computed above — is what stops a receipt file being written. Generating
+    // a manifest performs no transition on any source; the manifest itself is
+    // the artifact the run leaves behind.
     let mut recorder = DecisionRecorder::start(conn, &decision, None);
 
     let result = ops::cluster::execute_generate(&plan, &exec_params)?;
@@ -138,6 +142,8 @@ pub fn generate(
         open_editor(output_path);
     }
 
+    // Only spaces are quoted here. A path carrying a quote or a shell
+    // metacharacter produces a suggestion that will not run as printed.
     let path_str = output_path.display().to_string();
     let escaped = if path_str.contains(' ') {
         format!("'{path_str}'")
@@ -197,7 +203,9 @@ pub fn refresh(
         );
     }
 
-    // Parse scope from config
+    // Split back apart what generation joined. A directory name containing
+    // the separator shreds into prefixes that match nothing, and the refresh
+    // then re-queries a different set than the one asked for.
     let scope_prefixes: Vec<String> = match &config.meta.scope {
         Some(s) => s.split(", ").map(|p| p.to_string()).collect(),
         None => vec![],
@@ -251,6 +259,10 @@ pub fn refresh(
         receipt_enabled: ledger.recording == RecordingMode::Full && !no_receipt,
         ledger_config: ledger.clone(),
     };
+    // The receipt context is None on purpose, and that — not the flag
+    // computed above — is what stops a receipt file being written. Generating
+    // a manifest performs no transition on any source; the manifest itself is
+    // the artifact the run leaves behind.
     let mut recorder = DecisionRecorder::start(conn, &decision, None);
 
     let result = ops::cluster::execute_refresh(&plan, &exec_params)?;

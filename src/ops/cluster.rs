@@ -382,6 +382,11 @@ pub struct ExecuteRefreshResult {
 // ============================================================================
 
 /// Write lock file + manifest for a fresh cluster generation.
+///
+/// Both files are created outright, replacing whatever is at those paths.
+/// Refusing to overwrite an existing manifest — and letting a flag override
+/// that refusal — is the caller's job, and only for this entry point: a
+/// refresh is meant to rewrite in place.
 pub fn execute_generate(
     plan: &ClusterGeneratePlan,
     params: &ExecuteGenerateParams,
@@ -393,12 +398,22 @@ pub fn execute_generate(
     }
 
     // Write JSONL lock file
+    // Order matters: the lock file is written, then hashed, and the hash is
+    // embedded in the manifest written further below. Any other order records
+    // a hash of bytes that were never on disk, and every later apply refuses
+    // the pair. Note the manifest is flushed all the way to disk while the
+    // lock file is only buffered-flushed, so a power loss between them can
+    // leave a durable manifest pointing at a lock that did not survive.
     write_lock_file(&params.lock_path, &plan.lock_entries)?;
 
     // Compute lock file hash
     let lock_hash = super::fs::compute_full_hash(&params.lock_path)?;
 
     // Build ManifestConfig
+    // Several prefixes are joined into one string here and split back apart
+    // by the commands that read the manifest. A directory name containing the
+    // separator will not survive the round trip, and one reader consumes the
+    // joined string whole rather than splitting it.
     let scope = if params.scope_prefixes.len() == 1 {
         Some(params.scope_prefixes[0].clone())
     } else if params.scope_prefixes.is_empty() {
@@ -1137,6 +1152,9 @@ pub fn compute_manifest_status(
     let source_ids: Vec<i64> = lock_entries.iter().map(|s| s.id).collect();
     let mut all_facts: HashMap<i64, Vec<crate::domain::fact::FactEntry>> = HashMap::new();
     for key in &needed_keys {
+        // Must list the same namespaces as the fetch and evaluation sites in
+        // the apply operation — a namespace listed in one place and not the
+        // others changes which facts reach pattern evaluation.
         if key.starts_with("source.") || key.starts_with("scope.") || key == "object.hash" {
             continue;
         }
