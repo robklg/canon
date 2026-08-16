@@ -1260,11 +1260,10 @@ mod self_tests {
     // ========================================================================
     // Subsystem-boundary rule (feature-first migration). Synthetic fixtures
     // pin the rule shape itself, independent of which directories are
-    // physically populated. `retire/` exists for real; `story/` has not yet
-    // moved — so the real `retire -> story::report_over` reference is still
-    // old-tree access (unrestricted), not yet the sibling-boundary case
-    // these fixtures pin. That becomes the non-synthetic case once `story/`
-    // physically moves.
+    // physically populated — so a fixture stays meaningful whether or not
+    // the subsystem it names has been carved out yet. Several of them now
+    // stand for live edges rather than hypothetical ones: `retire` really
+    // does reach `story` and `trail` through their barrels.
     // ========================================================================
 
     #[test]
