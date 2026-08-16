@@ -2387,6 +2387,117 @@ mod tests {
     }
 
     // =========================================================================
+    // filter_by_roots
+    // =========================================================================
+
+    fn two_rooted_entries(conn: &Connection) -> (i64, i64, Vec<LockEntry>) {
+        let photos = insert_root(conn, "/photos", "source", false);
+        let scans = insert_root(conn, "/scans", "source", false);
+        let entries = vec![
+            make_lock_entry(1, photos, "/photos/one.jpg", None, None),
+            make_lock_entry(2, scans, "/scans/two.jpg", None, None),
+        ];
+        (photos, scans, entries)
+    }
+
+    #[test]
+    fn filter_by_roots_keeps_everything_when_no_root_is_named() {
+        let conn = setup_test_db();
+        let (_photos, _scans, entries) = two_rooted_entries(&conn);
+        let roots = repo::root::fetch_all(&conn).unwrap();
+
+        let kept = filter_by_roots(&entries, &[], &roots).unwrap();
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn filter_by_roots_keeps_only_the_named_root() {
+        let conn = setup_test_db();
+        let (photos, _scans, entries) = two_rooted_entries(&conn);
+        let roots = repo::root::fetch_all(&conn).unwrap();
+
+        let kept = filter_by_roots(&entries, &[format!("id:{photos}")], &roots).unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, 1);
+    }
+
+    #[test]
+    fn filter_by_roots_refuses_a_root_that_does_not_exist() {
+        let conn = setup_test_db();
+        let (_photos, _scans, entries) = two_rooted_entries(&conn);
+        let roots = repo::root::fetch_all(&conn).unwrap();
+
+        // Silently keeping everything would apply a wider set than asked for.
+        assert!(filter_by_roots(&entries, &["id:999".to_string()], &roots).is_err());
+    }
+
+    // =========================================================================
+    // check_disk_conflicts
+    // =========================================================================
+
+    fn plan_for_disk_conflicts(rel_paths: &[&str], db_conflicts: Vec<String>) -> ApplyPlan {
+        ApplyPlan {
+            transfers: rel_paths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| ApplyTransfer {
+                    source_id: i as i64 + 1,
+                    source_path: format!("/photos/{p}"),
+                    source_root_path: "/photos".to_string(),
+                    source_rel_path: p.to_string(),
+                    dest_rel_path: p.to_string(),
+                    archive_rel_path: p.to_string(),
+                    object_id: None,
+                    partial_hash: "testhash".to_string(),
+                    size: 4,
+                    mtime: 0,
+                    hash: None,
+                })
+                .collect(),
+            violations: ApplyViolations {
+                dest_conflicts_in_db: db_conflicts,
+                ..Default::default()
+            },
+            stale_sources: vec![],
+            already_archived_count: 0,
+            resume_already_there: vec![],
+            resume_already_there_source_present: 0,
+            resume_source_lost: vec![],
+            resume_size_mismatches: vec![],
+        }
+    }
+
+    #[test]
+    fn check_disk_conflicts_reports_a_destination_already_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("one.jpg"), b"x").unwrap();
+
+        let plan = plan_for_disk_conflicts(&["one.jpg", "two.jpg"], vec![]);
+        assert_eq!(
+            check_disk_conflicts(&plan, dir.path()),
+            vec!["one.jpg".to_string()]
+        );
+    }
+
+    #[test]
+    fn check_disk_conflicts_leaves_out_what_the_db_check_already_found() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("one.jpg"), b"x").unwrap();
+
+        // The interface adds these two counts together, so reporting the same
+        // path on both sides would double it in the preflight the user reads.
+        let plan = plan_for_disk_conflicts(&["one.jpg"], vec!["one.jpg".to_string()]);
+        assert!(check_disk_conflicts(&plan, dir.path()).is_empty());
+    }
+
+    #[test]
+    fn check_disk_conflicts_is_empty_when_the_destination_is_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = plan_for_disk_conflicts(&["one.jpg", "two.jpg"], vec![]);
+        assert!(check_disk_conflicts(&plan, dir.path()).is_empty());
+    }
+
+    // =========================================================================
     // validate_source_state tests
     // =========================================================================
 
@@ -2801,6 +2912,76 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    /// Every transfer mode passes noclobber, and that flag is what stands
+    /// between a re-run and an overwritten archive original — the reason the
+    /// planner is allowed to skip an archive hash check. Copy is covered
+    /// above; these cover the two modes that also remove the source.
+    fn noclobber_refuses_an_occupied_destination(mode: TransferMode) {
+        use std::io::Write;
+        let conn = setup_test_db();
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"data")
+            .unwrap();
+
+        let meta = std::fs::metadata(&src_file).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
+        #[cfg(not(unix))]
+        let (size, mtime) = (meta.len() as i64, 0i64);
+        let hash = compute_partial_hash(&src_file, size as u64).unwrap();
+
+        let dest_dir = tempfile::tempdir().unwrap();
+        std::fs::File::create(dest_dir.path().join("photo.jpg"))
+            .unwrap()
+            .write_all(b"original")
+            .unwrap();
+
+        let transfer = ApplyTransfer {
+            source_id: 1,
+            source_path: src_file.display().to_string(),
+            dest_rel_path: "photo.jpg".to_string(),
+            archive_rel_path: "photo.jpg".to_string(),
+            object_id: Some(1),
+            partial_hash: hash,
+            size,
+            mtime,
+            source_root_path: String::new(),
+            source_rel_path: String::new(),
+            hash: None,
+        };
+
+        let result =
+            execute_single_transfer(&transfer, dest_dir.path(), mode, &conn, archive_root, None);
+        assert!(
+            result.is_err(),
+            "{mode:?} overwrote an occupied destination"
+        );
+        assert!(result.unwrap_err().to_string().contains("already exists"));
+
+        // The occupant is untouched and the source is still where it was.
+        let occupant = std::fs::read(dest_dir.path().join("photo.jpg")).unwrap();
+        assert_eq!(occupant, b"original");
+        assert!(src_file.exists());
+    }
+
+    #[test]
+    fn execute_rename_noclobber() {
+        noclobber_refuses_an_occupied_destination(TransferMode::Rename);
+    }
+
+    #[test]
+    fn execute_move_noclobber() {
+        noclobber_refuses_an_occupied_destination(TransferMode::Move);
     }
 
     #[test]
@@ -3606,6 +3787,51 @@ mod tests {
             format!("{}/2016/Italy", archive_dir.path().display())
         );
         assert_eq!(row.disposition, Some(OriginDisposition::Retained));
+    }
+
+    #[test]
+    fn test_execute_apply_resume_registers_entries_already_at_the_destination() {
+        let conn = setup_test_db();
+        let src_dir = tempfile::tempdir().unwrap();
+        insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+
+        // A resumed run finds the file already copied. Nothing is transferred;
+        // the destination row is what the run still owes.
+        let (mut plan, _size, _mtime) =
+            single_transfer_plan(src_dir.path(), "2016/a.jpg", "2016/a.jpg", b"hi");
+        plan.resume_already_there = std::mem::take(&mut plan.transfers);
+        plan.resume_already_there_source_present = 1;
+        plan.already_archived_count = 1;
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: true,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: None,
+        };
+        let decision = make_decision_params(false);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+
+        assert_eq!(result.copied, 0);
+        let failed: Vec<&str> = result.errors.iter().map(|e| e.error.as_str()).collect();
+        assert!(failed.is_empty(), "registration failed: {failed:?}");
+
+        let decision_id = latest_decision_id(&conn);
+        let row = repo::source::fetch_by_path(&conn, archive_root, "2016/a.jpg")
+            .unwrap()
+            .expect("the already-there entry should be registered at the destination");
+        assert_eq!(row.decision_id, Some(decision_id));
     }
 
     #[test]

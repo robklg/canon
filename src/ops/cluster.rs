@@ -1275,7 +1275,7 @@ mod tests {
     use super::*;
     use crate::ops::test_helpers::{
         insert_fact, insert_object, insert_root, insert_source, insert_source_excluded,
-        setup_test_db,
+        insert_source_with_size, setup_test_db,
     };
 
     fn default_params() -> ClusterGenerateParams {
@@ -2133,5 +2133,211 @@ base_dir = \"output\"\n";
         assert!(result.outcome.is_none());
         assert!(!lock_path.exists());
         assert!(manifest_path.exists());
+    }
+
+    // =========================================================================
+    // compose_summary — the body ops writes under the interface's header
+    // =========================================================================
+
+    #[test]
+    fn compose_summary_says_root_for_one_and_roots_for_several() {
+        let one = ExecuteGenerateResult {
+            source_count: 3,
+            root_breakdown: vec![("/photos".to_string(), 3)],
+            not_archived_count: 1,
+        };
+        let summary = one.compose_summary("Generated manifest: cluster.toml");
+        assert!(summary.contains("From 1 root:"), "got: {summary}");
+        assert!(summary.contains("/photos  (3)"), "got: {summary}");
+
+        let several = ExecuteGenerateResult {
+            source_count: 5,
+            root_breakdown: vec![("/photos".to_string(), 3), ("/scans".to_string(), 2)],
+            not_archived_count: 4,
+        };
+        let summary = several.compose_summary("Generated manifest: cluster.toml");
+        assert!(summary.contains("From 2 roots:"), "got: {summary}");
+        assert!(summary.contains("/scans  (2)"), "got: {summary}");
+    }
+
+    #[test]
+    fn compose_summary_keeps_the_header_first_and_the_unarchived_count_last() {
+        let result = ExecuteGenerateResult {
+            source_count: 2,
+            root_breakdown: vec![("/photos".to_string(), 2)],
+            not_archived_count: 2,
+        };
+        let summary = result.compose_summary("Generated manifest: cluster.toml (2 sources)");
+        let lines: Vec<&str> = summary.lines().collect();
+        assert_eq!(lines[0], "Generated manifest: cluster.toml (2 sources)");
+        assert_eq!(lines[lines.len() - 1], "  2 have no archived copy");
+    }
+
+    // =========================================================================
+    // The generated manifest and the notes parser are one contract
+    // =========================================================================
+
+    #[test]
+    fn generate_output_round_trips_through_the_notes_parser() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "hash1", false);
+        insert_source(&conn, root, "photo.jpg", Some(obj));
+
+        let plan = plan_generate(&mut conn, &default_params()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("cluster.toml");
+        let params = ExecuteGenerateParams {
+            lock_path: dir.path().join("cluster.lock"),
+            manifest_path: manifest_path.clone(),
+            expanded_filters: vec![],
+            original_filters: vec![],
+            scope_prefixes: vec![],
+            archive_root_id: 1,
+            base_dir: String::new(),
+            allow: vec![],
+        };
+        execute_generate(&plan, &params).unwrap();
+
+        // The writer's section order and the parser's idea of where a section
+        // ends are a single contract, and the tests on either side of it use
+        // hand-written strings. This is the one that reads what was written.
+        let content = std::fs::read_to_string(&manifest_path).unwrap();
+        let raw = extract_notes_raw(&content).expect("a generated manifest carries a notes block");
+        assert!(raw.contains('#'), "notes block should carry its markers");
+        assert!(
+            !raw.contains("[meta]"),
+            "notes block ran into the TOML body"
+        );
+        assert!(
+            !raw.contains("# === "),
+            "notes block ran into the next section"
+        );
+    }
+
+    // =========================================================================
+    // compute_manifest_status
+    // =========================================================================
+
+    /// Generate a real manifest and lock over `names`, one four-byte file per
+    /// name in a source root, beside an empty archive root. Returns the
+    /// connection, the temp dir (the caller holds it so the files outlive the
+    /// call), the manifest path and the archive directory.
+    fn status_fixture(names: &[&str]) -> (Connection, tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("photos");
+        let archive_dir = dir.path().join("archive");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&archive_dir).unwrap();
+
+        let mut conn = setup_test_db();
+        let src_root = insert_root(&conn, src_dir.to_str().unwrap(), "source", false);
+        let archive_root = insert_root(&conn, archive_dir.to_str().unwrap(), "archive", false);
+
+        for (i, name) in names.iter().enumerate() {
+            std::fs::write(src_dir.join(name), b"aaaa").unwrap();
+            let obj = insert_object(&conn, &format!("hash{i}"), false);
+            insert_source_with_size(&conn, src_root, name, Some(obj), 4);
+        }
+
+        let plan = plan_generate(&mut conn, &default_params()).unwrap();
+        let manifest_path = dir.path().join("cluster.toml");
+        let params = ExecuteGenerateParams {
+            lock_path: dir.path().join("cluster.lock"),
+            manifest_path: manifest_path.clone(),
+            expanded_filters: vec![],
+            original_filters: vec![],
+            scope_prefixes: vec![],
+            archive_root_id: archive_root,
+            base_dir: String::new(),
+            allow: vec![],
+        };
+        execute_generate(&plan, &params).unwrap();
+
+        (conn, dir, manifest_path, archive_dir)
+    }
+
+    #[test]
+    fn compute_manifest_status_counts_a_file_at_its_destination() {
+        let (mut conn, _dir, manifest, archive) = status_fixture(&["settled.jpg"]);
+        std::fs::write(archive.join("settled.jpg"), b"aaaa").unwrap();
+
+        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert_eq!(status.at_destination, 1);
+        assert_eq!(status.source_still_present, 1);
+        assert_eq!(status.pending, 0);
+        assert_eq!(status.size_mismatch, 0);
+        assert_eq!(status.source_lost, 0);
+    }
+
+    #[test]
+    fn compute_manifest_status_counts_a_file_still_waiting() {
+        let (mut conn, _dir, manifest, _archive) = status_fixture(&["waiting.jpg"]);
+
+        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert_eq!(status.pending, 1);
+        assert_eq!(status.at_destination, 0);
+        assert_eq!(status.size_mismatch, 0);
+        assert_eq!(status.source_lost, 0);
+    }
+
+    #[test]
+    fn compute_manifest_status_counts_a_destination_of_the_wrong_size() {
+        let (mut conn, _dir, manifest, archive) = status_fixture(&["resized.jpg"]);
+        std::fs::write(archive.join("resized.jpg"), b"aa").unwrap();
+
+        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert_eq!(status.size_mismatch, 1);
+        assert_eq!(status.at_destination, 0);
+        assert_eq!(status.pending, 0);
+        assert_eq!(status.source_lost, 0);
+    }
+
+    #[test]
+    fn compute_manifest_status_counts_a_source_that_is_gone() {
+        let (mut conn, dir, manifest, _archive) = status_fixture(&["gone.jpg"]);
+        std::fs::remove_file(dir.path().join("photos").join("gone.jpg")).unwrap();
+
+        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert_eq!(status.source_lost, 1);
+        assert_eq!(status.at_destination, 0);
+        assert_eq!(status.pending, 0);
+        assert_eq!(status.size_mismatch, 0);
+    }
+
+    #[test]
+    fn manifest_status_is_accounted_for_unless_content_is_lost_or_wrong() {
+        let (mut conn, _dir, manifest, archive) = status_fixture(&["settled.jpg"]);
+        std::fs::write(archive.join("settled.jpg"), b"aaaa").unwrap();
+        let settled = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert!(settled.all_accounted_for());
+
+        // Still waiting counts as accounted for — the file is where it began.
+        std::fs::remove_file(archive.join("settled.jpg")).unwrap();
+        let waiting = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert_eq!(waiting.pending, 1);
+        assert!(waiting.all_accounted_for());
+
+        // A destination of the wrong size is not, even with the source intact.
+        std::fs::write(archive.join("settled.jpg"), b"aa").unwrap();
+        let mismatched = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert_eq!(mismatched.size_mismatch, 1);
+        assert!(!mismatched.all_accounted_for());
+    }
+
+    #[test]
+    fn compute_manifest_status_flags_a_lock_file_that_no_longer_matches() {
+        let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
+        let fresh = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert!(fresh.lock_hash_valid);
+
+        // Change the lock without touching the manifest's recorded hash. The
+        // entries stay parseable so the read still reaches the comparison.
+        let lock = dir.path().join("cluster.lock");
+        let content = std::fs::read_to_string(&lock).unwrap();
+        std::fs::write(&lock, format!("{content}{content}")).unwrap();
+
+        let tampered = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert!(!tampered.lock_hash_valid);
     }
 }
