@@ -55,9 +55,8 @@ mod expr;
 mod ops;
 mod repo;
 
-// Feature-first migration: the cross-cutting spine, and subsystems that have
-// moved onto it. Coexists with the layers above until the migration's
-// definition of done empties them.
+// The shared spine, and the features built on it. These coexist with the
+// layer modules above, which are being emptied into them.
 mod core;
 mod retire;
 mod story;

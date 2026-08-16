@@ -114,11 +114,11 @@ fn classify_subsystem_stratum(rest: &str) -> Layer {
 // Subsystem home (feature-first tree) — the sibling-boundary rule's basis.
 // ============================================================================
 
-/// Where a file lives relative to the feature-first migration: the shared
-/// hub (`core/`), a leaf subsystem (`retire/`, and more as the streak adds
-/// them), or the pre-migration flat tree (everything not yet moved —
-/// referencing it is legal staging, never drift, per the migration's
-/// membership-is-criterial/movement-is-staged principle).
+/// Where a file lives in the feature-first tree: the shared hub (`core/`),
+/// one of the feature modules beside it, or a layer module not yet emptied
+/// into either. Referencing a layer module is legal — the tree is being
+/// converted a feature at a time, and what has not converted yet is still
+/// the place its code lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Home {
     Core,

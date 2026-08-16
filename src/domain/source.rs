@@ -181,8 +181,7 @@ impl Source {
     /// carried with its place and resolves with the place's fate. This is
     /// the contentless law's one vocabulary point — the only place
     /// `size == 0` is written; every other site consumes this predicate or a
-    /// repo query documented as its SQL projection (ADR
-    /// 2026-08-04-contentless-law).
+    /// repo query documented as its SQL projection.
     pub fn is_contentless(&self) -> bool {
         self.size == 0
     }

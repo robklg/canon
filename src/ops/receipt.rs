@@ -954,7 +954,7 @@ mod tests {
     // The what: transition/posture derivation (the integrity law)
     // =========================================================================
 
-    /// The integrity law of the epic: a receipt's derived what/posture equals
+    /// The integrity law: a receipt's derived what/posture equals
     /// the trail's, command for command. `ReceiptKind → (family, aspect) →
     /// fate_transition` is the *same* function the trail rollup labels through,
     /// so the two stories can never diverge. The match is exhaustive — a new
