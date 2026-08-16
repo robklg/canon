@@ -9,17 +9,17 @@
 //!
 //! 1. **Single source of truth**: This struct is THE definition of a fact for read operations
 //! 2. **Pure types**: No I/O or side effects in this module
-//! 3. **Reuse existing types**: `FactValue` and `FactType` come from `expr.rs`
+//! 3. **Reuse existing types**: `FactValue` and `FactType` come from `expr::eval`
 //! 4. **Dependencies point inward**: Commands depend on this module, not vice versa
 //!
 //! ## Usage
 //!
 //! ```ignore
-//! use canon::fact::{FactEntry, FactValue, FactType};
-//! use canon::fact_repo;
+//! use crate::domain::fact::{FactEntry, FactValue, FactType};
+//! use crate::repo;
 //!
 //! // Fetch a specific fact key for sources
-//! let facts = fact_repo::batch_fetch_key_for_sources(conn, &source_ids, "content.Make")?;
+//! let facts = repo::fact::batch_fetch_key_for_sources(conn, &source_ids, "content.Make")?;
 //!
 //! // Check each source's fact value
 //! for (source_id, entry) in &facts {
@@ -29,8 +29,7 @@
 //! }
 //! ```
 
-// Re-export types from expr.rs for convenience.
-// FactType will be used by fact_repo::count_fact_keys() in Phase 2.
+// Re-export types from expr::eval for convenience.
 #[allow(unused_imports)]
 pub use crate::expr::eval::{FactType, FactValue};
 

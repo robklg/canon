@@ -14,10 +14,10 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use canon::source_repo;
+//! use crate::repo;
 //!
 //! // Fetch all sources for specific roots
-//! let sources = source_repo::batch_fetch_by_roots(conn, &[1, 2, 3])?;
+//! let sources = repo::source::batch_fetch_by_roots(conn, &[1, 2, 3])?;
 //! ```
 
 use std::collections::HashMap;

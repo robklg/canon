@@ -432,7 +432,7 @@ pub fn is_builtin_key(key: &str) -> bool {
 /// ## Example
 ///
 /// ```ignore
-/// use canon::expr::ParsedFactKey;
+/// use crate::expr::ParsedFactKey;
 ///
 /// let key = ParsedFactKey::parse("source.mtime|year")?;
 /// assert_eq!(key.base_key, "source.mtime");

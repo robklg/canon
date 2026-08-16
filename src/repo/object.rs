@@ -12,22 +12,22 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use canon::object_repo;
+//! use crate::repo;
 //!
 //! // Fetch objects by ID
-//! let objects = object_repo::batch_fetch_by_ids(conn, &object_ids)?;
+//! let objects = repo::object::batch_fetch_by_ids(conn, &object_ids)?;
 //!
 //! // Check which objects are in any archive
-//! let archived = object_repo::batch_check_archived(conn, &object_ids, None)?;
+//! let archived = repo::object::batch_check_archived(conn, &object_ids, None)?;
 //!
 //! // Check which objects are in a specific archive
-//! let in_archive = object_repo::batch_check_archived(conn, &object_ids, Some(archive_root_id))?;
+//! let in_archive = repo::object::batch_check_archived(conn, &object_ids, Some(archive_root_id))?;
 //!
 //! // Get archive paths for objects (by object_id)
-//! let paths = object_repo::batch_find_archive_paths(conn, &object_ids)?;
+//! let paths = repo::object::batch_find_archive_paths(conn, &object_ids)?;
 //!
 //! // Get archive info by content hash (for manifest workflows)
-//! let info = object_repo::batch_find_archive_info_by_hash(conn, &["abc123", "def456"])?;
+//! let info = repo::object::batch_find_archive_info_by_hash(conn, &["abc123", "def456"])?;
 //! ```
 
 use std::collections::{HashMap, HashSet};

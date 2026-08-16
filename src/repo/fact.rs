@@ -14,10 +14,10 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use canon::fact_repo;
+//! use crate::repo;
 //!
 //! // Fetch a specific fact key for sources
-//! let facts = fact_repo::batch_fetch_key_for_sources(conn, &source_ids, "content.Make")?;
+//! let facts = repo::fact::batch_fetch_key_for_sources(conn, &source_ids, "content.Make")?;
 //! for (source_id, entry) in &facts {
 //!     if let Some(fact) = entry {
 //!         println!("{}: {:?}", source_id, fact.value);

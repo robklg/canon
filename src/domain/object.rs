@@ -13,11 +13,11 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use canon::object::Object;
-//! use canon::object_repo;
+//! use crate::domain::object::Object;
+//! use crate::repo;
 //!
 //! // Fetch objects by ID
-//! let objects = object_repo::batch_fetch_by_ids(conn, &object_ids)?;
+//! let objects = repo::object::batch_fetch_by_ids(conn, &object_ids)?;
 //!
 //! // Check exclusion status
 //! for (id, obj) in &objects {

@@ -1292,8 +1292,8 @@ mod self_tests {
 
     #[test]
     fn subsystem_may_reference_sibling_public_surface_one_segment_deep() {
-        // Stands in for the real `ops/retire/ceremony.rs` -> `ops::story::report_over`
-        // dependency (traced 2026-08-08, epic Working register) — retire depends on
+        // Stands in for the real `retire/ops/ceremony.rs` -> `story::report_over`
+        // dependency — retire depends on
         // story's *finished result* through its declared one-segment surface, never
         // on story's internals.
         let text = "use crate::story::report_over;\n";

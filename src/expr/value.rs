@@ -14,8 +14,8 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use canon::fact_value::resolve_fact_value;
-//! use canon::expr::ParsedFactKey;
+//! use crate::expr::resolve_fact_value;
+//! use crate::expr::ParsedFactKey;
 //!
 //! let key = ParsedFactKey::parse("source.mtime|year")?;
 //! let value = resolve_fact_value(&source, &key, &stored_facts)?;

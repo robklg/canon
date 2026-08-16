@@ -13,8 +13,8 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use canon::source::Source;
-//! use canon::scope::ScopeMatch;
+//! use crate::domain::source::Source;
+//! use crate::domain::scope::ScopeMatch;
 //!
 //! // Filter sources using domain predicates
 //! sources.iter()
@@ -36,7 +36,7 @@ use super::scope::ScopeMatch;
 /// ## Usage
 ///
 /// ```ignore
-/// use canon::domain::source::NewSource;
+/// use crate::domain::source::NewSource;
 ///
 /// let new_source = NewSource {
 ///     root_id: archive_root_id,

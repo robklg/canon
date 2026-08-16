@@ -12,10 +12,10 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use canon::root_repo;
+//! use crate::repo;
 //!
 //! // Fetch all roots
-//! let roots = root_repo::fetch_all(conn)?;
+//! let roots = repo::root::fetch_all(conn)?;
 //!
 //! // Filter with domain predicates
 //! let active_sources: Vec<_> = roots.iter()
