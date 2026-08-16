@@ -31,6 +31,18 @@ pub fn path_strip_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
         .and_then(|p| p.to_str())
 }
 
+/// Whether a supposedly-relative directory would land outside the directory
+/// it is joined onto: absolute (`PathBuf::join` replaces the base wholesale)
+/// or traversing through a parent component. Purely lexical — no
+/// normalization, no filesystem access — so a value that merely *contains*
+/// `..` as a component is rejected rather than resolved.
+pub fn rel_dir_escapes(dir: &str) -> bool {
+    let p = Path::new(dir);
+    p.is_absolute()
+        || p.components()
+            .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+}
+
 // ============================================================================
 // Soft Path Resolution (offline-capable)
 // ============================================================================
@@ -169,6 +181,29 @@ mod tests {
     #[test]
     fn path_is_under_root() {
         assert!(path_is_under("/a/b/c", "/"));
+    }
+
+    // rel_dir_escapes tests
+
+    #[test]
+    fn rel_dir_escapes_rejects_parent_components() {
+        assert!(rel_dir_escapes(".."));
+        assert!(rel_dir_escapes("../../tmp"));
+        assert!(rel_dir_escapes("photos/../../../tmp"));
+    }
+
+    #[test]
+    fn rel_dir_escapes_rejects_absolute() {
+        assert!(rel_dir_escapes("/tmp/evil"));
+    }
+
+    #[test]
+    fn rel_dir_escapes_accepts_nested_relative() {
+        assert!(!rel_dir_escapes(""));
+        assert!(!rel_dir_escapes("photos"));
+        assert!(!rel_dir_escapes("photos/2020/summer"));
+        // A filename merely containing dots is not a traversal.
+        assert!(!rel_dir_escapes("photos/..hidden"));
     }
 
     // path_strip_prefix tests

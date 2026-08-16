@@ -169,6 +169,22 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
 
     // --- Preconditions (return Err) ---
 
+    // The manifest's base_dir must stay inside the archive root. It is
+    // user-editable, and it reaches both sides unfiltered: an absolute value
+    // replaces the archive root wholesale in the filesystem join, and a
+    // parent-traversing one walks out of the root while every recorded path
+    // still claims to be archive-relative. The per-transfer escape check
+    // below compares components without normalising, so it catches neither;
+    // this is the one gate.
+    if crate::domain::path::rel_dir_escapes(params.base_dir_rel) {
+        bail!(
+            "Manifest base_dir '{}' escapes the archive root — absolute paths and '..' components \
+             are not allowed.\n\
+             Edit base_dir in the manifest's [output] section to a directory inside the archive root.",
+            params.base_dir_rel
+        );
+    }
+
     // Check all lock entries have content hashes
     let unhashed: Vec<&str> = params
         .sources
@@ -370,7 +386,9 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
             // check compares path components without normalising, so a path
             // descending through `..` still reads as being under the archive
             // root. Removing `..` from an expanded pattern happens in the
-            // expression evaluator; this is not a second guard for it.
+            // expression evaluator, and a `..`-carrying or absolute base_dir
+            // is rejected as a precondition above; this is not a second
+            // guard for either.
             let full_dest = format!("{}/{}", archive_root_path, transfer.archive_rel_path);
             if !crate::domain::path::path_is_under(&full_dest, archive_root_path) {
                 violations
@@ -1861,6 +1879,116 @@ mod tests {
     // =========================================================================
     // Archive root escape detection
     // =========================================================================
+
+    #[test]
+    fn test_plan_rejects_parent_traversing_base_dir() {
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let archive_id = insert_root(&conn, "/archive", "archive", false);
+        let obj_id = insert_object(&conn, "hash1", false);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
+
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
+        let sources: Vec<&LockEntry> = vec![&entry];
+        let pattern = expr::parse_pattern("{filename}").unwrap();
+        let needed_keys = expr::extract_fact_keys(&pattern);
+        let mut root_paths = HashMap::new();
+        root_paths.insert(root_id, "/photos".to_string());
+        root_paths.insert(archive_id, "/archive".to_string());
+
+        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        params.base_dir_rel = "../../tmp";
+        let err = plan_apply(&mut conn, &params).unwrap_err();
+        assert!(err.to_string().contains("base_dir"));
+        assert!(err.to_string().contains("escapes the archive root"));
+    }
+
+    #[test]
+    fn test_plan_rejects_absolute_base_dir() {
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let archive_id = insert_root(&conn, "/archive", "archive", false);
+        let obj_id = insert_object(&conn, "hash1", false);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
+
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
+        let sources: Vec<&LockEntry> = vec![&entry];
+        let pattern = expr::parse_pattern("{filename}").unwrap();
+        let needed_keys = expr::extract_fact_keys(&pattern);
+        let mut root_paths = HashMap::new();
+        root_paths.insert(root_id, "/photos".to_string());
+        root_paths.insert(archive_id, "/archive".to_string());
+
+        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        params.base_dir_rel = "/tmp/elsewhere";
+        let err = plan_apply(&mut conn, &params).unwrap_err();
+        assert!(err.to_string().contains("escapes the archive root"));
+    }
+
+    #[test]
+    fn test_plan_accepts_nested_base_dir() {
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let archive_id = insert_root(&conn, "/archive", "archive", false);
+        let obj_id = insert_object(&conn, "hash1", false);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
+
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
+        let sources: Vec<&LockEntry> = vec![&entry];
+        let pattern = expr::parse_pattern("{filename}").unwrap();
+        let needed_keys = expr::extract_fact_keys(&pattern);
+        let mut root_paths = HashMap::new();
+        root_paths.insert(root_id, "/photos".to_string());
+        root_paths.insert(archive_id, "/archive".to_string());
+
+        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        params.base_dir_rel = "collections/2020";
+        let plan = plan_apply(&mut conn, &params).unwrap();
+        assert!(plan.violations.escaped_paths.is_empty());
+        assert_eq!(
+            plan.transfers[0].archive_rel_path,
+            "collections/2020/photo.jpg"
+        );
+    }
 
     #[test]
     fn test_plan_rejects_escaped_destination() {
