@@ -9,10 +9,11 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::domain::fact::FactEntry;
+use crate::domain::fact::{FactType, FactValue};
 use crate::expr::value as fact_value;
 use crate::expr::{
     self, fact_value_to_display, get_builtin_value, resolve_fact_value, BuiltinKey,
-    BuiltinKeyCategory, BuiltinKeyVisibility, FactType, FactValue, ParsedFactKey,
+    BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey,
 };
 use crate::facts::repo as facts_repo;
 use crate::repo::{self, Connection};

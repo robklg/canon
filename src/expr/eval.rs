@@ -7,6 +7,8 @@
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 
+use crate::domain::fact::{FactType, FactValue};
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -116,37 +118,6 @@ impl Modifier {
             Modifier::Bucket => ModifierCategory::Numeric,
         }
     }
-}
-
-/// Fact type classification (without the actual value).
-/// Matches the typed columns in the facts table plus Path for derived facts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FactType {
-    Text,
-    Num,
-    Time,
-    Path, // Derived path facts that support segment indexing
-}
-
-impl FactType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            FactType::Text => "text",
-            FactType::Num => "num",
-            FactType::Time => "time",
-            FactType::Path => "path",
-        }
-    }
-}
-
-/// Fact value types for evaluation.
-/// Matches the typed columns in the facts table: value_text, value_num, value_time.
-#[derive(Debug, Clone)]
-pub enum FactValue {
-    Text(String),
-    Num(f64),
-    Time(i64),    // Unix timestamp
-    Path(String), // Path that supports segment indexing (for derived path facts)
 }
 
 /// Context for pattern evaluation - provides fact values and source info

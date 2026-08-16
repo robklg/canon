@@ -18,8 +18,8 @@ pub use eval::{
     apply_accessor, apply_modifier, evaluate, extract_fact_keys, is_builtin_key,
     normalize_fact_key, normalize_key_string, parse_key_and_accessor, parse_key_with_modifiers,
     parse_modifier, parse_pattern, BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility,
-    EvalContext, Expr, FactType, FactValue, Modifier, ModifierCall, ModifierCategory,
-    ParsedFactKey, PathAccessor, Pattern, PatternSegment,
+    EvalContext, Expr, Modifier, ModifierCall, ModifierCategory, ParsedFactKey, PathAccessor,
+    Pattern, PatternSegment,
 };
 
 // Re-export from filter.rs

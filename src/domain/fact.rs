@@ -29,9 +29,36 @@
 //! }
 //! ```
 
-// Re-export types from expr::eval for convenience.
-#[allow(unused_imports)]
-pub use crate::expr::eval::{FactType, FactValue};
+/// Fact type classification (without the actual value).
+/// Matches the typed columns in the facts table plus Path for derived facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactType {
+    Text,
+    Num,
+    Time,
+    Path, // Derived path facts that support segment indexing
+}
+
+impl FactType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FactType::Text => "text",
+            FactType::Num => "num",
+            FactType::Time => "time",
+            FactType::Path => "path",
+        }
+    }
+}
+
+/// Fact value types.
+/// Matches the typed columns in the facts table: value_text, value_num, value_time.
+#[derive(Debug, Clone)]
+pub enum FactValue {
+    Text(String),
+    Num(f64),
+    Time(i64),    // Unix timestamp
+    Path(String), // Path that supports segment indexing (for derived path facts)
+}
 
 /// A single fact entry associated with a source.
 ///

@@ -3,6 +3,7 @@ use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 
 use super::eval as expr;
+use crate::domain::fact;
 use crate::repo::db::populate_temp_sources;
 
 // ============================================================================
@@ -88,9 +89,9 @@ pub type Filter = Expr;
 /// Cache of prefetched fact values to avoid N+1 queries
 struct FactCache {
     /// Source facts: (source_id, key) -> FactValue
-    source_facts: HashMap<(i64, String), expr::FactValue>,
+    source_facts: HashMap<(i64, String), fact::FactValue>,
     /// Object facts: (object_id, key) -> FactValue
-    object_facts: HashMap<(i64, String), expr::FactValue>,
+    object_facts: HashMap<(i64, String), fact::FactValue>,
     /// Source to object mapping
     source_objects: HashMap<i64, i64>,
     /// Keys that were prefetched (for existence checks)
@@ -117,11 +118,11 @@ impl FactCache {
         }
     }
 
-    fn get_source_fact(&self, source_id: i64, key: &str) -> Option<&expr::FactValue> {
+    fn get_source_fact(&self, source_id: i64, key: &str) -> Option<&fact::FactValue> {
         self.source_facts.get(&(source_id, key.to_string()))
     }
 
-    fn get_object_fact(&self, source_id: i64, key: &str) -> Option<&expr::FactValue> {
+    fn get_object_fact(&self, source_id: i64, key: &str) -> Option<&fact::FactValue> {
         self.source_objects
             .get(&source_id)
             .and_then(|obj_id| self.object_facts.get(&(*obj_id, key.to_string())))
@@ -273,13 +274,13 @@ fn to_fact_value(
     text: Option<String>,
     num: Option<f64>,
     time: Option<i64>,
-) -> Option<expr::FactValue> {
+) -> Option<fact::FactValue> {
     if let Some(t) = text {
-        Some(expr::FactValue::Text(t))
+        Some(fact::FactValue::Text(t))
     } else if let Some(n) = num {
-        Some(expr::FactValue::Num(n))
+        Some(fact::FactValue::Num(n))
     } else {
-        time.map(expr::FactValue::Time)
+        time.map(fact::FactValue::Time)
     }
 }
 
@@ -1357,13 +1358,13 @@ fn check_fact_in_cached(
     Ok(false)
 }
 
-/// Convert expr::FactValue to local FactValue
-fn to_local_fact_value(fv: &expr::FactValue) -> FactValue {
+/// Convert fact::FactValue to local FactValue
+fn to_local_fact_value(fv: &fact::FactValue) -> FactValue {
     match fv {
-        expr::FactValue::Text(t) => FactValue::Text(t.clone()),
-        expr::FactValue::Num(n) => FactValue::Num(*n),
-        expr::FactValue::Time(ts) => FactValue::Time(*ts),
-        expr::FactValue::Path(p) => FactValue::Text(p.clone()),
+        fact::FactValue::Text(t) => FactValue::Text(t.clone()),
+        fact::FactValue::Num(n) => FactValue::Num(*n),
+        fact::FactValue::Time(ts) => FactValue::Time(*ts),
+        fact::FactValue::Path(p) => FactValue::Text(p.clone()),
     }
 }
 
@@ -1385,11 +1386,11 @@ fn apply_accessor_and_modifiers(
     modifiers: &[expr::ModifierCall],
     key: &str,
 ) -> Result<FactValue> {
-    // Convert to expr::FactValue
+    // Convert to fact::FactValue
     let mut expr_value = match value {
-        FactValue::Text(t) => expr::FactValue::Text(t),
-        FactValue::Num(n) => expr::FactValue::Num(n),
-        FactValue::Time(ts) => expr::FactValue::Time(ts),
+        FactValue::Text(t) => fact::FactValue::Text(t),
+        FactValue::Num(n) => fact::FactValue::Num(n),
+        FactValue::Time(ts) => fact::FactValue::Time(ts),
     };
 
     // Apply accessor if present
@@ -1404,10 +1405,10 @@ fn apply_accessor_and_modifiers(
 
     // Convert back to FactValue
     Ok(match expr_value {
-        expr::FactValue::Text(t) => FactValue::Text(t),
-        expr::FactValue::Num(n) => FactValue::Num(n),
-        expr::FactValue::Time(ts) => FactValue::Time(ts),
-        expr::FactValue::Path(p) => FactValue::Text(p),
+        fact::FactValue::Text(t) => FactValue::Text(t),
+        fact::FactValue::Num(n) => FactValue::Num(n),
+        fact::FactValue::Time(ts) => FactValue::Time(ts),
+        fact::FactValue::Path(p) => FactValue::Text(p),
     })
 }
 

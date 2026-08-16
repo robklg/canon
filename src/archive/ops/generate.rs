@@ -17,9 +17,9 @@ use crate::archive::domain::{
 };
 use crate::domain::include::IncludeSet;
 use crate::domain::scope::ScopeMatch;
-use crate::domain::{FactEntry, FactValue};
+use crate::domain::{FactEntry, FactType, FactValue};
 use crate::expr::filter::Filter;
-use crate::expr::{BuiltinKey, FactType};
+use crate::expr::BuiltinKey;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Connection};
 
