@@ -350,16 +350,26 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
 
             if let Some(hash) = hash {
                 if let Some(info_list) = archive_info.get(hash) {
-                    if let Some(&(archive_id, ref archive_path)) = info_list.first() {
-                        if archive_id == params.archive_root_id {
-                            violations
-                                .archive_conflicts_dest
-                                .push((transfer.source_path.clone(), archive_path.clone()));
-                        } else {
-                            violations
-                                .archive_conflicts_other
-                                .push((transfer.source_path.clone(), archive_path.clone()));
-                        }
+                    // The list is ordered by root id, so taking the first
+                    // entry outright would read "lowest root id", not
+                    // "prefer the destination": content standing in both the
+                    // destination and an older archive would classify as a
+                    // cross-archive conflict, and acknowledging that with
+                    // --allow would wave a duplicate into the destination
+                    // without the destination gate ever being consulted.
+                    // A copy in the destination archive wins the
+                    // classification whenever one exists.
+                    let in_dest = info_list
+                        .iter()
+                        .find(|(archive_id, _)| *archive_id == params.archive_root_id);
+                    if let Some((_, archive_path)) = in_dest {
+                        violations
+                            .archive_conflicts_dest
+                            .push((transfer.source_path.clone(), archive_path.clone()));
+                    } else if let Some((_, archive_path)) = info_list.first() {
+                        violations
+                            .archive_conflicts_other
+                            .push((transfer.source_path.clone(), archive_path.clone()));
                     }
                 }
             }
@@ -1047,6 +1057,68 @@ mod tests {
 
         assert!(plan.violations.archive_conflicts_dest.is_empty());
         assert_eq!(plan.violations.archive_conflicts_other.len(), 1);
+    }
+
+    #[test]
+    fn test_plan_apply_conflict_in_both_archives_classifies_as_dest() {
+        // The destination copy must win the classification even when an
+        // older archive (lower root id, so first in the ordered fetch)
+        // holds the same content — otherwise --allow for cross-archive
+        // duplicates bypasses the destination gate and lands a duplicate.
+        let mut conn = setup_test_db();
+        let other_archive = insert_root(&conn, "/other-archive", "archive", false);
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let archive_id = insert_root(&conn, "/archive", "archive", false);
+        assert!(other_archive < archive_id);
+        let obj_id = insert_object(&conn, "hash1", false);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
+        // Same hash in BOTH the older archive and the destination archive
+        insert_source_with_metadata(
+            &conn,
+            other_archive,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
+        insert_source_with_metadata(
+            &conn,
+            archive_id,
+            "existing/photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
+
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/photo.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
+        let sources: Vec<&LockEntry> = vec![&entry];
+        let pattern = expr::parse_pattern("{filename}").unwrap();
+        let needed_keys = expr::extract_fact_keys(&pattern);
+        let mut root_paths = HashMap::new();
+        root_paths.insert(root_id, "/photos".to_string());
+        root_paths.insert(archive_id, "/archive".to_string());
+
+        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let plan = plan_apply(&mut conn, &params).unwrap();
+
+        assert_eq!(plan.violations.archive_conflicts_dest.len(), 1);
+        assert!(plan.violations.archive_conflicts_other.is_empty());
+        assert!(plan.violations.archive_conflicts_dest[0]
+            .1
+            .contains("existing/photo.jpg"));
     }
 
     #[test]
