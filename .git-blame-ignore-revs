@@ -14,3 +14,9 @@ ced5b3eafda4fb21fc3217caf45c18dbe54e4d86
 
 # Carve the archive subsystem out of the flat tree
 0fb15e27851aa0ee351a42715cd3bf3cb2c0278f
+
+# Move the domain layer into core
+0ab30b1097ee92bd7959c7834a5a76bc4e30bf79
+
+# Move the repository layer into core
+a3cc4c62241dae9bf7d8b73f27441a176ebec9f2
