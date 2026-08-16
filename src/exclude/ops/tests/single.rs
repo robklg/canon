@@ -472,7 +472,7 @@ fn test_execute_set_object_excludes_and_returns_summary() {
     assert_eq!(result.source_count, 1);
 
     // Verify actually excluded in DB
-    let objects = crate::repo::object::batch_fetch_by_ids(&conn, &[obj_id]).unwrap();
+    let objects = crate::core::repo::object::batch_fetch_by_ids(&conn, &[obj_id]).unwrap();
     assert!(objects.get(&obj_id).unwrap().is_excluded());
 }
 
@@ -521,6 +521,6 @@ fn test_execute_clear_object_clears_and_returns_summary() {
     );
 
     // Verify no longer excluded in DB
-    let objects = crate::repo::object::batch_fetch_by_ids(&conn, &[obj_id]).unwrap();
+    let objects = crate::core::repo::object::batch_fetch_by_ids(&conn, &[obj_id]).unwrap();
     assert!(!objects.get(&obj_id).unwrap().is_excluded());
 }

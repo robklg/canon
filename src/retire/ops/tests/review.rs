@@ -1,6 +1,6 @@
-use crate::repo;
-use crate::repo::db::open_in_memory_for_test;
-use crate::repo::insert_test_root;
+use crate::core::repo;
+use crate::core::repo::db::open_in_memory_for_test;
+use crate::core::repo::insert_test_root;
 use crate::retire::domain::Readiness;
 use crate::retire::ops::review::compute_readiness;
 use crate::retire::ops::{find_retirement_covering_path, validate_retire_target};

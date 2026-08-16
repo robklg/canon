@@ -18,10 +18,10 @@ use crate::archive::domain::{
 use crate::core::domain::include::IncludeSet;
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::{FactEntry, FactType, FactValue};
+use crate::core::repo::{self, Connection};
 use crate::expr::filter::Filter;
 use crate::expr::BuiltinKey;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
-use crate::repo::{self, Connection};
 
 use super::manifest::{write_and_sync, write_lock_file};
 

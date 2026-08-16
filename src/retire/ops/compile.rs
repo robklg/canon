@@ -14,10 +14,10 @@ use crate::core::domain::format::format_size;
 use crate::core::domain::resolution::{build_account, ResolutionAccount};
 use crate::core::domain::{format_count, Root};
 use crate::core::ops::root_story::RootStory;
+use crate::core::repo;
 use crate::notes::{fetch_by_roots, note_display_path, Note};
 use crate::ops;
 use crate::ops::ledger::{read_apply_receipt, ReceiptRead};
-use crate::repo;
 use crate::retire::domain::{
     build_book_entries, derive_posture, disposition_word, ApplyOrigin, BookEntry, FateContext,
     SourceFate, VerificationPosture,

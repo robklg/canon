@@ -52,7 +52,7 @@ impl DecisionCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionStatus {
     /// The initial row state; written as a raw SQL literal by
-    /// `repo::decision::insert_started` rather than through this variant,
+    /// `core::repo::decision::insert_started` rather than through this variant,
     /// so it's never constructed outside tests. Kept for round-trip
     /// completeness against the DB's status values.
     #[allow(dead_code)]

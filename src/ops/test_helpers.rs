@@ -3,10 +3,10 @@
 //! Consolidates duplicated insert/setup helpers that were independently
 //! maintained in each ops module's test section.
 
-use crate::repo::Connection;
+use crate::core::repo::Connection;
 
 pub fn setup_test_db() -> Connection {
-    crate::repo::db::open_in_memory_for_test()
+    crate::core::repo::db::open_in_memory_for_test()
 }
 
 pub fn insert_root(conn: &Connection, path: &str, role: &str, suspended: bool) -> i64 {

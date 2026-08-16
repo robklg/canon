@@ -18,12 +18,12 @@ use crate::core::domain::decision::DecisionStatus;
 use crate::core::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
 use crate::core::domain::format::first_chars;
 use crate::core::domain::source::NewSource;
+use crate::core::repo::{self, Connection};
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::fs::{
     compute_partial_hash, copy_file, ensure_parent_dir, move_file, rename_file, MoveOutcome,
 };
 use crate::ops::receipt::{ApplyReceipt, ApplyReceiptItem, ReceiptKind, ReceiptPlacement};
-use crate::repo::{self, Connection};
 
 use super::plan::{ApplyPlan, ApplyTransfer, StaleSource};
 

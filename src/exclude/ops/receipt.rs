@@ -10,13 +10,13 @@ use anyhow::Result;
 
 use crate::core::domain::decision::DecisionStatus;
 use crate::core::domain::source::Source;
+use crate::core::repo::{self, Connection};
 use crate::exclude::repo as exclude_repo;
 use crate::ops::decision::{DecisionCounts, DecisionParams};
 use crate::ops::receipt::{
     DuplicateExcludedEntry, DuplicateGroup, DuplicateKeptEntry, ExcludeReceiptItem,
     ObjectExcludeEntry, ObjectExcludeReceipt, ObjectSourceReceiptEntry, ReceiptKind,
 };
-use crate::repo::{self, Connection};
 
 use super::types::{DuplicateGroupData, ExcludeItemData};
 

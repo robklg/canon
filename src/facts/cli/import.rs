@@ -4,10 +4,10 @@ use std::io::{self, BufRead};
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::scope::DecisionScope;
+use crate::core::repo::{self, Db};
 use crate::facts::ops::import as facts_import;
 use crate::facts::ops::import::ImportRecord;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
-use crate::repo::{self, Db};
 
 pub fn import_run(
     db: &mut Db,

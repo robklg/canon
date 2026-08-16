@@ -7,7 +7,7 @@
 //! All functions in this module are pure (no I/O). Resolution against known
 //! roots with a filesystem fallback (parse_root_spec, resolve_root_path,
 //! resolve_archive_path) lives in `ops::scope`, which composes these pure
-//! predicates. Callers must fetch roots via `repo::root::fetch_all()` before
+//! predicates. Callers must fetch roots via `core::repo::root::fetch_all()` before
 //! calling resolution functions.
 
 use anyhow::{bail, Context, Result};
@@ -53,7 +53,7 @@ impl RootSpec {
 ///
 /// # Arguments
 /// * `canonical_path` - The canonicalized path to look up
-/// * `roots` - Slice of Root domain objects (typically from `repo::root::fetch_all()`)
+/// * `roots` - Slice of Root domain objects (typically from `core::repo::root::fetch_all()`)
 ///
 /// # Returns
 /// Some((root_id, root_path, role, relative_path)) if the path is under a root,

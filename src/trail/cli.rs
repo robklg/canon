@@ -13,7 +13,7 @@ use anyhow::{anyhow, Result};
 use chrono::Local;
 
 use crate::core::domain::root::Root;
-use crate::repo::{self, Db};
+use crate::core::repo::{self, Db};
 use crate::trail::domain::composition::{card_applies, ViewShape};
 use crate::trail::domain::timeline::{parse_when, WhenValue};
 use crate::trail::jsonl::{print_jsonl, JsonRetiredScopeEvent};

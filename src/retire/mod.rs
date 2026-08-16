@@ -10,6 +10,7 @@
 mod cli;
 mod domain;
 mod ops;
+mod repo;
 
 pub use cli::{retire, retired};
 pub use ops::{find_retirement_covering_path, RetiredScope};

@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use crate::core::domain::resolution::{build_account, ResolutionAccount};
 use crate::core::domain::root::Root;
 use crate::core::ops::root_story::{fetch_root_story, RootStory};
+use crate::core::repo;
 use crate::notes::fetch_by_roots;
-use crate::repo;
 use crate::story::domain::place::{
     assign_reason_sites, DecisionInfo, StoryInputs, StoryParams, StoryPlace,
 };
@@ -131,8 +131,8 @@ pub fn report_over(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::repo::{insert_test_root, open_in_memory_for_test};
     use crate::notes::insert;
-    use crate::repo::{insert_test_root, open_in_memory_for_test};
     use crate::story::domain::place::StoryPlace;
     use rusqlite::Connection as SqlConnection;
 
@@ -212,7 +212,7 @@ mod tests {
         files: i64,
         destination: &str,
     ) {
-        crate::repo::decision::replace_extractions(
+        crate::core::repo::decision::replace_extractions(
             conn,
             &[crate::core::domain::extraction::DecisionExtraction {
                 decision_id,

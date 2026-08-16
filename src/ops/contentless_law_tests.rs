@@ -13,12 +13,12 @@ use std::collections::HashSet;
 
 use crate::archive::{plan_generate, ClusterGenerateParams};
 use crate::core::domain::resolution::{classify_present, StandingBucket};
+use crate::core::repo;
 use crate::ops::test_helpers::*;
-use crate::repo;
 use crate::survey::ObjectIndex;
 
 struct Canary {
-    conn: crate::repo::Connection,
+    conn: crate::core::repo::Connection,
     source_root: i64,
     empty_obj: i64,
     data_obj: i64,
@@ -188,7 +188,7 @@ fn survey_counts_the_empty_files_it_sets_aside() {
     // must count what it set aside, like sweep, compare, and coverage do.
     let mut c = canary();
     let root_ids = vec![c.source_root];
-    let all_sources = crate::repo::source::batch_fetch_by_roots(&c.conn, &root_ids).unwrap();
+    let all_sources = crate::core::repo::source::batch_fetch_by_roots(&c.conn, &root_ids).unwrap();
     let outcome = crate::survey::compute_survey(
         &mut c.conn,
         &["/r".to_string()],

@@ -3,8 +3,8 @@ use std::path::Path;
 use rusqlite::Connection;
 
 use crate::core::domain::config::LedgerConfig;
-use crate::repo::db::open_in_memory_for_test;
-use crate::repo::insert_test_root;
+use crate::core::repo::db::open_in_memory_for_test;
+use crate::core::repo::insert_test_root;
 use crate::retire::ops::shelf::ShelfListing;
 use crate::retire::ops::{compute_shelf_listing, iso_date, ShelfLine, SHELF_DIR};
 

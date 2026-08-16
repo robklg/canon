@@ -1,7 +1,7 @@
-use crate::repo;
-use crate::repo::db::open_in_memory_for_test;
-use crate::repo::insert_test_root;
-use crate::repo::Connection;
+use crate::core::repo;
+use crate::core::repo::db::open_in_memory_for_test;
+use crate::core::repo::insert_test_root;
+use crate::core::repo::Connection;
 use crate::trail::ops::show::{compute_show, PointerRelocation};
 
 use super::fixtures::{extraction_row, insert_decision_at, insert_decision_full};

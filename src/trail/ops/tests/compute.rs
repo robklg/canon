@@ -1,8 +1,8 @@
 use chrono::NaiveDate;
 
-use crate::repo;
-use crate::repo::db::open_in_memory_for_test;
-use crate::repo::insert_test_root;
+use crate::core::repo;
+use crate::core::repo::db::open_in_memory_for_test;
+use crate::core::repo::insert_test_root;
 use crate::trail::domain::placement::RowAspect;
 use crate::trail::domain::timeline::{TimelineEvent, WhenValue};
 use crate::trail::ops::compute::{
@@ -1202,9 +1202,9 @@ fn time_lens_groups_days_and_rolls_up() {
     scope(&conn, apply, root, "");
 
     // Stamp: the scan observed two deletions and one new file.
-    let new = crate::repo::source::insert_test_source(&conn, root, "n.jpg", 1, 1, 10, 0);
-    let g1 = crate::repo::source::insert_test_source(&conn, root, "g1.jpg", 1, 2, 100, 0);
-    let g2 = crate::repo::source::insert_test_source(&conn, root, "g2.jpg", 1, 3, 200, 0);
+    let new = crate::core::repo::source::insert_test_source(&conn, root, "n.jpg", 1, 1, 10, 0);
+    let g1 = crate::core::repo::source::insert_test_source(&conn, root, "g1.jpg", 1, 2, 100, 0);
+    let g2 = crate::core::repo::source::insert_test_source(&conn, root, "g2.jpg", 1, 3, 200, 0);
     for (id, present) in [(new, 1), (g1, 0), (g2, 0)] {
         conn.execute(
             "UPDATE sources SET decision_id = ?, present = ? WHERE id = ?",
@@ -1315,7 +1315,7 @@ fn time_lens_day_archived_rollup_reflects_apply_stamps_regardless_of_extraction_
     // mechanism from the extraction row's own `files` count above (which
     // happens to agree here, but is not where the rollup reads from).
     for (i, name) in ["a.jpg", "b.jpg", "c.jpg"].iter().enumerate() {
-        let dest = crate::repo::source::insert_test_source(
+        let dest = crate::core::repo::source::insert_test_source(
             &conn,
             archive_root,
             name,

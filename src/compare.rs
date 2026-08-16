@@ -2,8 +2,8 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::core::domain::IncludeSet;
+use crate::core::repo::Db;
 use crate::ops;
-use crate::repo::Db;
 
 pub struct CompareOptions {
     pub include: IncludeSet,

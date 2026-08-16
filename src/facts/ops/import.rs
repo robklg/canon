@@ -14,9 +14,9 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::core::repo::{self, Connection};
 use crate::facts::domain::{is_content_fact, normalize_fact_key, FactValueType};
 use crate::facts::repo as facts_repo;
-use crate::repo::{self, Connection};
 
 // ============================================================================
 // Types

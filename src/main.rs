@@ -54,7 +54,6 @@ fn include_set_from(values: &[IncludeValue]) -> IncludeSet {
 // Infrastructure layers
 mod expr;
 mod ops;
-mod repo;
 
 // The shared spine, and the features built on it. These coexist with the
 // layer modules above, which are being emptied into them.
@@ -820,9 +819,9 @@ fn main() -> Result<()> {
 
     let db_path = canon_home.join("canon.db");
 
-    let mut db = repo::open_with_options(
+    let mut db = core::repo::open_with_options(
         &db_path,
-        repo::DbOptions {
+        core::repo::DbOptions {
             debug_sql: cli.debug_sql,
             profile: cli.profile,
         },
@@ -840,7 +839,7 @@ fn main() -> Result<()> {
 
     // Validate config.root after DB open (semantic validation: must be archive, not source).
     if let Some(root_id) = config.root {
-        let roots = repo::root::fetch_all(db.conn())?;
+        let roots = core::repo::root::fetch_all(db.conn())?;
         if let Some(root) = roots.iter().find(|r| r.id == root_id) {
             if root.is_source() {
                 bail!(
@@ -918,7 +917,7 @@ fn main() -> Result<()> {
         } => {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
             let mut include = include_set_from(&include);
-            let all_roots = repo::root::fetch_all(db.conn())?;
+            let all_roots = core::repo::root::fetch_all(db.conn())?;
             let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
             if resolved.auto_include_archived {
                 include.archived = true;
@@ -958,7 +957,7 @@ fn main() -> Result<()> {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
             let mut include = include_set_from(&include);
 
-            let all_roots = repo::root::fetch_all(db.conn())?;
+            let all_roots = core::repo::root::fetch_all(db.conn())?;
             let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
             if resolved.auto_include_archived {
                 include.archived = true;
@@ -1017,7 +1016,7 @@ fn main() -> Result<()> {
                     yes,
                 }) => {
                     let filters = alias::expand_filter_strings(&filters, &canon_home)?;
-                    let all_roots = repo::root::fetch_all(db.conn())?;
+                    let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved = ops::scope::resolve_scope(db.conn(), &paths, false, &all_roots)?;
                     let options = facts::DeleteOptions {
                         entity_type: on,
@@ -1038,7 +1037,7 @@ fn main() -> Result<()> {
                 None => {
                     let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                     let mut include = include_set_from(&include);
-                    let all_roots = repo::root::fetch_all(db.conn())?;
+                    let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved =
                         ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
                     if resolved.auto_include_archived {
@@ -1106,7 +1105,7 @@ fn main() -> Result<()> {
         } => {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
             let mut include = include_set_from(&include);
-            let all_roots = repo::root::fetch_all(db.conn())?;
+            let all_roots = core::repo::root::fetch_all(db.conn())?;
             let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
             if resolved.auto_include_archived {
                 include.archived = true;
@@ -1139,7 +1138,7 @@ fn main() -> Result<()> {
             if include.includes_archived() {
                 bail!("--include archived is not valid for survey");
             }
-            let all_roots = repo::root::fetch_all(db.conn())?;
+            let all_roots = core::repo::root::fetch_all(db.conn())?;
             let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
             if resolved.auto_include_archived {
                 include.archived = true;
@@ -1171,7 +1170,7 @@ fn main() -> Result<()> {
             if include.includes_archived() {
                 bail!("--include archived is not valid for compare (valid values: excluded)");
             }
-            let all_roots = repo::root::fetch_all(db.conn())?;
+            let all_roots = core::repo::root::fetch_all(db.conn())?;
             let (path_a, path_b) = if paths.len() == 2 {
                 (paths[0].clone(), paths[1].clone())
             } else {
@@ -1203,7 +1202,7 @@ fn main() -> Result<()> {
                 global,
             } => {
                 let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
-                let all_roots = repo::root::fetch_all(db.conn())?;
+                let all_roots = core::repo::root::fetch_all(db.conn())?;
                 let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
                 let options = archive::GenerateOptions {
                     force,
@@ -1331,7 +1330,7 @@ fn main() -> Result<()> {
                         reason.as_deref(),
                     )?;
                 } else {
-                    let all_roots = repo::root::fetch_all(db.conn())?;
+                    let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved =
                         ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
                     exclude::set(
@@ -1356,7 +1355,7 @@ fn main() -> Result<()> {
             } => {
                 let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::ClearOptions { dry_run, yes };
-                let all_roots = repo::root::fetch_all(db.conn())?;
+                let all_roots = core::repo::root::fetch_all(db.conn())?;
                 let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
                 exclude::clear(
                     &mut db,
@@ -1428,7 +1427,7 @@ fn main() -> Result<()> {
                         reason.as_deref(),
                     )?;
                 } else {
-                    let all_roots = repo::root::fetch_all(db.conn())?;
+                    let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved =
                         ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
                     if resolved.prefixes.is_empty() && filters.is_empty() {
@@ -1574,7 +1573,7 @@ fn main() -> Result<()> {
     }
 
     // Print profile summary if profiling was enabled
-    repo::print_profile_summary(db.conn());
+    core::repo::print_profile_summary(db.conn());
 
     Ok(())
 }

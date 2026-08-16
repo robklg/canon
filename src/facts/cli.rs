@@ -7,6 +7,7 @@ use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
 use crate::core::domain::IncludeSet;
+use crate::core::repo::Db;
 use crate::expr::filter::Filter;
 use crate::expr::{BuiltinKey, BuiltinKeyCategory, ParsedFactKey};
 use crate::facts::ops::maintain::{
@@ -22,7 +23,6 @@ use crate::facts::ops::report::{
 use crate::ops::decision::DecisionParams;
 use crate::ops::scope::{classify_all, ResolvedScope};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
-use crate::repo::Db;
 
 /// Check if a parsed key represents source.root (for special display formatting)
 fn is_root_key(key: &ParsedFactKey) -> bool {
@@ -522,7 +522,7 @@ pub fn delete_facts(
         );
     } else {
         // Execute
-        let roots = crate::repo::root::fetch_all(conn)?;
+        let roots = crate::core::repo::root::fetch_all(conn)?;
         let decision = DecisionParams {
             command: DecisionCommand::FactsDelete,
             scope: DecisionScope::decompose(scope_prefixes, &roots),

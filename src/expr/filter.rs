@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::eval as expr;
 use crate::core::domain::fact;
-use crate::repo::db::populate_temp_sources;
+use crate::core::repo::db::populate_temp_sources;
 
 // ============================================================================
 // Expression AST
@@ -842,7 +842,7 @@ fn prefetch_status_data(
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-        let archived = crate::repo::object::batch_check_archived(conn, &object_ids, None)?;
+        let archived = crate::core::repo::object::batch_check_archived(conn, &object_ids, None)?;
         cache.archived_objects = Some(archived);
     }
 
@@ -1678,7 +1678,7 @@ fn parse_filter_value(value: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::open_in_memory_for_test;
+    use crate::core::repo::open_in_memory_for_test;
     use rusqlite::Connection as RawConnection;
 
     fn setup_test_db() -> RawConnection {

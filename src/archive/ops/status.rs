@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::repo::{self, Connection};
+use crate::core::repo::{self, Connection};
 
 use super::manifest::{read_lock_entries, read_manifest_config};
 

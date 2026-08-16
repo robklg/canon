@@ -10,8 +10,8 @@ use anyhow::Result;
 use rusqlite::OptionalExtension;
 
 use crate::core::domain::source::{NewSource, Source};
-use crate::repo::source::{fetch_by_path, BATCH_SIZE};
-use crate::repo::Connection;
+use crate::core::repo::source::{fetch_by_path, BATCH_SIZE};
+use crate::core::repo::Connection;
 
 /// Fetch the current decision_id for a source at the given path.
 ///
@@ -245,7 +245,7 @@ pub fn update_location(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::open_in_memory_for_test;
+    use crate::core::repo::open_in_memory_for_test;
     use rusqlite::Connection as RusqliteConnection;
 
     // These three fixtures are duplicated from the shared source repository's
@@ -294,7 +294,7 @@ mod tests {
     fn insert_destination_fresh_insert() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "abc123hash", false);
 
         let new = NewSource {
@@ -330,7 +330,7 @@ mod tests {
     fn insert_destination_stale_record_update() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "abc123hash", false);
 
         // Insert a stale record (present=0) with basis_rev=5
@@ -384,7 +384,7 @@ mod tests {
     fn insert_destination_null_device_inode() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "abc123hash", false);
 
         // Simulate non-Unix platform where device/inode are not available
@@ -413,7 +413,7 @@ mod tests {
     fn insert_destination_update_active_record() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "abc123hash", false);
 
         // Insert an active record (present=1) — simulates a scan that ran between apply runs
@@ -462,7 +462,7 @@ mod tests {
     fn insert_destination_idempotent() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "abc123hash", false);
 
         let new = NewSource {
@@ -505,7 +505,7 @@ mod tests {
         // Verify the returned Source has all joined fields populated
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "abc123hash", true); // object is excluded
 
         let new = NewSource {
@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn test_insert_destination_sets_decision_id() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
 
         let new = NewSource {
@@ -580,7 +580,7 @@ mod tests {
     fn test_insert_destination_updates_decision_id() {
         // Re-inserting the same path with a new decision_id overwrites it
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash2", false);
 
         let new = NewSource {
@@ -608,7 +608,7 @@ mod tests {
     #[test]
     fn test_insert_destination_null_decision_id() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash3", false);
 
         let new = NewSource {
@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn fetch_decision_id_at_path_returns_value() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         conn.execute(
             "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
              basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn fetch_decision_id_at_path_null_returns_none() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         conn.execute(
             "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
              basis_rev, scanned_at, last_seen_at, present, excluded)
@@ -664,7 +664,7 @@ mod tests {
     #[test]
     fn fetch_decision_id_at_path_missing_returns_none() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         let result = fetch_decision_id_at_path(&conn, root_id, "nonexistent.jpg").unwrap();
         assert_eq!(result, None);
     }
@@ -672,7 +672,7 @@ mod tests {
     #[test]
     fn fetch_decision_id_at_path_not_present_returns_none() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         conn.execute(
             "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
              basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
@@ -692,7 +692,7 @@ mod tests {
     #[test]
     fn batch_check_paths_exist_empty_input() {
         let conn = setup_test_db();
-        let _root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let _root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         let result = batch_check_paths_exist(&conn, 1, &[]).unwrap();
         assert!(result.is_empty());
     }
@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn batch_check_paths_exist_none_found() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
 
         // No sources exist, query for paths that don't exist
         let result = batch_check_paths_exist(&conn, root_id, &["a.jpg", "b.jpg"]).unwrap();
@@ -710,7 +710,7 @@ mod tests {
     #[test]
     fn batch_check_paths_exist_all_found() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
 
         insert_source(&conn, root_id, "a.jpg", None, true, false);
         insert_source(&conn, root_id, "b.jpg", None, true, false);
@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn batch_check_paths_exist_mixed() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
 
         insert_source(&conn, root_id, "exists.jpg", None, true, false);
         // "missing.jpg" is not inserted
@@ -739,7 +739,7 @@ mod tests {
     #[test]
     fn batch_check_paths_exist_ignores_not_present() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
 
         insert_source(&conn, root_id, "present.jpg", None, true, false);
         insert_source(&conn, root_id, "deleted.jpg", None, false, false); // present=0
@@ -754,8 +754,8 @@ mod tests {
     #[test]
     fn batch_check_paths_exist_different_root() {
         let conn = setup_test_db();
-        let root1 = crate::repo::insert_test_root(&conn, "/archive1", "archive", false);
-        let root2 = crate::repo::insert_test_root(&conn, "/archive2", "archive", false);
+        let root1 = crate::core::repo::insert_test_root(&conn, "/archive1", "archive", false);
+        let root2 = crate::core::repo::insert_test_root(&conn, "/archive2", "archive", false);
 
         // Insert in root1
         insert_source(&conn, root1, "file.jpg", None, true, false);
@@ -773,7 +773,7 @@ mod tests {
     #[test]
     fn batch_check_paths_exist_handles_999_paths() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
 
         // Create 999 sources (just under BATCH_SIZE)
         let mut paths = Vec::new();
@@ -792,7 +792,7 @@ mod tests {
     #[test]
     fn batch_check_paths_exist_handles_1000_paths() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
 
         // Create exactly BATCH_SIZE sources
         let mut paths = Vec::new();
@@ -811,7 +811,7 @@ mod tests {
     #[test]
     fn batch_check_paths_exist_handles_1001_paths() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
 
         // Create more than BATCH_SIZE sources (requires 2 batches)
         let mut paths = Vec::new();
@@ -840,8 +840,8 @@ mod tests {
     fn update_location_updates_fields() {
         let conn = setup_test_db();
 
-        let source_root = crate::repo::insert_test_root(&conn, "/photos", "source", false);
-        let archive_root = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let source_root = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+        let archive_root = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         let source_id = insert_source(&conn, source_root, "original.jpg", None, true, false);
 
         let now = 1700000001i64;
@@ -874,7 +874,7 @@ mod tests {
     #[test]
     fn update_location_nonexistent_source() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
 
         // Should not error when source doesn't exist (0 rows affected)
         let result = update_location(&conn, 99999, root_id, "path.jpg", 1700000001, None);

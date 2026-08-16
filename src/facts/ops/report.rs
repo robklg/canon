@@ -10,13 +10,13 @@ use anyhow::Result;
 
 use crate::core::domain::fact::FactEntry;
 use crate::core::domain::fact::{FactType, FactValue};
+use crate::core::repo::{self, Connection};
 use crate::expr::value as fact_value;
 use crate::expr::{
     self, fact_value_to_display, get_builtin_value, resolve_fact_value, BuiltinKey,
     BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey,
 };
 use crate::facts::repo as facts_repo;
-use crate::repo::{self, Connection};
 
 // ============================================================================
 // Result types

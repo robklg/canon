@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
-use crate::repo;
-use crate::repo::Connection;
+use crate::core::repo;
+use crate::core::repo::Connection;
 use crate::trail::domain::placement::RowAspect;
 use crate::trail::domain::timeline::TimelineEvent;
 use crate::trail::ops::compute::{TrailParams, TrailView, DEFAULT_LIMIT};

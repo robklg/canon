@@ -5,9 +5,6 @@
 //! - Database connection management: `Db`, `open_with_options()`
 //! - No domain logic — just data access
 
-// Re-exports are intentional for public API convenience
-#![allow(unused_imports)]
-
 pub mod db;
 pub mod decision;
 pub mod fact;
@@ -16,9 +13,7 @@ pub mod root;
 pub mod source;
 
 // Re-export database utilities at module level
-pub use db::{
-    open_with_options, populate_temp_sources, print_profile_summary, Connection, Db, DbOptions,
-};
+pub use db::{open_with_options, print_profile_summary, Connection, Db, DbOptions};
 
 // Test utilities
 #[cfg(test)]
@@ -29,7 +24,7 @@ pub use root::insert_test_root;
 pub use source::insert_test_source;
 
 // Note: Repository functions are accessed via their submodules, e.g.:
-// - repo::source::batch_fetch_by_roots()
-// - repo::root::fetch_all()
-// - repo::object::batch_check_archived()
-// - repo::fact::batch_fetch_for_sources()
+// - core::repo::source::batch_fetch_by_roots()
+// - core::repo::root::fetch_all()
+// - core::repo::object::batch_check_archived()
+// - core::repo::fact::batch_fetch_for_sources()

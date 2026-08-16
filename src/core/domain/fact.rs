@@ -17,7 +17,7 @@
 //!
 //! ```ignore
 //! use crate::core::domain::fact::{FactEntry, FactValue, FactType};
-//! use crate::repo;
+//! use crate::core::repo;
 //!
 //! // Fetch a specific fact key for sources
 //! let facts = repo::fact::batch_fetch_key_for_sources(conn, &source_ids, "content.Make")?;
@@ -78,8 +78,12 @@ pub struct FactEntry {
     pub key: String,
     /// The typed fact value
     pub value: FactValue,
-    // Fields below are part of the domain model API but not currently used.
-    // Kept for debugging/introspection and future use cases.
+    // Nothing reads the two fields below today. They are kept because the
+    // fetch that produces these entries unions two SELECTs — facts stored on
+    // the source and facts stored on its object — and these are the only
+    // thing in the result that tells the two apart. Dropping them would make
+    // the union's halves unrecoverable, which is the opposite of what the
+    // union is for.
     #[allow(dead_code)]
     /// Where this fact is stored: "source" or "object"
     pub entity_type: String,

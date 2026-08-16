@@ -12,7 +12,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use crate::repo;
+//! use crate::core::repo;
 //!
 //! // Fetch all roots
 //! let roots = repo::root::fetch_all(conn)?;
@@ -78,7 +78,7 @@ pub fn insert_test_root(conn: &Connection, path: &str, role: &str, suspended: bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::open_in_memory_for_test;
+    use crate::core::repo::open_in_memory_for_test;
     use rusqlite::Connection as RusqliteConnection;
 
     /// Create an in-memory database with the full schema.

@@ -14,11 +14,11 @@ use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::format::first_chars;
 use crate::core::domain::scope::DecisionScope;
+use crate::core::repo::{self, Db};
 use crate::expr;
 use crate::ops;
 use crate::ops::decision::DecisionParams;
 use crate::ops::receipt::ReceiptPlacement;
-use crate::repo::{self, Db};
 
 pub struct ApplyOptions {
     pub dry_run: bool,

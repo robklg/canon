@@ -1,8 +1,8 @@
 use crate::core::domain::config::RecordingMode;
 use crate::core::ops::root_story::fetch_root_story;
-use crate::repo;
-use crate::repo::db::open_in_memory_for_test;
-use crate::repo::insert_test_root;
+use crate::core::repo;
+use crate::core::repo::db::open_in_memory_for_test;
+use crate::core::repo::insert_test_root;
 use crate::retire::ops::compile::{compile_book, CompileParams};
 use crate::retire::ops::frame::TellingArtifact;
 use crate::retire::ops::verify::verify_book;

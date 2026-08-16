@@ -1,12 +1,12 @@
 //! The scan subsystem's repo stratum: the nine scan-transition SQL functions
-//! and the receipt-capture row type, carved from `repo::source`/`repo::root`/
-//! `repo::fact` unchanged in SQL and signature. Kept as three inner
+//! and the receipt-capture row type, carved from `core::repo::source`/
+//! `core::repo::root`/`core::repo::fact` unchanged in SQL and signature. Kept as three inner
 //! `source`/`root`/`fact` modules mirroring their origin — `insert_object`
 //! exists in two incompatible signatures between the source and fact test
 //! flavors, so flattening into one namespace would force a rename the carve
 //! does not do. Opens no transaction: every function here takes `&Connection`.
 
-use crate::repo::Connection;
+use crate::core::repo::Connection;
 
 pub(crate) mod source {
     use anyhow::Result;
@@ -15,7 +15,7 @@ pub(crate) mod source {
 
     use super::Connection;
     use crate::core::domain::source::Source;
-    use crate::repo::source::{
+    use crate::core::repo::source::{
         fetch_by_id, fetch_by_path, source_from_row, BATCH_SIZE, SOURCE_COLUMNS, SOURCE_FROM,
     };
     use crate::scan::domain::{FileObservation, Reconciliation};
@@ -288,7 +288,7 @@ pub(crate) mod source {
                 let prefix = prefix.trim_end_matches('/');
                 let sql = format!(
                     "SELECT id FROM sources WHERE root_id = ? AND present = 1 AND {}",
-                    crate::repo::db::path_at_or_under_sql("rel_path")
+                    crate::core::repo::db::path_at_or_under_sql("rel_path")
                 );
                 conn.prepare(&sql)?
                     .query_map(rusqlite::params![root_id, prefix, prefix, prefix], |row| {
@@ -398,7 +398,7 @@ pub(crate) mod source {
         } else {
             format!(
                 "SELECT id, device FROM sources WHERE root_id = ? AND present = 1 AND {}",
-                crate::repo::db::path_strictly_under_sql("rel_path")
+                crate::core::repo::db::path_strictly_under_sql("rel_path")
             )
         };
         let mut stmt = conn.prepare(&sql)?;
@@ -425,7 +425,7 @@ pub(crate) mod source {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::repo::insert_test_source;
+        use crate::core::repo::insert_test_source;
         use crate::scan::repo::tests::setup_test_db;
         use rusqlite::Connection as RusqliteConnection;
 
@@ -465,7 +465,7 @@ pub(crate) mod source {
         fn fetch_by_inode_exists() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             // Insert source with specific device/inode
             conn.execute(
@@ -483,8 +483,8 @@ pub(crate) mod source {
         fn fetch_by_inode_cross_root() {
             let conn = setup_test_db();
 
-            let root1 = crate::repo::insert_test_root(&conn, "/photos", "source", false);
-            let _root2 = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+            let root1 = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            let _root2 = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
 
             // Insert source in root1 with specific device/inode
             conn.execute(
@@ -505,7 +505,7 @@ pub(crate) mod source {
         fn fetch_by_inode_not_found() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             insert_source(&conn, root_id, "file.jpg", None, true, false);
 
             // Query for non-existent device/inode
@@ -517,7 +517,7 @@ pub(crate) mod source {
         fn fetch_by_inode_not_present() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             // Insert non-present source with specific device/inode
             conn.execute(
@@ -539,7 +539,7 @@ pub(crate) mod source {
         fn apply_reconciliation_new() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             let observation = FileObservation {
                 root_id,
@@ -572,7 +572,7 @@ pub(crate) mod source {
             // The stale record should be revived with new attributes
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             // Create a stale source at this path (present=0)
             conn.execute(
@@ -627,7 +627,7 @@ pub(crate) mod source {
         fn apply_reconciliation_unchanged() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let source_id = insert_source(&conn, root_id, "existing.jpg", None, true, false);
 
             let observation = FileObservation {
@@ -664,7 +664,7 @@ pub(crate) mod source {
         fn apply_reconciliation_modified() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             // Insert existing source with basis_rev=2
             conn.execute(
@@ -704,8 +704,8 @@ pub(crate) mod source {
         fn apply_reconciliation_moved() {
             let conn = setup_test_db();
 
-            let root1 = crate::repo::insert_test_root(&conn, "/photos", "source", false);
-            let root2 = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+            let root1 = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root2 = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
 
             // Insert existing source in root1
             conn.execute(
@@ -751,7 +751,7 @@ pub(crate) mod source {
             // the stale record) but the constraint covers all records regardless of present.
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             // Create a stale record at the destination path (present=0)
             conn.execute(
@@ -809,7 +809,7 @@ pub(crate) mod source {
             // Verify the stale-record cleanup is harmless when no stale record exists
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             conn.execute(
                 "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, basis_rev, scanned_at, last_seen_at, present)
@@ -846,7 +846,7 @@ pub(crate) mod source {
         fn apply_reconciliation_new_requires_partial_hash() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             let observation = FileObservation {
                 root_id,
@@ -870,7 +870,7 @@ pub(crate) mod source {
         fn test_scan_new_sets_decision_id() {
             // New reconciliation with a decision_id sets it on the source record
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             let observation = FileObservation {
                 root_id,
@@ -906,7 +906,7 @@ pub(crate) mod source {
         fn test_scan_new_null_when_disabled() {
             // New reconciliation with decision_id=None leaves decision_id NULL
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             let observation = FileObservation {
                 root_id,
@@ -970,7 +970,7 @@ pub(crate) mod source {
             // keeps pointing at the excluding decision — undoing a dismissal is
             // exclude clear's recorded act, never a scan's side effect.
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let row_id =
                 insert_row_for_revive(&conn, root_id, "dismissed.jpg", false, true, Some(42));
 
@@ -1001,7 +1001,7 @@ pub(crate) mod source {
             // atomic-save edit takes) keeps the exclusion and its decision_id,
             // exactly as an in-place Modified edit would.
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let row_id =
                 insert_row_for_revive(&conn, root_id, "dismissed.jpg", true, true, Some(42));
 
@@ -1027,7 +1027,7 @@ pub(crate) mod source {
             // With recording off, an excluded row's decision_id is preserved,
             // not NULLed — same direction as the deletion path's convention.
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             insert_row_for_revive(&conn, root_id, "dismissed.jpg", false, true, Some(42));
 
             let observation = revive_observation(root_id, "dismissed.jpg");
@@ -1044,7 +1044,7 @@ pub(crate) mod source {
             // The carve-out is the exclusion's alone: an unexcluded revive is a
             // fresh state transition and takes the scan's decision_id as before.
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             insert_row_for_revive(&conn, root_id, "plain.jpg", false, false, Some(42));
 
             let observation = revive_observation(root_id, "plain.jpg");
@@ -1065,7 +1065,7 @@ pub(crate) mod source {
         fn test_scan_unchanged_preserves_decision_id() {
             // Unchanged reconciliation must not overwrite an existing decision_id
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             // Insert with a decision_id
             conn.execute(
@@ -1105,7 +1105,7 @@ pub(crate) mod source {
         fn test_scan_modified_preserves_decision_id() {
             // Modified reconciliation must not overwrite an existing decision_id
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             conn.execute(
                 "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
@@ -1146,7 +1146,7 @@ pub(crate) mod source {
         fn test_scan_moved_preserves_decision_id() {
             // Moved reconciliation must not overwrite an existing decision_id
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             conn.execute(
                 "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
@@ -1193,7 +1193,7 @@ pub(crate) mod source {
         fn fetch_for_receipt_resolves_hash_and_provenance() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let obj = insert_object(&conn, "abc123", false);
             let id1 = insert_source(&conn, root_id, "vacation/img.jpg", Some(obj), true, false);
             // Seed the pre-flip provenance link the receipt must capture.
@@ -1218,7 +1218,7 @@ pub(crate) mod source {
         fn fetch_for_receipt_unhashed_source_has_no_hash() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let id1 = insert_source(&conn, root_id, "raw.dat", None, true, false);
 
             let rows = fetch_for_receipt(&conn, &[id1]).unwrap();
@@ -1234,7 +1234,7 @@ pub(crate) mod source {
             // so the receipt matches exactly the sources this transition stamps.
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let present = insert_source(&conn, root_id, "here.jpg", None, true, false);
             let absent = insert_source(&conn, root_id, "gone.jpg", None, false, false);
 
@@ -1259,7 +1259,7 @@ pub(crate) mod source {
             // of its sources flow through here to build the deletion receipt.
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let ids: Vec<i64> = (0..2500)
                 .map(|i| insert_source(&conn, root_id, &format!("f{i}.jpg"), None, true, false))
                 .collect();
@@ -1288,7 +1288,7 @@ pub(crate) mod source {
         fn fetch_source_ids_for_root_returns_present_only() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let id1 = insert_source(&conn, root_id, "present1.jpg", None, true, false);
             let id2 = insert_source(&conn, root_id, "present2.jpg", None, true, false);
             let _id3 = insert_source(&conn, root_id, "deleted.jpg", None, false, false);
@@ -1304,7 +1304,7 @@ pub(crate) mod source {
         fn fetch_source_ids_for_root_empty() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             let ids = fetch_source_ids_for_root(&conn, root_id, None).unwrap();
             assert!(ids.is_empty());
@@ -1314,7 +1314,7 @@ pub(crate) mod source {
         fn fetch_source_ids_for_root_with_prefix() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let id1 = insert_source(&conn, root_id, "2024/photo1.jpg", None, true, false);
             let id2 = insert_source(&conn, root_id, "2024/photo2.jpg", None, true, false);
             let id3 = insert_source(&conn, root_id, "2023/old.jpg", None, true, false);
@@ -1336,7 +1336,7 @@ pub(crate) mod source {
         fn fetch_source_ids_for_root_prefix_stops_at_the_path_boundary() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let inside = insert_source(&conn, root_id, "alpha/a.jpg", None, true, false);
             let dash_sibling = insert_source(&conn, root_id, "alpha-beta/b.jpg", None, true, false);
             let run_on_sibling = insert_source(&conn, root_id, "alphabet/c.jpg", None, true, false);
@@ -1356,7 +1356,7 @@ pub(crate) mod source {
         fn fetch_source_ids_for_root_prefix_wildcard_bytes_are_literal() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let under_underscore =
                 insert_source(&conn, root_id, "alpha_beta/a.jpg", None, true, false);
             let trap_sibling = insert_source(&conn, root_id, "alphaXbeta/b.jpg", None, true, false);
@@ -1382,7 +1382,7 @@ pub(crate) mod source {
         #[test]
         fn fetch_device_info_by_prefix_empty_root() {
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             let results = fetch_device_info_by_prefix(&conn, root_id, "").unwrap();
             assert!(results.is_empty());
@@ -1391,7 +1391,7 @@ pub(crate) mod source {
         #[test]
         fn fetch_device_info_by_prefix_matches_all() {
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             // Insert sources with different devices
             insert_test_source(&conn, root_id, "a/1.jpg", 100, 1, 1000, 1700000000);
@@ -1406,7 +1406,7 @@ pub(crate) mod source {
         #[test]
         fn fetch_device_info_by_prefix_matches_prefix() {
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             insert_test_source(&conn, root_id, "a/1.jpg", 100, 1, 1000, 1700000000);
             insert_test_source(&conn, root_id, "a/2.jpg", 100, 2, 1000, 1700000000);
@@ -1420,7 +1420,7 @@ pub(crate) mod source {
         #[test]
         fn fetch_device_info_by_prefix_wildcard_bytes_are_literal() {
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             insert_test_source(&conn, root_id, "alpha_beta/1.jpg", 100, 1, 1000, 1700000000);
             insert_test_source(&conn, root_id, "alphaXbeta/2.jpg", 200, 2, 1000, 1700000000);
@@ -1435,7 +1435,7 @@ pub(crate) mod source {
         #[test]
         fn fetch_device_info_by_prefix_excludes_not_present() {
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             insert_test_source(&conn, root_id, "a/1.jpg", 100, 1, 1000, 1700000000);
             // Mark as not present
@@ -1452,7 +1452,7 @@ pub(crate) mod source {
         #[test]
         fn fetch_device_info_by_prefix_returns_device() {
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             insert_test_source(&conn, root_id, "a/1.jpg", 12345, 1, 1000, 1700000000);
 
@@ -1468,7 +1468,7 @@ pub(crate) mod root {
 
     use super::Connection;
     use crate::core::domain::root::Root;
-    use crate::repo::root::{root_from_row, ROOT_COLUMNS};
+    use crate::core::repo::root::{root_from_row, ROOT_COLUMNS};
 
     /// Create a new root in the database.
     ///
@@ -1513,7 +1513,7 @@ pub(crate) mod root {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::repo::root::fetch_all;
+        use crate::core::repo::root::fetch_all;
         use crate::scan::repo::tests::setup_test_db;
         use rusqlite::Connection as RusqliteConnection;
 
@@ -1761,6 +1761,6 @@ mod tests {
 
     /// Create an in-memory database with the full schema.
     pub(super) fn setup_test_db() -> RusqliteConnection {
-        crate::repo::open_in_memory_for_test()
+        crate::core::repo::open_in_memory_for_test()
     }
 }

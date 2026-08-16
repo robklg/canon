@@ -8,8 +8,8 @@ use anyhow::Result;
 use rusqlite::OptionalExtension;
 
 use crate::core::domain::fact::FactType;
+use crate::core::repo::db::{populate_temp_sources, Connection};
 use crate::facts::domain::{FactValueType, SourceFact};
-use crate::repo::db::{populate_temp_sources, Connection};
 
 /// Count fact keys across sources.
 ///
@@ -563,7 +563,7 @@ pub fn delete_excluded(conn: &Connection, scope: &str) -> Result<(usize, usize)>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::open_in_memory_for_test;
+    use crate::core::repo::open_in_memory_for_test;
 
     fn setup_test_db() -> Connection {
         open_in_memory_for_test()

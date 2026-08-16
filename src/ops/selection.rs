@@ -11,8 +11,8 @@ use anyhow::Result;
 use crate::core::domain::include::IncludeSet;
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
+use crate::core::repo::{self, Connection};
 use crate::expr::filter::{self, Filter, UsedStatus};
-use crate::repo::{self, Connection};
 
 /// How to handle root role filtering during source selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

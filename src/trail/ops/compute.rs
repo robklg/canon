@@ -10,8 +10,8 @@ use chrono::{Duration, Local, NaiveDate, TimeZone};
 
 use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::root::find_containing_root;
+use crate::core::repo::{self, Connection};
 use crate::notes::{fetch_all, fetch_by_roots};
-use crate::repo::{self, Connection};
 use crate::trail::domain::placement::{placement_in_view, row_aspect, scopes_touch, RowAspect};
 use crate::trail::domain::timeline::{
     group_by_day, merge_events, DayGroup, TimelineEvent, WhenValue,

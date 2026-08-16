@@ -3,9 +3,9 @@ use rusqlite::Connection;
 
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::format_count;
+use crate::core::repo;
 use crate::notes::count_subtree_notes;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
-use crate::repo;
 use crate::roots::repo as roots_repo;
 
 // =============================================================================
@@ -283,7 +283,7 @@ pub fn execute_unsuspend(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::db::open_in_memory_for_test;
+    use crate::core::repo::db::open_in_memory_for_test;
 
     fn setup_test_db() -> Connection {
         open_in_memory_for_test()

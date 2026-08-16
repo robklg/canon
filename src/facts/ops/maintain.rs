@@ -6,10 +6,10 @@ use anyhow::Result;
 
 use crate::core::domain::decision::DecisionStatus;
 use crate::core::domain::format_count;
+use crate::core::repo::object::OrphanedStats;
+use crate::core::repo::{Connection, Db};
 use crate::facts::repo as facts_repo;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
-use crate::repo::object::OrphanedStats;
-use crate::repo::{Connection, Db};
 
 /// Plan result for fact deletion.
 pub struct DeletePlan {
@@ -175,7 +175,7 @@ pub fn execute_prune_stale(
 
 /// Plan orphaned object pruning: count orphaned objects, sources, and facts.
 pub fn plan_prune_orphaned(conn: &mut Connection) -> Result<OrphanedStats> {
-    crate::repo::object::find_orphaned_stats(conn)
+    crate::core::repo::object::find_orphaned_stats(conn)
 }
 
 /// Result of orphaned object pruning.
@@ -197,7 +197,7 @@ pub fn execute_prune_orphaned(
 
     let conn = db.conn_mut();
     let tx = conn.transaction()?;
-    let deleted = crate::repo::object::delete_orphaned(&tx)?;
+    let deleted = crate::core::repo::object::delete_orphaned(&tx)?;
     tx.commit()?;
     let summary = format!(
         "Deleted {} orphaned objects, {} non-present sources, and {} facts",
@@ -475,7 +475,7 @@ mod tests {
         conn.execute("UPDATE sources SET present = 0 WHERE id = ?1", [s1])
             .unwrap();
 
-        let mut db = crate::repo::Db::from_connection(conn);
+        let mut db = crate::core::repo::Db::from_connection(conn);
         let decision = recording_decision(crate::core::domain::decision::DecisionCommand::Prune);
         let result = execute_prune_orphaned(&mut db, Some(&decision)).unwrap();
         assert_eq!(result.stats.object_count, 1);

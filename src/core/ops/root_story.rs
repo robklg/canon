@@ -16,9 +16,9 @@ use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::fate::{decision_family, DecisionFamily};
 use crate::core::domain::root::Root;
 use crate::core::domain::source::Source;
+use crate::core::repo;
+use crate::core::repo::decision::DecisionScopeRow;
 use crate::ops;
-use crate::repo;
-use crate::repo::decision::DecisionScopeRow;
 
 /// The root's complete story, fetched once — the retirement ceremony's one
 /// structural substrate. The readiness review and the book compile are both

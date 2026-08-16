@@ -14,7 +14,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use crate::repo;
+//! use crate::core::repo;
 //!
 //! // Fetch a specific fact key for sources
 //! let facts = repo::fact::batch_fetch_key_for_sources(conn, &source_ids, "content.Make")?;
@@ -199,7 +199,7 @@ fn fact_value_from_columns(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::open_in_memory_for_test;
+    use crate::core::repo::open_in_memory_for_test;
 
     fn setup_test_db() -> Connection {
         open_in_memory_for_test()

@@ -7,9 +7,9 @@
 use std::collections::HashMap;
 
 use crate::core::domain::decision::DecisionStatus;
+use crate::core::repo::{self, Connection};
 use crate::ops::decision::{DecisionParams, DecisionRecorder};
 use crate::ops::receipt::{DeletionReceipt, DeletionReceiptItem, ReceiptKind, ReceiptPlacement};
-use crate::repo::{self, Connection};
 
 /// Merge deletion entries that share a root so each root yields one receipt.
 /// Items are concatenated in the order roots were first seen and re-sorted by

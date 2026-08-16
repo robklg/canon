@@ -1,11 +1,11 @@
 //! The exclude subsystem's repo stratum: the six exclusion-transition SQL
-//! functions and the receipt-capture row type, carved from `repo::source`/
-//! `repo::object` unchanged in SQL and signature. Kept as two inner
+//! functions and the receipt-capture row type, carved from `core::repo::source`/
+//! `core::repo::object` unchanged in SQL and signature. Kept as two inner
 //! `source`/`object` modules mirroring their origin, since both define a
 //! `set_excluded` with a different signature — flattening them into one
 //! namespace would force a rename, which the carve does not do.
 
-use crate::repo::Connection;
+use crate::core::repo::Connection;
 
 pub(crate) mod source {
     use std::collections::HashMap;
@@ -14,11 +14,11 @@ pub(crate) mod source {
     use rusqlite::types::Value;
 
     use super::Connection;
-    use crate::repo::source::BATCH_SIZE;
+    use crate::core::repo::source::BATCH_SIZE;
 
     /// A source sharing an object's content, captured for an object-exclusion
     /// receipt. Unlike [`crate::scan::repo::source::ReceiptSource`] (and every
-    /// [`crate::core::domain::source::Source`] fetch in `repo::source`), this
+    /// [`crate::core::domain::source::Source`] fetch in `core::repo::source`), this
     /// includes non-present tombstone rows: the object-level stamp
     /// (`set_decision_id_by_object`) touches every sharer, present or not, and
     /// the receipt must list exactly that stamp-set so the stamp is
@@ -194,7 +194,7 @@ pub(crate) mod source {
         fn fetch_object_sharers_for_receipt_handles_large_batch() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             // More than BATCH_SIZE objects, so the chunking loop runs more than once.
             let mut object_ids = Vec::new();
@@ -229,7 +229,7 @@ pub(crate) mod source {
         fn fetch_object_sharers_for_receipt_groups_by_object() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let obj_a = insert_object(&conn, "hash_a", false);
             let obj_b = insert_object(&conn, "hash_b", false);
 
@@ -274,7 +274,7 @@ pub(crate) mod source {
         fn set_excluded_marks_source() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let source_id = insert_source(&conn, root_id, "file.jpg", None, true, false);
 
             // Verify initially not excluded
@@ -305,7 +305,7 @@ pub(crate) mod source {
         fn set_excluded_clears_source() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let source_id = insert_source(&conn, root_id, "file.jpg", None, true, true); // starts excluded
 
             // Verify initially excluded
@@ -356,7 +356,7 @@ pub(crate) mod source {
         fn batch_set_excluded_multiple() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let id1 = insert_source(&conn, root_id, "file1.jpg", None, true, false);
             let id2 = insert_source(&conn, root_id, "file2.jpg", None, true, false);
             let id3 = insert_source(&conn, root_id, "file3.jpg", None, true, false);
@@ -397,7 +397,7 @@ pub(crate) mod source {
         fn batch_set_excluded_returns_count() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let id1 = insert_source(&conn, root_id, "file1.jpg", None, true, false);
             let _id2 = insert_source(&conn, root_id, "file2.jpg", None, true, false);
 
@@ -412,7 +412,7 @@ pub(crate) mod source {
         fn batch_set_excluded_skips_nonexistent() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let id1 = insert_source(&conn, root_id, "file.jpg", None, true, false);
 
             // Mix of existing and nonexistent IDs
@@ -436,7 +436,7 @@ pub(crate) mod source {
         fn batch_set_excluded_handles_large_batch() {
             let conn = setup_test_db();
 
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
             // Create more than BATCH_SIZE sources (1000+)
             let mut source_ids = Vec::new();
@@ -493,7 +493,7 @@ pub(crate) mod source {
         #[test]
         fn set_excluded_writes_decision_id() {
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let source_id = insert_source(&conn, root_id, "file.jpg", None, true, false);
 
             // Some(id) records the deciding decision
@@ -508,7 +508,7 @@ pub(crate) mod source {
         #[test]
         fn batch_set_excluded_writes_decision_id() {
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let id1 = insert_source(&conn, root_id, "a.jpg", None, true, false);
             let id2 = insert_source(&conn, root_id, "b.jpg", None, true, false);
 
@@ -530,14 +530,14 @@ pub(crate) mod source {
         #[test]
         fn set_decision_id_by_object_updates_all_sources() {
             let conn = setup_test_db();
-            let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
-            let obj_id = crate::repo::object::get_or_create(&conn, "sha256", "deadbeef")
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            let obj_id = crate::core::repo::object::get_or_create(&conn, "sha256", "deadbeef")
                 .unwrap()
                 .id;
             let id1 = insert_source(&conn, root_id, "copy1.jpg", Some(obj_id), true, false);
             let id2 = insert_source(&conn, root_id, "copy2.jpg", Some(obj_id), true, false);
             // A source on a different object must NOT be touched.
-            let other_obj = crate::repo::object::get_or_create(&conn, "sha256", "cafef00d")
+            let other_obj = crate::core::repo::object::get_or_create(&conn, "sha256", "cafef00d")
                 .unwrap()
                 .id;
             let id3 = insert_source(&conn, root_id, "other.jpg", Some(other_obj), true, false);
@@ -565,7 +565,7 @@ pub(crate) mod object {
 
     use super::Connection;
     use crate::core::domain::object::Object;
-    use crate::repo::object::{object_from_row, OBJECT_COLUMNS};
+    use crate::core::repo::object::{object_from_row, OBJECT_COLUMNS};
 
     /// Set the exclusion flag for an object.
     ///
@@ -717,7 +717,7 @@ mod tests {
 
     /// Create an in-memory database with the full schema.
     pub(super) fn setup_test_db() -> RusqliteConnection {
-        crate::repo::open_in_memory_for_test()
+        crate::core::repo::open_in_memory_for_test()
     }
 
     /// Insert a test object and return its ID.

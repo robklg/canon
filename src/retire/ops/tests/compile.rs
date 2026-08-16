@@ -1,6 +1,6 @@
+use crate::core::repo::db::open_in_memory_for_test;
+use crate::core::repo::insert_test_root;
 use crate::notes::insert;
-use crate::repo::db::open_in_memory_for_test;
-use crate::repo::insert_test_root;
 use crate::retire::ops::verify::verify_book;
 
 use super::fixtures::{

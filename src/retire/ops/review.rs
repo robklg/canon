@@ -15,8 +15,8 @@ use crate::core::domain::decision::{Decision, DecisionCommand};
 use crate::core::domain::resolution::{build_account, ResolutionAccount};
 use crate::core::domain::Root;
 use crate::core::ops::root_story::{fetch_root_story, RootStory};
+use crate::core::repo;
 use crate::ops;
-use crate::repo;
 use crate::retire::domain::{derive_readiness, Readiness};
 
 /// Facts the review states beside the account — facts, never warnings, and
@@ -114,7 +114,7 @@ pub fn find_retirement_covering_path(
         return Ok(None);
     }
     let rows =
-        repo::decision::fetch_bound_retirements(conn, DecisionCommand::RootsRetire.as_str())?;
+        crate::retire::repo::fetch_bound_retirements(conn, DecisionCommand::RootsRetire.as_str())?;
     // Newest first — the first hit is the latest retirement of the place
     // (a re-retired path resolves to its newest telling).
     let Some(hit) = rows

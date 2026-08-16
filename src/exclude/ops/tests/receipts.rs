@@ -1,5 +1,6 @@
 use crate::core::domain::config::LedgerConfig;
 use crate::core::domain::decision::DecisionCommand;
+use crate::core::repo::Connection;
 use crate::exclude::repo as exclude_repo;
 use crate::ops::decision::DecisionParams;
 use crate::ops::receipt::{ExcludeReceipt, ReceiptPlacement};
@@ -7,7 +8,6 @@ use crate::ops::test_helpers::{
     insert_object, insert_root, insert_source, insert_source_excluded, is_object_excluded,
     is_source_excluded, setup_test_db,
 };
-use crate::repo::Connection;
 use tempfile::{tempdir, TempDir};
 
 use crate::exclude::ops::execute::{

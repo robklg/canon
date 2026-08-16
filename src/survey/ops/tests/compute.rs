@@ -20,12 +20,12 @@ fn run_compute(
     other_paths: &[&str],
     archive_root_id: Option<i64>,
 ) -> SurveyOutcome {
-    let root_ids: Vec<i64> = crate::repo::root::fetch_all(conn)
+    let root_ids: Vec<i64> = crate::core::repo::root::fetch_all(conn)
         .unwrap()
         .iter()
         .map(|r| r.id)
         .collect();
-    let all_sources = crate::repo::source::batch_fetch_by_roots(conn, &root_ids).unwrap();
+    let all_sources = crate::core::repo::source::batch_fetch_by_roots(conn, &root_ids).unwrap();
 
     let prefixes: Vec<String> = scope_paths.iter().map(|s| s.to_string()).collect();
     let other: Vec<String> = other_paths.iter().map(|s| s.to_string()).collect();

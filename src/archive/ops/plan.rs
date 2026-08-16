@@ -17,8 +17,8 @@ use crate::archive::domain::LockEntry;
 use crate::core::domain::fact::FactEntry;
 use crate::core::domain::format::first_chars;
 use crate::core::domain::path::path_strip_prefix;
+use crate::core::repo::{self, Connection};
 use crate::expr::Pattern;
-use crate::repo::{self, Connection};
 
 use super::pattern::evaluate_pattern;
 
@@ -32,7 +32,7 @@ pub struct ApplyPlanParams<'a> {
     pub needed_keys: &'a [String],
     /// Scope prefix from manifest config (meta.scope).
     pub scope_prefix: Option<&'a str>,
-    /// Root ID → root path cache (from repo::root::fetch_all).
+    /// Root ID → root path cache (from core::repo::root::fetch_all).
     pub root_paths: &'a HashMap<i64, String>,
     /// Destination archive root ID.
     pub archive_root_id: i64,

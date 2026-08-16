@@ -2,11 +2,11 @@ use anyhow::Result;
 
 use crate::core::domain::format_count;
 use crate::core::domain::IncludeSet;
+use crate::core::repo::{self, Db};
 use crate::expr::filter::Filter;
 use crate::ops;
 use crate::ops::coverage::CoverageStats;
 use crate::ops::scope::{classify_all, parse_root_spec, ResolvedScope};
-use crate::repo::{self, Db};
 
 pub fn run(
     db: &mut Db,

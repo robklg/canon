@@ -7,11 +7,11 @@ use crate::core::domain::config::LedgerConfig;
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::fate::{fate_posture, fate_transition};
 use crate::core::domain::scope::DecisionScope;
+use crate::core::repo::{self, Connection};
 use crate::ops::receipt::{
     compute_ledger_root_receipt_rel_path, compute_targeted_receipt_rel_path, finalize_receipt,
     write_receipt, ReceiptKind, ReceiptLocus, ReceiptMeta, ReceiptPlacement, ReceiptRef,
 };
-use crate::repo::{self, Connection};
 
 /// Parameters for starting a decision record.
 pub struct DecisionParams {
@@ -535,7 +535,7 @@ fn populate_decision_scopes(
 mod tests {
     use super::*;
     use crate::core::domain::config::{LedgerConfig, RecordingMode};
-    use crate::repo::db::open_in_memory_for_test;
+    use crate::core::repo::db::open_in_memory_for_test;
     use tempfile::tempdir;
 
     fn setup_test_db() -> Connection {

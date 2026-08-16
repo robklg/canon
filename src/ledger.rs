@@ -7,8 +7,8 @@
 use anyhow::Result;
 
 use crate::core::domain::format::format_count;
+use crate::core::repo::Db;
 use crate::ops::ledger::{reindex_extractions, ReindexParams, ReindexResult};
-use crate::repo::Db;
 
 pub fn run_reindex(db: &mut Db, dry_run: bool) -> Result<()> {
     let result = reindex_extractions(db.conn(), &ReindexParams { dry_run })?;

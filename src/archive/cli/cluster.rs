@@ -12,10 +12,10 @@ use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
+use crate::core::repo::{self, Connection, Db};
 use crate::expr::filter::Filter;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::scope::{classify_all, resolve_archive_path};
-use crate::repo::{self, Connection, Db};
 
 pub struct GenerateOptions {
     pub force: bool,

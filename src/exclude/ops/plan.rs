@@ -10,10 +10,10 @@ use anyhow::Result;
 use crate::core::domain::include::IncludeSet;
 use crate::core::domain::path::path_is_under;
 use crate::core::domain::source::Source;
+use crate::core::repo::{self, Connection};
 use crate::exclude::domain::find_excludable_duplicates;
 use crate::expr::filter;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
-use crate::repo::{self, Connection};
 
 use super::types::{
     object_source_info, DuplicateGroupData, ExcludeClearParams, ExcludeClearPlan,

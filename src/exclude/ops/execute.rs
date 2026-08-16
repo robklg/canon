@@ -7,13 +7,13 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::core::domain::format_count;
+use crate::core::repo::Connection;
 use crate::exclude::repo as exclude_repo;
 use crate::ops::decision::DecisionParams;
 use crate::ops::receipt::{
     DuplicatesReceipt, ExcludeReceipt, ObjectExcludeEntry, ObjectExcludeReceipt, ReceiptKind,
     ReceiptPlacement,
 };
-use crate::repo::Connection;
 
 use super::receipt::{
     counts_all, duplicate_receipt_groups, exclude_receipt_items, object_stamp_set_entries,

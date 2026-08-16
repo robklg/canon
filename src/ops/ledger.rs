@@ -23,7 +23,7 @@ use serde::Deserialize;
 use crate::core::domain::decision::{Decision, DecisionCommand};
 use crate::core::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
 use crate::core::domain::Root;
-use crate::repo::{self, Connection};
+use crate::core::repo::{self, Connection};
 
 pub struct ReindexParams {
     pub dry_run: bool,

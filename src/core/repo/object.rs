@@ -12,7 +12,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use crate::repo;
+//! use crate::core::repo;
 //!
 //! // Fetch objects by ID
 //! let objects = repo::object::batch_fetch_by_ids(conn, &object_ids)?;
@@ -39,7 +39,7 @@ use super::db::Connection;
 use crate::core::domain::object::Object;
 
 /// Batch size for SQL IN clauses (consistent with other repos).
-pub const BATCH_SIZE: usize = 1000;
+const BATCH_SIZE: usize = 1000;
 
 /// The columns we SELECT for Object construction.
 ///
@@ -491,7 +491,7 @@ pub fn find_orphaned_stats(conn: &Connection) -> Result<OrphanedStats> {
 ///
 /// ```ignore
 /// let tx = conn.transaction()?;
-/// let stats = repo::object::delete_orphaned(&tx)?;
+/// let stats = core::repo::object::delete_orphaned(&tx)?;
 /// tx.commit()?;
 /// ```
 pub fn delete_orphaned(conn: &Connection) -> Result<OrphanedStats> {
@@ -596,7 +596,7 @@ pub fn get_or_create(conn: &Connection, hash_type: &str, hash_value: &str) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::open_in_memory_for_test;
+    use crate::core::repo::open_in_memory_for_test;
     use rusqlite::Connection as RusqliteConnection;
 
     fn setup_test_db() -> RusqliteConnection {

@@ -14,7 +14,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use crate::repo;
+//! use crate::core::repo;
 //!
 //! // Fetch all sources for specific roots
 //! let sources = repo::source::batch_fetch_by_roots(conn, &[1, 2, 3])?;
@@ -27,7 +27,7 @@ use rusqlite::types::Value;
 use rusqlite::OptionalExtension;
 
 use super::db::Connection;
-use crate::core::domain::source::{NewSource, Source};
+use crate::core::domain::source::Source;
 
 /// Batch size for SQL IN clauses. Consistent across all repositories.
 pub const BATCH_SIZE: usize = 1000;
@@ -127,19 +127,6 @@ pub fn min_scanned_at_by_root(conn: &Connection, root_id: i64) -> Result<Option<
         |row| row.get(0),
     )?;
     Ok(min)
-}
-
-/// Count every source row for a root, present and absent alike. One half of
-/// the retirement ceremony's world-moved re-check: computes over SQL exactly
-/// what `readiness_lens` derived from the fetched rows, so equality with the
-/// review-time snapshot means "same world".
-pub fn count_all_by_root(conn: &Connection, root_id: i64) -> Result<i64> {
-    let count = conn.query_row(
-        "SELECT COUNT(*) FROM sources WHERE root_id = ?1",
-        [root_id],
-        |row| row.get(0),
-    )?;
-    Ok(count)
 }
 
 /// Fetch all present sources for the given root IDs.
@@ -316,7 +303,7 @@ pub fn sources_exist_at_scope(conn: &Connection, root_id: i64, rel_path: &str) -
         conn.query_row(
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM sources WHERE root_id = ? AND {})",
-                crate::repo::db::path_at_or_under_sql("rel_path")
+                crate::core::repo::db::path_at_or_under_sql("rel_path")
             ),
             rusqlite::params![root_id, rel_path, rel_path, rel_path],
             |row| row.get(0),
@@ -432,7 +419,7 @@ pub fn insert_test_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::open_in_memory_for_test;
+    use crate::core::repo::open_in_memory_for_test;
     use rusqlite::Connection as RusqliteConnection;
 
     /// Create an in-memory database with the full schema.
@@ -491,7 +478,7 @@ mod tests {
     fn batch_fetch_by_roots_single_root() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         insert_source(&conn, root_id, "a.jpg", None, true, false);
         insert_source(&conn, root_id, "b.jpg", None, true, false);
 
@@ -509,8 +496,8 @@ mod tests {
     fn batch_fetch_by_roots_multiple_roots() {
         let conn = setup_test_db();
 
-        let root1 = crate::repo::insert_test_root(&conn, "/photos", "source", false);
-        let root2 = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root1 = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root2 = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
 
         insert_source(&conn, root1, "photo.jpg", None, true, false);
         insert_source(&conn, root2, "backup.jpg", None, true, false);
@@ -530,7 +517,7 @@ mod tests {
     fn batch_fetch_by_roots_excludes_non_present() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         insert_source(&conn, root_id, "present.jpg", None, true, false);
         insert_source(&conn, root_id, "deleted.jpg", None, false, false); // present=false
 
@@ -540,27 +527,10 @@ mod tests {
     }
 
     #[test]
-    fn count_all_by_root_spans_both_presence_classes() {
-        // The world-moved re-check counts what fetch_root_story fetched:
-        // present + absent, this root only.
-        let conn = setup_test_db();
-
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
-        let other = crate::repo::insert_test_root(&conn, "/other", "source", false);
-        insert_source(&conn, root_id, "present.jpg", None, true, false);
-        insert_source(&conn, root_id, "deleted.jpg", None, false, false);
-        insert_source(&conn, other, "elsewhere.jpg", None, true, false);
-
-        assert_eq!(count_all_by_root(&conn, root_id).unwrap(), 2);
-        assert_eq!(count_all_by_root(&conn, other).unwrap(), 1);
-        assert_eq!(count_all_by_root(&conn, 999).unwrap(), 0);
-    }
-
-    #[test]
     fn min_scanned_at_by_root_ignores_other_roots() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
-        let other = crate::repo::insert_test_root(&conn, "/other", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+        let other = crate::core::repo::insert_test_root(&conn, "/other", "source", false);
         let a = insert_source(&conn, root_id, "a.jpg", None, true, false);
         let b = insert_source(&conn, other, "b.jpg", None, true, false);
         conn.execute("UPDATE sources SET scanned_at = 200 WHERE id = ?", [a])
@@ -578,7 +548,7 @@ mod tests {
         // same rows, the other presence class.
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         insert_source(&conn, root_id, "present.jpg", None, true, false);
         insert_source(&conn, root_id, "deleted.jpg", None, false, false);
 
@@ -593,7 +563,7 @@ mod tests {
         // The account classifies tombstones by their decision_id stamp; the
         // mapper must round-trip it (and empty ids stay cheap).
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let id = insert_source(&conn, root_id, "gone.jpg", None, false, false);
         conn.execute("UPDATE sources SET decision_id = 42 WHERE id = ?", [id])
             .unwrap();
@@ -610,7 +580,7 @@ mod tests {
         // Filtering by exclusion is done in the domain layer.
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         insert_source(&conn, root_id, "normal.jpg", None, true, false);
         insert_source(&conn, root_id, "excluded.jpg", None, true, true); // excluded=true
 
@@ -628,7 +598,7 @@ mod tests {
     fn batch_fetch_by_roots_includes_object_excluded() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let obj_id = insert_object(&conn, "abc123", true); // object excluded
         insert_source(&conn, root_id, "file.jpg", Some(obj_id), true, false);
 
@@ -645,7 +615,7 @@ mod tests {
     fn batch_fetch_by_roots_suspended_root() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", true); // suspended
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", true); // suspended
         insert_source(&conn, root_id, "file.jpg", None, true, false);
 
         let sources = batch_fetch_by_roots(&conn, &[root_id]).unwrap();
@@ -676,7 +646,7 @@ mod tests {
     fn batch_fetch_by_ids_returns_hashmap() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let id1 = insert_source(&conn, root_id, "a.jpg", None, true, false);
         let id2 = insert_source(&conn, root_id, "b.jpg", None, true, false);
 
@@ -692,7 +662,7 @@ mod tests {
     fn batch_fetch_by_ids_excludes_non_present() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let present_id = insert_source(&conn, root_id, "present.jpg", None, true, false);
         let deleted_id = insert_source(&conn, root_id, "deleted.jpg", None, false, false);
 
@@ -706,7 +676,7 @@ mod tests {
     fn batch_fetch_by_ids_partial_match() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let id1 = insert_source(&conn, root_id, "exists.jpg", None, true, false);
 
         // Query for mix of existing and non-existing IDs
@@ -723,7 +693,7 @@ mod tests {
     fn fetch_by_id_returns_source() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let obj_id = insert_object(&conn, "abc123", false);
         let source_id = insert_source(&conn, root_id, "photo.jpg", Some(obj_id), true, false);
 
@@ -752,7 +722,7 @@ mod tests {
     fn fetch_by_id_excludes_non_present() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let source_id = insert_source(&conn, root_id, "deleted.jpg", None, false, false); // present=false
 
         let result = fetch_by_id(&conn, source_id).unwrap();
@@ -764,7 +734,7 @@ mod tests {
     fn fetch_by_id_includes_excluded_source() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let source_id = insert_source(&conn, root_id, "excluded.jpg", None, true, true); // excluded=true
 
         let result = fetch_by_id(&conn, source_id).unwrap();
@@ -789,8 +759,8 @@ mod tests {
     fn fetch_sources_by_object_ids_returns_grouped() {
         let conn = setup_test_db();
 
-        let root1 = crate::repo::insert_test_root(&conn, "/source", "source", false);
-        let root2 = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root1 = crate::core::repo::insert_test_root(&conn, "/source", "source", false);
+        let root2 = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
 
         // Two objects (different content)
         let obj1 = insert_object(&conn, "content_hash_1", false);
@@ -819,7 +789,7 @@ mod tests {
     fn fetch_sources_by_object_ids_includes_root_path() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/my/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/my/archive", "archive", false);
         let obj = insert_object(&conn, "test_hash", false);
         let _src = insert_source(&conn, root_id, "subdir/file.txt", Some(obj), true, false);
 
@@ -837,7 +807,7 @@ mod tests {
     fn fetch_sources_by_object_ids_excludes_non_present() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/source", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/source", "source", false);
         let obj = insert_object(&conn, "test_hash", false);
 
         // One present, one deleted
@@ -856,7 +826,7 @@ mod tests {
     fn fetch_sources_by_object_ids_handles_large_batch() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/source", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/source", "source", false);
 
         // Create more than BATCH_SIZE objects (1000+)
         let mut object_ids = Vec::new();
@@ -891,7 +861,7 @@ mod tests {
     #[test]
     fn test_sources_decision_id_exists() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         conn.execute(
             "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
              basis_rev, scanned_at, last_seen_at, present, excluded, decision_id)
@@ -912,7 +882,7 @@ mod tests {
     #[test]
     fn test_sources_decision_id_nullable() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         conn.execute(
             "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash,
              basis_rev, scanned_at, last_seen_at, present, excluded)
@@ -938,7 +908,7 @@ mod tests {
     fn fetch_by_path_exists() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         insert_source(&conn, root_id, "found.jpg", None, true, false);
 
         let result = fetch_by_path(&conn, root_id, "found.jpg").unwrap();
@@ -950,7 +920,7 @@ mod tests {
     fn fetch_by_path_not_present() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         insert_source(&conn, root_id, "deleted.jpg", None, false, false); // present=0
 
         let result = fetch_by_path(&conn, root_id, "deleted.jpg").unwrap();
@@ -961,7 +931,7 @@ mod tests {
     fn fetch_by_path_not_found() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
         let result = fetch_by_path(&conn, root_id, "nonexistent.jpg").unwrap();
         assert!(result.is_none());
@@ -971,8 +941,8 @@ mod tests {
     fn fetch_by_path_wrong_root() {
         let conn = setup_test_db();
 
-        let root1 = crate::repo::insert_test_root(&conn, "/photos", "source", false);
-        let root2 = crate::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let root1 = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root2 = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
         insert_source(&conn, root1, "file.jpg", None, true, false);
 
         // File exists in root1, but we query root2
@@ -988,7 +958,7 @@ mod tests {
     fn mark_missing_sets_present_zero() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let id1 = insert_source(&conn, root_id, "missing1.jpg", None, true, false);
         let id2 = insert_source(&conn, root_id, "missing2.jpg", None, true, false);
         let _id3 = insert_source(&conn, root_id, "present.jpg", None, true, false);
@@ -1030,7 +1000,7 @@ mod tests {
     fn mark_missing_returns_count() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let id1 = insert_source(&conn, root_id, "file1.jpg", None, true, false);
         let id2 = insert_source(&conn, root_id, "file2.jpg", None, false, false); // already not present
 
@@ -1043,7 +1013,7 @@ mod tests {
     fn mark_missing_updates_last_seen_at() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let id1 = insert_source(&conn, root_id, "file.jpg", None, true, false);
 
         let now = 1700000001;
@@ -1063,7 +1033,7 @@ mod tests {
     fn mark_missing_sets_decision_id_when_some() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let id1 = insert_source(&conn, root_id, "gone.jpg", None, true, false);
 
         // A decision row must exist (decision_id has no FK, but keep the test realistic).
@@ -1084,7 +1054,7 @@ mod tests {
     fn mark_missing_preserves_decision_id_when_none() {
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let id1 = insert_source(&conn, root_id, "gone.jpg", None, true, false);
 
         // Seed an existing provenance link (e.g. a prior apply/exclude decision).
@@ -1113,7 +1083,7 @@ mod tests {
         // Exercise the chunking path: more IDs than the SQLite variable limit (~32k).
         let conn = setup_test_db();
 
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let ids: Vec<i64> = (0..35_000)
             .map(|i| insert_source(&conn, root_id, &format!("f{i}.jpg"), None, true, false))
             .collect();
@@ -1140,7 +1110,7 @@ mod tests {
     #[test]
     fn set_object_id_links_source() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let source_id = insert_source(&conn, root_id, "photo.jpg", None, true, false);
         let object_id = insert_object(&conn, "abc123", false);
 
@@ -1174,7 +1144,7 @@ mod tests {
     #[test]
     fn sources_exist_at_scope_with_present() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         insert_test_source(&conn, root_id, "a/1.jpg", 1, 1, 1000, 100);
 
         assert!(sources_exist_at_scope(&conn, root_id, "a").unwrap());
@@ -1183,7 +1153,7 @@ mod tests {
     #[test]
     fn sources_exist_at_scope_with_non_present() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         let source_id = insert_test_source(&conn, root_id, "a/1.jpg", 1, 1, 1000, 100);
         // Mark as not present
         conn.execute(
@@ -1199,7 +1169,7 @@ mod tests {
     #[test]
     fn sources_exist_at_scope_no_sources() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
         assert!(!sources_exist_at_scope(&conn, root_id, "nonexistent").unwrap());
     }
@@ -1207,7 +1177,7 @@ mod tests {
     #[test]
     fn sources_exist_at_scope_descendant() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         insert_test_source(&conn, root_id, "a/b/c/1.jpg", 1, 1, 1000, 100);
 
         // Scope "a" should find descendant at "a/b/c/1.jpg"
@@ -1217,7 +1187,7 @@ mod tests {
     #[test]
     fn sources_exist_at_scope_no_false_prefix() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         insert_test_source(&conn, root_id, "ab/1.jpg", 1, 1, 1000, 100);
 
         // Scope "a" should NOT match "ab/1.jpg"
@@ -1227,7 +1197,7 @@ mod tests {
     #[test]
     fn sources_exist_at_scope_wildcard_bytes_are_literal() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         insert_test_source(&conn, root_id, "alphaXbeta/1.jpg", 1, 1, 1000, 100);
 
         // '_' in the scope is a path byte, not a wildcard.
@@ -1237,7 +1207,7 @@ mod tests {
     #[test]
     fn sources_exist_at_scope_root_level() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         insert_test_source(&conn, root_id, "1.jpg", 1, 1, 1000, 100);
 
         // Empty rel_path = root level
@@ -1247,7 +1217,7 @@ mod tests {
     #[test]
     fn sources_exist_at_scope_root_level_empty() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
         // Root with no sources
         assert!(!sources_exist_at_scope(&conn, root_id, "").unwrap());

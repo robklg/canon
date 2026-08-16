@@ -1,8 +1,8 @@
 //! The roots subsystem's repo stratum: the roots-exclusive SQL carved from
-//! `repo::root`/`notes::repo` unchanged in SQL and signature. Kept as two
+//! `core::repo::root`/`notes::repo` unchanged in SQL and signature. Kept as two
 //! inner `root`/`note` modules mirroring their origin table.
 
-use crate::repo::Connection;
+use crate::core::repo::Connection;
 
 pub(crate) mod root {
     use std::collections::HashMap;
@@ -88,8 +88,8 @@ pub(crate) mod root {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::repo::open_in_memory_for_test;
-        use crate::repo::root::fetch_all;
+        use crate::core::repo::open_in_memory_for_test;
+        use crate::core::repo::root::fetch_all;
         use rusqlite::Connection as RusqliteConnection;
 
         /// Create an in-memory database with the full schema.

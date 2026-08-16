@@ -14,7 +14,7 @@ use anyhow::Result;
 
 use crate::core::domain::path::path_is_under;
 use crate::core::domain::root::find_containing_root;
-use crate::repo::{self, Connection};
+use crate::core::repo::{self, Connection};
 use crate::trail::domain::composition::{build_card, BucketCount, CompositionCard};
 
 /// Compute the composition card for a scope.
@@ -99,9 +99,9 @@ pub fn compute_composition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::db::open_in_memory_for_test;
-    use crate::repo::insert_test_root;
-    use crate::repo::source::insert_test_source;
+    use crate::core::repo::db::open_in_memory_for_test;
+    use crate::core::repo::insert_test_root;
+    use crate::core::repo::source::insert_test_source;
     use crate::trail::domain::composition::OriginLine;
 
     fn insert_decision_at(conn: &Connection, command: &str, created_at: i64) -> i64 {

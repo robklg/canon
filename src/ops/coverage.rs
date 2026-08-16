@@ -8,9 +8,9 @@ use anyhow::Result;
 use crate::core::domain::root::Root;
 use crate::core::domain::source::Source;
 use crate::core::domain::IncludeSet;
+use crate::core::repo::{self, Connection};
 use crate::expr::filter::{Filter, UsedStatus};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
-use crate::repo::{self, Connection};
 
 use crate::core::domain::scope::ScopeMatch;
 

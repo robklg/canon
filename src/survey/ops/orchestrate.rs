@@ -65,7 +65,7 @@ pub fn run_survey(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    let all_roots = crate::repo::root::fetch_all(conn)?;
+    let all_roots = crate::core::repo::root::fetch_all(conn)?;
 
     let note_context = if scope_prefixes.len() == 1 {
         if let Some((root_id, _, _, rel_path)) =
@@ -111,7 +111,7 @@ pub fn run_survey(
     });
 
     let root_ids: Vec<i64> = all_roots.iter().map(|r| r.id).collect();
-    let all_sources = crate::repo::source::batch_fetch_by_roots(conn, &root_ids)?;
+    let all_sources = crate::core::repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 
     let mut outcome = compute_survey(
         conn,

@@ -6,8 +6,8 @@
 use anyhow::Result;
 use rusqlite::types::Value;
 
-use crate::repo::source::BATCH_SIZE;
-use crate::repo::Connection;
+use crate::core::repo::source::BATCH_SIZE;
+use crate::core::repo::Connection;
 
 /// A group of sources sharing the same content hash.
 pub struct DuplicateGroup {

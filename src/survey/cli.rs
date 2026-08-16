@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 
 use crate::core::domain::IncludeSet;
+use crate::core::repo;
 use crate::ops::scope::ResolvedScope;
-use crate::repo;
 use crate::survey::ops::compute::{SurveyOutcome, SurveyParams};
 use crate::survey::ops::orchestrate::{run_survey, SurveyOrchestration, SurveyRun};
 use crate::survey::render;
@@ -339,8 +339,8 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::repo::open_in_memory_for_test;
     use crate::ops::test_helpers::{insert_object, insert_root, insert_source};
-    use crate::repo::open_in_memory_for_test;
 
     fn test_options() -> SurveyOptions {
         SurveyOptions {

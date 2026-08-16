@@ -10,9 +10,9 @@ use crate::core::domain::format::format_time_ago;
 use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
 use crate::core::domain::Root;
+use crate::core::repo::{self, Db};
 use crate::ops::decision::DecisionParams;
 use crate::ops::scope::{parse_root_spec, parse_root_spec_any, resolve_path};
-use crate::repo::{self, Db};
 use crate::roots::repo as roots_repo;
 
 pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {

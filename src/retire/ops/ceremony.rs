@@ -13,7 +13,6 @@ use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::root_story::RootStory;
 use crate::ops;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
-use crate::repo;
 use crate::retire::domain::book_dir_name;
 use crate::retire::ops::frame::{self, TellingArtifact};
 use crate::story::StoryParams;
@@ -390,7 +389,7 @@ impl RetireCeremony {
     /// as the world moving (a concurrent process's decision has a different
     /// id and correctly trips the check).
     fn world_moved(&self, conn: &Connection) -> Result<Option<String>> {
-        let count = repo::source::count_all_by_root(conn, self.story.root.id)?;
+        let count = crate::retire::repo::count_all_by_root(conn, self.story.root.id)?;
         if count != self.snapshot_source_count {
             return Ok(Some(format!(
                 "the root held {} source rows at review, {} now",
@@ -398,7 +397,7 @@ impl RetireCeremony {
                 format_count(count)
             )));
         }
-        let max = repo::decision::max_decision_id_touching_root(
+        let max = crate::retire::repo::max_decision_id_touching_root(
             conn,
             self.story.root.id,
             self.recorder.decision_id(),

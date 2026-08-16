@@ -13,8 +13,8 @@ use anyhow::Result;
 
 use crate::core::domain::path::path_is_under;
 use crate::core::domain::source::Source;
+use crate::core::repo::{self, Connection};
 use crate::notes::{fetch_by_roots, Note};
-use crate::repo::{self, Connection};
 use crate::sweep::domain::{
     compute_structural, reduction_lens, LeaderboardEntry, Location, RelationShape, SweepParams,
     SweepStats,

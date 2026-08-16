@@ -32,7 +32,7 @@ enum Layer {
 /// Old-tree stratum directory names — excluded when discovering subsystem
 /// directories (a subsystem is any top-level `src/` directory that isn't one
 /// of these and isn't `core`).
-const OLD_LAYER_DIRS: &[&str] = &["repo", "ops", "expr"];
+const OLD_LAYER_DIRS: &[&str] = &["ops", "expr"];
 
 /// Stratum front-door module names inside a subsystem. For the
 /// sibling-boundary rule these are never "declared surface": a sibling
@@ -79,9 +79,7 @@ fn classify_layer(rel_path: &str) -> Layer {
     if let Some(rest) = rel_path.strip_prefix("archive/") {
         return classify_subsystem_stratum(rest);
     }
-    if rel_path.starts_with("repo/") {
-        Layer::Repo
-    } else if rel_path.starts_with("ops/") {
+    if rel_path.starts_with("ops/") {
         Layer::Ops
     } else if rel_path.starts_with("expr/") {
         Layer::Expr
@@ -236,17 +234,17 @@ struct Violation {
 /// Tier 1 — sanctioned plumbing: the interface may hold/open the database.
 /// Normalized (crate:: stripped) form. Matches only `Rule::InterfaceRepoDataMovement`.
 const TIER1_PLUMBING: &[&str] = &[
-    "repo",
-    "repo::Db",
-    "repo::Connection",
-    "repo::DbOptions",
-    "repo::open_with_options",
-    "repo::open_in_memory_for_test",
-    "repo::db::Db",
-    "repo::db::Connection",
-    "repo::db::DbOptions",
-    "repo::db::open_with_options",
-    "repo::db::open_in_memory_for_test",
+    "core::repo",
+    "core::repo::Db",
+    "core::repo::Connection",
+    "core::repo::DbOptions",
+    "core::repo::open_with_options",
+    "core::repo::open_in_memory_for_test",
+    "core::repo::db::Db",
+    "core::repo::db::Connection",
+    "core::repo::db::DbOptions",
+    "core::repo::db::open_with_options",
+    "core::repo::db::open_in_memory_for_test",
 ];
 
 struct Tier2Entry {
@@ -272,92 +270,92 @@ struct Tier3Entry {
 const TIER3: &[Tier3Entry] = &[
     Tier3Entry {
         file: "archive/cli/apply.rs",
-        reference: "repo::root::fetch_all",
+        reference: "core::repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "archive/cli/apply.rs",
-        reference: "repo::fact::batch_fetch_key_for_sources",
+        reference: "core::repo::fact::batch_fetch_key_for_sources",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "archive/cli/cluster.rs",
-        reference: "repo::root::fetch_all",
+        reference: "core::repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "coverage.rs",
-        reference: "repo::root::fetch_all",
+        reference: "core::repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "exclude/cli.rs",
-        reference: "repo::root::fetch_all",
+        reference: "core::repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "facts/cli.rs",
-        reference: "repo::root::fetch_all",
+        reference: "core::repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "facts/cli/import.rs",
-        reference: "repo::root::fetch_all",
+        reference: "core::repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "notes/cli.rs",
-        reference: "repo::root::fetch_all",
+        reference: "core::repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "retire/cli.rs",
-        reference: "repo::root::fetch_all",
+        reference: "core::repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "roots/cli.rs",
-        reference: "repo::root::fetch_all",
+        reference: "core::repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "story/cli.rs",
-        reference: "repo::root::fetch_all",
+        reference: "core::repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "scan/cli.rs",
-        reference: "repo::root::fetch_all",
+        reference: "core::repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "trail/cli.rs",
-        reference: "repo::root::fetch_all",
+        reference: "core::repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "main.rs",
-        reference: "repo::root::fetch_all",
+        reference: "core::repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "main.rs",
-        reference: "repo::print_profile_summary",
+        reference: "core::repo::print_profile_summary",
         severity: Severity::Read,
     },
     Tier3Entry {
         file: "exclude/cli.rs",
-        reference: "repo::Db::from_connection",
+        reference: "core::repo::Db::from_connection",
         severity: Severity::TestOnly,
     },
     Tier3Entry {
         file: "survey/cli.rs",
-        reference: "repo::Db::from_connection",
+        reference: "core::repo::Db::from_connection",
         severity: Severity::TestOnly,
     },
     Tier3Entry {
         file: "scan/cli.rs",
-        reference: "repo::insert_test_root",
+        reference: "core::repo::insert_test_root",
         severity: Severity::TestOnly,
     },
     Tier3Entry {
@@ -400,6 +398,40 @@ fn is_or_under(path: &str, root: &str) -> bool {
     path == root || path.starts_with(&format!("{root}::"))
 }
 
+/// Matches a reference against the repository layer, whose canonical path is
+/// `core::repo`.
+///
+/// A file that imports the module itself — `use crate::core::repo::{self, Db}`,
+/// the prevailing idiom — then spells its calls `repo::root::fetch_all(..)`.
+/// That bare form denotes the same layer and must be caught the same way, or
+/// the most common call shape in the tree would be invisible here. A match is
+/// reported in the canonical spelling, so a reference carries one name in the
+/// baselines below however the source spelled it.
+///
+/// What makes the bare form unambiguous is not that the crate root has no
+/// `repo` module — that alone would leave a subsystem free to bind the name to
+/// its own `repo` stratum — but that `bare_repo_binding_refusal` refuses any
+/// import that would. The two belong together: loosen one and the other starts
+/// reporting references against a layer they do not belong to.
+fn match_repo(path: &str) -> Option<String> {
+    if is_or_under(path, "core::repo") {
+        return Some(path.to_string());
+    }
+    if is_or_under(path, "repo") {
+        return Some(format!("core::repo{}", &path["repo".len()..]));
+    }
+    None
+}
+
+/// Matches a reference against the operations layer. Unlike the repository
+/// layer, which has one home, `core::ops` and `crate::ops` are two distinct
+/// modules that both exist and both hold operations code. So both are matched
+/// and neither is rewritten into the other — a reference is reported as
+/// written, because as written is where the code actually is.
+fn is_ops_path(path: &str) -> bool {
+    is_or_under(path, "core::ops") || is_or_under(path, "ops")
+}
+
 fn classify_reference(
     layer: Layer,
     home: &Home,
@@ -412,11 +444,11 @@ fn classify_reference(
 
     match layer {
         Layer::Domain => {
-            if is_or_under(no_crate, "ops") {
+            if is_ops_path(no_crate) {
                 return Some((Rule::DomainNoOps, raw_path.to_string()));
             }
-            if is_or_under(no_crate, "repo") {
-                return Some((Rule::DomainNoRepo, no_crate.to_string()));
+            if let Some(reference) = match_repo(no_crate) {
+                return Some((Rule::DomainNoRepo, reference));
             }
             if is_or_under(raw_path, "rusqlite") {
                 return Some((Rule::DomainNoRusqlite, raw_path.to_string()));
@@ -429,14 +461,14 @@ fn classify_reference(
             }
         }
         Layer::Repo => {
-            if is_or_under(no_crate, "ops") {
+            if is_ops_path(no_crate) {
                 return Some((Rule::RepoNoOps, raw_path.to_string()));
             }
         }
         Layer::Ops | Layer::Expr => {}
         Layer::Interface => {
-            if is_or_under(no_crate, "repo") {
-                return Some((Rule::InterfaceRepoDataMovement, no_crate.to_string()));
+            if let Some(reference) = match_repo(no_crate) {
+                return Some((Rule::InterfaceRepoDataMovement, reference));
             }
         }
     }
@@ -605,6 +637,35 @@ impl<'a> ArchVisitor<'a> {
         None
     }
 
+    /// Refuses a `use` that binds the bare name `repo` to anything but the
+    /// shared repository layer.
+    ///
+    /// `match_repo` reads `repo::root::fetch_all(..)` as the shared layer
+    /// because the only import that binds that name is
+    /// `use crate::core::repo::{self, ..}`. A subsystem importing its *own*
+    /// `repo` stratum the same way would bind the name to a different module,
+    /// and every later bare path in that file would be reported against
+    /// `core::repo` — the wrong layer, under a path that appears nowhere in
+    /// the source. Refusing the binding keeps the reading true by
+    /// construction instead of by convention.
+    ///
+    /// An aliased import binds a different name and is unaffected; that is
+    /// the form the tree already uses everywhere (`scan_repo`, `notes_repo`,
+    /// and the rest). A glob binds the module's contents, not the module.
+    fn bare_repo_binding_refusal(&self, path: &str, renamed: bool, glob: bool) -> Option<String> {
+        if renamed || glob || path == "crate::core::repo" {
+            return None;
+        }
+        if path.rsplit("::").next()? != "repo" {
+            return None;
+        }
+        Some(format!(
+            "import `{path}` binds the bare name `repo` to a module other than the shared \
+             repository layer, so later `repo::..` paths in this file would be read as \
+             `core::repo` — import it under a distinct name or spell its items in full",
+        ))
+    }
+
     fn macro_rule(&self) -> Option<Rule> {
         match self.layer {
             Layer::Domain => Some(Rule::DomainNoStdioMacro),
@@ -704,6 +765,10 @@ impl<'a, 'ast> Visit<'ast> for ArchVisitor<'a> {
         expand_use_tree(&item.tree, &[], &mut leaves);
         for (path, renamed, glob) in &leaves {
             if let Some(err) = self.sibling_import_refusal(path, *renamed, *glob) {
+                self.error = Some(format!("{}:{}: {}", self.file_label, line, err));
+                return;
+            }
+            if let Some(err) = self.bare_repo_binding_refusal(path, *renamed, *glob) {
                 self.error = Some(format!("{}:{}: {}", self.file_label, line, err));
                 return;
             }
@@ -1045,7 +1110,7 @@ mod self_tests {
 
     #[test]
     fn strip_string_literal_no_reference() {
-        let text = "fn f() { let s = \"repo::root::fetch_all\"; }\n";
+        let text = "fn f() { let s = \"core::repo::root::fetch_all\"; }\n";
         let violations = scan_file(
             Layer::Interface,
             &Home::OldTree,
@@ -1102,7 +1167,7 @@ mod self_tests {
 
     #[test]
     fn strip_preserves_line_numbers() {
-        let text = "/* line1\nline2\nline3 */\nfn f() { repo::root::fetch_all(); }\n";
+        let text = "/* line1\nline2\nline3 */\nfn f() { core::repo::root::fetch_all(); }\n";
         let violations = scan_file(
             Layer::Domain,
             &Home::OldTree,
@@ -1121,7 +1186,7 @@ mod self_tests {
 
     #[test]
     fn use_expansion_group_and_self() {
-        let text = "use crate::repo::{root, source::batch_fetch_by_roots};\nuse crate::repo::{self, Db};\n";
+        let text = "use crate::core::repo::{root, source::batch_fetch_by_roots};\nuse crate::core::repo::{self, Db};\n";
         let violations = scan_file(
             Layer::Interface,
             &Home::OldTree,
@@ -1133,18 +1198,18 @@ mod self_tests {
         .unwrap();
         let refs: std::collections::BTreeSet<_> =
             violations.iter().map(|v| v.reference.clone()).collect();
-        assert!(refs.contains("repo::root"), "{refs:?}");
+        assert!(refs.contains("core::repo::root"), "{refs:?}");
         assert!(
-            refs.contains("repo::source::batch_fetch_by_roots"),
+            refs.contains("core::repo::source::batch_fetch_by_roots"),
             "{refs:?}"
         );
-        assert!(refs.contains("repo::Db"), "{refs:?}");
-        assert!(refs.contains("repo"), "{refs:?}");
+        assert!(refs.contains("core::repo::Db"), "{refs:?}");
+        assert!(refs.contains("core::repo"), "{refs:?}");
     }
 
     #[test]
     fn evasion_refusal_alias() {
-        let text = "use crate::repo as r;\n";
+        let text = "use crate::core::repo as r;\n";
         let result = scan_file(
             Layer::Interface,
             &Home::OldTree,
@@ -1158,7 +1223,7 @@ mod self_tests {
 
     #[test]
     fn evasion_refusal_glob() {
-        let text = "use crate::repo::root::*;\n";
+        let text = "use crate::core::repo::root::*;\n";
         let result = scan_file(
             Layer::Interface,
             &Home::OldTree,
@@ -1176,7 +1241,7 @@ mod self_tests {
             file: "roots.rs".to_string(),
             line: 1,
             rule: Rule::InterfaceRepoDataMovement,
-            reference: "repo::root::fetch_all".to_string(),
+            reference: "core::repo::root::fetch_all".to_string(),
         };
 
         let outcome = evaluate_violations(std::slice::from_ref(&v), &[], &[]);
@@ -1184,7 +1249,7 @@ mod self_tests {
 
         let tier3 = [Tier3Entry {
             file: "roots.rs",
-            reference: "repo::root::fetch_all",
+            reference: "core::repo::root::fetch_all",
             severity: Severity::Read,
         }];
         let outcome = evaluate_violations(std::slice::from_ref(&v), &[], &tier3);
@@ -1201,7 +1266,7 @@ mod self_tests {
             file: "roots.rs".to_string(),
             line: 1,
             rule: Rule::InterfaceRepoDataMovement,
-            reference: "repo::Db".to_string(),
+            reference: "core::repo::Db".to_string(),
         };
         let outcome = evaluate_violations(&[v], &[], &[]);
         assert!(outcome.new_drift.is_empty());
@@ -1210,10 +1275,120 @@ mod self_tests {
             file: "roots.rs".to_string(),
             line: 1,
             rule: Rule::InterfaceRepoDataMovement,
-            reference: "repo::root::fetch_all".to_string(),
+            reference: "core::repo::root::fetch_all".to_string(),
         };
         let outcome2 = evaluate_violations(&[v2], &[], &[]);
         assert_eq!(outcome2.new_drift.len(), 1);
+    }
+
+    /// Binding the bare name `repo` to a subsystem's own stratum would make
+    /// every later `repo::..` path in that file read as the shared layer.
+    #[test]
+    fn binding_bare_repo_to_a_subsystem_stratum_is_refused() {
+        let subsystems = vec!["scan".to_string()];
+        let result = scan_file(
+            Layer::Interface,
+            &Home::Subsystem("scan".to_string()),
+            "scan/cli.rs",
+            "use crate::scan::repo::{self, root};\n",
+            &[],
+            &subsystems,
+        );
+        assert!(result.is_err(), "{result:?}");
+
+        // The two forms that do not bind the name are untouched: the alias the
+        // tree actually uses, and the shared layer's own import.
+        for text in [
+            "use crate::scan::repo as scan_repo;\n",
+            "use crate::core::repo::{self, Connection};\n",
+        ] {
+            let ok = scan_file(
+                Layer::Interface,
+                &Home::Subsystem("scan".to_string()),
+                "scan/cli.rs",
+                text,
+                &[],
+                &subsystems,
+            );
+            assert!(ok.is_ok(), "{text:?} -> {ok:?}");
+        }
+    }
+
+    /// The operations layer is matched at both of the paths that hold
+    /// operations code. The `core::ops` half has no live observation anywhere
+    /// in the tree, so without this it could be misspelled unnoticed.
+    #[test]
+    fn domain_reaching_ops_is_caught_at_both_of_its_paths() {
+        for text in [
+            "use crate::ops::selection::select_sources;\n",
+            "use crate::core::ops::root_story::fetch_root_story;\n",
+        ] {
+            let violations = scan_file(
+                Layer::Domain,
+                &Home::Core,
+                "core/domain/source.rs",
+                text,
+                &[],
+                &[],
+            )
+            .unwrap();
+            assert!(
+                violations.iter().any(|v| v.rule == Rule::DomainNoOps),
+                "{text:?} -> {violations:?}"
+            );
+        }
+    }
+
+    /// The repository layer is at `core::repo`, and an interface file that
+    /// reaches a data function there is drift the rule must see — spelled
+    /// either way the tree really spells it.
+    #[test]
+    fn interface_reaching_repo_data_is_caught_at_its_real_path() {
+        for text in [
+            "use crate::core::repo::root::fetch_all;\n",
+            "use crate::core::repo::{self, Db};\nfn f() { repo::root::fetch_all(); }\n",
+        ] {
+            let violations = scan_file(
+                Layer::Interface,
+                &Home::OldTree,
+                "synthetic.rs",
+                text,
+                &[],
+                &[],
+            )
+            .unwrap();
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.rule == Rule::InterfaceRepoDataMovement
+                        && v.reference == "core::repo::root::fetch_all"),
+                "{text:?} -> {violations:?}"
+            );
+        }
+    }
+
+    /// Holding the database is plumbing; moving data through it is not. Both
+    /// halves are asserted together so a rule that stopped firing altogether
+    /// could not pass as a widened plumbing list.
+    #[test]
+    fn holding_the_database_is_plumbing_but_fetching_is_not() {
+        let text = "use crate::core::repo::Db;\nuse crate::core::repo::root::fetch_all;\n";
+        let violations = scan_file(
+            Layer::Interface,
+            &Home::OldTree,
+            "synthetic.rs",
+            text,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let outcome = evaluate_violations(&violations, &[], &[]);
+        let drift: Vec<&str> = outcome
+            .new_drift
+            .iter()
+            .map(|v| v.reference.as_str())
+            .collect();
+        assert_eq!(drift, vec!["core::repo::root::fetch_all"], "{violations:?}");
     }
 
     #[test]
@@ -1233,7 +1408,7 @@ mod self_tests {
 
     #[test]
     fn macro_body_token_walk_detects_nested_path_and_stdio_macro() {
-        let text = "fn f() { my_macro!(repo::root::fetch_all(), println!(\"x\")); }\n";
+        let text = "fn f() { my_macro!(core::repo::root::fetch_all(), println!(\"x\")); }\n";
         let violations = scan_file(
             Layer::Domain,
             &Home::OldTree,
@@ -1246,7 +1421,8 @@ mod self_tests {
         assert!(
             violations
                 .iter()
-                .any(|v| v.rule == Rule::DomainNoRepo && v.reference == "repo::root::fetch_all"),
+                .any(|v| v.rule == Rule::DomainNoRepo
+                    && v.reference == "core::repo::root::fetch_all"),
             "{violations:?}"
         );
         assert!(

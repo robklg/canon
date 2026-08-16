@@ -17,7 +17,7 @@ use anyhow::Result;
 use crate::core::domain::decision::{Decision, DecisionCommand};
 use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::root::Root;
-use crate::repo::{self, Connection};
+use crate::core::repo::{self, Connection};
 use crate::trail::domain::placement::{aggregate_placement_lines, RowAspect};
 
 /// A receipt's on-disk location, as a pointer (contents are never read here).

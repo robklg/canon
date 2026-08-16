@@ -14,7 +14,7 @@
 //!
 //! ```ignore
 //! use crate::core::domain::object::Object;
-//! use crate::repo;
+//! use crate::core::repo;
 //!
 //! // Fetch objects by ID
 //! let objects = repo::object::batch_fetch_by_ids(conn, &object_ids)?;
@@ -59,8 +59,6 @@ impl Object {
     /// which considers BOTH source-level and object-level exclusion.
     /// This method is for direct object operations where you have an Object
     /// struct rather than going through Source.
-    // Part of the domain model API but not currently used. Kept for API completeness.
-    #[allow(dead_code)]
     pub fn is_excluded(&self) -> bool {
         self.excluded
     }

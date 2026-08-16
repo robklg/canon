@@ -7,6 +7,7 @@ use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::path::validate_paths_in_roots;
 use crate::core::domain::root::find_containing_root;
 use crate::core::domain::scope::DecisionScope;
+use crate::core::repo::{Connection, Db};
 use crate::exclude::ops::execute::{
     execute_clear, execute_duplicates, execute_set, execute_set_objects,
 };
@@ -24,7 +25,6 @@ use crate::expr::filter::Filter;
 use crate::ops::decision::DecisionParams;
 use crate::ops::receipt::{resolve_ledger_root, ReceiptPlacement};
 use crate::ops::scope::{classify_all, resolve_path};
-use crate::repo::{Connection, Db};
 
 /// Build the decision params, decomposing the given canonical scope prefixes to
 /// their roots (the one funnel). Pass an empty slice for a global decision. A
@@ -41,7 +41,7 @@ fn make_decision(
     reason: Option<&str>,
     dry_run: bool,
 ) -> Result<DecisionParams> {
-    let roots = crate::repo::root::fetch_all(conn)?;
+    let roots = crate::core::repo::root::fetch_all(conn)?;
     Ok(DecisionParams {
         command,
         scope: DecisionScope::decompose(scope_prefixes, &roots),
@@ -62,7 +62,7 @@ fn resolve_placement(
     config: &LedgerConfig,
     decision: &DecisionParams,
 ) -> Result<Option<ReceiptPlacement>> {
-    let roots = crate::repo::root::fetch_all(conn)?;
+    let roots = crate::core::repo::root::fetch_all(conn)?;
     let placement = resolve_ledger_root(&roots, config)
         .map(|(root_id, root_path)| ReceiptPlacement::LedgerRoot { root_id, root_path });
     if decision.receipt_enabled && placement.is_none() {
@@ -290,7 +290,7 @@ pub fn set_by_path(
     let conn = db.conn_mut();
 
     // Resolve path (soft resolution: matches known roots, falls back to fs)
-    let roots = crate::repo::root::fetch_all(conn)?;
+    let roots = crate::core::repo::root::fetch_all(conn)?;
     let cwd = std::env::current_dir()?;
     let path_str = resolve_path(file_path, &roots, &cwd)?;
 
@@ -365,7 +365,7 @@ pub fn exclude_duplicates(
         .collect::<Result<Vec<_>>>()?;
 
     // Resolve paths (soft resolution: matches known roots, falls back to fs)
-    let all_roots = crate::repo::root::fetch_all(conn)?;
+    let all_roots = crate::core::repo::root::fetch_all(conn)?;
     let cwd = std::env::current_dir()?;
     let scope_prefixes: Vec<String> = if let Some(p) = scope_path {
         vec![resolve_path(p, &all_roots, &cwd)?]
@@ -555,7 +555,7 @@ pub fn set_object_by_file(
     let conn = db.conn_mut();
 
     // Resolve path (soft resolution: matches known roots, falls back to fs)
-    let roots = crate::repo::root::fetch_all(conn)?;
+    let roots = crate::core::repo::root::fetch_all(conn)?;
     let cwd = std::env::current_dir()?;
     let path_str = resolve_path(file_path, &roots, &cwd)?;
 
@@ -833,7 +833,7 @@ pub fn list_objects(db: &Db) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::open_in_memory_for_test;
+    use crate::core::repo::open_in_memory_for_test;
     use rusqlite::Connection as RusqliteConnection;
 
     fn setup_test_db() -> RusqliteConnection {
@@ -891,7 +891,7 @@ mod tests {
     /// Create a Db wrapper for testing exclude_duplicates
     fn make_test_db() -> Db {
         let conn = setup_test_db();
-        crate::repo::Db::from_connection(conn)
+        crate::core::repo::Db::from_connection(conn)
     }
 
     /// Check if a source is excluded in the database

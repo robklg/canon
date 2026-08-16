@@ -16,3 +16,4 @@
 
 pub mod domain;
 pub mod ops;
+pub mod repo;

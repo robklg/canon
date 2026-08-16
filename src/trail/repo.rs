@@ -2,7 +2,7 @@
 //! timeline merge, the extraction ledger's whole-table reads, and the
 //! scoped-footer adjustments; `decisions`/`decision_scopes`/
 //! `decision_extractions` access shared with other subsystems (root_story,
-//! ledger reindex, apply) stays in `repo::decision`/`repo::source`.
+//! ledger reindex, apply) stays in `core::repo::decision`/`core::repo::source`.
 
 use std::collections::HashMap;
 
@@ -10,9 +10,9 @@ use anyhow::Result;
 
 use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
-use crate::repo::db::Connection;
-use crate::repo::decision::DecisionScopeRow;
-use crate::repo::source::BATCH_SIZE;
+use crate::core::repo::db::Connection;
+use crate::core::repo::decision::DecisionScopeRow;
+use crate::core::repo::source::BATCH_SIZE;
 use crate::trail::domain::timeline::StampAgg;
 
 const DECISION_COLUMNS: &str = "id, command, scope, command_line, reason, status,
@@ -223,7 +223,7 @@ pub fn aggregate_stamped_by_decisions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::db::open_in_memory_for_test;
+    use crate::core::repo::db::open_in_memory_for_test;
 
     fn setup_test_db() -> Connection {
         open_in_memory_for_test()
@@ -271,7 +271,7 @@ mod tests {
     fn count_unscoped_ignores_scoped_decisions() {
         let conn = setup_test_db();
         let scoped = insert_decision_at(&conn, "scan", 100);
-        crate::repo::decision::insert_scopes(
+        crate::core::repo::decision::insert_scopes(
             &conn,
             scoped,
             &[(1, "/vol/j".to_string(), String::new())],
@@ -282,16 +282,18 @@ mod tests {
 
         assert_eq!(count_unscoped(&conn, None).unwrap(), 2);
         assert_eq!(count_unscoped(&conn, Some((100, 200))).unwrap(), 1);
-        // count_all has no production caller — sanity-checked here alongside
-        // count_unscoped, per its own doc comment.
-        assert_eq!(crate::repo::decision::count_all(&conn).unwrap(), 3);
+        // The scoped counts above are only meaningful against the total.
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM decisions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 3);
     }
 
     #[test]
     fn filter_unscoped_ids_against_mixed_decisions() {
         let conn = setup_test_db();
         let scoped = insert_decision_at(&conn, "exclude_set", 100);
-        crate::repo::decision::insert_scopes(
+        crate::core::repo::decision::insert_scopes(
             &conn,
             scoped,
             &[(1, "/vol/m".to_string(), String::new())],
@@ -307,7 +309,7 @@ mod tests {
     fn scope_rows_round_trip_with_receipt_path() {
         let conn = setup_test_db();
         let d = insert_decision_at(&conn, "scan", 100);
-        crate::repo::decision::insert_scopes(
+        crate::core::repo::decision::insert_scopes(
             &conn,
             d,
             &[
@@ -316,7 +318,7 @@ mod tests {
             ],
         )
         .unwrap();
-        crate::repo::decision::set_scope_receipt(
+        crate::core::repo::decision::set_scope_receipt(
             &conn,
             d,
             2,
@@ -325,7 +327,7 @@ mod tests {
         )
         .unwrap();
 
-        let by_root = crate::repo::decision::fetch_scope_rows_by_roots(&conn, &[2]).unwrap();
+        let by_root = crate::core::repo::decision::fetch_scope_rows_by_roots(&conn, &[2]).unwrap();
         assert_eq!(by_root.len(), 1);
         assert_eq!(by_root[0].decision_id, d);
         assert_eq!(by_root[0].rel_prefix, "");
@@ -360,12 +362,12 @@ mod tests {
         let conn = setup_test_db();
         let d1 = insert_decision_at(&conn, "apply", 100);
         let d2 = insert_decision_at(&conn, "apply", 200);
-        crate::repo::decision::replace_extractions(
+        crate::core::repo::decision::replace_extractions(
             &conn,
             &[mk_extraction(d1, 2), mk_extraction(d1, 1)],
         )
         .unwrap();
-        crate::repo::decision::replace_extractions(&conn, &[mk_extraction(d2, 1)]).unwrap();
+        crate::core::repo::decision::replace_extractions(&conn, &[mk_extraction(d2, 1)]).unwrap();
 
         let rows = fetch_all_extractions(&conn).unwrap();
         let pairs: Vec<(i64, i64)> = rows.iter().map(|r| (r.decision_id, r.root_id)).collect();
@@ -389,16 +391,34 @@ mod tests {
     #[test]
     fn aggregate_stamped_splits_by_presence() {
         let conn = setup_test_db();
-        let root_id = crate::repo::insert_test_root(&conn, "/photos", "source", false);
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
         // Decision 7: one scan stamping a new file (present) and two deletions.
-        let a = crate::repo::source::insert_test_source(&conn, root_id, "new.jpg", 1, 1, 100, 0);
-        let b = crate::repo::source::insert_test_source(&conn, root_id, "gone1.jpg", 1, 2, 200, 0);
-        let c = crate::repo::source::insert_test_source(&conn, root_id, "gone2.jpg", 1, 3, 300, 0);
+        let a =
+            crate::core::repo::source::insert_test_source(&conn, root_id, "new.jpg", 1, 1, 100, 0);
+        let b = crate::core::repo::source::insert_test_source(
+            &conn,
+            root_id,
+            "gone1.jpg",
+            1,
+            2,
+            200,
+            0,
+        );
+        let c = crate::core::repo::source::insert_test_source(
+            &conn,
+            root_id,
+            "gone2.jpg",
+            1,
+            3,
+            300,
+            0,
+        );
         stamp_source(&conn, a, 7, 1);
         stamp_source(&conn, b, 7, 0);
         stamp_source(&conn, c, 7, 0);
         // Decision 8: an apply stamping one destination.
-        let d = crate::repo::source::insert_test_source(&conn, root_id, "dest.jpg", 1, 4, 400, 0);
+        let d =
+            crate::core::repo::source::insert_test_source(&conn, root_id, "dest.jpg", 1, 4, 400, 0);
         stamp_source(&conn, d, 8, 1);
 
         let aggs = aggregate_stamped_by_decisions(&conn, &[7, 8, 9]).unwrap();

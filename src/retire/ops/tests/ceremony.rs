@@ -3,10 +3,10 @@ use rusqlite::Connection;
 use crate::core::domain::config::RecordingMode;
 use crate::core::domain::decision::Decision;
 use crate::core::ops::root_story::fetch_root_story;
+use crate::core::repo;
+use crate::core::repo::db::open_in_memory_for_test;
+use crate::core::repo::insert_test_root;
 use crate::ops;
-use crate::repo;
-use crate::repo::db::open_in_memory_for_test;
-use crate::repo::insert_test_root;
 use crate::retire::domain::book_dir_name;
 use crate::retire::ops::ceremony::BindPlan;
 use crate::retire::ops::verify::verify_book;
@@ -332,7 +332,7 @@ fn full_ceremony_releases_the_root_and_completes_the_decision() {
     let (conn, _src, _arch, root_id) = every_fate_fixture();
     let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
     let bound = ceremony.bind(&conn, test_telling()).unwrap();
-    let rows_before = repo::source::count_all_by_root(&conn, root_id).unwrap();
+    let rows_before = crate::retire::repo::count_all_by_root(&conn, root_id).unwrap();
 
     // Between review and release, the only new world state is the
     // ceremony's own decision and its scope row — releasing cleanly here
@@ -360,7 +360,10 @@ fn full_ceremony_releases_the_root_and_completes_the_decision() {
         .unwrap()
         .iter()
         .any(|r| r.id == root_id));
-    assert_eq!(repo::source::count_all_by_root(&conn, root_id).unwrap(), 0);
+    assert_eq!(
+        crate::retire::repo::count_all_by_root(&conn, root_id).unwrap(),
+        0
+    );
     verify_book(&bound.dir).unwrap();
 
     let decision = retire_decision_row(&conn, &ceremony);

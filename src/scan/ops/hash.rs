@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::{Transaction, TransactionBehavior};
 
-use crate::repo::{self, Connection};
+use crate::core::repo::{self, Connection};
 use crate::scan::repo as scan_repo;
 
 use super::types::{current_timestamp, FileToHash};

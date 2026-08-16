@@ -21,8 +21,8 @@ use crate::core::domain;
 use crate::core::domain::path::{clean_path, path_strip_prefix, validate_paths_in_roots};
 use crate::core::domain::root::{find_containing_root, Root, RootSpec};
 use crate::core::domain::scope::ScopeMatch;
+use crate::core::repo::{self, Connection};
 use crate::ops::fs::canonicalize_maybe_missing;
-use crate::repo::{self, Connection};
 
 /// Classify a canonicalized path as file or directory scope.
 ///
@@ -101,14 +101,14 @@ pub fn resolve_paths(paths: &[PathBuf], roots: &[Root]) -> Result<Vec<String>> {
 /// Parse root spec (id:N or path:/path) with optional role validation.
 /// Excludes suspended roots. Use parse_root_spec_any() to include them.
 ///
-/// Callers must fetch roots via `repo::root::fetch_all()` first.
+/// Callers must fetch roots via `core::repo::root::fetch_all()` first.
 pub fn parse_root_spec(roots: &[Root], spec: &str, required_role: Option<&str>) -> Result<i64> {
     parse_root_spec_impl(roots, spec, required_role, false)
 }
 
 /// Parse root spec including suspended roots. Used for suspend/unsuspend commands.
 ///
-/// Callers must fetch roots via `repo::root::fetch_all()` first.
+/// Callers must fetch roots via `core::repo::root::fetch_all()` first.
 pub fn parse_root_spec_any(roots: &[Root], spec: &str) -> Result<i64> {
     parse_root_spec_impl(roots, spec, None, true)
 }
@@ -162,7 +162,7 @@ fn parse_root_spec_impl(
 /// Resolve a path to its containing root (any role) and relative subdir.
 /// Excludes suspended roots. Use resolve_root_path_any() to include them.
 ///
-/// Callers must fetch roots via `repo::root::fetch_all()` first.
+/// Callers must fetch roots via `core::repo::root::fetch_all()` first.
 ///
 /// Returns Some((root_id, root_path, role, relative_subdir)) if inside a root, None otherwise.
 pub fn resolve_root_path(
@@ -175,7 +175,7 @@ pub fn resolve_root_path(
 /// Resolve a path to its containing root, including suspended roots.
 /// Used for internal operations like unsuspend and overlap checking.
 ///
-/// Callers must fetch roots via `repo::root::fetch_all()` first.
+/// Callers must fetch roots via `core::repo::root::fetch_all()` first.
 pub fn resolve_root_path_any(
     roots: &[Root],
     path: &Path,
@@ -208,7 +208,7 @@ fn resolve_root_path_impl(
 /// inside an archive root and extracts the relative portion.
 /// The path does not need to exist - only an ancestor within an archive root must exist.
 ///
-/// Callers must fetch roots via `repo::root::fetch_all()` first.
+/// Callers must fetch roots via `core::repo::root::fetch_all()` first.
 ///
 /// Returns (root_id, root_path, relative_subdir) or error if not in an archive.
 pub fn resolve_archive_path(roots: &[Root], path: &Path) -> Result<(i64, String, String)> {

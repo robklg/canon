@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 
+use crate::core::repo::db::Connection;
 use crate::notes::domain::{LocationEntry, Note};
-use crate::repo::db::Connection;
 
 /// The columns we SELECT for Note construction.
 const NOTE_COLUMNS: &str = "id, root_id, rel_path, text, created_at";
@@ -65,7 +65,7 @@ pub fn fetch_subtree(conn: &Connection, root_id: i64, rel_path: &str) -> Result<
     } else {
         format!(
             "SELECT {NOTE_COLUMNS} FROM notes WHERE root_id = ? AND {} ORDER BY created_at DESC",
-            crate::repo::db::path_at_or_under_sql("rel_path")
+            crate::core::repo::db::path_at_or_under_sql("rel_path")
         )
     };
 
@@ -90,7 +90,7 @@ pub fn fetch_subtree(conn: &Connection, root_id: i64, rel_path: &str) -> Result<
 /// viewed scope is domain logic — SQL never compares paths.
 pub fn fetch_by_roots(conn: &Connection, root_ids: &[i64]) -> Result<Vec<Note>> {
     let mut notes = Vec::new();
-    for chunk in root_ids.chunks(crate::repo::source::BATCH_SIZE) {
+    for chunk in root_ids.chunks(crate::core::repo::source::BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
         let sql = format!(
             "SELECT {NOTE_COLUMNS} FROM notes WHERE root_id IN ({})",
@@ -304,7 +304,7 @@ fn subtree_where(root_id: i64, rel_path: &str) -> (String, Vec<rusqlite::types::
         (
             format!(
                 "root_id = ? AND {}",
-                crate::repo::db::path_at_or_under_sql("rel_path")
+                crate::core::repo::db::path_at_or_under_sql("rel_path")
             ),
             vec![
                 rusqlite::types::Value::from(root_id),
@@ -376,7 +376,7 @@ pub fn count_descendant_locations(
         conn.query_row(
             &format!(
                 "SELECT COUNT(DISTINCT rel_path) FROM notes WHERE root_id = ? AND {}",
-                crate::repo::db::path_strictly_under_sql("rel_path")
+                crate::core::repo::db::path_strictly_under_sql("rel_path")
             ),
             rusqlite::params![root_id, rel_path, rel_path],
             |row| row.get(0),
@@ -397,7 +397,7 @@ pub fn count_subtree_notes(conn: &Connection, root_id: i64, rel_path: &str) -> R
         conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM notes WHERE root_id = ? AND {}",
-                crate::repo::db::path_at_or_under_sql("rel_path")
+                crate::core::repo::db::path_at_or_under_sql("rel_path")
             ),
             rusqlite::params![root_id, rel_path, rel_path, rel_path],
             |row| row.get(0),
@@ -418,7 +418,7 @@ pub fn count_subtree_locations(conn: &Connection, root_id: i64, rel_path: &str) 
         conn.query_row(
             &format!(
                 "SELECT COUNT(DISTINCT rel_path) FROM notes WHERE root_id = ? AND {}",
-                crate::repo::db::path_at_or_under_sql("rel_path")
+                crate::core::repo::db::path_at_or_under_sql("rel_path")
             ),
             rusqlite::params![root_id, rel_path, rel_path, rel_path],
             |row| row.get(0),
@@ -447,7 +447,7 @@ pub fn clear_subtree(conn: &Connection, root_id: i64, rel_path: &str) -> Result<
         conn.execute(
             &format!(
                 "DELETE FROM notes WHERE root_id = ? AND {}",
-                crate::repo::db::path_at_or_under_sql("rel_path")
+                crate::core::repo::db::path_at_or_under_sql("rel_path")
             ),
             rusqlite::params![root_id, rel_path, rel_path, rel_path],
         )?
