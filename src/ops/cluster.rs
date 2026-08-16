@@ -933,13 +933,20 @@ pub fn extract_notes_raw(content: &str) -> Option<String> {
     let after_marker = start_idx + marker.len();
     let rest = &content[after_marker..];
 
-    let end = rest
-        .lines()
-        .enumerate()
-        .skip(1)
-        .find(|(_, line)| line.starts_with("# === ") || line.starts_with('['))
-        .map(|(i, _)| rest.lines().take(i).map(|l| l.len() + 1).sum::<usize>())
-        .unwrap_or(rest.len());
+    // Walk whole lines with their terminators still attached, so the running
+    // offset is exact whatever the file's line endings are. A manifest is
+    // meant to be opened in an editor, and an editor may hand it back with
+    // CRLF endings; assuming a one-byte terminator would shift the offset by
+    // a byte per line and cut the notes short — or land inside a character.
+    let mut end = rest.len();
+    let mut offset = 0;
+    for (i, line) in rest.split_inclusive('\n').enumerate() {
+        if i > 0 && (line.starts_with("# === ") || line.starts_with('[')) {
+            end = offset;
+            break;
+        }
+        offset += line.len();
+    }
 
     Some(rest[..end].to_string())
 }
@@ -1744,6 +1751,37 @@ base_dir = "photos"
         let content = "# === Notes ===\n# My notes\n# === Cluster Summary ===\n# stuff\n";
         let notes = extract_notes_raw(content).unwrap();
         assert_eq!(notes, "\n# My notes\n");
+    }
+
+    #[test]
+    fn test_extract_notes_raw_handles_crlf() {
+        // An editor may return the manifest with two-byte line endings. Every
+        // note line must survive, terminators included.
+        let content =
+            "# === Notes ===\r\n# First note\r\n# Second note\r\n\r\n[meta]\r\nversion = 1\r\n";
+        let notes = extract_notes_raw(content).unwrap();
+        assert_eq!(notes, "\r\n# First note\r\n# Second note\r\n\r\n");
+    }
+
+    #[test]
+    fn test_extract_notes_raw_crlf_with_non_ascii() {
+        let content =
+            "# === Notes ===\r\n# Fotos de la boda — París\r\n# Añadir más tarde\r\n[meta]\r\n";
+        let notes = extract_notes_raw(content).unwrap();
+        assert_eq!(
+            notes,
+            "\r\n# Fotos de la boda — París\r\n# Añadir más tarde\r\n"
+        );
+    }
+
+    #[test]
+    fn test_extract_notes_strips_markers_on_crlf() {
+        // The last note is short on purpose: a parser that mismeasures a
+        // two-byte terminator loses ground with every line, and a trailing
+        // blank line would hide that behind the final trim.
+        let content = "# === Notes ===\r\n# alpha\r\n# beta\r\n# g\r\n[meta]\r\n";
+        let notes = extract_notes(content).unwrap();
+        assert_eq!(notes, "alpha\nbeta\ng");
     }
 
     // extract_notes — strips # markers for decision reason
