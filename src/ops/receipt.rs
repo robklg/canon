@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::archive::TransferMode;
+use crate::core::domain::extraction::OriginDisposition;
 use crate::core::domain::fate::{DecisionFamily, FateAspect};
 use crate::domain::config::{LedgerConfig, ReceiptLayout};
 use crate::domain::root::Root;
@@ -73,7 +73,7 @@ impl ReceiptPlacement {
 /// The variant→family mapping must agree with `decision_family(command)` for the
 /// corresponding command; the integrity test enforces that agreement.
 pub enum ReceiptKind {
-    Apply(TransferMode),
+    Apply(OriginDisposition),
     ExcludeSet,
     ExcludeDuplicates,
     ExcludeObject,
@@ -99,14 +99,13 @@ impl ReceiptKind {
         }
     }
 
-    /// The origin's disposition — apply only. `retained` (Copy — content now in
-    /// two places) or `relocated` (Move|Rename — the origin no longer holds it).
-    /// Sourced from the executed `TransferMode`, never re-parsed from a command
-    /// line. `None` for every non-apply receipt.
+    /// The origin's disposition — apply only. `retained` (content now in two
+    /// places) or `relocated` (the origin no longer holds it). Carried as data
+    /// by the caller that performed the transfer, never re-parsed from a
+    /// command line. `None` for every non-apply receipt.
     pub fn origin_disposition(&self) -> Option<&'static str> {
         match self {
-            ReceiptKind::Apply(TransferMode::Copy) => Some("retained"),
-            ReceiptKind::Apply(_) => Some("relocated"),
+            ReceiptKind::Apply(disposition) => Some(disposition.as_str()),
             _ => None,
         }
     }
@@ -966,7 +965,7 @@ mod tests {
         use crate::core::domain::fate::{decision_family, fate_posture, fate_transition};
 
         let all = [
-            ReceiptKind::Apply(TransferMode::Copy),
+            ReceiptKind::Apply(OriginDisposition::Retained),
             ReceiptKind::ExcludeSet,
             ReceiptKind::ExcludeDuplicates,
             ReceiptKind::ExcludeObject,
@@ -1007,20 +1006,17 @@ mod tests {
         }
     }
 
-    /// Origin disposition is the executed `TransferMode` made data — Move and
-    /// Rename collapse to `relocated`; only apply carries it at all.
+    /// Origin disposition is the carried value spoken in its registered word;
+    /// only apply carries one at all. Which transfer produces which disposition
+    /// is the caller's knowledge, asserted where that mapping lives.
     #[test]
-    fn origin_disposition_collapses_move_and_rename() {
+    fn origin_disposition_speaks_the_carried_value() {
         assert_eq!(
-            ReceiptKind::Apply(TransferMode::Copy).origin_disposition(),
+            ReceiptKind::Apply(OriginDisposition::Retained).origin_disposition(),
             Some("retained")
         );
         assert_eq!(
-            ReceiptKind::Apply(TransferMode::Move).origin_disposition(),
-            Some("relocated")
-        );
-        assert_eq!(
-            ReceiptKind::Apply(TransferMode::Rename).origin_disposition(),
+            ReceiptKind::Apply(OriginDisposition::Relocated).origin_disposition(),
             Some("relocated")
         );
         assert_eq!(ReceiptKind::ExcludeSet.origin_disposition(), None);

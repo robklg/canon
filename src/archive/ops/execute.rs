@@ -34,6 +34,19 @@ pub enum TransferMode {
     Move,   // Try rename, fallback to copy+delete on EXDEV
 }
 
+impl TransferMode {
+    /// What the transfer leaves behind at the origin. Copy leaves the content
+    /// standing in two places; Rename and Move both take it away, and the
+    /// receipt records only that difference — which of the two carried it is
+    /// the transfer's business, not the record's.
+    pub fn origin_disposition(self) -> OriginDisposition {
+        match self {
+            TransferMode::Copy => OriginDisposition::Retained,
+            TransferMode::Rename | TransferMode::Move => OriginDisposition::Relocated,
+        }
+    }
+}
+
 // ===========================================================================
 // Execute types
 // ===========================================================================
@@ -399,7 +412,7 @@ pub fn execute_apply(
                         status,
                         &result.summary,
                         placement.locus_root(),
-                        ReceiptKind::Apply(params.transfer_mode),
+                        ReceiptKind::Apply(params.transfer_mode.origin_disposition()),
                         Some(params.manifest_display.clone()),
                     ),
                     items: receipt_items,
@@ -813,6 +826,29 @@ mod tests {
     use crate::ops::test_helpers::{insert_object, insert_root, setup_test_db};
 
     use super::super::plan::ApplyViolations;
+
+    // =========================================================================
+    // Origin disposition
+    // =========================================================================
+
+    /// The three transfer modes collapse to two dispositions: only whether the
+    /// origin still holds the content is recorded. Rename and Move differ in
+    /// how they move it, never in what they leave behind.
+    #[test]
+    fn transfer_modes_collapse_to_two_origin_dispositions() {
+        assert_eq!(
+            TransferMode::Copy.origin_disposition(),
+            OriginDisposition::Retained
+        );
+        assert_eq!(
+            TransferMode::Rename.origin_disposition(),
+            OriginDisposition::Relocated
+        );
+        assert_eq!(
+            TransferMode::Move.origin_disposition(),
+            OriginDisposition::Relocated
+        );
+    }
 
     // =========================================================================
     // validate_source_state tests
