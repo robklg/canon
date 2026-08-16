@@ -3,7 +3,7 @@ use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 
 use super::eval as expr;
-use crate::domain::fact;
+use crate::core::domain::fact;
 use crate::repo::db::populate_temp_sources;
 
 // ============================================================================

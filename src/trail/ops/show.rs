@@ -14,9 +14,9 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
+use crate::core::domain::decision::{Decision, DecisionCommand};
 use crate::core::domain::extraction::DecisionExtraction;
-use crate::domain::decision::{Decision, DecisionCommand};
-use crate::domain::root::Root;
+use crate::core::domain::root::Root;
 use crate::repo::{self, Connection};
 use crate::trail::domain::placement::{aggregate_placement_lines, RowAspect};
 

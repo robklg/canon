@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::domain::path::path_is_under;
-use crate::domain::source::Source;
+use crate::core::domain::path::path_is_under;
+use crate::core::domain::source::Source;
 use crate::notes::{fetch_by_roots, Note};
 use crate::repo::{self, Connection};
 use crate::sweep::domain::{

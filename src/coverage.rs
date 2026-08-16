@@ -1,7 +1,7 @@
 use anyhow::Result;
 
-use crate::domain::format_count;
-use crate::domain::IncludeSet;
+use crate::core::domain::format_count;
+use crate::core::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::ops;
 use crate::ops::coverage::CoverageStats;
@@ -130,7 +130,7 @@ fn format_compact_label(id: &str, path: &str) -> String {
     let id_prefix = format!("id:{id:<2}");
     format!(
         "{id_prefix} {}",
-        crate::domain::format::cap_path(path, MAX_PATH_LEN)
+        crate::core::domain::format::cap_path(path, MAX_PATH_LEN)
     )
 }
 

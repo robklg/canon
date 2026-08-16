@@ -20,9 +20,9 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Deserialize;
 
+use crate::core::domain::decision::{Decision, DecisionCommand};
 use crate::core::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
-use crate::domain::decision::{Decision, DecisionCommand};
-use crate::domain::Root;
+use crate::core::domain::Root;
 use crate::repo::{self, Connection};
 
 pub struct ReindexParams {
@@ -318,7 +318,7 @@ mod tests {
         ApplyExecuteParams, ApplyPlan, ApplyTransfer, ApplyViolations, TransferMode,
         TransferOutcome, TransferProgress,
     };
-    use crate::domain::config::{LedgerConfig, ReceiptLayout, RecordingMode};
+    use crate::core::domain::config::{LedgerConfig, ReceiptLayout, RecordingMode};
     use crate::ops::decision::DecisionParams;
     use crate::ops::fs::compute_partial_hash;
     use crate::ops::receipt::ReceiptPlacement;

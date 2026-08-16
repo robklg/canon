@@ -7,7 +7,7 @@
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 
-use crate::domain::fact::{FactType, FactValue};
+use crate::core::domain::fact::{FactType, FactValue};
 
 // ============================================================================
 // Types

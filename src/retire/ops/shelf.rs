@@ -7,8 +7,8 @@ use anyhow::Result;
 use rusqlite::Connection;
 use serde::Deserialize;
 
-use crate::domain::config::LedgerConfig;
-use crate::domain::decision::DecisionCommand;
+use crate::core::domain::config::LedgerConfig;
+use crate::core::domain::decision::DecisionCommand;
 use crate::ops;
 use crate::repo;
 

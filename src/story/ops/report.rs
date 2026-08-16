@@ -12,8 +12,8 @@ use rusqlite::Connection;
 use std::collections::HashMap;
 
 use crate::core::domain::resolution::{build_account, ResolutionAccount};
+use crate::core::domain::root::Root;
 use crate::core::ops::root_story::{fetch_root_story, RootStory};
-use crate::domain::root::Root;
 use crate::notes::fetch_by_roots;
 use crate::repo;
 use crate::story::domain::place::{

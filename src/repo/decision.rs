@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::db::Connection;
 use super::source::BATCH_SIZE;
+use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
-use crate::domain::decision::Decision;
 
 /// Insert the initial "started" decision record. Returns the row ID.
 #[allow(clippy::too_many_arguments)]

@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::archive::domain::LockEntry;
-use crate::domain::fact::{FactEntry, FactValue};
-use crate::domain::path::path_strip_prefix;
+use crate::core::domain::fact::{FactEntry, FactValue};
+use crate::core::domain::path::path_strip_prefix;
 use crate::expr::{self, EvalContext, Pattern};
 
 /// Build an EvalContext for a source using pre-fetched facts and cached root paths.

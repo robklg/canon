@@ -8,8 +8,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::domain::fact::FactEntry;
-use crate::domain::fact::{FactType, FactValue};
+use crate::core::domain::fact::FactEntry;
+use crate::core::domain::fact::{FactType, FactValue};
 use crate::expr::value as fact_value;
 use crate::expr::{
     self, fact_value_to_display, get_builtin_value, resolve_fact_value, BuiltinKey,
@@ -95,7 +95,7 @@ pub struct RootDistributionResult {
 /// Compute source count per root for the given sources.
 /// Sources must have root_id populated (from batch_fetch_by_roots).
 pub fn compute_root_distribution(
-    sources: &[crate::domain::source::Source],
+    sources: &[crate::core::domain::source::Source],
 ) -> RootDistributionResult {
     use std::collections::BTreeMap;
     let mut counts: BTreeMap<i64, (String, usize)> = BTreeMap::new();

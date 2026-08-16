@@ -77,7 +77,7 @@ pub fn relative_to_scope(note_rel_path: &str, scope_rel_path: &str) -> String {
 /// the book's notes page — one note-identity rendering, two hosts.
 pub fn note_display_path(
     note: &Note,
-    roots: &std::collections::HashMap<i64, crate::domain::root::Root>,
+    roots: &std::collections::HashMap<i64, crate::core::domain::root::Root>,
     use_full_path: bool,
 ) -> String {
     if use_full_path {

@@ -4,12 +4,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 
 use crate::ceremony;
-use crate::domain::config::{LedgerConfig, RecordingMode};
-use crate::domain::decision::DecisionCommand;
-use crate::domain::format::format_time_ago;
-use crate::domain::format_count;
-use crate::domain::scope::DecisionScope;
-use crate::domain::Root;
+use crate::core::domain::config::{LedgerConfig, RecordingMode};
+use crate::core::domain::decision::DecisionCommand;
+use crate::core::domain::format::format_time_ago;
+use crate::core::domain::format_count;
+use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::Root;
 use crate::ops::decision::DecisionParams;
 use crate::ops::scope::{parse_root_spec, parse_root_spec_any, resolve_path};
 use crate::repo::{self, Db};

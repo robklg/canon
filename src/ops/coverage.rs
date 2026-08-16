@@ -5,14 +5,14 @@
 
 use anyhow::Result;
 
-use crate::domain::root::Root;
-use crate::domain::source::Source;
-use crate::domain::IncludeSet;
+use crate::core::domain::root::Root;
+use crate::core::domain::source::Source;
+use crate::core::domain::IncludeSet;
 use crate::expr::filter::{Filter, UsedStatus};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Connection};
 
-use crate::domain::scope::ScopeMatch;
+use crate::core::domain::scope::ScopeMatch;
 
 /// Statistics for a set of sources.
 pub struct CoverageStats {

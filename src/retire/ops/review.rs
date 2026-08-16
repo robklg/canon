@@ -10,11 +10,11 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{bail, Result};
 use rusqlite::Connection;
 
+use crate::core::domain::config::LedgerConfig;
+use crate::core::domain::decision::{Decision, DecisionCommand};
 use crate::core::domain::resolution::{build_account, ResolutionAccount};
+use crate::core::domain::Root;
 use crate::core::ops::root_story::{fetch_root_story, RootStory};
-use crate::domain::config::LedgerConfig;
-use crate::domain::decision::{Decision, DecisionCommand};
-use crate::domain::Root;
 use crate::ops;
 use crate::repo;
 use crate::retire::domain::{derive_readiness, Readiness};
@@ -109,7 +109,7 @@ pub fn find_retirement_covering_path(
     let roots = repo::root::fetch_all(conn)?;
     if roots
         .iter()
-        .any(|r| crate::domain::path::path_is_under(path, &r.path))
+        .any(|r| crate::core::domain::path::path_is_under(path, &r.path))
     {
         return Ok(None);
     }
@@ -119,7 +119,7 @@ pub fn find_retirement_covering_path(
     // (a re-retired path resolves to its newest telling).
     let Some(hit) = rows
         .into_iter()
-        .find(|r| crate::domain::path::path_is_under(path, &r.root_path))
+        .find(|r| crate::core::domain::path::path_is_under(path, &r.root_path))
     else {
         return Ok(None);
     };

@@ -3,7 +3,7 @@
 //! (`full_decision`, `ledger_root`, `fetch_source_decision_id`) stay there
 //! since they're used only by receipt tests, not shared with plan/execute.
 
-use crate::domain::scope::ScopeMatch;
+use crate::core::domain::scope::ScopeMatch;
 use crate::exclude::ops::types::{
     ExcludeClearParams, ExcludeDuplicatesParams, ExcludeItemData, ExcludeSetObjectsParams,
     ExcludeSetParams,

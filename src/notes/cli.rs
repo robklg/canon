@@ -15,10 +15,10 @@ use anyhow::Result;
 use chrono::{TimeZone, Utc};
 
 use crate::ceremony;
-use crate::domain::config::{LedgerConfig, RecordingMode};
-use crate::domain::decision::DecisionCommand;
-use crate::domain::root::Root;
-use crate::domain::scope::DecisionScope;
+use crate::core::domain::config::{LedgerConfig, RecordingMode};
+use crate::core::domain::decision::DecisionCommand;
+use crate::core::domain::root::Root;
+use crate::core::domain::scope::DecisionScope;
 use crate::notes::domain::{note_display_path, LocationEntry};
 use crate::notes::ops as notes_ops;
 use crate::notes::ops::{NoteListResult, NoteScope, NoteSpatialResult, NoteViewResult};

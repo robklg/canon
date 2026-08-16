@@ -15,9 +15,9 @@ use anyhow::{bail, Context, Result};
 use crate::archive::domain::{
     extract_notes_raw, LockEntry, ManifestConfig, ManifestMeta, ManifestOptions, ManifestOutput,
 };
-use crate::domain::include::IncludeSet;
-use crate::domain::scope::ScopeMatch;
-use crate::domain::{FactEntry, FactType, FactValue};
+use crate::core::domain::include::IncludeSet;
+use crate::core::domain::scope::ScopeMatch;
+use crate::core::domain::{FactEntry, FactType, FactValue};
 use crate::expr::filter::Filter;
 use crate::expr::BuiltinKey;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
@@ -239,7 +239,7 @@ impl ExecuteGenerateResult {
     /// Compose the cluster summary given a header line (provided by interface
     /// since it includes display paths that ops doesn't know).
     pub fn compose_summary(&self, header: &str) -> String {
-        use crate::domain::format_count;
+        use crate::core::domain::format_count;
         let root_word = if self.root_breakdown.len() == 1 {
             "root"
         } else {
@@ -649,7 +649,7 @@ fn current_timestamp() -> String {
 
 /// Generate cluster summary comment block for the manifest.
 fn generate_summary_comments(plan: &ClusterGeneratePlan) -> String {
-    use crate::domain::format_count;
+    use crate::core::domain::format_count;
 
     let source_count = plan.lock_entries.len();
     let mut s = String::new();

@@ -32,7 +32,7 @@ enum Layer {
 /// Old-tree stratum directory names — excluded when discovering subsystem
 /// directories (a subsystem is any top-level `src/` directory that isn't one
 /// of these and isn't `core`).
-const OLD_LAYER_DIRS: &[&str] = &["domain", "repo", "ops", "expr"];
+const OLD_LAYER_DIRS: &[&str] = &["repo", "ops", "expr"];
 
 /// Stratum front-door module names inside a subsystem. For the
 /// sibling-boundary rule these are never "declared surface": a sibling
@@ -79,9 +79,7 @@ fn classify_layer(rel_path: &str) -> Layer {
     if let Some(rest) = rel_path.strip_prefix("archive/") {
         return classify_subsystem_stratum(rest);
     }
-    if rel_path.starts_with("domain/") {
-        Layer::Domain
-    } else if rel_path.starts_with("repo/") {
+    if rel_path.starts_with("repo/") {
         Layer::Repo
     } else if rel_path.starts_with("ops/") {
         Layer::Ops
@@ -1515,7 +1513,7 @@ mod self_tests {
             classify_home("retire/ops/ceremony.rs"),
             Home::Subsystem("retire".to_string())
         );
-        assert_eq!(classify_home("domain/retire.rs"), Home::OldTree);
+        assert_eq!(classify_home("ops/retire.rs"), Home::OldTree);
         assert_eq!(classify_home("main.rs"), Home::OldTree);
     }
 

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::domain::format_count;
+use crate::core::domain::format_count;
 use crate::exclude::repo as exclude_repo;
 use crate::ops::decision::DecisionParams;
 use crate::ops::receipt::{
@@ -22,7 +22,7 @@ use super::runner::run_exclusion;
 use super::types::{
     ExcludeClearPlan, ExcludeDuplicatesPlan, ExcludeSetObjectsPlan, ExcludeSetPlan,
 };
-use crate::domain::decision::DecisionStatus;
+use crate::core::domain::decision::DecisionStatus;
 
 /// Result of an exclude-set execution.
 #[allow(dead_code)]

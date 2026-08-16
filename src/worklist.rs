@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::io::{self, Write};
 
-use crate::domain::IncludeSet;
+use crate::core::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::ops;
 use crate::ops::scope::classify_all;

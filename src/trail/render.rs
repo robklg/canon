@@ -5,11 +5,11 @@ use std::collections::HashMap;
 
 use chrono::{Local, TimeZone};
 
+use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::core::domain::fate::{fate_transition, DecisionFamily, FateAspect};
-use crate::domain::decision::Decision;
-use crate::domain::format::{cap_path, format_count, format_size};
-use crate::domain::root::Root;
+use crate::core::domain::format::{cap_path, format_count, format_size};
+use crate::core::domain::root::Root;
 use crate::ops::scope::ResolvedScope;
 use crate::trail::domain::composition::{CompositionCard, OriginLine, TransitionedLine};
 use crate::trail::domain::placement::{aggregate_placement_lines, RowAspect};
@@ -639,7 +639,7 @@ fn relativize(path: &str, resolved: &ResolvedScope) -> String {
         if path == prefix {
             return ".".to_string();
         }
-        if let Some(rel) = crate::domain::path_strip_prefix(path, prefix) {
+        if let Some(rel) = crate::core::domain::path_strip_prefix(path, prefix) {
             return rel.to_string();
         }
     }
@@ -730,7 +730,7 @@ fn format_time(ts: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::decision::Decision;
+    use crate::core::domain::decision::Decision;
     use crate::trail::domain::timeline::TimelineEvent;
 
     fn mk_extraction_row(

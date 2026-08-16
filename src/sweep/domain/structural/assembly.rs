@@ -3,8 +3,8 @@
 //! subjects → assemble findings), plus the floor-released second walk that
 //! counts what the emit floors keep off the board.
 
-use crate::domain::root::Root;
-use crate::domain::source::Source;
+use crate::core::domain::root::Root;
+use crate::core::domain::source::Source;
 
 use super::discovery::{discover_subjects, FindingTier};
 use super::localization::{localize_subjects, LocalizedSubject, Location, RelationShape};

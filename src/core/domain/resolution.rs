@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::extraction::{DecisionExtraction, OriginDisposition};
 use super::fate::DecisionFamily;
-use crate::domain::source::Source;
+use crate::core::domain::source::Source;
 
 /// The two-register resolution account of a root.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

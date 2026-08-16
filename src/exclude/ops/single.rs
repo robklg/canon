@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 
-use crate::domain::decision::DecisionStatus;
+use crate::core::domain::decision::DecisionStatus;
 use crate::exclude::repo as exclude_repo;
 use crate::ops::decision::DecisionParams;
 use crate::ops::receipt::{ExcludeReceipt, ReceiptKind, ReceiptPlacement};

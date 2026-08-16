@@ -59,7 +59,7 @@ fn stampless_excluded_rows_are_counted_beside_the_stamped() {
     let mut fx = Fixture::new();
     fx.present.push(excluded_src(1, "a/x.bin", None, 57));
     fx.present.push(excluded_src(2, "a/y.bin", None, 57));
-    fx.present.push(crate::domain::source::Source {
+    fx.present.push(crate::core::domain::source::Source {
         excluded: true,
         ..src(3, "a/z.bin", None)
     });

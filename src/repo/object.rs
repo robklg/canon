@@ -36,7 +36,7 @@ use anyhow::Result;
 use rusqlite::OptionalExtension;
 
 use super::db::Connection;
-use crate::domain::object::Object;
+use crate::core::domain::object::Object;
 
 /// Batch size for SQL IN clauses (consistent with other repos).
 pub const BATCH_SIZE: usize = 1000;

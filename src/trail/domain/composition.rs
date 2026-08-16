@@ -11,10 +11,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::fate::{decision_family, fate_transition, DecisionFamily, FateAspect};
-use crate::domain::decision::Decision;
-use crate::domain::path::path_is_under;
+use crate::core::domain::path::path_is_under;
 
 use super::placement::{classify_row, RowAspect};
 

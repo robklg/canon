@@ -4,8 +4,8 @@
 
 use anyhow::Result;
 
-use crate::domain::decision::DecisionStatus;
-use crate::domain::format_count;
+use crate::core::domain::decision::DecisionStatus;
+use crate::core::domain::format_count;
 use crate::facts::repo as facts_repo;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::repo::object::OrphanedStats;
@@ -372,7 +372,9 @@ mod tests {
     /// A decision with recording on and receipts off — fact maintenance leaves
     /// a decision row and never a receipt (facts are the user's scaffolding,
     /// not content, so no fate is being recorded).
-    fn recording_decision(command: crate::domain::decision::DecisionCommand) -> DecisionParams {
+    fn recording_decision(
+        command: crate::core::domain::decision::DecisionCommand,
+    ) -> DecisionParams {
         DecisionParams {
             command,
             scope: Vec::new(),
@@ -380,7 +382,7 @@ mod tests {
             reason: None,
             record_enabled: true,
             receipt_enabled: false,
-            ledger_config: crate::domain::config::LedgerConfig::default(),
+            ledger_config: crate::core::domain::config::LedgerConfig::default(),
         }
     }
 
@@ -411,7 +413,8 @@ mod tests {
         crate::ops::test_helpers::insert_fact(&conn, s1, "content.Make", "Canon");
 
         let plan = plan_delete(&mut conn, &[s1], "content.Make", "source", None).unwrap();
-        let decision = recording_decision(crate::domain::decision::DecisionCommand::FactsDelete);
+        let decision =
+            recording_decision(crate::core::domain::decision::DecisionCommand::FactsDelete);
         let result = execute_delete(
             &mut conn,
             &[s1],
@@ -451,7 +454,7 @@ mod tests {
 
         assert_eq!(plan_prune_stale(&conn).unwrap().stale_count, 1);
 
-        let decision = recording_decision(crate::domain::decision::DecisionCommand::Prune);
+        let decision = recording_decision(crate::core::domain::decision::DecisionCommand::Prune);
         let result = execute_prune_stale(&conn, Some(&decision)).unwrap();
 
         let (command, status, attempted, completed, summary) = only_decision(&conn);
@@ -473,7 +476,7 @@ mod tests {
             .unwrap();
 
         let mut db = crate::repo::Db::from_connection(conn);
-        let decision = recording_decision(crate::domain::decision::DecisionCommand::Prune);
+        let decision = recording_decision(crate::core::domain::decision::DecisionCommand::Prune);
         let result = execute_prune_orphaned(&mut db, Some(&decision)).unwrap();
         assert_eq!(result.stats.object_count, 1);
 
@@ -496,7 +499,7 @@ mod tests {
 
         assert_eq!(plan_prune_excluded(&conn, "all").unwrap().total_count(), 1);
 
-        let decision = recording_decision(crate::domain::decision::DecisionCommand::Prune);
+        let decision = recording_decision(crate::core::domain::decision::DecisionCommand::Prune);
         let result = execute_prune_excluded(&conn, "all", Some(&decision)).unwrap();
 
         let (command, status, attempted, completed, summary) = only_decision(&conn);

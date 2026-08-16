@@ -3,9 +3,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 
 use crate::ceremony;
-use crate::domain::config::{LedgerConfig, RecordingMode};
-use crate::domain::format::{format_date, format_size, format_time_ago};
-use crate::domain::format_count;
+use crate::core::domain::config::{LedgerConfig, RecordingMode};
+use crate::core::domain::format::{format_date, format_size, format_time_ago};
+use crate::core::domain::format_count;
 use crate::ops::scope::parse_root_spec_any;
 use crate::repo::{self, Db};
 use crate::retire::domain::Readiness;

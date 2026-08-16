@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 
 use crate::archive::domain::LockEntry;
-use crate::domain::fact::FactEntry;
-use crate::domain::format::first_chars;
-use crate::domain::path::path_strip_prefix;
+use crate::core::domain::fact::FactEntry;
+use crate::core::domain::format::first_chars;
+use crate::core::domain::path::path_strip_prefix;
 use crate::expr::Pattern;
 use crate::repo::{self, Connection};
 
@@ -176,7 +176,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     // still claims to be archive-relative. The per-transfer escape check
     // below compares components without normalising, so it catches neither;
     // this is the one gate.
-    if crate::domain::path::rel_dir_escapes(params.base_dir_rel) {
+    if crate::core::domain::path::rel_dir_escapes(params.base_dir_rel) {
         bail!(
             "Manifest base_dir '{}' escapes the archive root — absolute paths and '..' components \
              are not allowed.\n\
@@ -400,7 +400,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
             // is rejected as a precondition above; this is not a second
             // guard for either.
             let full_dest = format!("{}/{}", archive_root_path, transfer.archive_rel_path);
-            if !crate::domain::path::path_is_under(&full_dest, archive_root_path) {
+            if !crate::core::domain::path::path_is_under(&full_dest, archive_root_path) {
                 violations
                     .escaped_paths
                     .push((transfer.source_path.clone(), full_dest));
@@ -610,7 +610,7 @@ pub struct ResumeClassification<'a> {
 pub fn filter_by_roots<'a>(
     sources: &'a [LockEntry],
     root_specs: &[String],
-    all_roots: &[crate::domain::root::Root],
+    all_roots: &[crate::core::domain::root::Root],
 ) -> Result<Vec<&'a LockEntry>> {
     if root_specs.is_empty() {
         return Ok(sources.iter().collect());

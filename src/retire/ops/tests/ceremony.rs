@@ -1,8 +1,8 @@
 use rusqlite::Connection;
 
+use crate::core::domain::config::RecordingMode;
+use crate::core::domain::decision::Decision;
 use crate::core::ops::root_story::fetch_root_story;
-use crate::domain::config::RecordingMode;
-use crate::domain::decision::Decision;
 use crate::ops;
 use crate::repo;
 use crate::repo::db::open_in_memory_for_test;

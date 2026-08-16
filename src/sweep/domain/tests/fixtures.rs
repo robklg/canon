@@ -2,8 +2,8 @@
 //! cross-cutting helpers only; a helper used by a single test file lives
 //! there instead.
 
-use crate::domain::root::Root;
-use crate::domain::source::Source;
+use crate::core::domain::root::Root;
+use crate::core::domain::source::Source;
 use crate::sweep::domain::structural::{
     build_universe, compute_structural, FindingNature, FindingTier, LocalizedSubject, Location,
     RelationShape, StructuralFinding, StructuralSweep, SweepParams, Universe,

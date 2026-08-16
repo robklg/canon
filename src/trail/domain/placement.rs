@@ -14,7 +14,7 @@
 use std::path::Path;
 
 use crate::core::domain::extraction::DecisionExtraction;
-use crate::domain::path::common_path_prefix;
+use crate::core::domain::path::common_path_prefix;
 
 /// Bidirectional touches-scope over rel prefixes within one root: a decision
 /// touches the viewed scope if its prefix is under the view *or* an ancestor

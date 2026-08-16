@@ -14,10 +14,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 
+use crate::core::domain::decision::DecisionStatus;
 use crate::core::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
-use crate::domain::decision::DecisionStatus;
-use crate::domain::format::first_chars;
-use crate::domain::source::NewSource;
+use crate::core::domain::format::first_chars;
+use crate::core::domain::source::NewSource;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::fs::{
     compute_partial_hash, copy_file, ensure_parent_dir, move_file, rename_file, MoveOutcome,
@@ -1591,9 +1591,9 @@ mod tests {
     // =========================================================================
 
     fn make_decision_params(receipt_enabled: bool) -> DecisionParams {
-        use crate::domain::config::{LedgerConfig, ReceiptLayout, RecordingMode};
+        use crate::core::domain::config::{LedgerConfig, ReceiptLayout, RecordingMode};
         DecisionParams {
-            command: crate::domain::decision::DecisionCommand::Apply,
+            command: crate::core::domain::decision::DecisionCommand::Apply,
             scope: Vec::new(),
             command_line: "canon apply test.toml".to_string(),
             reason: None,
@@ -2336,7 +2336,7 @@ mod tests {
 
     #[test]
     fn test_apply_receipt_alongside_layout() {
-        use crate::domain::config::{LedgerConfig, ReceiptLayout, RecordingMode};
+        use crate::core::domain::config::{LedgerConfig, ReceiptLayout, RecordingMode};
         use std::io::Write;
 
         let conn = setup_test_db();
@@ -2398,7 +2398,7 @@ mod tests {
         };
 
         let decision = DecisionParams {
-            command: crate::domain::decision::DecisionCommand::Apply,
+            command: crate::core::domain::decision::DecisionCommand::Apply,
             scope: Vec::new(),
             command_line: "canon apply test.toml".to_string(),
             reason: None,

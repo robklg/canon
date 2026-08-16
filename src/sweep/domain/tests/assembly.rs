@@ -1,8 +1,8 @@
 //! Stage E tests — the orchestrator, finding assembly, and the
 //! floor-released second walk.
 
-use crate::domain::root::Root;
-use crate::domain::source::Source;
+use crate::core::domain::root::Root;
+use crate::core::domain::source::Source;
 use crate::sweep::domain::structural::{
     FindingNature, FindingTier, RelationShape, StructuralFinding, StructuralSweep, SweepParams,
 };

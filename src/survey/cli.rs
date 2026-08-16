@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 
-use crate::domain::IncludeSet;
+use crate::core::domain::IncludeSet;
 use crate::ops::scope::ResolvedScope;
 use crate::repo;
 use crate::survey::ops::compute::{SurveyOutcome, SurveyParams};

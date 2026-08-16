@@ -9,7 +9,9 @@
 //! over this same composition; structure is computed once here so the two
 //! can never drift.
 
-use crate::domain::format::{format_count, format_date, format_size, format_time_ago, shell_quote};
+use crate::core::domain::format::{
+    format_count, format_date, format_size, format_time_ago, shell_quote,
+};
 use crate::story::domain::acts::ActGroup;
 use crate::story::domain::locations::LocationAggregate;
 use crate::story::domain::place::StoryPlace;
@@ -557,7 +559,7 @@ mod tests {
 
     use super::*;
     use crate::core::domain::resolution::ResolutionAccount;
-    use crate::domain::root::Root;
+    use crate::core::domain::root::Root;
     use crate::notes::Note;
     use crate::story::domain::acts::{ActDecision, ActGroup};
     use crate::story::domain::locations::{LocationAggregate, LocationCount};

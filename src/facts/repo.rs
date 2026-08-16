@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 
-use crate::domain::fact::FactType;
+use crate::core::domain::fact::FactType;
 use crate::facts::domain::{FactValueType, SourceFact};
 use crate::repo::db::{populate_temp_sources, Connection};
 

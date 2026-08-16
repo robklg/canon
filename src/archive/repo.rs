@@ -9,7 +9,7 @@
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 
-use crate::domain::source::{NewSource, Source};
+use crate::core::domain::source::{NewSource, Source};
 use crate::repo::source::{fetch_by_path, BATCH_SIZE};
 use crate::repo::Connection;
 

@@ -4,8 +4,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::core::domain::folder_tree::FolderTree;
-use crate::domain::root::Root;
-use crate::domain::source::Source;
+use crate::core::domain::root::Root;
+use crate::core::domain::source::Source;
 
 /// The named calibratable parameters of the sweep computation.
 ///

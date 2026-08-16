@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-use crate::domain::IncludeSet;
+use crate::core::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::ops::test_helpers::{
     insert_object, insert_root, insert_source, insert_source_excluded, insert_source_with_size,
@@ -2430,7 +2430,7 @@ fn test_unique_detail_relative_paths() {
             assert_eq!(result.unique_count, 1);
             assert_eq!(result.unique_paths[0], "/mnt/drive/photos/sub/unique.jpg");
             let relative =
-                crate::domain::path::format_path(&result.unique_paths[0], Some("/mnt/drive"));
+                crate::core::domain::path::format_path(&result.unique_paths[0], Some("/mnt/drive"));
             assert_eq!(relative, "photos/sub/unique.jpg");
         }
         _ => panic!("Expected SurveyOutcome::Result"),

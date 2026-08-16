@@ -14,7 +14,7 @@ pub(crate) mod source {
     use rusqlite::OptionalExtension;
 
     use super::Connection;
-    use crate::domain::source::Source;
+    use crate::core::domain::source::Source;
     use crate::repo::source::{
         fetch_by_id, fetch_by_path, source_from_row, BATCH_SIZE, SOURCE_COLUMNS, SOURCE_FROM,
     };
@@ -1467,7 +1467,7 @@ pub(crate) mod root {
     use anyhow::Result;
 
     use super::Connection;
-    use crate::domain::root::Root;
+    use crate::core::domain::root::Root;
     use crate::repo::root::{root_from_row, ROOT_COLUMNS};
 
     /// Create a new root in the database.

@@ -9,17 +9,18 @@
 //! and effectful commands (cluster generate, exclude set/clear/duplicates).
 //!
 //! This module also hosts path and root resolution against known roots, with
-//! a filesystem fallback for the offline-pure predicates in `domain::path`/
-//! `domain::root` — the soft-match-then-fallback pattern for source-querying
+//! a filesystem fallback for the offline-pure predicates in
+//! `core::domain::path`/`core::domain::root` — the soft-match-then-fallback
+//! pattern for source-querying
 //! commands (file-accessing commands like `scan` use `fs::canonicalize` directly).
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::domain;
-use crate::domain::path::{clean_path, path_strip_prefix, validate_paths_in_roots};
-use crate::domain::root::{find_containing_root, Root, RootSpec};
-use crate::domain::scope::ScopeMatch;
+use crate::core::domain;
+use crate::core::domain::path::{clean_path, path_strip_prefix, validate_paths_in_roots};
+use crate::core::domain::root::{find_containing_root, Root, RootSpec};
+use crate::core::domain::scope::ScopeMatch;
 use crate::ops::fs::canonicalize_maybe_missing;
 use crate::repo::{self, Connection};
 

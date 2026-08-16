@@ -2,11 +2,11 @@ use anyhow::{bail, Result};
 
 pub(super) mod import;
 
-use crate::domain::config::{LedgerConfig, RecordingMode};
-use crate::domain::decision::DecisionCommand;
-use crate::domain::format_count;
-use crate::domain::scope::DecisionScope;
-use crate::domain::IncludeSet;
+use crate::core::domain::config::{LedgerConfig, RecordingMode};
+use crate::core::domain::decision::DecisionCommand;
+use crate::core::domain::format_count;
+use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::expr::{BuiltinKey, BuiltinKeyCategory, ParsedFactKey};
 use crate::facts::ops::maintain::{
@@ -336,7 +336,7 @@ fn format_root_display_adaptive(root_id: i64, root_path: &str, max_total: usize)
     };
     format!(
         "{id_prefix} {}",
-        crate::domain::format::cap_path(root_path, max_path)
+        crate::core::domain::format::cap_path(root_path, max_path)
     )
 }
 

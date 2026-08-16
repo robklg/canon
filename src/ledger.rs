@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 
-use crate::domain::format::format_count;
+use crate::core::domain::format::format_count;
 use crate::ops::ledger::{reindex_extractions, ReindexParams, ReindexResult};
 use crate::repo::Db;
 

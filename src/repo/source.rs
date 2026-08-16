@@ -27,7 +27,7 @@ use rusqlite::types::Value;
 use rusqlite::OptionalExtension;
 
 use super::db::Connection;
-use crate::domain::source::{NewSource, Source};
+use crate::core::domain::source::{NewSource, Source};
 
 /// Batch size for SQL IN clauses. Consistent across all repositories.
 pub const BATCH_SIZE: usize = 1000;

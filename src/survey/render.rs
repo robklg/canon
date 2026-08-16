@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::domain::format_count;
+use crate::core::domain::format_count;
 use crate::notes::{format_note_date, relative_to_scope, SurveyNoteContext};
 use crate::ops::scope::ResolvedScope;
 use crate::survey::ops::compute::{ArchivedLocationDetail, LocationResult};
@@ -191,7 +191,7 @@ pub(super) fn print_archived_detail(
         for detail in details {
             for pair in &detail.pairs {
                 if seen.insert(&pair.selection_path) {
-                    let display = crate::domain::path::format_path(&pair.selection_path, cwd);
+                    let display = crate::core::domain::path::format_path(&pair.selection_path, cwd);
                     // Ignore write errors: a closed pipe (piped to head, say)
                     // must end the command quietly, not panic.
                     let _ = write!(handle, "{}\0", display);
@@ -228,7 +228,7 @@ pub(super) fn print_archived_detail(
         };
 
         for pair in display_pairs {
-            let display = crate::domain::path::format_path(&pair.selection_path, cwd);
+            let display = crate::core::domain::path::format_path(&pair.selection_path, cwd);
             println!("    {display}");
             for cp in &pair.counterpart_paths {
                 println!("      → {cp}");
@@ -463,7 +463,7 @@ pub(super) fn print_overlap_detail(
         // Header: /path/ (N of M overlap):
         println!(
             "  {} ({} of {} overlap):",
-            crate::domain::path::format_path(&loc.path, cwd),
+            crate::core::domain::path::format_path(&loc.path, cwd),
             format_count(loc.shared_count),
             format_count(total_hashed),
         );
@@ -477,7 +477,7 @@ pub(super) fn print_overlap_detail(
         for pair in &pairs[..show_count] {
             println!(
                 "    {}",
-                crate::domain::path::format_path(&pair.selection_path, cwd)
+                crate::core::domain::path::format_path(&pair.selection_path, cwd)
             );
             for cp in &pair.counterpart_paths {
                 println!("      \u{2192} {cp}");
@@ -544,7 +544,7 @@ pub(super) fn print_residual_detail(
 
         println!(
             "Not at {} (residual):",
-            crate::domain::path::format_path(&loc.path, cwd),
+            crate::core::domain::path::format_path(&loc.path, cwd),
         );
 
         if paths.is_empty() {
@@ -557,7 +557,7 @@ pub(super) fn print_residual_detail(
                 DETAIL_SAMPLE_SIZE.min(paths.len())
             };
             for path in &paths[..show_count] {
-                println!("  {}", crate::domain::path::format_path(path, cwd));
+                println!("  {}", crate::core::domain::path::format_path(path, cwd));
             }
             if !verbose && paths.len() > DETAIL_SHOW_ALL_THRESHOLD {
                 println!(
@@ -579,7 +579,7 @@ pub(super) fn print_unique_detail(paths: &[String], null_delim: bool, cwd: Optio
         let display = if null_delim {
             path.clone() // -0: always absolute
         } else {
-            crate::domain::path::format_path(path, cwd)
+            crate::core::domain::path::format_path(path, cwd)
         };
         // Ignore broken pipe errors (EPIPE) when stdout is closed by consumer (e.g., piped to `head`)
         let sep = if null_delim { "\0" } else { "\n" };

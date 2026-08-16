@@ -4,7 +4,7 @@
 //! No I/O anywhere here; callers supply everything fetched.
 
 use crate::core::domain::folder_tree::FolderTree;
-use crate::domain::path::path_is_under;
+use crate::core::domain::path::path_is_under;
 
 /// One location entry on a "where" line: a directory prefix and how many of
 /// the line's files it accounts for.

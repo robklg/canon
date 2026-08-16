@@ -7,9 +7,9 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
-use crate::domain::include::IncludeSet;
-use crate::domain::path::path_is_under;
-use crate::domain::source::Source;
+use crate::core::domain::include::IncludeSet;
+use crate::core::domain::path::path_is_under;
+use crate::core::domain::source::Source;
 use crate::exclude::domain::find_excludable_duplicates;
 use crate::expr::filter;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};

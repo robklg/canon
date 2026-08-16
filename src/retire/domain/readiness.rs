@@ -62,7 +62,7 @@ mod tests {
     use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
     use crate::core::domain::fate::DecisionFamily;
     use crate::core::domain::resolution::build_account;
-    use crate::domain::source::Source;
+    use crate::core::domain::source::Source;
 
     fn source(id: i64, object_id: Option<i64>, excluded: bool, object_excluded: bool) -> Source {
         Source {

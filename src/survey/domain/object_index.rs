@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::domain::source::Source;
+use crate::core::domain::source::Source;
 
 /// Index of content identity: object id → every source holding that content.
 pub struct ObjectIndex<'a> {

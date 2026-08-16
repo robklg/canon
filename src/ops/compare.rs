@@ -11,7 +11,7 @@ use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::domain::IncludeSet;
+use crate::core::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::ops::scope::{classify_all, resolve_path, validate_sources_exist};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};

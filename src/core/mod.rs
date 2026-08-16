@@ -1,19 +1,18 @@
-//! Core: the cross-cutting spine of the feature-first migration
-//! (feature-first structure ADR, 2026-08-07).
+//! The shared spine: what the rest of the tree is built on.
 //!
-//! Holds only what genuinely qualifies: the fundamental nouns (not yet
-//! moved here — they relocate in dedicated blast-radius-sized stories, per
-//! the migration's membership-is-criterial/movement-is-staged principle), the
-//! provenance spine (ditto — only the slice a real move has forced so far
-//! lives here), and substrate multiple subsystems independently compute
-//! over. See `CLAUDE.md` in this directory for the current inventory and
-//! why each item is here.
+//! Two kinds of thing qualify. The fundamental nouns — sources, roots,
+//! objects, facts — and the pure utilities around them, which every feature
+//! speaks. And substrate that more than one feature independently computes
+//! over, where neither of them owns it. A feature's own finished output does
+//! not qualify, however many other features consume it.
 //!
-//! Core must never depend on a subsystem (`retire/`, and more as the streak
-//! adds them) — the architecture test enforces this
-//! (`Rule::CoreReferencesSubsystem`). A subsystem may depend on core at any
-//! depth; on a sibling subsystem only through its declared one-segment
-//! public surface (`Rule::SubsystemSiblingInternalReach`).
+//! Not everything shared lives here yet: database access and parts of the
+//! provenance machinery are still top-level modules of their own.
+//!
+//! Core must never depend on a feature module, or it stops being trustworthy
+//! ground to build on. A feature may depend on core at any depth; on a
+//! sibling feature only through that sibling's declared public surface. The
+//! architecture test enforces both directions.
 
 pub mod domain;
 pub mod ops;

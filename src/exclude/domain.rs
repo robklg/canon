@@ -22,8 +22,8 @@
 
 use std::collections::HashMap;
 
-use crate::domain::path::path_is_under;
-use crate::domain::source::Source;
+use crate::core::domain::path::path_is_under;
+use crate::core::domain::source::Source;
 
 /// Result of analyzing sources for excludable duplicates.
 ///

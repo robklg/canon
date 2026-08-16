@@ -106,7 +106,7 @@ fn get_or_create_object(
     conn: &Connection,
     hash_type: &str,
     hash_value: &str,
-) -> Result<crate::domain::object::Object> {
+) -> Result<crate::core::domain::object::Object> {
     repo::object::get_or_create(conn, hash_type, hash_value)
 }
 

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use crate::core::domain::folder_tree::FolderTree;
-use crate::domain::root::Root;
+use crate::core::domain::root::Root;
 
 use super::discovery::RawSubject;
 use super::universe::{subtree_sums, SweepParams, Universe};

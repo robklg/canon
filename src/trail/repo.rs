@@ -8,8 +8,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
+use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
-use crate::domain::decision::Decision;
 use crate::repo::db::Connection;
 use crate::repo::decision::DecisionScopeRow;
 use crate::repo::source::BATCH_SIZE;

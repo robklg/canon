@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use chrono::{Datelike, Duration, NaiveDate, Weekday};
 
+use crate::core::domain::decision::Decision;
 use crate::core::domain::fate::{decision_family, DecisionFamily};
-use crate::domain::decision::Decision;
 use crate::notes::Note;
 
 /// One event on the mixed timeline: an action (decision) or a thought (note).

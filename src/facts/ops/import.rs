@@ -69,7 +69,7 @@ pub struct ImportStats {
 impl ImportStats {
     /// Compose the import summary message.
     pub fn compose_summary(&self) -> String {
-        use crate::domain::format_count;
+        use crate::core::domain::format_count;
         format!(
             "Processed {} lines: {} facts imported, {} skipped (stale), {} skipped (reserved), {} skipped (archived), {} skipped (type mismatch), {} objects created, {} facts promoted",
             format_count(self.lines_processed),

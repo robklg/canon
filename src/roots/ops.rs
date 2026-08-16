@@ -1,8 +1,8 @@
 use anyhow::{bail, Result};
 use rusqlite::Connection;
 
-use crate::domain::decision::{DecisionCommand, DecisionStatus};
-use crate::domain::format_count;
+use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
+use crate::core::domain::format_count;
 use crate::notes::count_subtree_notes;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::repo;
@@ -618,7 +618,7 @@ mod tests {
     fn recording_params(command: DecisionCommand, root_id: i64, root_path: &str) -> DecisionParams {
         DecisionParams {
             command,
-            scope: vec![crate::domain::scope::DecisionScope::new(
+            scope: vec![crate::core::domain::scope::DecisionScope::new(
                 root_id,
                 root_path.to_string(),
                 String::new(),
@@ -627,7 +627,7 @@ mod tests {
             reason: None,
             record_enabled: true,
             receipt_enabled: false,
-            ledger_config: crate::domain::config::LedgerConfig::default(),
+            ledger_config: crate::core::domain::config::LedgerConfig::default(),
         }
     }
 

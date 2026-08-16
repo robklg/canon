@@ -14,8 +14,8 @@
 //! 3. **Domain describes "what happened"**: Not how to persist it
 //! 4. **Command layer applies policy**: User config affects behavior via parameters
 
-use crate::domain::root::Root;
-use crate::domain::source::Source;
+use crate::core::domain::root::Root;
+use crate::core::domain::source::Source;
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::path::Path;

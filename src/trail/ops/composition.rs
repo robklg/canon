@@ -12,8 +12,8 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
-use crate::domain::path::path_is_under;
-use crate::domain::root::find_containing_root;
+use crate::core::domain::path::path_is_under;
+use crate::core::domain::root::find_containing_root;
 use crate::repo::{self, Connection};
 use crate::trail::domain::composition::{build_card, BucketCount, CompositionCard};
 
@@ -62,7 +62,7 @@ pub fn compute_composition(
     }
 
     let decision_ids: Vec<i64> = groups.keys().filter_map(|id| *id).collect();
-    let decisions: HashMap<i64, crate::domain::decision::Decision> =
+    let decisions: HashMap<i64, crate::core::domain::decision::Decision> =
         repo::decision::fetch_by_ids(conn, &decision_ids)?
             .into_iter()
             .map(|d| (d.id, d))

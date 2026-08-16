@@ -10,7 +10,7 @@ use super::acts::ActGroup;
 use super::locations::LocationAggregate;
 use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::fate::{fate_transition, DecisionFamily, FateAspect};
-use crate::domain::source::Source;
+use crate::core::domain::source::Source;
 use crate::notes::Note;
 
 /// Named calibratable constants (the sweep discipline). Defaults were

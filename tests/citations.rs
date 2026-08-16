@@ -75,8 +75,13 @@ impl Universe {
             }
         }
 
+        // Roots this tree does not own. `core` is deliberately absent even
+        // though the standard library has a crate by that name: this tree has
+        // its own `core` module, it is the most-cited module in the source,
+        // and exempting the name would leave every citation of it unchecked.
+        // The standard library is spelled `std` here throughout.
         let mut external_roots: HashSet<String> =
-            ["std", "core", "alloc", "str", "io", "proc_macro", "crate"]
+            ["std", "alloc", "str", "io", "proc_macro", "crate"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect();

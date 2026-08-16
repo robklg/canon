@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::domain::decision::DecisionStatus;
+use crate::core::domain::decision::DecisionStatus;
 use crate::ops::decision::{DecisionParams, DecisionRecorder};
 use crate::ops::receipt::{DeletionReceipt, DeletionReceiptItem, ReceiptKind, ReceiptPlacement};
 use crate::repo::{self, Connection};
@@ -115,8 +115,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    use crate::domain::config::{LedgerConfig, RecordingMode};
-    use crate::domain::decision::DecisionCommand;
+    use crate::core::domain::config::{LedgerConfig, RecordingMode};
+    use crate::core::domain::decision::DecisionCommand;
     use crate::ops::decision::DecisionCounts;
 
     fn scan_params(recording: RecordingMode, no_receipt: bool) -> DecisionParams {

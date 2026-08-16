@@ -18,7 +18,7 @@ pub(crate) mod source {
 
     /// A source sharing an object's content, captured for an object-exclusion
     /// receipt. Unlike [`crate::scan::repo::source::ReceiptSource`] (and every
-    /// [`crate::domain::source::Source`] fetch in `repo::source`), this
+    /// [`crate::core::domain::source::Source`] fetch in `repo::source`), this
     /// includes non-present tombstone rows: the object-level stamp
     /// (`set_decision_id_by_object`) touches every sharer, present or not, and
     /// the receipt must list exactly that stamp-set so the stamp is
@@ -564,7 +564,7 @@ pub(crate) mod object {
     use anyhow::Result;
 
     use super::Connection;
-    use crate::domain::object::Object;
+    use crate::core::domain::object::Object;
     use crate::repo::object::{object_from_row, OBJECT_COLUMNS};
 
     /// Set the exclusion flag for an object.

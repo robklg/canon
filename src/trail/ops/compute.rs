@@ -9,7 +9,7 @@ use anyhow::Result;
 use chrono::{Duration, Local, NaiveDate, TimeZone};
 
 use crate::core::domain::extraction::DecisionExtraction;
-use crate::domain::root::find_containing_root;
+use crate::core::domain::root::find_containing_root;
 use crate::notes::{fetch_all, fetch_by_roots};
 use crate::repo::{self, Connection};
 use crate::trail::domain::placement::{placement_in_view, row_aspect, scopes_touch, RowAspect};

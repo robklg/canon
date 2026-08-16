@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 
-use crate::domain::decision::DecisionStatus;
-use crate::domain::root::Root;
+use crate::core::domain::decision::DecisionStatus;
+use crate::core::domain::root::Root;
 use crate::notes::domain::{ancestor_paths, LocationEntry, Note};
 use crate::notes::repo as notes_repo;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
@@ -79,7 +79,7 @@ pub struct SurveyNoteContext {
 
 /// Resolve a canonical path to a NoteScope.
 pub fn resolve_note_scope(path: &str, roots: &[Root]) -> Result<NoteScope> {
-    match crate::domain::root::find_containing_root(path, roots) {
+    match crate::core::domain::root::find_containing_root(path, roots) {
         Some((root_id, root_path, _role, rel_path)) => Ok(NoteScope {
             root_id,
             root_path,
@@ -657,8 +657,8 @@ mod tests {
             rel_path: "a".to_string(),
         };
         let decision = DecisionParams {
-            command: crate::domain::decision::DecisionCommand::NoteClear,
-            scope: vec![crate::domain::scope::DecisionScope::new(
+            command: crate::core::domain::decision::DecisionCommand::NoteClear,
+            scope: vec![crate::core::domain::scope::DecisionScope::new(
                 scope.root_id,
                 scope.root_path.clone(),
                 scope.rel_path.clone(),
@@ -667,7 +667,7 @@ mod tests {
             reason: None,
             record_enabled: true,
             receipt_enabled: true,
-            ledger_config: crate::domain::config::LedgerConfig::default(),
+            ledger_config: crate::core::domain::config::LedgerConfig::default(),
         };
 
         let result = execute_clear_recursive(&mut conn, &scope, Some(&decision)).unwrap();
@@ -714,8 +714,8 @@ mod tests {
             rel_path: "empty".to_string(),
         };
         let decision = DecisionParams {
-            command: crate::domain::decision::DecisionCommand::NoteClear,
-            scope: vec![crate::domain::scope::DecisionScope::new(
+            command: crate::core::domain::decision::DecisionCommand::NoteClear,
+            scope: vec![crate::core::domain::scope::DecisionScope::new(
                 scope.root_id,
                 scope.root_path.clone(),
                 scope.rel_path.clone(),
@@ -724,7 +724,7 @@ mod tests {
             reason: None,
             record_enabled: true,
             receipt_enabled: true,
-            ledger_config: crate::domain::config::LedgerConfig::default(),
+            ledger_config: crate::core::domain::config::LedgerConfig::default(),
         };
 
         let result = execute_clear_exact(&mut conn, &scope, Some(&decision)).unwrap();

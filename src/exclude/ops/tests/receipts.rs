@@ -1,5 +1,5 @@
-use crate::domain::config::LedgerConfig;
-use crate::domain::decision::DecisionCommand;
+use crate::core::domain::config::LedgerConfig;
+use crate::core::domain::decision::DecisionCommand;
 use crate::exclude::repo as exclude_repo;
 use crate::ops::decision::DecisionParams;
 use crate::ops::receipt::{ExcludeReceipt, ReceiptPlacement};
@@ -120,7 +120,7 @@ fn decision_scopes_populated_for_scoped_exclude() {
     };
     let decision = DecisionParams {
         command: DecisionCommand::ExcludeSet,
-        scope: vec![crate::domain::scope::DecisionScope::new(
+        scope: vec![crate::core::domain::scope::DecisionScope::new(
             1,
             "/photos".to_string(),
             String::new(),

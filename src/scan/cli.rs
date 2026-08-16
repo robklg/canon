@@ -3,9 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use crate::domain::config::{LedgerConfig, RecordingMode};
-use crate::domain::decision::{DecisionCommand, DecisionStatus};
-use crate::domain::scope::DecisionScope;
+use crate::core::domain::config::{LedgerConfig, RecordingMode};
+use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
+use crate::core::domain::scope::DecisionScope;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::receipt::DeletionReceiptItem;
 use crate::ops::scope::resolve_root_path_any;
@@ -94,7 +94,7 @@ pub fn run(
 
     // If --all, get all root paths (excluding suspended, optionally filtered by role)
     let paths_to_scan: Vec<PathBuf> = if all_roots {
-        let filtered: Vec<&crate::domain::root::Root> = roots
+        let filtered: Vec<&crate::core::domain::root::Root> = roots
             .iter()
             .filter(|r| r.is_active())
             .filter(|r| match role {
@@ -381,7 +381,7 @@ fn create_root(
     path: &Path,
     role: &str,
     comment: Option<&str>,
-) -> Result<crate::domain::root::Root> {
+) -> Result<crate::core::domain::root::Root> {
     let path_str = path.to_str().context("Path is not valid UTF-8")?;
     crate::scan::repo::root::create(conn, path_str, role, comment)
 }

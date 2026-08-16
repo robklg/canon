@@ -1,5 +1,5 @@
+use crate::core::domain::config::RecordingMode;
 use crate::core::ops::root_story::fetch_root_story;
-use crate::domain::config::RecordingMode;
 use crate::repo;
 use crate::repo::db::open_in_memory_for_test;
 use crate::repo::insert_test_root;

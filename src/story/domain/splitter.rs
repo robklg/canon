@@ -14,10 +14,10 @@ use crate::core::domain::fate::{
     fate_posture, fate_transition, DecisionFamily, FateAspect, Posture,
 };
 use crate::core::domain::folder_tree::FolderTree;
+use crate::core::domain::path::path_is_under;
 use crate::core::domain::resolution::{
     classify_absent, classify_present, AbsentBucket, StandingBucket,
 };
-use crate::domain::path::path_is_under;
 use crate::notes::Note;
 
 /// Per-node accumulation for the walk: direct, then subtree by a reverse

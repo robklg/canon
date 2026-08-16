@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::domain::source::Source;
+use crate::core::domain::source::Source;
 use crate::expr::filter::get_fact_value;
 use crate::repo::Connection;
 

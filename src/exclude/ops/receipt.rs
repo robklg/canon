@@ -8,8 +8,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::domain::decision::DecisionStatus;
-use crate::domain::source::Source;
+use crate::core::domain::decision::DecisionStatus;
+use crate::core::domain::source::Source;
 use crate::exclude::repo as exclude_repo;
 use crate::ops::decision::{DecisionCounts, DecisionParams};
 use crate::ops::receipt::{

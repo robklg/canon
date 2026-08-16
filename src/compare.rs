@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::domain::IncludeSet;
+use crate::core::domain::IncludeSet;
 use crate::ops;
 use crate::repo::Db;
 

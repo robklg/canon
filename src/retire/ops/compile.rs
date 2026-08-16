@@ -8,12 +8,12 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
+use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::OriginDisposition;
+use crate::core::domain::format::format_size;
 use crate::core::domain::resolution::{build_account, ResolutionAccount};
+use crate::core::domain::{format_count, Root};
 use crate::core::ops::root_story::RootStory;
-use crate::domain::decision::Decision;
-use crate::domain::format::format_size;
-use crate::domain::{format_count, Root};
 use crate::notes::{fetch_by_roots, note_display_path, Note};
 use crate::ops;
 use crate::ops::ledger::{read_apply_receipt, ReceiptRead};

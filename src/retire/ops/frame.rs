@@ -7,7 +7,7 @@
 
 use anyhow::{bail, Result};
 
-use crate::domain::format::{format_count, format_date, format_size};
+use crate::core::domain::format::{format_count, format_date, format_size};
 use crate::story::{
     fmt_locations, reference_place_lines, LocationAggregate, StoryParams, StoryReport,
 };
@@ -412,7 +412,7 @@ fn gaps_paragraph(account: &crate::core::domain::resolution::ResolutionAccount) 
 mod tests {
     use super::*;
     use crate::core::domain::resolution::ResolutionAccount;
-    use crate::domain::root::Root;
+    use crate::core::domain::root::Root;
     use crate::story::{ActDecision, ActGroup, LocationCount, PlaceStanding, StoryPlace};
 
     // `place`/`locations`/`act`/`report`/`report_with`/`zero_account` below

@@ -318,7 +318,7 @@ struct ReconcileResult {
     observation: FileObservation,
     reconciliation: Reconciliation,
     /// The source at this path before reconciliation (for old_object_id on Unchanged).
-    source_at_path: Option<crate::domain::source::Source>,
+    source_at_path: Option<crate::core::domain::source::Source>,
 }
 
 /// Reconcile a single file: read DB state, determine outcome, compute partial hash if needed.
@@ -373,7 +373,7 @@ fn persist_file(
     reconciliation: &Reconciliation,
     now: i64,
     decision_id: Option<i64>,
-) -> Result<crate::domain::source::Source> {
+) -> Result<crate::core::domain::source::Source> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let source = scan_repo::source::apply_reconciliation(
         &tx,
@@ -500,17 +500,17 @@ fn capture_deletion_items(
 pub fn mark_missing_path(
     conn: &Connection,
     path: &Path,
-    roots: &[crate::domain::root::Root],
+    roots: &[crate::core::domain::root::Root],
     cwd: &Path,
     now: i64,
     decision_id: Option<i64>,
     capture_deletions: bool,
 ) -> Result<MarkMissingPathResult> {
-    let cleaned = crate::domain::path::clean_path(path, cwd);
+    let cleaned = crate::core::domain::path::clean_path(path, cwd);
     let cleaned_str = cleaned.to_string_lossy();
 
     let (root_id, root_path, rel_prefix) =
-        match crate::domain::root::find_containing_root(&cleaned_str, roots) {
+        match crate::core::domain::root::find_containing_root(&cleaned_str, roots) {
             Some((id, root_path, _role, rel)) => (id, root_path, rel),
             None => bail!(
                 "Cannot mark missing: {} is not under any known root",
@@ -1397,7 +1397,7 @@ mod tests {
     /// Fetch roots as domain objects, the way the interface passes them in.
     /// Test paths are absolute, so the cwd handed to `mark_missing_path` is a
     /// placeholder (`/`).
-    fn all_roots(conn: &Connection) -> Vec<crate::domain::root::Root> {
+    fn all_roots(conn: &Connection) -> Vec<crate::core::domain::root::Root> {
         repo::root::fetch_all(conn).unwrap()
     }
 

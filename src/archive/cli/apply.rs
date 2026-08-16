@@ -10,10 +10,10 @@ use crate::archive::domain::{
 use crate::archive::ops::execute::{self, TransferMode};
 use crate::archive::ops::{pattern, plan};
 use crate::ceremony;
-use crate::domain::config::{LedgerConfig, RecordingMode};
-use crate::domain::decision::DecisionCommand;
-use crate::domain::format::first_chars;
-use crate::domain::scope::DecisionScope;
+use crate::core::domain::config::{LedgerConfig, RecordingMode};
+use crate::core::domain::decision::DecisionCommand;
+use crate::core::domain::format::first_chars;
+use crate::core::domain::scope::DecisionScope;
 use crate::expr;
 use crate::ops;
 use crate::ops::decision::DecisionParams;
@@ -641,7 +641,7 @@ fn compute_sample_destinations(
 
     // Fetch facts for sample sources only (same per-key pattern as plan_apply)
     let sample_ids: Vec<i64> = sample_sources.iter().map(|s| s.id).collect();
-    let mut all_facts: HashMap<i64, Vec<crate::domain::fact::FactEntry>> = HashMap::new();
+    let mut all_facts: HashMap<i64, Vec<crate::core::domain::fact::FactEntry>> = HashMap::new();
     for key in needed_keys {
         // Must list the same namespaces as the fetch and evaluation sites in
         // the apply operation — a namespace listed in one place and not the

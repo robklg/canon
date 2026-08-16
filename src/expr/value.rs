@@ -27,9 +27,9 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use super::eval::{self as expr, BuiltinKey, ParsedFactKey};
-use crate::domain::fact::FactEntry;
-use crate::domain::fact::FactValue;
-use crate::domain::source::Source;
+use crate::core::domain::fact::FactEntry;
+use crate::core::domain::fact::FactValue;
+use crate::core::domain::source::Source;
 
 /// Resolve a fact value for a source.
 ///
@@ -155,7 +155,7 @@ pub fn fact_value_to_display(value: &FactValue) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::fact::FactValue;
+    use crate::core::domain::fact::FactValue;
 
     /// Helper to create a Source with minimal required fields for testing.
     fn make_source() -> Source {

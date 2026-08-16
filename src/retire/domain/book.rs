@@ -7,7 +7,7 @@ use crate::core::domain::fate::{fate_transition, DecisionFamily, FateAspect};
 use crate::core::domain::resolution::{
     classify_absent, classify_present, AbsentBucket, StandingBucket,
 };
-use crate::domain::source::Source;
+use crate::core::domain::source::Source;
 
 /// Standing words for book entries whose state is not a transition. The
 /// never-literal law covers *transition* words (always derived through

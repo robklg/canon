@@ -14,7 +14,7 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::source::Source;
+use crate::core::domain::source::Source;
 
 // ============================================================================
 // Manifest data contract (shared between cluster generate and apply)

@@ -6,7 +6,7 @@
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::domain::decision::DecisionStatus;
+use crate::core::domain::decision::DecisionStatus;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::receipt::ReceiptPlacement;
 use crate::repo::Connection;

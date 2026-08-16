@@ -2,11 +2,11 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::ceremony;
-use crate::domain::config::{LedgerConfig, RecordingMode};
-use crate::domain::decision::DecisionCommand;
-use crate::domain::path::validate_paths_in_roots;
-use crate::domain::root::find_containing_root;
-use crate::domain::scope::DecisionScope;
+use crate::core::domain::config::{LedgerConfig, RecordingMode};
+use crate::core::domain::decision::DecisionCommand;
+use crate::core::domain::path::validate_paths_in_roots;
+use crate::core::domain::root::find_containing_root;
+use crate::core::domain::scope::DecisionScope;
 use crate::exclude::ops::execute::{
     execute_clear, execute_duplicates, execute_set, execute_set_objects,
 };

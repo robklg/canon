@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use chrono::Local;
 
-use crate::domain::root::Root;
+use crate::core::domain::root::Root;
 use crate::repo::{self, Db};
 use crate::trail::domain::composition::{card_applies, ViewShape};
 use crate::trail::domain::timeline::{parse_when, WhenValue};
@@ -78,7 +78,7 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<()> {
     // quietly showing the whole universe.
     if !args.global && args.paths.is_empty() && resolved.is_global() {
         if let Ok(cwd) = std::env::current_dir() {
-            let cleaned = crate::domain::path::clean_path(&cwd, &cwd);
+            let cleaned = crate::core::domain::path::clean_path(&cwd, &cwd);
             if let Some(statement) =
                 crate::retire::find_retirement_covering_path(db.conn(), &cleaned.to_string_lossy())?
             {
@@ -142,7 +142,7 @@ fn retired_scope_statement(
 ) -> Result<Option<crate::retire::RetiredScope>> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     for path in paths {
-        let cleaned = crate::domain::path::clean_path(path, &cwd);
+        let cleaned = crate::core::domain::path::clean_path(path, &cwd);
         if let Some(statement) =
             crate::retire::find_retirement_covering_path(conn, &cleaned.to_string_lossy())?
         {

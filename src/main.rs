@@ -2,7 +2,9 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
-use domain::IncludeSet;
+use crate::core::domain::config::{parse_ledger_config, LedgerConfig};
+use crate::core::domain::root::find_containing_root;
+use crate::core::domain::IncludeSet;
 
 #[derive(Clone, PartialEq, clap::ValueEnum)]
 enum IncludeValue {
@@ -50,7 +52,6 @@ fn include_set_from(values: &[IncludeValue]) -> IncludeSet {
 }
 
 // Infrastructure layers
-mod domain;
 mod expr;
 mod ops;
 mod repo;
@@ -754,7 +755,7 @@ layout = "central"
 # root = 1
 "#;
 
-fn load_or_create_config(canon_home: &Path) -> (domain::config::LedgerConfig, Vec<String>) {
+fn load_or_create_config(canon_home: &Path) -> (LedgerConfig, Vec<String>) {
     let path = canon_home.join("config.toml");
     if !path.exists() {
         let mut warnings = Vec::new();
@@ -766,16 +767,16 @@ fn load_or_create_config(canon_home: &Path) -> (domain::config::LedgerConfig, Ve
                 warnings.push(format!("Warning: could not create {}: {e}", path.display()));
             }
         }
-        return (domain::config::LedgerConfig::default(), warnings);
+        return (LedgerConfig::default(), warnings);
     }
     match std::fs::read_to_string(&path) {
-        Ok(content) => domain::config::parse_ledger_config(&content),
+        Ok(content) => parse_ledger_config(&content),
         Err(e) => {
             let warnings = vec![format!(
                 "Warning: could not read {}: {e}, using defaults",
                 path.display()
             )];
-            (domain::config::LedgerConfig::default(), warnings)
+            (LedgerConfig::default(), warnings)
         }
     }
 }
@@ -1177,7 +1178,7 @@ fn main() -> Result<()> {
                 // One path: CWD as side A
                 let cwd = std::env::current_dir()?;
                 let cwd_resolved = ops::scope::resolve_path(&cwd, &all_roots, &cwd)?;
-                if domain::root::find_containing_root(&cwd_resolved, &all_roots).is_none() {
+                if find_containing_root(&cwd_resolved, &all_roots).is_none() {
                     bail!("Current directory is not under any known root");
                 }
                 (cwd, paths[0].clone())

@@ -3,10 +3,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use crate::core::domain::config::LedgerConfig;
+use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::fate::{fate_posture, fate_transition};
-use crate::domain::config::LedgerConfig;
-use crate::domain::decision::{DecisionCommand, DecisionStatus};
-use crate::domain::scope::DecisionScope;
+use crate::core::domain::scope::DecisionScope;
 use crate::ops::receipt::{
     compute_ledger_root_receipt_rel_path, compute_targeted_receipt_rel_path, finalize_receipt,
     write_receipt, ReceiptKind, ReceiptLocus, ReceiptMeta, ReceiptPlacement, ReceiptRef,
@@ -534,7 +534,7 @@ fn populate_decision_scopes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::config::{LedgerConfig, RecordingMode};
+    use crate::core::domain::config::{LedgerConfig, RecordingMode};
     use crate::repo::db::open_in_memory_for_test;
     use tempfile::tempdir;
 
@@ -1246,7 +1246,7 @@ mod tests {
         // and the recorder stores exactly that canonical string in both the
         // decisions.scope column and meta.scope.
         let conn = setup_test_db();
-        let roots = vec![crate::domain::root::Root {
+        let roots = vec![crate::core::domain::root::Root {
             id: 1,
             path: "/vol/photos".to_string(),
             role: "source".to_string(),

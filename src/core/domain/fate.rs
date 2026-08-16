@@ -128,7 +128,7 @@ pub fn fate_posture(family: DecisionFamily, aspect: FateAspect) -> Posture {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::decision::DecisionCommand;
+    use crate::core::domain::decision::DecisionCommand;
 
     // decision_family — total over every registered identifier
 

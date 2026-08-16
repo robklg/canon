@@ -16,7 +16,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use crate::domain::fact::{FactEntry, FactValue, FactType};
+//! use crate::core::domain::fact::{FactEntry, FactValue, FactType};
 //! use crate::repo;
 //!
 //! // Fetch a specific fact key for sources

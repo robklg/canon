@@ -409,7 +409,7 @@ fn migrations() -> Migrations<'static> {
                     let candidates: Vec<String> =
                         serde_json::from_str(&scope_json).unwrap_or_default();
                     if let Some(root_path) =
-                        crate::domain::scope::recover_root_path(&candidates, &rel_prefix)
+                        crate::core::domain::scope::recover_root_path(&candidates, &rel_prefix)
                     {
                         tx.execute(
                             "UPDATE decision_scopes SET root_path = ?4

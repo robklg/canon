@@ -1,8 +1,8 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 
-use crate::domain::source::Source;
-use crate::domain::IncludeSet;
+use crate::core::domain::source::Source;
+use crate::core::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::ops::scope::classify_all;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
@@ -134,7 +134,7 @@ pub fn run(
 }
 
 fn format_path(full_path: &str, cwd: Option<&str>) -> String {
-    crate::domain::path::format_path(full_path, cwd)
+    crate::core::domain::path::format_path(full_path, cwd)
 }
 
 fn format_size(bytes: i64) -> String {

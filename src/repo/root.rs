@@ -27,7 +27,7 @@
 use anyhow::Result;
 
 use super::db::Connection;
-use crate::domain::root::Root;
+use crate::core::domain::root::Root;
 
 /// The columns we SELECT for Root construction.
 pub(crate) const ROOT_COLUMNS: &str = "id, path, role, comment, last_scanned_at, suspended";

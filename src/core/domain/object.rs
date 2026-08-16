@@ -13,7 +13,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use crate::domain::object::Object;
+//! use crate::core::domain::object::Object;
 //! use crate::repo;
 //!
 //! // Fetch objects by ID

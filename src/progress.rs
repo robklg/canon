@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::domain::format::cap_path;
+use crate::core::domain::format::cap_path;
 
 /// Progress indicator for long-running operations
 pub struct Progress {
