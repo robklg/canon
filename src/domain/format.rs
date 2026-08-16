@@ -41,6 +41,17 @@ pub fn cap_path(path: &str, max: usize) -> String {
     format!("...{tail}")
 }
 
+/// The first `n` characters of a string, for display.
+///
+/// Use this instead of slicing by byte index. `&s[..n]` panics when `n` lands
+/// inside a multi-byte character, and bounding `n` by `s.len()` does not help —
+/// that bounds the length, not the boundary. Filenames, paths and any text read
+/// back from a file the user can edit all reach display code, so the panic is
+/// reachable wherever a raw byte slice is used to fit text into a column.
+pub fn first_chars(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
 /// A timestamp as a local calendar date (`2026-08-04`).
 pub fn format_date(ts: i64) -> String {
     use chrono::{Local, TimeZone};
@@ -156,5 +167,20 @@ mod tests {
         let capped = cap_path(unicode, 12);
         assert_eq!(capped.chars().count(), 12);
         assert!(capped.starts_with("..."));
+    }
+
+    #[test]
+    fn first_chars_counts_characters_not_bytes() {
+        // Byte 16 of this string falls inside a three-byte character, so a
+        // byte slice would panic where this returns sixteen characters.
+        let multibyte = "日本語日本語日本語日本語日本語日本語";
+        assert_eq!(first_chars(multibyte, 16).chars().count(), 16);
+        assert_eq!(first_chars("abcdef", 3), "abc");
+    }
+
+    #[test]
+    fn first_chars_returns_the_whole_string_when_shorter() {
+        assert_eq!(first_chars("abc", 16), "abc");
+        assert_eq!(first_chars("", 16), "");
     }
 }

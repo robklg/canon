@@ -20,6 +20,7 @@ use super::fs::{
 use crate::core::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
 use crate::domain::decision::DecisionStatus;
 use crate::domain::fact::FactEntry;
+use crate::domain::format::first_chars;
 use crate::domain::path::path_strip_prefix;
 use crate::domain::source::NewSource;
 use crate::expr::{self, EvalContext, FactValue, Pattern};
@@ -518,8 +519,8 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
             } else if db_source.partial_hash != transfer.partial_hash {
                 mismatches.push(format!(
                     "partial hash: {}... → {}...",
-                    &transfer.partial_hash[..16.min(transfer.partial_hash.len())],
-                    &db_source.partial_hash[..16.min(db_source.partial_hash.len())]
+                    first_chars(&transfer.partial_hash, 16),
+                    first_chars(&db_source.partial_hash, 16)
                 ));
             }
 
@@ -1300,8 +1301,8 @@ fn validate_source_state(transfer: &ApplyTransfer) -> std::result::Result<(), St
     if current_hash != transfer.partial_hash {
         mismatches.push(format!(
             "partial hash mismatch: {}... → {}...",
-            &transfer.partial_hash[..16.min(transfer.partial_hash.len())],
-            &current_hash[..16]
+            first_chars(&transfer.partial_hash, 16),
+            first_chars(&current_hash, 16)
         ));
     }
 
@@ -2492,6 +2493,33 @@ mod tests {
 
         // Correct size/mtime but wrong hash
         let transfer = make_transfer_for_file(f.path(), size, mtime, "wrong_hash_value_here");
+        let err = validate_source_state(&transfer).unwrap_err();
+        assert!(
+            err.contains("partial hash"),
+            "expected 'partial hash' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_hash_changed_reports_a_multibyte_hash_without_panicking() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"test content").unwrap();
+        f.flush().unwrap();
+
+        let meta = std::fs::metadata(f.path()).unwrap();
+        #[cfg(unix)]
+        let (size, mtime) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.size() as i64, meta.mtime())
+        };
+        #[cfg(not(unix))]
+        let (size, mtime) = { (meta.len() as i64, 0i64) };
+
+        // A lock file is ordinary text on disk and nothing enforces that a
+        // recorded hash is hex. Truncating this one for the message must count
+        // characters: its sixteenth byte falls inside a character.
+        let transfer = make_transfer_for_file(f.path(), size, mtime, "日本語日本語日本語");
         let err = validate_source_state(&transfer).unwrap_err();
         assert!(
             err.contains("partial hash"),

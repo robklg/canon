@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::ceremony;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
+use crate::domain::format::first_chars;
 use crate::domain::scope::DecisionScope;
 use crate::expr;
 use crate::ops;
@@ -104,8 +105,8 @@ pub fn run(
             "Lock file hash mismatch: expected {}, got {}\n\
              The lock file may have been modified or does not belong to this config.\n\
              Run `cluster refresh` to regenerate the lock file.",
-            &config.meta.lock_hash[..16.min(config.meta.lock_hash.len())],
-            &actual_hash[..16]
+            first_chars(&config.meta.lock_hash, 16),
+            first_chars(&actual_hash, 16)
         );
     }
 

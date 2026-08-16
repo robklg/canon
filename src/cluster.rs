@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
+use crate::domain::format::first_chars;
 use crate::domain::format_count;
 use crate::domain::scope::{DecisionScope, ScopeMatch};
 use crate::expr::filter::Filter;
@@ -409,9 +410,11 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
             } else {
                 "\u{2014}"
             };
-            // Truncate filename for display
-            let display_name = if entry.source_filename.len() > 30 {
-                format!("{}...", &entry.source_filename[..27])
+            // Truncate filename for display. Counted in characters, not bytes,
+            // so the width matches the column below and a name that is not
+            // plain ASCII cannot be cut inside a character.
+            let display_name = if entry.source_filename.chars().count() > 30 {
+                format!("{}...", first_chars(&entry.source_filename, 27))
             } else {
                 entry.source_filename.clone()
             };
