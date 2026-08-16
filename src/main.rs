@@ -69,8 +69,7 @@ mod progress;
 mod scope;
 
 // Command modules
-mod apply;
-mod cluster;
+mod archive;
 mod compare;
 mod coverage;
 mod exclude;
@@ -1206,7 +1205,7 @@ fn main() -> Result<()> {
                 let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
                 let all_roots = repo::root::fetch_all(db.conn())?;
                 let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
-                let options = cluster::GenerateOptions {
+                let options = archive::GenerateOptions {
                     force,
                     allow_archived: allow.contains(&ClusterAllow::Archived),
                     allow_duplicates: allow.contains(&ClusterAllow::Duplicates),
@@ -1223,7 +1222,7 @@ fn main() -> Result<()> {
                 } else {
                     output_path
                 };
-                cluster::generate(
+                archive::generate(
                     &mut db,
                     &resolved.prefixes,
                     &filters,
@@ -1241,7 +1240,7 @@ fn main() -> Result<()> {
                 show_archived,
                 edit,
             } => {
-                cluster::refresh(
+                archive::refresh(
                     &mut db,
                     &manifest,
                     show_archived,
@@ -1252,7 +1251,7 @@ fn main() -> Result<()> {
                 )?;
             }
             ClusterAction::Status { manifest, verbose } => {
-                cluster::status(db.conn_mut(), &manifest, verbose)?;
+                archive::status(db.conn_mut(), &manifest, verbose)?;
             }
         },
         Commands::Apply {
@@ -1268,13 +1267,13 @@ fn main() -> Result<()> {
             reason,
         } => {
             let transfer_mode = if rename {
-                ops::apply::TransferMode::Rename
+                archive::TransferMode::Rename
             } else if move_files {
-                ops::apply::TransferMode::Move
+                archive::TransferMode::Move
             } else {
-                ops::apply::TransferMode::Copy
+                archive::TransferMode::Copy
             };
-            let options = apply::ApplyOptions {
+            let options = archive::ApplyOptions {
                 dry_run,
                 verbose,
                 allow_cross_archive_duplicates: allow.contains(&ApplyAllow::CrossArchiveDuplicates),
@@ -1284,7 +1283,7 @@ fn main() -> Result<()> {
                 yes,
                 resume,
             };
-            apply::run(
+            archive::run(
                 &mut db,
                 &manifest,
                 &options,

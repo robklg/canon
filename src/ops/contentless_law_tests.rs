@@ -11,8 +11,8 @@
 
 use std::collections::HashSet;
 
+use crate::archive::{plan_generate, ClusterGenerateParams};
 use crate::core::domain::resolution::{classify_present, StandingBucket};
-use crate::ops::cluster::{plan_generate, ClusterGenerateParams};
 use crate::ops::test_helpers::*;
 use crate::repo;
 use crate::survey::ObjectIndex;

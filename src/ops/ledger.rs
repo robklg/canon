@@ -314,11 +314,11 @@ pub fn reindex_extractions(conn: &Connection, params: &ReindexParams) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::config::{LedgerConfig, ReceiptLayout, RecordingMode};
-    use crate::ops::apply::{
+    use crate::archive::{
         ApplyExecuteParams, ApplyPlan, ApplyTransfer, ApplyViolations, TransferMode,
         TransferOutcome, TransferProgress,
     };
+    use crate::domain::config::{LedgerConfig, ReceiptLayout, RecordingMode};
     use crate::ops::decision::DecisionParams;
     use crate::ops::fs::compute_partial_hash;
     use crate::ops::receipt::ReceiptPlacement;
@@ -465,7 +465,7 @@ mod tests {
             receipt_ctx: Some(receipt_ctx),
         };
         let decision = make_decision_params(true);
-        crate::ops::apply::execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision))
+        crate::archive::execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision))
             .unwrap();
         let decision_id = latest_decision_id(&conn);
         (conn, decision_id, archive_dir, src_dir)

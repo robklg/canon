@@ -76,6 +76,9 @@ fn classify_layer(rel_path: &str) -> Layer {
     if let Some(rest) = rel_path.strip_prefix("facts/") {
         return classify_subsystem_stratum(rest);
     }
+    if let Some(rest) = rel_path.strip_prefix("archive/") {
+        return classify_subsystem_stratum(rest);
+    }
     if rel_path.starts_with("domain/") {
         Layer::Domain
     } else if rel_path.starts_with("repo/") {
@@ -270,17 +273,17 @@ struct Tier3Entry {
 /// (repairing a site requires deleting its entry in the same commit).
 const TIER3: &[Tier3Entry] = &[
     Tier3Entry {
-        file: "apply.rs",
+        file: "archive/cli/apply.rs",
         reference: "repo::root::fetch_all",
         severity: Severity::Read,
     },
     Tier3Entry {
-        file: "apply.rs",
+        file: "archive/cli/apply.rs",
         reference: "repo::fact::batch_fetch_key_for_sources",
         severity: Severity::Read,
     },
     Tier3Entry {
-        file: "cluster.rs",
+        file: "archive/cli/cluster.rs",
         reference: "repo::root::fetch_all",
         severity: Severity::Read,
     },
@@ -454,10 +457,12 @@ fn classify_reference(
     // referencing file is domain/repo/ops within its home. Old-tree
     // (`Home::OldTree`) files are unrestricted here — reaching into a
     // subsystem's public surface from the pre-migration tree (e.g. `main.rs`
-    // dispatching into `retire::`) is legal staging, and no old-tree file
-    // currently reaches a subsystem's internals (nothing to guard yet; add
-    // a rule when a real case exists, per record-on-sight/extract-on-
-    // second-use — not speculatively).
+    // dispatching into `retire::`) is legal staging. An old-tree file
+    // reaching a subsystem's *internals* is legal staging too, and happens
+    // while a subsystem moves in halves: the not-yet-moved half reads the
+    // moved half's stratum directly until it follows. Such a reference is
+    // temporary by construction — it dies when the second half moves — so
+    // there is nothing here to guard.
     // ------------------------------------------------------------------
     if has_crate {
         if let Some(ref_root) = no_crate.split("::").next() {
@@ -1651,6 +1656,29 @@ mod self_tests {
                 "prune_orphaned_objects",
                 "prune_excluded_facts",
                 "show_aliases",
+            ],
+        ),
+        // The command surface, the transfer mode the receipt vocabulary names,
+        // and the plan/execute types two law tests construct directly.
+        (
+            "archive",
+            &[
+                "run",
+                "ApplyOptions",
+                "generate",
+                "refresh",
+                "status",
+                "GenerateOptions",
+                "plan_generate",
+                "ClusterGenerateParams",
+                "TransferMode",
+                "execute_apply",
+                "ApplyExecuteParams",
+                "TransferOutcome",
+                "TransferProgress",
+                "ApplyPlan",
+                "ApplyTransfer",
+                "ApplyViolations",
             ],
         ),
     ];

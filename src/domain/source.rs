@@ -49,7 +49,7 @@ use super::scope::ScopeMatch;
 ///     inode: Some(metadata.ino()),
 /// };
 ///
-/// let created = repo::source::insert_destination(conn, &new_source)?;
+/// let created = insert_destination(conn, &new_source)?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct NewSource {

@@ -5,8 +5,6 @@
 //! functions, and returns a typed result. The interface layer (CLI, TUI) builds
 //! parameters from user input and formats results for display.
 
-pub mod apply;
-pub mod cluster;
 pub mod compare;
 pub mod coverage;
 pub mod decision;

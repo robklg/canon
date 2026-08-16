@@ -2,17 +2,17 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
 
+use crate::archive::domain::{parse_manifest_allow, validate_manifest_version, ManifestConfig};
+use crate::archive::ops::generate::{
+    ClusterGenerateParams, ClusterGeneratePlan, ExecuteGenerateParams, ExecuteRefreshParams,
+};
+use crate::archive::ops::{generate as generate_ops, status as status_ops};
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::format::first_chars;
 use crate::domain::format_count;
 use crate::domain::scope::{DecisionScope, ScopeMatch};
 use crate::expr::filter::Filter;
-use crate::ops;
-use crate::ops::cluster::{
-    parse_manifest_allow, validate_manifest_version, ClusterGenerateParams, ClusterGeneratePlan,
-    ExecuteGenerateParams, ExecuteRefreshParams, ManifestConfig,
-};
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::ops::scope::resolve_archive_path;
 use crate::repo::{self, Connection, Db};
@@ -73,7 +73,7 @@ pub fn generate(
         allow_archived: options.allow_archived,
         allow_duplicates: options.allow_duplicates,
     };
-    let plan = ops::cluster::plan_generate(conn, &params)?;
+    let plan = generate_ops::plan_generate(conn, &params)?;
 
     // Display warnings
     display_plan_warnings(&plan, options);
@@ -111,7 +111,7 @@ pub fn generate(
     // the artifact the run leaves behind.
     let mut recorder = DecisionRecorder::start(conn, &decision, None);
 
-    let result = ops::cluster::execute_generate(&plan, &exec_params)?;
+    let result = generate_ops::execute_generate(&plan, &exec_params)?;
 
     let gen_summary = format!(
         "Generated manifest: {} ({} sources in {})",
@@ -227,7 +227,7 @@ pub fn refresh(
         allow_archived,
         allow_duplicates,
     };
-    let plan = ops::cluster::plan_generate(conn, &plan_params)?;
+    let plan = generate_ops::plan_generate(conn, &plan_params)?;
 
     // Display warnings
     let display_options = GenerateOptions {
@@ -265,7 +265,7 @@ pub fn refresh(
     // the artifact the run leaves behind.
     let mut recorder = DecisionRecorder::start(conn, &decision, None);
 
-    let result = ops::cluster::execute_refresh(&plan, &exec_params)?;
+    let result = generate_ops::execute_refresh(&plan, &exec_params)?;
 
     match result.outcome {
         Some(r) => {
@@ -362,7 +362,7 @@ fn allow_values_to_strings(options: &GenerateOptions) -> Vec<String> {
 // ============================================================================
 
 pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Result<()> {
-    let status = ops::cluster::compute_manifest_status(conn, manifest_path)?;
+    let status = status_ops::compute_manifest_status(conn, manifest_path)?;
 
     // Header
     println!("Manifest: {}", status.manifest_path);
@@ -375,7 +375,7 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
     println!();
 
     // Per-entry table: concerning entries (or all if verbose)
-    let concerning: Vec<&crate::ops::cluster::StatusEntry> = status
+    let concerning: Vec<&status_ops::StatusEntry> = status
         .entries
         .iter()
         .filter(|e| {
@@ -386,7 +386,7 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
         })
         .collect();
 
-    let show_entries: Vec<&crate::ops::cluster::StatusEntry> = if verbose {
+    let show_entries: Vec<&status_ops::StatusEntry> = if verbose {
         status.entries.iter().collect()
     } else {
         concerning.clone()
@@ -475,7 +475,7 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
                 "WARNING: {} source files are missing and not at the destination.",
                 format_count(status.source_lost),
             );
-            let lost_entries: Vec<&crate::ops::cluster::StatusEntry> = status
+            let lost_entries: Vec<&status_ops::StatusEntry> = status
                 .entries
                 .iter()
                 .filter(|e| !(e.source_exists || e.dest_exists && e.dest_size_match))

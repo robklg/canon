@@ -1493,7 +1493,7 @@ pub(crate) mod root {
         let id = conn.last_insert_rowid();
 
         // Fetch the complete Root to ensure consistency with database state.
-        // This follows the insert_destination() pattern from source.rs.
+        // This follows the archive repository's insert_destination() pattern.
         let sql = format!("SELECT {ROOT_COLUMNS} FROM roots WHERE id = ?");
         let root = conn.query_row(&sql, [id], root_from_row)?;
         Ok(root)

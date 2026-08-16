@@ -9,10 +9,10 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::archive::TransferMode;
 use crate::core::domain::fate::{DecisionFamily, FateAspect};
 use crate::domain::config::{LedgerConfig, ReceiptLayout};
 use crate::domain::root::Root;
-use crate::ops::apply::TransferMode;
 use crate::ops::fs::{finalize_file, write_file_incomplete};
 
 /// Reference to a receipt file on disk, stored in the decision record.

@@ -1,130 +1,29 @@
-//! Cluster operations — plan and execute for cluster generation.
+//! Generating and refreshing a cluster manifest.
 //!
-//! `plan_generate()` computes what `cluster generate` would produce — source
-//! selection, archive detection, duplicate checking, and fact coverage
-//! computation — without any side effects.
-//!
-//! `execute_generate()` and `execute_refresh()` write the lock file and manifest
-//! to disk. Manifests are stored artifacts (not presentation) so this logic
-//! belongs in the ops layer, not the interface.
+//! `plan_generate` computes what `cluster generate` would produce — source
+//! selection, archive detection, duplicate checking and fact coverage — without
+//! side effects. `execute_generate` and `execute_refresh` then write the lock
+//! file and the manifest. Manifests are stored artifacts rather than
+//! presentation, so composing them belongs here and not in the command.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
 
-// ============================================================================
-// Manifest data contract (shared between cluster generate and apply)
-// ============================================================================
-
-/// TOML manifest config file structure.
-#[derive(Serialize, Deserialize)]
-pub struct ManifestConfig {
-    pub meta: ManifestMeta,
-    #[serde(default)]
-    pub options: ManifestOptions,
-    pub output: ManifestOutput,
-}
-
-#[derive(Serialize, Deserialize, Default)]
-pub struct ManifestOptions {
-    #[serde(default)]
-    pub allow: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ManifestMeta {
-    #[serde(default = "default_version")]
-    pub version: u32,
-    pub query: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-    /// RFC3339 timestamp when manifest was generated/refreshed
-    pub generated_at: String,
-    /// SHA256 hash of the lock file (for integrity validation)
-    pub lock_hash: String,
-}
-
-fn default_version() -> u32 {
-    1
-}
-
-const SUPPORTED_MANIFEST_VERSION: u32 = 1;
-
-pub fn validate_manifest_version(version: u32) -> Result<()> {
-    if version > SUPPORTED_MANIFEST_VERSION {
-        bail!("Manifest version {version} is not supported by this version of Canon. Please update Canon.");
-    }
-    Ok(())
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ManifestOutput {
-    pub pattern: String,
-    pub archive_root_id: i64,
-    pub base_dir: String,
-}
-
+use crate::archive::domain::{
+    extract_notes_raw, LockEntry, ManifestConfig, ManifestMeta, ManifestOptions, ManifestOutput,
+};
 use crate::domain::include::IncludeSet;
 use crate::domain::scope::ScopeMatch;
-use crate::domain::source::Source;
 use crate::domain::{FactEntry, FactValue};
 use crate::expr::filter::Filter;
 use crate::expr::{BuiltinKey, FactType};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::{self, Connection};
 
-// ============================================================================
-// Types
-// ============================================================================
-
-/// JSONL lock entry (one per line in .lock file)
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LockEntry {
-    pub id: i64,
-    pub root_id: i64,
-    pub path: String,
-    // Device and inode are recorded for move detection, not for staleness validation.
-    // Staleness is determined by size+mtime+partial_hash only.
-    pub device: i64,
-    pub inode: i64,
-    // File state for pre-transfer staleness validation
-    pub size: i64,
-    pub mtime: i64,
-    pub partial_hash: String, // SHA256 of first 8KB + last 8KB (for integrity validation)
-    // Content info
-    pub object_id: Option<i64>,
-    pub hash_type: Option<String>,
-    pub hash_value: Option<String>,
-    // Note: `facts` field was removed. Apply looks up facts at runtime from DB.
-    // Old lock files with `facts` field are still readable (serde ignores unknown fields).
-}
-
-impl LockEntry {
-    /// Build a LockEntry from a Source and object hash info.
-    pub fn from_source(
-        source: &Source,
-        hash_type: Option<String>,
-        hash_value: Option<String>,
-    ) -> Self {
-        Self {
-            id: source.id,
-            root_id: source.root_id,
-            path: source.path(),
-            device: source.device,
-            inode: source.inode,
-            size: source.size,
-            mtime: source.mtime,
-            partial_hash: source.partial_hash.clone(),
-            object_id: source.object_id,
-            hash_type,
-            hash_value,
-        }
-    }
-}
+use super::manifest::{write_and_sync, write_lock_file};
 
 // ============================================================================
 // Types
@@ -407,7 +306,7 @@ pub fn execute_generate(
     write_lock_file(&params.lock_path, &plan.lock_entries)?;
 
     // Compute lock file hash
-    let lock_hash = super::fs::compute_full_hash(&params.lock_path)?;
+    let lock_hash = crate::ops::fs::compute_full_hash(&params.lock_path)?;
 
     // Build ManifestConfig
     // Several prefixes are joined into one string here and split back apart
@@ -534,7 +433,7 @@ pub fn execute_refresh(
     write_lock_file(&params.lock_path, &plan.lock_entries)?;
 
     // Compute lock file hash and update config
-    let lock_hash = super::fs::compute_full_hash(&params.lock_path)?;
+    let lock_hash = crate::ops::fs::compute_full_hash(&params.lock_path)?;
     let mut config = ManifestConfig {
         meta: ManifestMeta {
             version: params.config.meta.version,
@@ -589,22 +488,6 @@ pub fn execute_refresh(
             not_archived_count: plan.not_archived_count,
         }),
     })
-}
-
-/// Parse `allow` values from a manifest's `[options]` section.
-pub fn parse_manifest_allow(allow: &[String]) -> Result<(bool, bool)> {
-    let mut archived = false;
-    let mut duplicates = false;
-    for v in allow {
-        match v.as_str() {
-            "archived" => archived = true,
-            "duplicates" => duplicates = true,
-            other => bail!(
-                "Invalid allow value '{other}' in manifest [options]. Valid: archived, duplicates"
-            ),
-        }
-    }
-    Ok((archived, duplicates))
 }
 
 // ============================================================================
@@ -757,35 +640,8 @@ fn get_fact_description(key: &str) -> String {
 }
 
 // ============================================================================
-// Manifest content helpers (moved from interface layer)
+// Manifest content helpers
 // ============================================================================
-
-/// Write content to a file and fsync to ensure it's flushed to disk.
-/// This prevents race conditions when opening the file in an editor
-/// immediately after writing, especially on network volumes (NAS/SMB).
-fn write_and_sync(path: &Path, content: &str) -> Result<()> {
-    use std::io::Write as _;
-    let mut file = fs::File::create(path)?;
-    file.write_all(content.as_bytes())?;
-    file.sync_all()?;
-    Ok(())
-}
-
-/// Write a JSONL lock file from lock entries.
-fn write_lock_file(lock_path: &Path, entries: &[LockEntry]) -> Result<()> {
-    let lock_file = std::fs::File::create(lock_path)
-        .with_context(|| format!("Failed to create lock file: {}", lock_path.display()))?;
-    let mut writer = BufWriter::new(lock_file);
-
-    for entry in entries {
-        serde_json::to_writer(&mut writer, entry)
-            .with_context(|| format!("Failed to write lock entry for {}", entry.path))?;
-        writeln!(writer)?;
-    }
-
-    writer.flush()?;
-    Ok(())
-}
 
 fn current_timestamp() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -939,54 +795,6 @@ fn generate_fact_help(
     help
 }
 
-/// Extract notes section from an existing manifest.
-/// Extract the raw notes section from a manifest (preserves `#` comment markers).
-/// Used by manifest refresh to re-emit the notes block verbatim.
-pub fn extract_notes_raw(content: &str) -> Option<String> {
-    let marker = "# === Notes ===";
-    let start_idx = content.find(marker)?;
-    let after_marker = start_idx + marker.len();
-    let rest = &content[after_marker..];
-
-    // Walk whole lines with their terminators still attached, so the running
-    // offset is exact whatever the file's line endings are. A manifest is
-    // meant to be opened in an editor, and an editor may hand it back with
-    // CRLF endings; assuming a one-byte terminator would shift the offset by
-    // a byte per line and cut the notes short — or land inside a character.
-    let mut end = rest.len();
-    let mut offset = 0;
-    for (i, line) in rest.split_inclusive('\n').enumerate() {
-        if i > 0 && (line.starts_with("# === ") || line.starts_with('[')) {
-            end = offset;
-            break;
-        }
-        offset += line.len();
-    }
-
-    Some(rest[..end].to_string())
-}
-
-/// Extract notes from a manifest as clean text (strips `#` comment markers).
-/// Used for decision reason when manifest notes flow into apply records.
-pub fn extract_notes(content: &str) -> Option<String> {
-    let raw = extract_notes_raw(content)?;
-    let stripped: String = raw
-        .lines()
-        .map(|line| {
-            line.strip_prefix("# ")
-                .or_else(|| line.strip_prefix("#"))
-                .unwrap_or(line)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let trimmed = stripped.trim().to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
 /// Insert comment lines before a key in a TOML string.
 fn inject_comments_before_key(toml_str: &str, key: &str, comments: &[String]) -> String {
     let prefix = format!("{key} = ");
@@ -1004,296 +812,12 @@ fn inject_comments_before_key(toml_str: &str, key: &str, comments: &[String]) ->
     result
 }
 
-// ============================================================================
-// Manifest I/O helpers (shared between apply and status)
-// ============================================================================
-
-/// Read and parse a manifest TOML config file.
-pub fn read_manifest_config(manifest_path: &Path) -> Result<ManifestConfig> {
-    let config_content = fs::read_to_string(manifest_path).with_context(|| {
-        format!(
-            "Failed to read manifest config: {}",
-            manifest_path.display()
-        )
-    })?;
-    let config: ManifestConfig = toml::from_str(&config_content).with_context(|| {
-        format!(
-            "Failed to parse manifest config: {}",
-            manifest_path.display()
-        )
-    })?;
-    validate_manifest_version(config.meta.version)?;
-    Ok(config)
-}
-
-/// Read and parse a lock file (JSONL format, one LockEntry per line).
-pub fn read_lock_entries(lock_path: &Path) -> Result<Vec<LockEntry>> {
-    use std::io::{BufRead, BufReader};
-    let lock_file = std::fs::File::open(lock_path)
-        .with_context(|| format!("Failed to open lock file: {}", lock_path.display()))?;
-    BufReader::new(lock_file)
-        .lines()
-        .enumerate()
-        .map(|(i, line)| {
-            let line =
-                line.with_context(|| format!("Failed to read line {} of lock file", i + 1))?;
-            serde_json::from_str(&line)
-                .with_context(|| format!("Failed to parse line {} of lock file", i + 1))
-        })
-        .collect::<Result<Vec<_>>>()
-}
-
-// ============================================================================
-// Manifest status
-// ============================================================================
-
-/// State of a single lock entry in status assessment.
-pub struct StatusEntry {
-    /// Absolute source path.
-    pub source_path: String,
-    /// Last component of source path, for display.
-    pub source_filename: String,
-    /// Whether the source file exists on disk.
-    pub source_exists: bool,
-    /// Full destination path.
-    pub dest_path: String,
-    /// Whether the destination file exists on disk.
-    pub dest_exists: bool,
-    /// Whether dest size matches expected size (only meaningful when dest_exists).
-    pub dest_size_match: bool,
-    /// Whether the destination is registered in the DB (present=1).
-    pub db_registered: bool,
-}
-
-/// Result of manifest status assessment.
-pub struct ManifestStatus {
-    /// Path to the manifest file.
-    pub manifest_path: String,
-    /// Display string for destination (archive root + base_dir).
-    pub dest_display: String,
-    /// Output pattern from the manifest.
-    pub pattern: String,
-    /// Number of entries in the lock file.
-    pub lock_entry_count: usize,
-    /// Whether the lock file hash matches the manifest.
-    pub lock_hash_valid: bool,
-    /// Per-entry status assessment.
-    pub entries: Vec<StatusEntry>,
-    /// Count of entries where dest exists with correct size.
-    pub at_destination: usize,
-    /// Count of entries where source exists but dest does not.
-    pub pending: usize,
-    /// Count of entries where source is missing and dest is missing.
-    pub source_lost: usize,
-    /// Count of entries where dest exists but size doesn't match.
-    pub size_mismatch: usize,
-    /// Count of entries at dest where source file still exists.
-    pub source_still_present: usize,
-}
-
-impl ManifestStatus {
-    /// Are all source files accounted for (either at source or at destination)?
-    pub fn all_accounted_for(&self) -> bool {
-        self.source_lost == 0 && self.size_mismatch == 0
-    }
-}
-
-/// Compute the status of a manifest by checking filesystem and DB state.
-///
-/// This is a read-only diagnostic: no DB writes, no file operations.
-/// Needs `&mut Connection` because fact fetching uses temp tables.
-pub fn compute_manifest_status(
-    conn: &mut Connection,
-    manifest_path: &Path,
-) -> Result<ManifestStatus> {
-    use crate::expr;
-    use crate::ops::apply::evaluate_pattern;
-
-    // 1. Read manifest and lock
-    let config = read_manifest_config(manifest_path)?;
-    let lock_path = manifest_path.with_extension("lock");
-    let lock_entries = read_lock_entries(&lock_path)?;
-    let lock_entry_count = lock_entries.len();
-
-    // 2. Validate lock hash (non-fatal)
-    let lock_hash_valid = match super::fs::compute_full_hash(&lock_path) {
-        Ok(actual_hash) => actual_hash == config.meta.lock_hash,
-        Err(_) => false,
-    };
-
-    // 3. Fetch roots, build root_paths map
-    let roots = repo::root::fetch_all(conn)?;
-    let root_paths: HashMap<i64, String> = roots.iter().map(|r| (r.id, r.path.clone())).collect();
-
-    // 4. Find archive root and compute base_dir
-    let archive_root = roots
-        .iter()
-        .find(|r| r.id == config.output.archive_root_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Archive root id {} not found",
-                config.output.archive_root_id
-            )
-        })?;
-    let base_dir = if config.output.base_dir.is_empty() {
-        PathBuf::from(&archive_root.path)
-    } else {
-        PathBuf::from(&archive_root.path).join(&config.output.base_dir)
-    };
-    let dest_display = base_dir.to_string_lossy().to_string();
-
-    // 5. Parse pattern and fetch needed facts
-    let pattern = expr::parse_pattern(&config.output.pattern)
-        .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
-    let needed_keys = expr::extract_fact_keys(&pattern);
-    let scope_prefix = config.meta.scope.as_deref();
-
-    // Batch fetch facts for all lock entries if pattern uses content facts
-    let source_ids: Vec<i64> = lock_entries.iter().map(|s| s.id).collect();
-    let mut all_facts: HashMap<i64, Vec<crate::domain::fact::FactEntry>> = HashMap::new();
-    for key in &needed_keys {
-        // Must list the same namespaces as the fetch and evaluation sites in
-        // the apply operation — a namespace listed in one place and not the
-        // others changes which facts reach pattern evaluation.
-        if key.starts_with("source.") || key.starts_with("scope.") || key == "object.hash" {
-            continue;
-        }
-        let key_facts = repo::fact::batch_fetch_key_for_sources(conn, &source_ids, key)?;
-        for (source_id, entry_opt) in key_facts {
-            if let Some(entry) = entry_opt {
-                all_facts.entry(source_id).or_default().push(entry);
-            }
-        }
-    }
-
-    // 6. Evaluate patterns to get dest paths, then check filesystem + DB
-    let mut entries = Vec::with_capacity(lock_entry_count);
-    let mut dest_rel_paths: Vec<String> = Vec::with_capacity(lock_entry_count);
-
-    for lock_entry in &lock_entries {
-        let dest_rel = match evaluate_pattern(
-            &pattern,
-            lock_entry,
-            &needed_keys,
-            scope_prefix,
-            &root_paths,
-            &all_facts,
-        ) {
-            Ok(rel) => rel,
-            Err(e) => {
-                // If pattern expansion fails, we can't determine dest path.
-                // Use a placeholder and mark as not-at-dest.
-                let filename = Path::new(&lock_entry.path)
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| lock_entry.path.clone());
-                entries.push(StatusEntry {
-                    source_path: lock_entry.path.clone(),
-                    source_filename: filename,
-                    source_exists: Path::new(&lock_entry.path).exists(),
-                    dest_path: format!("<pattern expansion failed: {}>", e),
-                    dest_exists: false,
-                    dest_size_match: false,
-                    db_registered: false,
-                });
-                dest_rel_paths.push(String::new());
-                continue;
-            }
-        };
-
-        let archive_rel_path = if config.output.base_dir.is_empty() {
-            dest_rel.clone()
-        } else {
-            format!("{}/{}", config.output.base_dir, &dest_rel)
-        };
-
-        let dest_full = base_dir.join(&dest_rel);
-        let source_exists = Path::new(&lock_entry.path).exists();
-        let dest_stat = fs::metadata(&dest_full).ok();
-
-        let (dest_exists, dest_size_match) = match &dest_stat {
-            Some(meta) if meta.is_file() => {
-                let actual_size = meta.len();
-                let expected_size = lock_entry.size as u64;
-                (true, actual_size == expected_size)
-            }
-            _ => (false, false),
-        };
-
-        let filename = Path::new(&lock_entry.path)
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_else(|| lock_entry.path.clone());
-
-        entries.push(StatusEntry {
-            source_path: lock_entry.path.clone(),
-            source_filename: filename,
-            source_exists,
-            dest_path: dest_full.to_string_lossy().to_string(),
-            dest_exists,
-            dest_size_match,
-            db_registered: false, // filled in below
-        });
-        dest_rel_paths.push(archive_rel_path);
-    }
-
-    // 7. Batch check DB registration
-    let rel_refs: Vec<&str> = dest_rel_paths.iter().map(|s| s.as_str()).collect();
-    let registered =
-        repo::source::batch_check_paths_exist(conn, config.output.archive_root_id, &rel_refs)?;
-    for (entry, rel_path) in entries.iter_mut().zip(dest_rel_paths.iter()) {
-        if !rel_path.is_empty() && registered.contains(rel_path.as_str()) {
-            entry.db_registered = true;
-        }
-    }
-
-    // 8. Compute counts
-    let mut at_destination = 0usize;
-    let mut pending = 0usize;
-    let mut source_lost = 0usize;
-    let mut size_mismatch = 0usize;
-    let mut source_still_present = 0usize;
-
-    for entry in &entries {
-        if entry.dest_exists && entry.dest_size_match {
-            at_destination += 1;
-            if entry.source_exists {
-                source_still_present += 1;
-            }
-        } else if entry.dest_exists && !entry.dest_size_match {
-            size_mismatch += 1;
-        } else if entry.source_exists {
-            pending += 1;
-        } else {
-            source_lost += 1;
-        }
-    }
-
-    Ok(ManifestStatus {
-        manifest_path: manifest_path.to_string_lossy().to_string(),
-        dest_display,
-        pattern: config.output.pattern.clone(),
-        lock_entry_count,
-        lock_hash_valid,
-        entries,
-        at_destination,
-        pending,
-        source_lost,
-        size_mismatch,
-        source_still_present,
-    })
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ops::test_helpers::{
         insert_fact, insert_object, insert_root, insert_source, insert_source_excluded,
-        insert_source_with_size, setup_test_db,
+        setup_test_db,
     };
 
     fn default_params() -> ClusterGenerateParams {
@@ -1597,249 +1121,6 @@ mod tests {
     }
 
     // =========================================================================
-    // parse_manifest_allow
-    // =========================================================================
-
-    #[test]
-    fn test_manifest_options_invalid_allow() {
-        let result = parse_manifest_allow(&["bogus".to_string()]);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("bogus"));
-        assert!(err.contains("archived"));
-    }
-
-    #[test]
-    fn test_parse_manifest_allow_valid() {
-        let (archived, duplicates) =
-            parse_manifest_allow(&["archived".to_string(), "duplicates".to_string()]).unwrap();
-        assert!(archived);
-        assert!(duplicates);
-    }
-
-    #[test]
-    fn test_parse_manifest_allow_empty() {
-        let (archived, duplicates) = parse_manifest_allow(&[]).unwrap();
-        assert!(!archived);
-        assert!(!duplicates);
-    }
-
-    // =========================================================================
-    // Version validation
-    // =========================================================================
-
-    #[test]
-    fn test_version_1_accepted() {
-        assert!(validate_manifest_version(1).is_ok());
-    }
-
-    #[test]
-    fn test_version_future_rejected() {
-        let result = validate_manifest_version(99);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("99"));
-        assert!(err.contains("not supported"));
-    }
-
-    // =========================================================================
-    // Manifest serde
-    // =========================================================================
-
-    #[test]
-    fn test_manifest_options_round_trip() {
-        let config = ManifestConfig {
-            meta: ManifestMeta {
-                version: 1,
-                query: vec!["source.ext=jpg".to_string()],
-                scope: Some("/photos".to_string()),
-                generated_at: "2026-02-15T12:00:00Z".to_string(),
-                lock_hash: "abc123".to_string(),
-            },
-            options: ManifestOptions {
-                allow: vec!["archived".to_string(), "duplicates".to_string()],
-            },
-            output: ManifestOutput {
-                pattern: "{filename}".to_string(),
-                archive_root_id: 1,
-                base_dir: "photos".to_string(),
-            },
-        };
-
-        let toml_str = toml::to_string_pretty(&config).unwrap();
-        let parsed: ManifestConfig = toml::from_str(&toml_str).unwrap();
-
-        assert_eq!(parsed.options.allow, vec!["archived", "duplicates"]);
-        assert_eq!(parsed.meta.query, vec!["source.ext=jpg"]);
-        assert_eq!(parsed.output.pattern, "{filename}");
-    }
-
-    #[test]
-    fn test_manifest_options_backward_compat() {
-        let toml_str = r#"
-[meta]
-query = ["source.ext=jpg"]
-scope = "/photos"
-generated_at = "2026-02-15T12:00:00Z"
-lock_hash = "abc123"
-
-[output]
-pattern = "{filename}"
-archive_root_id = 1
-base_dir = "photos"
-"#;
-        let config: ManifestConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.options.allow.is_empty());
-    }
-
-    #[test]
-    fn test_manifest_without_version_defaults_to_1() {
-        let toml_str = r#"
-[meta]
-query = ["source.ext=jpg"]
-scope = "/photos"
-generated_at = "2026-02-15T12:00:00Z"
-lock_hash = "abc123"
-
-[output]
-pattern = "{filename}"
-archive_root_id = 1
-base_dir = "photos"
-"#;
-        let config: ManifestConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.meta.version, 1);
-    }
-
-    #[test]
-    fn test_manifest_with_version_round_trip() {
-        let config = ManifestConfig {
-            meta: ManifestMeta {
-                version: 1,
-                query: vec!["source.ext=jpg".to_string()],
-                scope: Some("/photos".to_string()),
-                generated_at: "2026-02-15T12:00:00Z".to_string(),
-                lock_hash: "abc123".to_string(),
-            },
-            options: ManifestOptions { allow: vec![] },
-            output: ManifestOutput {
-                pattern: "{filename}".to_string(),
-                archive_root_id: 1,
-                base_dir: "photos".to_string(),
-            },
-        };
-
-        let toml_str = toml::to_string_pretty(&config).unwrap();
-        let parsed: ManifestConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(parsed.meta.version, 1);
-    }
-
-    // =========================================================================
-    // extract_notes
-    // =========================================================================
-
-    // extract_notes_raw — preserves # markers for manifest refresh
-
-    #[test]
-    fn test_extract_notes_raw_empty_placeholder() {
-        let content = "# === Notes ===\n#\n\n[meta]\nversion = 1\n";
-        let notes = extract_notes_raw(content).unwrap();
-        assert_eq!(notes, "\n#\n\n");
-    }
-
-    #[test]
-    fn test_extract_notes_raw_with_content() {
-        let content =
-            "# === Notes ===\n# This cluster has family photos\n# from 2020-2023\n\n[meta]\n";
-        let notes = extract_notes_raw(content).unwrap();
-        assert_eq!(
-            notes,
-            "\n# This cluster has family photos\n# from 2020-2023\n\n"
-        );
-    }
-
-    #[test]
-    fn test_extract_notes_raw_before_meta() {
-        let content = "# === Notes ===\n# Some note\n[meta]\nversion = 1\n";
-        let notes = extract_notes_raw(content).unwrap();
-        assert_eq!(notes, "\n# Some note\n");
-    }
-
-    #[test]
-    fn test_extract_notes_raw_before_next_section() {
-        let content = "# === Notes ===\n# My notes\n# === Cluster Summary ===\n# stuff\n";
-        let notes = extract_notes_raw(content).unwrap();
-        assert_eq!(notes, "\n# My notes\n");
-    }
-
-    #[test]
-    fn test_extract_notes_raw_handles_crlf() {
-        // An editor may return the manifest with two-byte line endings. Every
-        // note line must survive, terminators included.
-        let content =
-            "# === Notes ===\r\n# First note\r\n# Second note\r\n\r\n[meta]\r\nversion = 1\r\n";
-        let notes = extract_notes_raw(content).unwrap();
-        assert_eq!(notes, "\r\n# First note\r\n# Second note\r\n\r\n");
-    }
-
-    #[test]
-    fn test_extract_notes_raw_crlf_with_non_ascii() {
-        let content =
-            "# === Notes ===\r\n# Fotos de la boda — París\r\n# Añadir más tarde\r\n[meta]\r\n";
-        let notes = extract_notes_raw(content).unwrap();
-        assert_eq!(
-            notes,
-            "\r\n# Fotos de la boda — París\r\n# Añadir más tarde\r\n"
-        );
-    }
-
-    #[test]
-    fn test_extract_notes_strips_markers_on_crlf() {
-        // The last note is short on purpose: a parser that mismeasures a
-        // two-byte terminator loses ground with every line, and a trailing
-        // blank line would hide that behind the final trim.
-        let content = "# === Notes ===\r\n# alpha\r\n# beta\r\n# g\r\n[meta]\r\n";
-        let notes = extract_notes(content).unwrap();
-        assert_eq!(notes, "alpha\nbeta\ng");
-    }
-
-    // extract_notes — strips # markers for decision reason
-
-    #[test]
-    fn test_extract_notes_empty_placeholder() {
-        let content = "# === Notes ===\n#\n\n[meta]\nversion = 1\n";
-        // Empty placeholder: after stripping # prefix, content is whitespace-only → None
-        assert!(extract_notes(content).is_none());
-    }
-
-    #[test]
-    fn test_extract_notes_with_content() {
-        let content =
-            "# === Notes ===\n# This cluster has family photos\n# from 2020-2023\n\n[meta]\n";
-        let notes = extract_notes(content).unwrap();
-        assert_eq!(notes, "This cluster has family photos\nfrom 2020-2023");
-    }
-
-    #[test]
-    fn test_extract_notes_missing() {
-        let content = "[meta]\nversion = 1\nquery = []\n";
-        assert!(extract_notes(content).is_none());
-    }
-
-    #[test]
-    fn test_extract_notes_strips_comment_markers() {
-        let content = "# === Notes ===\n# Some note\n[meta]\nversion = 1\n";
-        let notes = extract_notes(content).unwrap();
-        assert_eq!(notes, "Some note");
-    }
-
-    #[test]
-    fn test_extract_notes_stops_at_next_section() {
-        let content = "# === Notes ===\n# My notes\n# === Cluster Summary ===\n# stuff\n";
-        let notes = extract_notes(content).unwrap();
-        assert_eq!(notes, "My notes");
-    }
-
-    // =========================================================================
     // generate_summary_comments
     // =========================================================================
 
@@ -1930,58 +1211,6 @@ base_dir = "photos"
         let plan = make_plan_for_summary(10, vec![("/photos".to_string(), 10)], 10, 4, 2, 0);
         let summary = generate_summary_comments(&plan);
         assert!(summary.contains("# Skipped: 4 already archived (--allow archived), 2 excluded"));
-    }
-
-    // =========================================================================
-    // write_lock_file
-    // =========================================================================
-
-    #[test]
-    fn test_write_lock_file_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let lock_path = dir.path().join("test.lock");
-        let entries = vec![
-            LockEntry {
-                id: 1,
-                root_id: 10,
-                path: "/photos/a.jpg".to_string(),
-                device: 100,
-                inode: 200,
-                size: 5000,
-                mtime: 1700000000,
-                partial_hash: "abc123".to_string(),
-                object_id: Some(42),
-                hash_type: Some("sha256".to_string()),
-                hash_value: Some("deadbeef".to_string()),
-            },
-            LockEntry {
-                id: 2,
-                root_id: 10,
-                path: "/photos/b.jpg".to_string(),
-                device: 100,
-                inode: 201,
-                size: 3000,
-                mtime: 1700000001,
-                partial_hash: "def456".to_string(),
-                object_id: None,
-                hash_type: None,
-                hash_value: None,
-            },
-        ];
-
-        write_lock_file(&lock_path, &entries).unwrap();
-
-        // Read back and verify
-        let content = std::fs::read_to_string(&lock_path).unwrap();
-        let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 2);
-        let entry1: LockEntry = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(entry1.id, 1);
-        assert_eq!(entry1.path, "/photos/a.jpg");
-        assert_eq!(entry1.hash_value.as_deref(), Some("deadbeef"));
-        let entry2: LockEntry = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(entry2.id, 2);
-        assert!(entry2.object_id.is_none());
     }
 
     // =========================================================================
@@ -2231,131 +1460,5 @@ base_dir = \"output\"\n";
             !raw.contains("# === "),
             "notes block ran into the next section"
         );
-    }
-
-    // =========================================================================
-    // compute_manifest_status
-    // =========================================================================
-
-    /// Generate a real manifest and lock over `names`, one four-byte file per
-    /// name in a source root, beside an empty archive root. Returns the
-    /// connection, the temp dir (the caller holds it so the files outlive the
-    /// call), the manifest path and the archive directory.
-    fn status_fixture(names: &[&str]) -> (Connection, tempfile::TempDir, PathBuf, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let src_dir = dir.path().join("photos");
-        let archive_dir = dir.path().join("archive");
-        std::fs::create_dir_all(&src_dir).unwrap();
-        std::fs::create_dir_all(&archive_dir).unwrap();
-
-        let mut conn = setup_test_db();
-        let src_root = insert_root(&conn, src_dir.to_str().unwrap(), "source", false);
-        let archive_root = insert_root(&conn, archive_dir.to_str().unwrap(), "archive", false);
-
-        for (i, name) in names.iter().enumerate() {
-            std::fs::write(src_dir.join(name), b"aaaa").unwrap();
-            let obj = insert_object(&conn, &format!("hash{i}"), false);
-            insert_source_with_size(&conn, src_root, name, Some(obj), 4);
-        }
-
-        let plan = plan_generate(&mut conn, &default_params()).unwrap();
-        let manifest_path = dir.path().join("cluster.toml");
-        let params = ExecuteGenerateParams {
-            lock_path: dir.path().join("cluster.lock"),
-            manifest_path: manifest_path.clone(),
-            expanded_filters: vec![],
-            original_filters: vec![],
-            scope_prefixes: vec![],
-            archive_root_id: archive_root,
-            base_dir: String::new(),
-            allow: vec![],
-        };
-        execute_generate(&plan, &params).unwrap();
-
-        (conn, dir, manifest_path, archive_dir)
-    }
-
-    #[test]
-    fn compute_manifest_status_counts_a_file_at_its_destination() {
-        let (mut conn, _dir, manifest, archive) = status_fixture(&["settled.jpg"]);
-        std::fs::write(archive.join("settled.jpg"), b"aaaa").unwrap();
-
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
-        assert_eq!(status.at_destination, 1);
-        assert_eq!(status.source_still_present, 1);
-        assert_eq!(status.pending, 0);
-        assert_eq!(status.size_mismatch, 0);
-        assert_eq!(status.source_lost, 0);
-    }
-
-    #[test]
-    fn compute_manifest_status_counts_a_file_still_waiting() {
-        let (mut conn, _dir, manifest, _archive) = status_fixture(&["waiting.jpg"]);
-
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
-        assert_eq!(status.pending, 1);
-        assert_eq!(status.at_destination, 0);
-        assert_eq!(status.size_mismatch, 0);
-        assert_eq!(status.source_lost, 0);
-    }
-
-    #[test]
-    fn compute_manifest_status_counts_a_destination_of_the_wrong_size() {
-        let (mut conn, _dir, manifest, archive) = status_fixture(&["resized.jpg"]);
-        std::fs::write(archive.join("resized.jpg"), b"aa").unwrap();
-
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
-        assert_eq!(status.size_mismatch, 1);
-        assert_eq!(status.at_destination, 0);
-        assert_eq!(status.pending, 0);
-        assert_eq!(status.source_lost, 0);
-    }
-
-    #[test]
-    fn compute_manifest_status_counts_a_source_that_is_gone() {
-        let (mut conn, dir, manifest, _archive) = status_fixture(&["gone.jpg"]);
-        std::fs::remove_file(dir.path().join("photos").join("gone.jpg")).unwrap();
-
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
-        assert_eq!(status.source_lost, 1);
-        assert_eq!(status.at_destination, 0);
-        assert_eq!(status.pending, 0);
-        assert_eq!(status.size_mismatch, 0);
-    }
-
-    #[test]
-    fn manifest_status_is_accounted_for_unless_content_is_lost_or_wrong() {
-        let (mut conn, _dir, manifest, archive) = status_fixture(&["settled.jpg"]);
-        std::fs::write(archive.join("settled.jpg"), b"aaaa").unwrap();
-        let settled = compute_manifest_status(&mut conn, &manifest).unwrap();
-        assert!(settled.all_accounted_for());
-
-        // Still waiting counts as accounted for — the file is where it began.
-        std::fs::remove_file(archive.join("settled.jpg")).unwrap();
-        let waiting = compute_manifest_status(&mut conn, &manifest).unwrap();
-        assert_eq!(waiting.pending, 1);
-        assert!(waiting.all_accounted_for());
-
-        // A destination of the wrong size is not, even with the source intact.
-        std::fs::write(archive.join("settled.jpg"), b"aa").unwrap();
-        let mismatched = compute_manifest_status(&mut conn, &manifest).unwrap();
-        assert_eq!(mismatched.size_mismatch, 1);
-        assert!(!mismatched.all_accounted_for());
-    }
-
-    #[test]
-    fn compute_manifest_status_flags_a_lock_file_that_no_longer_matches() {
-        let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
-        let fresh = compute_manifest_status(&mut conn, &manifest).unwrap();
-        assert!(fresh.lock_hash_valid);
-
-        // Change the lock without touching the manifest's recorded hash. The
-        // entries stay parseable so the read still reaches the comparison.
-        let lock = dir.path().join("cluster.lock");
-        let content = std::fs::read_to_string(&lock).unwrap();
-        std::fs::write(&lock, format!("{content}{content}")).unwrap();
-
-        let tampered = compute_manifest_status(&mut conn, &manifest).unwrap();
-        assert!(!tampered.lock_hash_valid);
     }
 }

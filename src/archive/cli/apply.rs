@@ -4,6 +4,11 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+use crate::archive::domain::{
+    extract_notes, parse_manifest_allow, validate_manifest_version, LockEntry, ManifestConfig,
+};
+use crate::archive::ops::execute::{self, TransferMode};
+use crate::archive::ops::{pattern, plan};
 use crate::ceremony;
 use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
@@ -11,9 +16,6 @@ use crate::domain::format::first_chars;
 use crate::domain::scope::DecisionScope;
 use crate::expr;
 use crate::ops;
-use crate::ops::apply::TransferMode;
-use crate::ops::cluster::LockEntry;
-use crate::ops::cluster::{parse_manifest_allow, validate_manifest_version, ManifestConfig};
 use crate::ops::decision::DecisionParams;
 use crate::ops::receipt::ReceiptPlacement;
 use crate::repo::{self, Db};
@@ -158,7 +160,7 @@ pub fn run(
     };
 
     // Filter sources by root if specified
-    let filtered_sources = ops::apply::filter_by_roots(&sources, &options.roots, &roots)?;
+    let filtered_sources = plan::filter_by_roots(&sources, &options.roots, &roots)?;
     let skipped_by_filter = sources.len() - filtered_sources.len();
 
     // Show summary and confirm (unless --yes)
@@ -193,9 +195,9 @@ pub fn run(
     // --- Plan: compute all DB-based preflight checks and destination paths ---
 
     eprintln!("Running preflight checks...");
-    let plan = ops::apply::plan_apply(
+    let plan = plan::plan_apply(
         conn,
-        &ops::apply::ApplyPlanParams {
+        &plan::ApplyPlanParams {
             sources: &filtered_sources,
             pattern: &pattern,
             needed_keys: &needed_keys,
@@ -352,7 +354,7 @@ pub fn run(
     // Destination path conflicts (non-resume only):
     // DB conflicts come from plan, disk-only conflicts checked via ops layer
     if !options.resume {
-        let on_disk_only = ops::apply::check_disk_conflicts(&plan, &base_dir);
+        let on_disk_only = plan::check_disk_conflicts(&plan, &base_dir);
 
         let total_conflicts = v.dest_conflicts_in_db.len() + on_disk_only.len();
         if total_conflicts > 0 {
@@ -501,7 +503,7 @@ pub fn run(
     let effective_reason = if let Some(r) = reason.filter(|r| !r.trim().is_empty()) {
         Some(r.to_string())
     } else {
-        ops::cluster::extract_notes(&config_content).filter(|n| !n.trim().is_empty())
+        extract_notes(&config_content).filter(|n| !n.trim().is_empty())
     };
     let decision = DecisionParams {
         command: DecisionCommand::Apply,
@@ -532,10 +534,10 @@ pub fn run(
     };
 
     let progress_impl = CliTransferProgress::new(options.verbose);
-    let result = ops::apply::execute_apply(
+    let result = execute::execute_apply(
         conn,
         &plan,
-        &ops::apply::ApplyExecuteParams {
+        &execute::ApplyExecuteParams {
             base_dir: base_dir.clone(),
             archive_root_id: config.output.archive_root_id,
             transfer_mode: options.transfer_mode,
@@ -662,7 +664,7 @@ fn compute_sample_destinations(
     sample_sources
         .iter()
         .map(|source| {
-            match ops::apply::evaluate_pattern(
+            match pattern::evaluate_pattern(
                 pattern,
                 source,
                 needed_keys,
@@ -797,12 +799,7 @@ fn show_directory_preview(dir: &Path, max_items: usize) {
 }
 
 /// Display dry-run transfer plan.
-fn display_dry_run_plan(
-    plan: &ops::apply::ApplyPlan,
-    base_dir: &Path,
-    mode: TransferMode,
-    resume: bool,
-) {
+fn display_dry_run_plan(plan: &plan::ApplyPlan, base_dir: &Path, mode: TransferMode, resume: bool) {
     if resume {
         eprintln!("=== DRY RUN (resume) ===");
     } else {
@@ -849,7 +846,7 @@ impl CliTransferProgress {
     }
 }
 
-impl ops::apply::TransferProgress for CliTransferProgress {
+impl execute::TransferProgress for CliTransferProgress {
     fn on_start(&self, total: usize) {
         if total > 0 {
             eprintln!();
@@ -864,7 +861,7 @@ impl ops::apply::TransferProgress for CliTransferProgress {
         _total: usize,
         source_path: &str,
         dest_path: &str,
-        outcome: &ops::apply::TransferOutcome,
+        outcome: &execute::TransferOutcome,
     ) {
         if let Some(ref p) = *self.progress.borrow() {
             let filename = source_path.rsplit('/').next().unwrap_or(source_path);
@@ -872,21 +869,21 @@ impl ops::apply::TransferProgress for CliTransferProgress {
         }
         if self.verbose {
             match outcome {
-                ops::apply::TransferOutcome::Copied => {
+                execute::TransferOutcome::Copied => {
                     println!("Copied: {source_path} -> {dest_path}");
                 }
-                ops::apply::TransferOutcome::Renamed => {
+                execute::TransferOutcome::Renamed => {
                     println!("Renamed: {source_path} -> {dest_path}");
                 }
-                ops::apply::TransferOutcome::Moved => {
+                execute::TransferOutcome::Moved => {
                     println!("Moved: {source_path} -> {dest_path}");
                 }
-                ops::apply::TransferOutcome::Error(msg) => {
+                execute::TransferOutcome::Error(msg) => {
                     eprintln!("Error processing {source_path}: {msg}");
                 }
                 _ => {}
             }
-        } else if let ops::apply::TransferOutcome::Error(msg) = outcome {
+        } else if let execute::TransferOutcome::Error(msg) = outcome {
             eprintln!("Error processing {source_path}: {msg}");
         }
     }
