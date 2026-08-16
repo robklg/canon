@@ -9,7 +9,8 @@
 //!
 //! 1. **Single source of truth**: This struct is THE definition of a fact for read operations
 //! 2. **Pure types**: No I/O or side effects in this module
-//! 3. **Reuse existing types**: `FactValue` and `FactType` come from `expr::eval`
+//! 3. **The value vocabulary lives here**: `FactValue` and `FactType` are defined in this
+//!    module; the expression engine imports them from it, never the reverse
 //! 4. **Dependencies point inward**: Commands depend on this module, not vice versa
 //!
 //! ## Usage
