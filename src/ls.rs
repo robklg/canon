@@ -1,10 +1,10 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 
-use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
+use crate::ops::scope::classify_all;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::Db;
 
@@ -33,7 +33,7 @@ pub fn run(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let scopes = classify_all(scope_prefixes);
 
     // Get cwd for relative path display (must be canonicalized to match DB paths)
     let cwd = if use_relative_paths {
@@ -190,7 +190,7 @@ pub fn show_duplicates(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let scopes = classify_all(scope_prefixes);
 
     // Get cwd for relative path display (must be canonicalized to match DB paths)
     let cwd = if use_relative_paths {

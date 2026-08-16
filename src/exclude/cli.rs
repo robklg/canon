@@ -6,7 +6,7 @@ use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::DecisionCommand;
 use crate::domain::path::validate_paths_in_roots;
 use crate::domain::root::find_containing_root;
-use crate::domain::scope::{DecisionScope, ScopeMatch};
+use crate::domain::scope::DecisionScope;
 use crate::exclude::ops::execute::{
     execute_clear, execute_duplicates, execute_set, execute_set_objects,
 };
@@ -23,7 +23,7 @@ use crate::exclude::ops::types::{
 use crate::expr::filter::Filter;
 use crate::ops::decision::DecisionParams;
 use crate::ops::receipt::{resolve_ledger_root, ReceiptPlacement};
-use crate::ops::scope::resolve_path;
+use crate::ops::scope::{classify_all, resolve_path};
 use crate::repo::{Connection, Db};
 
 /// Build the decision params, decomposing the given canonical scope prefixes to
@@ -116,7 +116,7 @@ pub fn set(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let scopes = classify_all(scope_prefixes);
     let plan = plan_set(conn, &ExcludeSetParams { scopes, filters })?;
 
     if plan.source_ids().is_empty() {
@@ -185,7 +185,7 @@ pub fn clear(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let scopes = classify_all(scope_prefixes);
     let plan = plan_clear(conn, &ExcludeClearParams { scopes, filters })?;
 
     if plan.source_ids().is_empty() {
@@ -383,7 +383,7 @@ pub fn exclude_duplicates(
     )?;
 
     // Plan
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let scopes = classify_all(&scope_prefixes);
     let params = ExcludeDuplicatesParams {
         scopes,
         filters,
@@ -637,7 +637,7 @@ pub fn set_objects_by_filter(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let scopes = classify_all(scope_prefixes);
     let plan = plan_set_objects(conn, &ExcludeSetObjectsParams { scopes, filters })?;
 
     if plan.objects.is_empty() {

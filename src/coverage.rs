@@ -1,12 +1,11 @@
 use anyhow::Result;
 
 use crate::domain::format_count;
-use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::ops;
 use crate::ops::coverage::CoverageStats;
-use crate::ops::scope::{parse_root_spec, ResolvedScope};
+use crate::ops::scope::{classify_all, parse_root_spec, ResolvedScope};
 use crate::repo::{self, Db};
 
 pub fn run(
@@ -29,7 +28,7 @@ pub fn run(
     // Fetch all roots for spec resolution
     let roots = repo::root::fetch_all(conn)?;
 
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let scopes = classify_all(scope_prefixes);
 
     // Parse and validate archive spec (must be archive role)
     let archive_root_id = if let Some(spec) = archive_spec {

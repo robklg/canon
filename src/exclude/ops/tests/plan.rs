@@ -1,5 +1,5 @@
-use crate::domain::scope::ScopeMatch;
 use crate::exclude::ops::plan::{plan_clear, plan_duplicates, plan_set, plan_set_objects};
+use crate::ops::scope::classify_all;
 use crate::ops::test_helpers::{
     insert_object, insert_root, insert_source, insert_source_excluded, insert_source_with_size,
     setup_test_db,
@@ -116,7 +116,7 @@ fn test_plan_set_respects_scope() {
     let in_scope = insert_source(&conn, root, "2024/a.jpg", None);
     let _out_scope = insert_source(&conn, root, "2023/b.jpg", None);
 
-    let scopes = ScopeMatch::classify_all(&["/photos/2024".to_string()]);
+    let scopes = classify_all(&["/photos/2024".to_string()]);
     let plan = plan_set(&mut conn, &make_set_params(scopes)).unwrap();
 
     assert_eq!(plan.source_ids(), vec![in_scope]);
@@ -242,7 +242,7 @@ fn test_plan_clear_respects_scope() {
     let in_scope = insert_source_excluded(&conn, root, "2024/excluded.jpg", None);
     let _out_scope = insert_source_excluded(&conn, root, "2023/excluded.jpg", None);
 
-    let scopes = ScopeMatch::classify_all(&["/photos/2024".to_string()]);
+    let scopes = classify_all(&["/photos/2024".to_string()]);
     let plan = plan_clear(&mut conn, &make_clear_params(scopes)).unwrap();
 
     assert_eq!(plan.source_ids(), vec![in_scope]);
@@ -486,7 +486,7 @@ fn test_plan_duplicates_respects_scope() {
     insert_source(&conn, archive_root, "photo1.jpg", Some(obj1));
     insert_source(&conn, archive_root, "photo2.jpg", Some(obj2));
 
-    let scopes = ScopeMatch::classify_all(&["/source/2024".to_string()]);
+    let scopes = classify_all(&["/source/2024".to_string()]);
     let plan = plan_duplicates(&mut conn, &make_duplicates_params(scopes, "/archive")).unwrap();
 
     assert_eq!(plan.source_ids(), vec![in_scope]);
@@ -713,7 +713,7 @@ fn test_plan_set_objects_respects_scope() {
     insert_source(&conn, root, "2024/photo.jpg", Some(obj1));
     insert_source(&conn, root, "2023/photo.jpg", Some(obj2));
 
-    let scopes = ScopeMatch::classify_all(&["/photos/2024".to_string()]);
+    let scopes = classify_all(&["/photos/2024".to_string()]);
     let plan = plan_set_objects(&mut conn, &make_set_objects_params(scopes)).unwrap();
 
     assert_eq!(plan.objects.len(), 1);

@@ -12,6 +12,7 @@ use crate::domain::scope::ScopeMatch;
 use crate::domain::source::Source;
 use crate::domain::IncludeSet;
 use crate::expr::filter::{self, Filter};
+use crate::ops::scope::classify_all;
 use crate::survey::domain::analysis::{
     classify_location, count_only_here, discover_scopes_by_root, find_unique_object_ids,
     LocationKind,
@@ -118,7 +119,7 @@ pub fn compute_survey(
     other_paths: &[String],
     archive_root_id: Option<i64>,
 ) -> Result<SurveyOutcome> {
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let scopes = classify_all(scope_prefixes);
 
     // Build selection from domain predicates (asymmetric visibility model)
     let selection: Vec<&Source> = all_sources

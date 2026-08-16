@@ -11,10 +11,9 @@ use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
-use crate::ops::scope::{resolve_path, validate_sources_exist};
+use crate::ops::scope::{classify_all, resolve_path, validate_sources_exist};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo;
 
@@ -125,7 +124,7 @@ fn select_and_build_map(
     filters: &[Filter],
     include: &IncludeSet,
 ) -> Result<ScopeContentMap> {
-    let scopes = ScopeMatch::classify_all(&[scope_prefix.to_string()]);
+    let scopes = classify_all(&[scope_prefix.to_string()]);
     let params = SelectionParams {
         scopes,
         include: include.clone(),

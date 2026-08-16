@@ -11,10 +11,10 @@ use crate::domain::config::{LedgerConfig, RecordingMode};
 use crate::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::domain::format::first_chars;
 use crate::domain::format_count;
-use crate::domain::scope::{DecisionScope, ScopeMatch};
+use crate::domain::scope::DecisionScope;
 use crate::expr::filter::Filter;
 use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
-use crate::ops::scope::resolve_archive_path;
+use crate::ops::scope::{classify_all, resolve_archive_path};
 use crate::repo::{self, Connection, Db};
 
 pub struct GenerateOptions {
@@ -66,7 +66,7 @@ pub fn generate(
         .collect::<Result<Vec<_>>>()?;
 
     // Plan
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let scopes = classify_all(scope_prefixes);
     let params = ClusterGenerateParams {
         scopes,
         filters: parsed_filters,
@@ -220,7 +220,7 @@ pub fn refresh(
         .collect::<Result<Vec<_>>>()?;
 
     // Plan
-    let scopes = ScopeMatch::classify_all(&scope_prefixes);
+    let scopes = classify_all(&scope_prefixes);
     let plan_params = ClusterGenerateParams {
         scopes,
         filters: parsed_filters,

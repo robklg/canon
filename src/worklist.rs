@@ -1,10 +1,10 @@
 use anyhow::Result;
 use std::io::{self, Write};
 
-use crate::domain::scope::ScopeMatch;
 use crate::domain::IncludeSet;
 use crate::expr::filter::Filter;
 use crate::ops;
+use crate::ops::scope::classify_all;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 use crate::repo::Db;
 
@@ -24,7 +24,7 @@ pub fn run(
 
     let conn = db.conn_mut();
 
-    let scopes = ScopeMatch::classify_all(scope_prefixes);
+    let scopes = classify_all(scope_prefixes);
 
     let params = SelectionParams {
         scopes,

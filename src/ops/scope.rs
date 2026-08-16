@@ -19,8 +19,28 @@ use std::path::{Path, PathBuf};
 use crate::domain;
 use crate::domain::path::{clean_path, path_strip_prefix, validate_paths_in_roots};
 use crate::domain::root::{find_containing_root, Root, RootSpec};
+use crate::domain::scope::ScopeMatch;
 use crate::ops::fs::canonicalize_maybe_missing;
 use crate::repo::{self, Connection};
+
+/// Classify a canonicalized path as file or directory scope.
+///
+/// Asks the filesystem whether the path names a file; anything else — a
+/// directory, or a path that no longer exists — is treated as a prefix. The
+/// look at the disk is why this composes here rather than on `ScopeMatch`
+/// itself, which stays free of I/O.
+pub fn classify(path: &str) -> ScopeMatch {
+    if Path::new(path).is_file() {
+        ScopeMatch::ExactFile(path.to_string())
+    } else {
+        ScopeMatch::UnderDirectory(path.to_string())
+    }
+}
+
+/// Classify multiple canonicalized paths.
+pub fn classify_all(paths: &[String]) -> Vec<ScopeMatch> {
+    paths.iter().map(|p| classify(p)).collect()
+}
 
 /// Result of resolving scope for a discovery command.
 #[derive(Debug)]
