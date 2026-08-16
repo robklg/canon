@@ -503,8 +503,9 @@ fn fate_counts(entries: &[BookEntry]) -> MetaCounts {
     counts
 }
 
-// TOML field order law: values (version, gaps) must precede the sub-tables,
-// or serialization fails — same constraint receipt meta lives under.
+// Values (version, gaps) are declared before the sub-tables so the struct reads
+// in the order meta.toml is written: TOML requires a table to follow every
+// scalar key of its parent, and the serializer arranges that on its own.
 #[derive(Serialize)]
 struct BookMeta<'a> {
     version: u32,

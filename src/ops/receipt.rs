@@ -157,9 +157,11 @@ pub struct ReceiptMeta {
     /// (Move|Rename). Omitted for every other receipt type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin_disposition: Option<String>,
-    /// The root this receipt is anchored to (the `[meta.locus]` table). MUST be
-    /// the last field: a TOML sub-table has to follow all scalar keys of its
-    /// parent table, so any scalar placed after this would fail to serialize.
+    /// The root this receipt is anchored to (the `[meta.locus]` table). Kept
+    /// last so the declaration reads in the order the file is written: a TOML
+    /// table has to follow every scalar key of its parent, and the serializer
+    /// reorders to satisfy that on its own — so a struct declared out of order
+    /// still writes correctly, it just no longer describes its own output.
     pub locus: ReceiptLocus,
 }
 
@@ -1029,7 +1031,7 @@ mod tests {
 
     /// Apply's meta states what/where, and the nested `[meta.locus]` table
     /// renders after all flat `[meta]` scalars and before `[[items]]` — the
-    /// serialization invariant that forces `locus` to be the last struct field.
+    /// layout a reader of a receipt on disk can count on.
     #[test]
     fn apply_meta_serializes_what_where_and_orders_locus_last() {
         let out = toml::to_string_pretty(&make_apply_receipt()).unwrap();
@@ -1042,8 +1044,8 @@ mod tests {
         assert!(locus.contains("id = 7"));
 
         // Ordering: a flat scalar precedes the sub-table, which precedes the
-        // items array. A scalar emitted after a sub-table would fail to
-        // serialize outright — this documents the intent the type enforces.
+        // items array. TOML requires it and the serializer arranges it, so this
+        // pins the shape of what lands on disk rather than the field order.
         let command_at = out.find("command =").unwrap();
         let locus_at = out.find("[meta.locus]").unwrap();
         let items_at = out.find("[[items]]").unwrap();
