@@ -549,7 +549,7 @@ fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{insert_object, insert_root, insert_source, setup_test_db};
+    use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
 
     // =========================================================================
     // try_parse_datetime
@@ -902,7 +902,7 @@ mod tests {
         let root = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "hash1", false);
         let src = insert_source(&conn, root, "photo.jpg", Some(obj));
-        crate::ops::test_helpers::insert_fact(&conn, src, "content.Make", "Canon");
+        crate::core::testing::insert_fact(&conn, src, "content.Make", "Canon");
 
         let promoted = promote_content_facts(&conn, src, obj).unwrap();
 
@@ -920,7 +920,7 @@ mod tests {
         let root = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "hash1", false);
         let src = insert_source(&conn, root, "photo.jpg", Some(obj));
-        crate::ops::test_helpers::insert_fact(&conn, src, "content.Make", "Nikon");
+        crate::core::testing::insert_fact(&conn, src, "content.Make", "Nikon");
         facts_repo::insert_object_fact(&conn, obj, "content.Make", Some("Canon"), None, None, 0)
             .unwrap();
 

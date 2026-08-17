@@ -257,7 +257,7 @@ pub fn compute_manifest_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{
+    use crate::core::testing::{
         insert_object, insert_root, insert_source_with_size, setup_test_db,
     };
 

@@ -327,7 +327,7 @@ pub fn survey_note_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{insert_note, insert_root, setup_test_db};
+    use crate::core::testing::{insert_note, insert_root, setup_test_db};
 
     #[test]
     fn view_notes_with_spatial_indicators() {

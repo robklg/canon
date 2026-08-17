@@ -314,7 +314,7 @@ pub fn reindex_extractions(conn: &Connection, params: &ReindexParams) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{insert_root, setup_test_db};
+    use crate::core::testing::{insert_root, setup_test_db};
 
     fn latest_decision_id(conn: &Connection) -> i64 {
         conn.query_row(

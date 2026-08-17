@@ -3,12 +3,12 @@ use crate::core::domain::decision::DecisionCommand;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
 use crate::core::repo::Connection;
-use crate::exclude::ops::receipt::ExcludeReceipt;
-use crate::exclude::repo as exclude_repo;
-use crate::ops::test_helpers::{
+use crate::core::testing::{
     insert_object, insert_root, insert_source, insert_source_excluded, is_object_excluded,
     is_source_excluded, setup_test_db,
 };
+use crate::exclude::ops::receipt::ExcludeReceipt;
+use crate::exclude::repo as exclude_repo;
 use tempfile::{tempdir, TempDir};
 
 use crate::exclude::ops::execute::{

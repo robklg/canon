@@ -1,11 +1,11 @@
+use crate::core::testing::{
+    insert_object, insert_root, insert_source, insert_source_excluded, insert_source_with_size,
+    setup_test_db,
+};
 use crate::exclude::ops::single::{
     check_clear_object, check_set_object_by_file, check_set_object_by_hash, check_set_source_by_id,
     check_set_source_by_path, execute_clear_object, execute_set_object, fetch_object_sources,
     list_excluded_objects, ObjectClearCheck, ObjectExclusionCheck, SourceExclusionCheck,
-};
-use crate::ops::test_helpers::{
-    insert_object, insert_root, insert_source, insert_source_excluded, insert_source_with_size,
-    setup_test_db,
 };
 
 // =========================================================================

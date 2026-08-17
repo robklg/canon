@@ -6,7 +6,7 @@
 
 use std::io::Write;
 
-pub use crate::core::ops::scope::ResolvedScope;
+use crate::core::ops::scope::ResolvedScope;
 
 /// Print scope header for report commands (stdout).
 ///

@@ -182,11 +182,11 @@ fn subject_locations(entry: &LeaderboardEntry) -> Vec<&Location> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::notes::insert;
-    use crate::ops::test_helpers::{
+    use crate::core::testing::{
         insert_object, insert_root, insert_source, insert_source_excluded, insert_source_with_size,
         setup_test_db,
     };
+    use crate::notes::insert;
     use crate::sweep::domain::structural::FindingNature;
 
     /// Two roots with one 20 MB duplicated folder (`big` ↔ `q`) and unique

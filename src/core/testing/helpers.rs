@@ -1,7 +1,6 @@
-//! Shared test helpers for ops layer tests.
-//!
-//! Consolidates duplicated insert/setup helpers that were independently
-//! maintained in each ops module's test section.
+//! The insert/setup helpers themselves. Consolidates fixtures that were
+//! once independently maintained in each module's test section, so a schema
+//! change lands in one place.
 
 use crate::core::repo::Connection;
 
@@ -79,9 +78,11 @@ pub fn insert_source_with_metadata(
     )
 }
 
-/// Full-control source insertion with all parameters.
+/// Full-control source insertion with all parameters. Private: the named
+/// helpers above are the surface, and each one exists because some test
+/// needed exactly that combination.
 #[allow(clippy::too_many_arguments)]
-pub fn insert_source_full(
+fn insert_source_full(
     conn: &Connection,
     root_id: i64,
     rel_path: &str,

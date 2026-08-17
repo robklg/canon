@@ -580,7 +580,7 @@ fn is_root_grouping_key(key: &ParsedFactKey) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{insert_object, insert_root, insert_source, setup_test_db};
+    use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
 
     /// Insert a source fact with a time value.
     fn insert_time_fact(conn: &Connection, source_id: i64, key: &str, timestamp: i64) {
@@ -605,7 +605,7 @@ mod tests {
         let s2 = insert_source(&conn, root_id, "b.jpg", Some(obj_id));
 
         // Add a stored fact for one source
-        crate::ops::test_helpers::insert_fact(&conn, s1, "content.Make", "Canon");
+        crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
 
         let result = compute_all_keys(&mut conn, &[s1, s2], false).unwrap();
 
@@ -641,9 +641,9 @@ mod tests {
         let s2 = insert_source(&conn, root_id, "b.jpg", Some(obj2));
         let s3 = insert_source(&conn, root_id, "c.jpg", Some(obj3));
 
-        crate::ops::test_helpers::insert_fact(&conn, s1, "content.Make", "Canon");
-        crate::ops::test_helpers::insert_fact(&conn, s2, "content.Make", "Canon");
-        crate::ops::test_helpers::insert_fact(&conn, s3, "content.Make", "Nikon");
+        crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
+        crate::core::testing::insert_fact(&conn, s2, "content.Make", "Canon");
+        crate::core::testing::insert_fact(&conn, s3, "content.Make", "Nikon");
 
         let key = ParsedFactKey::parse("content.Make").unwrap();
         let result = compute_distribution(&mut conn, &[s1, s2, s3], &key, 0).unwrap();
@@ -671,10 +671,10 @@ mod tests {
         let s3 = insert_source(&conn, root_id, "c.jpg", Some(obj3));
         let s4 = insert_source(&conn, root_id, "d.jpg", Some(obj4));
 
-        crate::ops::test_helpers::insert_fact(&conn, s1, "content.Make", "Canon");
-        crate::ops::test_helpers::insert_fact(&conn, s2, "content.Make", "Nikon");
-        crate::ops::test_helpers::insert_fact(&conn, s3, "content.Make", "Sony");
-        crate::ops::test_helpers::insert_fact(&conn, s4, "content.Make", "Canon");
+        crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
+        crate::core::testing::insert_fact(&conn, s2, "content.Make", "Nikon");
+        crate::core::testing::insert_fact(&conn, s3, "content.Make", "Sony");
+        crate::core::testing::insert_fact(&conn, s4, "content.Make", "Canon");
 
         let key = ParsedFactKey::parse("content.Make").unwrap();
         let result = compute_distribution(&mut conn, &[s1, s2, s3, s4], &key, 2).unwrap();
@@ -695,7 +695,7 @@ mod tests {
 
         // Insert sources with different sizes via insert_source_with_size
         // 500 bytes (< 1 KB), 500KB (1 KB - 1 MB), 5MB (1 MB - 10 MB)
-        use crate::ops::test_helpers::insert_source_with_size;
+        use crate::core::testing::insert_source_with_size;
         let s1 = insert_source_with_size(&conn, root_id, "tiny.txt", Some(obj1), 500);
         let s2 = insert_source_with_size(&conn, root_id, "medium.jpg", Some(obj2), 512_000);
         let s3 = insert_source_with_size(&conn, root_id, "large.raw", Some(obj3), 5_242_880);
@@ -720,7 +720,7 @@ mod tests {
         let obj3 = insert_object(&conn, "h3", false);
 
         // 2023-06-15, 2024-01-01, 2024-07-01
-        use crate::ops::test_helpers::insert_source_with_metadata;
+        use crate::core::testing::insert_source_with_metadata;
         let s1 = insert_source_with_metadata(&conn, root_id, "a.jpg", Some(obj1), 1000, 1686830400);
         let s2 = insert_source_with_metadata(&conn, root_id, "b.jpg", Some(obj2), 1000, 1704067200);
         let s3 = insert_source_with_metadata(&conn, root_id, "c.jpg", Some(obj3), 1000, 1719792000);
@@ -812,7 +812,7 @@ mod tests {
         let s2 = insert_source(&conn, root_id, "b.jpg", Some(obj2));
 
         // Only s1 has the main key value
-        crate::ops::test_helpers::insert_fact(&conn, s1, "content.Make", "Canon");
+        crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
 
         let main_key = ParsedFactKey::parse("content.Make").unwrap();
         let group_key = ParsedFactKey::parse("source.root").unwrap();

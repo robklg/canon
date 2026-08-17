@@ -196,7 +196,7 @@ pub fn compute_per_root(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{insert_object, insert_root, insert_source, setup_test_db};
+    use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
 
     /// Test that archived counts sources, not unique objects.
     /// Guards against the Object Infrastructure bug pattern where
@@ -239,7 +239,7 @@ mod tests {
         // neither archived nor waiting to be — a fully-covered root with
         // empties reads 100%, and the unarchived remainder never hides
         // them.
-        use crate::ops::test_helpers::insert_source_with_size;
+        use crate::core::testing::insert_source_with_size;
         let mut conn = setup_test_db();
         let source_root = insert_root(&conn, "/photos", "source", false);
         let archive_root = insert_root(&conn, "/archive", "archive", false);
@@ -279,7 +279,7 @@ mod tests {
 
         insert_source(&conn, root, "included.jpg", Some(obj));
 
-        use crate::ops::test_helpers::insert_source_excluded;
+        use crate::core::testing::insert_source_excluded;
         let excl_obj = insert_object(&conn, "hash2", false);
         insert_source_excluded(&conn, root, "excluded.jpg", Some(excl_obj));
 

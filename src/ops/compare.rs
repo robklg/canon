@@ -168,7 +168,7 @@ fn select_and_build_map(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::*;
+    use crate::core::testing::*;
 
     fn setup() -> Connection {
         setup_test_db()

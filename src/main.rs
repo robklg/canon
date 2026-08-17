@@ -83,6 +83,12 @@ mod sweep;
 mod trail;
 mod worklist;
 
+// The contentless law's canary. It sits at the crate root because it reads
+// across every surface that consumes content identity, belonging to no one
+// of them.
+#[cfg(test)]
+mod contentless_law_tests;
+
 #[derive(Parser)]
 #[command(name = "canon")]
 #[command(about = "Organize large media libraries into a canonical archive")]

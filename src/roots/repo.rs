@@ -358,8 +358,8 @@ pub(crate) mod note {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::core::testing::{insert_note, insert_root, setup_test_db};
         use crate::notes::fetch_all;
-        use crate::ops::test_helpers::{insert_note, insert_root, setup_test_db};
 
         #[test]
         fn delete_by_root_removes_all_notes() {

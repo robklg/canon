@@ -475,7 +475,7 @@ pub fn batch_count_subtree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{insert_note, insert_root, setup_test_db};
+    use crate::core::testing::{insert_note, insert_root, setup_test_db};
 
     // =========================================================================
     // insert tests

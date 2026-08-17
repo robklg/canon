@@ -815,7 +815,7 @@ fn inject_comments_before_key(toml_str: &str, key: &str, comments: &[String]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{
+    use crate::core::testing::{
         insert_fact, insert_object, insert_root, insert_source, insert_source_excluded,
         setup_test_db,
     };

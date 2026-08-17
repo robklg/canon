@@ -103,7 +103,7 @@ pub fn find_duplicate_groups(conn: &Connection, source_ids: &[i64]) -> Result<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{insert_object, insert_root, insert_source, setup_test_db};
+    use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
 
     #[test]
     fn find_duplicates_groups_by_object() {

@@ -1,11 +1,11 @@
 use rusqlite::Connection;
 
 use crate::core::domain::IncludeSet;
-use crate::expr::filter::Filter;
-use crate::ops::test_helpers::{
+use crate::core::testing::{
     insert_object, insert_root, insert_source, insert_source_excluded, insert_source_with_size,
     setup_test_db,
 };
+use crate::expr::filter::Filter;
 use crate::survey::domain::analysis::LocationKind;
 use crate::survey::ops::compute::{compute_survey, SurveyOutcome, SurveyParams};
 

@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use crate::archive::{plan_generate, ClusterGenerateParams};
 use crate::core::domain::resolution::{classify_present, StandingBucket};
 use crate::core::repo;
-use crate::ops::test_helpers::*;
+use crate::core::testing::*;
 use crate::survey::ObjectIndex;
 
 struct Canary {

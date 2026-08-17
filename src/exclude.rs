@@ -17,7 +17,7 @@ pub use cli::{
 };
 
 // These three have no production caller — the contentless-law canary
-// (ops/contentless_law_tests.rs) is the only consumer, reaching them
+// (contentless_law_tests.rs) is the only consumer, reaching them
 // through the barrel like trail.rs/survey.rs's own test-only re-exports.
 #[allow(unused_imports)]
 pub use ops::plan::plan_set_objects;

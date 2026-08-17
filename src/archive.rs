@@ -17,7 +17,7 @@ pub use cli::cluster::{generate, refresh, status, GenerateOptions};
 pub use ops::execute::TransferMode;
 
 // These two have no production caller — the contentless-law canary
-// (ops/contentless_law_tests.rs) is the only consumer, reaching them
+// (contentless_law_tests.rs) is the only consumer, reaching them
 // through the barrel like the other subsystems' test-only re-exports.
 #[allow(unused_imports)]
 pub use ops::generate::{plan_generate, ClusterGenerateParams};

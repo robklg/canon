@@ -44,7 +44,7 @@ mod tests {
     use crate::core::ops::ledger::{reindex_extractions, ReindexParams};
     use crate::core::ops::receipt::{write_receipt, ReceiptLocus, ReceiptPlacement};
     use crate::core::repo::{self, Connection};
-    use crate::ops::test_helpers::{insert_root, setup_test_db};
+    use crate::core::testing::{insert_root, setup_test_db};
     use std::io::Write;
     use std::path::Path;
     use tempfile::tempdir;

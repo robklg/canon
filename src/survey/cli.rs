@@ -340,7 +340,7 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::core::repo::open_in_memory_for_test;
-    use crate::ops::test_helpers::{insert_object, insert_root, insert_source};
+    use crate::core::testing::{insert_object, insert_root, insert_source};
 
     fn test_options() -> SurveyOptions {
         SurveyOptions {

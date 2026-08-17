@@ -372,7 +372,7 @@ pub fn validate_sources_exist(conn: &Connection, paths: &[String], roots: &[Root
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{insert_root, insert_source, setup_test_db};
+    use crate::core::testing::{insert_root, insert_source, setup_test_db};
 
     fn make_test_root(id: i64, path: &str, role: &str) -> Root {
         Root {

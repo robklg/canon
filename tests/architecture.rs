@@ -27,7 +27,23 @@ enum Layer {
     Ops,
     Expr,
     Interface,
+    /// Test scaffolding and the cross-surface canaries. Exempt from the four
+    /// stratum rules, like `Expr`: a fixture builds a database by writing
+    /// rows, and a canary reads across every surface it guards, so those
+    /// rules would only ever mistake test setup for production data movement.
+    ///
+    /// The exemption stops there. Layer is orthogonal to home, so a file
+    /// here still answers to the boundary rules — a fixture in `core/` may
+    /// no more reach a subsystem than any other core file, which is the one
+    /// rule core exists to prove. Membership is spelled out one path at a
+    /// time in `classify_layer`: a new testing home is a deliberate edit
+    /// here, never something a directory name grants itself.
+    Testing,
 }
+
+/// Paths that classify as `Layer::Testing`: the shared fixtures, and the
+/// contentless law's canary at the crate root.
+const TESTING_PATHS: &[&str] = &["core/testing/", "contentless_law_tests.rs"];
 
 /// Old-tree stratum directory names — excluded when discovering subsystem
 /// directories (a subsystem is any top-level `src/` directory that isn't one
@@ -43,6 +59,12 @@ const OLD_LAYER_DIRS: &[&str] = &["ops", "expr"];
 const STRATUM_FRONT_DOORS: &[&str] = &["domain", "repo", "ops", "cli"];
 
 fn classify_layer(rel_path: &str) -> Layer {
+    if TESTING_PATHS
+        .iter()
+        .any(|p| rel_path == *p || rel_path.starts_with(p))
+    {
+        return Layer::Testing;
+    }
     if let Some(rest) = rel_path.strip_prefix("core/") {
         return classify_subsystem_stratum(rest);
     }
@@ -358,36 +380,6 @@ const TIER3: &[Tier3Entry] = &[
         reference: "core::repo::insert_test_root",
         severity: Severity::TestOnly,
     },
-    Tier3Entry {
-        file: "notes/repo.rs",
-        reference: "crate::ops::test_helpers::insert_note",
-        severity: Severity::TestOnly,
-    },
-    Tier3Entry {
-        file: "notes/repo.rs",
-        reference: "crate::ops::test_helpers::insert_root",
-        severity: Severity::TestOnly,
-    },
-    Tier3Entry {
-        file: "notes/repo.rs",
-        reference: "crate::ops::test_helpers::setup_test_db",
-        severity: Severity::TestOnly,
-    },
-    Tier3Entry {
-        file: "roots/repo.rs",
-        reference: "crate::ops::test_helpers::insert_note",
-        severity: Severity::TestOnly,
-    },
-    Tier3Entry {
-        file: "roots/repo.rs",
-        reference: "crate::ops::test_helpers::insert_root",
-        severity: Severity::TestOnly,
-    },
-    Tier3Entry {
-        file: "roots/repo.rs",
-        reference: "crate::ops::test_helpers::setup_test_db",
-        severity: Severity::TestOnly,
-    },
 ];
 
 // ============================================================================
@@ -465,7 +457,7 @@ fn classify_reference(
                 return Some((Rule::RepoNoOps, raw_path.to_string()));
             }
         }
-        Layer::Ops | Layer::Expr => {}
+        Layer::Ops | Layer::Expr | Layer::Testing => {}
         Layer::Interface => {
             if let Some(reference) = match_repo(no_crate) {
                 return Some((Rule::InterfaceRepoDataMovement, reference));
@@ -1679,6 +1671,102 @@ mod self_tests {
         // A bare `repo.rs` (no `repo/` directory) classifies as Repo, same as
         // the single-file `domain.rs`/`ops.rs` pattern above.
         assert_eq!(classify_layer("trail/repo.rs"), Layer::Repo);
+    }
+
+    #[test]
+    fn the_fixtures_and_the_canary_classify_as_testing() {
+        assert_eq!(classify_layer("core/testing/mod.rs"), Layer::Testing);
+        assert_eq!(classify_layer("core/testing/helpers.rs"), Layer::Testing);
+        assert_eq!(classify_layer("contentless_law_tests.rs"), Layer::Testing);
+    }
+
+    #[test]
+    fn testing_files_raise_no_rule_for_the_reaches_they_make() {
+        // What the canary actually does: batch reads through repo (data
+        // movement anywhere else in the interface layer) and calls into
+        // the subsystems whose surfaces it guards.
+        let text = "\
+use crate::core::repo;
+use crate::survey::ObjectIndex;
+fn c() {
+    let _ = crate::core::repo::source::batch_fetch_by_roots(&conn, &ids);
+    let _ = crate::exclude::plan_set_objects(&conn);
+}
+";
+        let subsystems = vec!["survey".to_string(), "exclude".to_string()];
+        let violations = scan_file(
+            Layer::Testing,
+            &Home::OldTree,
+            "contentless_law_tests.rs",
+            text,
+            &[],
+            &subsystems,
+        )
+        .unwrap();
+        assert!(violations.is_empty(), "{violations:?}");
+
+        // And what the fixtures do: open a database and write rows.
+        let fixture = "\
+use crate::core::repo::Connection;
+fn s() -> Connection {
+    crate::core::repo::db::open_in_memory_for_test()
+}
+";
+        let violations = scan_file(
+            Layer::Testing,
+            &Home::Core,
+            "core/testing/helpers.rs",
+            fixture,
+            &[],
+            &subsystems,
+        )
+        .unwrap();
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// Control for the two above: the testing layer is spelled path by path,
+    /// so nothing else may drift into it. Were `classify_layer` to hand out
+    /// `Testing` broadly, the four stratum rules would go quiet across the
+    /// whole tree. Two other guards would catch that too — the stratum
+    /// control below, and the drift baselines, which match both directions
+    /// and so redden on entries left unmatched — but this is the one that
+    /// names the cause.
+    #[test]
+    fn the_testing_layer_claims_nothing_beyond_its_own_paths() {
+        assert_eq!(classify_layer("core/ops/receipt.rs"), Layer::Ops);
+        assert_eq!(classify_layer("core/repo/source.rs"), Layer::Repo);
+        assert_eq!(classify_layer("core/domain/fate.rs"), Layer::Domain);
+        assert_eq!(classify_layer("archive/ops/receipt.rs"), Layer::Ops);
+        assert_eq!(classify_layer("main.rs"), Layer::Interface);
+        // Not a prefix match on a bare name: a subsystem file whose path
+        // merely starts the same way stays where it was.
+        assert_eq!(classify_layer("core/testing.rs"), Layer::Interface);
+    }
+
+    /// The exemption is from the stratum rules only. A fixture living in
+    /// core is still core, and the hub may not depend on a spoke through
+    /// its test scaffolding any more than through its production code —
+    /// the one rule core exists to prove, which would otherwise hold here
+    /// only by reading the classifier.
+    #[test]
+    fn a_testing_file_in_core_still_may_not_reach_a_subsystem() {
+        let text = "use crate::survey::ObjectIndex;\n";
+        let subsystems = vec!["survey".to_string()];
+        let violations = scan_file(
+            Layer::Testing,
+            &Home::Core,
+            "core/testing/helpers.rs",
+            text,
+            &[],
+            &subsystems,
+        )
+        .unwrap();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == Rule::CoreReferencesSubsystem),
+            "{violations:?}"
+        );
     }
 
     #[test]

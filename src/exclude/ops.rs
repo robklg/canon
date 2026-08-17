@@ -11,7 +11,7 @@
 //! transaction site; `single` holds the single-target check/execute pairs.
 //
 // pub(super): `exclude::cli` reaches these strata directly; the
-// contentless-law canary (`ops/contentless_law_tests.rs`) reaches the three
+// contentless-law canary (`contentless_law_tests.rs`) reaches the three
 // it needs through the barrel's re-exports instead.
 pub(super) mod execute;
 pub(super) mod plan;

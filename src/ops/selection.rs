@@ -135,7 +135,7 @@ pub fn select_sources(conn: &mut Connection, params: &SelectionParams) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{
+    use crate::core::testing::{
         insert_object, insert_root, insert_source, insert_source_excluded, insert_source_with_size,
         setup_test_db,
     };

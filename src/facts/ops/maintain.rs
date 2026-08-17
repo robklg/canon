@@ -314,7 +314,7 @@ pub fn execute_prune_excluded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{insert_object, insert_root, insert_source, setup_test_db};
+    use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
 
     #[test]
     fn test_validate_delete_key_protected() {
@@ -337,8 +337,8 @@ mod tests {
         let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj1));
         let s2 = insert_source(&conn, root_id, "b.jpg", Some(obj2));
 
-        crate::ops::test_helpers::insert_fact(&conn, s1, "content.Make", "Canon");
-        crate::ops::test_helpers::insert_fact(&conn, s2, "content.Make", "Nikon");
+        crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
+        crate::core::testing::insert_fact(&conn, s2, "content.Make", "Nikon");
 
         let plan = plan_delete(&mut conn, &[s1, s2], "content.Make", "source", None).unwrap();
 
@@ -410,7 +410,7 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "h1", false);
         let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj));
-        crate::ops::test_helpers::insert_fact(&conn, s1, "content.Make", "Canon");
+        crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
 
         let plan = plan_delete(&mut conn, &[s1], "content.Make", "source", None).unwrap();
         let decision =
@@ -495,7 +495,7 @@ mod tests {
         let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj));
         conn.execute("UPDATE sources SET excluded = 1 WHERE id = ?1", [s1])
             .unwrap();
-        crate::ops::test_helpers::insert_fact(&conn, s1, "content.Make", "Canon");
+        crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
 
         assert_eq!(plan_prune_excluded(&conn, "all").unwrap().total_count(), 1);
 

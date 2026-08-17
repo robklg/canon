@@ -758,7 +758,7 @@ fn classify_resume_entries<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{
+    use crate::core::testing::{
         insert_fact, insert_object, insert_root, insert_source_excluded,
         insert_source_with_metadata, setup_test_db,
     };

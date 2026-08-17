@@ -1,9 +1,9 @@
 use crate::core::ops::scope::classify_all;
-use crate::exclude::ops::plan::{plan_clear, plan_duplicates, plan_set, plan_set_objects};
-use crate::ops::test_helpers::{
+use crate::core::testing::{
     insert_object, insert_root, insert_source, insert_source_excluded, insert_source_with_size,
     setup_test_db,
 };
+use crate::exclude::ops::plan::{plan_clear, plan_duplicates, plan_set, plan_set_objects};
 
 use super::fixtures::{
     make_clear_params, make_duplicates_params, make_set_objects_params, make_set_params,

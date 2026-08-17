@@ -823,7 +823,7 @@ fn build_new_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::test_helpers::{insert_object, insert_root, setup_test_db};
+    use crate::core::testing::{insert_object, insert_root, setup_test_db};
 
     use super::super::plan::ApplyViolations;
 

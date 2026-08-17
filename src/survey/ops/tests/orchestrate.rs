@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 
-use crate::ops::test_helpers::{
-    insert_note, insert_object, insert_root, insert_source, setup_test_db,
-};
+use crate::core::testing::{insert_note, insert_object, insert_root, insert_source, setup_test_db};
 use crate::survey::ops::compute::SurveyOutcome;
 use crate::survey::ops::orchestrate::{run_survey, SurveyOrchestration};
 
