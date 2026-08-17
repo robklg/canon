@@ -6,16 +6,16 @@ use walkdir::WalkDir;
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::scope::DecisionScope;
+use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
+use crate::core::ops::scope::resolve_root_path_any;
 use crate::core::repo::{self, Connection, Db};
-use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
-use crate::ops::receipt::DeletionReceiptItem;
-use crate::ops::scope::resolve_root_path_any;
 use crate::progress::Progress;
 use crate::scan::ops::hash::HashProgress;
 use crate::scan::ops::pipeline::{mark_missing_path, scan_root};
 use crate::scan::ops::receipt::write_deletion_receipts;
 use crate::scan::ops::types::{
-    current_timestamp, FileAction, FileToHash, ScanOptions, ScanProgress, ScanStats,
+    current_timestamp, DeletionReceiptItem, FileAction, FileToHash, ScanOptions, ScanProgress,
+    ScanStats,
 };
 use crate::scan::ops::{candidates::find_root_candidates, hash::hash_files};
 

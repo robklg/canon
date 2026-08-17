@@ -7,16 +7,14 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::core::domain::format_count;
+use crate::core::ops::decision::DecisionParams;
+use crate::core::ops::receipt::{ReceiptKind, ReceiptPlacement};
 use crate::core::repo::Connection;
 use crate::exclude::repo as exclude_repo;
-use crate::ops::decision::DecisionParams;
-use crate::ops::receipt::{
-    DuplicatesReceipt, ExcludeReceipt, ObjectExcludeEntry, ObjectExcludeReceipt, ReceiptKind,
-    ReceiptPlacement,
-};
 
 use super::receipt::{
     counts_all, duplicate_receipt_groups, exclude_receipt_items, object_stamp_set_entries,
+    DuplicatesReceipt, ExcludeReceipt, ObjectExcludeEntry, ObjectExcludeReceipt,
 };
 use super::runner::run_exclusion;
 use super::types::{

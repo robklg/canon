@@ -1,14 +1,14 @@
 //! ledger command — maintain the extraction ledger index.
 //!
-//! Interface layer only: parse args, call ops::ledger, format the coverage
+//! Interface layer only: parse args, call core::ops::ledger, format the coverage
 //! report. `canon ledger reindex` is a maintenance command, not a content
 //! decision — it writes no decision row; its printed report is its record.
 
 use anyhow::Result;
 
 use crate::core::domain::format::format_count;
+use crate::core::ops::ledger::{reindex_extractions, ReindexParams, ReindexResult};
 use crate::core::repo::Db;
-use crate::ops::ledger::{reindex_extractions, ReindexParams, ReindexResult};
 
 pub fn run_reindex(db: &mut Db, dry_run: bool) -> Result<()> {
     let result = reindex_extractions(db.conn(), &ReindexParams { dry_run })?;

@@ -11,8 +11,8 @@ use crate::core::domain;
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
 use crate::core::domain::IncludeSet;
+use crate::core::ops::scope::classify_all;
 use crate::expr::filter::{self, Filter};
-use crate::ops::scope::classify_all;
 use crate::survey::domain::analysis::{
     classify_location, count_only_here, discover_scopes_by_root, find_unique_object_ids,
     LocationKind,

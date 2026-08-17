@@ -7,6 +7,9 @@ use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::path::validate_paths_in_roots;
 use crate::core::domain::root::find_containing_root;
 use crate::core::domain::scope::DecisionScope;
+use crate::core::ops::decision::DecisionParams;
+use crate::core::ops::receipt::{resolve_ledger_root, ReceiptPlacement};
+use crate::core::ops::scope::{classify_all, resolve_path};
 use crate::core::repo::{Connection, Db};
 use crate::exclude::ops::execute::{
     execute_clear, execute_duplicates, execute_set, execute_set_objects,
@@ -22,9 +25,6 @@ use crate::exclude::ops::types::{
     ObjectSourceInfo,
 };
 use crate::expr::filter::Filter;
-use crate::ops::decision::DecisionParams;
-use crate::ops::receipt::{resolve_ledger_root, ReceiptPlacement};
-use crate::ops::scope::{classify_all, resolve_path};
 
 /// Build the decision params, decomposing the given canonical scope prefixes to
 /// their roots (the one funnel). Pass an empty slice for a global decision. A
@@ -373,10 +373,10 @@ pub fn exclude_duplicates(
         vec![]
     };
     validate_paths_in_roots(&scope_prefixes, &all_roots)?;
-    crate::ops::scope::validate_sources_exist(conn, &scope_prefixes, &all_roots)?;
+    crate::core::ops::scope::validate_sources_exist(conn, &scope_prefixes, &all_roots)?;
     let prefer_prefix = resolve_path(prefer_path, &all_roots, &cwd)?;
     validate_paths_in_roots(std::slice::from_ref(&prefer_prefix), &all_roots)?;
-    crate::ops::scope::validate_sources_exist(
+    crate::core::ops::scope::validate_sources_exist(
         conn,
         std::slice::from_ref(&prefer_prefix),
         &all_roots,

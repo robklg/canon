@@ -6,8 +6,8 @@ use crate::ceremony;
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::format::{format_date, format_size, format_time_ago};
 use crate::core::domain::format_count;
+use crate::core::ops::scope::parse_root_spec_any;
 use crate::core::repo::{self, Db};
-use crate::ops::scope::parse_root_spec_any;
 use crate::retire::domain::Readiness;
 use crate::story::StoryParams;
 

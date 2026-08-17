@@ -10,9 +10,8 @@ use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
+use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::core::ops::root_story::RootStory;
-use crate::ops;
-use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::retire::domain::book_dir_name;
 use crate::retire::ops::frame::{self, TellingArtifact};
 use crate::story::StoryParams;
@@ -51,7 +50,7 @@ pub struct BindPlan {
 /// identified refuses the ceremony.
 pub fn plan_bind(story: &RootStory, config: &LedgerConfig, now: i64) -> Result<BindPlan> {
     let (ledger_root_id, ledger_root_path) =
-        ops::receipt::resolve_ledger_root(&story.roots, config).ok_or_else(|| {
+        crate::core::ops::receipt::resolve_ledger_root(&story.roots, config).ok_or_else(|| {
             anyhow::anyhow!(
             "Retirement needs an archive root to hold the record — no archive root is registered"
         )

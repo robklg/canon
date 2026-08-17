@@ -7,12 +7,7 @@
 
 pub mod compare;
 pub mod coverage;
-pub mod decision;
-pub mod fs;
-pub mod ledger;
 pub mod ls;
-pub mod receipt;
-pub mod scope;
 pub mod selection;
 pub mod worklist;
 

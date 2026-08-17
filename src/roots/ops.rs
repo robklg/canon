@@ -3,9 +3,9 @@ use rusqlite::Connection;
 
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::format_count;
+use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::core::repo;
 use crate::notes::count_subtree_notes;
-use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::roots::repo as roots_repo;
 
 // =============================================================================

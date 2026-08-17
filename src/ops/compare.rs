@@ -12,9 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::core::domain::IncludeSet;
+use crate::core::ops::scope::{classify_all, resolve_path, validate_sources_exist};
 use crate::core::repo;
 use crate::expr::filter::Filter;
-use crate::ops::scope::{classify_all, resolve_path, validate_sources_exist};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 
 /// Result of comparing two locations by content.

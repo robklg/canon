@@ -10,7 +10,7 @@ use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::core::domain::fate::{fate_transition, DecisionFamily, FateAspect};
 use crate::core::domain::format::{cap_path, format_count, format_size};
 use crate::core::domain::root::Root;
-use crate::ops::scope::ResolvedScope;
+use crate::core::ops::scope::ResolvedScope;
 use crate::trail::domain::composition::{CompositionCard, OriginLine, TransitionedLine};
 use crate::trail::domain::placement::{aggregate_placement_lines, RowAspect};
 use crate::trail::domain::timeline::{DayRollup, FateLine, TimelineEvent};

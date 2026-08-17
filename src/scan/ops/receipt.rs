@@ -7,9 +7,11 @@
 use std::collections::HashMap;
 
 use crate::core::domain::decision::DecisionStatus;
+use crate::core::ops::decision::{DecisionParams, DecisionRecorder};
+use crate::core::ops::receipt::{ReceiptKind, ReceiptPlacement};
 use crate::core::repo::{self, Connection};
-use crate::ops::decision::{DecisionParams, DecisionRecorder};
-use crate::ops::receipt::{DeletionReceipt, DeletionReceiptItem, ReceiptKind, ReceiptPlacement};
+
+use super::types::{DeletionReceipt, DeletionReceiptItem};
 
 /// Merge deletion entries that share a root so each root yields one receipt.
 /// Items are concatenated in the order roots were first seen and re-sorted by
@@ -117,7 +119,7 @@ mod tests {
 
     use crate::core::domain::config::{LedgerConfig, RecordingMode};
     use crate::core::domain::decision::DecisionCommand;
-    use crate::ops::decision::DecisionCounts;
+    use crate::core::ops::decision::DecisionCounts;
 
     fn scan_params(recording: RecordingMode, no_receipt: bool) -> DecisionParams {
         DecisionParams {

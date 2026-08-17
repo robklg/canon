@@ -2,7 +2,7 @@
 //!
 //! Pure path manipulation only — no I/O. Soft-match-then-fallback resolution
 //! against known roots (whose fallback branch touches the filesystem) lives
-//! in `ops::scope`.
+//! in `core::ops::scope`.
 //!
 //! No database dependencies.
 
@@ -77,7 +77,7 @@ pub fn clean_path(path: &Path, cwd: &Path) -> PathBuf {
 /// Resolve a single path against known roots (pure, offline — no filesystem
 /// access). Returns `None` when the (lexically cleaned) path doesn't match
 /// any known root; a filesystem fallback for unmatched paths lives in
-/// `ops::scope::resolve_path`.
+/// `core::ops::scope::resolve_path`.
 pub fn resolve_path(path: &Path, roots: &[Root], cwd: &Path) -> Option<String> {
     let cleaned = clean_path(path, cwd);
     let cleaned_str = cleaned.to_string_lossy();

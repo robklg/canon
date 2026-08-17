@@ -18,7 +18,8 @@ use crate::core::domain::root::Root;
 use crate::core::domain::source::Source;
 use crate::core::repo;
 use crate::core::repo::decision::DecisionScopeRow;
-use crate::ops;
+
+use super::fs;
 
 /// The root's complete story, fetched once — the retirement ceremony's one
 /// structural substrate. The readiness review and the book compile are both
@@ -95,7 +96,7 @@ pub fn fetch_root_story(conn: &Connection, root_id: i64) -> Result<RootStory> {
         .map(|d| (d.id, decision_family(&d.command)))
         .collect();
 
-    let reachable = ops::fs::dir_exists(Path::new(&root.path));
+    let reachable = fs::dir_exists(Path::new(&root.path));
     let max_decision_id = decision_ids.last().copied();
     let first_indexed = repo::source::min_scanned_at_by_root(conn, root_id)?;
 

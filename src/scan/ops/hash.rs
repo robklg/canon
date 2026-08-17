@@ -55,7 +55,7 @@ pub fn hash_files(
         progress.on_hash(i, &file.full_path);
 
         // Compute full SHA256 hash
-        let hash_value = match crate::ops::fs::compute_full_hash(&file.full_path) {
+        let hash_value = match crate::core::ops::fs::compute_full_hash(&file.full_path) {
             Ok(h) => h,
             Err(e) => {
                 progress.on_hash_error(&file.full_path, &format!("{:#}", e));
@@ -184,7 +184,7 @@ mod tests {
         let conn = repo::open_in_memory_for_test();
         let temp = TempDir::new().unwrap();
         let (source_id, full_path) = hashable_source(&conn, &temp, "photo.jpg", "content");
-        let expected = crate::ops::fs::compute_full_hash(&full_path).unwrap();
+        let expected = crate::core::ops::fs::compute_full_hash(&full_path).unwrap();
         let progress = RecordingHashProgress::default();
 
         let stats = hash_files(

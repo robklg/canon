@@ -1,17 +1,23 @@
 //! Planning an apply — what would move where, and what stands in the way.
 //!
 //! Destination paths are computed and every constraint checked before a single
-//! file is touched: two sources landing on the same path, content already in the
-//! archive, excluded or suspended sources, records that no longer match what is
-//! on disk. Failures are collected and reported together rather than stopping at
-//! the first, so one pass shows the whole picture.
+//! file is transferred: two sources landing on the same path, content already in
+//! the archive, excluded or suspended sources, records that no longer match what
+//! is on disk. Failures are collected and reported together rather than stopping
+//! at the first, so one pass shows the whole picture.
+//!
+//! Two functions here do touch the filesystem, and deliberately: the writability
+//! probe creates and removes a test file, and the parent-directory helper is
+//! called per transfer from the execute loop. Both are apply's alone and answer
+//! the same question the planning does — what stands in the way — so they sit
+//! here rather than in the filesystem layer every subsystem shares.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::archive::domain::LockEntry;
 use crate::core::domain::fact::FactEntry;
@@ -618,7 +624,7 @@ pub fn filter_by_roots<'a>(
 
     let mut root_ids = std::collections::HashSet::new();
     for spec in root_specs {
-        let id = crate::ops::scope::parse_root_spec(all_roots, spec, None)?;
+        let id = crate::core::ops::scope::parse_root_spec(all_roots, spec, None)?;
         root_ids.insert(id);
     }
 
@@ -647,6 +653,54 @@ pub fn check_disk_conflicts(plan: &ApplyPlan, base_dir: &Path) -> Vec<String> {
         .filter(|t| base_dir.join(&t.dest_rel_path).exists())
         .map(|t| t.archive_rel_path.clone())
         .collect()
+}
+
+/// Check if a directory (or its nearest existing ancestor) is writable.
+/// Creates and removes a test file to verify write permissions.
+pub fn check_destination_writable(base_dir: &Path) -> Result<()> {
+    // Walk up to find the nearest existing directory
+    let mut check_dir = base_dir.to_path_buf();
+    while !check_dir.exists() {
+        if let Some(parent) = check_dir.parent() {
+            check_dir = parent.to_path_buf();
+        } else {
+            anyhow::bail!(
+                "Cannot find existing parent directory for {}",
+                base_dir.display()
+            );
+        }
+    }
+
+    // Try to create a temp file to verify write permissions
+    let test_file = check_dir.join(".canon_write_test");
+    match File::create(&test_file) {
+        Ok(_) => {
+            let _ = fs::remove_file(&test_file);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            anyhow::bail!(
+                "No write permission for destination directory: {}",
+                check_dir.display()
+            );
+        }
+        Err(e) => {
+            anyhow::bail!(
+                "Cannot write to destination directory {}: {}",
+                check_dir.display(),
+                e
+            );
+        }
+    }
+}
+
+/// Create parent directories for a path.
+pub(super) fn ensure_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+    Ok(())
 }
 
 /// Classify lock entries by checking filesystem state of source and destination.
@@ -2216,5 +2270,43 @@ mod tests {
 
         assert_eq!(plan.violations.missing_sources.len(), 1);
         assert_eq!(plan.violations.missing_sources[0].0, src_id);
+    }
+
+    // =========================================================================
+    // check_destination_writable
+    // =========================================================================
+
+    #[test]
+    fn check_writable_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(check_destination_writable(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn check_writable_nested_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b").join("c");
+        // Parent exists and is writable, nested dirs don't exist yet
+        assert!(check_destination_writable(&nested).is_ok());
+    }
+
+    // =========================================================================
+    // ensure_parent_dir
+    // =========================================================================
+
+    #[test]
+    fn ensure_parent_dir_creates_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a").join("b").join("c").join("file.txt");
+        ensure_parent_dir(&path).unwrap();
+        assert!(dir.path().join("a").join("b").join("c").exists());
+    }
+
+    #[test]
+    fn ensure_parent_dir_existing_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        ensure_parent_dir(&path).unwrap();
+        assert!(dir.path().exists());
     }
 }

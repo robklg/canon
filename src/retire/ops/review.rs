@@ -16,7 +16,6 @@ use crate::core::domain::resolution::{build_account, ResolutionAccount};
 use crate::core::domain::Root;
 use crate::core::ops::root_story::{fetch_root_story, RootStory};
 use crate::core::repo;
-use crate::ops;
 use crate::retire::domain::{derive_readiness, Readiness};
 
 /// Facts the review states beside the account — facts, never warnings, and
@@ -68,7 +67,7 @@ pub fn validate_retire_target(roots: &[Root], root_id: i64, config: &LedgerConfi
             root.path
         );
     }
-    if ops::receipt::resolve_ledger_root(roots, config).is_none() {
+    if crate::core::ops::receipt::resolve_ledger_root(roots, config).is_none() {
         bail!("Retirement needs an archive root to hold the record — no archive root is registered. To remove the root without binding its story: canon roots rm");
     }
     Ok(())

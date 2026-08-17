@@ -10,7 +10,6 @@ use serde::Deserialize;
 use crate::core::domain::config::LedgerConfig;
 use crate::core::domain::decision::DecisionCommand;
 use crate::core::repo;
-use crate::ops;
 
 use super::{iso_date, SHELF_DIR};
 
@@ -92,7 +91,7 @@ pub fn compute_shelf_listing(conn: &Connection, config: &LedgerConfig) -> Result
     let roots = repo::root::fetch_all(conn)?;
     let rows =
         crate::retire::repo::fetch_bound_retirements(conn, DecisionCommand::RootsRetire.as_str())?;
-    let shelf = ops::receipt::resolve_ledger_root(&roots, config)
+    let shelf = crate::core::ops::receipt::resolve_ledger_root(&roots, config)
         .map(|(_, path)| format!("{path}/{SHELF_DIR}"));
 
     let basename = |rel: &str| rel.rsplit('/').next().unwrap_or(rel).to_string();

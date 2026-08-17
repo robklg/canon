@@ -6,8 +6,9 @@
 //! over, where neither of them owns it. A feature's own finished output does
 //! not qualify, however many other features consume it.
 //!
-//! Not everything shared lives here yet: database access and parts of the
-//! provenance machinery are still top-level modules of their own.
+//! Not everything shared lives here yet: the selector every query command
+//! runs through, and the extraction ledger's maintenance path, are still
+//! top-level modules of their own.
 //!
 //! Core must never depend on a feature module, or it stops being trustworthy
 //! ground to build on. A feature may depend on core at any depth; on a

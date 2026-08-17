@@ -9,11 +9,11 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use super::fs::{finalize_file, write_file_incomplete};
 use crate::core::domain::config::{LedgerConfig, ReceiptLayout};
 use crate::core::domain::extraction::OriginDisposition;
 use crate::core::domain::fate::{DecisionFamily, FateAspect};
 use crate::core::domain::root::Root;
-use crate::ops::fs::{finalize_file, write_file_incomplete};
 
 /// Reference to a receipt file on disk, stored in the decision record.
 pub struct ReceiptRef {
@@ -165,161 +165,6 @@ pub struct ReceiptMeta {
     pub locus: ReceiptLocus,
 }
 
-/// Apply-specific receipt.
-#[derive(Serialize)]
-pub struct ApplyReceipt {
-    pub meta: ReceiptMeta,
-    pub items: Vec<ApplyReceiptItem>,
-}
-
-/// One item in an apply receipt — a single completed file transfer.
-#[derive(Serialize)]
-pub struct ApplyReceiptItem {
-    pub source_root: String,
-    pub source_rel_path: String,
-    pub destination_rel_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hash: Option<String>,
-    pub size: i64,
-    pub mtime: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous_decision_id: Option<i64>,
-}
-
-// ---------------------------------------------------------------------------
-// Exclusion receipts
-// ---------------------------------------------------------------------------
-
-/// Source-level exclusion receipt — `exclude set`/`exclude clear` and the
-/// single-source `set_by_id`/`set_by_path`. Flat list of affected sources.
-#[derive(Serialize)]
-pub struct ExcludeReceipt {
-    pub meta: ReceiptMeta,
-    pub items: Vec<ExcludeReceiptItem>,
-}
-
-/// One item in an exclusion receipt — a single source whose state transitioned.
-#[derive(Serialize)]
-pub struct ExcludeReceiptItem {
-    pub root: String,
-    pub rel_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hash: Option<String>,
-    pub size: i64,
-    pub mtime: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous_decision_id: Option<i64>,
-}
-
-/// Duplicate-exclusion receipt — `exclude duplicates`. Grouped by content hash,
-/// recording which copy was kept vs which were excluded.
-#[derive(Serialize)]
-pub struct DuplicatesReceipt {
-    pub meta: ReceiptMeta,
-    pub groups: Vec<DuplicateGroup>,
-}
-
-/// One duplicate group: the shared content hash, the kept copy/copies (under
-/// the prefer prefix), and the excluded duplicates.
-#[derive(Serialize)]
-pub struct DuplicateGroup {
-    pub hash: String,
-    pub kept: Vec<DuplicateKeptEntry>,
-    pub excluded: Vec<DuplicateExcludedEntry>,
-}
-
-/// A kept copy in a duplicate group — no state transition, so no
-/// `previous_decision_id`.
-#[derive(Serialize)]
-pub struct DuplicateKeptEntry {
-    pub root: String,
-    pub rel_path: String,
-    pub size: i64,
-    pub mtime: i64,
-}
-
-/// An excluded copy in a duplicate group. The content hash lives on the group,
-/// so it is not repeated per entry.
-#[derive(Serialize)]
-pub struct DuplicateExcludedEntry {
-    pub root: String,
-    pub rel_path: String,
-    pub size: i64,
-    pub mtime: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous_decision_id: Option<i64>,
-}
-
-/// Object-level exclusion receipt — `exclude set-object`/`clear-object`.
-/// Grouped by content hash; each object lists its full stamp-set.
-#[derive(Serialize)]
-pub struct ObjectExcludeReceipt {
-    pub meta: ReceiptMeta,
-    pub objects: Vec<ObjectExcludeEntry>,
-}
-
-/// One object in an object-exclusion receipt: the content hash and every
-/// source the object-level `decision_id` stamp touched (the stamp-set) —
-/// including tombstone rows, so the stamp is reconstructable from disk.
-#[derive(Serialize)]
-pub struct ObjectExcludeEntry {
-    pub hash: String,
-    pub sources: Vec<ObjectSourceReceiptEntry>,
-}
-
-/// A source sharing an excluded object's content.
-#[derive(Serialize)]
-pub struct ObjectSourceReceiptEntry {
-    pub root: String,
-    pub rel_path: String,
-    pub size: i64,
-    pub mtime: i64,
-    /// `false` for a tombstone row (`present = 0`) — the file was already gone
-    /// when the stamp touched it. Omitted for present sources.
-    #[serde(skip_serializing_if = "is_true")]
-    pub present: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous_decision_id: Option<i64>,
-}
-
-/// Serde helper: skip a `bool` field when `true` (serialize only the
-/// exceptional `false` case).
-fn is_true(b: &bool) -> bool {
-    *b
-}
-
-// ---------------------------------------------------------------------------
-// Deletion receipts
-// ---------------------------------------------------------------------------
-
-/// Deletion receipt — written when `canon scan` observes sources gone from disk
-/// (`present → absent`). Source-root-local: it lists exactly the sources deleted
-/// from one root and lives at that root's `.canon-ledger/`, because the loss is
-/// part of that drive's story. A single scan may emit several — one per affected
-/// root.
-#[derive(Serialize)]
-pub struct DeletionReceipt {
-    pub meta: ReceiptMeta,
-    pub items: Vec<DeletionReceiptItem>,
-}
-
-/// One item in a deletion receipt — a single source that went missing. The root
-/// is shared across the receipt (placement is per-root), so only the rel_path is
-/// recorded per item.
-#[derive(Debug, Serialize)]
-pub struct DeletionReceiptItem {
-    pub rel_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hash: Option<String>,
-    pub size: i64,
-    pub mtime: i64,
-    /// The source's `decision_id` before the deletion — the predecessor in the
-    /// provenance chain. Captured before the `present → absent` flip so a later
-    /// revival resetting `sources.decision_id` cannot erase it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous_decision_id: Option<i64>,
-}
-
 // ---------------------------------------------------------------------------
 // Path computation (pure functions, no I/O)
 // ---------------------------------------------------------------------------
@@ -327,7 +172,7 @@ pub struct DeletionReceiptItem {
 /// Format the receipt filename: 6-digit zero-padded decision_id + command.
 ///
 /// Examples: `000043-apply.toml`, `1000000-apply.toml` (no truncation beyond 6 digits)
-pub fn receipt_filename(decision_id: i64, command: &str) -> String {
+fn receipt_filename(decision_id: i64, command: &str) -> String {
     format!("{:06}-{}.toml", decision_id, command)
 }
 
@@ -415,7 +260,7 @@ pub fn write_receipt<T: Serialize>(path: &Path, receipt: &T, comment_summary: &s
 
 /// Finalize a receipt: rename `.incomplete` → final path (`.toml`).
 ///
-/// Wraps `ops::fs::finalize_file`. Returns `Err` if the `.incomplete` file
+/// Wraps `core::ops::fs::finalize_file`. Returns `Err` if the `.incomplete` file
 /// does not exist — the caller collects a warning.
 pub fn finalize_receipt(path: &Path) -> Result<()> {
     finalize_file(path).with_context(|| format!("Failed to finalize receipt: {}", path.display()))
@@ -425,6 +270,57 @@ pub fn finalize_receipt(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// A minimal receipt body for the tests below.
+    ///
+    /// This module owns the shared `[meta]` table and the writer that puts a
+    /// body on disk; it does not own any body. The writer is generic and never
+    /// inspects what it serializes — that is precisely what lets each command
+    /// define its own body — so the tests here bring a body of their own
+    /// rather than borrowing one, and stay true whatever the real bodies grow
+    /// into.
+    #[derive(Serialize)]
+    struct TestReceipt {
+        meta: ReceiptMeta,
+        items: Vec<TestReceiptItem>,
+    }
+
+    #[derive(Serialize)]
+    struct TestReceiptItem {
+        rel_path: String,
+        size: i64,
+    }
+
+    /// A receipt whose meta carries every optional field, so a test can assert
+    /// that a field is present without first having to populate it.
+    fn make_receipt() -> TestReceipt {
+        TestReceipt {
+            meta: ReceiptMeta {
+                receipt_version: 1,
+                decision_id: 43,
+                command: "apply".to_string(),
+                transition: "archived".to_string(),
+                posture: "performed".to_string(),
+                status: "completed".to_string(),
+                timestamp: 1744300800,
+                scope: Some(vec!["/Volumes/old-laptop/Photos".to_string()]),
+                reason: Some("Italy 2016".to_string()),
+                summary: "Applied 2 files".to_string(),
+                canon_version: "0.4.1".to_string(),
+                command_line: "canon apply manifest.toml".to_string(),
+                manifest: Some("/Volumes/Archive/manifest.toml".to_string()),
+                origin_disposition: Some("retained".to_string()),
+                locus: ReceiptLocus {
+                    path: "/Volumes/Archive".to_string(),
+                    id: 7,
+                },
+            },
+            items: vec![TestReceiptItem {
+                rel_path: "Media/2016/Italy/IMG_001.jpg".to_string(),
+                size: 3456789,
+            }],
+        }
+    }
 
     // =========================================================================
     // receipt_filename
@@ -492,46 +388,12 @@ mod tests {
     }
 
     // =========================================================================
-    // ApplyReceipt serialization
+    // ReceiptMeta serialization
     // =========================================================================
-
-    fn make_apply_receipt() -> ApplyReceipt {
-        ApplyReceipt {
-            meta: ReceiptMeta {
-                receipt_version: 1,
-                decision_id: 43,
-                command: "apply".to_string(),
-                transition: "archived".to_string(),
-                posture: "performed".to_string(),
-                status: "completed".to_string(),
-                timestamp: 1744300800,
-                scope: Some(vec!["/Volumes/old-laptop/Photos".to_string()]),
-                reason: Some("Italy 2016".to_string()),
-                summary: "Applied 2 files".to_string(),
-                canon_version: "0.4.1".to_string(),
-                command_line: "canon apply manifest.toml".to_string(),
-                manifest: Some("/Volumes/Archive/manifest.toml".to_string()),
-                origin_disposition: Some("retained".to_string()),
-                locus: ReceiptLocus {
-                    path: "/Volumes/Archive".to_string(),
-                    id: 7,
-                },
-            },
-            items: vec![ApplyReceiptItem {
-                source_root: "/Volumes/old-laptop".to_string(),
-                source_rel_path: "Photos/italy/IMG_001.jpg".to_string(),
-                destination_rel_path: "Media/2016/Italy/IMG_001.jpg".to_string(),
-                hash: Some("sha256:abc123".to_string()),
-                size: 3456789,
-                mtime: 1700000000,
-                previous_decision_id: Some(12),
-            }],
-        }
-    }
 
     #[test]
     fn test_serialize_meta_fields_present() {
-        let receipt = make_apply_receipt();
+        let receipt = make_receipt();
         let toml_str = toml::to_string_pretty(&receipt).unwrap();
         assert!(toml_str.contains("[meta]"), "missing [meta]\n{toml_str}");
         assert!(toml_str.contains("receipt_version = 1"));
@@ -544,7 +406,7 @@ mod tests {
     #[test]
     fn test_meta_status_interrupted_serializes() {
         // A partial/interrupted receipt self-describes its status on disk.
-        let mut receipt = make_apply_receipt();
+        let mut receipt = make_receipt();
         receipt.meta.status = "interrupted".to_string();
         let toml_str = toml::to_string_pretty(&receipt).unwrap();
         assert!(
@@ -554,43 +416,14 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_items_present() {
-        let receipt = make_apply_receipt();
-        let toml_str = toml::to_string_pretty(&receipt).unwrap();
-        assert!(
-            toml_str.contains("[[items]]"),
-            "missing [[items]]\n{toml_str}"
-        );
-        assert!(toml_str.contains("source_root = \"/Volumes/old-laptop\""));
-        assert!(toml_str.contains("destination_rel_path = \"Media/2016/Italy/IMG_001.jpg\""));
-        assert!(toml_str.contains("previous_decision_id = 12"));
-    }
-
-    #[test]
     fn test_serialize_optional_fields_omitted_when_none() {
-        let receipt = ApplyReceipt {
-            meta: ReceiptMeta {
-                receipt_version: 1,
-                decision_id: 1,
-                command: "apply".to_string(),
-                transition: "archived".to_string(),
-                posture: "performed".to_string(),
-                status: "completed".to_string(),
-                timestamp: 0,
-                scope: None,
-                reason: None,
-                summary: "done".to_string(),
-                canon_version: "0.4.1".to_string(),
-                command_line: "canon apply m.lock".to_string(),
-                manifest: None,
-                origin_disposition: None,
-                locus: ReceiptLocus {
-                    path: "/archive".to_string(),
-                    id: 1,
-                },
-            },
-            items: vec![],
-        };
+        let mut receipt = make_receipt();
+        receipt.meta.scope = None;
+        receipt.meta.reason = None;
+        receipt.meta.manifest = None;
+        // The command line is asserted against by substring below, so it must
+        // not itself mention a manifest.
+        receipt.meta.command_line = "canon apply m.lock".to_string();
         let toml_str = toml::to_string_pretty(&receipt).unwrap();
         assert!(
             !toml_str.contains("scope"),
@@ -606,50 +439,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_serialize_previous_decision_id_omitted_when_none() {
-        let receipt = ApplyReceipt {
-            meta: ReceiptMeta {
-                receipt_version: 1,
-                decision_id: 1,
-                command: "apply".to_string(),
-                transition: "archived".to_string(),
-                posture: "performed".to_string(),
-                status: "completed".to_string(),
-                timestamp: 0,
-                scope: None,
-                reason: None,
-                summary: "done".to_string(),
-                canon_version: "0.4.1".to_string(),
-                command_line: "canon apply m.lock".to_string(),
-                manifest: None,
-                origin_disposition: None,
-                locus: ReceiptLocus {
-                    path: "/archive".to_string(),
-                    id: 1,
-                },
-            },
-            items: vec![ApplyReceiptItem {
-                source_root: "/src".to_string(),
-                source_rel_path: "file.jpg".to_string(),
-                destination_rel_path: "Media/file.jpg".to_string(),
-                hash: None,
-                size: 100,
-                mtime: 0,
-                previous_decision_id: None,
-            }],
-        };
-        let toml_str = toml::to_string_pretty(&receipt).unwrap();
-        assert!(
-            !toml_str.contains("previous_decision_id"),
-            "previous_decision_id should be absent\n{toml_str}"
-        );
-        assert!(
-            !toml_str.contains("hash"),
-            "hash should be absent\n{toml_str}"
-        );
-    }
-
     // =========================================================================
     // write_receipt + finalize_receipt
     // =========================================================================
@@ -658,7 +447,7 @@ mod tests {
     fn test_write_receipt_creates_incomplete_with_header() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("000043-apply.toml");
-        let receipt = make_apply_receipt();
+        let receipt = make_receipt();
 
         write_receipt(&path, &receipt, "Applied 2 files").unwrap();
 
@@ -679,7 +468,7 @@ mod tests {
     fn test_finalize_receipt_renames() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("000043-apply.toml");
-        let receipt = make_apply_receipt();
+        let receipt = make_receipt();
 
         write_receipt(&path, &receipt, "Applied 2 files").unwrap();
         finalize_receipt(&path).unwrap();
@@ -697,7 +486,7 @@ mod tests {
     #[test]
     fn test_write_receipt_invalid_path_returns_err() {
         let path = std::path::Path::new("/dev/null/receipt.toml");
-        let receipt = make_apply_receipt();
+        let receipt = make_receipt();
         assert!(write_receipt(path, &receipt, "test").is_err());
     }
 
@@ -792,167 +581,6 @@ mod tests {
     }
 
     // =========================================================================
-    // Exclusion receipt serialization
-    // =========================================================================
-
-    fn sample_meta(command: &str) -> ReceiptMeta {
-        ReceiptMeta {
-            receipt_version: 1,
-            decision_id: 42,
-            command: command.to_string(),
-            transition: "excluded".to_string(),
-            posture: "performed".to_string(),
-            status: "completed".to_string(),
-            timestamp: 1700000000,
-            scope: None,
-            reason: None,
-            summary: "test".to_string(),
-            canon_version: "0.0.0".to_string(),
-            command_line: "canon test".to_string(),
-            manifest: None,
-            origin_disposition: None,
-            locus: ReceiptLocus {
-                path: "/vol".to_string(),
-                id: 42,
-            },
-        }
-    }
-
-    #[test]
-    fn test_exclude_receipt_serializes() {
-        let receipt = ExcludeReceipt {
-            meta: sample_meta("exclude_set"),
-            items: vec![
-                ExcludeReceiptItem {
-                    root: "/vol".to_string(),
-                    rel_path: "a.dll".to_string(),
-                    hash: Some("sha256:abc".to_string()),
-                    size: 10,
-                    mtime: 100,
-                    previous_decision_id: Some(12),
-                },
-                ExcludeReceiptItem {
-                    root: "/vol".to_string(),
-                    rel_path: "b.tmp".to_string(),
-                    hash: None,
-                    size: 0,
-                    mtime: 200,
-                    previous_decision_id: None,
-                },
-            ],
-        };
-        let out = toml::to_string_pretty(&receipt).unwrap();
-        assert!(out.contains("[[items]]"));
-        assert!(out.contains("hash = \"sha256:abc\""));
-        // Unhashed item omits hash; only the Some item carries it.
-        assert_eq!(out.matches("hash =").count(), 1);
-        // Only the item with a prior decision carries previous_decision_id.
-        assert_eq!(out.matches("previous_decision_id").count(), 1);
-        assert!(out.contains("previous_decision_id = 12"));
-    }
-
-    #[test]
-    fn test_duplicates_receipt_serializes() {
-        let receipt = DuplicatesReceipt {
-            meta: sample_meta("exclude_duplicates"),
-            groups: vec![DuplicateGroup {
-                hash: "sha256:dup".to_string(),
-                kept: vec![DuplicateKeptEntry {
-                    root: "/vol".to_string(),
-                    rel_path: "orig.jpg".to_string(),
-                    size: 5,
-                    mtime: 1,
-                }],
-                excluded: vec![DuplicateExcludedEntry {
-                    root: "/vol".to_string(),
-                    rel_path: "copy.jpg".to_string(),
-                    size: 5,
-                    mtime: 1,
-                    previous_decision_id: Some(9),
-                }],
-            }],
-        };
-        let out = toml::to_string_pretty(&receipt).unwrap();
-        assert!(out.contains("[[groups]]"));
-        assert!(out.contains("hash = \"sha256:dup\""));
-        assert!(out.contains("[[groups.kept]]"));
-        assert!(out.contains("[[groups.excluded]]"));
-        // Kept has no previous_decision_id field; only the excluded entry carries it.
-        assert_eq!(out.matches("previous_decision_id").count(), 1);
-        assert!(out.contains("previous_decision_id = 9"));
-    }
-
-    #[test]
-    fn test_object_exclude_receipt_serializes() {
-        let receipt = ObjectExcludeReceipt {
-            meta: sample_meta("exclude_set_object"),
-            objects: vec![ObjectExcludeEntry {
-                hash: "sha256:obj".to_string(),
-                sources: vec![
-                    ObjectSourceReceiptEntry {
-                        root: "/vol".to_string(),
-                        rel_path: "dup.bin".to_string(),
-                        size: 4,
-                        mtime: 7,
-                        present: true,
-                        previous_decision_id: None,
-                    },
-                    ObjectSourceReceiptEntry {
-                        root: "/vol".to_string(),
-                        rel_path: "gone.bin".to_string(),
-                        size: 4,
-                        mtime: 7,
-                        present: false,
-                        previous_decision_id: Some(3),
-                    },
-                ],
-            }],
-        };
-        let out = toml::to_string_pretty(&receipt).unwrap();
-        assert!(out.contains("[[objects]]"));
-        assert!(out.contains("hash = \"sha256:obj\""));
-        assert!(out.contains("[[objects.sources]]"));
-        // `present` is serialized only for the exceptional tombstone entry;
-        // the present entry's None previous_decision_id is omitted entirely.
-        assert_eq!(out.matches("present = ").count(), 1);
-        assert!(out.contains("present = false"));
-        assert_eq!(out.matches("previous_decision_id").count(), 1);
-        assert!(out.contains("previous_decision_id = 3"));
-    }
-
-    #[test]
-    fn test_deletion_receipt_serializes() {
-        let receipt = DeletionReceipt {
-            meta: sample_meta("scan"),
-            items: vec![
-                DeletionReceiptItem {
-                    rel_path: "vacation/IMG_001.jpg".to_string(),
-                    hash: Some("sha256:gone".to_string()),
-                    size: 2048,
-                    mtime: 1700000000,
-                    previous_decision_id: Some(7),
-                },
-                DeletionReceiptItem {
-                    rel_path: "notes.txt".to_string(),
-                    hash: None,
-                    size: 12,
-                    mtime: 1700000100,
-                    previous_decision_id: None,
-                },
-            ],
-        };
-        let out = toml::to_string_pretty(&receipt).unwrap();
-        assert!(out.contains("[[items]]"));
-        assert!(out.contains("rel_path = \"vacation/IMG_001.jpg\""));
-        // Unhashed item omits hash; only the Some item carries it.
-        assert_eq!(out.matches("hash =").count(), 1);
-        assert!(out.contains("hash = \"sha256:gone\""));
-        // Only the item with a prior decision carries previous_decision_id.
-        assert_eq!(out.matches("previous_decision_id").count(), 1);
-        assert!(out.contains("previous_decision_id = 7"));
-    }
-
-    // =========================================================================
     // The what: transition/posture derivation (the integrity law)
     // =========================================================================
 
@@ -1029,12 +657,12 @@ mod tests {
     // The where: nested [meta.locus] presence + ordering
     // =========================================================================
 
-    /// Apply's meta states what/where, and the nested `[meta.locus]` table
-    /// renders after all flat `[meta]` scalars and before `[[items]]` — the
-    /// layout a reader of a receipt on disk can count on.
+    /// The meta states what/where, and the nested `[meta.locus]` table renders
+    /// after all flat `[meta]` scalars and before the body — the layout a
+    /// reader of a receipt on disk can count on.
     #[test]
-    fn apply_meta_serializes_what_where_and_orders_locus_last() {
-        let out = toml::to_string_pretty(&make_apply_receipt()).unwrap();
+    fn meta_serializes_what_where_and_orders_locus_last() {
+        let out = toml::to_string_pretty(&make_receipt()).unwrap();
         assert!(out.contains("transition = \"archived\""));
         assert!(out.contains("posture = \"performed\""));
         assert!(out.contains("origin_disposition = \"retained\""));
@@ -1056,21 +684,49 @@ mod tests {
         assert!(locus_at < items_at, "the locus table precedes the items");
     }
 
-    /// Every non-apply receipt omits `origin_disposition` (it is apply's alone)
-    /// and still carries its locus.
+    /// The serializer, not the struct, is what puts a nested table after its
+    /// parent's scalar keys — so declaring a scalar below one still writes a
+    /// valid file. `locus` is kept last for readability, and this is why that
+    /// is a preference rather than a requirement.
+    ///
+    /// Worth a test of its own because nothing else in the corpus declares a
+    /// scalar after a sub-table: an older serializer did reject it, the comments
+    /// saying so outlived it by several versions, and without this the same
+    /// sentence could quietly go stale again.
+    #[test]
+    fn a_scalar_declared_after_a_nested_table_still_serializes() {
+        #[derive(Serialize)]
+        struct Nested {
+            inner: Inner,
+            after: i64,
+        }
+        #[derive(Serialize)]
+        struct Inner {
+            value: i64,
+        }
+
+        let out = toml::to_string_pretty(&Nested {
+            inner: Inner { value: 1 },
+            after: 2,
+        })
+        .expect("a trailing scalar must not break serialization");
+
+        assert!(
+            out.find("after =").unwrap() < out.find("[inner]").unwrap(),
+            "the scalar is emitted above the table it was declared below\n{out}"
+        );
+        toml::from_str::<toml::Table>(&out).expect("and the result must be valid TOML");
+    }
+
+    /// A receipt that carries no origin disposition — every kind but apply —
+    /// omits the key entirely and still carries its locus.
     #[test]
     fn non_apply_receipt_omits_origin_disposition_but_carries_locus() {
-        let receipt = ExcludeReceipt {
-            meta: sample_meta("exclude_set"),
-            items: vec![ExcludeReceiptItem {
-                root: "/vol".to_string(),
-                rel_path: "a.dll".to_string(),
-                hash: None,
-                size: 1,
-                mtime: 1,
-                previous_decision_id: None,
-            }],
-        };
+        let mut receipt = make_receipt();
+        receipt.meta.command = "exclude_set".to_string();
+        receipt.meta.transition = "excluded".to_string();
+        receipt.meta.manifest = None;
+        receipt.meta.origin_disposition = None;
         let out = toml::to_string_pretty(&receipt).unwrap();
         assert!(!out.contains("origin_disposition"));
         assert!(out.contains("transition = \"excluded\""));

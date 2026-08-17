@@ -6,7 +6,6 @@ use crate::core::ops::root_story::fetch_root_story;
 use crate::core::repo;
 use crate::core::repo::db::open_in_memory_for_test;
 use crate::core::repo::insert_test_root;
-use crate::ops;
 use crate::retire::domain::book_dir_name;
 use crate::retire::ops::ceremony::BindPlan;
 use crate::retire::ops::verify::verify_book;
@@ -137,7 +136,7 @@ fn bind_places_a_verified_book_and_records_the_pointer() {
         decision.receipt_rel_path.as_deref(),
         Some(format!("{SHELF_DIR}/{name}").as_str())
     );
-    let (arch_id, _) = ops::receipt::resolve_ledger_root(
+    let (arch_id, _) = crate::core::ops::receipt::resolve_ledger_root(
         &fetch_root_story(&conn, root_id).unwrap().roots,
         &ledger_config(),
     )

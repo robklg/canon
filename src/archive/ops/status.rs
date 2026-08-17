@@ -83,7 +83,7 @@ pub fn compute_manifest_status(
     let lock_entry_count = lock_entries.len();
 
     // 2. Validate lock hash (non-fatal)
-    let lock_hash_valid = match crate::ops::fs::compute_full_hash(&lock_path) {
+    let lock_hash_valid = match crate::core::ops::fs::compute_full_hash(&lock_path) {
         Ok(actual_hash) => actual_hash == config.meta.lock_hash,
         Err(_) => false,
     };

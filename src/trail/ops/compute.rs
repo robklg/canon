@@ -22,7 +22,7 @@ pub const DEFAULT_LIMIT: usize = 20;
 
 pub struct TrailParams {
     /// Pre-resolved scope prefixes (empty = global). The interface resolves
-    /// scope via `ops::scope::resolve_scope` before building params.
+    /// scope via `core::ops::scope::resolve_scope` before building params.
     pub prefixes: Vec<String>,
     /// `Some` activates the time lens (day-grouped story view).
     pub timeframe: Option<WhenValue>,

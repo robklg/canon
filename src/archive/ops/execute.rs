@@ -18,14 +18,14 @@ use crate::core::domain::decision::DecisionStatus;
 use crate::core::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
 use crate::core::domain::format::first_chars;
 use crate::core::domain::source::NewSource;
+use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
+use crate::core::ops::fs::{compute_partial_hash, copy_file, move_file, rename_file, MoveOutcome};
+use crate::core::ops::receipt::{ReceiptKind, ReceiptPlacement};
 use crate::core::repo::{self, Connection};
-use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
-use crate::ops::fs::{
-    compute_partial_hash, copy_file, ensure_parent_dir, move_file, rename_file, MoveOutcome,
-};
-use crate::ops::receipt::{ApplyReceipt, ApplyReceiptItem, ReceiptKind, ReceiptPlacement};
 
-use super::plan::{ApplyPlan, ApplyTransfer, StaleSource};
+use super::receipt::{ApplyReceipt, ApplyReceiptItem};
+
+use super::plan::{ensure_parent_dir, ApplyPlan, ApplyTransfer, StaleSource};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferMode {

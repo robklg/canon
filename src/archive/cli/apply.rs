@@ -14,11 +14,10 @@ use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::format::first_chars;
 use crate::core::domain::scope::DecisionScope;
+use crate::core::ops::decision::DecisionParams;
+use crate::core::ops::receipt::ReceiptPlacement;
 use crate::core::repo::{self, Db};
 use crate::expr;
-use crate::ops;
-use crate::ops::decision::DecisionParams;
-use crate::ops::receipt::ReceiptPlacement;
 
 pub struct ApplyOptions {
     pub dry_run: bool,
@@ -104,7 +103,7 @@ pub fn run(
         .collect::<Result<Vec<_>>>()?;
 
     // Validate lock file hash matches config
-    let actual_hash = ops::fs::compute_full_hash(&lock_path)?;
+    let actual_hash = crate::core::ops::fs::compute_full_hash(&lock_path)?;
     if actual_hash != config.meta.lock_hash {
         bail!(
             "Lock file hash mismatch: expected {}, got {}\n\
@@ -497,7 +496,7 @@ pub fn run(
     // --- Execute transfers ---
 
     eprintln!("Checking destination write permissions...");
-    ops::fs::check_destination_writable(&base_dir)?;
+    plan::check_destination_writable(&base_dir)?;
 
     // Construct decision: reason falls back to manifest notes
     let effective_reason = if let Some(r) = reason.filter(|r| !r.trim().is_empty()) {

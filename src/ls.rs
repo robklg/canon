@@ -3,9 +3,9 @@ use chrono::{TimeZone, Utc};
 
 use crate::core::domain::source::Source;
 use crate::core::domain::IncludeSet;
+use crate::core::ops::scope::classify_all;
 use crate::core::repo::Db;
 use crate::expr::filter::Filter;
-use crate::ops::scope::classify_all;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 
 #[allow(clippy::too_many_arguments)]

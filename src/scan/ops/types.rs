@@ -1,11 +1,49 @@
 //! Scan's shared result/parameter types: the pipeline's per-file outcome and
-//! stats types, options, the walk-observability trait, and the shared
-//! timestamp helper the other four stratum files call.
+//! stats types, options, the walk-observability trait, the deletion receipt's
+//! document shape, and the shared timestamp helper the other four stratum
+//! files call.
+//!
+//! The receipt body lives here rather than beside the writer in `receipt.rs`
+//! because the pipeline's result types carry it as a field; this is the one
+//! stratum both can depend on without an edge against the grain. The document
+//! shape is scan's own — the shared machinery serializes any body and never
+//! inspects one, so the only part of a receipt that is common across commands
+//! is its `[meta]` table.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::ops::receipt::DeletionReceiptItem;
+use serde::Serialize;
+
+use crate::core::ops::receipt::ReceiptMeta;
+
+/// Deletion receipt — written when `canon scan` observes sources gone from disk
+/// (`present → absent`). Source-root-local: it lists exactly the sources deleted
+/// from one root and lives at that root's `.canon-ledger/`, because the loss is
+/// part of that drive's story. A single scan may emit several — one per affected
+/// root.
+#[derive(Serialize)]
+pub(super) struct DeletionReceipt {
+    pub meta: ReceiptMeta,
+    pub items: Vec<DeletionReceiptItem>,
+}
+
+/// One item in a deletion receipt — a single source that went missing. The root
+/// is shared across the receipt (placement is per-root), so only the rel_path is
+/// recorded per item.
+#[derive(Debug, Serialize)]
+pub struct DeletionReceiptItem {
+    pub rel_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    pub size: i64,
+    pub mtime: i64,
+    /// The source's `decision_id` before the deletion — the predecessor in the
+    /// provenance chain. Captured before the `present → absent` flip so a later
+    /// revival resetting `sources.decision_id` cannot erase it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_decision_id: Option<i64>,
+}
 
 /// Classification of a source's fate during scan.
 pub enum SourceOutcome {
@@ -146,6 +184,91 @@ pub fn current_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::ops::receipt::{write_receipt, ReceiptLocus};
+    use tempfile::tempdir;
+
+    fn sample_meta(command: &str) -> ReceiptMeta {
+        ReceiptMeta {
+            receipt_version: 1,
+            decision_id: 42,
+            command: command.to_string(),
+            transition: "deleted".to_string(),
+            posture: "observed".to_string(),
+            status: "completed".to_string(),
+            timestamp: 1700000000,
+            scope: None,
+            reason: None,
+            summary: "test".to_string(),
+            canon_version: "0.0.0".to_string(),
+            command_line: "canon test".to_string(),
+            manifest: None,
+            origin_disposition: None,
+            locus: ReceiptLocus {
+                path: "/vol".to_string(),
+                id: 42,
+            },
+        }
+    }
+
+    #[test]
+    fn test_deletion_receipt_serializes() {
+        let receipt = DeletionReceipt {
+            meta: sample_meta("scan"),
+            items: vec![
+                DeletionReceiptItem {
+                    rel_path: "vacation/IMG_001.jpg".to_string(),
+                    hash: Some("sha256:gone".to_string()),
+                    size: 2048,
+                    mtime: 1700000000,
+                    previous_decision_id: Some(7),
+                },
+                DeletionReceiptItem {
+                    rel_path: "notes.txt".to_string(),
+                    hash: None,
+                    size: 12,
+                    mtime: 1700000100,
+                    previous_decision_id: None,
+                },
+            ],
+        };
+        let out = toml::to_string_pretty(&receipt).unwrap();
+        assert!(out.contains("[[items]]"));
+        assert!(out.contains("rel_path = \"vacation/IMG_001.jpg\""));
+        // Unhashed item omits hash; only the Some item carries it.
+        assert_eq!(out.matches("hash =").count(), 1);
+        assert!(out.contains("hash = \"sha256:gone\""));
+        // Only the item with a prior decision carries previous_decision_id.
+        assert_eq!(out.matches("previous_decision_id").count(), 1);
+        assert!(out.contains("previous_decision_id = 7"));
+    }
+
+    /// A fully-populated deletion receipt survives the real write path and
+    /// reads back as TOML. The test above serializes the body; this one pins
+    /// the *file* — the writer prepends a comment header and writes to an
+    /// `.incomplete` path, and neither is exercised anywhere else.
+    #[test]
+    fn deletion_receipt_round_trips_through_the_writer() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("000042-scan.toml");
+        let receipt = DeletionReceipt {
+            meta: sample_meta("scan"),
+            items: vec![DeletionReceiptItem {
+                rel_path: "vacation/IMG_001.jpg".to_string(),
+                hash: Some("sha256:gone".to_string()),
+                size: 2048,
+                mtime: 1700000000,
+                previous_decision_id: Some(7),
+            }],
+        };
+
+        write_receipt(&path, &receipt, "2 sources gone").unwrap();
+
+        let written = std::fs::read_to_string(dir.path().join("000042-scan.incomplete")).unwrap();
+        let parsed: toml::Table =
+            toml::from_str(&written).expect("receipt must parse back as TOML");
+        assert_eq!(parsed["meta"]["transition"].as_str(), Some("deleted"));
+        assert_eq!(parsed["items"].as_array().unwrap().len(), 1);
+    }
 
     #[test]
     fn compose_summary_records_missing_detection_skip() {

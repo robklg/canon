@@ -9,4 +9,5 @@ pub(super) mod generate;
 pub(super) mod manifest;
 pub(super) mod pattern;
 pub(super) mod plan;
+pub(super) mod receipt;
 pub(super) mod status;

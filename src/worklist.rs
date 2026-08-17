@@ -2,10 +2,10 @@ use anyhow::Result;
 use std::io::{self, Write};
 
 use crate::core::domain::IncludeSet;
+use crate::core::ops::scope::classify_all;
 use crate::core::repo::Db;
 use crate::expr::filter::Filter;
 use crate::ops;
-use crate::ops::scope::classify_all;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 
 pub fn run(

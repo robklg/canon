@@ -6,7 +6,7 @@
 //!
 //! All functions in this module are pure (no I/O). Resolution against known
 //! roots with a filesystem fallback (parse_root_spec, resolve_root_path,
-//! resolve_archive_path) lives in `ops::scope`, which composes these pure
+//! resolve_archive_path) lives in `core::ops::scope`, which composes these pure
 //! predicates. Callers must fetch roots via `core::repo::root::fetch_all()` before
 //! calling resolution functions.
 

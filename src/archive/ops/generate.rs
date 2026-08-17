@@ -306,7 +306,7 @@ pub fn execute_generate(
     write_lock_file(&params.lock_path, &plan.lock_entries)?;
 
     // Compute lock file hash
-    let lock_hash = crate::ops::fs::compute_full_hash(&params.lock_path)?;
+    let lock_hash = crate::core::ops::fs::compute_full_hash(&params.lock_path)?;
 
     // Build ManifestConfig
     // Several prefixes are joined into one string here and split back apart
@@ -433,7 +433,7 @@ pub fn execute_refresh(
     write_lock_file(&params.lock_path, &plan.lock_entries)?;
 
     // Compute lock file hash and update config
-    let lock_hash = crate::ops::fs::compute_full_hash(&params.lock_path)?;
+    let lock_hash = crate::core::ops::fs::compute_full_hash(&params.lock_path)?;
     let mut config = ManifestConfig {
         meta: ManifestMeta {
             version: params.config.meta.version,

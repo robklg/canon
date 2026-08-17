@@ -1831,8 +1831,8 @@ mod self_tests {
                 "show_aliases",
             ],
         ),
-        // The command surface, the transfer mode the receipt vocabulary names,
-        // and the plan/execute types two law tests construct directly.
+        // The command surface, the transfer mode main's dispatch selects, and
+        // the two types the contentless-law canary constructs directly.
         (
             "archive",
             &[
@@ -1845,13 +1845,6 @@ mod self_tests {
                 "plan_generate",
                 "ClusterGenerateParams",
                 "TransferMode",
-                "execute_apply",
-                "ApplyExecuteParams",
-                "TransferOutcome",
-                "TransferProgress",
-                "ApplyPlan",
-                "ApplyTransfer",
-                "ApplyViolations",
             ],
         ),
     ];

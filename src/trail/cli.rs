@@ -51,27 +51,31 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<()> {
     };
 
     let all_roots = repo::root::fetch_all(db.conn())?;
-    let resolved =
-        match crate::ops::scope::resolve_scope(db.conn(), &args.paths, args.global, &all_roots) {
-            Ok(resolved) => resolved,
-            // An explicit path that misses every live root may be a retired
-            // root's old mount path — then the retirement is the answer, not
-            // the error. On a live root, a miss means an emptied place — no
-            // sources stand there, but its history (extraction rows, notes)
-            // still does, and refusing the question would 404 exactly the
-            // best-resolved places. Anything else propagates the original
-            // error untouched.
-            Err(err) => {
-                if let Some(statement) = retired_scope_statement(db.conn(), &args.paths)? {
-                    emit_retired_statement(&statement, args.jsonl)?;
-                    return Ok(());
-                }
-                match crate::ops::scope::resolve_history_scope(&args.paths, &all_roots) {
-                    Some(resolved) => resolved,
-                    None => return Err(err),
-                }
+    let resolved = match crate::core::ops::scope::resolve_scope(
+        db.conn(),
+        &args.paths,
+        args.global,
+        &all_roots,
+    ) {
+        Ok(resolved) => resolved,
+        // An explicit path that misses every live root may be a retired
+        // root's old mount path — then the retirement is the answer, not
+        // the error. On a live root, a miss means an emptied place — no
+        // sources stand there, but its history (extraction rows, notes)
+        // still does, and refusing the question would 404 exactly the
+        // best-resolved places. Anything else propagates the original
+        // error untouched.
+        Err(err) => {
+            if let Some(statement) = retired_scope_statement(db.conn(), &args.paths)? {
+                emit_retired_statement(&statement, args.jsonl)?;
+                return Ok(());
             }
-        };
+            match crate::core::ops::scope::resolve_history_scope(&args.paths, &all_roots) {
+                Some(resolved) => resolved,
+                None => return Err(err),
+            }
+        }
+    };
 
     // The silent CWD-global fallback: standing inside a retired root's old
     // mount path, `canon trail` must state the retirement rather than

@@ -918,7 +918,7 @@ fn main() -> Result<()> {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
             let mut include = include_set_from(&include);
             let all_roots = core::repo::root::fetch_all(db.conn())?;
-            let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+            let resolved = core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
             if resolved.auto_include_archived {
                 include.archived = true;
             }
@@ -958,7 +958,7 @@ fn main() -> Result<()> {
             let mut include = include_set_from(&include);
 
             let all_roots = core::repo::root::fetch_all(db.conn())?;
-            let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+            let resolved = core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
             if resolved.auto_include_archived {
                 include.archived = true;
             }
@@ -1017,7 +1017,8 @@ fn main() -> Result<()> {
                 }) => {
                     let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
-                    let resolved = ops::scope::resolve_scope(db.conn(), &paths, false, &all_roots)?;
+                    let resolved =
+                        core::ops::scope::resolve_scope(db.conn(), &paths, false, &all_roots)?;
                     let options = facts::DeleteOptions {
                         entity_type: on,
                         value_type,
@@ -1039,7 +1040,7 @@ fn main() -> Result<()> {
                     let mut include = include_set_from(&include);
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved =
-                        ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+                        core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
                     if resolved.auto_include_archived {
                         include.archived = true;
                     }
@@ -1106,7 +1107,7 @@ fn main() -> Result<()> {
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
             let mut include = include_set_from(&include);
             let all_roots = core::repo::root::fetch_all(db.conn())?;
-            let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+            let resolved = core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
             if resolved.auto_include_archived {
                 include.archived = true;
             }
@@ -1139,7 +1140,7 @@ fn main() -> Result<()> {
                 bail!("--include archived is not valid for survey");
             }
             let all_roots = core::repo::root::fetch_all(db.conn())?;
-            let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+            let resolved = core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
             if resolved.auto_include_archived {
                 include.archived = true;
             }
@@ -1176,7 +1177,7 @@ fn main() -> Result<()> {
             } else {
                 // One path: CWD as side A
                 let cwd = std::env::current_dir()?;
-                let cwd_resolved = ops::scope::resolve_path(&cwd, &all_roots, &cwd)?;
+                let cwd_resolved = core::ops::scope::resolve_path(&cwd, &all_roots, &cwd)?;
                 if find_containing_root(&cwd_resolved, &all_roots).is_none() {
                     bail!("Current directory is not under any known root");
                 }
@@ -1203,7 +1204,8 @@ fn main() -> Result<()> {
             } => {
                 let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
                 let all_roots = core::repo::root::fetch_all(db.conn())?;
-                let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+                let resolved =
+                    core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
                 let options = archive::GenerateOptions {
                     force,
                     allow_archived: allow.contains(&ClusterAllow::Archived),
@@ -1332,7 +1334,7 @@ fn main() -> Result<()> {
                 } else {
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved =
-                        ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+                        core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
                     exclude::set(
                         &mut db,
                         &resolved.prefixes,
@@ -1356,7 +1358,8 @@ fn main() -> Result<()> {
                 let filters = alias::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::ClearOptions { dry_run, yes };
                 let all_roots = core::repo::root::fetch_all(db.conn())?;
-                let resolved = ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+                let resolved =
+                    core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
                 exclude::clear(
                     &mut db,
                     &resolved.prefixes,
@@ -1429,7 +1432,7 @@ fn main() -> Result<()> {
                 } else {
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved =
-                        ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+                        core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
                     if resolved.prefixes.is_empty() && filters.is_empty() {
                         anyhow::bail!("Provide a hash (--hash), file path, or filters (--where)");
                     }

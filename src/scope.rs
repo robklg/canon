@@ -1,12 +1,12 @@
 //! Scope display for the interface layer.
 //!
-//! Scope resolution lives in `ops::scope` (behavioral policy).
+//! Scope resolution lives in `core::ops::scope` (behavioral policy).
 //! This module provides the display functions that format scope
 //! information for terminal output — stdout for reports, stderr for lists.
 
 use std::io::Write;
 
-pub use crate::ops::scope::ResolvedScope;
+pub use crate::core::ops::scope::ResolvedScope;
 
 /// Print scope header for report commands (stdout).
 ///

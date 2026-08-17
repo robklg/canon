@@ -13,11 +13,10 @@ use crate::core::domain::extraction::OriginDisposition;
 use crate::core::domain::format::format_size;
 use crate::core::domain::resolution::{build_account, ResolutionAccount};
 use crate::core::domain::{format_count, Root};
+use crate::core::ops::ledger::{read_apply_receipt, ReceiptRead};
 use crate::core::ops::root_story::RootStory;
 use crate::core::repo;
 use crate::notes::{fetch_by_roots, note_display_path, Note};
-use crate::ops;
-use crate::ops::ledger::{read_apply_receipt, ReceiptRead};
 use crate::retire::domain::{
     build_book_entries, derive_posture, disposition_word, ApplyOrigin, BookEntry, FateContext,
     SourceFate, VerificationPosture,
@@ -468,7 +467,7 @@ fn gather_ledger(dir: &Path, story: &RootStory, gaps: &mut Vec<String>) -> Resul
     if !src.is_dir() {
         return Ok(Some(0));
     }
-    let count = ops::fs::copy_tree(&src, &dir.join("ledger"))?;
+    let count = crate::core::ops::fs::copy_tree(&src, &dir.join("ledger"))?;
     if count == 0 {
         // An empty gather leaves no directory: the book never lists (or
         // holds) a `ledger/` with nothing in it — README and story say the

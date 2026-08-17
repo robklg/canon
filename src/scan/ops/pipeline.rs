@@ -13,15 +13,14 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use rusqlite::{Transaction, TransactionBehavior};
 
+use crate::core::ops::fs::compute_partial_hash;
 use crate::core::repo::{self, Connection};
-use crate::ops::fs::compute_partial_hash;
-use crate::ops::receipt::DeletionReceiptItem;
 use crate::scan::domain::{find_missing, reconcile, FileObservation, Reconciliation};
 use crate::scan::repo as scan_repo;
 
 use super::types::{
-    FileAction, FileToHash, MarkMissingPathResult, ScanOptions, ScanProgress, ScanRootResult,
-    ScanStats, SourceOutcome,
+    DeletionReceiptItem, FileAction, FileToHash, MarkMissingPathResult, ScanOptions, ScanProgress,
+    ScanRootResult, ScanStats, SourceOutcome,
 };
 
 /// Scan a root directory, processing each entry through the

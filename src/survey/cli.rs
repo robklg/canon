@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 
 use crate::core::domain::IncludeSet;
+use crate::core::ops::scope::ResolvedScope;
 use crate::core::repo;
-use crate::ops::scope::ResolvedScope;
 use crate::survey::ops::compute::{SurveyOutcome, SurveyParams};
 use crate::survey::ops::orchestrate::{run_survey, SurveyOrchestration, SurveyRun};
 use crate::survey::render;

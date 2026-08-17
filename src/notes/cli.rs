@@ -19,13 +19,13 @@ use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::root::Root;
 use crate::core::domain::scope::DecisionScope;
+use crate::core::ops::decision::DecisionParams;
+use crate::core::ops::scope::resolve_scope;
 use crate::core::repo::{self, Db};
 use crate::notes::domain::{note_display_path, LocationEntry};
 use crate::notes::ops as notes_ops;
 use crate::notes::ops::{NoteListResult, NoteScope, NoteSpatialResult, NoteViewResult};
 use crate::notes::repo as notes_repo;
-use crate::ops::decision::DecisionParams;
-use crate::ops::scope::resolve_scope;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(

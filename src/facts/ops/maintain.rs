@@ -6,10 +6,10 @@ use anyhow::Result;
 
 use crate::core::domain::decision::DecisionStatus;
 use crate::core::domain::format_count;
+use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::core::repo::object::OrphanedStats;
 use crate::core::repo::{Connection, Db};
 use crate::facts::repo as facts_repo;
-use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 
 /// Plan result for fact deletion.
 pub struct DeletePlan {

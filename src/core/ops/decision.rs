@@ -7,11 +7,11 @@ use crate::core::domain::config::LedgerConfig;
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::fate::{fate_posture, fate_transition};
 use crate::core::domain::scope::DecisionScope;
-use crate::core::repo::{self, Connection};
-use crate::ops::receipt::{
+use crate::core::ops::receipt::{
     compute_ledger_root_receipt_rel_path, compute_targeted_receipt_rel_path, finalize_receipt,
     write_receipt, ReceiptKind, ReceiptLocus, ReceiptMeta, ReceiptPlacement, ReceiptRef,
 };
+use crate::core::repo::{self, Connection};
 
 /// Parameters for starting a decision record.
 pub struct DecisionParams {
@@ -134,13 +134,13 @@ impl DecisionRecorder {
     /// Expose the receipt reference (root_id + rel_path) stored in the DB.
     /// Returns None if receipts are disabled or path computation failed.
     #[allow(dead_code)]
-    pub fn receipt_ref(&self) -> Option<&ReceiptRef> {
+    fn receipt_ref(&self) -> Option<&ReceiptRef> {
         self.receipt_ref.as_ref()
     }
 
     /// Expose the absolute path for receipt writing.
     /// Returns None if receipts are disabled or path computation failed.
-    pub fn receipt_abs_path(&self) -> Option<&std::path::Path> {
+    fn receipt_abs_path(&self) -> Option<&std::path::Path> {
         self.receipt_abs_path.as_deref()
     }
 

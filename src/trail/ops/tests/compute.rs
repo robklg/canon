@@ -208,7 +208,7 @@ fn a_story_handoff_at_an_emptied_place_gets_a_real_answer() {
     .unwrap();
 
     let roots = repo::root::fetch_all(&conn).unwrap();
-    let resolved = crate::ops::scope::resolve_history_scope(
+    let resolved = crate::core::ops::scope::resolve_history_scope(
         &[std::path::PathBuf::from("/a/old/photos")],
         &roots,
     )

@@ -12,7 +12,7 @@ use super::root::{find_containing_root, Root};
 /// a specific file exactly or all files under a directory.
 ///
 /// Deciding which variant a given path is takes a look at the disk, so that
-/// classification lives in the operations layer (`ops::scope::classify_all`);
+/// classification lives in the operations layer (`core::ops::scope::classify_all`);
 /// the distinction itself is domain knowledge and lives here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopeMatch {

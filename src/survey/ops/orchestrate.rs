@@ -49,7 +49,7 @@ pub struct SurveyRun {
 /// Fetch inputs, resolve `--other`/`--archive`, and compute a survey.
 ///
 /// Takes raw scope prefixes and filter strings (scope prefixes are already
-/// resolved by the caller via `ops::scope::resolve_scope()`; filter strings
+/// resolved by the caller via `core::ops::scope::resolve_scope()`; filter strings
 /// are parsed here). Reproduces the same order of fallible operations the
 /// interface used to run, in order: roots → note context → `--other`
 /// resolve/validate → `--archive` resolve → sources → compute.
@@ -83,8 +83,9 @@ pub fn run_survey(
     };
 
     let other_resolved = if !orchestration.other_paths.is_empty() {
-        let resolved = crate::ops::scope::resolve_paths(&orchestration.other_paths, &all_roots)?;
-        crate::ops::scope::validate_sources_exist(conn, &resolved, &all_roots)?;
+        let resolved =
+            crate::core::ops::scope::resolve_paths(&orchestration.other_paths, &all_roots)?;
+        crate::core::ops::scope::validate_sources_exist(conn, &resolved, &all_roots)?;
         resolved
     } else {
         Vec::new()
@@ -97,7 +98,7 @@ pub fn run_survey(
     }
 
     let archive_root_id = if let Some(ref spec) = orchestration.archive {
-        Some(crate::ops::scope::parse_root_spec(
+        Some(crate::core::ops::scope::parse_root_spec(
             &all_roots,
             spec,
             Some("archive"),

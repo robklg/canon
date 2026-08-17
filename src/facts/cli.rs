@@ -7,6 +7,8 @@ use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
 use crate::core::domain::IncludeSet;
+use crate::core::ops::decision::DecisionParams;
+use crate::core::ops::scope::{classify_all, ResolvedScope};
 use crate::core::repo::Db;
 use crate::expr::filter::Filter;
 use crate::expr::{BuiltinKey, BuiltinKeyCategory, ParsedFactKey};
@@ -20,8 +22,6 @@ use crate::facts::ops::report::{
     compute_root_distribution, AllKeysResult, DistributionResult, GroupedDistributionResult,
     RootDistributionResult,
 };
-use crate::ops::decision::DecisionParams;
-use crate::ops::scope::{classify_all, ResolvedScope};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 
 /// Check if a parsed key represents source.root (for special display formatting)

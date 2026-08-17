@@ -9,10 +9,10 @@ use anyhow::{bail, Result};
 
 use crate::core::domain::decision::DecisionStatus;
 use crate::core::domain::root::Root;
+use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::core::repo::{self, Connection};
 use crate::notes::domain::{ancestor_paths, LocationEntry, Note};
 use crate::notes::repo as notes_repo;
-use crate::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 
 // ============================================================================
 // Types

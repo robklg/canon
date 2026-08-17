@@ -17,12 +17,12 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
+use super::fs::canonicalize_maybe_missing;
 use crate::core::domain;
 use crate::core::domain::path::{clean_path, path_strip_prefix, validate_paths_in_roots};
 use crate::core::domain::root::{find_containing_root, Root, RootSpec};
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::repo::{self, Connection};
-use crate::ops::fs::canonicalize_maybe_missing;
 
 /// Classify a canonicalized path as file or directory scope.
 ///
@@ -165,10 +165,7 @@ fn parse_root_spec_impl(
 /// Callers must fetch roots via `core::repo::root::fetch_all()` first.
 ///
 /// Returns Some((root_id, root_path, role, relative_subdir)) if inside a root, None otherwise.
-pub fn resolve_root_path(
-    roots: &[Root],
-    path: &Path,
-) -> Result<Option<(i64, String, String, String)>> {
+fn resolve_root_path(roots: &[Root], path: &Path) -> Result<Option<(i64, String, String, String)>> {
     resolve_root_path_impl(roots, path, false)
 }
 

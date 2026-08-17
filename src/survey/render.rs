@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use crate::core::domain::format_count;
+use crate::core::ops::scope::ResolvedScope;
 use crate::notes::{format_note_date, relative_to_scope, SurveyNoteContext};
-use crate::ops::scope::ResolvedScope;
 use crate::survey::ops::compute::{ArchivedLocationDetail, LocationResult};
 
 const DETAIL_SAMPLE_SIZE: usize = 5;
