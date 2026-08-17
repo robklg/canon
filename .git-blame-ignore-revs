@@ -6,6 +6,27 @@
 # Carve core and move retire onto the feature-first tree
 4635b15873e929efb47cdb13a42bb26ded1eda53
 
+# Carve the place-walk subsystem out of the flat tree and retire
+081ade2136c01733dd112a1aae2ef6e7c8b9e631
+
+# Carve the trail read-layer subsystem out of the flat tree
+b3e2c3620b873bcd395eaf71e8bc20b3cc96e21b
+
+# Carve the sweep finder-seat subsystem out of the flat tree
+4a0e8bc9bea39a073b5a54f80e9dcd4fe56a0145
+
+# Carve the survey subsystem out of the flat tree
+a2cc98eb04247cd036fa763532fd5fcc5e7c67e9
+
+# Carve the exclusion subsystem out of the flat tree
+98e803ff47c0433497d0343e4aa8433d1fbb6526
+
+# Carve the scan subsystem out of the flat tree
+264f5ebb20334cd3d58c42c1fc92beac767dc57a
+
+# Carve the roots subsystem out of the flat tree
+202286eaa2879d0e3663ca76b4ff7ecaf4362fa3
+
 # Move notes onto the feature-first tree
 ced5b3eafda4fb21fc3217caf45c18dbe54e4d86
 
@@ -20,3 +41,6 @@ ced5b3eafda4fb21fc3217caf45c18dbe54e4d86
 
 # Move the repository layer into core
 a3cc4c62241dae9bf7d8b73f27441a176ebec9f2
+
+# Consolidate the shared spine under core
+72675ad4385ad52c6696a255af559322a6a22e15
