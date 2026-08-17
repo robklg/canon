@@ -44,3 +44,6 @@ a3cc4c62241dae9bf7d8b73f27441a176ebec9f2
 
 # Consolidate the shared spine under core
 72675ad4385ad52c6696a255af559322a6a22e15
+
+# Consolidate the shared test scaffolding under core
+2a9a317051c23c43cea12eae498d8cfa22f681f1
