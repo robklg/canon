@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::filter::Expr;
+use super::filter::Filter;
 
 /// Check if a filter string contains any `@` alias references outside of quoted strings.
 /// This is the fast-path check to avoid loading the aliases file when not needed.
@@ -30,12 +30,12 @@ pub fn has_alias_references(input: &str) -> bool {
 }
 
 /// Classify alias values: expression aliases get wrapped in parentheses,
-/// key aliases pass through unchanged. Classification uses `Expr::parse()` —
+/// key aliases pass through unchanged. Classification uses `Filter::parse()` —
 /// if the value parses as a valid filter expression, it's an expression alias.
 pub fn classify_aliases(raw: HashMap<String, String>) -> HashMap<String, String> {
     raw.into_iter()
         .map(|(name, value)| {
-            let processed = if Expr::parse(&value).is_ok() {
+            let processed = if Filter::parse(&value).is_ok() {
                 format!("({value})")
             } else {
                 value

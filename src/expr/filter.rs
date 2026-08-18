@@ -79,8 +79,22 @@ pub struct UsedStatus {
     pub enriched: bool,
 }
 
-// Keep Filter as alias for backwards compatibility
-pub type Filter = Expr;
+/// A parsed `--where` expression.
+///
+/// Opaque on purpose. Every consumer parses a string and hands the result
+/// onward; nothing outside this module reads the tree inside. Keeping the
+/// syntax tree behind the newtype means the language can grow — a filter
+/// that remembers the text it was written as, or the name it was saved
+/// under — without touching a caller.
+#[derive(Debug, Clone)]
+pub struct Filter(Expr);
+
+impl Filter {
+    /// Parse a `--where` expression string.
+    pub fn parse(s: &str) -> Result<Self> {
+        Ok(Filter(Expr::parse(s)?))
+    }
+}
 
 // ============================================================================
 // Fact Cache for Bulk Prefetching
@@ -777,7 +791,7 @@ pub fn apply_filters(
     // Extract all keys used in filters and prefetch their values
     let mut all_keys = Vec::new();
     for filter in filters {
-        extract_keys(filter, &mut all_keys);
+        extract_keys(&filter.0, &mut all_keys);
     }
     let mut cache = prefetch_facts(conn, source_ids, &all_keys)?;
 
@@ -786,9 +800,9 @@ pub fn apply_filters(
 
     // Combine all filters with AND
     let combined = if filters.len() == 1 {
-        filters[0].clone()
+        filters[0].0.clone()
     } else {
-        Expr::And(filters.to_vec())
+        Expr::And(filters.iter().map(|f| f.0.clone()).collect())
     };
 
     let mut result = Vec::new();
@@ -896,7 +910,7 @@ fn prefetch_status_data(
 fn validate_filter_keys(conn: &Connection, filters: &[Filter]) -> Result<()> {
     let mut all_keys = Vec::new();
     for filter in filters {
-        extract_comparable_keys(filter, &mut all_keys);
+        extract_comparable_keys(&filter.0, &mut all_keys);
     }
 
     for key in all_keys {
@@ -947,7 +961,7 @@ fn extract_comparable_keys(expr: &Expr, keys: &mut Vec<String>) {
 fn detect_status_predicates(exprs: &[Filter]) -> UsedStatus {
     let mut used = UsedStatus::default();
     for expr in exprs {
-        detect_status_in_expr(expr, &mut used);
+        detect_status_in_expr(&expr.0, &mut used);
     }
     used
 }
@@ -1713,7 +1727,7 @@ mod tests {
         // 2-segment path: "2024/doc.txt" (index [1] = "doc.txt")
         let s3 = insert_source(&conn, root, "2024/doc.txt");
 
-        let filter = Expr::parse("source.rel_path[1]~'*tion*'").unwrap();
+        let filter = Filter::parse("source.rel_path[1]~'*tion*'").unwrap();
         let result = apply_filters(&mut conn, &[s1, s2, s3], &[filter]).unwrap();
 
         // s1 silently skipped (out of bounds), s2 matches, s3 doesn't match glob
@@ -1730,7 +1744,7 @@ mod tests {
         // 3-segment path: [-3] = "2024"
         let s2 = insert_source(&conn, root, "2024/vacation/photo.jpg");
 
-        let filter = Expr::parse("source.rel_path[-3]=2024").unwrap();
+        let filter = Filter::parse("source.rel_path[-3]=2024").unwrap();
         let result = apply_filters(&mut conn, &[s1, s2], &[filter]).unwrap();
 
         assert_eq!(result.source_ids, vec![s2]);
@@ -1746,7 +1760,7 @@ mod tests {
         // 4-segment path: [2:4] = "c/d"
         let s2 = insert_source(&conn, root, "a/b/c/d");
 
-        let filter = Expr::parse("source.rel_path[2:4]~'c*'").unwrap();
+        let filter = Filter::parse("source.rel_path[2:4]~'c*'").unwrap();
         let result = apply_filters(&mut conn, &[s1, s2], &[filter]).unwrap();
 
         assert_eq!(result.source_ids, vec![s2]);
@@ -1760,7 +1774,7 @@ mod tests {
         // source.ext is a text value; |year modifier should fail on it
         let s1 = insert_source(&conn, root, "photo.jpg");
 
-        let filter = Expr::parse("source.ext|year=2024").unwrap();
+        let filter = Filter::parse("source.ext|year=2024").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
 
         // Modifier failure treated as non-match, not error
@@ -2138,7 +2152,7 @@ mod tests {
         // Same content in archive
         insert_source_with_object(&conn, arc_root, "a.jpg", Some(obj));
 
-        let filter = Expr::parse("archived?").unwrap();
+        let filter = Filter::parse("archived?").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
@@ -2150,7 +2164,7 @@ mod tests {
         // Unhashed source (no object_id)
         let s1 = insert_source_with_object(&conn, src_root, "a.jpg", None);
 
-        let filter = Expr::parse("archived?").unwrap();
+        let filter = Filter::parse("archived?").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
         assert!(result.source_ids.is_empty());
     }
@@ -2163,7 +2177,7 @@ mod tests {
         // Hashed but not in any archive
         let s1 = insert_source_with_object(&conn, src_root, "a.jpg", Some(obj));
 
-        let filter = Expr::parse("archived?").unwrap();
+        let filter = Filter::parse("archived?").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
         assert!(result.source_ids.is_empty());
     }
@@ -2174,7 +2188,7 @@ mod tests {
         let src_root = insert_root(&conn, "/src");
         let s1 = insert_source_with_object(&conn, src_root, "a.jpg", None);
 
-        let filter = Expr::parse("NOT archived?").unwrap();
+        let filter = Filter::parse("NOT archived?").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
@@ -2187,7 +2201,7 @@ mod tests {
         let s1 = insert_source_with_object(&conn, root, "a.jpg", Some(obj));
         let s2 = insert_source_with_object(&conn, root, "b.jpg", None);
 
-        let filter = Expr::parse("hashed?").unwrap();
+        let filter = Filter::parse("hashed?").unwrap();
         let result = apply_filters(&mut conn, &[s1, s2], &[filter]).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
@@ -2202,8 +2216,8 @@ mod tests {
         let s2 = insert_source_with_object(&conn, root, "b.jpg", None);
         let ids = [s1, s2];
 
-        let f1 = Expr::parse("hashed?").unwrap();
-        let f2 = Expr::parse("content.hash.sha256?").unwrap();
+        let f1 = Filter::parse("hashed?").unwrap();
+        let f2 = Filter::parse("content.hash.sha256?").unwrap();
         let r1 = apply_filters(&mut conn, &ids, &[f1]).unwrap();
         let r2 = apply_filters(&mut conn, &ids, &[f2]).unwrap();
         assert_eq!(r1.source_ids, r2.source_ids);
@@ -2222,7 +2236,7 @@ mod tests {
         .unwrap();
         let s1 = conn.last_insert_rowid();
 
-        let filter = Expr::parse("excluded?").unwrap();
+        let filter = Filter::parse("excluded?").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
@@ -2234,7 +2248,7 @@ mod tests {
         let obj = insert_object_excluded(&conn, "hash_excl");
         let s1 = insert_source_with_object(&conn, root, "a.jpg", Some(obj));
 
-        let filter = Expr::parse("excluded?").unwrap();
+        let filter = Filter::parse("excluded?").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
@@ -2245,7 +2259,7 @@ mod tests {
         let root = insert_root(&conn, "/src");
         let s1 = insert_source_with_object(&conn, root, "a.jpg", None);
 
-        let filter = Expr::parse("excluded?").unwrap();
+        let filter = Filter::parse("excluded?").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
         assert!(result.source_ids.is_empty());
     }
@@ -2259,7 +2273,7 @@ mod tests {
         // Object-level fact (not hash)
         insert_fact_entry(&conn, "object", obj, "content.mime", "image/jpeg");
 
-        let filter = Expr::parse("enriched?").unwrap();
+        let filter = Filter::parse("enriched?").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
@@ -2272,7 +2286,7 @@ mod tests {
         let s1 = insert_source_with_object(&conn, root, "a.jpg", None);
         insert_fact_entry(&conn, "source", s1, "policy.tag", "keep");
 
-        let filter = Expr::parse("enriched?").unwrap();
+        let filter = Filter::parse("enriched?").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
@@ -2286,7 +2300,7 @@ mod tests {
         // Only content.hash.sha256 fact — should NOT count as enriched
         insert_fact_entry(&conn, "object", obj, "content.hash.sha256", "hash_f");
 
-        let filter = Expr::parse("enriched?").unwrap();
+        let filter = Filter::parse("enriched?").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
         assert!(result.source_ids.is_empty());
     }
@@ -2297,7 +2311,7 @@ mod tests {
         let root = insert_root(&conn, "/src");
         let s1 = insert_source_with_object(&conn, root, "a.jpg", None);
 
-        let filter = Expr::parse("enriched?").unwrap();
+        let filter = Filter::parse("enriched?").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
         assert!(result.source_ids.is_empty());
     }
@@ -2318,7 +2332,7 @@ mod tests {
         // s3: unhashed
         let s3 = insert_source_with_object(&conn, src_root, "c.jpg", None);
 
-        let filter = Expr::parse("NOT archived? AND hashed?").unwrap();
+        let filter = Filter::parse("NOT archived? AND hashed?").unwrap();
         let result = apply_filters(&mut conn, &[s1, s2, s3], &[filter]).unwrap();
         assert_eq!(result.source_ids, vec![s2]);
     }
@@ -2333,7 +2347,7 @@ mod tests {
         let root = insert_root(&conn, "/src");
         let s1 = insert_source(&conn, root, "a.jpg");
 
-        let filter = Expr::parse("archived?").unwrap();
+        let filter = Filter::parse("archived?").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
         assert!(result.used_status.archived);
         assert!(!result.used_status.hashed);
@@ -2347,7 +2361,7 @@ mod tests {
         let root = insert_root(&conn, "/src");
         let s1 = insert_source(&conn, root, "a.jpg");
 
-        let filter = Expr::parse("source.ext=jpg").unwrap();
+        let filter = Filter::parse("source.ext=jpg").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
         assert!(!result.used_status.archived);
         assert!(!result.used_status.hashed);
@@ -2357,7 +2371,7 @@ mod tests {
 
     #[test]
     fn filter_result_flags_nested_detection() {
-        let filter = Expr::parse("NOT (archived? AND excluded?)").unwrap();
+        let filter = Filter::parse("NOT (archived? AND excluded?)").unwrap();
         let used = detect_status_predicates(&[filter]);
         assert!(used.archived);
         assert!(used.excluded);
@@ -2375,7 +2389,7 @@ mod tests {
         let s2 = insert_source(&conn, root, "b.jpg");
 
         // No facts ingested — content.mime doesn't exist in facts table
-        let filter = Expr::parse("NOT content.mime?").unwrap();
+        let filter = Filter::parse("NOT content.mime?").unwrap();
         let result = apply_filters(&mut conn, &[s1, s2], &[filter]).unwrap();
 
         // All sources should match (content.mime doesn't exist for any)
@@ -2389,7 +2403,7 @@ mod tests {
         let root = insert_root(&conn, "/photos");
         let s1 = insert_source(&conn, root, "a.jpg");
 
-        let filter = Expr::parse("content.mime?").unwrap();
+        let filter = Filter::parse("content.mime?").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
 
         assert!(result.source_ids.is_empty());
@@ -2402,7 +2416,7 @@ mod tests {
         let root = insert_root(&conn, "/photos");
         let s1 = insert_source(&conn, root, "a.jpg");
 
-        let filter = Expr::parse("content.mime=image/jpeg").unwrap();
+        let filter = Filter::parse("content.mime=image/jpeg").unwrap();
         let result = apply_filters(&mut conn, &[s1], &[filter]);
 
         let err = result
