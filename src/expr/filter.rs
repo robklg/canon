@@ -165,7 +165,11 @@ fn prefetch_facts(conn: &mut Connection, source_ids: &[i64], keys: &[String]) ->
     // Parse keys to get base keys (without accessors/modifiers)
     let base_keys: Vec<String> = keys
         .iter()
-        .filter_map(|k| parse_key_with_modifiers(k).ok().map(|(base, _, _)| base))
+        .filter_map(|k| {
+            expr::parse_key_with_modifiers(k)
+                .ok()
+                .map(|(base, _, _)| base)
+        })
         .collect();
 
     // Skip built-in keys (they don't need DB lookups)
@@ -914,7 +918,7 @@ fn validate_filter_keys(conn: &Connection, filters: &[Filter]) -> Result<()> {
     }
 
     for key in all_keys {
-        let (base_key, _, _) = parse_key_with_modifiers(&key)?;
+        let (base_key, _, _) = expr::parse_key_with_modifiers(&key)?;
         if !is_known_key(conn, &base_key)? {
             bail!("Unknown fact key: '{base_key}'. Use 'canon facts' to see available keys.");
         }
@@ -1019,7 +1023,7 @@ fn check_fact_compare(
     use expr::BuiltinKey;
 
     // Parse key, accessor, and modifiers
-    let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
+    let (base_key, accessor, modifiers) = expr::parse_key_with_modifiers(key)?;
 
     // Handle built-in keys via enum
     if let Some(builtin) = BuiltinKey::from_str(&base_key) {
@@ -1296,7 +1300,7 @@ fn check_fact_exists_cached(
     key: &str,
     cache: &FactCache,
 ) -> Result<bool> {
-    let (base_key, _accessor, _modifiers) = parse_key_with_modifiers(key)?;
+    let (base_key, _accessor, _modifiers) = expr::parse_key_with_modifiers(key)?;
 
     // Check cache for stored facts
     if cache.has_key(&base_key) {
@@ -1325,7 +1329,7 @@ fn check_fact_compare_cached(
 ) -> Result<bool> {
     use expr::BuiltinKey;
 
-    let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
+    let (base_key, accessor, modifiers) = expr::parse_key_with_modifiers(key)?;
 
     // Handle built-in keys (still need DB for source columns)
     if BuiltinKey::from_str(&base_key).is_some() {
@@ -1383,15 +1387,8 @@ fn to_local_fact_value(fv: &fact::FactValue) -> FactValue {
 }
 
 // ============================================================================
-// Modifier and Accessor Parsing
+// Modifier and Accessor Application
 // ============================================================================
-
-// Use expr::parse_key_with_modifiers for parsing - just re-export for local use
-fn parse_key_with_modifiers(
-    key: &str,
-) -> Result<(String, Option<expr::PathAccessor>, Vec<expr::ModifierCall>)> {
-    expr::parse_key_with_modifiers(key)
-}
 
 /// Apply accessor and modifiers to a FactValue using the expr module
 fn apply_accessor_and_modifiers(
