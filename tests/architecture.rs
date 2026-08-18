@@ -306,11 +306,6 @@ const TIER3: &[Tier3Entry] = &[
         severity: Severity::Read,
     },
     Tier3Entry {
-        file: "coverage.rs",
-        reference: "core::repo::root::fetch_all",
-        severity: Severity::Read,
-    },
-    Tier3Entry {
         file: "exclude/cli.rs",
         reference: "core::repo::root::fetch_all",
         severity: Severity::Read,

@@ -2,8 +2,8 @@ use anyhow::Result;
 
 use crate::core::domain::format_count;
 use crate::core::domain::IncludeSet;
-use crate::core::ops::scope::{classify_all, parse_root_spec, ResolvedScope};
-use crate::core::repo::{self, Db};
+use crate::core::ops::scope::{classify_all, ResolvedScope};
+use crate::core::repo::Db;
 use crate::expr::filter::Filter;
 use crate::ops;
 use crate::ops::coverage::CoverageStats;
@@ -25,17 +25,9 @@ pub fn run(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Fetch all roots for spec resolution
-    let roots = repo::root::fetch_all(conn)?;
-
     let scopes = classify_all(scope_prefixes);
 
-    // Parse and validate archive spec (must be archive role)
-    let archive_root_id = if let Some(spec) = archive_spec {
-        Some(parse_root_spec(&roots, spec, Some("archive"))?)
-    } else {
-        None
-    };
+    let archive_root_id = ops::coverage::resolve_archive_root(conn, archive_spec)?;
 
     // Get mutable reference for operations
     let conn = db.conn_mut();

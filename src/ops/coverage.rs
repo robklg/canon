@@ -13,6 +13,7 @@ use crate::expr::filter::{Filter, UsedStatus};
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 
 use crate::core::domain::scope::ScopeMatch;
+use crate::core::ops::scope::parse_root_spec;
 
 /// Statistics for a set of sources.
 pub struct CoverageStats {
@@ -77,6 +78,22 @@ impl CoverageStats {
     /// no longer hide inside this number.
     pub fn unarchived(&self) -> i64 {
         self.coverable_sources() - self.archived_sources
+    }
+}
+
+/// Resolve an `--archive` spec to a root id, refusing a root that is not an
+/// archive.
+///
+/// The fetch belongs here rather than at the command: which root a spec names
+/// is a question about the world, and the interface has no business asking the
+/// database it. Survey resolves its own the same way.
+pub fn resolve_archive_root(conn: &Connection, spec: Option<&str>) -> Result<Option<i64>> {
+    match spec {
+        Some(spec) => {
+            let roots = repo::root::fetch_all(conn)?;
+            Ok(Some(parse_root_spec(&roots, spec, Some("archive"))?))
+        }
+        None => Ok(None),
     }
 }
 
@@ -261,6 +278,22 @@ mod tests {
         assert_eq!(stats.archived_sources, 1);
         assert_eq!(stats.unarchived(), 0, "the empty file is not 'unarchived'");
         assert_eq!(stats.archived_pct(), 100.0, "covered means covered");
+    }
+
+    #[test]
+    fn archive_spec_resolves_an_archive_root_and_refuses_a_source_root() {
+        let conn = setup_test_db();
+        let source = insert_root(&conn, "/photos", "source", false);
+        let archive = insert_root(&conn, "/archive", "archive", false);
+
+        assert_eq!(resolve_archive_root(&conn, None).unwrap(), None);
+        assert_eq!(
+            resolve_archive_root(&conn, Some(&format!("id:{archive}"))).unwrap(),
+            Some(archive)
+        );
+
+        let err = resolve_archive_root(&conn, Some(&format!("id:{source}"))).unwrap_err();
+        assert!(err.to_string().contains("expected 'archive'"), "{err}");
     }
 
     #[test]
