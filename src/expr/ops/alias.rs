@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::expr::alias as expr_alias;
+use crate::expr::domain::alias as expr_alias;
 
 /// Load aliases from `$canon_home/aliases.toml`.
 /// Returns `Ok(None)` if the file doesn't exist.

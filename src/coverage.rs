@@ -4,7 +4,7 @@ use crate::core::domain::format_count;
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::{classify_all, ResolvedScope};
 use crate::core::repo::Db;
-use crate::expr::filter::Filter;
+use crate::expr::Filter;
 use crate::ops;
 use crate::ops::coverage::CoverageStats;
 

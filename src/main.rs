@@ -51,18 +51,18 @@ fn include_set_from(values: &[IncludeValue]) -> IncludeSet {
     set
 }
 
-// Infrastructure layers
+// The expression facility — the language's one home — and what is left of the
+// pre-migration operations tree.
 mod expr;
 mod ops;
 
-// The shared spine, and the features built on it. These coexist with the
-// layer modules above, which are being emptied into them.
+// The shared spine, and the features built on it. `ops` above is still being
+// emptied into them; `expr` is a facility of its own and stays.
 mod core;
 mod retire;
 mod story;
 
 // Utilities
-mod alias;
 mod ceremony;
 mod progress;
 mod scope;
@@ -921,7 +921,7 @@ fn main() -> Result<()> {
             unique_content,
             emit,
         } => {
-            let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+            let filters = expr::expand_filter_strings(&filters, &canon_home)?;
             let mut include = include_set_from(&include);
             let all_roots = core::repo::root::fetch_all(db.conn())?;
             let resolved = core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
@@ -960,7 +960,7 @@ fn main() -> Result<()> {
             reverse,
             null_delim,
         } => {
-            let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+            let filters = expr::expand_filter_strings(&filters, &canon_home)?;
             let mut include = include_set_from(&include);
 
             let all_roots = core::repo::root::fetch_all(db.conn())?;
@@ -1021,7 +1021,7 @@ fn main() -> Result<()> {
                     value_type,
                     yes,
                 }) => {
-                    let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+                    let filters = expr::expand_filter_strings(&filters, &canon_home)?;
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved =
                         core::ops::scope::resolve_scope(db.conn(), &paths, false, &all_roots)?;
@@ -1042,7 +1042,7 @@ fn main() -> Result<()> {
                     )?;
                 }
                 None => {
-                    let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+                    let filters = expr::expand_filter_strings(&filters, &canon_home)?;
                     let mut include = include_set_from(&include);
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved =
@@ -1110,7 +1110,7 @@ fn main() -> Result<()> {
             include,
             compact,
         } => {
-            let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+            let filters = expr::expand_filter_strings(&filters, &canon_home)?;
             let mut include = include_set_from(&include);
             let all_roots = core::repo::root::fetch_all(db.conn())?;
             let resolved = core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
@@ -1140,7 +1140,7 @@ fn main() -> Result<()> {
             null_delim,
             verbose,
         } => {
-            let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
+            let expanded = expr::expand_filter_strings(&filters, &canon_home)?;
             let mut include = include_set_from(&include);
             if include.includes_archived() {
                 bail!("--include archived is not valid for survey");
@@ -1178,7 +1178,7 @@ fn main() -> Result<()> {
             // expanded; running them through expansion a second time would
             // resolve alias references that a single pass deliberately
             // leaves alone, since an alias may not refer to another alias.
-            let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+            let filters = expr::expand_filter_strings(&filters, &canon_home)?;
             let include = include_set_from(&include);
             if include.includes_archived() {
                 bail!("--include archived is not valid for compare (valid values: excluded)");
@@ -1214,7 +1214,7 @@ fn main() -> Result<()> {
                 no_edit,
                 global,
             } => {
-                let expanded = alias::expand_filter_strings(&filters, &canon_home)?;
+                let expanded = expr::expand_filter_strings(&filters, &canon_home)?;
                 let all_roots = core::repo::root::fetch_all(db.conn())?;
                 let resolved =
                     core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
@@ -1316,7 +1316,7 @@ fn main() -> Result<()> {
                 global,
                 reason,
             } => {
-                let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+                let filters = expr::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::SetOptions {
                     dry_run,
                     verbose: false,
@@ -1367,7 +1367,7 @@ fn main() -> Result<()> {
                 global,
                 reason,
             } => {
-                let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+                let filters = expr::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::ClearOptions { dry_run, yes };
                 let all_roots = core::repo::root::fetch_all(db.conn())?;
                 let resolved =
@@ -1391,7 +1391,7 @@ fn main() -> Result<()> {
                 yes,
                 reason,
             } => {
-                let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+                let filters = expr::expand_filter_strings(&filters, &canon_home)?;
                 exclude::exclude_duplicates(
                     &mut db,
                     &prefer,
@@ -1414,7 +1414,7 @@ fn main() -> Result<()> {
                 global,
                 reason,
             } => {
-                let filters = alias::expand_filter_strings(&filters, &canon_home)?;
+                let filters = expr::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::SetOptions {
                     dry_run: !yes,
                     verbose,

@@ -13,8 +13,8 @@ use std::path::Path;
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::{classify_all, resolve_path, validate_sources_exist};
 use crate::core::repo::{self, Connection};
-use crate::expr::filter::Filter;
-use crate::ops::selection::{self, RolePolicy, SelectionParams};
+use crate::expr::Filter;
+use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
 /// Result of comparing two locations by content.
 #[derive(Debug)]
@@ -108,7 +108,7 @@ type ScopeContentMap = (
     HashMap<i64, String>,
     usize,
     usize,
-    crate::expr::filter::UsedStatus,
+    crate::expr::UsedStatus,
     usize,
 );
 
@@ -130,7 +130,7 @@ fn select_and_build_map(
         filters: filters.to_vec(),
         role_policy: RolePolicy::AnyRole,
     };
-    let sel = selection::select_sources(conn, &params)?;
+    let sel = select_sources(conn, &params)?;
 
     // Build object_id → path map, counting unhashed and contentless sources.
     // The contentless law: every empty file shares the one universal empty

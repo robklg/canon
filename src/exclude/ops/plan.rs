@@ -12,8 +12,8 @@ use crate::core::domain::path::path_is_under;
 use crate::core::domain::source::Source;
 use crate::core::repo::{self, Connection};
 use crate::exclude::domain::find_excludable_duplicates;
-use crate::expr::filter;
-use crate::ops::selection::{self, RolePolicy, SelectionParams};
+use crate::expr::apply_filters;
+use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
 use super::types::{
     object_source_info, DuplicateGroupData, ExcludeClearParams, ExcludeClearPlan,
@@ -38,7 +38,7 @@ pub fn plan_set(conn: &mut Connection, params: &ExcludeSetParams) -> Result<Excl
         // The same policy guards plan_duplicates and plan_set_objects.
         role_policy: RolePolicy::SourceOnly,
     };
-    let selection = selection::select_sources(conn, &sel_params)?;
+    let selection = select_sources(conn, &sel_params)?;
 
     // select_sources() with default IncludeSet already filters out excluded sources
     let sources = selection.sources;
@@ -120,7 +120,7 @@ pub fn plan_clear(conn: &mut Connection, params: &ExcludeClearParams) -> Result<
         filtered
     } else {
         let ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-        let filtered_ids: HashSet<i64> = filter::apply_filters(conn, &ids, &params.filters)?
+        let filtered_ids: HashSet<i64> = apply_filters(conn, &ids, &params.filters)?
             .source_ids
             .into_iter()
             .collect();
@@ -161,7 +161,7 @@ pub fn plan_duplicates(
         filters: params.filters.clone(),
         role_policy: RolePolicy::SourceOnly,
     };
-    let selection = selection::select_sources(conn, &sel_params)?;
+    let selection = select_sources(conn, &sel_params)?;
     let scope_count = selection.sources.len();
 
     if selection.sources.is_empty() {
@@ -288,7 +288,7 @@ pub fn plan_set_objects(
         filters: params.filters.clone(),
         role_policy: RolePolicy::SourceOnly,
     };
-    let selection = selection::select_sources(conn, &sel_params)?;
+    let selection = select_sources(conn, &sel_params)?;
 
     if selection.sources.is_empty() {
         return Ok(ExcludeSetObjectsPlan {

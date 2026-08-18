@@ -26,7 +26,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use super::eval::{self as expr, BuiltinKey, ParsedFactKey};
+use super::key::{BuiltinKey, ParsedFactKey};
+use super::transform;
 use crate::core::domain::fact::FactEntry;
 use crate::core::domain::fact::FactValue;
 use crate::core::domain::source::Source;
@@ -125,12 +126,12 @@ fn apply_transforms(value: FactValue, key: &ParsedFactKey) -> Result<String> {
 
     // Apply accessor if present
     if let Some(ref acc) = key.accessor {
-        result = expr::apply_accessor(&result, acc, &key.raw)?;
+        result = transform::apply_accessor(&result, acc, &key.raw)?;
     }
 
     // Apply modifiers (for_display: true since this is for facts output)
     for modifier_call in &key.modifiers {
-        result = expr::apply_modifier(&result, modifier_call, &key.raw, true)?;
+        result = transform::apply_modifier(&result, modifier_call, &key.raw, true)?;
     }
 
     // Convert to display string

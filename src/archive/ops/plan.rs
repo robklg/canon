@@ -763,7 +763,7 @@ mod tests {
         insert_source_with_metadata, setup_test_db,
     };
 
-    use crate::expr;
+    use crate::expr::{extract_fact_keys, parse_pattern};
 
     fn make_lock_entry(
         id: i64,
@@ -834,8 +834,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{content.Make}/{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{content.Make}/{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -872,8 +872,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -914,8 +914,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{content.Make}/{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{content.Make}/{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -975,8 +975,8 @@ mod tests {
         );
         let sources: Vec<&LockEntry> = vec![&e1, &e2];
         // Pattern uses only Make + filename → both expand to "Canon/photo.jpg"
-        let pattern = expr::parse_pattern("{content.Make}/{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{content.Make}/{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1005,8 +1005,8 @@ mod tests {
         let e2 = make_lock_entry(src2, root_id, "/photos/b.jpg", Some(obj2), Some("hash2"));
         let sources: Vec<&LockEntry> = vec![&e1, &e2];
         // filename pattern produces different paths
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1054,8 +1054,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1100,8 +1100,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1159,8 +1159,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1198,8 +1198,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1231,8 +1231,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1267,8 +1267,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1316,8 +1316,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1355,8 +1355,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1419,8 +1419,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, src_path);
         root_paths.insert(archive_id, archive_path);
@@ -1469,8 +1469,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1506,8 +1506,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1563,8 +1563,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, src_path);
         root_paths.insert(archive_id, archive_path);
@@ -1617,8 +1617,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, src_path);
         root_paths.insert(archive_id, archive_path);
@@ -1648,8 +1648,8 @@ mod tests {
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", None, None);
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1689,8 +1689,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1712,8 +1712,8 @@ mod tests {
         let archive_id = insert_root(&conn, "/archive", "archive", false);
 
         let sources: Vec<&LockEntry> = vec![];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let root_paths = HashMap::new();
 
         let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
@@ -2029,8 +2029,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -2065,8 +2065,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -2100,8 +2100,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -2143,8 +2143,8 @@ mod tests {
         );
         let sources: Vec<&LockEntry> = vec![&entry];
         // Pattern produces a normal path — no escape expected
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -2178,8 +2178,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{source.rel_path[:-1]}/{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{source.rel_path[:-1]}/{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -2222,8 +2222,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -2259,8 +2259,8 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = expr::parse_pattern("{filename}").unwrap();
-        let needed_keys = expr::extract_fact_keys(&pattern);
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, root_path.to_string());
         root_paths.insert(archive_id, "/archive".to_string());

@@ -15,7 +15,7 @@ use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::core::ops::scope::{classify_all, resolve_archive_path};
 use crate::core::repo::{self, Connection, Db};
-use crate::expr::filter::Filter;
+use crate::expr::Filter;
 
 pub struct GenerateOptions {
     pub force: bool,

@@ -5,8 +5,8 @@ use crate::core::domain::source::Source;
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::classify_all;
 use crate::core::repo::Db;
-use crate::expr::filter::Filter;
-use crate::ops::selection::{self, RolePolicy, SelectionParams};
+use crate::expr::Filter;
+use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -51,7 +51,7 @@ pub fn run(
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
     };
-    let sel = selection::select_sources(conn, &params)?;
+    let sel = select_sources(conn, &params)?;
 
     if sel.sources.is_empty() {
         eprintln!("No sources match the given filters.");
@@ -208,7 +208,7 @@ pub fn show_duplicates(
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
     };
-    let sel = selection::select_sources(conn, &params)?;
+    let sel = select_sources(conn, &params)?;
 
     if sel.sources.is_empty() {
         eprintln!("No sources match the given filters.");

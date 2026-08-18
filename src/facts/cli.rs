@@ -10,8 +10,9 @@ use crate::core::domain::IncludeSet;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::scope::{classify_all, ResolvedScope};
 use crate::core::repo::Db;
-use crate::expr::filter::Filter;
-use crate::expr::{BuiltinKey, BuiltinKeyCategory, ParsedFactKey};
+use crate::expr::Filter;
+use crate::expr::{select_sources, RolePolicy, SelectionParams};
+use crate::expr::{BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey};
 use crate::facts::ops::maintain::{
     execute_delete, execute_prune_excluded, execute_prune_orphaned, execute_prune_stale,
     plan_delete, plan_prune_excluded, plan_prune_orphaned, plan_prune_stale, validate_delete_key,
@@ -22,7 +23,6 @@ use crate::facts::ops::report::{
     compute_root_distribution, AllKeysResult, DistributionResult, GroupedDistributionResult,
     RootDistributionResult,
 };
-use crate::ops::selection::{self, RolePolicy, SelectionParams};
 
 /// Check if a parsed key represents source.root (for special display formatting)
 fn is_root_key(key: &ParsedFactKey) -> bool {
@@ -77,7 +77,7 @@ pub fn run(
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
     };
-    let sel = selection::select_sources(conn, &params)?;
+    let sel = select_sources(conn, &params)?;
     let source_ids = sel.source_ids();
     let total_sources = source_ids.len();
 
@@ -231,7 +231,7 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool, show_status_predicat
     if !show_all {
         use strum::IntoEnumIterator;
         let hidden_count = BuiltinKey::iter()
-            .filter(|k| k.visibility() == crate::expr::BuiltinKeyVisibility::Hidden)
+            .filter(|k| k.visibility() == BuiltinKeyVisibility::Hidden)
             .count();
         let _ = writeln!(
             handle,
@@ -489,7 +489,7 @@ pub fn delete_facts(
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
     };
-    let source_ids = selection::select_sources(conn, &params)?.source_ids();
+    let source_ids = select_sources(conn, &params)?.source_ids();
 
     if source_ids.is_empty() {
         println!("No sources match the given filters.");

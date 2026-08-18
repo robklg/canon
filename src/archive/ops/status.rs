@@ -74,7 +74,7 @@ pub fn compute_manifest_status(
     manifest_path: &Path,
 ) -> Result<ManifestStatus> {
     use super::pattern::evaluate_pattern;
-    use crate::expr;
+    use crate::expr::{extract_fact_keys, parse_pattern};
 
     // 1. Read manifest and lock
     let config = read_manifest_config(manifest_path)?;
@@ -110,9 +110,9 @@ pub fn compute_manifest_status(
     let dest_display = base_dir.to_string_lossy().to_string();
 
     // 5. Parse pattern and fetch needed facts
-    let pattern = expr::parse_pattern(&config.output.pattern)
+    let pattern = parse_pattern(&config.output.pattern)
         .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
-    let needed_keys = expr::extract_fact_keys(&pattern);
+    let needed_keys = extract_fact_keys(&pattern);
     let scope_prefix = config.meta.scope.as_deref();
 
     // Batch fetch facts for all lock entries if pattern uses content facts

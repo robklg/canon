@@ -19,9 +19,9 @@ use crate::core::domain::include::IncludeSet;
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::{FactEntry, FactType, FactValue};
 use crate::core::repo::{self, Connection};
-use crate::expr::filter::Filter;
 use crate::expr::BuiltinKey;
-use crate::ops::selection::{self, RolePolicy, SelectionParams};
+use crate::expr::Filter;
+use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
 use super::manifest::{write_and_sync, write_lock_file};
 
@@ -84,7 +84,7 @@ pub fn plan_generate(
         filters: params.filters.clone(),
         role_policy: RolePolicy::SourceUnlessIncluded,
     };
-    let selection = selection::select_sources(conn, &selection_params)?;
+    let selection = select_sources(conn, &selection_params)?;
 
     // 2. Separate hashed from unhashed sources
     let mut unhashed_count = 0usize;

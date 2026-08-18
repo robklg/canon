@@ -17,7 +17,7 @@ use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
 use crate::core::repo::{self, Db};
-use crate::expr;
+use crate::expr::{extract_fact_keys, parse_pattern, Pattern};
 
 pub struct ApplyOptions {
     pub dry_run: bool,
@@ -117,9 +117,9 @@ pub fn run(
     let conn = db.conn_mut();
 
     // Parse the pattern once upfront
-    let pattern = expr::parse_pattern(&config.output.pattern)
+    let pattern = parse_pattern(&config.output.pattern)
         .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
-    let needed_keys = expr::extract_fact_keys(&pattern);
+    let needed_keys = extract_fact_keys(&pattern);
 
     // Passed to pattern evaluation as a single prefix, deliberately without
     // splitting — unlike the decision scope further below, which splits the
@@ -627,7 +627,7 @@ const SAMPLE_COUNT: usize = 5;
 fn compute_sample_destinations(
     conn: &mut repo::Connection,
     sources: &[&LockEntry],
-    pattern: &expr::Pattern,
+    pattern: &Pattern,
     needed_keys: &[String],
     scope_prefix: Option<&str>,
     root_paths: &HashMap<i64, String>,

@@ -12,7 +12,7 @@ use anyhow::Result;
 use crate::archive::domain::LockEntry;
 use crate::core::domain::fact::{FactEntry, FactValue};
 use crate::core::domain::path::path_strip_prefix;
-use crate::expr::{self, EvalContext, Pattern};
+use crate::expr::{evaluate, EvalContext, Pattern};
 
 /// Build an EvalContext for a source using pre-fetched facts and cached root paths.
 fn build_eval_context(
@@ -73,5 +73,5 @@ pub fn evaluate_pattern(
     all_facts: &HashMap<i64, Vec<FactEntry>>,
 ) -> Result<String> {
     let ctx = build_eval_context(source, needed_keys, scope_prefix, root_paths, all_facts)?;
-    expr::evaluate(pattern, &ctx)
+    evaluate(pattern, &ctx)
 }

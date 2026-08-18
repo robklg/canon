@@ -24,7 +24,7 @@ use crate::exclude::ops::types::{
     ExcludeClearParams, ExcludeDuplicatesParams, ExcludeSetObjectsParams, ExcludeSetParams,
     ObjectSourceInfo,
 };
-use crate::expr::filter::Filter;
+use crate::expr::Filter;
 
 /// Build the decision params, decomposing the given canonical scope prefixes to
 /// their roots (the one funnel). Pass an empty slice for a global decision. A

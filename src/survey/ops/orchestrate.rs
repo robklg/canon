@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::core::domain;
-use crate::expr::filter::Filter;
+use crate::expr::Filter;
 use crate::notes::SurveyNoteContext;
 use crate::survey::ops::compute::{compute_survey, SurveyOutcome, SurveyParams};
 

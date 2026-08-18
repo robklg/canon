@@ -1,8 +1,14 @@
-//! Source selection — Canon's standard query contract.
+//! Selection: the expression language applied within a scope.
 //!
-//! Provides `select_sources()`, the single implementation that replaces per-command
-//! `get_matching_sources()` functions. All commands needing filtered sources build
-//! a `SelectionParams` and receive a `Selection` back.
+//! The set of sources an operation reports over or acts on. A caller describes
+//! what it wants — a scope, what to include, filters to apply, and how to treat
+//! archive roots — and receives back the sources that answer, along with the
+//! counts needed to explain what was left out.
+//!
+//! It lives in the expression facility rather than beside any one command
+//! because exploring and acting must resolve to the same set: what you act on
+//! has to be what you saw. That is why there is one implementation here and
+//! not a query per command.
 
 use std::collections::HashSet;
 
@@ -12,7 +18,8 @@ use crate::core::domain::include::IncludeSet;
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
 use crate::core::repo::{self, Connection};
-use crate::expr::filter::{self, Filter, UsedStatus};
+use crate::expr::domain::filter::{Filter, UsedStatus};
+use crate::expr::ops::filter::apply_filters;
 
 /// How to handle root role filtering during source selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +127,7 @@ pub fn select_sources(conn: &mut Connection, params: &SelectionParams) -> Result
 
     // Apply --where filters: get passing IDs, then keep matching sources
     let source_ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-    let filter_result = filter::apply_filters(conn, &source_ids, &params.filters)?;
+    let filter_result = apply_filters(conn, &source_ids, &params.filters)?;
     let passing_set: HashSet<i64> = filter_result.source_ids.into_iter().collect();
 
     let result: Vec<Source> = filtered

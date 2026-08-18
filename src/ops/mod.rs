@@ -8,5 +8,4 @@
 pub mod compare;
 pub mod coverage;
 pub mod ls;
-pub mod selection;
 pub mod worklist;

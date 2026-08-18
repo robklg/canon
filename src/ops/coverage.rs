@@ -9,8 +9,8 @@ use crate::core::domain::root::Root;
 use crate::core::domain::source::Source;
 use crate::core::domain::IncludeSet;
 use crate::core::repo::{self, Connection};
-use crate::expr::filter::{Filter, UsedStatus};
-use crate::ops::selection::{self, RolePolicy, SelectionParams};
+use crate::expr::{select_sources, RolePolicy, SelectionParams};
+use crate::expr::{Filter, UsedStatus};
 
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::ops::scope::parse_root_spec;
@@ -149,7 +149,7 @@ pub fn compute_scoped(
         filters: filters.to_vec(),
         role_policy: RolePolicy::SourceUnlessIncluded,
     };
-    let sel = selection::select_sources(conn, &params)?;
+    let sel = select_sources(conn, &params)?;
     let used_status = sel.used_status.clone();
     let excluded_count = sel.excluded_count;
     let refs: Vec<&Source> = sel.sources.iter().collect();
@@ -177,7 +177,7 @@ pub fn compute_per_root(
         filters: filters.to_vec(),
         role_policy: RolePolicy::SourceUnlessIncluded,
     };
-    let all_sel = selection::select_sources(conn, &params)?;
+    let all_sel = select_sources(conn, &params)?;
     let all_sources = all_sel.sources;
 
     let mut per_root_stats = Vec::new();

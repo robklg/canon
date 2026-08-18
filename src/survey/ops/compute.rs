@@ -12,7 +12,7 @@ use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::classify_all;
-use crate::expr::filter::{self, Filter};
+use crate::expr::{apply_filters, Filter, UsedStatus};
 use crate::survey::domain::analysis::{
     classify_location, count_only_here, discover_scopes_by_root, find_unique_object_ids,
     LocationKind,
@@ -63,7 +63,7 @@ pub struct SurveyResult {
     /// with counterpart paths. Only populated when compute_archived_pairs is true.
     pub archived_details: Vec<ArchivedLocationDetail>,
     /// Which status predicates appeared in filter expressions.
-    pub used_status: filter::UsedStatus,
+    pub used_status: UsedStatus,
     /// Count of excluded sources hidden from selection (for visibility hints).
     pub excluded_count: usize,
     /// Selection-side empty files, set aside from every comparison (the
@@ -145,10 +145,10 @@ pub fn compute_survey(
 
     // Apply --where filters to selection
     let (selection, used_status) = if filters.is_empty() {
-        (selection, filter::UsedStatus::default())
+        (selection, UsedStatus::default())
     } else {
         let ids: Vec<i64> = selection.iter().map(|s| s.id).collect();
-        let filter_result = filter::apply_filters(conn, &ids, filters)?;
+        let filter_result = apply_filters(conn, &ids, filters)?;
         let passed: HashSet<i64> = filter_result.source_ids.into_iter().collect();
         let filtered = selection
             .into_iter()
@@ -310,7 +310,7 @@ pub fn compute_survey(
 
             // Step 2: Apply --where filters to location sources
             let loc_ids: Vec<i64> = loc_sources.iter().map(|s| s.id).collect();
-            let passed: HashSet<i64> = filter::apply_filters(conn, &loc_ids, filters)?
+            let passed: HashSet<i64> = apply_filters(conn, &loc_ids, filters)?
                 .source_ids
                 .into_iter()
                 .collect();

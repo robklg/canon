@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::core::domain::source::Source;
 use crate::core::repo::Connection;
-use crate::expr::filter::get_fact_value;
+use crate::expr::get_fact_value;
 
 /// A single worklist entry, ready for JSONL serialization.
 #[derive(Serialize)]

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use crate::core::domain::object::Object;
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
-use crate::expr::filter::Filter;
+use crate::expr::Filter;
 
 /// Receipt-capable per-source detail carried through exclusion plans.
 ///

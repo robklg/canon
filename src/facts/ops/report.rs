@@ -11,10 +11,9 @@ use anyhow::Result;
 use crate::core::domain::fact::FactEntry;
 use crate::core::domain::fact::{FactType, FactValue};
 use crate::core::repo::{self, Connection};
-use crate::expr::value as fact_value;
 use crate::expr::{
-    self, fact_value_to_display, get_builtin_value, resolve_fact_value, BuiltinKey,
-    BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey,
+    apply_accessor, apply_modifier, fact_value_to_display, get_builtin_value, resolve_fact_value,
+    BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey,
 };
 use crate::facts::repo as facts_repo;
 
@@ -374,7 +373,7 @@ fn compute_transformed_distribution(
         // Apply accessor + modifiers via the same transform pipeline
         let mut result = entry.value.clone();
         if let Some(ref acc) = key.accessor {
-            match expr::apply_accessor(&result, acc, &key.raw) {
+            match apply_accessor(&result, acc, &key.raw) {
                 Ok(v) => result = v,
                 Err(_) => {
                     skipped_type_mismatch += 1;
@@ -384,7 +383,7 @@ fn compute_transformed_distribution(
         }
         let mut transform_failed = false;
         for modifier_call in &key.modifiers {
-            match expr::apply_modifier(&result, modifier_call, &key.raw, true) {
+            match apply_modifier(&result, modifier_call, &key.raw, true) {
                 Ok(v) => result = v,
                 Err(_) => {
                     skipped_type_mismatch += 1;
@@ -490,7 +489,7 @@ pub fn compute_grouped_distribution(
         let stored_facts = all_facts.get(source_id).unwrap_or(&empty_facts);
 
         // Resolve main value
-        let main_value = match fact_value::resolve_fact_value(source, main_key, stored_facts)? {
+        let main_value = match resolve_fact_value(source, main_key, stored_facts)? {
             Some(v) => {
                 sources_with_value += 1;
                 v
@@ -504,7 +503,7 @@ pub fn compute_grouped_distribution(
         let mut root_path_for_display: Option<String> = None;
 
         for gk in grouping_keys {
-            let gk_value = match fact_value::resolve_fact_value(source, gk, stored_facts) {
+            let gk_value = match resolve_fact_value(source, gk, stored_facts) {
                 Ok(Some(v)) => v,
                 Ok(None) => "(no value)".to_string(),
                 Err(_) => "(transform error)".to_string(),

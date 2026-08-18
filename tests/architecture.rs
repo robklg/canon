@@ -25,12 +25,11 @@ enum Layer {
     Domain,
     Repo,
     Ops,
-    Expr,
     Interface,
     /// Test scaffolding and the cross-surface canaries. Exempt from the four
-    /// stratum rules, like `Expr`: a fixture builds a database by writing
-    /// rows, and a canary reads across every surface it guards, so those
-    /// rules would only ever mistake test setup for production data movement.
+    /// stratum rules: a fixture builds a database by writing rows, and a
+    /// canary reads across every surface it guards, so those rules would only
+    /// ever mistake test setup for production data movement.
     ///
     /// The exemption stops there. Layer is orthogonal to home, so a file
     /// here still answers to the boundary rules — a fixture in `core/` may
@@ -48,7 +47,7 @@ const TESTING_PATHS: &[&str] = &["core/testing/", "contentless_law_tests.rs"];
 /// Old-tree stratum directory names — excluded when discovering subsystem
 /// directories (a subsystem is any top-level `src/` directory that isn't one
 /// of these and isn't `core`).
-const OLD_LAYER_DIRS: &[&str] = &["ops", "expr"];
+const OLD_LAYER_DIRS: &[&str] = &["ops"];
 
 /// Stratum front-door module names inside a subsystem. For the
 /// sibling-boundary rule these are never "declared surface": a sibling
@@ -101,10 +100,11 @@ fn classify_layer(rel_path: &str) -> Layer {
     if let Some(rest) = rel_path.strip_prefix("archive/") {
         return classify_subsystem_stratum(rest);
     }
+    if let Some(rest) = rel_path.strip_prefix("expr/") {
+        return classify_subsystem_stratum(rest);
+    }
     if rel_path.starts_with("ops/") {
         Layer::Ops
-    } else if rel_path.starts_with("expr/") {
-        Layer::Expr
     } else {
         Layer::Interface
     }
@@ -419,6 +419,45 @@ fn is_ops_path(path: &str) -> bool {
     is_or_under(path, "core::ops") || is_or_under(path, "ops")
 }
 
+/// Matches a repository stratum reaching the operations stratum beside it,
+/// inside one subsystem.
+///
+/// `is_ops_path` sees the two operations modules that are reached by an
+/// absolute path from the crate root, and a subsystem's own `ops` is neither.
+/// It is reached by one of two spellings, and a matcher keyed on either alone
+/// leaves the other free: `crate::<own>::ops` names the subsystem it belongs
+/// to, while `super::ops` climbs to the same place without naming it. Both
+/// are the one edge the rule exists to refuse, so both are refused.
+///
+/// The climbing form is matched however far it climbs, and without asking
+/// which subsystem the file belongs to. That is deliberately blunt rather
+/// than exact: it holds for every repository file in the tree today, all of
+/// which sit directly under their subsystem, so one climb lands on the
+/// subsystem itself. It would over-refuse from a nested repository directory,
+/// where a single climb lands inside `repo` rather than beside it — no such
+/// directory exists, and the failure would be a refusal to compile the test,
+/// not a silently missed reach. Nothing outside a `super::` chain is affected,
+/// which is what keeps `std::ops` out of it.
+fn match_own_ops(home: &Home, raw_path: &str, no_crate: &str) -> Option<String> {
+    if let Home::Subsystem(own) = home {
+        if is_or_under(no_crate, &format!("{own}::ops")) {
+            return Some(raw_path.to_string());
+        }
+    }
+
+    let mut climbed = raw_path;
+    let mut levels = 0;
+    while let Some(rest) = climbed.strip_prefix("super::") {
+        climbed = rest;
+        levels += 1;
+    }
+    if levels > 0 && is_or_under(climbed, "ops") {
+        return Some(raw_path.to_string());
+    }
+
+    None
+}
+
 fn classify_reference(
     layer: Layer,
     home: &Home,
@@ -451,8 +490,11 @@ fn classify_reference(
             if is_ops_path(no_crate) {
                 return Some((Rule::RepoNoOps, raw_path.to_string()));
             }
+            if let Some(reference) = match_own_ops(home, raw_path, no_crate) {
+                return Some((Rule::RepoNoOps, reference));
+            }
         }
-        Layer::Ops | Layer::Expr | Layer::Testing => {}
+        Layer::Ops | Layer::Testing => {}
         Layer::Interface => {
             if let Some(reference) = match_repo(no_crate) {
                 return Some((Rule::InterfaceRepoDataMovement, reference));
@@ -1080,6 +1122,150 @@ fn architecture_rules_hold() {
 }
 
 // ============================================================================
+// Pinned exceptions
+// ============================================================================
+
+/// Calls that reach the database directly, rather than through a repository.
+const SQL_CALLS: &[&str] = &[
+    ".query_row(",
+    ".query_map(",
+    ".query(",
+    ".prepare(",
+    ".execute(",
+    ".execute_batch(",
+];
+
+/// The expression facility's operations stratum leaves SQL to its repository
+/// stratum — with exactly one accepted exception, pinned here.
+///
+/// `check_fact_compare` is the per-source fallback for built-in keys, the
+/// values derived from source columns rather than stored as facts, and it
+/// queries the database itself. It is accepted rather than repaired: moving it
+/// whole into `repo` would put comparison logic there instead, which is the
+/// same law broken from the other side. The repair that does work is deriving
+/// built-in values in one place rather than two, which deletes the function
+/// outright — so the exception ends by being removed, not by being relocated.
+///
+/// The exception predates the stratum. What changed when the code moved is
+/// that the file it sits in now claims a layer, so the claim needs a stated
+/// exception rather than silence.
+///
+/// This pin fails three ways, each of them wanted:
+///
+/// - a second SQL-speaking function appears in the stratum — the exception was
+///   being treated as a precedent;
+/// - the marker on the function is dropped while the SQL stays — the site
+///   would vanish from the audit count while still owing the repair;
+/// - the function goes away, which is the repair landing. The pin is then
+///   stale and fails, so the marker, this test, and the reason for both are
+///   removed by one change. That is the property that keeps it from being
+///   overlooked: the repair cannot land quietly.
+#[test]
+fn the_facility_leaves_sql_to_its_repo_but_for_one_pinned_exception() {
+    const PINNED: &str = "check_fact_compare";
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let ops_root = Path::new(&manifest_dir).join("src/expr/ops");
+    let mut files = collect_rs_files(&ops_root);
+    files.push(Path::new(&manifest_dir).join("src/expr/ops.rs"));
+
+    let mut speaks_sql: Vec<(String, String, bool)> = Vec::new();
+
+    for path in &files {
+        let text = fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+        let rel = path
+            .strip_prefix(&manifest_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        // Test modules build databases by writing rows; that is fixture work,
+        // not the stratum reaching past its layer.
+        // Everything from the test module on is out of scope. Cutting at the
+        // first `#[cfg(test)]` is only sound while there is at most one: a
+        // test-only helper placed early would otherwise hide every production
+        // function below it from this scan, and the pin would go quiet without
+        // saying so. So the assumption is asserted rather than relied on.
+        assert!(
+            text.matches("#[cfg(test)]").count() <= 1,
+            "{rel}: more than one #[cfg(test)] — the SQL scan cuts at the first \
+             one and would stop seeing production code below it"
+        );
+        let production = match text.find("#[cfg(test)]") {
+            Some(i) => &text[..i],
+            None => &text[..],
+        };
+
+        let mut current: Option<String> = None;
+        let mut marked = false;
+        let mut pending_marker = false;
+
+        for line in production.lines() {
+            if line.contains("// AUDIT:") {
+                pending_marker = true;
+            }
+            // Indentation is stripped before matching, so a method inside an
+            // `impl` block is attributed to itself rather than silently
+            // inheriting the last top-level function's name — which would let
+            // a second SQL speaker hide behind the first one's identity and
+            // then be dropped as a duplicate. Visibility is matched by taking
+            // whatever precedes `fn`, so no spelling of `pub(in ...)` slips by
+            // through not being listed.
+            let head = line.trim_start();
+            if let Some(rest) = head.strip_prefix("fn ").or_else(|| {
+                head.split_once(" fn ").and_then(|(qualifiers, rest)| {
+                    let qualifiers = qualifiers.trim_end_matches(" async");
+                    (qualifiers == "pub"
+                        || qualifiers == "async"
+                        || (qualifiers.starts_with("pub(") && qualifiers.ends_with(')')))
+                    .then_some(rest)
+                })
+            }) {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                current = Some(name);
+                marked = pending_marker;
+                pending_marker = false;
+            } else if line.trim().is_empty() {
+                // A blank line separates a marker from anything it could mark.
+                pending_marker = false;
+            }
+
+            if SQL_CALLS.iter().any(|c| line.contains(c)) {
+                let owner = current
+                    .clone()
+                    .unwrap_or_else(|| "<file scope>".to_string());
+                if !speaks_sql.iter().any(|(f, n, _)| f == &rel && n == &owner) {
+                    speaks_sql.push((rel.clone(), owner, marked));
+                }
+            }
+        }
+    }
+
+    let names: Vec<&str> = speaks_sql.iter().map(|(_, n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![PINNED],
+        "the facility's operations stratum speaks SQL in {} place(s): {:?}.\n  \
+         Exactly one is pinned ({PINNED}). If a new one appeared, it is drift — route it \
+         through `expr/repo.rs`.\n  \
+         If {PINNED} is gone, the repair landed: delete this test and its `// AUDIT:` marker \
+         in the same commit.",
+        speaks_sql.len(),
+        speaks_sql
+    );
+
+    assert!(
+        speaks_sql[0].2,
+        "{PINNED} still queries the database but has lost its `// AUDIT:` marker, so it no \
+         longer appears in the audit count that tracks work still owed."
+    );
+}
+
+// ============================================================================
 // Self-tests (August's spec)
 // ============================================================================
 
@@ -1304,10 +1490,14 @@ mod self_tests {
     /// The operations layer is matched at both of the paths that hold
     /// operations code. The `core::ops` half has no live observation anywhere
     /// in the tree, so without this it could be misspelled unnoticed.
+    ///
+    /// The bare-`ops::` sample is deliberately not a path that resolves: the
+    /// spelling must stay refused whether or not a module answers to it, and
+    /// the top-level operations tree is on its way out.
     #[test]
     fn domain_reaching_ops_is_caught_at_both_of_its_paths() {
         for text in [
-            "use crate::ops::selection::select_sources;\n",
+            "use crate::ops::anything::at_all;\n",
             "use crate::core::ops::root_story::fetch_root_story;\n",
         ] {
             let violations = scan_file(
@@ -1324,6 +1514,84 @@ mod self_tests {
                 "{text:?} -> {violations:?}"
             );
         }
+    }
+
+    /// A subsystem's repository stratum must not reach the operations stratum
+    /// beside it. The absolute spelling names the subsystem the file already
+    /// belongs to, which is the form a file written from the outside in tends
+    /// to take.
+    #[test]
+    fn subsystem_repo_reaching_its_own_ops_is_refused_when_spelled_absolutely() {
+        let subsystems = vec!["expr".to_string()];
+        let violations = scan_file(
+            Layer::Repo,
+            &Home::Subsystem("expr".to_string()),
+            "expr/repo.rs",
+            "use crate::expr::ops::filter::apply_filters;\n",
+            &[],
+            &subsystems,
+        )
+        .unwrap();
+        assert!(
+            violations.iter().any(|v| v.rule == Rule::RepoNoOps),
+            "{violations:?}"
+        );
+
+        // The sibling stratum a repository file may legitimately read is the
+        // domain one, and naming the subsystem is not itself the problem.
+        let ok = scan_file(
+            Layer::Repo,
+            &Home::Subsystem("expr".to_string()),
+            "expr/repo.rs",
+            "use crate::expr::domain::cache::FactCache;\n",
+            &[],
+            &subsystems,
+        )
+        .unwrap();
+        assert!(
+            !ok.iter().any(|v| v.rule == Rule::RepoNoOps),
+            "reading its own domain must stay legal, got {ok:?}"
+        );
+    }
+
+    /// The same edge, climbed rather than named. Written from inside the
+    /// subsystem this is the shorter spelling, so a guard that only knew the
+    /// absolute form would be refusing the phrasing nobody reaches for.
+    #[test]
+    fn subsystem_repo_reaching_its_own_ops_is_refused_when_spelled_relatively() {
+        for text in [
+            "use super::ops::filter::apply_filters;\n",
+            "use super::super::ops::filter::apply_filters;\n",
+        ] {
+            let violations = scan_file(
+                Layer::Repo,
+                &Home::Subsystem("expr".to_string()),
+                "expr/repo.rs",
+                text,
+                &[],
+                &["expr".to_string()],
+            )
+            .unwrap();
+            assert!(
+                violations.iter().any(|v| v.rule == Rule::RepoNoOps),
+                "{text:?} -> {violations:?}"
+            );
+        }
+
+        // `std::ops` is not a climb, and the repository layer imports it.
+        let ok = scan_file(
+            Layer::Repo,
+            &Home::Core,
+            "core/repo/db.rs",
+            "use std::ops::Deref;\n",
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            !ok.iter().any(|v| v.rule == Rule::RepoNoOps),
+            "std::ops is unrelated to the operations layer, got {ok:?}"
+        );
     }
 
     /// The repository layer is at `core::repo`, and an interface file that
@@ -1669,6 +1937,21 @@ mod self_tests {
     }
 
     #[test]
+    fn the_expression_facility_answers_to_the_stratum_rules() {
+        // The facility was once a layer of its own, exempt from every stratum
+        // rule. The failure that exemption invites is silence, not noise: a
+        // repo reach from a domain file inside it would have been allowed
+        // rather than misclassified, so nothing would have said a word.
+        assert_eq!(classify_layer("expr/domain/filter.rs"), Layer::Domain);
+        assert_eq!(classify_layer("expr/domain.rs"), Layer::Domain);
+        assert_eq!(classify_layer("expr/repo.rs"), Layer::Repo);
+        assert_eq!(classify_layer("expr/ops/selection.rs"), Layer::Ops);
+        assert_eq!(classify_layer("expr/ops.rs"), Layer::Ops);
+        // The front door itself, which is where the barrel lives.
+        assert_eq!(classify_layer("expr.rs"), Layer::Interface);
+    }
+
+    #[test]
     fn the_fixtures_and_the_canary_classify_as_testing() {
         assert_eq!(classify_layer("core/testing/mod.rs"), Layer::Testing);
         assert_eq!(classify_layer("core/testing/helpers.rs"), Layer::Testing);
@@ -1781,11 +2064,57 @@ fn s() -> Connection {
 
     /// Each subsystem's complete public surface: the `pub use` items its
     /// front door re-exports — CLI entry points, the finished-result items
-    /// siblings consume, and pub-field/variant types riding for
-    /// crate-readiness (a future crate boundary can't expose a public field
-    /// of a private type). Changing a barrel means editing its pin here in
-    /// the same commit: a surface change is a deliberate, reviewable act.
+    /// siblings consume, and the return, parameter and public-field types of
+    /// those, which let a caller write a signature against what it is handed.
+    ///
+    /// That last group is a deliberate courtesy, not a necessity: this is one
+    /// binary, so nothing — no crate boundary, and no lint, which was checked
+    /// rather than assumed — forces a type to be re-exported for a value of it
+    /// to cross a module boundary. Whether a barrel should carry items no
+    /// consumer names is therefore an open question, and the answer may differ
+    /// between a parameter type (a caller can be forced to name it) and a
+    /// return type (inference always lets a caller avoid naming it).
+    ///
+    /// Changing a barrel means editing its pin here in the same commit: a
+    /// surface change is a deliberate, reviewable act.
     const SUBSYSTEM_BARREL_ITEMS: &[(&str, &[&str])] = &[
+        (
+            "expr",
+            &[
+                // Named externally: what the rest of the engine writes down.
+                "Filter",
+                "UsedStatus",
+                "apply_filters",
+                "select_sources",
+                "RolePolicy",
+                "SelectionParams",
+                "expand_filter_strings",
+                "parse_pattern",
+                "extract_fact_keys",
+                "evaluate",
+                "Pattern",
+                "EvalContext",
+                "resolve_fact_value",
+                "get_builtin_value",
+                "fact_value_to_display",
+                "ParsedFactKey",
+                "BuiltinKey",
+                "BuiltinKeyCategory",
+                "BuiltinKeyVisibility",
+                "Modifier",
+                "ModifierCategory",
+                "apply_accessor",
+                "apply_modifier",
+                // Completing the surface: return and field types of the above,
+                // named by nothing today.
+                "FilterResult",
+                "Selection",
+                "PathAccessor",
+                "ModifierCall",
+                // The one point read still reached past the language.
+                "get_fact_value",
+            ],
+        ),
         (
             "retire",
             &[

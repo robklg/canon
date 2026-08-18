@@ -4,9 +4,9 @@ use std::io::{self, Write};
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::classify_all;
 use crate::core::repo::Db;
-use crate::expr::filter::Filter;
+use crate::expr::Filter;
+use crate::expr::{select_sources, RolePolicy, SelectionParams};
 use crate::ops;
-use crate::ops::selection::{self, RolePolicy, SelectionParams};
 
 pub fn run(
     db: &mut Db,
@@ -32,7 +32,7 @@ pub fn run(
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
     };
-    let sel = selection::select_sources(conn, &params)?;
+    let sel = select_sources(conn, &params)?;
 
     let result = ops::worklist::build_entries(conn, &sel.sources, unique_content, emit_keys)?;
 
