@@ -91,7 +91,9 @@ fn display_compact_scoped(stats: &CoverageStats, scope: &ResolvedScope) {
     } else {
         "(scoped)".to_string()
     };
-    print_compact_line(&label, stats, true);
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    let _ = print_compact_line(&mut handle, &label, stats, true);
 }
 
 fn display_compact_per_root(
@@ -113,7 +115,7 @@ fn display_compact_per_root(
             .unwrap_or_else(|| "?".to_string());
         let path = stats.root_path.as_deref().unwrap_or("unknown");
         let label = format_compact_label(&id, path);
-        if print_compact_line_handle(&mut handle, &label, stats, first).is_err() {
+        if print_compact_line(&mut handle, &label, stats, first).is_err() {
             return;
         }
         first = false;
@@ -121,7 +123,7 @@ fn display_compact_per_root(
 
     // Overall summary if multiple roots
     if per_root.len() > 1 && overall.total_sources > 0 {
-        let _ = print_compact_line_handle(&mut handle, "(total)", overall, false);
+        let _ = print_compact_line(&mut handle, "(total)", overall, false);
     }
 }
 
@@ -134,28 +136,7 @@ fn format_compact_label(id: &str, path: &str) -> String {
     )
 }
 
-fn print_compact_line(label: &str, stats: &CoverageStats, show_legend: bool) {
-    let sources = stats.included_sources();
-    let hashed_pct = stats.hashed_pct();
-    let archived_pct = stats.archived_pct();
-
-    let legend = if show_legend {
-        "  (sources/hashed/archived)"
-    } else {
-        ""
-    };
-
-    println!(
-        "{:<42} {:>10}/{:>5.1}%/{:>5.1}%{}",
-        label,
-        format_count(sources),
-        hashed_pct,
-        archived_pct,
-        legend
-    );
-}
-
-fn print_compact_line_handle<W: std::io::Write>(
+fn print_compact_line<W: std::io::Write>(
     handle: &mut W,
     label: &str,
     stats: &CoverageStats,

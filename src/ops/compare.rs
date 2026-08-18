@@ -7,13 +7,12 @@
 //! contentless-law site (CLAUDE.md, contentless-law conventions).
 
 use anyhow::Result;
-use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::{classify_all, resolve_path, validate_sources_exist};
-use crate::core::repo;
+use crate::core::repo::{self, Connection};
 use crate::expr::filter::Filter;
 use crate::ops::selection::{self, RolePolicy, SelectionParams};
 
