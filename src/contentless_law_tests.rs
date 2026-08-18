@@ -60,6 +60,25 @@ fn archived_ness_never_reads_empty_content() {
 }
 
 #[test]
+fn the_coverage_rollup_carries_the_empty_files_it_set_aside() {
+    // The per-root lines get their set-aside from the query above; the
+    // totals line is arithmetic on top of them and has no query to inherit
+    // from. It must carry the set-aside too, or the summary of a fully
+    // covered universe reads below 100% while every line above it reads
+    // 100%.
+    let mut c = canary();
+    let (_, overall, _, _) =
+        crate::ops::coverage::compute_per_root(&mut c.conn, &[], None, &Default::default())
+            .unwrap();
+    assert_eq!(overall.hashed_sources, 2);
+    assert_eq!(overall.contentless_sources, 1, "the empty file is counted");
+    assert_eq!(overall.coverable_sources(), 1);
+    assert_eq!(overall.archived_sources, 1);
+    assert_eq!(overall.unarchived(), 0);
+    assert_eq!(overall.archived_pct(), 100.0);
+}
+
+#[test]
 fn coverage_locations_never_name_the_empty_object() {
     // Cluster's skip set, the story's covered-where, and the compile's
     // locations all derive here.

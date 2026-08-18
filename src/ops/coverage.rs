@@ -181,6 +181,7 @@ pub fn compute_per_root(
         overall.excluded_sources += stats.excluded_sources;
         overall.hashed_sources += stats.hashed_sources;
         overall.archived_sources += stats.archived_sources;
+        overall.contentless_sources += stats.contentless_sources;
 
         per_root_stats.push(stats);
     }
@@ -260,6 +261,51 @@ mod tests {
         assert_eq!(stats.archived_sources, 1);
         assert_eq!(stats.unarchived(), 0, "the empty file is not 'unarchived'");
         assert_eq!(stats.archived_pct(), 100.0, "covered means covered");
+    }
+
+    #[test]
+    fn overall_rollup_obeys_the_contentless_law() {
+        // The rollup must carry every field the law touches, or the totals
+        // line contradicts the per-root lines above it: a universe whose
+        // content is fully covered reads 100% per root and less than that
+        // overall. Two roots, so an assignment in place of an accumulation
+        // fails here too.
+        use crate::core::testing::insert_source_with_size;
+        let mut conn = setup_test_db();
+        let r1 = insert_root(&conn, "/r1", "source", false);
+        let r2 = insert_root(&conn, "/r2", "source", false);
+        let archive = insert_root(&conn, "/archive", "archive", false);
+
+        let empty_obj = insert_object(&conn, "emptyhash", false);
+        let data_a = insert_object(&conn, "datahash_a", false);
+        let data_b = insert_object(&conn, "datahash_b", false);
+
+        insert_source_with_size(&conn, r1, "data.bin", Some(data_a), 100);
+        insert_source_with_size(&conn, r1, "empty.log", Some(empty_obj), 0);
+        insert_source_with_size(&conn, r2, "data.bin", Some(data_b), 100);
+        insert_source_with_size(&conn, r2, "empty.log", Some(empty_obj), 0);
+        insert_source_with_size(&conn, archive, "a.bin", Some(data_a), 100);
+        insert_source_with_size(&conn, archive, "b.bin", Some(data_b), 100);
+
+        let (per_root, overall, _, _) =
+            compute_per_root(&mut conn, &[], None, &IncludeSet::default()).unwrap();
+
+        assert_eq!(per_root.len(), 2, "archive roots stay out of the breakdown");
+        for stats in &per_root {
+            assert_eq!(stats.contentless_sources, 1);
+            assert_eq!(stats.archived_pct(), 100.0);
+        }
+
+        assert_eq!(overall.hashed_sources, 4);
+        assert_eq!(overall.contentless_sources, 2, "both empties roll up");
+        assert_eq!(overall.coverable_sources(), 2);
+        assert_eq!(overall.archived_sources, 2);
+        assert_eq!(overall.unarchived(), 0);
+        assert_eq!(
+            overall.archived_pct(),
+            100.0,
+            "the totals line must agree with the per-root lines"
+        );
     }
 
     #[test]
