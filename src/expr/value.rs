@@ -60,6 +60,14 @@ pub fn resolve_fact_value(
     // 2. Apply transforms if value exists
     match raw_value {
         Some(value) => {
+            // A transform that cannot be applied — `|year` on a text value —
+            // is an error here and a plain non-match when the same key
+            // appears in `--where`. The two surfaces mean different things by
+            // failure: a report was asked for this key by name and would
+            // otherwise print a blank where the user expected a value, while
+            // a filter is asking a question whose honest answer is "no".
+            // Deliberate, and not to be unified without first deciding which
+            // of the two meanings wins.
             let transformed = apply_transforms(value, key)?;
             Ok(Some(transformed))
         }

@@ -1172,6 +1172,12 @@ fn main() -> Result<()> {
             include,
             verbose,
         } => {
+            // Compare is the one command whose filters are not expanded
+            // immediately before the call that consumes them — the two-path
+            // resolution below sits in between. These strings are already
+            // expanded; running them through expansion a second time would
+            // resolve alias references that a single pass deliberately
+            // leaves alone, since an alias may not refer to another alias.
             let filters = alias::expand_filter_strings(&filters, &canon_home)?;
             let include = include_set_from(&include);
             if include.includes_archived() {

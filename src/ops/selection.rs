@@ -89,6 +89,11 @@ pub fn select_sources(conn: &mut Connection, params: &SelectionParams) -> Result
         })
         .filter(|s| s.matches_scope(&params.scopes))
         .filter(|s| {
+            // These counts are taken before `--where` runs, and cannot be
+            // taken after: the rows they count are dropped right here. The
+            // hint they feed answers "what did visibility hide from this
+            // scope" — the question a user asks when a file they expected is
+            // missing — not "how many of your matches were hidden".
             if s.is_excluded() && !params.include.includes_excluded() {
                 excluded_count += 1;
                 return false;

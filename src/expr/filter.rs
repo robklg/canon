@@ -205,6 +205,14 @@ fn prefetch_facts(conn: &mut Connection, source_ids: &[i64], keys: &[String]) ->
     if stored_keys.is_empty() {
         // content.hash.sha256? needs source_objects even with no stored keys.
         if base_keys.iter().any(|k| k == "content.hash.sha256") {
+            // Filling the temp source table opens and commits a transaction
+            // of its own, and clears whatever a previous fill left behind.
+            // Two consequences hold for every query in this module that uses
+            // it, here and below: none of them may run inside an outer
+            // transaction, and the drops that follow each one are tidiness
+            // rather than correctness. Hoisting the fills into a single
+            // shared setup looks like an obvious simplification and would
+            // break the first of those.
             populate_temp_sources(conn, source_ids)?;
             let mappings: Vec<(i64, i64)> = conn
                 .prepare(
