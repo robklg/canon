@@ -47,3 +47,6 @@ a3cc4c62241dae9bf7d8b73f27441a176ebec9f2
 
 # Consolidate the shared test scaffolding under core
 2a9a317051c23c43cea12eae498d8cfa22f681f1
+
+# Make the expression language a sealed facility
+9038bda9d0402f73664c3f4eca1b98d657e5e1f7
