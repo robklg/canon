@@ -23,7 +23,11 @@ pub enum CompareOp {
 }
 
 /// Status predicates — computed boolean state, not stored facts.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// Adding a variant is deliberately noisy: the prefetch walks every variant
+/// and matches exhaustively, so a new one cannot be evaluated before someone
+/// has said what it needs loaded.
+#[derive(Debug, Clone, Copy, PartialEq, strum::EnumIter)]
 pub enum StatusPredicate {
     /// Content exists in at least one archive root (including suspended).
     Archived,
@@ -77,6 +81,22 @@ pub struct UsedStatus {
     pub hashed: bool,
     pub excluded: bool,
     pub enriched: bool,
+}
+
+impl UsedStatus {
+    /// Whether the expression asked for this predicate.
+    ///
+    /// Reading the flags through here rather than field by field is what
+    /// keeps the prefetch honest: a predicate with no flag stops the build
+    /// instead of reaching evaluation with nothing loaded.
+    fn uses(&self, predicate: StatusPredicate) -> bool {
+        match predicate {
+            StatusPredicate::Archived => self.archived,
+            StatusPredicate::Hashed => self.hashed,
+            StatusPredicate::Excluded => self.excluded,
+            StatusPredicate::Enriched => self.enriched,
+        }
+    }
 }
 
 /// A parsed `--where` expression.
@@ -822,12 +842,19 @@ pub fn apply_filters(
 }
 
 /// Prefetch status predicate data into the cache based on which predicates are used.
+///
+/// Evaluation reads each predicate's prefetched set without checking that it
+/// is there, so every predicate the expression asked for must be loaded here
+/// before evaluation runs. The walk covers every variant and matches
+/// exhaustively so that stays true of predicates added later.
 fn prefetch_status_data(
     conn: &mut Connection,
     source_ids: &[i64],
     used: &UsedStatus,
     cache: &mut FactCache,
 ) -> Result<()> {
+    use strum::IntoEnumIterator;
+
     if source_ids.is_empty() {
         return Ok(());
     }
@@ -851,58 +878,68 @@ fn prefetch_status_data(
         conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
     }
 
-    if used.archived {
-        // Collect object_ids from the cache's source_objects mapping
-        let object_ids: Vec<i64> = cache
-            .source_objects
-            .values()
-            .copied()
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        let archived = crate::core::repo::object::batch_check_archived(conn, &object_ids, None)?;
-        cache.archived_objects = Some(archived);
+    for predicate in StatusPredicate::iter() {
+        if !used.uses(predicate) {
+            continue;
+        }
+        match predicate {
+            // Answered from the source-to-object map populated above.
+            StatusPredicate::Hashed => {}
+
+            StatusPredicate::Archived => {
+                // Collect object_ids from the cache's source_objects mapping
+                let object_ids: Vec<i64> = cache
+                    .source_objects
+                    .values()
+                    .copied()
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                let archived =
+                    crate::core::repo::object::batch_check_archived(conn, &object_ids, None)?;
+                cache.archived_objects = Some(archived);
+            }
+
+            StatusPredicate::Excluded => {
+                populate_temp_sources(conn, source_ids)?;
+                let excluded: HashSet<i64> = conn
+                    .prepare(
+                        "SELECT DISTINCT s.id FROM temp_sources ts
+                         JOIN sources s ON s.id = ts.id
+                         WHERE s.excluded = 1
+                         UNION
+                         SELECT DISTINCT s.id FROM temp_sources ts
+                         JOIN sources s ON s.id = ts.id
+                         JOIN objects o ON o.id = s.object_id
+                         WHERE o.excluded = 1",
+                    )?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<HashSet<_>, _>>()?;
+                conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+                cache.excluded_sources = Some(excluded);
+            }
+
+            StatusPredicate::Enriched => {
+                populate_temp_sources(conn, source_ids)?;
+                let enriched: HashSet<i64> = conn
+                    .prepare(
+                        "SELECT DISTINCT ts.id FROM temp_sources ts
+                         JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id
+                             AND f.key != 'content.hash.sha256'
+                         UNION
+                         SELECT DISTINCT s.id FROM temp_sources ts
+                         JOIN sources s ON s.id = ts.id
+                         JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id
+                             AND f.key != 'content.hash.sha256'",
+                    )?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<HashSet<_>, _>>()?;
+                conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+                cache.enriched_sources = Some(enriched);
+            }
+        }
     }
 
-    if used.excluded {
-        populate_temp_sources(conn, source_ids)?;
-        let excluded: HashSet<i64> = conn
-            .prepare(
-                "SELECT DISTINCT s.id FROM temp_sources ts
-                 JOIN sources s ON s.id = ts.id
-                 WHERE s.excluded = 1
-                 UNION
-                 SELECT DISTINCT s.id FROM temp_sources ts
-                 JOIN sources s ON s.id = ts.id
-                 JOIN objects o ON o.id = s.object_id
-                 WHERE o.excluded = 1",
-            )?
-            .query_map([], |row| row.get(0))?
-            .collect::<Result<HashSet<_>, _>>()?;
-        conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
-        cache.excluded_sources = Some(excluded);
-    }
-
-    if used.enriched {
-        populate_temp_sources(conn, source_ids)?;
-        let enriched: HashSet<i64> = conn
-            .prepare(
-                "SELECT DISTINCT ts.id FROM temp_sources ts
-                 JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id
-                     AND f.key != 'content.hash.sha256'
-                 UNION
-                 SELECT DISTINCT s.id FROM temp_sources ts
-                 JOIN sources s ON s.id = ts.id
-                 JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id
-                     AND f.key != 'content.hash.sha256'",
-            )?
-            .query_map([], |row| row.get(0))?
-            .collect::<Result<HashSet<_>, _>>()?;
-        conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
-        cache.enriched_sources = Some(enriched);
-    }
-
-    // hashed? uses existing source_objects map — no extra prefetch needed
     Ok(())
 }
 
@@ -2420,5 +2457,38 @@ mod tests {
             .err()
             .expect("should error on unknown key in comparison");
         assert!(err.to_string().contains("Unknown fact key"));
+    }
+
+    #[test]
+    fn every_status_predicate_prefetches_before_evaluation() {
+        // Evaluating a status predicate reads its prefetched set without
+        // checking the set is there, so a predicate that reaches evaluation
+        // unprefetched takes the process down on the user's first query.
+        // This walks every predicate the language has rather than the ones
+        // that happened to exist when it was written, and asserts each is
+        // reachable from a keyword — a predicate nothing can ask for cannot
+        // be tested here at all.
+        use strum::IntoEnumIterator;
+
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let obj = insert_object(&conn, "hash1");
+        let s1 = insert_source_with_object(&conn, root, "a.jpg", Some(obj));
+
+        for predicate in StatusPredicate::iter() {
+            let keyword = STATUS_KEYWORDS
+                .iter()
+                .find(|(_, p)| *p == predicate)
+                .map(|(k, _)| *k)
+                .unwrap_or_else(|| panic!("{predicate:?} has no keyword to ask for it by"));
+
+            let filter = Filter::parse(&format!("{keyword}?")).unwrap();
+            apply_filters(&mut conn, &[s1], &[filter])
+                .unwrap_or_else(|e| panic!("{keyword}? failed: {e}"));
+
+            let negated = Filter::parse(&format!("NOT {keyword}?")).unwrap();
+            apply_filters(&mut conn, &[s1], &[negated])
+                .unwrap_or_else(|e| panic!("NOT {keyword}? failed: {e}"));
+        }
     }
 }
