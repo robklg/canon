@@ -23,12 +23,12 @@ pub struct Pattern {
 #[derive(Debug, Clone)]
 pub enum PatternSegment {
     Literal(String),
-    Expr(Expr),
+    Expr(PatternExpr),
 }
 
 /// A parsed expression from within `{...}`
 #[derive(Debug, Clone)]
-pub struct Expr {
+pub struct PatternExpr {
     pub key: String,
     pub accessor: Option<PathAccessor>,
     pub modifiers: Vec<ModifierCall>,
@@ -515,7 +515,7 @@ pub fn parse_pattern(pattern: &str) -> Result<Pattern> {
 }
 
 /// Parse an expression string (the content within `{...}`)
-fn parse_expr(s: &str) -> Result<Expr> {
+fn parse_expr(s: &str) -> Result<PatternExpr> {
     let s = s.trim();
     if s.is_empty() {
         bail!("Empty expression");
@@ -536,7 +536,7 @@ fn parse_expr(s: &str) -> Result<Expr> {
         modifiers.push(modifier);
     }
 
-    Ok(Expr {
+    Ok(PatternExpr {
         key,
         accessor,
         modifiers,
@@ -767,7 +767,7 @@ fn normalize_pattern_result(path: &str) -> String {
 }
 
 /// Evaluate a single expression
-fn evaluate_expr(expr: &Expr, ctx: &EvalContext) -> Result<String> {
+fn evaluate_expr(expr: &PatternExpr, ctx: &EvalContext) -> Result<String> {
     // Get the base value
     let value = get_value(&expr.key, ctx)?;
 
