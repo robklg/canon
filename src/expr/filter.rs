@@ -2491,4 +2491,79 @@ mod tests {
                 .unwrap_or_else(|e| panic!("NOT {keyword}? failed: {e}"));
         }
     }
+
+    #[test]
+    fn trailing_tokens_are_rejected_not_ignored() {
+        // Two clauses with no operator between them is a mistake, not an
+        // implicit AND. Accepting the input would filter on the first clause
+        // and drop the rest without saying so — the user gets a plausible
+        // answer to a question they did not ask.
+        let err = Filter::parse("source.size=1 source.size=2").unwrap_err();
+        assert!(err.to_string().contains("Unexpected token"), "{err}");
+    }
+
+    #[test]
+    fn not_in_parses_as_negated_membership() {
+        let expr = Expr::parse("source.ext NOT IN (jpg, png)").unwrap();
+        match expr {
+            Expr::Not(inner) => match *inner {
+                Expr::In { key, values } => {
+                    assert_eq!(key, "source.ext");
+                    assert_eq!(values, vec!["jpg", "png"]);
+                }
+                other => panic!("expected a membership test inside the negation: {other:?}"),
+            },
+            other => panic!("expected a negation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_before_non_in_restores_parser_position() {
+        // Deciding whether NOT begins a membership test is the parser's only
+        // backtrack. If the position is not restored when it does not, the
+        // parser resumes past the NOT and reads what follows as though the
+        // NOT had never been written — turning a malformed expression into a
+        // valid one that means the opposite of what it says.
+        let err = Expr::parse("source.ext NOT = jpg").unwrap_err();
+        assert!(err.to_string().contains("Expected operator"), "{err}");
+    }
+
+    #[test]
+    fn glob_matches_wildcards_and_classes() {
+        assert!(glob_match("photo.jpg", "*.jpg"));
+        assert!(!glob_match("photo.png", "*.jpg"));
+        assert!(glob_match("anything", "*"));
+        assert!(glob_match("", "*"));
+        assert!(glob_match("photo.jpg", "photo.???"));
+        assert!(!glob_match("photo.jpeg", "photo.???"));
+        assert!(glob_match("a", "[abc]"));
+        assert!(!glob_match("d", "[abc]"));
+        assert!(glob_match("m", "[a-z]"));
+        assert!(!glob_match("M", "[a-z]"));
+    }
+
+    #[test]
+    fn glob_negated_and_literal_classes() {
+        assert!(glob_match("d", "[!abc]"));
+        assert!(!glob_match("a", "[!abc]"));
+        assert!(glob_match("d", "[^abc]"));
+        assert!(!glob_match("a", "[^abc]"));
+        // A ']' first in the class is the literal bracket, not the terminator.
+        assert!(glob_match("]", "[]abc]"));
+        assert!(glob_match("b", "[]abc]"));
+        // A class that is never closed is a literal '[', not an error.
+        assert!(glob_match("[abc", "[abc"));
+        assert!(!glob_match("a", "[abc"));
+    }
+
+    #[test]
+    fn glob_escapes_metacharacters() {
+        assert!(glob_match("*", r"\*"));
+        assert!(!glob_match("x", r"\*"));
+        assert!(glob_match("?", r"\?"));
+        assert!(!glob_match("x", r"\?"));
+        assert!(glob_match("[", r"\["));
+        assert!(glob_match("a*b", r"a\*b"));
+        assert!(!glob_match("axb", r"a\*b"));
+    }
 }

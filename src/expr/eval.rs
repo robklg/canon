@@ -1634,4 +1634,55 @@ mod tests {
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "subdir/file.jpg");
     }
+
+    #[test]
+    fn every_builtin_key_is_reachable_under_a_distinct_name() {
+        // A built-in key's serialized string is the word a user types, so the
+        // set of them is the vocabulary Canon promises. Two keys answering to
+        // one name makes the second unreachable, and editing any one of these
+        // strings retires a word from the language — pinned here so that is a
+        // decision someone makes, not a rename that happens to compile.
+        use strum::IntoEnumIterator;
+
+        let mut names: Vec<&'static str> = Vec::new();
+        for key in BuiltinKey::iter() {
+            let name: &'static str = key.into();
+            assert_eq!(
+                BuiltinKey::from_str(name),
+                Some(key),
+                "'{name}' does not resolve back to the key it names"
+            );
+            assert!(
+                !names.contains(&name),
+                "two built-in keys answer to '{name}'"
+            );
+            names.push(name);
+        }
+
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "content.hash.sha256",
+                "ext",
+                "filename",
+                "hash",
+                "hash_short",
+                "id",
+                "mtime",
+                "root_id",
+                "size",
+                "source.device",
+                "source.ext",
+                "source.id",
+                "source.inode",
+                "source.mtime",
+                "source.path",
+                "source.rel_path",
+                "source.root",
+                "source.size",
+                "stem",
+            ]
+        );
+    }
 }
