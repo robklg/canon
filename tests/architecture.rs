@@ -2136,16 +2136,19 @@ fn s() -> Connection {
 
     /// Each subsystem's complete public surface: the `pub use` items its
     /// front door re-exports — CLI entry points, the finished-result items
-    /// siblings consume, and the return, parameter and public-field types of
-    /// those, which let a caller write a signature against what it is handed.
+    /// siblings consume, and the parameter types of those, which a caller
+    /// must be able to name to factor a helper around a call.
     ///
-    /// That last group is a deliberate courtesy, not a necessity: this is one
-    /// binary, so nothing — no crate boundary, and no lint, which was checked
-    /// rather than assumed — forces a type to be re-exported for a value of it
-    /// to cross a module boundary. Whether a barrel should carry items no
-    /// consumer names is therefore an open question, and the answer may differ
-    /// between a parameter type (a caller can be forced to name it) and a
-    /// return type (inference always lets a caller avoid naming it).
+    /// Nothing structural forces an unnamed type onto a barrel: this is one
+    /// binary, so no crate boundary — and no lint, which was checked rather
+    /// than assumed — requires a type to be re-exported for a value of it to
+    /// cross a module boundary. The line is drawn by rule instead — the
+    /// parameter-type rule: a parameter type of an exported item is carried
+    /// even while nothing names it, because the constraint binds the moment a
+    /// caller writes a helper; a return type is not, because inference always
+    /// lets a caller leave it unnamed, and carrying it would record demand
+    /// that does not exist. Real demand for a return type earns it a place by
+    /// a one-line pin edit, with the consumer as the evidence.
     ///
     /// Changing a barrel means editing its pin here in the same commit: a
     /// surface change is a deliberate, reviewable act.
@@ -2177,10 +2180,8 @@ fn s() -> Connection {
                 "ModifierCategory",
                 "apply_accessor",
                 "apply_modifier",
-                // Completing the surface: return and field types of the above,
+                // Completing the surface: parameter types of the above,
                 // named by nothing today.
-                "FilterResult",
-                "Selection",
                 "PathAccessor",
                 "ModifierCall",
                 // The one point read still reached past the language.

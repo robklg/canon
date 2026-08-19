@@ -50,30 +50,23 @@ pub use domain::transform::{apply_accessor, apply_modifier, Modifier, ModifierCa
 // ---------------------------------------------------------------------------
 // Completing the surface
 //
-// Return types and public-field types of the items above. Nothing outside
-// names them today — a caller receives a value and reads its fields without
-// ever writing the type down — so nothing forces them to be here. They are
-// here so that a caller *can* name what it is handed: a surface that hands
-// back a type it does not expose is one a consumer cannot write a signature
-// against.
+// Parameter types of items above. Nothing outside names them today, but the
+// claim is structural rather than observed: `PathAccessor` and `ModifierCall`
+// are parameter types of `apply_accessor` and `apply_modifier`, so a caller
+// that wants to factor out a helper taking one must be able to name it.
 //
-// The allow sits on each of these re-export statements rather than on the
-// file, so that a re-export which becomes dead for any other reason still
-// says so.
+// Return types are deliberately absent, per the parameter-type rule: inference
+// always lets a caller leave one unnamed, so carrying it would record demand
+// that does not exist. A consumer that genuinely needs to write one down —
+// storing it in a field, passing it onward — earns the item a place here by
+// a one-line pin edit, with that consumer as the evidence.
 //
-// `PathAccessor` and `ModifierCall` have the stronger claim of the four: they
-// are parameter types of `apply_accessor` and `apply_modifier` above, so a
-// caller that wants to factor out a helper taking one must be able to name it.
-// The other two are return types, which inference always lets a caller leave
-// unnamed.
+// The allow sits on the re-export statement rather than on the file, so that
+// a re-export which becomes dead for any other reason still says so.
 // ---------------------------------------------------------------------------
 
 #[allow(unused_imports)]
-pub use domain::filter::FilterResult;
-#[allow(unused_imports)]
 pub use domain::transform::{ModifierCall, PathAccessor};
-#[allow(unused_imports)]
-pub use ops::selection::Selection;
 
 // ---------------------------------------------------------------------------
 // Reaching past the front door
