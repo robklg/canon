@@ -1,15 +1,21 @@
-//! Ls operations — duplicate detection.
+//! What `canon ls` computes: which sources in a selection are copies of each
+//! other.
 //!
-//! `find_duplicate_groups()` groups sources by content hash and returns groups
-//! with 2+ sources.
+//! Grouping is by content identity — the object a source resolves to, not the
+//! hash string, though an object owns exactly one hash so the two answer the
+//! same question. A group of one is not a duplicate and is dropped, leaving
+//! only the places where the same content sits more than once. The read
+//! itself lives in the repository stratum beside this one; what happens here
+//! is the grouping, the ordering, and composing each source's path from the
+//! two halves it is stored as.
 
 use anyhow::Result;
-use rusqlite::types::Value;
 
-use crate::core::repo::source::BATCH_SIZE;
 use crate::core::repo::Connection;
+use crate::ls::repo::fetch_duplicate_rows;
 
-/// A group of sources sharing the same content hash.
+/// A group of sources sharing the same content identity — the object they all
+/// resolve to. The hash is carried for display; it is not what grouped them.
 pub struct DuplicateGroup {
     pub hash_value: String,
     pub total_size: i64,
@@ -32,47 +38,21 @@ pub fn find_duplicate_groups(conn: &Connection, source_ids: &[i64]) -> Result<Ve
     use std::collections::HashMap;
     let mut object_map: HashMap<i64, (String, i64, Vec<DuplicateSource>)> = HashMap::new();
 
-    for chunk in source_ids.chunks(BATCH_SIZE) {
-        let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        let sql = format!(
-            "SELECT s.id, s.object_id, o.hash_value, s.size, r.path, s.rel_path
-             FROM sources s
-             JOIN roots r ON s.root_id = r.id
-             JOIN objects o ON s.object_id = o.id
-             WHERE s.id IN ({}) AND s.object_id IS NOT NULL",
-            placeholders.join(",")
-        );
+    for row in fetch_duplicate_rows(conn, source_ids)? {
+        let full_path = if row.rel_path.is_empty() {
+            row.root_path
+        } else {
+            format!("{}/{}", row.root_path, row.rel_path)
+        };
 
-        let params: Vec<Value> = chunk.iter().map(|&id| Value::from(id)).collect();
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
-            Ok((
-                row.get::<_, i64>(0)?,    // source_id
-                row.get::<_, i64>(1)?,    // object_id
-                row.get::<_, String>(2)?, // hash_value
-                row.get::<_, i64>(3)?,    // size
-                row.get::<_, String>(4)?, // root_path
-                row.get::<_, String>(5)?, // rel_path
-            ))
-        })?;
-
-        for row in rows {
-            let (_source_id, object_id, hash, size, root_path, rel_path) = row?;
-            let full_path = if rel_path.is_empty() {
-                root_path
-            } else {
-                format!("{root_path}/{rel_path}")
-            };
-
-            object_map
-                .entry(object_id)
-                .or_insert_with(|| (hash, size, Vec::new()))
-                .2
-                .push(DuplicateSource {
-                    path: full_path,
-                    source_id: _source_id,
-                });
-        }
+        object_map
+            .entry(row.object_id)
+            .or_insert_with(|| (row.hash_value, row.size, Vec::new()))
+            .2
+            .push(DuplicateSource {
+                path: full_path,
+                source_id: row.source_id,
+            });
     }
 
     // Filter to only groups with 2+ sources

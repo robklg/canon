@@ -51,23 +51,25 @@ fn include_set_from(values: &[IncludeValue]) -> IncludeSet {
     set
 }
 
-// The expression facility — the language's one home — and what is left of the
-// pre-migration operations tree.
-mod expr;
-mod ops;
-
-// The shared spine, and the features built on it. `ops` above is still being
-// emptied into them; `expr` is a facility of its own and stays.
+// The shared spine, which every subsystem is built on, and the expression
+// facility — the language's one home, which every subsystem that takes a
+// selection speaks through and no other re-derives.
 mod core;
-mod retire;
-mod story;
+mod expr;
 
 // Utilities
 mod ceremony;
 mod progress;
 mod scope;
 
-// Command modules
+// The subsystems: each a directory of layer strata sealed behind a barrel,
+// declared either in a flat file beside this one or in the subsystem's own
+// `mod.rs`. A subsystem owns a coherent area of the tool rather than exactly
+// one command — `archive` answers for `apply` and the three `cluster` verbs,
+// `facts` for two commands, `roots` and `exclude` for several each.
+//
+// `ledger` in this list is the exception: a flat command module, never part of
+// the restructuring that gave the others their own homes.
 mod archive;
 mod compare;
 mod coverage;
@@ -76,8 +78,10 @@ mod facts;
 mod ledger;
 mod ls;
 mod notes;
+mod retire;
 mod roots;
 mod scan;
+mod story;
 mod survey;
 mod sweep;
 mod trail;

@@ -44,11 +44,6 @@ enum Layer {
 /// contentless law's canary at the crate root.
 const TESTING_PATHS: &[&str] = &["core/testing/", "contentless_law_tests.rs"];
 
-/// Old-tree stratum directory names — excluded when discovering subsystem
-/// directories (a subsystem is any top-level `src/` directory that isn't one
-/// of these and isn't `core`).
-const OLD_LAYER_DIRS: &[&str] = &["ops"];
-
 /// Stratum front-door module names inside a subsystem. For the
 /// sibling-boundary rule these are never "declared surface": a sibling
 /// reference to `crate::<sibling>::<stratum>` hands out the internals'
@@ -103,11 +98,22 @@ fn classify_layer(rel_path: &str) -> Layer {
     if let Some(rest) = rel_path.strip_prefix("expr/") {
         return classify_subsystem_stratum(rest);
     }
-    if rel_path.starts_with("ops/") {
-        Layer::Ops
-    } else {
-        Layer::Interface
+    if let Some(rest) = rel_path.strip_prefix("ls/") {
+        return classify_subsystem_stratum(rest);
     }
+    if let Some(rest) = rel_path.strip_prefix("coverage/") {
+        return classify_subsystem_stratum(rest);
+    }
+    if let Some(rest) = rel_path.strip_prefix("compare/") {
+        return classify_subsystem_stratum(rest);
+    }
+    if let Some(rest) = rel_path.strip_prefix("worklist/") {
+        return classify_subsystem_stratum(rest);
+    }
+    // Everything left is a flat file at the crate root: `main.rs`, the
+    // utilities beside it, and the front-door barrels of the subsystems that
+    // have one there rather than in their own `mod.rs`.
+    Layer::Interface
 }
 
 /// Classifies a path already stripped of its `core/`/`<subsystem>/` prefix
@@ -133,15 +139,19 @@ fn classify_subsystem_stratum(rest: &str) -> Layer {
 // ============================================================================
 
 /// Where a file lives in the feature-first tree: the shared hub (`core/`),
-/// one of the feature modules beside it, or a layer module not yet emptied
-/// into either. Referencing a layer module is legal — the tree is being
-/// converted a feature at a time, and what has not converted yet is still
-/// the place its code lives.
+/// one of the feature modules beside it, or the crate root — the flat files
+/// directly in `src/`. Two unlike things sit at that root and share the
+/// variant: `main.rs` with the utilities it dispatches through, which belong
+/// to no subsystem, and the flat front-door barrels, each belonging entirely
+/// to the subsystem it opens. (Not every front door is here: `retire` and
+/// `story` put theirs in their own `mod.rs`, which classifies as the
+/// subsystem.) Both kinds are exempted by the boundary rule below, for the
+/// reasons given there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Home {
     Core,
     Subsystem(String),
-    OldTree,
+    CrateRoot,
 }
 
 fn top_level_dir(rel_path: &str) -> Option<&str> {
@@ -151,16 +161,15 @@ fn top_level_dir(rel_path: &str) -> Option<&str> {
 fn classify_home(rel_path: &str) -> Home {
     match top_level_dir(rel_path) {
         Some("core") => Home::Core,
-        Some(dir) if !OLD_LAYER_DIRS.contains(&dir) => Home::Subsystem(dir.to_string()),
-        _ => Home::OldTree,
+        Some(dir) => Home::Subsystem(dir.to_string()),
+        None => Home::CrateRoot,
     }
 }
 
 /// Discovers subsystem directory names by listing `src/`'s top-level
-/// directories and excluding `core` and the old stratum dirs — mirrors
-/// `interface_module_names`'s dynamic-enumeration style rather than a
-/// hardcoded list, so a new subsystem needs no scanner edit to be
-/// recognized.
+/// directories and excluding `core` — mirrors `interface_module_names`'s
+/// dynamic-enumeration style rather than a hardcoded list, so a new
+/// subsystem needs no scanner edit to be recognized.
 fn subsystem_dir_names(src_root: &Path) -> Vec<String> {
     let mut names = Vec::new();
     let mut entries: Vec<PathBuf> = fs::read_dir(src_root)
@@ -171,7 +180,7 @@ fn subsystem_dir_names(src_root: &Path) -> Vec<String> {
     for path in entries {
         if path.is_dir() {
             if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                if name != "core" && !OLD_LAYER_DIRS.contains(&name) {
+                if name != "core" {
                     names.push(name.to_string());
                 }
             }
@@ -410,11 +419,22 @@ fn match_repo(path: &str) -> Option<String> {
     None
 }
 
-/// Matches a reference against the operations layer. Unlike the repository
-/// layer, which has one home, `core::ops` and `crate::ops` are two distinct
-/// modules that both exist and both hold operations code. So both are matched
-/// and neither is rewritten into the other — a reference is reported as
-/// written, because as written is where the code actually is.
+/// Matches a reference against the operations layer.
+///
+/// This matches a path that begins at `core::ops` or at `ops` — which, given
+/// the `crate::` prefix its callers strip, means the two top-level spellings
+/// `crate::core::ops` and `crate::ops`. It does not see a subsystem's own
+/// operations stratum
+/// (`crate::ls::ops`, `super::ops`); that is `match_own_ops`'s job, and the two
+/// are kept apart because reaching your own stratum and reaching the spine's
+/// are different edges with different rules.
+///
+/// `core::ops` is the shared spine's operations stratum. The bare `crate::ops`
+/// spelling no longer resolves to anything — the pre-migration operations tree
+/// is gone — and is matched anyway, deliberately: a path that names no module
+/// must still be refused rather than pass unrecognized, and the spelling is the
+/// one a habit or a stale example would reach for. Neither form is rewritten
+/// into the other; a reference is reported as written.
 fn is_ops_path(path: &str) -> bool {
     is_or_under(path, "core::ops") || is_or_under(path, "ops")
 }
@@ -422,8 +442,9 @@ fn is_ops_path(path: &str) -> bool {
 /// Matches a repository stratum reaching the operations stratum beside it,
 /// inside one subsystem.
 ///
-/// `is_ops_path` sees the two operations modules that are reached by an
-/// absolute path from the crate root, and a subsystem's own `ops` is neither.
+/// `is_ops_path` sees only the two top-level spellings — the spine's
+/// `core::ops` and a bare `crate::ops`, which now names nothing — and a
+/// subsystem's own `ops` is neither.
 /// It is reached by one of two spellings, and a matcher keyed on either alone
 /// leaves the other free: `crate::<own>::ops` names the subsystem it belongs
 /// to, while `super::ops` climbs to the same place without naming it. Both
@@ -513,15 +534,25 @@ fn classify_reference(
     // ------------------------------------------------------------------
     // Subsystem-boundary rule (feature-first migration): orthogonal to
     // stratum (Layer) — applies to a reference regardless of whether the
-    // referencing file is domain/repo/ops within its home. Old-tree
-    // (`Home::OldTree`) files are unrestricted here — reaching into a
-    // subsystem's public surface from the pre-migration tree (e.g. `main.rs`
-    // dispatching into `retire::`) is legal staging. An old-tree file
-    // reaching a subsystem's *internals* is legal staging too, and happens
-    // while a subsystem moves in halves: the not-yet-moved half reads the
-    // moved half's stratum directly until it follows. Such a reference is
-    // temporary by construction — it dies when the second half moves — so
-    // there is nothing here to guard.
+    // referencing file is domain/repo/ops within its home. Crate-root
+    // (`Home::CrateRoot`) files are unrestricted here, because two of the
+    // tree's load-bearing references live there: `main.rs` dispatching into
+    // `retire::`, which is what the tree is for, and a front-door barrel
+    // naming its own subsystem's strata, which is how a barrel is written at
+    // all. The cost, stated rather than implied: no rule in this file refuses
+    // a crate-root reach past a subsystem's barrel. What refuses it is the
+    // module system — every *subsystem* front door declares its strata with
+    // bare-private `mod`, so `crate::<sub>::repo::…` resolves from nowhere.
+    // (`core` is the deliberate opposite and not a subsystem: its strata are
+    // `pub mod`, because the spine's job is to be reachable.)
+    //
+    // That is a property of how the front doors happen to be written, and the
+    // seal below pins it only partly: at a front door it refuses `pub mod`,
+    // but `pub(super) mod` and `pub(crate) mod` both pass — and at that one
+    // depth `super` *is* the crate root, so either would open the stratum to
+    // every flat file while the seal stayed green. No subsystem front door
+    // does that today, all being bare-private; whether the seal should require
+    // it outright is on the backlog, not settled here.
     // ------------------------------------------------------------------
     if has_crate {
         if let Some(ref_root) = no_crate.split("::").next() {
@@ -553,7 +584,7 @@ fn classify_reference(
                             ));
                         }
                     }
-                    Home::Subsystem(_) | Home::OldTree => {}
+                    Home::Subsystem(_) | Home::CrateRoot => {}
                 }
             }
         }
@@ -1277,7 +1308,7 @@ mod self_tests {
     fn strip_doc_comment_code_example_no_stdio_violation() {
         let text = "/// println!(\"x\");\nfn f() {}\n";
         let violations =
-            scan_file(Layer::Ops, &Home::OldTree, "synthetic.rs", text, &[], &[]).unwrap();
+            scan_file(Layer::Ops, &Home::CrateRoot, "synthetic.rs", text, &[], &[]).unwrap();
         assert!(violations.is_empty(), "{violations:?}");
     }
 
@@ -1286,7 +1317,7 @@ mod self_tests {
         let text = "fn f() { let s = \"core::repo::root::fetch_all\"; }\n";
         let violations = scan_file(
             Layer::Interface,
-            &Home::OldTree,
+            &Home::CrateRoot,
             "synthetic.rs",
             text,
             &[],
@@ -1301,7 +1332,7 @@ mod self_tests {
         let text = "/* outer /* inner */ still outer */\nfn f() {}\n";
         let result = scan_file(
             Layer::Domain,
-            &Home::OldTree,
+            &Home::CrateRoot,
             "synthetic.rs",
             text,
             &[],
@@ -1315,7 +1346,7 @@ mod self_tests {
         let text = "/* never closed\nfn f() {}\n";
         let result = scan_file(
             Layer::Domain,
-            &Home::OldTree,
+            &Home::CrateRoot,
             "synthetic.rs",
             text,
             &[],
@@ -1329,7 +1360,7 @@ mod self_tests {
         let text = "fn f() { let s = r#\"never closed; }\n";
         let result = scan_file(
             Layer::Domain,
-            &Home::OldTree,
+            &Home::CrateRoot,
             "synthetic.rs",
             text,
             &[],
@@ -1343,7 +1374,7 @@ mod self_tests {
         let text = "/* line1\nline2\nline3 */\nfn f() { core::repo::root::fetch_all(); }\n";
         let violations = scan_file(
             Layer::Domain,
-            &Home::OldTree,
+            &Home::CrateRoot,
             "synthetic.rs",
             text,
             &[],
@@ -1362,7 +1393,7 @@ mod self_tests {
         let text = "use crate::core::repo::{root, source::batch_fetch_by_roots};\nuse crate::core::repo::{self, Db};\n";
         let violations = scan_file(
             Layer::Interface,
-            &Home::OldTree,
+            &Home::CrateRoot,
             "synthetic.rs",
             text,
             &[],
@@ -1385,7 +1416,7 @@ mod self_tests {
         let text = "use crate::core::repo as r;\n";
         let result = scan_file(
             Layer::Interface,
-            &Home::OldTree,
+            &Home::CrateRoot,
             "synthetic.rs",
             text,
             &[],
@@ -1399,7 +1430,7 @@ mod self_tests {
         let text = "use crate::core::repo::root::*;\n";
         let result = scan_file(
             Layer::Interface,
-            &Home::OldTree,
+            &Home::CrateRoot,
             "synthetic.rs",
             text,
             &[],
@@ -1487,15 +1518,18 @@ mod self_tests {
         }
     }
 
-    /// The operations layer is matched at both of the paths that hold
-    /// operations code. The `core::ops` half has no live observation anywhere
-    /// in the tree, so without this it could be misspelled unnoticed.
+    /// The operations layer is matched at both of the spellings the matcher
+    /// accepts. `core::ops` is the one that names a live module, and it has no
+    /// live observation anywhere in the tree, so without this it could be
+    /// misspelled unnoticed.
     ///
-    /// The bare-`ops::` sample is deliberately not a path that resolves: the
-    /// spelling must stay refused whether or not a module answers to it, and
-    /// the top-level operations tree is on its way out.
+    /// The bare-`ops::` sample resolves to nothing at all — the pre-migration
+    /// operations tree it once named is gone. It stays here because the
+    /// spelling must be refused whether or not a module answers to it: what
+    /// would reach for it now is a habit or a stale example, and either should
+    /// be told no rather than pass unrecognized.
     #[test]
-    fn domain_reaching_ops_is_caught_at_both_of_its_paths() {
+    fn domain_reaching_ops_is_caught_at_both_of_its_spellings() {
         for text in [
             "use crate::ops::anything::at_all;\n",
             "use crate::core::ops::root_story::fetch_root_story;\n",
@@ -1605,7 +1639,7 @@ mod self_tests {
         ] {
             let violations = scan_file(
                 Layer::Interface,
-                &Home::OldTree,
+                &Home::CrateRoot,
                 "synthetic.rs",
                 text,
                 &[],
@@ -1630,7 +1664,7 @@ mod self_tests {
         let text = "use crate::core::repo::Db;\nuse crate::core::repo::root::fetch_all;\n";
         let violations = scan_file(
             Layer::Interface,
-            &Home::OldTree,
+            &Home::CrateRoot,
             "synthetic.rs",
             text,
             &[],
@@ -1651,7 +1685,7 @@ mod self_tests {
         let text = "fn f() { let my_repo = 1; my_repo::thing(); }\n";
         let violations = scan_file(
             Layer::Interface,
-            &Home::OldTree,
+            &Home::CrateRoot,
             "synthetic.rs",
             text,
             &[],
@@ -1666,7 +1700,7 @@ mod self_tests {
         let text = "fn f() { my_macro!(core::repo::root::fetch_all(), println!(\"x\")); }\n";
         let violations = scan_file(
             Layer::Domain,
-            &Home::OldTree,
+            &Home::CrateRoot,
             "synthetic.rs",
             text,
             &[],
@@ -1902,14 +1936,14 @@ mod self_tests {
     }
 
     #[test]
-    fn old_tree_may_reference_a_subsystems_public_surface() {
-        // main.rs dispatching into `retire::` command entry points — legal staging,
-        // unrestricted, same as any other Interface-layer reference today.
+    fn the_crate_root_may_reference_a_subsystems_public_surface() {
+        // main.rs dispatching into `retire::` command entry points — what the
+        // tree exists to allow, and unrestricted by the boundary rule.
         let text = "use crate::retire::retire;\n";
         let subsystems = vec!["retire".to_string()];
         let violations = scan_file(
             Layer::Interface,
-            &Home::OldTree,
+            &Home::CrateRoot,
             "main.rs",
             text,
             &[],
@@ -1934,6 +1968,34 @@ mod self_tests {
         // A bare `repo.rs` (no `repo/` directory) classifies as Repo, same as
         // the single-file `domain.rs`/`ops.rs` pattern above.
         assert_eq!(classify_layer("trail/repo.rs"), Layer::Repo);
+    }
+
+    /// `classify_layer` is a hand-written chain of `strip_prefix` arms with an
+    /// `Interface` tail, while the directories it must cover are discovered
+    /// from disk. A directory with no arm is not refused — it falls through
+    /// the tail and every file under it classifies as `Interface`, so its
+    /// whole subsystem drops out of the domain and repo rules, and its
+    /// ordinary ops-to-repo reads start reporting as interface violations.
+    /// Nothing else catches that: the barrel pin forces a new directory to be
+    /// *noticed*, but it says nothing about this chain.
+    ///
+    /// So the chain is checked against the same disk listing the pin uses.
+    /// `domain.rs` is the probe because only a real arm can classify it as
+    /// `Domain` — the tail cannot.
+    #[test]
+    fn every_directory_under_src_has_a_classify_layer_arm() {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+        let src_root = Path::new(&manifest_dir).join("src");
+        let mut dirs = subsystem_dir_names(&src_root);
+        dirs.push("core".to_string()); // excluded from the listing, still needs an arm
+        for dir in dirs {
+            assert_eq!(
+                classify_layer(&format!("{dir}/domain.rs")),
+                Layer::Domain,
+                "`{dir}/` has no arm in classify_layer, so every file under it \
+                 classifies as Interface — add one beside the others"
+            );
+        }
     }
 
     #[test]
@@ -1974,7 +2036,7 @@ fn c() {
         let subsystems = vec!["survey".to_string(), "exclude".to_string()];
         let violations = scan_file(
             Layer::Testing,
-            &Home::OldTree,
+            &Home::CrateRoot,
             "contentless_law_tests.rs",
             text,
             &[],
@@ -2048,14 +2110,24 @@ fn s() -> Connection {
     }
 
     #[test]
-    fn classify_home_recognizes_core_subsystem_and_old_tree() {
+    fn classify_home_recognizes_core_subsystem_and_crate_root() {
         assert_eq!(classify_home("core/domain/resolution.rs"), Home::Core);
         assert_eq!(
             classify_home("retire/ops/ceremony.rs"),
             Home::Subsystem("retire".to_string())
         );
-        assert_eq!(classify_home("ops/retire.rs"), Home::OldTree);
-        assert_eq!(classify_home("main.rs"), Home::OldTree);
+        assert_eq!(classify_home("main.rs"), Home::CrateRoot);
+        // Most subsystems open through a flat front-door file, which therefore
+        // lives at the crate root — beside `main.rs`, not inside the directory
+        // it opens. `retire` and `story` use their own `mod.rs` instead, so
+        // their front doors classify as the subsystem, not the crate root.
+        // (`core` also opens through a `mod.rs`, but it is not a subsystem at
+        // all: the arm above catches it first.)
+        assert_eq!(classify_home("ls.rs"), Home::CrateRoot);
+        assert_eq!(
+            classify_home("retire/mod.rs"),
+            Home::Subsystem("retire".to_string())
+        );
     }
 
     // ========================================================================
@@ -2115,6 +2187,10 @@ fn s() -> Connection {
                 "get_fact_value",
             ],
         ),
+        ("ls", &["run", "show_duplicates"]),
+        ("worklist", &["run"]),
+        ("coverage", &["run", "compute_per_root"]),
+        ("compare", &["run", "CompareOptions", "run_compare"]),
         (
             "retire",
             &[
@@ -2290,9 +2366,10 @@ fn s() -> Connection {
         }
 
         for (name, items) in SUBSYSTEM_BARREL_ITEMS {
-            // The front door is `src/<name>/mod.rs`, or the flat
-            // `src/<name>.rs` while a subsystem coexists with its
-            // same-named interface file.
+            // A subsystem's front door is either `src/<name>/mod.rs` or the
+            // flat `src/<name>.rs` beside the directory — a settled choice of
+            // file placement, not a transitional state. Most take the flat
+            // form; `retire` and `story` take the other.
             let mod_rs = src_root.join(name).join("mod.rs");
             let front_door = if mod_rs.exists() {
                 mod_rs

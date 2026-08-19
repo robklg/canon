@@ -68,8 +68,7 @@ fn the_coverage_rollup_carries_the_empty_files_it_set_aside() {
     // 100%.
     let mut c = canary();
     let (_, overall, _, _) =
-        crate::ops::coverage::compute_per_root(&mut c.conn, &[], None, &Default::default())
-            .unwrap();
+        crate::coverage::compute_per_root(&mut c.conn, &[], None, &Default::default()).unwrap();
     assert_eq!(overall.hashed_sources, 2);
     assert_eq!(overall.contentless_sources, 1, "the empty file is counted");
     assert_eq!(overall.coverable_sources(), 1);
@@ -248,7 +247,7 @@ fn compare_counts_the_empty_files_it_sets_aside() {
     // it does, matching the "stated, never silent" rule every other law
     // site follows.
     let mut c = canary();
-    let run = crate::ops::compare::run_compare(
+    let run = crate::compare::run_compare(
         &mut c.conn,
         std::path::Path::new("/r"),
         std::path::Path::new("/archive"),

@@ -1,7 +1,9 @@
 //! Worklist operations — JSONL entry construction and unique-content filtering.
 //!
 //! `build_entries()` converts selected sources into serializable worklist entries,
-//! optionally fetching facts and deduplicating by content hash.
+//! optionally fetching facts and deduplicating by content identity — the object
+//! a source resolves to, not the hash string, though an object owns exactly one
+//! hash so the two answer the same question.
 
 use std::collections::{HashMap, HashSet};
 

@@ -11,9 +11,9 @@
 //! speaks them. The inverse binds just as hard — a feature that re-derives
 //! a claim core already makes has made a second claim that can disagree.
 //!
-//! One piece of shared ground sits outside: the selector every query
-//! command runs through is a top-level module, where the commands it was
-//! written for can reach it directly.
+//! One piece of shared ground sits outside: the selector every query command
+//! runs through belongs to the expression facility, not here. It is the
+//! language applied, so it lives where the language does.
 //!
 //! Core must never depend on a feature module, or it stops being trustworthy
 //! ground to build on. A feature may depend on core at any depth; on a
