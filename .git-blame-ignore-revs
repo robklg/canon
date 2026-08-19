@@ -50,3 +50,6 @@ a3cc4c62241dae9bf7d8b73f27441a176ebec9f2
 
 # Make the expression language a sealed facility
 9038bda9d0402f73664c3f4eca1b98d657e5e1f7
+
+# Give the query instruments their own homes and close the old tree
+089eddc8b438b2fddd831eb8277a7b2b679ec2bd
