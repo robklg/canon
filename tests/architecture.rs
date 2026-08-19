@@ -59,55 +59,16 @@ fn classify_layer(rel_path: &str) -> Layer {
     {
         return Layer::Testing;
     }
-    if let Some(rest) = rel_path.strip_prefix("core/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("retire/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("story/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("trail/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("sweep/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("survey/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("exclude/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("scan/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("roots/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("notes/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("facts/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("archive/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("expr/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("ls/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("coverage/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("compare/") {
-        return classify_subsystem_stratum(rest);
-    }
-    if let Some(rest) = rel_path.strip_prefix("worklist/") {
+    // Any directory under `src/` is `core` or a subsystem — the barrel pin
+    // refuses a subsystem directory it does not list, so no third kind of
+    // directory can exist — and both classify their strata the same way.
+    // Splitting on the first separator therefore covers every directory by
+    // construction: a newly added subsystem classifies correctly before
+    // anyone remembers this function exists. The per-directory arm chain
+    // this replaces could silently drop a whole subsystem out of the layer
+    // rules when its arm was forgotten; making that unrepresentable retired
+    // both the chain and the guard test that watched over it.
+    if let Some((_, rest)) = rel_path.split_once('/') {
         return classify_subsystem_stratum(rest);
     }
     // Everything left is a flat file at the crate root: `main.rs`, the
@@ -439,8 +400,9 @@ fn is_ops_path(path: &str) -> bool {
     is_or_under(path, "core::ops") || is_or_under(path, "ops")
 }
 
-/// Matches a repository stratum reaching the operations stratum beside it,
-/// inside one subsystem.
+/// Matches a reference to a subsystem's own operations stratum — the edge
+/// both the repository rule and the domain rule refuse, spelled from inside
+/// the subsystem.
 ///
 /// `is_ops_path` sees only the two top-level spellings — the spine's
 /// `core::ops` and a bare `crate::ops`, which now names nothing — and a
@@ -448,17 +410,16 @@ fn is_ops_path(path: &str) -> bool {
 /// It is reached by one of two spellings, and a matcher keyed on either alone
 /// leaves the other free: `crate::<own>::ops` names the subsystem it belongs
 /// to, while `super::ops` climbs to the same place without naming it. Both
-/// are the one edge the rule exists to refuse, so both are refused.
+/// are the one edge the rules exist to refuse, so both are refused.
 ///
 /// The climbing form is matched however far it climbs, and without asking
 /// which subsystem the file belongs to. That is deliberately blunt rather
-/// than exact: it holds for every repository file in the tree today, all of
-/// which sit directly under their subsystem, so one climb lands on the
-/// subsystem itself. It would over-refuse from a nested repository directory,
-/// where a single climb lands inside `repo` rather than beside it — no such
-/// directory exists, and the failure would be a refusal to compile the test,
-/// not a silently missed reach. Nothing outside a `super::` chain is affected,
-/// which is what keeps `std::ops` out of it.
+/// than exact: a climb whose remainder is `ops` can only mean the stratum —
+/// the one path shape it would over-match is a *nested* `ops` module inside
+/// another stratum, which does not exist, and whose arrival would surface as
+/// a refusal to compile the test, never a silently missed reach. Nothing
+/// outside a `super::` chain is affected, which is what keeps `std::ops` out
+/// of it.
 fn match_own_ops(home: &Home, raw_path: &str, no_crate: &str) -> Option<String> {
     if let Home::Subsystem(own) = home {
         if is_or_under(no_crate, &format!("{own}::ops")) {
@@ -473,6 +434,31 @@ fn match_own_ops(home: &Home, raw_path: &str, no_crate: &str) -> Option<String> 
         levels += 1;
     }
     if levels > 0 && is_or_under(climbed, "ops") {
+        return Some(raw_path.to_string());
+    }
+
+    None
+}
+
+/// Matches a reference to a subsystem's own repository stratum —
+/// `match_own_ops`'s repository twin, serving the domain rule: `match_repo`
+/// sees the spine's `core::repo` and the bare form, and a subsystem's own
+/// `repo` is neither. Same two spellings, same deliberately blunt climb, for
+/// the reasons given there.
+fn match_own_repo(home: &Home, raw_path: &str, no_crate: &str) -> Option<String> {
+    if let Home::Subsystem(own) = home {
+        if is_or_under(no_crate, &format!("{own}::repo")) {
+            return Some(raw_path.to_string());
+        }
+    }
+
+    let mut climbed = raw_path;
+    let mut levels = 0;
+    while let Some(rest) = climbed.strip_prefix("super::") {
+        climbed = rest;
+        levels += 1;
+    }
+    if levels > 0 && is_or_under(climbed, "repo") {
         return Some(raw_path.to_string());
     }
 
@@ -494,7 +480,13 @@ fn classify_reference(
             if is_ops_path(no_crate) {
                 return Some((Rule::DomainNoOps, raw_path.to_string()));
             }
+            if let Some(reference) = match_own_ops(home, raw_path, no_crate) {
+                return Some((Rule::DomainNoOps, reference));
+            }
             if let Some(reference) = match_repo(no_crate) {
+                return Some((Rule::DomainNoRepo, reference));
+            }
+            if let Some(reference) = match_own_repo(home, raw_path, no_crate) {
                 return Some((Rule::DomainNoRepo, reference));
             }
             if is_or_under(raw_path, "rusqlite") {
@@ -546,13 +538,11 @@ fn classify_reference(
     // (`core` is the deliberate opposite and not a subsystem: its strata are
     // `pub mod`, because the spine's job is to be reachable.)
     //
-    // That is a property of how the front doors happen to be written, and the
-    // seal below pins it only partly: at a front door it refuses `pub mod`,
-    // but `pub(super) mod` and `pub(crate) mod` both pass — and at that one
-    // depth `super` *is* the crate root, so either would open the stratum to
-    // every flat file while the seal stayed green. No subsystem front door
-    // does that today, all being bare-private; whether the seal should require
-    // it outright is on the backlog, not settled here.
+    // That is a property of how the front doors are written, and the seal
+    // below pins it whole: a stratum `mod` at a front door must carry
+    // inherited visibility — `pub(super)` and `pub(crate)` are refused along
+    // with bare `pub`, because at that one depth `super` *is* the crate
+    // root, and either would open the stratum to every flat file.
     // ------------------------------------------------------------------
     if has_crate {
         if let Some(ref_root) = no_crate.split("::").next() {
@@ -1628,6 +1618,62 @@ mod self_tests {
         );
     }
 
+    /// A subsystem's domain stratum must not reach the operations or the
+    /// repository stratum beside it. The spine spellings (`core::ops`,
+    /// `core::repo`) were always refused; these are the same edges spelled at
+    /// the subsystem's own strata — absolute and climbed — which the spine
+    /// matchers cannot see.
+    #[test]
+    fn subsystem_domain_reaching_its_own_ops_or_repo_is_refused() {
+        for (text, rule) in [
+            (
+                "use crate::expr::ops::filter::apply_filters;\n",
+                Rule::DomainNoOps,
+            ),
+            (
+                "use super::super::ops::filter::apply_filters;\n",
+                Rule::DomainNoOps,
+            ),
+            (
+                "use crate::expr::repo::get_fact_value;\n",
+                Rule::DomainNoRepo,
+            ),
+            (
+                "use super::super::repo::get_fact_value;\n",
+                Rule::DomainNoRepo,
+            ),
+        ] {
+            let violations = scan_file(
+                Layer::Domain,
+                &Home::Subsystem("expr".to_string()),
+                "expr/domain/filter.rs",
+                text,
+                &[],
+                &["expr".to_string()],
+            )
+            .unwrap();
+            assert!(
+                violations.iter().any(|v| v.rule == rule),
+                "{text:?} -> {violations:?}"
+            );
+        }
+
+        // A domain file reading the domain module beside it stays legal.
+        let ok = scan_file(
+            Layer::Domain,
+            &Home::Subsystem("expr".to_string()),
+            "expr/domain/filter.rs",
+            "use super::key::ParsedFactKey;\n",
+            &[],
+            &["expr".to_string()],
+        )
+        .unwrap();
+        assert!(
+            ok.is_empty(),
+            "a sibling domain module is legal, got {ok:?}"
+        );
+    }
+
     /// The repository layer is at `core::repo`, and an interface file that
     /// reaches a data function there is drift the rule must see — spelled
     /// either way the tree really spells it.
@@ -1968,34 +2014,6 @@ mod self_tests {
         // A bare `repo.rs` (no `repo/` directory) classifies as Repo, same as
         // the single-file `domain.rs`/`ops.rs` pattern above.
         assert_eq!(classify_layer("trail/repo.rs"), Layer::Repo);
-    }
-
-    /// `classify_layer` is a hand-written chain of `strip_prefix` arms with an
-    /// `Interface` tail, while the directories it must cover are discovered
-    /// from disk. A directory with no arm is not refused — it falls through
-    /// the tail and every file under it classifies as `Interface`, so its
-    /// whole subsystem drops out of the domain and repo rules, and its
-    /// ordinary ops-to-repo reads start reporting as interface violations.
-    /// Nothing else catches that: the barrel pin forces a new directory to be
-    /// *noticed*, but it says nothing about this chain.
-    ///
-    /// So the chain is checked against the same disk listing the pin uses.
-    /// `domain.rs` is the probe because only a real arm can classify it as
-    /// `Domain` — the tail cannot.
-    #[test]
-    fn every_directory_under_src_has_a_classify_layer_arm() {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-        let src_root = Path::new(&manifest_dir).join("src");
-        let mut dirs = subsystem_dir_names(&src_root);
-        dirs.push("core".to_string()); // excluded from the listing, still needs an arm
-        for dir in dirs {
-            assert_eq!(
-                classify_layer(&format!("{dir}/domain.rs")),
-                Layer::Domain,
-                "`{dir}/` has no arm in classify_layer, so every file under it \
-                 classifies as Interface — add one beside the others"
-            );
-        }
     }
 
     #[test]
@@ -2404,13 +2422,18 @@ fn s() -> Connection {
                 "{name}'s `pub use` surface no longer matches its pinned barrel"
             );
 
-            // The front door's mod declarations must never be pub — the
-            // barrel's `pub use` list is the only public surface.
+            // The front door's mod declarations must be bare-private — the
+            // barrel's `pub use` list is the only public surface. Restricted
+            // visibility is refused along with bare `pub`: at this depth
+            // `super` *is* the crate root, so `pub(super)` and `pub(crate)`
+            // would each open the stratum to every flat file.
             for item in &file.items {
                 if let syn::Item::Mod(item_mod) = item {
                     assert!(
-                        !matches!(item_mod.vis, syn::Visibility::Public(_)),
-                        "{name}'s front door: `mod {}` must not be pub",
+                        matches!(item_mod.vis, syn::Visibility::Inherited),
+                        "{name}'s front door: `mod {}` must be bare-private — \
+                         any visibility at this depth opens the stratum to the \
+                         crate root",
                         item_mod.ident
                     );
                 }
