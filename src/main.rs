@@ -418,6 +418,10 @@ enum Commands {
     },
     /// Read the decision trail — what happened here, or the day's story;
     /// for your thoughts, see 'note'
+    // The timeline flags below belong to the scoped/time views only; `trail show`
+    // honors none of them, so clap must reject them beside the subcommand rather
+    // than accept and drop them (same shape as `roots` and `facts`).
+    #[command(args_conflicts_with_subcommands = true)]
     Trail {
         #[command(subcommand)]
         action: Option<TrailAction>,
@@ -1595,4 +1599,33 @@ fn main() -> Result<()> {
     core::repo::print_profile_summary(db.conn());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A flag the named subcommand cannot honor must be refused, never dropped.
+    #[test]
+    fn trail_show_refuses_timeline_flags_it_cannot_honor() {
+        for flag in [
+            vec!["--global"],
+            vec!["--since", "today"],
+            vec!["--jsonl"],
+            vec!["--all"],
+        ] {
+            let mut argv = vec!["canon", "trail", "show", "7"];
+            argv.extend(flag.iter());
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "expected {argv:?} to be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn trail_timeline_flags_still_parse_without_a_subcommand() {
+        assert!(Cli::try_parse_from(["canon", "trail", "--global", "--jsonl"]).is_ok());
+        assert!(Cli::try_parse_from(["canon", "trail", "show", "7"]).is_ok());
+    }
 }
