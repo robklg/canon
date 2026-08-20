@@ -84,7 +84,9 @@ pub fn run(
     if total_sources == 0 {
         println!("No sources match the given filters.");
         if !include.includes_excluded() && sel.excluded_count > 0 {
-            println!(
+            // Visibility hints go to stderr — they are about the view, not part
+            // of the report a caller may be piping.
+            eprintln!(
                 "\n({} excluded sources hidden, use --include excluded to show)",
                 sel.excluded_count
             );
