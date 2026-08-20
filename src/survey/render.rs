@@ -8,6 +8,16 @@ use crate::core::ops::scope::ResolvedScope;
 use crate::notes::{format_note_date, relative_to_scope, SurveyNoteContext};
 use crate::survey::ops::compute::{ArchivedLocationDetail, LocationResult};
 
+/// `1 empty file` / `N empty files`, thousands-separated — the noun agrees
+/// with the count, as it does where compare and sweep state the same set-aside.
+fn empty_files_phrase(n: usize) -> String {
+    if n == 1 {
+        "1 empty file".to_string()
+    } else {
+        format!("{} empty files", format_count(n))
+    }
+}
+
 const DETAIL_SAMPLE_SIZE: usize = 5;
 const DETAIL_SHOW_ALL_THRESHOLD: usize = 20;
 const DEFAULT_LOCATION_CAP: usize = 10;
@@ -43,8 +53,8 @@ pub(super) fn print_survey_header(
     // sweep, compare, and coverage.
     if contentless > 0 {
         println!(
-            "  {} empty files (no content to compare)",
-            format_count(contentless)
+            "  {} (no content to compare)",
+            empty_files_phrase(contentless)
         );
     }
 
@@ -587,5 +597,18 @@ pub(super) fn print_unique_detail(paths: &[String], null_delim: bool, cwd: Optio
             // Pipe closed; exit gracefully
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_empty_files_count_agrees_with_its_noun() {
+        assert_eq!(empty_files_phrase(1), "1 empty file");
+        assert_eq!(empty_files_phrase(0), "0 empty files");
+        assert_eq!(empty_files_phrase(2), "2 empty files");
+        assert_eq!(empty_files_phrase(1_500), "1,500 empty files");
     }
 }
