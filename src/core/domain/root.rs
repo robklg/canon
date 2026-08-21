@@ -12,7 +12,7 @@
 
 use anyhow::{bail, Context, Result};
 
-use super::path::path_strip_prefix;
+use super::path::{path_is_under, path_strip_prefix};
 
 // ============================================================================
 // Domain Concepts (pure, no I/O)
@@ -131,8 +131,13 @@ impl Root {
     /// - Scope is at or under the root (scope starts with root path)
     ///
     /// This is used by `canon roots <scope>` to find related roots.
+    ///
+    /// Containment is a boundary claim in both directions: `/a/bc` is not
+    /// under `/a/b`, so a listing under one scope never offers a root the
+    /// scope did not name — which is what the user then removes, suspends or
+    /// retires.
     pub fn matches_scope(&self, scope: &str) -> bool {
-        self.path.starts_with(scope) || scope.starts_with(&self.path)
+        path_is_under(&self.path, scope) || path_is_under(scope, &self.path)
     }
 }
 
@@ -387,18 +392,23 @@ mod tests {
         assert!(!root.matches_scope("/x/y"));
     }
 
+    /// The documented containment edge, in both directions: a listing must
+    /// never offer a root whose path merely begins with the same characters
+    /// as the scope, because acting on what a scope listed is the next step.
     #[test]
     fn matches_scope_similar_prefix_no_match() {
-        // /a/bc is not under /a/b (different directory, not a child)
-        // But with starts_with, "/a/bc".starts_with("/a/b") is true!
-        // This is the current behavior in roots.rs - it uses starts_with.
-        // Note: This differs from find_containing_root which uses path_strip_prefix.
-        let root = Root {
+        let sibling = Root {
             path: "/a/bc".to_string(),
             ..make_root()
         };
-        // Current behavior: starts_with matches similar prefixes
-        // This matches how roots.rs:list() currently works
-        assert!(root.matches_scope("/a/b"));
+        assert!(!sibling.matches_scope("/a/b"));
+
+        let root = Root {
+            path: "/a/b".to_string(),
+            ..make_root()
+        };
+        assert!(!root.matches_scope("/a/bc"));
+        // The real shape of the mistake: a backup drive beside the one named.
+        assert!(!root.matches_scope("/a/b-backup"));
     }
 }
