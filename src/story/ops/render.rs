@@ -64,18 +64,9 @@ pub fn story_lines(report: &StoryReport, cap: usize, now: i64) -> Vec<String> {
     lines.push(String::new());
     lines.push("The places".to_string());
 
-    let mut shown = 0usize;
-    let mut omitted = 0usize;
-    render_place(
-        &report.places,
-        0,
-        &report.root.path,
-        Voicing::Judgment,
-        cap,
-        &mut shown,
-        &mut omitted,
-        &mut lines,
-    );
+    let mut cursor = PlaceCursor::new(&report.root.path, Voicing::Judgment, cap, &mut lines);
+    cursor.render(&report.places, 0);
+    let omitted = cursor.omitted;
     if omitted > 0 {
         lines.push(String::new());
         lines.push(format!(
@@ -125,18 +116,13 @@ pub fn story_lines(report: &StoryReport, cap: usize, now: i64) -> Vec<String> {
 /// omissions.
 pub fn reference_place_lines(report: &StoryReport) -> Vec<String> {
     let mut lines = Vec::new();
-    let mut shown = 0usize;
-    let mut omitted = 0usize;
-    render_place(
-        &report.places,
-        0,
+    PlaceCursor::new(
         &report.root.path,
         Voicing::Reference,
         usize::MAX,
-        &mut shown,
-        &mut omitted,
         &mut lines,
-    );
+    )
+    .render(&report.places, 0);
     lines
 }
 
@@ -162,111 +148,121 @@ fn count_renderable(place: &StoryPlace) -> usize {
     place_renderable(place) as usize + place.children.iter().map(count_renderable).sum::<usize>()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_place(
-    place: &StoryPlace,
-    depth: usize,
-    root_path: &str,
+/// The place walk's setting and its running state, threaded through the
+/// recursion so each step passes only what actually varies: the place and
+/// its depth. The three settings are fixed for a whole walk; `shown` and
+/// `omitted` are the display cap's bookkeeping, and `lines` is the caller's
+/// buffer, which the walk appends to rather than owning.
+struct PlaceCursor<'a> {
+    root_path: &'a str,
     voicing: Voicing,
     cap: usize,
-    shown: &mut usize,
-    omitted: &mut usize,
-    lines: &mut Vec<String>,
-) {
-    let forced_root = depth == 0 && place.children.is_empty();
-    let renderable = place_renderable(place) || forced_root;
-    if renderable {
-        if *shown >= cap {
-            // The whole subtree drops; the omission line carries the count.
-            *omitted += count_renderable(place);
-            return;
-        }
-        *shown += 1;
-        let indent = "  ".repeat(depth + 1);
-        lines.push(String::new());
-        let name = if place.rel_path.is_empty() {
-            "(root)".to_string()
-        } else {
-            place.rel_path.clone()
-        };
-        let breadth = if place.folder_breadth > 1 {
-            format!(
-                "   · across {} folders",
-                format_count(place.folder_breadth as i64)
-            )
-        } else {
-            String::new()
-        };
-        lines.push(format!("{indent}{name}{breadth}"));
-        for group in &place.acts {
-            act_lines(group, &indent, voicing, lines);
-        }
-        // "no decision here" speaks for the question content only — covered,
-        // unresolved, missing: nothing evidences a decision either way.
-        // Excluded standing is different: exclusion is always a deliberate
-        // act, so at an undecided place it evidences an UNRECORDED decision
-        // — its line says so instead (never "no decision here"). Archived
-        // standing likewise evidences the apply; contentless has nothing to
-        // decide (the contentless law) — neither joins the question here.
-        // Judgment furniture: the reference reading states facts — its
-        // "preserved by copies" definition (the entries guide) already says
-        // nothing was chosen; an open question has no place in a book.
-        let question =
-            place.standing.covered + place.standing.unresolved + place.standing.missing_unexplained;
-        if voicing == Voicing::Judgment && place.undecided() && question > 0 {
-            lines.push(format!("{indent}  no decision here"));
-        }
-        if voicing == Voicing::Judgment
-            && place.undecided()
-            && place.standing.is_empty()
-            && place.covered_where.is_empty()
-            && !place.notes.is_empty()
-            && place.children.is_empty()
-        {
-            // A note-forced leaf whose content is all gone: say so, rather
-            // than leaving the testimony hanging beside nothing. What left
-            // is narrated by the containing place's act slices. A noted
-            // place WITH children stays bare — its content stands one line
-            // down, claimed by the deeper places. Bind-time furniture: the
-            // reference voicing drops it (the ever-axis makes no "now"
-            // claims; the note stands where it was written).
-            lines.push(format!("{indent}  nothing stands here now"));
-        }
-        standing_lines(place, &indent, voicing, lines);
-        for note in &place.notes {
-            lines.push(format!(
-                "{indent}  note: {}",
-                indent_multiline(&note.text, &format!("{indent}        "))
-            ));
-        }
-        if !place_renderable(place) {
-            lines.push(match voicing {
-                Voicing::Judgment => format!("{indent}  nothing indexed here"),
-                Voicing::Reference => format!("{indent}  nothing was ever indexed here"),
-            });
-        }
-        if voicing == Voicing::Judgment {
-            let abs = if place.rel_path.is_empty() {
-                root_path.to_string()
-            } else {
-                format!("{root_path}/{}", place.rel_path)
-            };
-            let (display, _argv) = trail_handoff(&abs);
-            lines.push(format!("{indent}  {display}"));
-        }
-    }
-    let child_depth = if renderable { depth + 1 } else { depth };
-    for child in &place.children {
-        render_place(
-            child,
-            child_depth,
+    shown: usize,
+    omitted: usize,
+    lines: &'a mut Vec<String>,
+}
+
+impl<'a> PlaceCursor<'a> {
+    fn new(root_path: &'a str, voicing: Voicing, cap: usize, lines: &'a mut Vec<String>) -> Self {
+        PlaceCursor {
             root_path,
             voicing,
             cap,
-            shown,
-            omitted,
+            shown: 0,
+            omitted: 0,
             lines,
-        );
+        }
+    }
+
+    fn render(&mut self, place: &StoryPlace, depth: usize) {
+        let forced_root = depth == 0 && place.children.is_empty();
+        let renderable = place_renderable(place) || forced_root;
+        if renderable {
+            if self.shown >= self.cap {
+                // The whole subtree drops; the omission line carries the count.
+                self.omitted += count_renderable(place);
+                return;
+            }
+            self.shown += 1;
+            let indent = "  ".repeat(depth + 1);
+            self.lines.push(String::new());
+            let name = if place.rel_path.is_empty() {
+                "(root)".to_string()
+            } else {
+                place.rel_path.clone()
+            };
+            let breadth = if place.folder_breadth > 1 {
+                format!(
+                    "   · across {} folders",
+                    format_count(place.folder_breadth as i64)
+                )
+            } else {
+                String::new()
+            };
+            self.lines.push(format!("{indent}{name}{breadth}"));
+            for group in &place.acts {
+                act_lines(group, &indent, self.voicing, self.lines);
+            }
+            // "no decision here" speaks for the question content only — covered,
+            // unresolved, missing: nothing evidences a decision either way.
+            // Excluded standing is different: exclusion is always a deliberate
+            // act, so at an undecided place it evidences an UNRECORDED decision
+            // — its line says so instead (never "no decision here"). Archived
+            // standing likewise evidences the apply; contentless has nothing to
+            // decide (the contentless law) — neither joins the question here.
+            // Judgment furniture: the reference reading states facts — its
+            // "preserved by copies" definition (the entries guide) already says
+            // nothing was chosen; an open question has no place in a book.
+            let question = place.standing.covered
+                + place.standing.unresolved
+                + place.standing.missing_unexplained;
+            if self.voicing == Voicing::Judgment && place.undecided() && question > 0 {
+                self.lines.push(format!("{indent}  no decision here"));
+            }
+            if self.voicing == Voicing::Judgment
+                && place.undecided()
+                && place.standing.is_empty()
+                && place.covered_where.is_empty()
+                && !place.notes.is_empty()
+                && place.children.is_empty()
+            {
+                // A note-forced leaf whose content is all gone: say so, rather
+                // than leaving the testimony hanging beside nothing. What left
+                // is narrated by the containing place's act slices. A noted
+                // place WITH children stays bare — its content stands one line
+                // down, claimed by the deeper places. Bind-time furniture: the
+                // reference voicing drops it (the ever-axis makes no "now"
+                // claims; the note stands where it was written).
+                self.lines
+                    .push(format!("{indent}  nothing stands here now"));
+            }
+            standing_lines(place, &indent, self.voicing, self.lines);
+            for note in &place.notes {
+                self.lines.push(format!(
+                    "{indent}  note: {}",
+                    indent_multiline(&note.text, &format!("{indent}        "))
+                ));
+            }
+            if !place_renderable(place) {
+                self.lines.push(match self.voicing {
+                    Voicing::Judgment => format!("{indent}  nothing indexed here"),
+                    Voicing::Reference => format!("{indent}  nothing was ever indexed here"),
+                });
+            }
+            if self.voicing == Voicing::Judgment {
+                let abs = if place.rel_path.is_empty() {
+                    self.root_path.to_string()
+                } else {
+                    format!("{}/{}", self.root_path, place.rel_path)
+                };
+                let (display, _argv) = trail_handoff(&abs);
+                self.lines.push(format!("{indent}  {display}"));
+            }
+        }
+        let child_depth = if renderable { depth + 1 } else { depth };
+        for child in &place.children {
+            self.render(child, child_depth);
+        }
     }
 }
 
