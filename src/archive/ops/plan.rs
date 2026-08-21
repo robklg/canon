@@ -306,8 +306,11 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     collisions.sort_by(|a, b| a.0.cmp(&b.0));
     violations.collisions = collisions;
 
-    // --- Check stale records + destination conflicts (DB) ---
-    // In resume mode, skip these checks — destination DB records are evidence of progress.
+    // --- Check destination conflicts (DB) ---
+    // Skipped in resume mode: destination DB records are evidence of progress,
+    // not of a conflict. Source staleness below is checked in every mode — a
+    // source that changed since generation invalidates the plan whether or not
+    // an earlier run got partway through it.
 
     let archive_rel_paths: Vec<&str> = transfers
         .iter()

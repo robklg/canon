@@ -447,25 +447,28 @@ pub fn run(
         bail!("Aborting due to sources from suspended roots");
     }
 
+    // A source that changed since the manifest was generated invalidates the
+    // plan itself, so this gate belongs beside the other preflight refusals —
+    // never inside the dry-run arm, where a rehearsal would fail and the run
+    // it rehearsed proceed.
+    if !plan.stale_sources.is_empty() {
+        eprintln!(
+            "Error: {} sources have changed since manifest was generated:",
+            plan.stale_sources.len()
+        );
+        for s in plan.stale_sources.iter().take(10) {
+            eprintln!("  {}: {}", s.path, s.reason);
+        }
+        if plan.stale_sources.len() > 10 {
+            eprintln!("  ... and {} more", plan.stale_sources.len() - 10);
+        }
+        eprintln!("\nRun `canon scan` then `cluster refresh` to regenerate the lock file.");
+        bail!("Aborting due to stale sources in manifest");
+    }
+
     // --- Dry-run: display plan and return ---
 
     if options.dry_run {
-        // DB-based staleness check for dry-run
-        if !plan.stale_sources.is_empty() {
-            eprintln!(
-                "Error: {} sources have changed since manifest was generated:",
-                plan.stale_sources.len()
-            );
-            for s in plan.stale_sources.iter().take(10) {
-                eprintln!("  {}: {}", s.path, s.reason);
-            }
-            if plan.stale_sources.len() > 10 {
-                eprintln!("  ... and {} more", plan.stale_sources.len() - 10);
-            }
-            eprintln!("\nRun `canon scan` then `cluster refresh` to regenerate the lock file.");
-            bail!("Aborting due to stale sources in manifest");
-        }
-
         display_dry_run_plan(&plan, &base_dir, options.transfer_mode, options.resume);
 
         if options.resume {
