@@ -436,7 +436,24 @@ fn mark_missing_sources(
     let mut missing_ids: Vec<i64> = Vec::new();
     let mut disconnected_count = 0u64;
 
+    // Observation outranks inference. A source can collect two outcomes in one
+    // scan: the empty-directory classifier reads a directory that a move has
+    // just emptied as evidence its sources are gone — true of the directory,
+    // false of the file, which the same walk saw at its new path. Which of the
+    // two lands last depends only on the order the walker happened to reach
+    // them in, and the wrong order marks a file deleted that is sitting right
+    // there. Having been seen is the stronger claim, so the seen set is
+    // subtracted before anything is flipped.
+    let seen: HashSet<i64> = outcomes
+        .iter()
+        .filter(|(_, outcome)| matches!(outcome, SourceOutcome::Seen))
+        .map(|(id, _)| *id)
+        .collect();
+
     for (id, outcome) in outcomes {
+        if seen.contains(id) {
+            continue;
+        }
         match outcome {
             SourceOutcome::Seen => {}
             SourceOutcome::Missing => {
@@ -1179,6 +1196,81 @@ mod tests {
     // =========================================================================
     // Deletion capture before the flip (scan_root)
     // =========================================================================
+
+    #[test]
+    fn a_source_seen_this_scan_is_never_marked_missing() {
+        // A move empties the directory the file came from, and the
+        // empty-directory classifier reads that as evidence its sources are
+        // gone. True of the directory; false of the file, which this same scan
+        // saw at its new path. Whether the two collide depends on which the
+        // walker reaches first, so the order is fixed here rather than left to
+        // the filesystem: the emptied directory, then the new path.
+        //
+        // Without the seen-set subtraction this marks a present file deleted
+        // and writes a deletion receipt for it — the most damaging thing a scan
+        // can get wrong, since a scan only ever observes.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_path = temp.path().to_str().unwrap();
+        let root_id = repo::insert_test_root(&conn, root_path, "source", false);
+
+        std::fs::create_dir(temp.path().join("from")).unwrap();
+        std::fs::write(temp.path().join("from/x.txt"), "content").unwrap();
+        scan_root(
+            &conn,
+            root_id,
+            root_path,
+            None,
+            walk(temp.path()),
+            &no_hash_options(),
+            &NoopProgress,
+            current_timestamp(),
+            Some(1),
+            false,
+        )
+        .unwrap();
+        let source_id = repo::source::fetch_by_path(&conn, root_id, "from/x.txt")
+            .unwrap()
+            .unwrap()
+            .id;
+
+        std::fs::create_dir(temp.path().join("to")).unwrap();
+        std::fs::rename(temp.path().join("from/x.txt"), temp.path().join("to/x.txt")).unwrap();
+
+        let emptied = WalkDir::new(temp.path().join("from"))
+            .into_iter()
+            .next()
+            .unwrap();
+        let entries = std::iter::once(emptied).chain(walk(&temp.path().join("to")));
+
+        let result = scan_root(
+            &conn,
+            root_id,
+            root_path,
+            None,
+            entries,
+            &no_hash_options(),
+            &NoopProgress,
+            current_timestamp(),
+            Some(2),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(result.stats.missing, 0, "a file seen this scan is present");
+        assert!(
+            result.deleted_items.is_empty(),
+            "and no deletion receipt claims otherwise"
+        );
+        let present: i64 = conn
+            .query_row(
+                "SELECT present FROM sources WHERE id = ?",
+                [source_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(present, 1);
+    }
 
     use walkdir::WalkDir;
 
