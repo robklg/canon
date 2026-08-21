@@ -333,58 +333,6 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
         std::collections::HashSet::new()
     };
 
-    // --- Check archive conflicts ---
-
-    let hash_values: Vec<&str> = transfers
-        .iter()
-        .filter_map(|t| {
-            // Find original lock entry to get hash_value
-            params
-                .sources
-                .iter()
-                .find(|s| s.id == t.source_id)
-                .and_then(|s| s.hash_value.as_deref())
-        })
-        .collect();
-
-    if !hash_values.is_empty() {
-        let archive_info = repo::object::batch_find_archive_info_by_hash(conn, &hash_values)?;
-
-        for transfer in &transfers {
-            let hash = params
-                .sources
-                .iter()
-                .find(|s| s.id == transfer.source_id)
-                .and_then(|s| s.hash_value.as_deref());
-
-            if let Some(hash) = hash {
-                if let Some(info_list) = archive_info.get(hash) {
-                    // The list is ordered by root id, so taking the first
-                    // entry outright would read "lowest root id", not
-                    // "prefer the destination": content standing in both the
-                    // destination and an older archive would classify as a
-                    // cross-archive conflict, and acknowledging that with
-                    // --allow would wave a duplicate into the destination
-                    // without the destination gate ever being consulted.
-                    // A copy in the destination archive wins the
-                    // classification whenever one exists.
-                    let in_dest = info_list
-                        .iter()
-                        .find(|(archive_id, _)| *archive_id == params.archive_root_id);
-                    if let Some((_, archive_path)) = in_dest {
-                        violations
-                            .archive_conflicts_dest
-                            .push((transfer.source_path.clone(), archive_path.clone()));
-                    } else if let Some((_, archive_path)) = info_list.first() {
-                        violations
-                            .archive_conflicts_other
-                            .push((transfer.source_path.clone(), archive_path.clone()));
-                    }
-                }
-            }
-        }
-    }
-
     // --- Check destination paths stay under archive root ---
 
     if !transfers.is_empty() {
@@ -584,6 +532,64 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
         let pending_ids: std::collections::HashSet<i64> =
             classification.pending.iter().map(|t| t.source_id).collect();
         transfers.retain(|t| pending_ids.contains(&t.source_id));
+    }
+
+    // --- Check archive conflicts ---
+    // Deliberately last: in resume mode the transfers above have been trimmed
+    // to the ones still pending, and this check must not see the rest. What an
+    // interrupted run already placed is registered in the destination archive,
+    // so checking it here would read the run's own progress as content already
+    // archived and abort the resume that is finishing it. Pending transfers are
+    // still checked in full — resume is not a way past the duplicate gate.
+
+    let hash_values: Vec<&str> = transfers
+        .iter()
+        .filter_map(|t| {
+            // Find original lock entry to get hash_value
+            params
+                .sources
+                .iter()
+                .find(|s| s.id == t.source_id)
+                .and_then(|s| s.hash_value.as_deref())
+        })
+        .collect();
+
+    if !hash_values.is_empty() {
+        let archive_info = repo::object::batch_find_archive_info_by_hash(conn, &hash_values)?;
+
+        for transfer in &transfers {
+            let hash = params
+                .sources
+                .iter()
+                .find(|s| s.id == transfer.source_id)
+                .and_then(|s| s.hash_value.as_deref());
+
+            if let Some(hash) = hash {
+                if let Some(info_list) = archive_info.get(hash) {
+                    // The list is ordered by root id, so taking the first
+                    // entry outright would read "lowest root id", not
+                    // "prefer the destination": content standing in both the
+                    // destination and an older archive would classify as a
+                    // cross-archive conflict, and acknowledging that with
+                    // --allow would wave a duplicate into the destination
+                    // without the destination gate ever being consulted.
+                    // A copy in the destination archive wins the
+                    // classification whenever one exists.
+                    let in_dest = info_list
+                        .iter()
+                        .find(|(archive_id, _)| *archive_id == params.archive_root_id);
+                    if let Some((_, archive_path)) = in_dest {
+                        violations
+                            .archive_conflicts_dest
+                            .push((transfer.source_path.clone(), archive_path.clone()));
+                    } else if let Some((_, archive_path)) = info_list.first() {
+                        violations
+                            .archive_conflicts_other
+                            .push((transfer.source_path.clone(), archive_path.clone()));
+                    }
+                }
+            }
+        }
     }
 
     Ok(ApplyPlan {
@@ -1442,6 +1448,95 @@ mod tests {
         assert_eq!(plan.resume_already_there.len(), 1);
         // Source still present
         assert_eq!(plan.resume_already_there_source_present, 1);
+    }
+
+    /// A resume must not trip over its own progress: the files the
+    /// interrupted run already placed are registered in the archive, and
+    /// reading them back as "already in the destination archive" would abort
+    /// the very run that put them there.
+    #[test]
+    fn resume_never_reads_its_own_progress_as_an_archive_conflict() {
+        use std::io::Write;
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let src_path = src_dir.path().to_str().unwrap().to_string();
+        let archive_path = archive_dir.path().to_str().unwrap().to_string();
+
+        // Two sources in the manifest; the first was transferred before the
+        // interruption, the second never made it.
+        for name in ["done.jpg", "pending.jpg"] {
+            let mut f = std::fs::File::create(src_dir.path().join(name)).unwrap();
+            f.write_all(&vec![0u8; 1000]).unwrap();
+        }
+        let mut f = std::fs::File::create(archive_dir.path().join("done.jpg")).unwrap();
+        f.write_all(&vec![0u8; 1000]).unwrap();
+
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, &src_path, "source", false);
+        let archive_id = insert_root(&conn, &archive_path, "archive", false);
+        let done_obj = insert_object(&conn, "hash_done", false);
+        let pending_obj = insert_object(&conn, "hash_pending", false);
+        let done_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "done.jpg",
+            Some(done_obj),
+            1000,
+            1704067200,
+        );
+        let pending_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "pending.jpg",
+            Some(pending_obj),
+            1000,
+            1704067200,
+        );
+        // What the interrupted run registered: the destination copy.
+        insert_source_with_metadata(
+            &conn,
+            archive_id,
+            "done.jpg",
+            Some(done_obj),
+            1000,
+            1704067200,
+        );
+
+        let done = make_lock_entry(
+            done_id,
+            root_id,
+            &src_dir.path().join("done.jpg").display().to_string(),
+            Some(done_obj),
+            Some("hash_done"),
+        );
+        let pending = make_lock_entry(
+            pending_id,
+            root_id,
+            &src_dir.path().join("pending.jpg").display().to_string(),
+            Some(pending_obj),
+            Some("hash_pending"),
+        );
+        let sources: Vec<&LockEntry> = vec![&done, &pending];
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
+        let mut root_paths = HashMap::new();
+        root_paths.insert(root_id, src_path);
+        root_paths.insert(archive_id, archive_path);
+
+        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        params.resume = true;
+
+        let plan = plan_apply(&mut conn, &params).unwrap();
+
+        assert_eq!(plan.already_archived_count, 1);
+        assert_eq!(plan.transfers.len(), 1, "only the pending transfer remains");
+        assert!(
+            plan.violations.archive_conflicts_dest.is_empty(),
+            "the run's own progress is not a conflict: {:?}",
+            plan.violations.archive_conflicts_dest
+        );
+        assert!(plan.violations.archive_conflicts_other.is_empty());
     }
 
     // =========================================================================
