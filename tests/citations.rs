@@ -5,7 +5,11 @@
 //! This check makes the mechanically checkable citation forms fail the build:
 //!
 //! - **File citations** — a comment names a `foo.rs`; the file must exist
-//!   somewhere under `src/` or `tests/`.
+//!   somewhere under `src/` or `tests/`. A citation that carries directories
+//!   (`retire/ops/frame.rs`) is held to the whole path, suffix-aligned like a
+//!   module path: naming a location and being checked only on the basename
+//!   would let a move between subsystems pass unseen, which is the very thing
+//!   this check exists to catch.
 //! - **Module-path citations** — a comment names an `a::b::c` path; the path's
 //!   module prefix must resolve against the tree (filesystem modules plus
 //!   inline `mod` declarations), allowing a trailing item segment and a
@@ -38,6 +42,9 @@ struct Universe {
     modules: HashSet<String>,
     /// Basenames of every `.rs` file in the tree ("plan.rs", "eval.rs", ...).
     file_names: HashSet<String>,
+    /// Repo-relative paths of the same files, slash-joined
+    /// ("src/archive/ops/plan.rs", ...).
+    file_paths: HashSet<String>,
     /// Path roots that are not this tree's to resolve: std and friends,
     /// Cargo.toml dependencies, workspace members, primitives.
     external_roots: HashSet<String>,
@@ -47,11 +54,13 @@ impl Universe {
     fn build(root: &Path) -> Self {
         let mut modules = HashSet::new();
         let mut file_names = HashSet::new();
+        let mut file_paths = HashSet::new();
 
         for file in collect_rs_files(&root.join("src")) {
             if let Some(name) = file.file_name().and_then(|n| n.to_str()) {
                 file_names.insert(name.to_string());
             }
+            file_paths.insert(relative_slash_path(root, &file));
             let module = module_path_of(&root.join("src"), &file);
             // Register the module and every prefix.
             let mut prefix = String::new();
@@ -73,6 +82,7 @@ impl Universe {
             if let Some(name) = file.file_name().and_then(|n| n.to_str()) {
                 file_names.insert(name.to_string());
             }
+            file_paths.insert(relative_slash_path(root, &file));
         }
 
         // Roots this tree does not own. `core` is deliberately absent even
@@ -90,17 +100,37 @@ impl Universe {
         Universe {
             modules,
             file_names,
+            file_paths,
             external_roots,
         }
     }
 
     #[cfg(test)]
-    fn from_parts(modules: &[&str], file_names: &[&str], external_roots: &[&str]) -> Self {
+    fn from_parts(modules: &[&str], file_paths: &[&str], external_roots: &[&str]) -> Self {
         Universe {
             modules: modules.iter().map(|s| s.to_string()).collect(),
-            file_names: file_names.iter().map(|s| s.to_string()).collect(),
+            file_names: file_paths
+                .iter()
+                .map(|p| p.rsplit('/').next().unwrap_or(p).to_string())
+                .collect(),
+            file_paths: file_paths.iter().map(|s| s.to_string()).collect(),
             external_roots: external_roots.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    /// A cited file resolves when a bare basename is a file somewhere in the
+    /// tree, or — for a citation that carries directories — when the whole
+    /// path is suffix-aligned with a real one at a component boundary, so
+    /// `retire/ops/frame.rs` and `src/retire/ops/frame.rs` both resolve and
+    /// `story/ops/frame.rs` does not.
+    fn resolves_file_citation(&self, cite: &str) -> bool {
+        if !cite.contains('/') {
+            return self.file_names.contains(cite);
+        }
+        let suffix = format!("/{}", cite);
+        self.file_paths
+            .iter()
+            .any(|p| p == cite || p.ends_with(&suffix))
     }
 
     /// A cited module path resolves when its segments are suffix-aligned with a
@@ -131,6 +161,15 @@ impl Universe {
         let suffix = format!("::{}", joined);
         self.modules.iter().any(|m| m.ends_with(&suffix))
     }
+}
+
+fn relative_slash_path(root: &Path, file: &Path) -> String {
+    file.strip_prefix(root)
+        .unwrap_or(file)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn module_path_of(src: &Path, file: &Path) -> String {
@@ -282,9 +321,15 @@ fn module_citations(text: &str) -> Vec<Vec<String>> {
     out
 }
 
-/// File citations: tokens ending in `.rs`. URL fragments (containing `//`) are
-/// skipped; `mod.rs` and `lib.rs` are structural names, not citations of a
-/// particular file.
+/// File citations: tokens ending in `.rs`, as written. URL fragments
+/// (containing `//`) are skipped; a bare `mod.rs` or `lib.rs` is a structural
+/// name, not a citation of a particular file — but `retire/mod.rs` names one,
+/// so a path-qualified citation of either is checked.
+///
+/// A citation keeps its directories only when they read as directories. Prose
+/// pairs two files with a slash (`trail.rs/survey.rs`), and the run splitter
+/// cannot tell that from a path — so a non-final component ending in `.rs`
+/// demotes the citation to its basename rather than inventing a directory.
 fn file_citations(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for run in split_runs(text, |c: char| {
@@ -293,15 +338,13 @@ fn file_citations(text: &str) -> Vec<String> {
         if run.contains("//") || !run.ends_with(".rs") {
             continue;
         }
-        let base = run.rsplit('/').next().unwrap_or(&run);
+        let run = run.trim_start_matches("./");
+        let base = run.rsplit('/').next().unwrap_or(run);
         let Some(stem) = base.strip_suffix(".rs") else {
             continue;
         };
         if stem.is_empty() {
             continue; // a bare `.rs` (as in "every `.rs` file") names no file.
-        }
-        if base == "mod.rs" || base == "lib.rs" {
-            continue;
         }
         if !base
             .chars()
@@ -310,7 +353,18 @@ fn file_citations(text: &str) -> Vec<String> {
         {
             continue;
         }
-        out.push(base.to_string());
+        let mut components: Vec<&str> = run.split('/').collect();
+        let is_path = components.len() > 1
+            && components[..components.len() - 1]
+                .iter()
+                .all(|c| !c.is_empty() && !c.ends_with(".rs"));
+        if !is_path {
+            components = vec![base];
+        }
+        if components.len() == 1 && (base == "mod.rs" || base == "lib.rs") {
+            continue;
+        }
+        out.push(components.join("/"));
     }
     out
 }
@@ -362,7 +416,7 @@ fn check_comment_citations(display_path: &str, text: &str, universe: &Universe) 
             }
         }
         for file in file_citations(comment) {
-            if !universe.file_names.contains(&file) {
+            if !universe.resolves_file_citation(&file) {
                 violations.push(format!(
                     "{}:{}: comment cites `{}`, but no such file exists",
                     display_path,
@@ -563,7 +617,12 @@ mod self_tests {
                 "domain",
                 "domain::format",
             ],
-            &["eval.rs", "source.rs", "plan.rs"],
+            &[
+                "src/expr/eval.rs",
+                "src/repo/source.rs",
+                "src/archive/ops/plan.rs",
+                "src/retire/mod.rs",
+            ],
             &["std", "serde", "rusqlite"],
         )
     }
@@ -595,6 +654,42 @@ mod self_tests {
     fn skips_structural_and_url_file_names() {
         let text = "// a future lib.rs controls the surface; see https://host/x.rs\n";
         let v = check_comment_citations("x.rs", text, &universe());
+        assert!(v.is_empty(), "{:?}", v);
+    }
+
+    #[test]
+    fn accepts_full_path_citation() {
+        // Suffix-aligned like a module path: with or without the `src/` head.
+        let text = "// see archive/ops/plan.rs and src/repo/source.rs\n";
+        let v = check_comment_citations("x.rs", text, &universe());
+        assert!(v.is_empty(), "{:?}", v);
+    }
+
+    #[test]
+    fn flags_full_path_citation_with_wrong_directory() {
+        // `plan.rs` exists — under `archive/ops`, not `exclude/ops`. The
+        // basename check alone would pass this, which is the gap the path
+        // form closes: a file moved between subsystems leaves prose behind.
+        let v = check_comment_citations("x.rs", "// see exclude/ops/plan.rs\n", &universe());
+        assert_eq!(v.len(), 1, "a wrong directory must flag: {:?}", v);
+        assert!(v[0].contains("exclude/ops/plan.rs"));
+    }
+
+    #[test]
+    fn path_qualified_structural_name_is_checked() {
+        // A bare `mod.rs` names no particular file and is skipped; a
+        // path-qualified one names exactly one, so it resolves or flags.
+        let v = check_comment_citations("x.rs", "// see retire/mod.rs\n", &universe());
+        assert!(v.is_empty(), "an existing path-qualified mod.rs: {:?}", v);
+        let v = check_comment_citations("x.rs", "// see ghost/mod.rs\n", &universe());
+        assert_eq!(v.len(), 1, "a stale one must flag: {:?}", v);
+    }
+
+    #[test]
+    fn prose_pairing_two_files_is_not_a_path() {
+        // "trail.rs/survey.rs" is prose joining two names, not a directory
+        // and a file — it is read as the basename it ends with.
+        let v = check_comment_citations("x.rs", "// like plan.rs/source.rs do\n", &universe());
         assert!(v.is_empty(), "{:?}", v);
     }
 
