@@ -91,7 +91,7 @@ archive_root_id = 2
 - **Cluster Summary** is regenerated on each `cluster refresh`, showing current source counts, root breakdown, and archive coverage.
 - **Notes** section is preserved across refreshes — add your own comments here.
 - **`version`** field tracks the manifest format version.
-- **`[options]`** records which `--allow` flags were used during generation. These are carried forward to `apply` and `cluster refresh`.
+- **`[options]`** records which `--allow` flags were used during generation. [`cluster refresh`](cluster.md) reads them, because it re-selects sources from the same query. [`apply`](apply.md) reads only `duplicates`, which speaks to the content it is about to transfer; `archived` acknowledged a selection that has already happened, and apply selects nothing. What apply needs acknowledged, it asks for on its own flags.
 
 **Common output patterns:**
 

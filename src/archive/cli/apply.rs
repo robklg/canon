@@ -75,10 +75,15 @@ pub fn run(
     // Validate manifest version
     validate_manifest_version(config.meta.version)?;
 
-    // Merge manifest [options] with CLI options
-    // Only the duplicates flag is merged. A manifest may also record that
-    // archived sources were allowed, but that governed which sources were
-    // selected when the manifest was made; it has nothing to say here.
+    // Merge manifest [options] with CLI options.
+    //
+    // Only the duplicates flag is merged, and that is settled rather than an
+    // oversight: an acknowledgment is per-command and belongs to the
+    // invocation that needs it. `archived` acknowledges a *selection*, so it
+    // is read by the one command that re-selects from a manifest — `cluster
+    // refresh`. Apply selects nothing; it carries out a lock file already
+    // written, and the conflicts it is the one to find carry their own
+    // acknowledgments on its own flags.
     let (_, manifest_duplicates) = parse_manifest_allow(&config.options.allow)?;
     let allow_duplicates = options.allow_duplicates || manifest_duplicates;
     if manifest_duplicates && !options.allow_duplicates {
