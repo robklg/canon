@@ -268,7 +268,7 @@ Not at /mnt/backup/vacation/ (residual):
   photos/IMG_4203.raw
 ```
 
-Unhashed files are always included in residual output: without a hash, their presence at the reference location can't be confirmed. Use `-0` for flat output. With multiple `--other` locations, each gets a separate listing.
+Unhashed files are always included in residual output: without a hash, their presence at the reference location can't be confirmed. Empty files are never included, for the opposite reason — there is no content whose absence could be claimed; they stay counted in the header. Use `-0` for flat output. With multiple `--other` locations, each gets a separate listing.
 
 ## Directed comparison (`--other`)
 

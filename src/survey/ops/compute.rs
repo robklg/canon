@@ -402,10 +402,20 @@ pub fn compute_survey(
         };
 
         // Residual paths: selection files NOT shared with this location.
-        // Uses full selection (not just hashed) — unhashed sources are always residual.
+        // Uses full selection (not just hashed) — unhashed sources are always
+        // residual: nothing can show them as shared, so they stay listed.
+        //
+        // Empty files are the opposite case and are refused. This is a direct
+        // read past the index, so its contentless refusal is re-applied here:
+        // "not at this location" is an identity claim, and `loc_oids` already
+        // refuses the one empty-content object every empty file shares — so an
+        // empty file would be listed as residual even when a byte-identical
+        // empty file stands at the location the view names. They stay stated
+        // through the header's contentless count.
         let residual_paths = if params.compute_residual {
             let mut paths: Vec<String> = selection
                 .iter()
+                .filter(|s| !s.is_contentless())
                 .filter(|s| match s.object_id {
                     Some(oid) => !loc_oids.contains(&oid),
                     None => true, // unhashed always residual

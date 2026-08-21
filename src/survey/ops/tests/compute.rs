@@ -2293,6 +2293,62 @@ fn test_residual_includes_unhashed() {
 }
 
 #[test]
+fn test_residual_never_lists_empty_files() {
+    // The contentless law at the residual direct read. "Not at this location"
+    // is an identity claim, and every empty file shares the one empty-content
+    // object the location's object set already refuses — so an empty file
+    // would read as residual whether or not a byte-identical empty file
+    // stands at the very location named. Both cases are here: the reference
+    // holds one empty file, the selection holds two. Neither is listed, and
+    // both stay stated in the contentless count.
+    let mut conn = setup_test_db();
+
+    let root_a = insert_root(&conn, "/mnt/drive-a", "source", false);
+    let root_b = insert_root(&conn, "/mnt/backup", "source", false);
+
+    let obj1 = insert_object(&conn, "hash_001", false);
+    let obj2 = insert_object(&conn, "hash_002", false);
+    let empty_obj = insert_object(&conn, "hash_empty", false);
+
+    insert_source_with_size(&conn, root_a, "photos/IMG_001.jpg", Some(obj1), 100);
+    insert_source_with_size(&conn, root_a, "photos/only_here.jpg", Some(obj2), 100);
+    insert_source_with_size(&conn, root_a, "photos/empty_one.jpg", Some(empty_obj), 0);
+    insert_source_with_size(&conn, root_a, "photos/empty_two.jpg", Some(empty_obj), 0);
+
+    insert_source_with_size(&conn, root_b, "trip/IMG_001.jpg", Some(obj1), 100);
+    insert_source_with_size(&conn, root_b, "trip/empty.jpg", Some(empty_obj), 0);
+
+    let params = SurveyParams {
+        compute_residual: true,
+        ..test_params()
+    };
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive-a"],
+        &params,
+        &[],
+        &["/mnt/backup/trip"],
+        None,
+    );
+
+    match outcome {
+        SurveyOutcome::Result(result) => {
+            let paths = result.location_results[0].residual_paths.as_ref().unwrap();
+            assert_eq!(
+                paths,
+                &vec!["/mnt/drive-a/photos/only_here.jpg".to_string()],
+                "only real content the reference lacks is residual"
+            );
+            assert_eq!(
+                result.contentless_count, 2,
+                "the empty files are refused, not dropped from sight"
+            );
+        }
+        _ => panic!("Expected SurveyOutcome::Result"),
+    }
+}
+
+#[test]
 fn test_residual_zero() {
     let mut conn = setup_test_db();
 
