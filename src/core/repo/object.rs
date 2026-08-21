@@ -574,9 +574,22 @@ pub fn delete_orphaned(conn: &Connection) -> Result<OrphanedStats> {
 /// # Returns
 /// The existing or newly created Object with all fields populated.
 pub fn get_or_create(conn: &Connection, hash_type: &str, hash_value: &str) -> Result<Object> {
+    Ok(get_or_create_reporting_creation(conn, hash_type, hash_value)?.0)
+}
+
+/// [`get_or_create`], also saying whether this call is the one that created the
+/// row: `true` means content new to the universe, `false` that the hash was
+/// already known and this caller merely found it. A caller counting creations
+/// must read this rather than its own subject's change of link — many sources
+/// share one object, and each of them linking is one creation, not several.
+pub fn get_or_create_reporting_creation(
+    conn: &Connection,
+    hash_type: &str,
+    hash_value: &str,
+) -> Result<(Object, bool)> {
     // Atomic upsert: INSERT if not exists, do nothing on conflict.
     // This handles race conditions where two processes try to create the same hash.
-    conn.execute(
+    let inserted = conn.execute(
         "INSERT INTO objects (hash_type, hash_value) VALUES (?, ?)
          ON CONFLICT(hash_type, hash_value) DO NOTHING",
         rusqlite::params![hash_type, hash_value],
@@ -590,7 +603,7 @@ pub fn get_or_create(conn: &Connection, hash_type: &str, hash_value: &str) -> Re
         rusqlite::params![hash_type, hash_value],
         object_from_row,
     )?;
-    Ok(obj)
+    Ok((obj, inserted == 1))
 }
 
 #[cfg(test)]

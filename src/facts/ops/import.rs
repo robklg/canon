@@ -176,8 +176,9 @@ pub fn process_record(
 
     if let Some(hash_val) = hash_value {
         if let Some(hash_str) = hash_val.as_str() {
-            let obj = repo::object::get_or_create(conn, "sha256", hash_str)?;
-            if current_object_id.is_none() || current_object_id != Some(obj.id) {
+            let (obj, created) =
+                repo::object::get_or_create_reporting_creation(conn, "sha256", hash_str)?;
+            if created {
                 state.stats.objects_created += 1;
             }
             object_id = Some(obj.id);
@@ -262,8 +263,11 @@ pub fn process_record(
                 record.observed_at,
                 None,
             )?;
+            // Counted as imported, never as promoted: this fact arrived on the
+            // object directly. Promotion is the separate event above — facts
+            // that already stood on the source, moved onto the object when the
+            // source gained its content identity.
             state.stats.facts_imported += 1;
-            state.stats.facts_promoted += 1;
         } else {
             outcome
                 .verbose_lines
@@ -845,6 +849,70 @@ mod tests {
         let outcome = process_record(&mut conn, &record, &mut state, false).unwrap();
         assert!(outcome.warnings.is_empty());
         assert_eq!(state.stats.objects_created, 1);
+    }
+
+    /// The two counters that go into the printed *and* recorded summary must
+    /// count the events they name. Two sources sharing one hash is one object
+    /// created; a fact arriving straight onto an object was never promoted.
+    #[test]
+    fn the_import_counters_count_the_events_they_name() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let first = insert_source(&conn, root, "photo.jpg", None);
+        let second = insert_source(&conn, root, "copy.jpg", None);
+        let mut state = init_state(&conn).unwrap();
+
+        // A fact stands on the first source before it has a content identity;
+        // giving it one promotes that fact onto the object.
+        let mut with_fact = HashMap::new();
+        with_fact.insert("content.Make".to_string(), serde_json::json!("Canon"));
+        process_record(
+            &mut conn,
+            &make_record(first, 0, with_fact),
+            &mut state,
+            false,
+        )
+        .unwrap();
+        assert_eq!(state.stats.facts_imported, 1);
+        assert_eq!(state.stats.facts_promoted, 0, "nothing promoted yet");
+
+        let mut hash_and_fact = HashMap::new();
+        hash_and_fact.insert(
+            "content.hash.sha256".to_string(),
+            serde_json::json!("abc123def456"),
+        );
+        hash_and_fact.insert("content.Model".to_string(), serde_json::json!("R6"));
+        process_record(
+            &mut conn,
+            &make_record(first, 0, hash_and_fact.clone()),
+            &mut state,
+            false,
+        )
+        .unwrap();
+        assert_eq!(state.stats.objects_created, 1);
+        assert_eq!(
+            state.stats.facts_promoted, 1,
+            "the fact that already stood on the source"
+        );
+
+        // The second source carries the same content: it links to the object
+        // that already exists, and the facts it brings land on that object
+        // directly — imported, not promoted.
+        process_record(
+            &mut conn,
+            &make_record(second, 0, hash_and_fact),
+            &mut state,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            state.stats.objects_created, 1,
+            "one object, however many sources share it"
+        );
+        assert_eq!(
+            state.stats.facts_promoted, 1,
+            "an object fact imported directly was never promoted"
+        );
     }
 
     #[test]
