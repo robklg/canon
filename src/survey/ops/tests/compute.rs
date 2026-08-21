@@ -2436,3 +2436,33 @@ fn test_unique_detail_relative_paths() {
         _ => panic!("Expected SurveyOutcome::Result"),
     }
 }
+
+#[test]
+fn the_selection_side_stays_source_roots_whatever_the_include_set_says() {
+    // Why survey refuses `--include archived`: the flag has nothing to widen.
+    // The selection side is role-source by construction, so an archive root in
+    // scope contributes nothing to it either way — it is read on the outward
+    // side, which is always visible.
+    let mut conn = setup_test_db();
+    let source = insert_root(&conn, "/mnt/drive", "source", false);
+    let archive = insert_root(&conn, "/archive/photos", "archive", false);
+
+    let obj = insert_object(&conn, "hash_001", false);
+    insert_source(&conn, source, "a.jpg", Some(obj));
+    insert_source(&conn, archive, "2024/a.jpg", Some(obj));
+
+    for archived in [false, true] {
+        let params = SurveyParams {
+            include: IncludeSet {
+                excluded: false,
+                archived,
+            },
+            ..test_params()
+        };
+        let outcome = run_compute(&mut conn, &["/archive/photos"], &params, &[], &[], None);
+        assert!(
+            matches!(outcome, SurveyOutcome::Empty),
+            "archive sources must never enter the selection (archived = {archived})"
+        );
+    }
+}

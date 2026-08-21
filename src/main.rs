@@ -1149,15 +1149,17 @@ fn main() -> Result<()> {
             verbose,
         } => {
             let expanded = expr::expand_filter_strings(&filters, &canon_home)?;
-            let mut include = include_set_from(&include);
+            let include = include_set_from(&include);
+            // Survey has no archived-visibility axis to widen: its selection
+            // side is source roots by construction and its outward side always
+            // sees archives (the asymmetric-visibility model). So the flag is
+            // refused, and the archive-CWD auto-enable other commands honor
+            // does not apply here.
             if include.includes_archived() {
                 bail!("--include archived is not valid for survey");
             }
             let all_roots = core::repo::root::fetch_all(db.conn())?;
             let resolved = core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
-            if resolved.auto_include_archived {
-                include.archived = true;
-            }
             let scope_prefixes = resolved.prefixes.clone();
             let options = survey::SurveyOptions {
                 original_filters: filters,
