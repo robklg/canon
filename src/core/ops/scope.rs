@@ -43,6 +43,44 @@ pub fn classify_all(paths: &[String]) -> Vec<ScopeMatch> {
     paths.iter().map(|p| classify(p)).collect()
 }
 
+/// Classify canonicalized paths for a command that acts on what it matches,
+/// asking the index whatever the disk cannot answer.
+///
+/// [`classify`] reads the disk, and a path whose storage is detached answers
+/// neither "file" nor "directory" — it falls to the prefix arm. On a reporting
+/// command that only widens a view; on an effectful one it widens the act: an
+/// exclusion aimed at one file the drive no longer offers would take every row
+/// recorded beneath that path with it. Dismissing content needs no mount (the
+/// judgment must outlive the drive it clears), so the command must mean the
+/// same thing attached or detached. When the disk is silent, the index
+/// answers: a source standing at exactly this path makes it a file, and
+/// anything else stays a prefix.
+pub fn classify_all_indexed(conn: &Connection, paths: &[String]) -> Result<Vec<ScopeMatch>> {
+    let roots = repo::root::fetch_all(conn)?;
+    paths
+        .iter()
+        .map(|path| {
+            let p = Path::new(path);
+            if p.is_file() {
+                return Ok(ScopeMatch::ExactFile(path.clone()));
+            }
+            if !p.is_dir() && indexed_as_file(conn, path, &roots)? {
+                return Ok(ScopeMatch::ExactFile(path.clone()));
+            }
+            Ok(ScopeMatch::UnderDirectory(path.clone()))
+        })
+        .collect()
+}
+
+fn indexed_as_file(conn: &Connection, path: &str, roots: &[Root]) -> Result<bool> {
+    match find_containing_root(path, roots) {
+        Some((root_id, _, _, rel)) if !rel.is_empty() => {
+            repo::source::source_exists_at_path(conn, root_id, &rel)
+        }
+        _ => Ok(false),
+    }
+}
+
 /// Result of resolving scope for a discovery command.
 #[derive(Debug)]
 pub struct ResolvedScope {
@@ -383,6 +421,57 @@ mod tests {
             last_scanned_at: None,
             suspended: false,
         }
+    }
+
+    /// The detached-drive guard: an act means the same thing whether or not
+    /// the storage is mounted. Neither path here exists on disk, so the disk
+    /// answers nothing and the index has to.
+    #[test]
+    fn a_path_the_disk_cannot_answer_for_is_classified_by_the_index() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/mnt/drive", "source", false);
+        insert_source(&conn, root_id, "photos/IMG_1.jpg", None);
+        insert_source(&conn, root_id, "photos/album/IMG_2.jpg", None);
+
+        let scopes = classify_all_indexed(
+            &conn,
+            &[
+                "/mnt/drive/photos/IMG_1.jpg".to_string(),
+                "/mnt/drive/photos".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            scopes,
+            vec![
+                ScopeMatch::ExactFile("/mnt/drive/photos/IMG_1.jpg".to_string()),
+                ScopeMatch::UnderDirectory("/mnt/drive/photos".to_string()),
+            ]
+        );
+        // What the disk-only classification would have said about the file —
+        // a prefix, sweeping in whatever the index records beneath it.
+        assert_eq!(
+            classify("/mnt/drive/photos/IMG_1.jpg"),
+            ScopeMatch::UnderDirectory("/mnt/drive/photos/IMG_1.jpg".to_string())
+        );
+    }
+
+    /// A path the index has never heard of stays a prefix: the classification
+    /// narrows on evidence, it does not invent a file.
+    #[test]
+    fn an_unknown_path_the_disk_cannot_answer_for_stays_a_prefix() {
+        let conn = setup_test_db();
+        insert_root(&conn, "/mnt/drive", "source", false);
+
+        let scopes =
+            classify_all_indexed(&conn, &["/mnt/drive/photos/gone.jpg".to_string()]).unwrap();
+        assert_eq!(
+            scopes,
+            vec![ScopeMatch::UnderDirectory(
+                "/mnt/drive/photos/gone.jpg".to_string()
+            )]
+        );
     }
 
     #[test]

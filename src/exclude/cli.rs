@@ -9,7 +9,7 @@ use crate::core::domain::root::find_containing_root;
 use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::{resolve_ledger_root, ReceiptPlacement};
-use crate::core::ops::scope::{classify_all, resolve_path};
+use crate::core::ops::scope::{classify_all_indexed, resolve_path};
 use crate::core::repo::{Connection, Db};
 use crate::exclude::ops::execute::{
     execute_clear, execute_duplicates, execute_set, execute_set_objects,
@@ -116,7 +116,7 @@ pub fn set(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    let scopes = classify_all(scope_prefixes);
+    let scopes = classify_all_indexed(conn, scope_prefixes)?;
     let plan = plan_set(conn, &ExcludeSetParams { scopes, filters })?;
 
     if plan.source_ids().is_empty() {
@@ -185,7 +185,7 @@ pub fn clear(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    let scopes = classify_all(scope_prefixes);
+    let scopes = classify_all_indexed(conn, scope_prefixes)?;
     let plan = plan_clear(conn, &ExcludeClearParams { scopes, filters })?;
 
     if plan.source_ids().is_empty() {
@@ -383,7 +383,7 @@ pub fn exclude_duplicates(
     )?;
 
     // Plan
-    let scopes = classify_all(&scope_prefixes);
+    let scopes = classify_all_indexed(conn, &scope_prefixes)?;
     let params = ExcludeDuplicatesParams {
         scopes,
         filters,
@@ -637,7 +637,7 @@ pub fn set_objects_by_filter(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    let scopes = classify_all(scope_prefixes);
+    let scopes = classify_all_indexed(conn, scope_prefixes)?;
     let plan = plan_set_objects(conn, &ExcludeSetObjectsParams { scopes, filters })?;
 
     if plan.objects.is_empty() {

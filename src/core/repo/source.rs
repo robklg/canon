@@ -289,6 +289,18 @@ pub fn fetch_by_id(conn: &Connection, source_id: i64) -> Result<Option<Source>> 
     Ok(result)
 }
 
+/// Check if a source (current or historical) stands at exactly this path —
+/// the index's answer to "is this path a file?", for when the disk cannot
+/// answer. Includes `present = 0` records, like [`sources_exist_at_scope`].
+pub fn source_exists_at_path(conn: &Connection, root_id: i64, rel_path: &str) -> Result<bool> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sources WHERE root_id = ? AND rel_path = ?)",
+        rusqlite::params![root_id, rel_path],
+        |row| row.get(0),
+    )?;
+    Ok(exists)
+}
+
 /// Check if any sources (current or historical) exist at or under a scope path.
 /// Includes present=0 records — Canon once knew this place.
 /// Returns true if at least one source record exists.
