@@ -14,6 +14,35 @@ use crate::core::repo::{self, Connection};
 
 use super::manifest::{read_lock_entries, read_manifest_config};
 
+/// What one lock entry's two endpoints add up to — derived once, here, and
+/// read by the counts and by every line the interface prints. A header that
+/// counts one way while the list beneath it filters another is how a status
+/// report ends up disagreeing with itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryStatus {
+    /// The destination holds the file, at the expected size.
+    AtDestination,
+    /// The destination holds a file of a different size.
+    SizeMismatch,
+    /// Not at the destination yet; the source is still there to bring.
+    Pending,
+    /// Not at the destination, and the source is gone.
+    SourceLost,
+}
+
+/// The one derivation of an entry's status from what was found on disk.
+fn classify_entry(source_exists: bool, dest_exists: bool, dest_size_match: bool) -> EntryStatus {
+    if dest_exists && dest_size_match {
+        EntryStatus::AtDestination
+    } else if dest_exists {
+        EntryStatus::SizeMismatch
+    } else if source_exists {
+        EntryStatus::Pending
+    } else {
+        EntryStatus::SourceLost
+    }
+}
+
 /// State of a single lock entry in status assessment.
 pub struct StatusEntry {
     /// Absolute source path.
@@ -24,12 +53,10 @@ pub struct StatusEntry {
     pub source_exists: bool,
     /// Full destination path.
     pub dest_path: String,
-    /// Whether the destination file exists on disk.
-    pub dest_exists: bool,
-    /// Whether dest size matches expected size (only meaningful when dest_exists).
-    pub dest_size_match: bool,
     /// Whether the destination is registered in the DB (present=1).
     pub db_registered: bool,
+    /// What the three facts above add up to.
+    pub status: EntryStatus,
 }
 
 /// Result of manifest status assessment.
@@ -154,14 +181,14 @@ pub fn compute_manifest_status(
                     .file_name()
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or_else(|| lock_entry.path.clone());
+                let source_exists = Path::new(&lock_entry.path).exists();
                 entries.push(StatusEntry {
                     source_path: lock_entry.path.clone(),
                     source_filename: filename,
-                    source_exists: Path::new(&lock_entry.path).exists(),
+                    source_exists,
                     dest_path: format!("<pattern expansion failed: {}>", e),
-                    dest_exists: false,
-                    dest_size_match: false,
                     db_registered: false,
+                    status: classify_entry(source_exists, false, false),
                 });
                 dest_rel_paths.push(String::new());
                 continue;
@@ -197,9 +224,8 @@ pub fn compute_manifest_status(
             source_filename: filename,
             source_exists,
             dest_path: dest_full.to_string_lossy().to_string(),
-            dest_exists,
-            dest_size_match,
             db_registered: false, // filled in below
+            status: classify_entry(source_exists, dest_exists, dest_size_match),
         });
         dest_rel_paths.push(archive_rel_path);
     }
@@ -225,17 +251,16 @@ pub fn compute_manifest_status(
     let mut source_still_present = 0usize;
 
     for entry in &entries {
-        if entry.dest_exists && entry.dest_size_match {
-            at_destination += 1;
-            if entry.source_exists {
-                source_still_present += 1;
+        match entry.status {
+            EntryStatus::AtDestination => {
+                at_destination += 1;
+                if entry.source_exists {
+                    source_still_present += 1;
+                }
             }
-        } else if entry.dest_exists && !entry.dest_size_match {
-            size_mismatch += 1;
-        } else if entry.source_exists {
-            pending += 1;
-        } else {
-            source_lost += 1;
+            EntryStatus::SizeMismatch => size_mismatch += 1,
+            EntryStatus::Pending => pending += 1,
+            EntryStatus::SourceLost => source_lost += 1,
         }
     }
 
@@ -385,6 +410,38 @@ mod tests {
         let mismatched = compute_manifest_status(&mut conn, &manifest).unwrap();
         assert_eq!(mismatched.size_mismatch, 1);
         assert!(!mismatched.all_accounted_for());
+    }
+
+    /// The header count and the list under it read one classification. The
+    /// case that split them: a destination file of the wrong size whose source
+    /// is also gone — counted as a size mismatch, but admitted by a
+    /// separately-spelled "lost" filter that only asked whether the source was
+    /// missing and the destination not good.
+    #[test]
+    fn every_entry_lands_in_exactly_one_class() {
+        let (mut conn, dir, manifest, archive) = status_fixture(&["settled.jpg", "broken.jpg"]);
+        std::fs::write(archive.join("settled.jpg"), b"aaaa").unwrap();
+        std::fs::write(archive.join("broken.jpg"), b"aa").unwrap();
+        std::fs::remove_file(dir.path().join("photos").join("broken.jpg")).unwrap();
+
+        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert_eq!(status.at_destination, 1);
+        assert_eq!(status.size_mismatch, 1);
+        assert_eq!(
+            status.source_lost, 0,
+            "a wrong-size destination is not lost"
+        );
+
+        let counted = |class| status.entries.iter().filter(|e| e.status == class).count();
+        assert_eq!(counted(EntryStatus::AtDestination), status.at_destination);
+        assert_eq!(counted(EntryStatus::SizeMismatch), status.size_mismatch);
+        assert_eq!(counted(EntryStatus::Pending), status.pending);
+        assert_eq!(counted(EntryStatus::SourceLost), status.source_lost);
+        assert_eq!(
+            status.at_destination + status.size_mismatch + status.pending + status.source_lost,
+            status.entries.len(),
+            "the classes partition the entries"
+        );
     }
 
     #[test]

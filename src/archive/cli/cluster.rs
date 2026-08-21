@@ -382,10 +382,10 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
         .entries
         .iter()
         .filter(|e| {
-            // Concerning: source lost (no source, no dest), or size mismatch
-            let is_source_lost = !e.source_exists && !e.dest_exists;
-            let is_size_mismatch = e.dest_exists && !e.dest_size_match;
-            is_source_lost || is_size_mismatch
+            matches!(
+                e.status,
+                status_ops::EntryStatus::SourceLost | status_ops::EntryStatus::SizeMismatch
+            )
         })
         .collect();
 
@@ -413,12 +413,12 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
             } else {
                 "MISSING"
             };
-            let dest_status = if entry.dest_exists && entry.dest_size_match {
-                "at dest"
-            } else if entry.dest_exists {
-                "WRONG SIZE"
-            } else {
-                "not at dest"
+            let dest_status = match entry.status {
+                status_ops::EntryStatus::AtDestination => "at dest",
+                status_ops::EntryStatus::SizeMismatch => "WRONG SIZE",
+                status_ops::EntryStatus::Pending | status_ops::EntryStatus::SourceLost => {
+                    "not at dest"
+                }
             };
             let db_status = if entry.db_registered {
                 "yes"
@@ -481,7 +481,7 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
             let lost_entries: Vec<&status_ops::StatusEntry> = status
                 .entries
                 .iter()
-                .filter(|e| !(e.source_exists || e.dest_exists && e.dest_size_match))
+                .filter(|e| e.status == status_ops::EntryStatus::SourceLost)
                 .collect();
             for entry in &lost_entries {
                 println!(
