@@ -52,9 +52,12 @@ pub(crate) mod source {
     ///
     /// # Behavior by Reconciliation variant
     ///
-    /// - **New**: INSERT source with basis_rev=0, scanned_at=now, present=1
-    /// - **Unchanged**: UPDATE last_seen_at=now only
-    /// - **Modified**: UPDATE size, mtime, partial_hash, device, inode, basis_rev+1, last_seen_at=now
+    /// - **New**: INSERT source with basis_rev=0, scanned_at=now, present=1 (or
+    ///   revive a stale row at the path, incrementing its basis_rev)
+    /// - **Unchanged**: UPDATE last_seen_at=now plus device+inode — the file is
+    ///   the same one, but where it sits may have been renumbered (the silent refresh)
+    /// - **Modified**: UPDATE size, mtime, partial_hash, device, inode, basis_rev+1,
+    ///   last_seen_at=now, and clear object_id (content changed, identity unknown)
     /// - **Moved**: UPDATE root_id, rel_path, device, inode, size, mtime, last_seen_at=now
     /// - **Disconnected**: No database operation; returns the existing Source unchanged
     ///
@@ -79,6 +82,13 @@ pub(crate) mod source {
         match reconciliation {
             Reconciliation::New => {
                 // INSERT new source with basis_rev=0, or revive stale record at same path.
+                //
+                // A revived row's basis_rev is incremented, never reset: the
+                // number's whole job is to differ from any value a manifest or
+                // a fact could have recorded earlier, and a reset can land back
+                // on one of them — staleness is compared by inequality, so an
+                // alias reads as fresh. A fresh INSERT starts at 0 safely: no
+                // record can predate the row's first indexing.
                 //
                 // Two cases lead here:
                 // 1. Truly new file: no record exists at this path
@@ -111,7 +121,7 @@ pub(crate) mod source {
                 let updated = conn.execute(
                     "UPDATE sources SET
                         device = ?, inode = ?, size = ?, mtime = ?, partial_hash = ?,
-                        basis_rev = 0, scanned_at = ?, last_seen_at = ?,
+                        basis_rev = basis_rev + 1, scanned_at = ?, last_seen_at = ?,
                         present = 1, object_id = NULL,
                         decision_id = CASE WHEN excluded = 1 THEN decision_id ELSE ? END
                      WHERE root_id = ? AND rel_path = ?",
@@ -174,7 +184,18 @@ pub(crate) mod source {
             }
 
             Reconciliation::Modified { source_id, .. } => {
-                // UPDATE with new metadata, increment basis_rev
+                // UPDATE with new metadata, increment basis_rev, and drop the
+                // object link: the content at this path changed, so the identity
+                // Canon recorded for it is no longer a claim it can make. The
+                // hash pass re-establishes it; until then the source reads as
+                // unhashed, which is the truth and is what a later scan's hash
+                // queue looks for. Uniform across the two shapes an edit takes —
+                // written in place, or renamed over the path — so the row lands
+                // in the same state either way.
+                //
+                // decision_id and excluded are absent from the SET list, and so
+                // preserved: an observation never overwrites the judgment that
+                // governs a standing path.
                 let partial_hash = observation.partial_hash.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("partial_hash required for Modified reconciliation")
                 })?;
@@ -183,7 +204,7 @@ pub(crate) mod source {
                     "UPDATE sources SET
                         device = ?, inode = ?, size = ?, mtime = ?,
                         partial_hash = ?, basis_rev = basis_rev + 1,
-                        last_seen_at = ?, present = 1
+                        last_seen_at = ?, present = 1, object_id = NULL
                      WHERE id = ?",
                     rusqlite::params![
                         observation.device as i64,
@@ -607,8 +628,9 @@ pub(crate) mod source {
             assert_eq!(source.size, 2048);
             assert_eq!(source.mtime, 1700000000);
             assert_eq!(source.partial_hash, "newhash");
-            // basis_rev should be reset to 0 (new file)
-            assert_eq!(source.basis_rev, 0);
+            // basis_rev moves forward, never back: the stale row stood at 5, so
+            // a reader holding any earlier value still sees a difference.
+            assert_eq!(source.basis_rev, 6);
             // object_id should be cleared
             assert_eq!(source.object_id, None);
 
@@ -666,11 +688,12 @@ pub(crate) mod source {
 
             let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
 
-            // Insert existing source with basis_rev=2
+            // Insert existing source with basis_rev=2, linked to an object
+            let old_object = insert_object(&conn, "oldcontent", false);
             conn.execute(
-                "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, basis_rev, scanned_at, last_seen_at, present)
-                 VALUES (?, 'modified.jpg', 100, 12345, 1000, 1700000000, 'oldhash', 2, 0, 0, 1)",
-                rusqlite::params![root_id],
+                "INSERT INTO sources (root_id, rel_path, object_id, device, inode, size, mtime, partial_hash, basis_rev, scanned_at, last_seen_at, present)
+                 VALUES (?, 'modified.jpg', ?, 100, 12345, 1000, 1700000000, 'oldhash', 2, 0, 0, 1)",
+                rusqlite::params![root_id, old_object],
             ).unwrap();
             let source_id = conn.last_insert_rowid();
 
@@ -698,6 +721,10 @@ pub(crate) mod source {
             assert_eq!(source.mtime, 1700000100);
             assert_eq!(source.partial_hash, "newhash");
             assert_eq!(source.basis_rev, 3); // Incremented from 2
+                                             // The content changed, so the recorded identity no longer describes
+                                             // what is at this path — the link is dropped until the hash pass
+                                             // establishes a new one.
+            assert_eq!(source.object_id, None);
         }
 
         #[test]
@@ -999,17 +1026,28 @@ pub(crate) mod source {
         fn test_scan_replacement_preserves_source_exclusion() {
             // Replacement in place (same path, new inode — the shape every
             // atomic-save edit takes) keeps the exclusion and its decision_id,
-            // exactly as an in-place Modified edit would.
+            // exactly as an in-place edit does. It reconciles through the
+            // Modified arm: a standing path is never new, whichever way the
+            // editor wrote the bytes, and the arm preserves both by omission.
             let conn = setup_test_db();
             let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let row_id =
                 insert_row_for_revive(&conn, root_id, "dismissed.jpg", true, true, Some(42));
+            let old_object = insert_object(&conn, "oldcontent", false);
+            conn.execute(
+                "UPDATE sources SET object_id = ? WHERE id = ?",
+                rusqlite::params![old_object, row_id],
+            )
+            .unwrap();
 
             let observation = revive_observation(root_id, "dismissed.jpg");
             let source = apply_reconciliation(
                 &conn,
                 &observation,
-                &Reconciliation::New,
+                &Reconciliation::Modified {
+                    source_id: row_id,
+                    old_object_id: None,
+                },
                 1700000001,
                 Some(99),
             )
@@ -1020,6 +1058,41 @@ pub(crate) mod source {
             assert_eq!(source.decision_id, Some(42));
             // Content identity is unknown until the hash pass re-establishes it.
             assert_eq!(source.object_id, None);
+        }
+
+        #[test]
+        fn a_revive_never_reuses_a_basis_rev_it_already_held() {
+            // Staleness is read as a difference, so a basis_rev that returns to
+            // a value some fact or manifest already recorded reads as fresh
+            // when it is not. A row that goes missing and comes back moves
+            // forward instead — here from 5 to 6, past every value it held.
+            let conn = setup_test_db();
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            let row_id =
+                insert_row_for_revive(&conn, root_id, "gone-and-back.jpg", false, false, None);
+
+            let observation = revive_observation(root_id, "gone-and-back.jpg");
+            let source =
+                apply_reconciliation(&conn, &observation, &Reconciliation::New, 1700000001, None)
+                    .unwrap();
+
+            assert_eq!(source.id, row_id);
+            assert_eq!(source.basis_rev, 6);
+        }
+
+        #[test]
+        fn a_fresh_insert_starts_at_basis_rev_zero() {
+            // Nothing can have recorded a basis for a path Canon has never
+            // indexed, so the first revision is free to be 0.
+            let conn = setup_test_db();
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+
+            let observation = revive_observation(root_id, "first-sighting.jpg");
+            let source =
+                apply_reconciliation(&conn, &observation, &Reconciliation::New, 1700000001, None)
+                    .unwrap();
+
+            assert_eq!(source.basis_rev, 0);
         }
 
         #[test]

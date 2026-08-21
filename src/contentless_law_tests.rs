@@ -265,6 +265,54 @@ fn compare_counts_the_empty_files_it_sets_aside() {
 }
 
 #[test]
+fn contentless_is_never_relocated() {
+    // Scan's identity law. Every empty file's content agrees with every other
+    // empty file's, so "the content matches" tells one from another not at
+    // all — and a claim that would move a row to a different path is a claim
+    // about where content was. Refused on vacuous evidence; the same evidence
+    // shape carries the claim for a file that actually holds content.
+    let c = canary();
+
+    let empty = repo::source::fetch_by_path(&c.conn, c.source_root, "folder/empty.log")
+        .unwrap()
+        .unwrap();
+    let relocated = |source: &crate::core::domain::source::Source, rel_path: &str| {
+        crate::scan::FileObservation {
+            root_id: source.root_id,
+            rel_path: rel_path.to_string(),
+            device: 1,
+            inode: 1,
+            size: source.size,
+            mtime: source.mtime,
+            partial_hash: None,
+        }
+    };
+
+    assert!(
+        !crate::scan::same_physical_file(
+            &empty,
+            &relocated(&empty, "folder/moved/empty.log"),
+            Some(&empty.partial_hash),
+            crate::scan::IdentityClaim::Relocation,
+        ),
+        "an empty source never earns a relocation"
+    );
+
+    let data = repo::source::fetch_by_path(&c.conn, c.source_root, "folder/data.bin")
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::scan::same_physical_file(
+            &data,
+            &relocated(&data, "folder/moved/data.bin"),
+            Some(&data.partial_hash),
+            crate::scan::IdentityClaim::Relocation,
+        ),
+        "the refusal is the emptiness, not the evidence shape"
+    );
+}
+
+#[test]
 fn set_object_by_path_refuses_the_empty_file() {
     // A path names one file, but its object is the one every empty file
     // shares — refused toward the explicit `--hash` intent.

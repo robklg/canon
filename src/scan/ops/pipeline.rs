@@ -15,7 +15,9 @@ use rusqlite::{Transaction, TransactionBehavior};
 
 use crate::core::ops::fs::compute_partial_hash;
 use crate::core::repo::{self, Connection};
-use crate::scan::domain::{find_missing, reconcile, FileObservation, Reconciliation};
+use crate::scan::domain::{
+    find_missing, reconcile, reconcile_at_path, FileObservation, Reconciliation,
+};
 use crate::scan::repo as scan_repo;
 
 use super::types::{
@@ -344,17 +346,35 @@ fn reconcile_file(
     };
 
     let source_at_path = repo::source::fetch_by_path(conn, root_id, rel_path)?;
-    let source_by_inode = scan_repo::source::fetch_by_inode(conn, device as u64, inode as u64)?;
 
-    let reconciliation = reconcile(
-        &observation,
-        source_at_path.as_ref(),
-        source_by_inode.as_ref(),
-    );
+    // Every partial hash below is computed outside the transaction — filesystem
+    // I/O can be slow on NAS/network storage and must not hold the write lock.
+    let reconciliation = match source_at_path.as_ref() {
+        Some(existing) => {
+            // The path holds a row, so the row is this file's; the only question
+            // is whether the content under it moved. The head read is demanded
+            // exactly when the inode changed beneath a standing path — that is
+            // the one case where a bit-identical recreation and a real edit look
+            // alike from metadata alone. A stored inode of 0 was never tracked
+            // (a platform that records none), so nothing says it moved and the
+            // fingerprint decides, as it always has.
+            let inode_changed = existing.inode != 0 && existing.inode as u64 != observation.inode;
+            if inode_changed {
+                observation.partial_hash = Some(compute_partial_hash(full_path, size as u64)?);
+            }
+            reconcile_at_path(&observation, existing, observation.partial_hash.as_deref())
+                .into_reconciliation()
+        }
+        None => {
+            let source_by_inode =
+                scan_repo::source::fetch_by_inode(conn, device as u64, inode as u64)?;
+            reconcile(source_by_inode.as_ref())
+        }
+    };
 
-    // Compute partial_hash outside the transaction — filesystem I/O can be slow
-    // on NAS/network storage and must not hold the write lock
-    if reconciliation.needs_partial_hash() {
+    // A head read taken for the decision is the one the write needs — a file is
+    // never opened twice for the same observation.
+    if reconciliation.needs_partial_hash() && observation.partial_hash.is_none() {
         observation.partial_hash = Some(compute_partial_hash(full_path, size as u64)?);
     }
 
@@ -922,7 +942,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(result.action, FileAction::New));
+        // The path stands and its content changed: the file the user has is an
+        // edited one, whatever inode the editor left behind.
+        assert!(matches!(result.action, FileAction::Modified));
 
         let count: i64 = conn
             .query_row(
@@ -1174,6 +1196,239 @@ mod tests {
             hash_all: false,
             ignore_device_id: false,
         }
+    }
+
+    // =========================================================================
+    // Identity at a standing path (scan_root, end to end)
+    // =========================================================================
+
+    /// One full pass of the pipeline over `dir`, as the interface drives it.
+    fn scan_pass(
+        conn: &Connection,
+        root_id: i64,
+        dir: &Path,
+        decision_id: Option<i64>,
+    ) -> ScanRootResult {
+        scan_root(
+            conn,
+            root_id,
+            dir.to_str().unwrap(),
+            None,
+            walk(dir),
+            &no_hash_options(),
+            &NoopProgress,
+            current_timestamp(),
+            decision_id,
+            false,
+        )
+        .unwrap()
+    }
+
+    /// The headline invariant, asserted wherever a test has just changed state:
+    /// scanning an unchanged disk reports nothing. Applied ambiently rather
+    /// than in one dedicated test, because it must hold after every kind of
+    /// mutation, not merely once.
+    fn assert_second_scan_quiet(conn: &Connection, root_id: i64, dir: &Path) {
+        let stats = scan_pass(conn, root_id, dir, Some(9_999)).stats;
+        assert_eq!(
+            (
+                stats.new,
+                stats.updated,
+                stats.moved,
+                stats.missing,
+                stats.skipped
+            ),
+            (0, 0, 0, 0, 0),
+            "a second scan of an unchanged disk must report nothing"
+        );
+    }
+
+    /// Replace `path` the way an atomic-save editor does: write a sibling temp
+    /// file and rename it over the path. The result is a new inode at a
+    /// standing path — and, unlike delete-then-create, the old inode cannot be
+    /// handed straight back, so the test's premise is guaranteed.
+    fn atomic_save(path: &Path, content: &str) {
+        let tmp = path.with_extension("tmp-save");
+        std::fs::write(&tmp, content).unwrap();
+        std::fs::rename(&tmp, path).unwrap();
+    }
+
+    fn inode_of(path: &Path) -> u64 {
+        fs::metadata(path).unwrap().ino()
+    }
+
+    fn row_decision_id(conn: &Connection, source_id: i64) -> Option<i64> {
+        conn.query_row(
+            "SELECT decision_id FROM sources WHERE id = ?",
+            [source_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_atomic_save_replacement_reads_as_updated() {
+        // The report speaks in the user's terms: they edited one file, so the
+        // scan says one file was updated — never "new", which would claim the
+        // path had never been seen.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let notes = temp.path().join("notes.md");
+        std::fs::write(&notes, "first draft").unwrap();
+
+        let first = scan_pass(&conn, root_id, temp.path(), Some(1));
+        assert_eq!(first.stats.new, 1);
+        let source_id = repo::source::fetch_by_path(&conn, root_id, "notes.md")
+            .unwrap()
+            .unwrap()
+            .id;
+        let first_inode = inode_of(&notes);
+
+        atomic_save(&notes, "second draft, rewritten");
+        assert_ne!(inode_of(&notes), first_inode, "the editor left a new inode");
+
+        let second = scan_pass(&conn, root_id, temp.path(), Some(2));
+        assert_eq!(second.stats.updated, 1);
+        assert_eq!(second.stats.new, 0);
+        assert_eq!(second.stats.missing, 0);
+
+        // The same row, carried through — not a new one beside a lost one.
+        let after = repo::source::fetch_by_path(&conn, root_id, "notes.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.id, source_id);
+        assert_eq!(after.inode, inode_of(&notes) as i64);
+
+        assert_second_scan_quiet(&conn, root_id, temp.path());
+    }
+
+    #[test]
+    fn a_replacement_preserves_the_standing_decision_id() {
+        // A scan observes; it does not act. The row keeps pointing at the
+        // decision that last performed something on it, so story and trail keep
+        // narrating the judgment rather than the observation that noticed it.
+        // Asserted end to end, because what changed is which arm the pipeline
+        // reaches: a path still routed to New would pass every arm-level guard
+        // and stamp anyway.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let doc = temp.path().join("report.txt");
+        std::fs::write(&doc, "original").unwrap();
+
+        scan_pass(&conn, root_id, temp.path(), Some(11));
+        let source_id = repo::source::fetch_by_path(&conn, root_id, "report.txt")
+            .unwrap()
+            .unwrap()
+            .id;
+        // First indexing is a state transition of its own, and takes the stamp.
+        assert_eq!(row_decision_id(&conn, source_id), Some(11));
+
+        atomic_save(&doc, "rewritten entirely");
+        let second = scan_pass(&conn, root_id, temp.path(), Some(22));
+        assert_eq!(second.stats.updated, 1);
+        assert_eq!(
+            row_decision_id(&conn, source_id),
+            Some(11),
+            "the replacement observation must not overwrite the standing link"
+        );
+
+        assert_second_scan_quiet(&conn, root_id, temp.path());
+        assert_eq!(
+            row_decision_id(&conn, source_id),
+            Some(11),
+            "nor may a quiet scan"
+        );
+    }
+
+    #[test]
+    fn an_identical_content_recreation_reports_nothing() {
+        // A restore or a dedup pass can hand back a byte-identical file under a
+        // fresh inode. Nothing happened to the user's data, so nothing is
+        // reported — the location metadata is refreshed and the row stands.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let restored = temp.path().join("restored.bin");
+        std::fs::write(&restored, "identical bytes").unwrap();
+
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let before = repo::source::fetch_by_path(&conn, root_id, "restored.bin")
+            .unwrap()
+            .unwrap();
+        let original_mtime =
+            filetime::FileTime::from_last_modification_time(&fs::metadata(&restored).unwrap());
+
+        atomic_save(&restored, "identical bytes");
+        filetime::set_file_mtime(&restored, original_mtime).unwrap();
+        assert_ne!(inode_of(&restored), before.inode as u64);
+
+        let second = scan_pass(&conn, root_id, temp.path(), Some(2));
+        assert_eq!(
+            (
+                second.stats.new,
+                second.stats.updated,
+                second.stats.moved,
+                second.stats.missing
+            ),
+            (0, 0, 0, 0),
+            "recreating a file byte for byte is not an event"
+        );
+        assert_eq!(second.stats.unchanged, 1);
+
+        // Refreshed silently: the row now carries where the file actually is.
+        let after = repo::source::fetch_by_path(&conn, root_id, "restored.bin")
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.inode, inode_of(&restored) as i64);
+
+        assert_second_scan_quiet(&conn, root_id, temp.path());
+    }
+
+    #[test]
+    fn a_head_read_is_taken_only_when_the_inode_moved() {
+        // Reading every file's head on every scan would cost a whole-library
+        // read; reading none would let a replacement pass as unchanged. The
+        // line is the inode: it decides *whether to look*, never what the
+        // answer is.
+        //
+        // Each row below carries a stored partial hash that disagrees with its
+        // file, so the head read is observable by its verdict alone: where one
+        // is taken the file reads as updated, and where none is taken the
+        // fingerprint carries the row.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+
+        let mut rows = Vec::new();
+        for (name, stored_inode) in [
+            ("steady.txt", None),         // the file's own inode: nothing moved
+            ("untracked.txt", Some(0)),   // never tracked: nothing says it moved
+            ("swapped.txt", Some(4_242)), // a different inode: look
+        ] {
+            let path = temp.path().join(name);
+            std::fs::write(&path, format!("contents of {name}")).unwrap();
+            let meta = fs::metadata(&path).unwrap();
+            let inode = stored_inode.unwrap_or_else(|| meta.ino() as i64);
+            rows.push(repo::insert_test_source(
+                &conn,
+                root_id,
+                name,
+                meta.dev() as i64,
+                inode,
+                meta.size() as i64,
+                meta.mtime(),
+            ));
+        }
+
+        let stats = scan_pass(&conn, root_id, temp.path(), Some(1)).stats;
+        assert_eq!(stats.unchanged, 2, "no head read where the inode stood");
+        assert_eq!(stats.updated, 1, "a head read where the inode moved");
+        assert_eq!(stats.new, 0);
+
+        assert_second_scan_quiet(&conn, root_id, temp.path());
     }
 
     #[test]

@@ -3,6 +3,9 @@
 //! This module defines the domain concepts for filesystem scanning:
 //! - `FileObservation`: What scan observes about a file on disk
 //! - `Reconciliation`: The outcome of comparing an observation to database state
+//! - `same_physical_file()`: The physical-identity law — the one place Canon
+//!   decides whether an observation and a stored row are the same file
+//! - `reconcile_at_path()`: The same-path arm, deciding unchanged vs. updated
 //! - `reconcile()`: Pure function encoding the reconciliation rules
 //! - `find_missing()`: Pure function for detecting missing files
 //! - `check_no_overlap()`: Pure predicate guarding new-root creation
@@ -53,13 +56,18 @@ pub enum Reconciliation {
     /// Action: INSERT new source record.
     New,
 
-    /// File exists and is unchanged — same path, same size+mtime.
-    /// Action: UPDATE last_seen_at only.
+    /// File exists and is unchanged — the row standing at this path satisfies
+    /// the identity law.
+    /// Action: UPDATE last_seen_at, and device+inode — location metadata, which
+    /// may have moved beneath a standing path (the silent refresh).
     Unchanged { source_id: i64 },
 
-    /// File exists but content may have changed — same path, different size or mtime.
+    /// The content at this path changed — the row standing there does not
+    /// satisfy the identity law. "Updated", however the editor wrote it: in
+    /// place, or by renaming a temp file over the path.
     /// Requires: partial_hash must be computed before persistence.
-    /// Action: UPDATE with new size, mtime, partial_hash, increment basis_rev.
+    /// Action: UPDATE size, mtime, partial_hash, device, inode; clear object_id
+    /// (identity unknown until the hash pass); increment basis_rev.
     Modified {
         source_id: i64,
         /// Previous object_id for detecting unexpected hash changes during hashing phase
@@ -103,83 +111,162 @@ impl Reconciliation {
     }
 }
 
-/// Determine the reconciliation outcome for a file observation.
+/// What an identity claim would *do*, which sets the evidence it must clear.
+///
+/// The grade is about the claim, never about the file: the same pair of
+/// observation and row can be the same file for one purpose and not enough
+/// for another, because the two claims cost different things when wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityClaim {
+    /// Continuity at a standing path: the row and the observation share a
+    /// path, and the question is only whether the content moved under it.
+    /// Being wrong costs a mislabelled report line — the path, and every
+    /// judgment attached to it, stands either way.
+    SamePath,
+
+    /// A claim that would relocate a row to a different path. Being wrong
+    /// rewrites where content was, which no later scan self-heals — so this
+    /// grade demands evidence that actually says something.
+    Relocation,
+}
+
+/// The physical-identity law: is this observation the same file as this row?
+///
+/// **(device, inode) is a hint, never identity.** It nominates candidates —
+/// that is its whole job — and this predicate deliberately never reads it: a
+/// remount that renumbers a device, or a network filesystem that synthesizes
+/// inodes afresh per session, must not be able to make Canon report events the
+/// user's own actions did not cause. What decides is content evidence:
+///
+/// 1. A **relocating** claim about a contentless candidate is refused outright.
+///    An empty source is all shape, no content, so "the content agrees" agrees
+///    about nothing — vacuous evidence is failed corroboration for a claim that
+///    moves a row (the contentless law's one predicate is asked here).
+/// 2. The **fingerprint** — size and mtime — must agree. Floor grade for either
+///    claim.
+/// 3. With a **head-read in hand**, the observed partial hash must equal the
+///    row's stored one. This is the strong corroborator, and the only evidence
+///    that separates a metadata refresh from a real edit at a standing path.
+///    Without one, a `SamePath` claim still stands (the path itself carries
+///    continuity, and the fingerprint is exactly the evidence an unchanged file
+///    has always been trusted on), while a `Relocation` is refused — a claim
+///    with no anchor is a guess, and this is the class of guess Canon does not
+///    make.
+///
+/// The corroboration is strong, not absolute: a partial hash reads a file's
+/// head and tail, so a middle-of-file change that preserves size *and* mtime
+/// reads as continuity. Two things follow, both accepted deliberately: the edit
+/// goes unreported, and the row keeps an object link that no longer describes
+/// its content until something re-hashes it (`--verify` does, and still warns
+/// about the change; a plain scan does not, because a link that is merely stale
+/// is indistinguishable from a good one without reading the file). This is an
+/// evidence limit, not a new one — the same corner exists wherever a fingerprint
+/// is preserved across an edit — and it is never a relocated row.
+pub fn same_physical_file(
+    candidate: &Source,
+    observation: &FileObservation,
+    observed_partial_hash: Option<&str>,
+    claim: IdentityClaim,
+) -> bool {
+    if claim == IdentityClaim::Relocation && candidate.is_contentless() {
+        return false;
+    }
+
+    if candidate.size != observation.size || candidate.mtime != observation.mtime {
+        return false;
+    }
+
+    match (claim, observed_partial_hash) {
+        (_, Some(observed)) => candidate.partial_hash == observed,
+        (IdentityClaim::SamePath, None) => true,
+        (IdentityClaim::Relocation, None) => false,
+    }
+}
+
+/// What the same-path arm decided about a standing row.
+///
+/// Two outcomes only: the file at this path is the one Canon already knows
+/// (whatever the filesystem renumbered underneath it), or its content moved
+/// and the row is updated in place. A path that holds a row is never new.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtPathOutcome {
+    /// Same file, nothing to report. The stored device and inode are refreshed
+    /// as ordinary location metadata — a silent refresh when they moved.
+    Unchanged { source_id: i64 },
+
+    /// The content at this path changed — "updated", however the editor wrote
+    /// it: in place, or by renaming a temp file over the path.
+    Modified {
+        source_id: i64,
+        /// Previous object_id, for detecting unexpected hash changes during
+        /// the hashing phase.
+        old_object_id: Option<i64>,
+    },
+}
+
+impl AtPathOutcome {
+    /// Map onto the persistence vocabulary the repo layer speaks.
+    pub fn into_reconciliation(self) -> Reconciliation {
+        match self {
+            AtPathOutcome::Unchanged { source_id } => Reconciliation::Unchanged { source_id },
+            AtPathOutcome::Modified {
+                source_id,
+                old_object_id,
+            } => Reconciliation::Modified {
+                source_id,
+                old_object_id,
+            },
+        }
+    }
+}
+
+/// Reconcile an observation against the row standing at its path.
+///
+/// The path is the identity here; the law decides only whether the content
+/// held there is still the same. `observed_partial_hash` is the caller's head
+/// read, demanded exactly when the inode changed under a standing path —
+/// without it, an atomic-save editor's replacement and a bit-identical
+/// recreation are indistinguishable, and one of those is an event while the
+/// other is not.
+pub fn reconcile_at_path(
+    observation: &FileObservation,
+    existing: &Source,
+    observed_partial_hash: Option<&str>,
+) -> AtPathOutcome {
+    if same_physical_file(
+        existing,
+        observation,
+        observed_partial_hash,
+        IdentityClaim::SamePath,
+    ) {
+        AtPathOutcome::Unchanged {
+            source_id: existing.id,
+        }
+    } else {
+        AtPathOutcome::Modified {
+            source_id: existing.id,
+            old_object_id: existing.object_id,
+        }
+    }
+}
+
+/// Determine the reconciliation outcome for an observation whose path holds no
+/// source — the other half of `reconcile_at_path`.
+///
+/// A path Canon already holds a row for is that row's, whatever the filesystem
+/// renumbered underneath it; this arm is for the paths it does not. A stored
+/// row carrying the same (device, inode) is the one thread suggesting the file
+/// was moved here from somewhere else; with no such nomination, the path is new.
 ///
 /// This function ONLY processes files that exist on disk. It does NOT perform
 /// device ID checking — that happens at the command layer for empty directories
 /// via `classify_sources_in_empty_dir()`.
 ///
 /// # Arguments
-/// - `observation`: What we observed on disk (the file EXISTS)
-/// - `source_at_path`: Existing source at this (root_id, rel_path), if any
 /// - `source_by_inode`: Existing source with this (device, inode), if any
-///
-/// # Behavior
-///
-/// The decision tree:
-///
-/// 1. If source exists at path:
-///     - a. If same inode (or inode not tracked): check size+mtime
-///         - Match: Unchanged
-///         - Differ: Modified
-///     - b. If different inode: New (replacement, old file handled by `mark_missing`)
-/// 2. Else if source exists with same inode (different path): Moved
-/// 3. Else: New
-///
-/// # Note on "Replaced" case
-///
-/// If a source exists at the path but with different inode, this means:
-/// - Old file at this path was deleted
-/// - New file was created at same path
-///
-/// This is handled as: New (for the new file) + Missing (old file detected at end of scan).
-/// We don't need a Replaced variant because mark_missing handles the old file.
-///
-/// # Note on device ID changes
-///
-/// If a file is present on disk, it is always processed — even if its device ID
-/// differs from what was stored. Device ID changes are legitimate (e.g., NAS remount,
-/// drive replacement). The device ID will be updated in the source record.
-///
-/// # Note on device/inode tracking
-///
-/// In the Source struct, device=0 and inode=0 indicate "not tracked" (e.g., non-Unix platform).
-/// When not tracked, we fall back to size+mtime comparison only.
-pub fn reconcile(
-    observation: &FileObservation,
-    source_at_path: Option<&Source>,
-    source_by_inode: Option<&Source>,
-) -> Reconciliation {
-    // Source exists at this path?
-    if let Some(existing) = source_at_path {
-        // Check if this is actually the same file (by inode) or a replacement
-        // inode=0 means "not tracked"
-        let inode_tracked = existing.inode != 0;
-        let same_inode = inode_tracked && existing.inode as u64 == observation.inode;
-
-        if same_inode || !inode_tracked {
-            // Same file (or inode not tracked) — check for modifications
-            let fingerprint_matches =
-                existing.size == observation.size && existing.mtime == observation.mtime;
-
-            if fingerprint_matches {
-                Reconciliation::Unchanged {
-                    source_id: existing.id,
-                }
-            } else {
-                Reconciliation::Modified {
-                    source_id: existing.id,
-                    old_object_id: existing.object_id,
-                }
-            }
-        } else {
-            // Different inode at same path = replacement
-            // The old file will be caught by mark_missing
-            // This observation is treated as New
-            Reconciliation::New
-        }
-    } else if let Some(existing) = source_by_inode {
-        // No source at path, but found one with same inode = moved
+pub fn reconcile(source_by_inode: Option<&Source>) -> Reconciliation {
+    if let Some(existing) = source_by_inode {
+        // Nominated by inode from another path = moved
         Reconciliation::Moved {
             source_id: existing.id,
             from_root_id: existing.root_id,
@@ -187,7 +274,7 @@ pub fn reconcile(
             old_object_id: existing.object_id,
         }
     } else {
-        // No existing source at path or by inode = new file
+        // No row at this path and none nominated = a path Canon has not held
         Reconciliation::New
     }
 }
@@ -283,70 +370,292 @@ mod tests {
     }
 
     // =========================================================================
+    // same_physical_file() — the physical-identity law
+    // =========================================================================
+
+    #[test]
+    fn same_path_continuity_needs_no_head_read() {
+        // The evidence an unchanged file has always been trusted on: the path
+        // holds the row, and the fingerprint agrees. No file is opened.
+        let obs = make_observation("file.txt");
+        let existing = make_source(1, "file.txt");
+        assert!(same_physical_file(
+            &existing,
+            &obs,
+            None,
+            IdentityClaim::SamePath
+        ));
+    }
+
+    #[test]
+    fn a_fingerprint_difference_refuses_either_claim() {
+        let existing = make_source(1, "file.txt");
+
+        let mut bigger = make_observation("file.txt");
+        bigger.size = 2048;
+        let mut later = make_observation("file.txt");
+        later.mtime = 1800000000;
+
+        for obs in [&bigger, &later] {
+            for claim in [IdentityClaim::SamePath, IdentityClaim::Relocation] {
+                assert!(
+                    !same_physical_file(&existing, obs, Some("abc123"), claim),
+                    "a changed fingerprint is not continuity, whatever the claim"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_disagreeing_head_read_refuses_either_claim() {
+        // Size and mtime can agree by coincidence or by an editor preserving
+        // them; the head read is what settles it.
+        let obs = make_observation("file.txt");
+        let existing = make_source(1, "file.txt");
+
+        for claim in [IdentityClaim::SamePath, IdentityClaim::Relocation] {
+            assert!(!same_physical_file(
+                &existing,
+                &obs,
+                Some("different"),
+                claim
+            ));
+        }
+    }
+
+    #[test]
+    fn an_agreeing_head_read_corroborates_a_relocation() {
+        let obs = make_observation("moved_here.txt");
+        let existing = make_source(1, "was_here.txt");
+        assert!(same_physical_file(
+            &existing,
+            &obs,
+            Some("abc123"),
+            IdentityClaim::Relocation
+        ));
+    }
+
+    #[test]
+    fn a_relocation_without_a_head_read_is_refused() {
+        // Moving a row rewrites where content was. Fingerprint agreement alone
+        // never buys that claim — refuse rather than guess.
+        let obs = make_observation("moved_here.txt");
+        let existing = make_source(1, "was_here.txt");
+        assert!(!same_physical_file(
+            &existing,
+            &obs,
+            None,
+            IdentityClaim::Relocation
+        ));
+    }
+
+    #[test]
+    fn a_relocation_of_a_contentless_candidate_is_refused() {
+        // Every empty file agrees with every other empty file. Agreement that
+        // cannot distinguish is no evidence at all.
+        let mut obs = make_observation("moved_here.txt");
+        obs.size = 0;
+        let mut existing = make_source(1, "was_here.txt");
+        existing.size = 0;
+
+        assert!(!same_physical_file(
+            &existing,
+            &obs,
+            Some("abc123"),
+            IdentityClaim::Relocation
+        ));
+    }
+
+    #[test]
+    fn a_contentless_source_still_holds_continuity_at_its_own_path() {
+        // The refusal is the relocating claim's alone: an empty file at its own
+        // path is the same file, and rescanning it is not an event.
+        let mut obs = make_observation("empty.log");
+        obs.size = 0;
+        let mut existing = make_source(1, "empty.log");
+        existing.size = 0;
+
+        assert!(same_physical_file(
+            &existing,
+            &obs,
+            Some("abc123"),
+            IdentityClaim::SamePath
+        ));
+    }
+
+    #[test]
+    fn the_law_reads_content_evidence_never_device_or_inode() {
+        // The demotion, made structural. A wholesale remount plus inode
+        // renumbering leaves identity intact...
+        let obs = make_observation("file.txt");
+        let mut renumbered = make_source(1, "file.txt");
+        renumbered.device = 999_999;
+        renumbered.inode = 888_888;
+        assert!(same_physical_file(
+            &renumbered,
+            &obs,
+            Some("abc123"),
+            IdentityClaim::SamePath
+        ));
+        assert!(same_physical_file(
+            &renumbered,
+            &obs,
+            Some("abc123"),
+            IdentityClaim::Relocation
+        ));
+
+        // ...and a device+inode match buys nothing when the content disagrees
+        // (an inode reused after delete+create is exactly this shape).
+        let mut recycled = make_source(1, "file.txt");
+        recycled.size = 4096;
+        assert_eq!(recycled.device, obs.device as i64);
+        assert_eq!(recycled.inode, obs.inode as i64);
+        assert!(!same_physical_file(
+            &recycled,
+            &obs,
+            Some("abc123"),
+            IdentityClaim::SamePath
+        ));
+        assert!(!same_physical_file(
+            &recycled,
+            &obs,
+            Some("abc123"),
+            IdentityClaim::Relocation
+        ));
+    }
+
+    // =========================================================================
+    // reconcile_at_path() tests
+    // =========================================================================
+
+    #[test]
+    fn reconcile_at_path_is_unchanged_when_the_fingerprint_stands() {
+        let obs = make_observation("file.txt");
+        let existing = make_source(1, "file.txt");
+        assert_eq!(
+            reconcile_at_path(&obs, &existing, None),
+            AtPathOutcome::Unchanged { source_id: 1 }
+        );
+    }
+
+    #[test]
+    fn reconcile_at_path_is_modified_when_the_size_changed() {
+        let mut obs = make_observation("file.txt");
+        obs.size = 2048;
+        let existing = make_source(1, "file.txt");
+        assert_eq!(
+            reconcile_at_path(&obs, &existing, None),
+            AtPathOutcome::Modified {
+                source_id: 1,
+                old_object_id: Some(42)
+            }
+        );
+    }
+
+    #[test]
+    fn reconcile_at_path_is_modified_when_only_the_mtime_changed() {
+        // A touched file reads as updated: source.mtime is a fact users filter
+        // and pattern on, so a changed mtime changes what Canon would do with
+        // the file even when the bytes did not move.
+        let mut obs = make_observation("file.txt");
+        obs.mtime = 1800000000;
+        let existing = make_source(1, "file.txt");
+        assert_eq!(
+            reconcile_at_path(&obs, &existing, Some("abc123")),
+            AtPathOutcome::Modified {
+                source_id: 1,
+                old_object_id: Some(42)
+            }
+        );
+    }
+
+    #[test]
+    fn an_identical_content_replacement_is_a_silent_refresh() {
+        // A restore or a dedup pass recreates a file byte for byte: new inode,
+        // same content. Nothing happened to the user's data, so nothing is
+        // reported — the location metadata is refreshed and that is all.
+        let mut obs = make_observation("file.txt");
+        obs.inode = 9999;
+        obs.device = 200;
+        let existing = make_source(1, "file.txt");
+
+        assert_eq!(
+            reconcile_at_path(&obs, &existing, Some("abc123")),
+            AtPathOutcome::Unchanged { source_id: 1 }
+        );
+    }
+
+    #[test]
+    fn a_changed_content_replacement_is_modified() {
+        // What an atomic-save editor leaves behind: a different inode at the
+        // same path, holding different content. The user edited a file, so the
+        // report says updated — never new.
+        let mut obs = make_observation("file.txt");
+        obs.inode = 9999;
+        let existing = make_source(1, "file.txt");
+
+        assert_eq!(
+            reconcile_at_path(&obs, &existing, Some("rewritten")),
+            AtPathOutcome::Modified {
+                source_id: 1,
+                old_object_id: Some(42)
+            }
+        );
+    }
+
+    #[test]
+    fn modified_carries_the_previous_object_link() {
+        // The hashing phase compares against it to spot content changing under
+        // an unchanged fingerprint.
+        let mut obs = make_observation("file.txt");
+        obs.size = 2048;
+        let mut existing = make_source(1, "file.txt");
+        existing.object_id = Some(7);
+
+        match reconcile_at_path(&obs, &existing, None) {
+            AtPathOutcome::Modified { old_object_id, .. } => {
+                assert_eq!(old_object_id, Some(7));
+            }
+            other => panic!("expected Modified, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn at_path_outcomes_map_onto_the_persistence_vocabulary() {
+        assert_eq!(
+            AtPathOutcome::Unchanged { source_id: 5 }.into_reconciliation(),
+            Reconciliation::Unchanged { source_id: 5 }
+        );
+        assert_eq!(
+            AtPathOutcome::Modified {
+                source_id: 5,
+                old_object_id: Some(9)
+            }
+            .into_reconciliation(),
+            Reconciliation::Modified {
+                source_id: 5,
+                old_object_id: Some(9)
+            }
+        );
+    }
+
+    // =========================================================================
     // reconcile() tests
     // =========================================================================
 
     #[test]
     fn reconcile_new_file() {
-        // No source at path, no source by inode → New
-        let obs = make_observation("new_file.txt");
-        let result = reconcile(&obs, None, None);
+        // Nothing nominated → a path Canon has not held is new
+        let result = reconcile(None);
         assert_eq!(result, Reconciliation::New);
     }
 
     #[test]
-    fn reconcile_unchanged_file() {
-        // Source at path, same size+mtime → Unchanged
-        let obs = make_observation("existing.txt");
-        let existing = make_source(1, "existing.txt");
-
-        let result = reconcile(&obs, Some(&existing), Some(&existing));
-        assert_eq!(result, Reconciliation::Unchanged { source_id: 1 });
-    }
-
-    #[test]
-    fn reconcile_modified_file_size() {
-        // Source at path, different size → Modified
-        let mut obs = make_observation("existing.txt");
-        obs.size = 2048; // Different size
-
-        let existing = make_source(1, "existing.txt");
-
-        let result = reconcile(&obs, Some(&existing), Some(&existing));
-        assert_eq!(
-            result,
-            Reconciliation::Modified {
-                source_id: 1,
-                old_object_id: Some(42)
-            }
-        );
-    }
-
-    #[test]
-    fn reconcile_modified_file_mtime() {
-        // Source at path, different mtime → Modified
-        let mut obs = make_observation("existing.txt");
-        obs.mtime = 1800000000; // Different mtime
-
-        let existing = make_source(1, "existing.txt");
-
-        let result = reconcile(&obs, Some(&existing), Some(&existing));
-        assert_eq!(
-            result,
-            Reconciliation::Modified {
-                source_id: 1,
-                old_object_id: Some(42)
-            }
-        );
-    }
-
-    #[test]
     fn reconcile_moved_file() {
-        // No source at path, source by inode exists → Moved
-        let obs = make_observation("new_location.txt");
+        // A row nominated by inode from another path → Moved
         let existing = make_source(1, "old_location.txt");
 
-        let result = reconcile(&obs, None, Some(&existing));
+        let result = reconcile(Some(&existing));
         assert_eq!(
             result,
             Reconciliation::Moved {
@@ -360,96 +669,17 @@ mod tests {
 
     #[test]
     fn reconcile_moved_cross_root() {
-        // Source by inode in different root → Moved with different from_root_id
-        let obs = make_observation("imported.txt");
+        // A nomination from a different root → Moved carrying that root
         let mut existing = make_source(1, "original.txt");
         existing.root_id = 2; // Different root
 
-        let result = reconcile(&obs, None, Some(&existing));
+        let result = reconcile(Some(&existing));
         assert_eq!(
             result,
             Reconciliation::Moved {
                 source_id: 1,
                 from_root_id: 2,
                 from_path: "original.txt".to_string(),
-                old_object_id: Some(42)
-            }
-        );
-    }
-
-    #[test]
-    fn reconcile_replaced_file() {
-        // Source at path with different inode → New (old handled by missing)
-        let mut obs = make_observation("replaced.txt");
-        obs.inode = 9999; // Different inode
-
-        let existing = make_source(1, "replaced.txt");
-
-        let result = reconcile(&obs, Some(&existing), None);
-        assert_eq!(result, Reconciliation::New);
-    }
-
-    #[test]
-    fn reconcile_inode_not_tracked() {
-        // Source at path with inode=0 (not tracked) → uses size+mtime only
-        let obs = make_observation("file.txt");
-        let mut existing = make_source(1, "file.txt");
-        existing.inode = 0; // Not tracked
-        existing.device = 0; // Not tracked
-
-        // Same size+mtime → Unchanged
-        let result = reconcile(&obs, Some(&existing), None);
-        assert_eq!(result, Reconciliation::Unchanged { source_id: 1 });
-    }
-
-    #[test]
-    fn reconcile_inode_not_tracked_modified() {
-        // Source at path with inode=0, different size → Modified
-        let mut obs = make_observation("file.txt");
-        obs.size = 2048;
-
-        let mut existing = make_source(1, "file.txt");
-        existing.inode = 0;
-        existing.device = 0;
-
-        let result = reconcile(&obs, Some(&existing), None);
-        assert_eq!(
-            result,
-            Reconciliation::Modified {
-                source_id: 1,
-                old_object_id: Some(42)
-            }
-        );
-    }
-
-    #[test]
-    fn reconcile_device_changed() {
-        // Source at path, different device, same inode → processed normally (Unchanged)
-        // Device ID changes are legitimate (e.g., NAS remount, drive replacement)
-        let mut obs = make_observation("file.txt");
-        obs.device = 200; // Different device
-
-        let existing = make_source(1, "file.txt");
-
-        let result = reconcile(&obs, Some(&existing), Some(&existing));
-        // Should proceed to Unchanged since inode and size+mtime match
-        assert_eq!(result, Reconciliation::Unchanged { source_id: 1 });
-    }
-
-    #[test]
-    fn reconcile_device_changed_modified() {
-        // Source at path, different device, same inode, different size → Modified
-        let mut obs = make_observation("file.txt");
-        obs.device = 200; // Different device
-        obs.size = 2048; // Different size
-
-        let existing = make_source(1, "file.txt");
-
-        let result = reconcile(&obs, Some(&existing), Some(&existing));
-        assert_eq!(
-            result,
-            Reconciliation::Modified {
-                source_id: 1,
                 old_object_id: Some(42)
             }
         );

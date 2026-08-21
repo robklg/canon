@@ -93,3 +93,5 @@ Output shows what was found:
 Scanned 1234 files: 100 new, 5 updated, 2 moved, 1127 unchanged, 0 missing
 Hashed 105 files
 ```
+
+**Reading the counts:** `new` counts paths the index has not held before. `updated` counts files whose content changed at a path already indexed, whichever way the application saved them: written in place, or written to a temporary file and renamed over the path. A file whose content is recreated exactly as it was, by a restore or a deduplication pass, is neither new nor updated: it counts as unchanged, and the scan records where the file now sits.

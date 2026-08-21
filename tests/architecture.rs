@@ -2394,7 +2394,19 @@ fn s() -> Connection {
                 "check_set_object_by_file",
             ],
         ),
-        ("scan", &["run", "find_candidates"]),
+        // The two command entry points main.rs dispatches, plus the
+        // physical-identity law and the types naming its subject, which the
+        // contentless-law canary asks directly.
+        (
+            "scan",
+            &[
+                "run",
+                "find_candidates",
+                "same_physical_file",
+                "FileObservation",
+                "IdentityClaim",
+            ],
+        ),
         (
             "roots",
             &[
