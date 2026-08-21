@@ -13,6 +13,12 @@ pub fn format_count(n: impl std::fmt::Display) -> String {
 
 /// Format a byte count as a human-readable size (decimal units, one decimal
 /// place above bytes: 4_080_218_931 → "4.1 GB").
+///
+/// **Canon states sizes in decimal units, everywhere.** KB/MB/GB/TB are the
+/// decimal labels (the binary ones are KiB/MiB/GiB), and it is how storage
+/// capacity is sold and reported. Every surface that prints a size calls this;
+/// a second local size formatter makes two Canon outputs disagree about one
+/// file under identical labels, which is exactly what `ls -l` did.
 pub fn format_size(bytes: i64) -> String {
     const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
     if bytes < 1000 {

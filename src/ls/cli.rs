@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 
+use crate::core::domain::format::format_size;
 use crate::core::domain::source::Source;
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::classify_all;
@@ -135,22 +136,6 @@ pub fn run(
 
 fn format_path(full_path: &str, cwd: Option<&str>) -> String {
     crate::core::domain::path::format_path(full_path, cwd)
-}
-
-fn format_size(bytes: i64) -> String {
-    const KB: i64 = 1024;
-    const MB: i64 = 1024 * KB;
-    const GB: i64 = 1024 * MB;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
 }
 
 fn format_date(unix_timestamp: i64) -> String {
