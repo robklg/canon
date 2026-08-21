@@ -199,6 +199,11 @@ impl Rule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Severity {
     Read,
+    /// The entry covers at least one reach that writes. An entry naming a
+    /// module import rather than a call takes the worst severity under it:
+    /// the reaches it stands for are spelled through a bound name the scan
+    /// cannot follow, so the row must not read milder than what it admits.
+    Write,
     TestOnly,
 }
 
@@ -206,6 +211,7 @@ impl Severity {
     fn label(self) -> &'static str {
         match self {
             Severity::Read => "read",
+            Severity::Write => "write",
             Severity::TestOnly => "test-only",
         }
     }
@@ -344,6 +350,32 @@ const TIER3: &[Tier3Entry] = &[
         file: "scan/cli.rs",
         reference: "core::repo::insert_test_root",
         severity: Severity::TestOnly,
+    },
+    // Own-repo reaches from an interface file. Invisible until the interface
+    // arm gained the own-repo matcher, so these are drift that was always
+    // there, not drift that arrived. The two module-import rows each stand
+    // for the calls made through their bound name — notes::repo's `insert`,
+    // roots::repo::root's `fetch_file_counts` and `set_comment` — which is
+    // why they name a module and carry the write severity.
+    Tier3Entry {
+        file: "notes/cli.rs",
+        reference: "crate::notes::repo",
+        severity: Severity::Write,
+    },
+    Tier3Entry {
+        file: "roots/cli.rs",
+        reference: "crate::roots::repo",
+        severity: Severity::Write,
+    },
+    Tier3Entry {
+        file: "scan/cli.rs",
+        reference: "crate::scan::repo::root::update_last_scanned_at",
+        severity: Severity::Write,
+    },
+    Tier3Entry {
+        file: "scan/cli.rs",
+        reference: "crate::scan::repo::root::create",
+        severity: Severity::Write,
     },
 ];
 
@@ -510,6 +542,14 @@ fn classify_reference(
         Layer::Ops | Layer::Testing => {}
         Layer::Interface => {
             if let Some(reference) = match_repo(no_crate) {
+                return Some((Rule::InterfaceRepoDataMovement, reference));
+            }
+            // The own-repo twin, for the same reason the domain arm carries
+            // it: a subsystem reaching its own `repo` names neither the
+            // spine's `core::repo` nor the bare form, so `match_repo` alone
+            // left every own-repo reach from an interface file invisible —
+            // and an interface file is where the rule matters most.
+            if let Some(reference) = match_own_repo(home, raw_path, no_crate) {
                 return Some((Rule::InterfaceRepoDataMovement, reference));
             }
         }
@@ -829,7 +869,22 @@ impl<'a, 'ast> Visit<'ast> for ArchVisitor<'a> {
                 self.interface_modules,
                 self.subsystem_names,
             ) {
-                if *renamed || *glob {
+                // A rename or a glob normally aborts: the bound name carries
+                // the reach through the rest of the file, where no path walk
+                // can see it. One rename is exempt — exactly the import
+                // `bare_repo_binding_refusal` *requires* to be renamed, so
+                // that later bare `repo::..` paths keep meaning the shared
+                // layer. Aborting there would leave the two guards demanding
+                // opposite things, so the exemption is asked of that guard
+                // rather than restated here. The import
+                // line is a complete observation of the reach on its own, so
+                // it is recorded as a violation instead, at the grain a
+                // baseline row names. A glob still aborts: it binds contents,
+                // not the module, and no rule forces that spelling.
+                let forced_rename = *renamed
+                    && !*glob
+                    && self.bare_repo_binding_refusal(path, false, false).is_some();
+                if (*renamed || *glob) && !forced_rename {
                     self.error = Some(format!(
                         "{}:{}: {} import of restricted path `{}` defeats scanning",
                         self.file_label,
@@ -1490,8 +1545,8 @@ mod self_tests {
         );
         assert!(result.is_err(), "{result:?}");
 
-        // The two forms that do not bind the name are untouched: the alias the
-        // tree actually uses, and the shared layer's own import.
+        // Neither of the forms that do not bind the bare name aborts the scan:
+        // the alias the tree actually uses, and the shared layer's own import.
         for text in [
             "use crate::scan::repo as scan_repo;\n",
             "use crate::core::repo::{self, Connection};\n",
@@ -1506,6 +1561,50 @@ mod self_tests {
             );
             assert!(ok.is_ok(), "{text:?} -> {ok:?}");
         }
+    }
+
+    /// The rename this rule forces is not read as evasion — and no other one
+    /// is spared. Without the pairing the two guards contradict: the bare
+    /// form is refused for binding `repo`, and the renamed form would abort
+    /// the scan for defeating it, leaving a subsystem no legal spelling.
+    #[test]
+    fn the_rename_the_bare_repo_rule_forces_is_recorded_not_refused() {
+        let subsystems = vec!["scan".to_string()];
+        let forced = scan_file(
+            Layer::Interface,
+            &Home::Subsystem("scan".to_string()),
+            "scan/cli.rs",
+            "use crate::scan::repo as scan_repo;\n",
+            &[],
+            &subsystems,
+        )
+        .expect("a forced rename is recorded, not refused");
+        assert_eq!(forced.len(), 1, "{forced:?}");
+        assert_eq!(forced[0].reference, "crate::scan::repo");
+
+        // `crate::core::repo` may be bound bare, so nothing forces a rename
+        // of it — aliasing it is evasion and still aborts.
+        let evasion = scan_file(
+            Layer::Interface,
+            &Home::Subsystem("scan".to_string()),
+            "scan/cli.rs",
+            "use crate::core::repo as r;\n",
+            &[],
+            &subsystems,
+        );
+        assert!(evasion.is_err(), "{evasion:?}");
+
+        // A glob binds contents, not the module: no rule forces it, and the
+        // exemption must not widen to cover it.
+        let globbed = scan_file(
+            Layer::Interface,
+            &Home::Subsystem("scan".to_string()),
+            "scan/cli.rs",
+            "use crate::scan::repo::*;\n",
+            &[],
+            &subsystems,
+        );
+        assert!(globbed.is_err(), "{globbed:?}");
     }
 
     /// The operations layer is matched at both of the spellings the matcher
