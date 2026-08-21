@@ -448,6 +448,9 @@ pub struct DeleteOptions {
     pub entity_type: String,        // "source" or "object"
     pub value_type: Option<String>, // "text", "num", or "time"
     pub dry_run: bool,
+    /// The visibility the equivalent `ls --where` would have used at this
+    /// scope. Deletion must act on the population the user could preview.
+    pub include: IncludeSet,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -480,14 +483,14 @@ pub fn delete_facts(
 
     let scopes = classify_all(scope_prefixes);
 
-    // Select all sources (include all for delete operations)
-    let include_all = IncludeSet {
-        excluded: true,
-        archived: true,
-    };
+    // The population is the one the user can look at first: `facts delete
+    // --where X` deletes over exactly what `ls --where X` at this scope
+    // lists. Substituting a wider visibility here made a destructive command
+    // reach sources — dismissed ones, archive copies — that no preview of it
+    // ever showed.
     let params = SelectionParams {
         scopes,
-        include: include_all,
+        include: options.include.clone(),
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
     };
@@ -778,5 +781,62 @@ mod tests {
         assert!(format_root_display(99, "/tmp").starts_with("id:99"));
     }
 
-    // is_protected_fact tests moved to facts::ops::maintain::tests::test_validate_delete_key_protected
+    // =========================================================================
+    // delete_facts — the population it acts on
+    // =========================================================================
+
+    /// A destructive command must not reach past what a look would show. The
+    /// selection here is the one `ls --where` uses at the same scope, so the
+    /// dismissed source and the archive copy — neither of which any preview
+    /// lists — keep their facts.
+    #[test]
+    fn delete_acts_on_the_population_a_preview_would_have_listed() {
+        use crate::core::repo::{open_in_memory_for_test, Db};
+        use crate::core::testing::{insert_object, insert_root, insert_source};
+
+        let conn = open_in_memory_for_test();
+        let source_root = insert_root(&conn, "/photos", "source", false);
+        let archive_root = insert_root(&conn, "/archive", "archive", false);
+        let obj = insert_object(&conn, "h1", false);
+
+        let visible = insert_source(&conn, source_root, "visible.jpg", Some(obj));
+        let dismissed =
+            crate::core::testing::insert_source_excluded(&conn, source_root, "dismissed.jpg", None);
+        let archived = insert_source(&conn, archive_root, "kept.jpg", Some(obj));
+        for id in [visible, dismissed, archived] {
+            crate::core::testing::insert_fact(&conn, id, "content.Make", "Canon");
+        }
+
+        let mut db = Db::from_connection(conn);
+        let options = DeleteOptions {
+            entity_type: "source".to_string(),
+            value_type: None,
+            dry_run: false,
+            include: IncludeSet::default(),
+        };
+        delete_facts(
+            &mut db,
+            "content.Make",
+            &[],
+            &[],
+            &options,
+            "canon facts delete content.Make --on source --yes",
+            &LedgerConfig::default(),
+            true,
+        )
+        .unwrap();
+
+        let surviving = |id: i64| -> i64 {
+            db.conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM facts WHERE entity_type = 'source' AND entity_id = ?",
+                    rusqlite::params![id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(surviving(visible), 0, "the previewable fact is deleted");
+        assert_eq!(surviving(dismissed), 1, "a dismissed source is not listed");
+        assert_eq!(surviving(archived), 1, "nor is an archive copy");
+    }
 }

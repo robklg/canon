@@ -1033,10 +1033,18 @@ fn main() -> Result<()> {
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved =
                         core::ops::scope::resolve_scope(db.conn(), &paths, false, &all_roots)?;
+                    // Same visibility a read at this scope would get: the
+                    // archive-CWD auto-enable, and nothing else. Deletion
+                    // acts on what the matching `ls` would have listed.
+                    let mut include = IncludeSet::default();
+                    if resolved.auto_include_archived {
+                        include.archived = true;
+                    }
                     let options = facts::DeleteOptions {
                         entity_type: on,
                         value_type,
                         dry_run: !yes,
+                        include,
                     };
                     facts::delete_facts(
                         &mut db,
