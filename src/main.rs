@@ -187,7 +187,8 @@ enum Commands {
         /// Emit only one source per unique content hash (sources without a hash are skipped)
         #[arg(long)]
         unique_content: bool,
-        /// Include specific facts in the output (e.g., --emit geo.lat --emit geo.lon)
+        /// Include specific facts in the output, keyed exactly as stored —
+        /// unlike --where, no content. prefix is added (e.g. --emit content.geo.lat)
         #[arg(long)]
         emit: Vec<String>,
     },

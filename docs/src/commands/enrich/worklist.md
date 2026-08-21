@@ -55,13 +55,20 @@ Each line is a JSON object with source metadata:
 With `--emit`, requested facts are included in the output (`null` if absent):
 
 ```bash
-canon worklist --emit geo.lat --emit geo.lon
+canon worklist --emit content.geo.lat --emit content.geo.lon
 ```
 
 ```json
-{"source_id":123,"path":"/...","basis_rev":0,"facts":{"geo.lat":52.37,"geo.lon":4.89}}
-{"source_id":124,"path":"/...","basis_rev":0,"facts":{"geo.lat":null,"geo.lon":null}}
+{"source_id":123,"path":"/...","basis_rev":0,"facts":{"content.geo.lat":52.37,"content.geo.lon":4.89}}
+{"source_id":124,"path":"/...","basis_rev":0,"facts":{"content.geo.lat":null,"content.geo.lon":null}}
 ```
+
+**`--emit` takes the key as stored — write it in full.** Unlike `--where`, it does not add the
+optional `content.` prefix for you: `--emit geo.lat` looks for a fact whose key is literally
+`geo.lat` and emits `null`, even where `--where 'geo.lat?'` on the same command line matches.
+Check how a key is stored with [`canon facts`](../query/facts.md). Built-in `source.*` keys are
+never emittable — no fact is ever stored under that namespace ([`import-facts`](import-facts.md)
+refuses it), and what they would say is already in the entry's own fields.
 
 This enables processors to build on previous enrichment:
 
@@ -71,7 +78,7 @@ This enables processors to build on previous enrichment:
 Example: reverse geocoding files that have coordinates but no city name:
 
 ```bash
-canon worklist --emit geo.lat --emit geo.lon --where 'geo.lat? AND NOT geo.city?' \
+canon worklist --emit content.geo.lat --emit content.geo.lon --where 'geo.lat? AND NOT geo.city?' \
   | ./scripts/reverse-geocode.sh \
   | canon import-facts
 ```
