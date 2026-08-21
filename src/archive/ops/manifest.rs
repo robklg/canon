@@ -27,6 +27,10 @@ pub(super) fn write_and_sync(path: &Path, content: &str) -> Result<()> {
 }
 
 /// Write a JSONL lock file from lock entries.
+///
+/// Synced to disk like the manifest beside it, and for the same reason twice
+/// over: the manifest is written second and carries a hash of these bytes, so
+/// a manifest that survives a power loss must not outlive the lock it names.
 pub(super) fn write_lock_file(lock_path: &Path, entries: &[LockEntry]) -> Result<()> {
     let lock_file = std::fs::File::create(lock_path)
         .with_context(|| format!("Failed to create lock file: {}", lock_path.display()))?;
@@ -39,6 +43,11 @@ pub(super) fn write_lock_file(lock_path: &Path, entries: &[LockEntry]) -> Result
     }
 
     writer.flush()?;
+    writer
+        .into_inner()
+        .map_err(|e| anyhow::anyhow!("Failed to flush lock file: {e}"))?
+        .sync_all()
+        .with_context(|| format!("Failed to sync lock file: {}", lock_path.display()))?;
     Ok(())
 }
 

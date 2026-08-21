@@ -300,9 +300,8 @@ pub fn execute_generate(
     // Order matters: the lock file is written, then hashed, and the hash is
     // embedded in the manifest written further below. Any other order records
     // a hash of bytes that were never on disk, and every later apply refuses
-    // the pair. Note the manifest is flushed all the way to disk while the
-    // lock file is only buffered-flushed, so a power loss between them can
-    // leave a durable manifest pointing at a lock that did not survive.
+    // the pair. Both files are synced, so the durable manifest cannot name a
+    // lock that did not survive alongside it.
     write_lock_file(&params.lock_path, &plan.lock_entries)?;
 
     // Compute lock file hash
