@@ -239,9 +239,6 @@ pub fn refresh(
     };
     display_plan_warnings(&plan, &display_options);
 
-    // Decompose the manifest's scope to known roots for the decision record.
-    let refresh_roots = repo::root::fetch_all(conn)?;
-
     // Execute
     let lock_path = config_path.with_extension("lock");
     let exec_params = ExecuteRefreshParams {
@@ -250,6 +247,24 @@ pub fn refresh(
         old_manifest_content: old_content,
         config,
     };
+
+    // A refresh whose query now matches nothing records nothing — the 0-item
+    // convention, the same answer `cluster generate` gives. The lock is still
+    // cleared and the manifest rewritten, because the declaration has to keep
+    // telling the truth about its query; but no source was touched, and a 0/0
+    // row in the trail would claim an act where there was none.
+    if plan.lock_entries.is_empty() {
+        generate_ops::execute_refresh(&plan, &exec_params)?;
+        println!("No sources matched the query");
+        if !no_edit {
+            open_editor(config_path);
+        }
+        return Ok(());
+    }
+
+    // Decompose the manifest's scope to known roots for the decision record.
+    let refresh_roots = repo::root::fetch_all(conn)?;
+
     let decision = DecisionParams {
         command: DecisionCommand::ClusterRefresh,
         scope: DecisionScope::decompose(&scope_prefixes, &refresh_roots),
@@ -267,42 +282,30 @@ pub fn refresh(
 
     let result = generate_ops::execute_refresh(&plan, &exec_params)?;
 
-    match result.outcome {
-        Some(r) => {
-            let refresh_summary = format!(
-                "Refreshed lock file: {} ({} sources)",
-                lock_path.display(),
-                r.source_count
-            );
-            let full_summary = r.compose_summary(&refresh_summary);
-            recorder.complete(
-                conn,
-                DecisionStatus::Completed,
-                DecisionCounts {
-                    attempted: Some(r.source_count as i64),
-                    completed: Some(r.source_count as i64),
-                    failed: None,
-                    skipped: None,
-                },
-                &full_summary,
-            );
-            println!("{}", full_summary);
-        }
-        None => {
-            recorder.complete(
-                conn,
-                DecisionStatus::Completed,
-                DecisionCounts {
-                    attempted: Some(0),
-                    completed: Some(0),
-                    failed: None,
-                    skipped: None,
-                },
-                "No sources matched the query",
-            );
-            println!("No sources matched the query");
-        }
-    }
+    // Only an empty plan leaves no outcome, and that path returned above; a
+    // missing one here means the lock was never written, which the started
+    // row stays open to say.
+    let r = result
+        .outcome
+        .context("refresh wrote no lock file for a non-empty plan")?;
+    let refresh_summary = format!(
+        "Refreshed lock file: {} ({} sources)",
+        lock_path.display(),
+        r.source_count
+    );
+    let full_summary = r.compose_summary(&refresh_summary);
+    recorder.complete(
+        conn,
+        DecisionStatus::Completed,
+        DecisionCounts {
+            attempted: Some(r.source_count as i64),
+            completed: Some(r.source_count as i64),
+            failed: None,
+            skipped: None,
+        },
+        &full_summary,
+    );
+    println!("{}", full_summary);
     for w in recorder.take_warnings() {
         eprintln!("{w}");
     }
