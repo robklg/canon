@@ -89,7 +89,13 @@ fn shelf_listing_renders_an_unindexed_book_from_meta_alone() {
             reason,
             ..
         } => {
-            assert_eq!(retired_on.as_deref(), Some("2026-08-02"));
+            // Dated from the book's own compile stamp, rendered on the same
+            // calendar a row-dated line uses — not the raw UTC prefix.
+            let compiled_at = chrono::DateTime::parse_from_rfc3339("2026-08-02T10:00:00Z").unwrap();
+            assert_eq!(
+                retired_on.as_deref(),
+                Some(iso_date(compiled_at.timestamp()).as_str())
+            );
             assert!(!indexed);
             assert!(reason.is_none());
         }

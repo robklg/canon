@@ -578,7 +578,12 @@ mod tests {
             "sections out of order: {positions:?}\n{text}"
         );
         assert!(text.contains("This is the record of one place"));
-        assert!(text.contains("It was written on 1970-01-01, the day the place was retired."));
+        // The day is the reader's own — derived, not spelled, so the
+        // assertion holds wherever the machine stands.
+        assert!(text.contains(&format!(
+            "It was written on {}, the day the place was retired.",
+            format_date(0)
+        )));
         assert!(text.contains("It was retired with these words: *\"the story is complete\"*"));
         assert!(text.contains(FOREWORD_SENTINEL));
         assert!(text.contains("Nothing here is a summary you have to take on faith."));

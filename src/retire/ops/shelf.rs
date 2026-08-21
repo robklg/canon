@@ -84,6 +84,17 @@ fn read_listing_probe(dir: &Path) -> Option<ListingProbe> {
     toml::from_str(&raw).ok()
 }
 
+/// The local day a book was compiled, from its own UTC compile stamp — the
+/// column reads one calendar either way, whether the line is dated from the
+/// decision row or from the book alone. A stamp this cannot parse keeps its
+/// leading date verbatim: the probe identifies, it never refuses.
+fn book_day(compiled_at: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(compiled_at) {
+        Ok(dt) => iso_date(dt.timestamp()),
+        Err(_) => compiled_at.chars().take(10).collect(),
+    }
+}
+
 /// Compute the retired fleet. Rows join books on one key: the decision's
 /// recorded artifact reference naming the book's directory — the key every
 /// bound book carries, past and future, so no book needs a special case.
@@ -132,12 +143,9 @@ pub fn compute_shelf_listing(conn: &Connection, config: &LedgerConfig) -> Result
                             .find(|r| basename(&r.receipt_rel_path) == dir_name);
                         lines.push(ShelfLine::Book {
                             root_path: probe.identity.path,
-                            retired_on: row.map(|r| iso_date(r.created_at)).or_else(|| {
-                                probe
-                                    .identity
-                                    .compiled_at
-                                    .map(|at| at.chars().take(10).collect())
-                            }),
+                            retired_on: row
+                                .map(|r| iso_date(r.created_at))
+                                .or_else(|| probe.identity.compiled_at.as_deref().map(book_day)),
                             entries: probe.counts.and_then(|c| c.entries),
                             book_dir: dir_name.clone(),
                             reason: row.and_then(|r| r.reason.clone()),

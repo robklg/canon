@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use chrono::{TimeZone, Utc};
+use chrono::{Local, TimeZone};
 
 use crate::ceremony;
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
@@ -205,7 +205,7 @@ fn resolve_single_scope_optional(
 }
 
 pub fn format_note_date(timestamp: i64) -> String {
-    match Utc.timestamp_opt(timestamp, 0) {
+    match Local.timestamp_opt(timestamp, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
         _ => "????-??-??".to_string(),
     }

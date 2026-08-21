@@ -59,6 +59,18 @@ pub fn first_chars(s: &str, n: usize) -> String {
 }
 
 /// A timestamp as a local calendar date (`2026-08-04`).
+///
+/// **Canon dates a human's reading in that human's own day.** A decision made
+/// at 22:00 belongs to the evening it was made, and the trail's day lens
+/// (`--today`, `--since`) already draws its boundaries there — so every surface
+/// that shows a person a date or a time renders it locally, including the book,
+/// which is dated the day its author retired the place.
+///
+/// Two deliberate exceptions, both where the output is not a sentence:
+/// machine-readable instants (the book's structured fields, a manifest's
+/// generation stamp) are UTC and carry the `Z` that says so; and the expression
+/// facility renders fact values in UTC, so a manifest pattern places a file in
+/// the same folder no matter where the machine stands.
 pub fn format_date(ts: i64) -> String {
     use chrono::{Local, TimeZone};
     match Local.timestamp_opt(ts, 0) {

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{TimeZone, Utc};
+use chrono::{Local, TimeZone};
 
 use crate::core::domain::format::format_size;
 use crate::core::domain::source::Source;
@@ -139,7 +139,8 @@ fn format_path(full_path: &str, cwd: Option<&str>) -> String {
 }
 
 fn format_date(unix_timestamp: i64) -> String {
-    Utc.timestamp_opt(unix_timestamp, 0)
+    Local
+        .timestamp_opt(unix_timestamp, 0)
         .single()
         .map(|dt| dt.format("%b %e %Y").to_string())
         .unwrap_or_else(|| "???".to_string())
