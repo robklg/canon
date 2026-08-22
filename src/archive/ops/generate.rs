@@ -332,7 +332,7 @@ pub fn execute_generate(
             allow: params.allow.clone(),
         },
         output: ManifestOutput {
-            pattern: "{filename}".to_string(),
+            pattern: default_pattern(&params.scope_prefixes).to_string(),
             archive_root_id: params.archive_root_id,
             base_dir: params.base_dir.clone(),
         },
@@ -433,6 +433,31 @@ pub fn execute_refresh(
 /// The Notes body a manifest starts life with: one empty comment line under
 /// the marker, so the block is there to be written in.
 const EMPTY_NOTES: &str = "\n#\n";
+
+/// The pattern a freshly generated manifest starts with.
+///
+/// Structure, not a flat heap: the folders a file was found in are the user's
+/// own arrangement, and a default that discards them makes what landed in the
+/// archive unrecoverable by hand. It also spares the run the collisions a flat
+/// default guarantees, where every folder contributes its own `IMG_0001.jpg`.
+///
+/// One scope measures from the scope, which is the place the user named and
+/// the shape they are looking at. Anything else measures from each source's
+/// own root: with no scope there is nothing else to measure from, and with
+/// several the manifest stores them joined into one string that
+/// `scope.rel_path` cannot match — its fallback for a non-matching scope is
+/// the full rel_path, which happens to be right here but is a wart to lean on
+/// rather than a contract.
+///
+/// It is a default, not a rule: the pattern is the line of the manifest the
+/// user is most invited to edit, and `{filename}` remains one edit away.
+fn default_pattern(scope_prefixes: &[String]) -> &'static str {
+    if scope_prefixes.len() == 1 {
+        "{scope.rel_path}"
+    } else {
+        "{source.rel_path}"
+    }
+}
 
 /// Assemble the manifest document every write path emits: header, Cluster
 /// Summary, Notes block, TOML body, fact help.
@@ -1275,7 +1300,7 @@ mod tests {
         assert!(manifest.contains("# === Notes ==="));
         assert!(manifest.contains("[meta]"));
         assert!(manifest.contains("[output]"));
-        assert!(manifest.contains("pattern = \"{filename}\""));
+        assert!(manifest.contains("pattern = \"{scope.rel_path}\""));
     }
 
     #[test]
@@ -1303,6 +1328,150 @@ mod tests {
 
         let manifest = std::fs::read_to_string(dir.path().join("cluster.toml")).unwrap();
         assert!(manifest.contains("# Original: @image"));
+    }
+
+    // =========================================================================
+    // The default pattern — what a manifest starts with before any edit
+    // =========================================================================
+
+    /// Generate with the given scopes and hand back the pattern the manifest
+    /// was born with.
+    fn generated_pattern(scope_prefixes: Vec<String>) -> String {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "hash1", false);
+        insert_source(&conn, root, "trip/day1/photo.jpg", Some(obj));
+
+        let plan = plan_generate(&mut conn, &default_params()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("cluster.toml");
+        let params = ExecuteGenerateParams {
+            lock_path: dir.path().join("cluster.lock"),
+            manifest_path: manifest_path.clone(),
+            expanded_filters: vec![],
+            original_filters: vec![],
+            scope_prefixes,
+            archive_root_id: 1,
+            base_dir: "output".to_string(),
+            allow: vec![],
+        };
+        execute_generate(&plan, &params).unwrap();
+
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        let config: ManifestConfig = toml::from_str(&manifest).unwrap();
+        config.output.pattern
+    }
+
+    #[test]
+    fn default_pattern_is_scope_relative_for_a_single_scope() {
+        // The scope is the place the user named, so it is the shape they are
+        // looking at and the one to measure from.
+        assert_eq!(
+            generated_pattern(vec!["/photos/trip".to_string()]),
+            "{scope.rel_path}"
+        );
+    }
+
+    #[test]
+    fn default_pattern_is_root_relative_when_unscoped() {
+        assert_eq!(generated_pattern(vec![]), "{source.rel_path}");
+    }
+
+    #[test]
+    fn default_pattern_is_root_relative_for_multiple_scopes() {
+        // Several prefixes are stored joined into one string, which
+        // `scope.rel_path` cannot match; each source measures from its own
+        // root instead of leaning on the non-matching fallback.
+        assert_eq!(
+            generated_pattern(vec![
+                "/photos/trip".to_string(),
+                "/photos/scans".to_string()
+            ]),
+            "{source.rel_path}"
+        );
+    }
+
+    /// The default carried through to where it decides file placement: two
+    /// files sharing a name in different folders land in different places,
+    /// keeping the shape they were found in. Under the old flat default this
+    /// pair was a collision, and the whole apply refused.
+    #[test]
+    fn the_default_pattern_keeps_a_nested_tree_apart_at_apply_time() {
+        use crate::archive::ops::plan::{plan_apply, ApplyPlanParams};
+        use crate::expr::{extract_fact_keys, parse_pattern};
+
+        let tree = tempfile::tempdir().unwrap();
+        let root_path = tree.path().to_str().unwrap().to_string();
+        for day in ["day1", "day2"] {
+            let dir = tree.path().join("trip").join(day);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("IMG_0001.jpg"), day).unwrap();
+        }
+
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, &root_path, "source", false);
+        let archive = insert_root(&conn, "/archive", "archive", false);
+        for (day, hash) in [("day1", "hash-day1"), ("day2", "hash-day2")] {
+            let obj = insert_object(&conn, hash, false);
+            insert_source(&conn, root, &format!("trip/{day}/IMG_0001.jpg"), Some(obj));
+        }
+
+        // Generate, then read the pattern back off the manifest — what apply
+        // plans with is what generation wrote, not a literal repeated here.
+        let gen_plan = plan_generate(&mut conn, &default_params()).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let manifest_path = out.path().join("cluster.toml");
+        let scope = format!("{root_path}/trip");
+        execute_generate(
+            &gen_plan,
+            &ExecuteGenerateParams {
+                lock_path: out.path().join("cluster.lock"),
+                manifest_path: manifest_path.clone(),
+                expanded_filters: vec![],
+                original_filters: vec![],
+                scope_prefixes: vec![scope.clone()],
+                archive_root_id: archive,
+                base_dir: String::new(),
+                allow: vec![],
+            },
+        )
+        .unwrap();
+        let config: ManifestConfig =
+            toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        let pattern = parse_pattern(&config.output.pattern).unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
+
+        let sources: Vec<&LockEntry> = gen_plan.lock_entries.iter().collect();
+        let mut root_paths = HashMap::new();
+        root_paths.insert(root, root_path.clone());
+        root_paths.insert(archive, "/archive".to_string());
+        let apply_plan = plan_apply(
+            &mut conn,
+            &ApplyPlanParams {
+                sources: &sources,
+                pattern: &pattern,
+                needed_keys: &needed_keys,
+                scope_prefix: Some(&scope),
+                root_paths: &root_paths,
+                archive_root_id: archive,
+                base_dir_rel: "",
+                resume: false,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            apply_plan.violations.collisions.is_empty(),
+            "same-named files in different folders collided: {:?}",
+            apply_plan.violations.collisions
+        );
+        let mut dests: Vec<&str> = apply_plan
+            .transfers
+            .iter()
+            .map(|t| t.dest_rel_path.as_str())
+            .collect();
+        dests.sort();
+        assert_eq!(dests, vec!["day1/IMG_0001.jpg", "day2/IMG_0001.jpg"]);
     }
 
     // =========================================================================

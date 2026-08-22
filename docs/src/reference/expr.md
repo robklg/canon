@@ -25,6 +25,8 @@ Any fact key can be used in a pattern:
 
 The `content.` prefix is optional for content facts, so `{Make}` is equivalent to `{content.Make}`.
 
+`{scope.rel_path}` is not a fact: it is the source's path below the path scope recorded in the manifest, and needs that scope to be there. [`cluster generate`](../commands/archive/cluster.md) records one when the generation was scoped to a single path.
+
 ## Modifiers
 
 Transform values using the `|` syntax. See [Facts](facts.md#modifiers) for the complete list.
@@ -94,11 +96,14 @@ If sources are missing required facts, you can:
 ## Common Patterns
 
 ```toml
+# Preserve structure below the manifest's scope
+pattern = "{scope.rel_path}"
+
+# Preserve structure below each source's root
+pattern = "{source.rel_path}"
+
 # Flat (all files in one directory)
 pattern = "{filename}"
-
-# Preserve original structure
-pattern = "{source.rel_path}"
 
 # By EXIF capture date
 pattern = "{content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{filename}"

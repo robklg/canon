@@ -80,7 +80,7 @@ lock_hash = "abc123..."
 allow = []                       # e.g. ["archived", "duplicates"]
 
 [output]
-pattern = "{filename}"           # ← Edit this to customize organization
+pattern = "{scope.rel_path}"     # ← Edit this to customize organization
 base_dir = "/Volumes/Archive"
 archive_root_id = 2
 
@@ -90,17 +90,21 @@ archive_root_id = 2
 
 - **Cluster Summary** is regenerated on each `cluster refresh`, showing current source counts, root breakdown, and archive coverage.
 - **Notes** section is preserved across refreshes — add your own comments here.
+- **`pattern`** starts at `{scope.rel_path}` when the generation was scoped to a single path, and at `{source.rel_path}` otherwise: files keep the folder structure they were found in. Edit it to organize them differently. An existing manifest keeps the pattern it recorded.
 - **`version`** field tracks the manifest format version.
 - **`[options]`** records which `--allow` flags were used during generation. [`cluster refresh`](cluster.md) reads them, because it re-selects sources from the same query. [`apply`](apply.md) reads only `duplicates`, which speaks to the content it is about to transfer; `archived` acknowledged a selection that has already happened, and apply selects nothing. What apply needs acknowledged, it asks for on its own flags.
 
 **Common output patterns:**
 
 ```toml
-# Flat (default) - all files in base_dir
-pattern = "{filename}"
+# Structure below the scoped path (default for a single-path generate)
+pattern = "{scope.rel_path}"
 
-# Preserve original folder structure (relocate as-is)
+# Structure below each source's root (default otherwise)
 pattern = "{source.rel_path}"
+
+# Flat - all files in base_dir
+pattern = "{filename}"
 
 # By EXIF date
 pattern = "{content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{filename}"
