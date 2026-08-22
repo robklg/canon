@@ -86,6 +86,27 @@ pub struct ScanStats {
 }
 
 impl ScanStats {
+    /// Fold one root's counts into a running total.
+    ///
+    /// Every counter a walk produces is added here, and the fields are
+    /// enumerated beside the struct that declares them — a scan of several
+    /// roots reports one summary, and a counter that reaches the per-root
+    /// result but not this fold is computed correctly and then dropped on the
+    /// floor. `hashed` and `unexpected_hash_changes` are deliberately absent:
+    /// the hash pass runs once, after every root, and sets them directly.
+    pub fn absorb(&mut self, root: &ScanStats) {
+        self.scanned += root.scanned;
+        self.new += root.new;
+        self.updated += root.updated;
+        self.moved += root.moved;
+        self.unchanged += root.unchanged;
+        self.missing += root.missing;
+        self.disconnected += root.disconnected;
+        self.skipped += root.skipped;
+        self.missing_detection_skipped += root.missing_detection_skipped;
+        self.walk_errors += root.walk_errors;
+    }
+
     /// Compose the scan summary message.
     pub fn compose_summary(&self) -> String {
         let mut summary = format!(
@@ -268,6 +289,67 @@ mod tests {
             toml::from_str(&written).expect("receipt must parse back as TOML");
         assert_eq!(parsed["meta"]["transition"].as_str(), Some("deleted"));
         assert_eq!(parsed["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn absorb_carries_every_counter_a_walk_produces() {
+        // The destructuring below has no `..` rest, so adding a field to
+        // ScanStats fails to compile here until someone decides whether the
+        // fold carries it. That is the point: the previous spelling enumerated
+        // these fields far from the struct, where a new counter could be
+        // computed per root, never summed, and silently absent from the summary
+        // and from the durable decision record.
+        let root = ScanStats {
+            scanned: 1,
+            new: 2,
+            updated: 3,
+            moved: 4,
+            unchanged: 5,
+            missing: 6,
+            disconnected: 7,
+            skipped: 8,
+            hashed: 100,
+            unexpected_hash_changes: 200,
+            missing_detection_skipped: 9,
+            walk_errors: 10,
+        };
+
+        let mut total = ScanStats::default();
+        total.absorb(&root);
+        total.absorb(&root);
+
+        let ScanStats {
+            scanned,
+            new,
+            updated,
+            moved,
+            unchanged,
+            missing,
+            disconnected,
+            skipped,
+            hashed,
+            unexpected_hash_changes,
+            missing_detection_skipped,
+            walk_errors,
+        } = total;
+
+        assert_eq!(
+            (
+                scanned,
+                new,
+                updated,
+                moved,
+                unchanged,
+                missing,
+                disconnected,
+                skipped,
+                missing_detection_skipped,
+                walk_errors
+            ),
+            (2, 4, 6, 8, 10, 12, 14, 16, 18, 20)
+        );
+        // Set once by the hash pass after every root, never folded per root.
+        assert_eq!((hashed, unexpected_hash_changes), (0, 0));
     }
 
     #[test]

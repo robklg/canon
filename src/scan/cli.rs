@@ -291,15 +291,7 @@ pub fn run(
             crate::scan::repo::root::update_last_scanned_at(conn, root_id, now)?;
         }
 
-        total_stats.scanned += result.stats.scanned;
-        total_stats.new += result.stats.new;
-        total_stats.updated += result.stats.updated;
-        total_stats.moved += result.stats.moved;
-        total_stats.unchanged += result.stats.unchanged;
-        total_stats.missing += result.stats.missing;
-        total_stats.disconnected += result.stats.disconnected;
-        total_stats.skipped += result.stats.skipped;
-        total_stats.missing_detection_skipped += result.stats.missing_detection_skipped;
+        total_stats.absorb(&result.stats);
 
         // Collect files for hashing
         all_files_to_hash.extend(result.files_to_hash);
