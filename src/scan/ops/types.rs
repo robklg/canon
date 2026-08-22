@@ -73,6 +73,11 @@ pub struct ScanStats {
     pub skipped: u64,
     pub hashed: u64,
     pub unexpected_hash_changes: u64,
+    /// Present sources in the scanned scope that still hold no content
+    /// identity when the scan is over. Set once after the hash pass, like
+    /// `hashed` — it is a fact about what stands at the end, not a per-root
+    /// tally, so it is deliberately outside the fold.
+    pub unhashed: u64,
     /// Number of walk roots where missing detection was skipped (mount guard).
     /// Counted in the stats — and thus the durable decision summary — so a scan
     /// that *couldn't verify* absence is distinguishable from one that verified
@@ -97,6 +102,18 @@ pub struct ScanStats {
     /// the tree went unseen, and unseen must never read as deleted — and lands
     /// in the durable decision summary like the mount-guard skip.
     pub walk_errors: u64,
+    /// Files the hash pass read because the row carried no content identity,
+    /// not because anything about them changed — standing debt this scan paid
+    /// off. A root indexed once with `--no-hash` pays its whole backlog on the
+    /// next plain scan, which can be the entire root at once; the count
+    /// annotates the hashed line so a large pay-down reads as bookkeeping
+    /// catching up rather than as a library that suddenly needs rehashing.
+    ///
+    /// Counted where the hash succeeds, never where it is queued: it qualifies
+    /// the `hashed` count, so it must never exceed it. A backlog file that
+    /// could not be read was not paid off — it is still debt, and the line
+    /// below says so.
+    pub hash_backlog: u64,
 }
 
 impl ScanStats {
@@ -106,8 +123,10 @@ impl ScanStats {
     /// enumerated beside the struct that declares them — a scan of several
     /// roots reports one summary, and a counter that reaches the per-root
     /// result but not this fold is computed correctly and then dropped on the
-    /// floor. `hashed` and `unexpected_hash_changes` are deliberately absent:
-    /// the hash pass runs once, after every root, and sets them directly.
+    /// floor. `hashed`, `hash_backlog`, `unexpected_hash_changes` and
+    /// `unhashed` are deliberately absent: the hash pass runs once, after every
+    /// root, and those four are set directly from what it did, how much of that
+    /// was debt, and what it left standing.
     pub fn absorb(&mut self, root: &ScanStats) {
         self.scanned += root.scanned;
         self.new += root.new;
@@ -171,10 +190,48 @@ impl ScanStats {
             summary.push_str(&format!(", {} skipped (disconnected)", self.disconnected));
         }
         if self.hashed > 0 {
-            summary.push_str(&format!("\nHashed {} files", self.hashed));
+            // The backlog annotation rides the hashed count for the same reason
+            // the companions annotation rides "new": it explains that number and
+            // nothing else. A root indexed once without hashing pays its whole
+            // backlog on the next plain scan, which can be every file it holds
+            // — a pay-down of that size has to read as bookkeeping catching up,
+            // not as a library that suddenly needs re-reading.
+            if self.hash_backlog > 0 {
+                summary.push_str(&format!(
+                    "\nHashed {} files ({} from backlog)",
+                    self.hashed, self.hash_backlog
+                ));
+            } else {
+                summary.push_str(&format!("\nHashed {} files", self.hashed));
+            }
+        }
+        if self.unhashed > 0 {
+            // Stated in every mode, because the omission is the same one either
+            // way: content Canon holds no identity for is invisible to coverage
+            // and to cluster selection, and silence there is what let debt sit
+            // unnoticed from one January to the following August. Under
+            // --no-hash this is the debt the user declined to pay; after a
+            // hashing scan it is what a failed pay-down left standing.
+            summary.push_str(&format!("\n{} sources remain unhashed", self.unhashed));
         }
         summary
     }
+}
+
+/// Why the hash pass must visit a file. Decided once by the walk's gate and
+/// carried here, because two of the pass's own answers are readings of it: a
+/// file whose basis changed is exactly one admitted for `Basis`, and a file
+/// paying off debt is exactly one admitted for `Backlog`.
+#[derive(Debug, PartialEq)]
+pub enum HashNeed {
+    /// The file is newly indexed, or its content evidence changed — whatever
+    /// identity Canon held for it is stale.
+    Basis,
+    /// The row stood still and carries no object: content Canon has never
+    /// identified. This is standing debt, and a plain scan pays it.
+    Backlog,
+    /// `--verify` — re-read the content whatever is already known about it.
+    Reverify,
 }
 
 /// A file that needs full hashing after the walk completes.
@@ -182,7 +239,7 @@ pub struct FileToHash {
     pub source_id: i64,
     pub full_path: PathBuf,
     pub old_object_id: Option<i64>,
-    pub basis_changed: bool,
+    pub need: HashNeed,
 }
 
 /// Result of scanning a single root.
@@ -347,10 +404,12 @@ mod tests {
             skipped: 8,
             hashed: 100,
             unexpected_hash_changes: 200,
+            unhashed: 300,
             missing_detection_skipped: 9,
             hardlink_companions: 11,
             moves_unverified: 12,
             walk_errors: 10,
+            hash_backlog: 13,
         };
 
         let mut total = ScanStats::default();
@@ -368,14 +427,19 @@ mod tests {
             skipped,
             hashed,
             unexpected_hash_changes,
+            unhashed,
             missing_detection_skipped,
             hardlink_companions,
             moves_unverified,
             walk_errors,
+            hash_backlog,
         } = total;
 
+        // An array rather than a tuple: the counters outgrew the arity Rust's
+        // tuple trait impls reach, and the next counter must not have to
+        // reshape this assertion to be added.
         assert_eq!(
-            (
+            [
                 scanned,
                 new,
                 updated,
@@ -388,11 +452,15 @@ mod tests {
                 hardlink_companions,
                 moves_unverified,
                 walk_errors
-            ),
-            (2, 4, 6, 8, 10, 12, 14, 16, 18, 22, 24, 20)
+            ],
+            [2, 4, 6, 8, 10, 12, 14, 16, 18, 22, 24, 20]
         );
-        // Set once by the hash pass after every root, never folded per root.
-        assert_eq!((hashed, unexpected_hash_changes), (0, 0));
+        // Set once from the hash pass after every root — what it did, how much
+        // of that was debt, and what it left standing — never folded per root.
+        assert_eq!(
+            (hashed, hash_backlog, unexpected_hash_changes, unhashed),
+            (0, 0, 0, 0)
+        );
     }
 
     #[test]
@@ -464,6 +532,68 @@ mod tests {
         assert!(!ScanStats::default()
             .compose_summary()
             .contains("could not be verified"));
+    }
+
+    #[test]
+    fn compose_summary_annotates_a_backlog_pay_down() {
+        // The durable summary must be able to answer, months later, why one
+        // scan hashed a whole root: not because the files changed, but because
+        // they had never been read.
+        let stats = ScanStats {
+            scanned: 500,
+            unchanged: 500,
+            hashed: 500,
+            hash_backlog: 480,
+            ..Default::default()
+        };
+        assert!(stats
+            .compose_summary()
+            .contains("Hashed 500 files (480 from backlog)"));
+
+        // With no debt paid the line reads exactly as it always has — the
+        // annotation is additive, never a permanent change of shape.
+        let plain = ScanStats {
+            scanned: 500,
+            hashed: 20,
+            ..Default::default()
+        };
+        assert!(plain.compose_summary().contains("Hashed 20 files"));
+        assert!(!plain.compose_summary().contains("backlog"));
+    }
+
+    #[test]
+    fn compose_summary_states_debt_left_standing() {
+        // Stated in whichever mode leaves it: --no-hash declines to pay, a
+        // failed pay-down cannot. Either way the omission is durably visible,
+        // because content with no identity is invisible everywhere else.
+        let declined = ScanStats {
+            scanned: 40,
+            unhashed: 40,
+            ..Default::default()
+        };
+        assert!(declined
+            .compose_summary()
+            .contains("40 sources remain unhashed"));
+
+        // A pay-down of 40 where 2 files could not be read: 38 hashed, all 38
+        // of them backlog, and the 2 still owed. The backlog number is what was
+        // *paid*, never what was attempted — a parenthetical larger than the
+        // count it qualifies is a number no reader can act on.
+        let residue = ScanStats {
+            scanned: 40,
+            hashed: 38,
+            hash_backlog: 38,
+            unhashed: 2,
+            ..Default::default()
+        };
+        let summary = residue.compose_summary();
+        assert!(summary.contains("Hashed 38 files (38 from backlog)"));
+        assert!(summary.contains("2 sources remain unhashed"));
+
+        // Nothing standing, nothing said.
+        assert!(!ScanStats::default()
+            .compose_summary()
+            .contains("remain unhashed"));
     }
 
     #[test]

@@ -48,7 +48,7 @@ canon scan --verify /Volumes/Archive
 canon scan --missing /path/to/deleted/folder
 ```
 
-**Hash computation:** By default, Canon computes content hashes for new and changed files during scan; hashes enable deduplication and archive tracking. Hashing can take long. Use `--no-hash` to index files without hashing, either for speed or when you intend to hash only certain kinds of files.
+**Hash computation:** By default, Canon computes content hashes for new and changed files during scan; hashes enable deduplication and archive tracking. Hashing can take long. Use `--no-hash` to index files without hashing, either for speed or when you intend to hash only certain kinds of files. Sources left without a hash are reported at the end of the scan and hashed by the next scan that hashes (see [Hash debt](#hash-debt)).
 
 **Integrity verification:** `--verify` recomputes hashes for all files, even unchanged ones. If a file's hash changes without its mtime changing, Canon warns about possible corruption and exits with an error.
 
@@ -115,6 +115,28 @@ Scanned 12 files: 3 new, 0 updated, 0 moved, 9 unchanged, 0 missing, 2 possible 
 The files count as `new`, and stay that way: the old path keeps its own source until the root holding it is scanned again, which reports it missing. Canon does not join the two records afterwards.
 
 The same line appears for one scan after a root is remounted, because the remount renumbers the storage and the recorded identifiers have not caught up. Scanning that root refreshes them.
+
+### Hash debt
+
+A source with no content hash is invisible to everything that reads content: coverage, duplicate detection, and cluster selection all pass over it. Canon states how many sources a scan leaves in that state:
+
+```
+Scanned 4820 files: 4820 new, 0 updated, 0 moved, 0 unchanged, 0 missing
+4820 sources remain unhashed
+```
+
+The count covers the paths this scan walked, and appears after any scan that leaves sources unhashed, including one where individual files could not be read.
+
+The next scan that hashes reads them, whatever else it finds: a file Canon has never read is hashed even when nothing about it changed. The summary separates that backlog from work this scan caused, so a large pay-down is readable:
+
+```
+Scanned 4820 files: 0 new, 0 updated, 0 moved, 4820 unchanged, 0 missing
+Hashed 4820 files (4820 from backlog)
+```
+
+Clearing a root indexed with `--no-hash` can take as long as hashing it the first time would have. The pass can be interrupted: what remains unhashed is reported again, and the next scan continues from there. A file that could not be read this time is warned about individually and stays in debt until a later scan reads it.
+
+`--verify` re-reads every file regardless, so it clears debt as a side effect and reports no backlog count.
 
 ### Keeping continuity across a move
 

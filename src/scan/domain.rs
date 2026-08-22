@@ -18,7 +18,9 @@
 //! 3. **Domain describes "what happened"**: Not how to persist it
 //! 4. **Command layer applies policy**: User config affects behavior via parameters
 
+use crate::core::domain::path::path_is_under;
 use crate::core::domain::root::Root;
+use crate::core::domain::scope::DecisionScope;
 use crate::core::domain::source::Source;
 use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, HashSet};
@@ -512,6 +514,37 @@ pub fn resolve_moves(
 /// so they won't appear in the missing list.
 pub fn find_missing(expected_ids: &HashSet<i64>, seen_ids: &HashSet<i64>) -> Vec<i64> {
     expected_ids.difference(seen_ids).copied().collect()
+}
+
+/// Narrow the scopes a scan walked to the outermost ones, per root.
+///
+/// One invocation can be handed several paths, and one may sit inside another
+/// (`canon scan photos photos/2024`). The report's event counters tolerate the
+/// overlap — the walk really did visit those files twice — but a count of what
+/// *stands* does not: asking each scope how much content still holds no
+/// identity would count the inner scope's sources twice and claim debt the
+/// universe does not carry.
+///
+/// A whole-root scope (empty prefix) swallows every prefix under it; otherwise
+/// a prefix is dropped when another walked prefix in the same root contains it.
+/// Siblings are disjoint by construction and all survive, and identical scopes
+/// collapse to one. Containment is the shared path predicate's to answer, so
+/// "vacation" never swallows "vacation-2023".
+pub fn outermost_scopes(scopes: &[DecisionScope]) -> Vec<DecisionScope> {
+    let mut kept: Vec<DecisionScope> = Vec::new();
+
+    for scope in scopes {
+        let contained_by = |outer: &DecisionScope, inner: &DecisionScope| {
+            outer.root_id == inner.root_id && path_is_under(&inner.rel_prefix, &outer.rel_prefix)
+        };
+        if kept.iter().any(|k| contained_by(k, scope)) {
+            continue;
+        }
+        kept.retain(|k| !contained_by(scope, k));
+        kept.push(scope.clone());
+    }
+
+    kept
 }
 
 /// Check that a new root path does not overlap with any existing root.
@@ -1417,6 +1450,73 @@ mod tests {
         let seen: HashSet<i64> = [1, 2, 99, 100].into_iter().collect();
         let result = find_missing(&expected, &seen);
         assert!(result.is_empty());
+    }
+
+    // =========================================================================
+    // outermost_scopes() tests
+    // =========================================================================
+
+    fn scope(root_id: i64, rel_prefix: &str) -> DecisionScope {
+        DecisionScope::new(root_id, format!("/root{root_id}"), rel_prefix.to_string())
+    }
+
+    fn prefixes(scopes: &[DecisionScope]) -> Vec<(i64, &str)> {
+        scopes
+            .iter()
+            .map(|s| (s.root_id, s.rel_prefix.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn outermost_scopes_drops_a_scope_walked_inside_another() {
+        // `canon scan photos photos/2024` walks the inner path twice. Counting
+        // what stands once per scope would report its sources twice.
+        let narrowed = outermost_scopes(&[scope(1, "photos"), scope(1, "photos/2024")]);
+        assert_eq!(prefixes(&narrowed), vec![(1, "photos")]);
+
+        // The order the paths were given must not decide the answer.
+        let narrowed = outermost_scopes(&[scope(1, "photos/2024"), scope(1, "photos")]);
+        assert_eq!(prefixes(&narrowed), vec![(1, "photos")]);
+    }
+
+    #[test]
+    fn outermost_scopes_keeps_siblings_and_separate_roots() {
+        // Disjoint scopes each hold their own sources; dropping one would
+        // under-report the debt the scan is speaking about.
+        let narrowed = outermost_scopes(&[scope(1, "photos"), scope(1, "videos"), scope(2, "")]);
+        assert_eq!(
+            prefixes(&narrowed),
+            vec![(1, "photos"), (1, "videos"), (2, "")]
+        );
+
+        // A prefix in another root is not contained by one here, however alike
+        // the two paths read.
+        let narrowed = outermost_scopes(&[scope(1, "photos"), scope(2, "photos/2024")]);
+        assert_eq!(prefixes(&narrowed), vec![(1, "photos"), (2, "photos/2024")]);
+    }
+
+    #[test]
+    fn outermost_scopes_lets_a_whole_root_swallow_its_prefixes() {
+        let narrowed = outermost_scopes(&[scope(1, "photos"), scope(1, "")]);
+        assert_eq!(prefixes(&narrowed), vec![(1, "")]);
+    }
+
+    #[test]
+    fn outermost_scopes_stops_at_the_path_boundary() {
+        // Containment is the shared predicate's answer, so a scope named
+        // "vacation" never swallows the sibling directory "vacation-2023" —
+        // whose sources would then go uncounted.
+        let narrowed = outermost_scopes(&[scope(1, "vacation"), scope(1, "vacation-2023")]);
+        assert_eq!(
+            prefixes(&narrowed),
+            vec![(1, "vacation"), (1, "vacation-2023")]
+        );
+    }
+
+    #[test]
+    fn outermost_scopes_collapses_a_repeated_scope() {
+        let narrowed = outermost_scopes(&[scope(1, "photos"), scope(1, "photos")]);
+        assert_eq!(prefixes(&narrowed), vec![(1, "photos")]);
     }
 
     // =========================================================================

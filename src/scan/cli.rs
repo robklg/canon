@@ -17,7 +17,7 @@ use crate::scan::ops::types::{
     current_timestamp, DeletionReceiptItem, FileAction, FileToHash, ScanOptions, ScanProgress,
     ScanStats,
 };
-use crate::scan::ops::{candidates::find_root_candidates, hash::hash_files};
+use crate::scan::ops::{candidates::find_root_candidates, hash::run_hash_pass};
 
 /// ScanProgress implementation that writes warnings to stderr.
 struct StderrProgress;
@@ -306,13 +306,15 @@ pub fn run(
         }
     }
 
-    // Hash collected files via ops layer
-    if !all_files_to_hash.is_empty() {
-        let hash_progress = StderrHashProgress::default();
-        let hash_stats = hash_files(conn, &all_files_to_hash, &hash_progress)?;
-        total_stats.hashed = hash_stats.hashed;
-        total_stats.unexpected_hash_changes = hash_stats.unexpected_hash_changes;
-    }
+    // Hash collected files via ops layer, then read what is still unhashed in
+    // the scanned scope — one call, so the debt can only ever be counted after
+    // the pay-down it survived.
+    let hash_progress = StderrHashProgress::default();
+    let pass = run_hash_pass(conn, &all_files_to_hash, &scope_pairs, &hash_progress)?;
+    total_stats.hashed = pass.stats.hashed;
+    total_stats.hash_backlog = pass.stats.backlog_hashed;
+    total_stats.unexpected_hash_changes = pass.stats.unexpected_hash_changes;
+    total_stats.unhashed = pass.standing_debt;
 
     // Print summary (composed by ops)
     let summary = total_stats.compose_summary();

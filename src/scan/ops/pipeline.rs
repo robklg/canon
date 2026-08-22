@@ -23,8 +23,8 @@ use crate::scan::domain::{
 use crate::scan::repo as scan_repo;
 
 use super::types::{
-    DeletionReceiptItem, FileAction, FileToHash, MarkMissingPathResult, ScanOptions, ScanProgress,
-    ScanRootResult, ScanStats, SourceOutcome,
+    DeletionReceiptItem, FileAction, FileToHash, HashNeed, MarkMissingPathResult, ScanOptions,
+    ScanProgress, ScanRootResult, ScanStats, SourceOutcome,
 };
 
 /// Scan a root directory, processing each entry through the
@@ -272,20 +272,16 @@ pub fn scan_root(
             FileAction::Unchanged => stats.unchanged += 1,
         }
 
-        // Collect files for hashing based on mode
-        if options.hash {
-            let needs_hash = match action {
-                FileAction::New | FileAction::Modified => true,
-                FileAction::Moved | FileAction::Unchanged => options.hash_all,
-            };
-            if needs_hash {
-                files_to_hash.push(FileToHash {
-                    source_id,
-                    full_path: full_path.to_path_buf(),
-                    old_object_id,
-                    basis_changed: matches!(action, FileAction::New | FileAction::Modified),
-                });
-            }
+        // Collect files for hashing. The gate is asked here and at end-of-walk
+        // resolution below, and nowhere else.
+        if let Some(need) = needs_hash(&action, options, old_object_id) {
+            queue_for_hash(
+                &mut files_to_hash,
+                need,
+                source_id,
+                full_path.to_path_buf(),
+                old_object_id,
+            );
         }
     }
 
@@ -338,19 +334,14 @@ pub fn scan_root(
             FileAction::Unchanged => stats.unchanged += 1,
         }
 
-        if options.hash {
-            let needs_hash = match action {
-                FileAction::New | FileAction::Modified => true,
-                FileAction::Moved | FileAction::Unchanged => options.hash_all,
-            };
-            if needs_hash {
-                files_to_hash.push(FileToHash {
-                    source_id,
-                    full_path: root_path.join(&rel_path),
-                    old_object_id,
-                    basis_changed: matches!(action, FileAction::New | FileAction::Modified),
-                });
-            }
+        if let Some(need) = needs_hash(&action, options, old_object_id) {
+            queue_for_hash(
+                &mut files_to_hash,
+                need,
+                source_id,
+                root_path.join(&rel_path),
+                old_object_id,
+            );
         }
     }
 
@@ -481,6 +472,67 @@ fn old_object_link(reconciliation: &Reconciliation) -> Option<i64> {
         Reconciliation::Modified { old_object_id, .. }
         | Reconciliation::Moved { old_object_id, .. } => *old_object_id,
     }
+}
+
+/// The hash gate, spoken once: does this file go to the hash pass, and what for.
+///
+/// The question is **need-driven, not action-driven**. What a file's
+/// reconciliation was called says whether its content is known to have
+/// *changed*; it says nothing about whether Canon holds its content identity at
+/// all. A row that was never hashed carries the same debt whether this walk
+/// found it new, moved, or sitting exactly where it always sat — and a gate
+/// keyed on the outcome leaves that debt standing for as long as the file stays
+/// still, which on the quiet parts of a library is forever. Debt indexed in
+/// January survived a clean full scan in August that way, and surfaced only when
+/// an archive operation could not see the content at all.
+///
+/// The row's object link is already in hand at both call sites, so asking costs
+/// no query. Empty files are asked about like any other: identity claims about
+/// empty content are vacuous, but the hash is still computed, so an unhashed
+/// empty source is debt exactly as a photograph is.
+fn needs_hash(
+    action: &FileAction,
+    options: &ScanOptions,
+    object_id: Option<i64>,
+) -> Option<HashNeed> {
+    if !options.hash {
+        return None;
+    }
+    match action {
+        FileAction::New | FileAction::Modified => Some(HashNeed::Basis),
+        FileAction::Moved | FileAction::Unchanged => {
+            if options.hash_all {
+                Some(HashNeed::Reverify)
+            } else if object_id.is_none() {
+                Some(HashNeed::Backlog)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Queue a file for the hash pass, carrying the gate's own answer with it.
+///
+/// The need travels rather than being re-derived downstream: the pass reads it
+/// twice, once to know whether a changed hash is expected and once to know
+/// whether reading this file paid off debt, and both are the same question the
+/// gate already answered. Neither is counted here — a file is queued long
+/// before it is read, and what a scan reports about debt has to follow what the
+/// pass actually managed to read.
+fn queue_for_hash(
+    files_to_hash: &mut Vec<FileToHash>,
+    need: HashNeed,
+    source_id: i64,
+    full_path: std::path::PathBuf,
+    old_object_id: Option<i64>,
+) {
+    files_to_hash.push(FileToHash {
+        source_id,
+        full_path,
+        old_object_id,
+        need,
+    });
 }
 
 /// What the disk says about a nominated row's own path.
@@ -2513,8 +2565,9 @@ mod tests {
             Some(object_id),
             "the link the row came in with reaches the hash pass"
         );
-        assert!(
-            !queued[0].basis_changed,
+        assert_eq!(
+            queued[0].need,
+            HashNeed::Reverify,
             "a move is not a content change, so an altered hash here is unexpected"
         );
     }
@@ -2560,6 +2613,381 @@ mod tests {
             row(&conn, root_id, "sorted/photo.jpg").unwrap().id,
             source_id
         );
+    }
+
+    // =========================================================================
+    // Hash debt — content Canon has never identified
+    // =========================================================================
+
+    use crate::scan::ops::hash::{hash_files, HashProgress, HashStats};
+    use crate::scan::repo::source::count_unhashed;
+
+    struct NoopHashProgress;
+    impl HashProgress for NoopHashProgress {
+        fn on_start(&self, _: usize) {}
+        fn on_hash(&self, _: usize, _: &Path) {}
+        fn on_hash_error(&self, _: &Path, _: &str) {}
+        fn on_unexpected_change(&self, _: &Path) {}
+        fn on_finish(&self) {}
+    }
+
+    fn hash_options() -> ScanOptions {
+        ScanOptions {
+            hash: true,
+            hash_all: false,
+            ignore_device_id: false,
+        }
+    }
+
+    /// A pass with hashing on, as a plain `canon scan` runs it.
+    fn plain_scan(
+        conn: &Connection,
+        root_id: i64,
+        dir: &Path,
+        decision_id: Option<i64>,
+    ) -> ScanRootResult {
+        scan_root(
+            conn,
+            root_id,
+            dir.to_str().unwrap(),
+            None,
+            walk(dir),
+            &hash_options(),
+            &NoopProgress,
+            current_timestamp(),
+            decision_id,
+            false,
+        )
+        .unwrap()
+    }
+
+    /// Run the hash pass over what a walk queued, the way the interface does
+    /// once every root has been walked.
+    fn pay(conn: &Connection, result: &ScanRootResult) -> HashStats {
+        hash_files(conn, &result.files_to_hash, &NoopHashProgress).unwrap()
+    }
+
+    fn object_of(conn: &Connection, root_id: i64, rel_path: &str) -> Option<i64> {
+        row(conn, root_id, rel_path).unwrap().object_id
+    }
+
+    #[test]
+    fn the_walk_has_exactly_one_place_that_queues_a_file_for_hashing() {
+        // The behavioral guards below prove that both *existing* gate sites ask
+        // the one owner. They cannot prove that a third site is never added:
+        // a third direct push onto the queue vector, anywhere in this walk,
+        // would compile, pass every test in this file, and quietly reintroduce
+        // a second spelling of both the gate and the basis question. The queue is
+        // claim-bearing — it decides what content Canon ever identifies — so
+        // the one-definition-site property is pinned here rather than left to
+        // the next reader's memory.
+        let source = include_str!("pipeline.rs");
+        // Assembled rather than written out, so this test's own text is not one
+        // of the occurrences it counts.
+        let queue_site = ["files_to_hash", ".push("].concat();
+        assert_eq!(
+            source.matches(&queue_site).count(),
+            1,
+            "queue a file through queue_for_hash, which asks needs_hash — never \
+             by pushing onto files_to_hash directly"
+        );
+    }
+
+    #[test]
+    fn the_hash_gate_asks_what_is_needed_not_what_happened() {
+        // The gate's whole table, in one place. The row that matters is
+        // Unchanged with no object under a plain scan: nothing happened to the
+        // file, and it still must be hashed, because Canon has never read it.
+        let plain = hash_options();
+        let verify = ScanOptions {
+            hash_all: true,
+            ..hash_options()
+        };
+        let off = no_hash_options();
+        let known = Some(7);
+
+        // Content evidence changed (or the path is newly indexed): always.
+        assert_eq!(
+            needs_hash(&FileAction::New, &plain, None),
+            Some(HashNeed::Basis)
+        );
+        assert_eq!(
+            needs_hash(&FileAction::Modified, &plain, known),
+            Some(HashNeed::Basis)
+        );
+
+        // Nothing changed and the content is known: nothing to do...
+        assert_eq!(needs_hash(&FileAction::Unchanged, &plain, known), None);
+        assert_eq!(needs_hash(&FileAction::Moved, &plain, known), None);
+
+        // ...but nothing changed and the content was never read is debt, on
+        // either arm — a standing row and a relocated one carry it alike.
+        assert_eq!(
+            needs_hash(&FileAction::Unchanged, &plain, None),
+            Some(HashNeed::Backlog)
+        );
+        assert_eq!(
+            needs_hash(&FileAction::Moved, &plain, None),
+            Some(HashNeed::Backlog)
+        );
+
+        // --verify re-reads everything, and says so: a row it re-reads is not
+        // reported as a backlog pay-down, because the user asked for the pass.
+        assert_eq!(
+            needs_hash(&FileAction::Unchanged, &verify, known),
+            Some(HashNeed::Reverify)
+        );
+        assert_eq!(
+            needs_hash(&FileAction::Unchanged, &verify, None),
+            Some(HashNeed::Reverify)
+        );
+
+        // --no-hash queues nothing at all, debt included: it opts out of paying,
+        // never out of being told (the summary states what stands).
+        assert_eq!(needs_hash(&FileAction::New, &off, None), None);
+        assert_eq!(needs_hash(&FileAction::Unchanged, &off, None), None);
+    }
+
+    #[test]
+    fn a_source_indexed_without_hashing_is_hashed_by_the_next_plain_scan() {
+        // The hole this closes, in its own shape: a file indexed in January
+        // under --no-hash sat through a clean full scan in August still
+        // unhashed, because every scan after the first found it unchanged and
+        // an action-driven gate had nothing to say about it. It surfaced months
+        // later, when an archive operation could not see the content at all.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        write_at(temp.path(), "photos/holiday.jpg", "photo bytes");
+
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        assert_eq!(object_of(&conn, root_id, "photos/holiday.jpg"), None);
+        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 1);
+
+        // The next plain scan finds nothing about the file changed — and reads
+        // it anyway, counting it as debt rather than as work the walk caused.
+        let result = plain_scan(&conn, root_id, temp.path(), Some(2));
+        assert_eq!(result.stats.unchanged, 1);
+        assert_eq!(result.stats.new, 0);
+        assert_eq!(result.files_to_hash.len(), 1, "the debt is queued");
+        assert_eq!(
+            result.files_to_hash[0].need,
+            HashNeed::Backlog,
+            "and queued as debt, not as work the walk caused"
+        );
+        let paid = pay(&conn, &result);
+        assert_eq!((paid.hashed, paid.backlog_hashed), (1, 1));
+
+        assert!(object_of(&conn, root_id, "photos/holiday.jpg").is_some());
+        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 0);
+
+        // And the debt does not come back: the scan after the pay-down queues
+        // nothing.
+        let settled = plain_scan(&conn, root_id, temp.path(), Some(3));
+        assert!(settled.files_to_hash.is_empty());
+        assert_second_scan_quiet(&conn, root_id, temp.path());
+    }
+
+    #[test]
+    fn a_debt_carrying_row_that_moved_is_queued_at_the_resolution_gate() {
+        // The gate is asked twice — once in the walk, once after it, where a
+        // move is decided — and an edit that changes only the first leaves debt
+        // standing for every file that happened to move. Nothing about this
+        // file's content changed, so only the debt rule can queue it.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let original = write_at(temp.path(), "inbox/photo.jpg", "photo bytes");
+
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let source_id = row(&conn, root_id, "inbox/photo.jpg").unwrap().id;
+        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 1);
+
+        std::fs::create_dir_all(temp.path().join("sorted")).unwrap();
+        std::fs::rename(&original, temp.path().join("sorted/photo.jpg")).unwrap();
+
+        let result = plain_scan(&conn, root_id, temp.path(), Some(2));
+
+        assert_eq!(result.stats.moved, 1);
+        let queued: Vec<_> = result
+            .files_to_hash
+            .iter()
+            .filter(|f| f.source_id == source_id)
+            .collect();
+        assert_eq!(
+            queued.len(),
+            1,
+            "the second gate queues debt too, or a moved file's debt is permanent"
+        );
+        assert_eq!(queued[0].old_object_id, None);
+        assert_eq!(
+            queued[0].need,
+            HashNeed::Backlog,
+            "a move is not a content change — the file was merely never read"
+        );
+
+        let paid = pay(&conn, &result);
+        assert_eq!((paid.hashed, paid.backlog_hashed), (1, 1));
+        assert!(object_of(&conn, root_id, "sorted/photo.jpg").is_some());
+        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 0);
+        assert_second_scan_quiet(&conn, root_id, temp.path());
+    }
+
+    #[test]
+    fn a_file_that_could_not_be_hashed_is_queued_again_by_the_next_scan() {
+        // A hash error leaves the row exactly as it was: present, unlinked, in
+        // debt. Nothing marks it as tried-and-failed, and nothing needs to —
+        // the next plain scan asks the same question and gets the same answer.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        write_at(temp.path(), "photo.jpg", "photo bytes");
+
+        let first = plain_scan(&conn, root_id, temp.path(), Some(1));
+        assert_eq!(first.files_to_hash.len(), 1);
+
+        // The hash pass reads the file after the walk has moved on, so it can
+        // find it gone, locked, or unreadable. Point the pass at a path that
+        // isn't there, leaving the disk itself untouched: the file is still
+        // where the walk saw it when the next scan runs.
+        let vanished = vec![FileToHash {
+            source_id: first.files_to_hash[0].source_id,
+            full_path: temp.path().join("no-such-file.jpg"),
+            old_object_id: None,
+            need: HashNeed::Basis,
+        }];
+        let failed = hash_files(&conn, &vanished, &NoopHashProgress).unwrap();
+        assert_eq!((failed.errors, failed.hashed), (1, 0));
+        assert_eq!(object_of(&conn, root_id, "photo.jpg"), None);
+        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 1);
+
+        // The retry needs no repair command and no flag: it is the ordinary
+        // next scan, which finds the file unchanged and the debt standing.
+        let retry = plain_scan(&conn, root_id, temp.path(), Some(2));
+        assert_eq!(retry.stats.unchanged, 1);
+        assert_eq!(retry.files_to_hash.len(), 1, "the debt is queued again");
+        assert_eq!(retry.files_to_hash[0].need, HashNeed::Backlog);
+        let paid = pay(&conn, &retry);
+        assert_eq!((paid.hashed, paid.backlog_hashed), (1, 1));
+        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 0);
+    }
+
+    #[test]
+    fn paying_debt_never_reads_as_content_changing_under_canon() {
+        // The unexpected-change detector fires when a file's hash differs from
+        // the object it was linked to while nothing about its basis explains
+        // it — possible corruption, and the scan exits non-zero for it. A debt
+        // row was never linked to anything, so there is nothing to differ from:
+        // the pay-down must be silent, or every backlog scan cries corruption.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        write_at(temp.path(), "photo.jpg", "photo bytes");
+
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let result = plain_scan(&conn, root_id, temp.path(), Some(2));
+
+        assert_eq!(result.files_to_hash.len(), 1, "the debt is queued");
+        let queued = &result.files_to_hash[0];
+        assert_eq!(
+            (&queued.need, queued.old_object_id),
+            (&HashNeed::Backlog, None),
+            "debt carries no predecessor link, which is what keeps the detector quiet"
+        );
+        // Documentation, not a guard: with no predecessor link the detector
+        // cannot fire whatever else breaks, so this line must never be counted
+        // toward a rung's expected failure set. The tuple above is the
+        // falsifiable half.
+        assert_eq!(pay(&conn, &result).unexpected_hash_changes, 0);
+    }
+
+    #[test]
+    fn verify_still_rereads_a_file_whose_content_is_already_known() {
+        // --verify keeps its own meaning: re-read everything, debt or not. Its
+        // rows are not counted as backlog — the user asked for the pass, so
+        // there is no surprising pay-down to explain.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        write_at(temp.path(), "photo.jpg", "photo bytes");
+
+        let first = plain_scan(&conn, root_id, temp.path(), Some(1));
+        pay(&conn, &first);
+        let object_id = object_of(&conn, root_id, "photo.jpg");
+        assert!(object_id.is_some());
+
+        let verified = scan_root(
+            &conn,
+            root_id,
+            temp.path().to_str().unwrap(),
+            None,
+            walk(temp.path()),
+            &ScanOptions {
+                hash: true,
+                hash_all: true,
+                ignore_device_id: false,
+            },
+            &NoopProgress,
+            current_timestamp(),
+            Some(2),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(verified.stats.unchanged, 1);
+        assert_eq!(verified.files_to_hash.len(), 1, "--verify re-reads it");
+        assert_eq!(verified.files_to_hash[0].old_object_id, object_id);
+        assert_eq!(
+            verified.files_to_hash[0].need,
+            HashNeed::Reverify,
+            "asked for, not owed — a re-read is never reported as a backlog pay-down"
+        );
+        assert_eq!(pay(&conn, &verified).backlog_hashed, 0);
+    }
+
+    #[test]
+    fn a_scoped_scan_pays_only_the_debt_inside_its_scope() {
+        // A scan speaks about the scope it walked. Debt outside it is neither
+        // paid nor claimed to be paid — it simply wasn't this scan's subject.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        write_at(temp.path(), "vacation/a.jpg", "a bytes");
+        write_at(temp.path(), "other/b.jpg", "b bytes");
+
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 2);
+
+        let scoped = scan_root(
+            &conn,
+            root_id,
+            temp.path().to_str().unwrap(),
+            Some("vacation"),
+            walk(&temp.path().join("vacation")),
+            &hash_options(),
+            &NoopProgress,
+            current_timestamp(),
+            Some(2),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            scoped.files_to_hash.len(),
+            1,
+            "only the debt inside the walked scope is queued"
+        );
+        assert_eq!(scoped.files_to_hash[0].need, HashNeed::Backlog);
+        let paid = pay(&conn, &scoped);
+        assert_eq!((paid.hashed, paid.backlog_hashed), (1, 1));
+        assert!(object_of(&conn, root_id, "vacation/a.jpg").is_some());
+        assert_eq!(
+            object_of(&conn, root_id, "other/b.jpg"),
+            None,
+            "content outside the walked scope is untouched"
+        );
+        assert_eq!(count_unhashed(&conn, root_id, Some("vacation")).unwrap(), 0);
+        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 1);
     }
 
     // =========================================================================

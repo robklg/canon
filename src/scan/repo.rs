@@ -329,6 +329,54 @@ pub(crate) mod source {
         Ok(ids)
     }
 
+    /// Count present sources here that hold no content identity — the standing
+    /// hash debt.
+    ///
+    /// A source with no linked object has never been hashed successfully: it was
+    /// indexed under `--no-hash`, its hash failed, or its content changed and the
+    /// link was cleared until the next pass. Nothing that reads content identity
+    /// can see such a row — not coverage, not cluster selection, not the
+    /// resolution account — so a scan that leaves debt standing states how much
+    /// rather than letting the omission pass in silence.
+    ///
+    /// Empty sources are counted like any other. Identity claims *about* empty
+    /// content are vacuous, but the hash is still computed, so an unhashed empty
+    /// source is debt exactly as a photograph is.
+    ///
+    /// `scan_prefix` bounds the count to the walked subtree — a scan speaks about
+    /// its own scope, and the boundary stops at the path separator, so a scan of
+    /// "vacation" never counts "vacation-2023" (the shared predicate, spelled
+    /// once).
+    pub fn count_unhashed(
+        conn: &Connection,
+        root_id: i64,
+        scan_prefix: Option<&str>,
+    ) -> Result<i64> {
+        let count = match scan_prefix {
+            Some(prefix) => {
+                let prefix = prefix.trim_end_matches('/');
+                let sql = format!(
+                    "SELECT COUNT(*) FROM sources
+                     WHERE root_id = ? AND present = 1 AND object_id IS NULL AND {}",
+                    crate::core::repo::db::path_at_or_under_sql("rel_path")
+                );
+                conn.query_row(
+                    &sql,
+                    rusqlite::params![root_id, prefix, prefix, prefix],
+                    |row| row.get(0),
+                )?
+            }
+            None => conn.query_row(
+                "SELECT COUNT(*) FROM sources
+                 WHERE root_id = ? AND present = 1 AND object_id IS NULL",
+                rusqlite::params![root_id],
+                |row| row.get(0),
+            )?,
+        };
+
+        Ok(count)
+    }
+
     /// A source snapshot captured for a receipt, resolved while the source is still
     /// present. `fetch_for_receipt` returns these; the caller maps them into receipt
     /// items. The content hash is resolved from the linked object (`None` if unhashed).
@@ -1481,6 +1529,103 @@ pub(crate) mod source {
             let ids = fetch_source_ids_for_root(&conn, root_id, Some("pct%")).unwrap();
             assert_eq!(ids, vec![under_percent]);
             assert!(!ids.contains(&percent_trap));
+        }
+
+        // =========================================================================
+        // count_unhashed tests
+        // =========================================================================
+
+        #[test]
+        fn count_unhashed_counts_present_rows_with_no_object() {
+            let conn = setup_test_db();
+
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            let object_id = insert_object(&conn, "known", false);
+            insert_source(&conn, root_id, "unhashed1.jpg", None, true, false);
+            insert_source(&conn, root_id, "unhashed2.jpg", None, true, false);
+            insert_source(&conn, root_id, "hashed.jpg", Some(object_id), true, false);
+
+            assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 2);
+        }
+
+        #[test]
+        fn count_unhashed_ignores_rows_that_are_gone() {
+            let conn = setup_test_db();
+
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            insert_source(&conn, root_id, "still-here.jpg", None, true, false);
+            insert_source(&conn, root_id, "deleted.jpg", None, false, false);
+
+            // Debt is about content Canon could still read. A source that is no
+            // longer on disk was never going to be hashed, and counting it would
+            // make a scan's debt line grow with every deletion.
+            assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 1);
+        }
+
+        #[test]
+        fn count_unhashed_ignores_other_roots() {
+            let conn = setup_test_db();
+
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            let other_id = crate::core::repo::insert_test_root(&conn, "/backup", "source", false);
+            insert_source(&conn, root_id, "mine.jpg", None, true, false);
+            insert_source(&conn, other_id, "theirs.jpg", None, true, false);
+
+            assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 1);
+        }
+
+        #[test]
+        fn count_unhashed_prefix_stops_at_the_path_boundary() {
+            let conn = setup_test_db();
+
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            insert_source(&conn, root_id, "vacation/a.jpg", None, true, false);
+            insert_source(&conn, root_id, "vacation-2023/b.jpg", None, true, false);
+            insert_source(&conn, root_id, "vacations/c.jpg", None, true, false);
+
+            // The debt a scan reports is the debt inside the scope it walked;
+            // a string-prefix sibling was never in scope, and a count that swept
+            // one in would report work this scan neither did nor could do.
+            assert_eq!(count_unhashed(&conn, root_id, Some("vacation")).unwrap(), 1);
+            // The trailing-slash spelling names the same scope.
+            assert_eq!(
+                count_unhashed(&conn, root_id, Some("vacation/")).unwrap(),
+                1
+            );
+            assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 3);
+        }
+
+        #[test]
+        fn count_unhashed_prefix_wildcard_bytes_are_literal() {
+            let conn = setup_test_db();
+
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            insert_source(&conn, root_id, "alpha_beta/a.jpg", None, true, false);
+            insert_source(&conn, root_id, "alphaXbeta/b.jpg", None, true, false);
+
+            // '_' and '%' in a scope path are path bytes, never wildcards.
+            assert_eq!(
+                count_unhashed(&conn, root_id, Some("alpha_beta")).unwrap(),
+                1
+            );
+        }
+
+        #[test]
+        fn count_unhashed_counts_an_empty_source_like_any_other() {
+            let conn = setup_test_db();
+
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            conn.execute(
+                "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, scanned_at, last_seen_at, present)
+                 VALUES (?, 'empty.txt', 0, 0, 0, 1704067200, '', 0, 0, 1)",
+                rusqlite::params![root_id],
+            )
+            .unwrap();
+
+            // Identity claims *about* empty content are vacuous, but the hash is
+            // still computed for one, so an unhashed empty source is debt exactly
+            // as a photograph is. Nothing here optimizes it out of the queue.
+            assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 1);
         }
 
         // =========================================================================
