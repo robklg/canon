@@ -139,7 +139,9 @@ pub fn generate(
     println!("{}", full_summary);
 
     if !options.no_edit {
-        open_editor(output_path);
+        if let Err(e) = open_editor(output_path) {
+            eprintln!("Warning: {e}");
+        }
     }
 
     // Only spaces are quoted here. A path carrying a quote or a shell
@@ -156,27 +158,80 @@ pub fn generate(
 }
 
 /// Open a file in the user's preferred editor ($VISUAL, $EDITOR, or vi).
-/// Reports errors but does not fail — the file was already written successfully.
-fn open_editor(path: &Path) {
+///
+/// A failed launch or a non-zero exit comes back as an error; what that means
+/// is the caller's to decide. After a file is written it is a warning — the
+/// work is already on disk. Before a re-query it is a refusal, because the
+/// editor's exit is the user's answer about what to query.
+fn open_editor(path: &Path) -> Result<()> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".to_string());
     match std::process::Command::new(&editor).arg(path).status() {
-        Ok(status) if !status.success() => {
-            eprintln!("Warning: editor exited with status {status}");
-        }
-        Err(e) => {
-            eprintln!("Warning: failed to launch editor '{editor}': {e}");
-        }
-        _ => {}
+        Ok(status) if !status.success() => match status.code() {
+            Some(code) => bail!("editor '{editor}' exited with status {code}"),
+            None => bail!("editor '{editor}' was terminated before it exited"),
+        },
+        Err(e) => bail!("failed to launch editor '{editor}': {e}"),
+        _ => Ok(()),
     }
+}
+
+/// Read a manifest from disk. Split from parsing so a `--edit` refresh can
+/// read the file twice and parse only what the user saved.
+fn read_manifest_text(config_path: &Path) -> Result<String> {
+    fs::read_to_string(config_path)
+        .with_context(|| format!("Failed to read config: {}", config_path.display()))
+}
+
+/// Parse a manifest: TOML body, version gate, `[options] allow` vocabulary.
+/// One spelling, so the content a `--edit` refresh re-queries from passes the
+/// same gates the plain refresh applies.
+fn parse_manifest(content: &str, config_path: &Path) -> Result<(ManifestConfig, bool, bool)> {
+    let config: ManifestConfig = toml::from_str(content)
+        .with_context(|| format!("Failed to parse config: {}", config_path.display()))?;
+    validate_manifest_version(config.meta.version)?;
+    let (allow_archived, allow_duplicates) = parse_manifest_allow(&config.options.allow)?;
+    Ok((config, allow_archived, allow_duplicates))
 }
 
 pub fn refresh(
     db: &mut Db,
     config_path: &Path,
     show_archived: bool,
-    no_edit: bool,
+    edit: bool,
+    command_line: &str,
+    ledger: &LedgerConfig,
+    no_receipt: bool,
+) -> Result<()> {
+    let launch = |path: &Path| open_editor(path);
+    let editor: Option<EditorPass> = if edit { Some(&launch) } else { None };
+    refresh_with_editor(
+        db,
+        config_path,
+        show_archived,
+        editor,
+        command_line,
+        ledger,
+        no_receipt,
+    )
+}
+
+/// The user's editor session, as the refresh calls it: hand it the manifest,
+/// hear back whether the pass succeeded.
+type EditorPass<'a> = &'a dyn Fn(&Path) -> Result<()>;
+
+/// The refresh, with the editor pass as a parameter.
+///
+/// `Some(_)` is `--edit`: the pass runs on the manifest before anything is
+/// read for the re-query. Tests stand in for the user's editor session here,
+/// rather than through the process environment the whole test binary shares.
+#[allow(clippy::too_many_arguments)]
+fn refresh_with_editor(
+    db: &mut Db,
+    config_path: &Path,
+    show_archived: bool,
+    editor: Option<EditorPass>,
     command_line: &str,
     ledger: &LedgerConfig,
     no_receipt: bool,
@@ -184,16 +239,28 @@ pub fn refresh(
     let conn = db.conn_mut();
 
     // Read existing manifest content (for notes preservation)
-    let old_content = fs::read_to_string(config_path)
-        .with_context(|| format!("Failed to read config: {}", config_path.display()))?;
-    let config: ManifestConfig = toml::from_str(&old_content)
-        .with_context(|| format!("Failed to parse config: {}", config_path.display()))?;
+    let mut old_content = read_manifest_text(config_path)?;
 
-    // Validate manifest version
-    validate_manifest_version(config.meta.version)?;
+    // The editor comes first, and the refresh re-queries from what was saved.
+    // Editing a query after the query has run leaves the manifest describing
+    // one thing and its lock file holding another. The read above is only to
+    // establish the file is there — nothing is parsed until the user has had
+    // their pass, so a manifest that currently fails to parse can still be
+    // fixed this way. The manifest is edited in place, so an abort below
+    // leaves the user's words in their own file — which is why this does not
+    // route through the ceremony's editor helper: that one edits a temp draft
+    // and hands the text back, and an abort would strand the words there.
+    if let Some(edit) = editor {
+        edit(config_path).with_context(|| {
+            format!(
+                "Refresh aborted — {} and its lock file are unchanged",
+                config_path.display()
+            )
+        })?;
+        old_content = read_manifest_text(config_path)?;
+    }
 
-    // Parse allow options from manifest
-    let (allow_archived, allow_duplicates) = parse_manifest_allow(&config.options.allow)?;
+    let (config, allow_archived, allow_duplicates) = parse_manifest(&old_content, config_path)?;
 
     // Report which options are in effect
     if !config.options.allow.is_empty() {
@@ -256,9 +323,6 @@ pub fn refresh(
     if plan.lock_entries.is_empty() {
         generate_ops::execute_refresh(&plan, &exec_params)?;
         println!("No sources matched the query");
-        if !no_edit {
-            open_editor(config_path);
-        }
         return Ok(());
     }
 
@@ -308,10 +372,6 @@ pub fn refresh(
     println!("{}", full_summary);
     for w in recorder.take_warnings() {
         eprintln!("{w}");
-    }
-
-    if !no_edit {
-        open_editor(config_path);
     }
 
     Ok(())
@@ -519,4 +579,148 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
+    use std::path::PathBuf;
+
+    /// A manifest as generation leaves it: commented shape, Notes, TOML body.
+    fn manifest_text(query: &str) -> String {
+        format!(
+            "# Canon manifest — edit pattern and Notes freely.\n\
+             #\n\
+             # === Notes ===\n\
+             # keep these words\n\
+             [meta]\n\
+             version = 1\n\
+             query = [\"{query}\"]\n\
+             generated_at = \"2026-01-01T00:00:00Z\"\n\
+             lock_hash = \"\"\n\
+             \n\
+             [options]\n\
+             allow = []\n\
+             \n\
+             [output]\n\
+             pattern = \"{{filename}}\"\n\
+             archive_root_id = 1\n\
+             base_dir = \"out\"\n"
+        )
+    }
+
+    /// One `.jpg` and one `.png` under a source root, and a manifest asking
+    /// for the jpg — so an edited query is visible in the lock file.
+    fn setup(dir: &Path) -> (Db, PathBuf, PathBuf) {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let jpg = insert_object(&conn, "hash-jpg", false);
+        let png = insert_object(&conn, "hash-png", false);
+        insert_source(&conn, root, "a.jpg", Some(jpg));
+        insert_source(&conn, root, "b.png", Some(png));
+
+        let manifest_path = dir.join("cluster.toml");
+        let lock_path = dir.join("cluster.lock");
+        fs::write(&manifest_path, manifest_text("source.ext=jpg")).unwrap();
+        (Db::from_connection(conn), manifest_path, lock_path)
+    }
+
+    fn run_refresh(db: &mut Db, manifest_path: &Path, editor: Option<EditorPass>) -> Result<()> {
+        refresh_with_editor(
+            db,
+            manifest_path,
+            false,
+            editor,
+            "canon cluster refresh",
+            &LedgerConfig::default(),
+            true,
+        )
+    }
+
+    #[test]
+    fn refresh_edit_consumes_the_saved_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest_path, lock_path) = setup(dir.path());
+
+        // The user's pass runs first, so the re-query is the edited one —
+        // that is the whole reason to edit a query before refreshing.
+        let edit = |p: &Path| -> Result<()> {
+            fs::write(p, manifest_text("source.ext=png"))?;
+            Ok(())
+        };
+        run_refresh(&mut db, &manifest_path, Some(&edit)).unwrap();
+
+        let lock = fs::read_to_string(&lock_path).unwrap();
+        assert!(lock.contains("b.png"), "got: {lock}");
+        assert!(
+            !lock.contains("a.jpg"),
+            "the pre-edit query was queried: {lock}"
+        );
+
+        let manifest = fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.contains("source.ext=png"), "got: {manifest}");
+        assert!(manifest.contains("# keep these words"), "got: {manifest}");
+    }
+
+    #[test]
+    fn refresh_abort_on_parse_failure_touches_neither_manifest_nor_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest_path, lock_path) = setup(dir.path());
+        fs::write(&lock_path, "the lock from last time\n").unwrap();
+
+        let edit = |p: &Path| -> Result<()> {
+            fs::write(p, "[meta\nversion = 1\n")?;
+            Ok(())
+        };
+        let err = run_refresh(&mut db, &manifest_path, Some(&edit)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("Failed to parse config"),
+            "{err:#}"
+        );
+
+        // The user's file holds exactly what they saved — Canon wrote nothing
+        // over it — and the lock still describes the last good query.
+        assert_eq!(
+            fs::read_to_string(&manifest_path).unwrap(),
+            "[meta\nversion = 1\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&lock_path).unwrap(),
+            "the lock from last time\n"
+        );
+    }
+
+    #[test]
+    fn refresh_abort_on_editor_failure_touches_neither_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest_path, lock_path) = setup(dir.path());
+        fs::write(&lock_path, "the lock from last time\n").unwrap();
+
+        let edit = |_: &Path| -> Result<()> { bail!("editor 'false' exited with status 1") };
+        let err = run_refresh(&mut db, &manifest_path, Some(&edit)).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("Refresh aborted"), "{rendered}");
+        assert!(rendered.contains("editor 'false'"), "{rendered}");
+
+        assert_eq!(
+            fs::read_to_string(&manifest_path).unwrap(),
+            manifest_text("source.ext=jpg")
+        );
+        assert_eq!(
+            fs::read_to_string(&lock_path).unwrap(),
+            "the lock from last time\n"
+        );
+    }
+
+    #[test]
+    fn refresh_without_edit_never_opens_an_editor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest_path, lock_path) = setup(dir.path());
+
+        run_refresh(&mut db, &manifest_path, None).unwrap();
+
+        let lock = fs::read_to_string(&lock_path).unwrap();
+        assert!(lock.contains("a.jpg"), "got: {lock}");
+    }
 }

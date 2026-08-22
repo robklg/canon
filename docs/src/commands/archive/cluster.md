@@ -124,6 +124,9 @@ Use `canon cluster refresh` to update the lock file if sources have changed sinc
 ```bash
 # Re-query and update the lock file
 canon cluster refresh manifest.toml
+
+# Edit the manifest first, then re-query from what was saved
+canon cluster refresh manifest.toml --edit
 ```
 
 This re-runs the manifest's query and updates `manifest.lock` with the current matching sources. The manifest settings (`[options]`, `[output]`) remain unchanged.
@@ -132,3 +135,7 @@ On refresh:
 - The **Cluster Summary** is regenerated with current counts
 - The **Notes** section is preserved verbatim
 - The same root breakdown and archive coverage summary is printed to stdout
+
+`--edit` opens the manifest in `$VISUAL`/`$EDITOR` before the re-query, so an edited query is the query that runs. The manifest is edited in place. If the editor exits with a failure status, or the saved manifest does not parse, the refresh stops: neither the manifest nor the lock file is written, and the file holds exactly what was saved. Nothing is parsed before the editor opens, so a manifest that no longer parses can be repaired this way.
+
+When the query matches nothing, the lock file is removed and `lock_hash` is emptied. The manifest is rewritten in full, with the Cluster Summary stating the zero match and the Notes section preserved as on any other refresh.

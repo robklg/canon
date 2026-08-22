@@ -731,7 +731,7 @@ enum ClusterAction {
         /// Show which files were excluded because they're already archived
         #[arg(long)]
         show_archived: bool,
-        /// Open manifest in $VISUAL/$EDITOR after refresh
+        /// Open manifest in $VISUAL/$EDITOR first, then refresh from what you saved
         #[arg(long)]
         edit: bool,
     },
@@ -1292,7 +1292,7 @@ fn main() -> Result<()> {
                     &mut db,
                     &manifest,
                     show_archived,
-                    !edit,
+                    edit,
                     &command_line,
                     &config,
                     cli.no_receipt,

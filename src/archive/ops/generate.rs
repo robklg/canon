@@ -338,22 +338,6 @@ pub fn execute_generate(
         },
     };
 
-    // Assemble manifest
-    let header = "# Canon manifest — edit pattern and Notes freely.\n\
-                  # To change the query, edit it here then run: canon cluster refresh <manifest>\n\
-                  # Other fields are managed by Canon — do not edit.\n\
-                  #\n";
-    let summary = generate_summary_comments(plan);
-    let notes_block = "# === Notes ===\n#\n";
-    let fact_help = generate_fact_help(
-        plan.lock_entries.len(),
-        &plan.full_coverage_facts,
-        config.meta.scope.is_some(),
-    );
-
-    let toml_str =
-        toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
-
     // Inject "# Original:" comments when alias expansion changed the filter
     let comment_lines: Vec<String> = params
         .original_filters
@@ -362,20 +346,8 @@ pub fn execute_generate(
         .filter(|(orig, exp)| orig != exp)
         .map(|(orig, _)| format!("# Original: {orig}"))
         .collect();
-    let toml_str = if comment_lines.is_empty() {
-        toml_str
-    } else {
-        inject_comments_before_key(&toml_str, "query", &comment_lines)
-    };
 
-    let manifest = format!(
-        "{}{}\n{}\n{}\n\n{}",
-        header,
-        summary.trim_end(),
-        notes_block.trim_end(),
-        toml_str.trim_end(),
-        fact_help
-    );
+    let manifest = assemble_manifest(plan, &config, EMPTY_NOTES, &comment_lines)?;
     write_and_sync(&params.manifest_path, &manifest).with_context(|| {
         format!(
             "Failed to write manifest to {}",
@@ -391,49 +363,33 @@ pub fn execute_generate(
 }
 
 /// Rewrite lock file + update existing manifest for a cluster refresh.
+///
+/// Both arms — matches and no matches — write the same document through the
+/// same assembly. A refresh that found nothing still rewrites a manifest the
+/// user can read and edit; it must not hand back a bare TOML body with the
+/// user's Notes gone.
 pub fn execute_refresh(
     plan: &ClusterGeneratePlan,
     params: &ExecuteRefreshParams,
 ) -> Result<ExecuteRefreshResult> {
-    if plan.lock_entries.is_empty() {
-        // No sources — remove lock file if it exists
+    let matched_nothing = plan.lock_entries.is_empty();
+
+    // A lock file states what a query matched. With no matches there is
+    // nothing to state, so the file goes and the manifest records the empty
+    // hash rather than pointing at a stale lock.
+    let lock_hash = if matched_nothing {
         if params.lock_path.exists() {
             fs::remove_file(&params.lock_path)?;
         }
-        // Update config with empty lock hash
-        let mut config = ManifestConfig {
-            meta: ManifestMeta {
-                version: params.config.meta.version,
-                query: params.config.meta.query.clone(),
-                scope: params.config.meta.scope.clone(),
-                generated_at: current_timestamp(),
-                lock_hash: String::new(),
-            },
-            options: ManifestOptions {
-                allow: params.config.options.allow.clone(),
-            },
-            output: ManifestOutput {
-                pattern: params.config.output.pattern.clone(),
-                archive_root_id: params.config.output.archive_root_id,
-                base_dir: params.config.output.base_dir.clone(),
-            },
-        };
-        // Preserve version default behavior
-        config.meta.version = params.config.meta.version;
-        let toml_str =
-            toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
-        write_and_sync(&params.manifest_path, &toml_str).with_context(|| {
-            format!("Failed to write config: {}", params.manifest_path.display())
-        })?;
-        return Ok(ExecuteRefreshResult { outcome: None });
-    }
+        String::new()
+    } else {
+        // Order matters exactly as it does for generation: write the lock,
+        // then hash what landed on disk, then name that hash in the manifest.
+        write_lock_file(&params.lock_path, &plan.lock_entries)?;
+        crate::core::ops::fs::compute_full_hash(&params.lock_path)?
+    };
 
-    // Write JSONL lock file
-    write_lock_file(&params.lock_path, &plan.lock_entries)?;
-
-    // Compute lock file hash and update config
-    let lock_hash = crate::core::ops::fs::compute_full_hash(&params.lock_path)?;
-    let mut config = ManifestConfig {
+    let config = ManifestConfig {
         meta: ManifestMeta {
             version: params.config.meta.version,
             query: params.config.meta.query.clone(),
@@ -450,38 +406,19 @@ pub fn execute_refresh(
             base_dir: params.config.output.base_dir.clone(),
         },
     };
-    config.meta.version = params.config.meta.version;
 
-    // Assemble manifest with preserved notes
-    let header = "# Canon manifest — edit pattern and Notes freely.\n\
-                  # To change the query, edit it here then run: canon cluster refresh <manifest>\n\
-                  # Other fields are managed by Canon — do not edit.\n\
-                  #\n";
-    let summary = generate_summary_comments(plan);
+    // The user's words come back verbatim. A manifest that never carried a
+    // Notes block gets the empty one, so the next refresh has somewhere to
+    // read from.
     let notes =
-        extract_notes_raw(&params.old_manifest_content).unwrap_or_else(|| "\n#\n".to_string());
-    let notes_block = format!("# === Notes ==={notes}");
-    let fact_help = generate_fact_help(
-        plan.lock_entries.len(),
-        &plan.full_coverage_facts,
-        config.meta.scope.is_some(),
-    );
+        extract_notes_raw(&params.old_manifest_content).unwrap_or_else(|| EMPTY_NOTES.to_string());
 
-    let toml_str =
-        toml::to_string_pretty(&config).context("Failed to serialize manifest config")?;
-    let manifest = format!(
-        "{}{}\n{}\n{}\n\n{}",
-        header,
-        summary.trim_end(),
-        notes_block.trim_end(),
-        toml_str.trim_end(),
-        fact_help
-    );
+    let manifest = assemble_manifest(plan, &config, &notes, &[])?;
     write_and_sync(&params.manifest_path, &manifest)
         .with_context(|| format!("Failed to write config: {}", params.manifest_path.display()))?;
 
     Ok(ExecuteRefreshResult {
-        outcome: Some(ExecuteGenerateResult {
+        outcome: (!matched_nothing).then(|| ExecuteGenerateResult {
             source_count: plan.lock_entries.len(),
             root_breakdown: plan.root_breakdown.clone(),
             not_archived_count: plan.not_archived_count,
@@ -492,6 +429,58 @@ pub fn execute_refresh(
 // ============================================================================
 // Private helpers
 // ============================================================================
+
+/// The Notes body a manifest starts life with: one empty comment line under
+/// the marker, so the block is there to be written in.
+const EMPTY_NOTES: &str = "\n#\n";
+
+/// Assemble the manifest document every write path emits: header, Cluster
+/// Summary, Notes block, TOML body, fact help.
+///
+/// One assembly for generation and both refresh arms. The manifest's commented
+/// shape is what the user edits and what the notes parser reads back, so a
+/// second writer with its own idea of the layout is how the shape — and the
+/// user's words with it — goes missing.
+///
+/// `notes` is the Notes body as it follows the marker line, `#` markers intact.
+/// `original_comments` are the `# Original:` lines alias expansion leaves behind
+/// (generation only; a refresh re-emits the query it was given).
+fn assemble_manifest(
+    plan: &ClusterGeneratePlan,
+    config: &ManifestConfig,
+    notes: &str,
+    original_comments: &[String],
+) -> Result<String> {
+    let header = "# Canon manifest — edit pattern and Notes freely.\n\
+                  # To change the query, edit it here then run: canon cluster refresh <manifest>\n\
+                  # Other fields are managed by Canon — do not edit.\n\
+                  #\n";
+    let summary = generate_summary_comments(plan);
+    let notes_block = format!("# === Notes ==={notes}");
+    // Empty at zero sources by the fact help's own rule — there is no coverage
+    // to enumerate over nothing. The section is absent, not dropped.
+    let fact_help = generate_fact_help(
+        plan.lock_entries.len(),
+        &plan.full_coverage_facts,
+        config.meta.scope.is_some(),
+    );
+
+    let toml_str = toml::to_string_pretty(config).context("Failed to serialize manifest config")?;
+    let toml_str = if original_comments.is_empty() {
+        toml_str
+    } else {
+        inject_comments_before_key(&toml_str, "query", original_comments)
+    };
+
+    Ok(format!(
+        "{}{}\n{}\n{}\n\n{}",
+        header,
+        summary.trim_end(),
+        notes_block.trim_end(),
+        toml_str.trim_end(),
+        fact_help
+    ))
+}
 
 /// Find duplicate sources (same object_id) within lock entries.
 /// Returns Vec of (object_id, Vec<source_id>).
@@ -825,6 +814,39 @@ mod tests {
             filters: vec![],
             allow_archived: false,
             allow_duplicates: false,
+        }
+    }
+
+    /// A plan that matched nothing — the refresh arm this story routes through
+    /// the shared assembly.
+    fn empty_plan() -> ClusterGeneratePlan {
+        ClusterGeneratePlan {
+            lock_entries: vec![],
+            archived: vec![],
+            full_coverage_facts: vec![],
+            mixed_type_warnings: vec![],
+            root_breakdown: vec![],
+            not_archived_count: 0,
+            excluded_count: 0,
+            unhashed_count: 0,
+        }
+    }
+
+    fn refresh_config() -> ManifestConfig {
+        ManifestConfig {
+            meta: ManifestMeta {
+                version: 1,
+                query: vec![],
+                scope: None,
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+                lock_hash: "old".to_string(),
+            },
+            options: ManifestOptions { allow: vec![] },
+            output: ManifestOutput {
+                pattern: "{filename}".to_string(),
+                archive_root_id: 1,
+                base_dir: "output".to_string(),
+            },
         }
     }
 
@@ -1341,44 +1363,97 @@ base_dir = \"output\"\n";
         // Create a lock file that should be removed
         std::fs::write(&lock_path, "old content").unwrap();
 
-        let empty_plan = ClusterGeneratePlan {
-            lock_entries: vec![],
-            archived: vec![],
-            full_coverage_facts: vec![],
-            mixed_type_warnings: vec![],
-            root_breakdown: vec![],
-            not_archived_count: 0,
-            excluded_count: 0,
-            unhashed_count: 0,
-        };
-
-        let config = ManifestConfig {
-            meta: ManifestMeta {
-                version: 1,
-                query: vec![],
-                scope: None,
-                generated_at: "2026-01-01T00:00:00Z".to_string(),
-                lock_hash: "old".to_string(),
-            },
-            options: ManifestOptions { allow: vec![] },
-            output: ManifestOutput {
-                pattern: "{filename}".to_string(),
-                archive_root_id: 1,
-                base_dir: "output".to_string(),
-            },
-        };
-
         let params = ExecuteRefreshParams {
             lock_path: lock_path.clone(),
             manifest_path: manifest_path.clone(),
             old_manifest_content: String::new(),
-            config,
+            config: refresh_config(),
         };
 
-        let result = execute_refresh(&empty_plan, &params).unwrap();
+        let result = execute_refresh(&empty_plan(), &params).unwrap();
         assert!(result.outcome.is_none());
         assert!(!lock_path.exists());
         assert!(manifest_path.exists());
+    }
+
+    #[test]
+    fn execute_refresh_empty_arm_preserves_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("cluster.toml");
+
+        let old_content = "\
+# === Cluster Summary ===\n\
+# 3 sources from 1 root:\n\
+# === Notes ===\n\
+# These are my important notes\n\
+# about this cluster\n\
+[meta]\n\
+version = 1\n\
+query = []\n\
+generated_at = \"2026-01-01T00:00:00Z\"\n\
+lock_hash = \"old\"\n\
+\n\
+[output]\n\
+pattern = \"{filename}\"\n\
+archive_root_id = 1\n\
+base_dir = \"output\"\n";
+
+        let params = ExecuteRefreshParams {
+            lock_path: dir.path().join("cluster.lock"),
+            manifest_path: manifest_path.clone(),
+            old_manifest_content: old_content.to_string(),
+            config: refresh_config(),
+        };
+
+        let result = execute_refresh(&empty_plan(), &params).unwrap();
+        assert!(result.outcome.is_none());
+
+        // A query that now matches nothing is not a reason to lose the words
+        // the user wrote about it.
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(
+            manifest.contains("# These are my important notes"),
+            "got: {manifest}"
+        );
+        assert!(manifest.contains("# about this cluster"), "got: {manifest}");
+        let raw = extract_notes_raw(&manifest).expect("the empty arm still writes a notes block");
+        assert!(
+            !raw.contains("[meta]"),
+            "notes block ran into the TOML body"
+        );
+    }
+
+    #[test]
+    fn execute_refresh_empty_arm_carries_header_and_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("cluster.toml");
+
+        let params = ExecuteRefreshParams {
+            lock_path: dir.path().join("cluster.lock"),
+            manifest_path: manifest_path.clone(),
+            old_manifest_content: String::new(),
+            config: refresh_config(),
+        };
+
+        execute_refresh(&empty_plan(), &params).unwrap();
+
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.starts_with("# Canon manifest"), "got: {manifest}");
+        assert!(
+            manifest.contains("# === Cluster Summary ==="),
+            "got: {manifest}"
+        );
+        // The 0 match is stated, not left to be inferred from an absent lock.
+        assert!(
+            manifest.contains("# 0 sources from 0 roots:"),
+            "got: {manifest}"
+        );
+        assert!(manifest.contains("# === Notes ==="), "got: {manifest}");
+
+        // Still a manifest the next refresh can read.
+        let reparsed: ManifestConfig = toml::from_str(&manifest).unwrap();
+        assert_eq!(reparsed.meta.lock_hash, "");
+        assert_eq!(reparsed.output.pattern, "{filename}");
     }
 
     // =========================================================================
@@ -1450,6 +1525,29 @@ base_dir = \"output\"\n";
         // hand-written strings. This is the one that reads what was written.
         let content = std::fs::read_to_string(&manifest_path).unwrap();
         let raw = extract_notes_raw(&content).expect("a generated manifest carries a notes block");
+        assert!(raw.contains('#'), "notes block should carry its markers");
+        assert!(
+            !raw.contains("[meta]"),
+            "notes block ran into the TOML body"
+        );
+        assert!(
+            !raw.contains("# === "),
+            "notes block ran into the next section"
+        );
+
+        // The same contract on the arm that used to write a bare TOML body:
+        // refresh what was just generated, matching nothing.
+        let refresh_params = ExecuteRefreshParams {
+            lock_path: dir.path().join("cluster.lock"),
+            manifest_path: manifest_path.clone(),
+            old_manifest_content: content,
+            config: toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap(),
+        };
+        execute_refresh(&empty_plan(), &refresh_params).unwrap();
+
+        let refreshed = std::fs::read_to_string(&manifest_path).unwrap();
+        let raw =
+            extract_notes_raw(&refreshed).expect("an empty refresh still carries a notes block");
         assert!(raw.contains('#'), "notes block should carry its markers");
         assert!(
             !raw.contains("[meta]"),
