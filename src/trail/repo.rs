@@ -220,6 +220,71 @@ pub fn aggregate_stamped_by_decisions(
     Ok(aggs)
 }
 
+/// Whether any `apply` drew from or placed into this location.
+///
+/// Both endpoints of the extraction ledger count. Origins are matched
+/// root-relative (`root_id` + `rel_prefix`); destinations are matched on the
+/// absolute write-time snapshot path rather than on `destination_root_id`,
+/// so a row still answers once that id has gone stale. The path itself must
+/// still sit under some known root — a caller asking about a path under none
+/// is refused before it reaches here. Both go through the one containment
+/// spelling, so a real path containing `_` or `%` matches literally.
+pub fn extraction_endpoint_at(
+    conn: &Connection,
+    root_id: i64,
+    rel_prefix: &str,
+    absolute_path: &str,
+) -> Result<bool> {
+    let origin_sql = format!(
+        "SELECT EXISTS(SELECT 1 FROM decision_extractions
+                       WHERE root_id = ? AND {})",
+        crate::core::repo::db::path_at_or_under_sql("rel_prefix")
+    );
+    let origin: bool = conn.query_row(
+        &origin_sql,
+        rusqlite::params![root_id, rel_prefix, rel_prefix, rel_prefix],
+        |row| row.get(0),
+    )?;
+    if origin {
+        return Ok(true);
+    }
+
+    let destination_sql = format!(
+        "SELECT EXISTS(SELECT 1 FROM decision_extractions WHERE {})",
+        crate::core::repo::db::path_at_or_under_sql("destination_path")
+    );
+    conn.query_row(
+        &destination_sql,
+        rusqlite::params![absolute_path, absolute_path, absolute_path],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+/// Whether any decision was scoped at this location or inside it.
+///
+/// Descendant-or-equal only — the two-claims placement law's direction. A
+/// decision scoped at an ancestor says nothing about this place: it is
+/// exactly what made a mistyped path render a plausible view of somewhere
+/// it never was.
+pub fn decision_scoped_at_or_under(
+    conn: &Connection,
+    root_id: i64,
+    rel_prefix: &str,
+) -> Result<bool> {
+    let sql = format!(
+        "SELECT EXISTS(SELECT 1 FROM decision_scopes
+                       WHERE root_id = ? AND {})",
+        crate::core::repo::db::path_at_or_under_sql("rel_prefix")
+    );
+    conn.query_row(
+        &sql,
+        rusqlite::params![root_id, rel_prefix, rel_prefix, rel_prefix],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -79,6 +79,8 @@ canon scan --missing /Volumes/Backup
 
 The sources are marked as not present but remain in the database with their hashes and metadata intact. If the path reappears later (e.g., storage remounted), a normal scan will reconcile them back. Cannot be combined with `--all` or `--add`.
 
+The decision is recorded against the folder it was aimed at, so [`canon trail`](../query/trail.md) shows it at that location rather than as a global decision.
+
 **Deletions are recorded.** Whether Canon infers a deletion by re-scanning a parent (files that were present but weren't seen this time) or you mark one directly with `--missing`, the disappearance is captured as [decision provenance](../../concepts/decisions.md): each vanished source is linked to the scan decision, and a **source-local receipt** listing exactly what was lost is written to `.canon-ledger/` on the affected storage. Add `--reason` to say why; the reason travels into both the record and the receipt:
 
 ```bash
@@ -87,6 +89,12 @@ canon scan --missing /Volumes/Backup/old-phone \
 ```
 
 Deletion is a recorded fate alongside archiving and exclusion: what the storage held, what you kept, released, or discarded, and why, stays reconstructible from the files alone. A deletion is recorded even when no archive root exists. To suppress the receipt for one run use `--no-receipt`; to disable recording entirely set `recording = "Off"` (see [Decision Provenance](../../concepts/decisions.md)).
+
+**Absolute paths need no current directory.** A shell whose working directory has been deleted (a root retired or unmounted in another window, for example) can still run `canon scan /some/absolute/path`. A relative path does need one, and says so:
+
+```
+Error: cannot resolve relative path './photos': the current directory is unavailable
+```
 
 Output shows what was found:
 ```

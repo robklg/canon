@@ -14,7 +14,7 @@ mod ops;
 mod render;
 mod repo;
 
-pub use cli::{run, run_show, TrailArgs};
+pub use cli::{run, run_show, TrailArgs, TrailExit};
 
 // The pub-field and variant types of TrailParams/TrailResult — a future crate
 // boundary can't expose a public field of a private type, so these ride on

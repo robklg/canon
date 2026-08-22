@@ -8,6 +8,7 @@
 
 use anyhow::{bail, Result};
 use std::path::{Component, Path, PathBuf};
+use unicode_normalization::UnicodeNormalization;
 
 use super::root::{find_containing_root, Root};
 
@@ -74,18 +75,48 @@ pub fn clean_path(path: &Path, cwd: &Path) -> PathBuf {
     components.iter().collect()
 }
 
+/// Candidate byte-forms of a path for matching against stored data:
+/// as given, then NFC, then NFD — deduplicated, order preserved.
+///
+/// The same visible path can reach Canon in more than one byte-form: a
+/// filesystem hands out one Unicode normalization form, a shell or a
+/// clipboard may hand over another, and the index stores whichever form the
+/// disk gave when the path was scanned. Matching therefore bends the
+/// argument to the stored form; stored bytes are never rewritten, so
+/// receipts and rows keep the disk's own spelling. ASCII paths — the common
+/// case — have a single candidate and cost nothing.
+pub fn normalization_candidates(path: &str) -> Vec<String> {
+    if path.is_ascii() {
+        return vec![path.to_string()];
+    }
+    let mut candidates = Vec::with_capacity(3);
+    candidates.push(path.to_string());
+    for form in [
+        path.nfc().collect::<String>(),
+        path.nfd().collect::<String>(),
+    ] {
+        if !candidates.contains(&form) {
+            candidates.push(form);
+        }
+    }
+    candidates
+}
+
 /// Resolve a single path against known roots (pure, offline — no filesystem
 /// access). Returns `None` when the (lexically cleaned) path doesn't match
 /// any known root; a filesystem fallback for unmatched paths lives in
 /// `core::ops::scope::resolve_path`.
+///
+/// Matching is form-tolerant: each normalization candidate of the cleaned
+/// path is tried in turn, and the one that finds a root is what comes back —
+/// so a root stored in the disk's form is reachable from an argument typed
+/// in the other one.
 pub fn resolve_path(path: &Path, roots: &[Root], cwd: &Path) -> Option<String> {
     let cleaned = clean_path(path, cwd);
     let cleaned_str = cleaned.to_string_lossy();
-    if find_containing_root(&cleaned_str, roots).is_some() {
-        Some(cleaned_str.into_owned())
-    } else {
-        None
-    }
+    normalization_candidates(&cleaned_str)
+        .into_iter()
+        .find(|candidate| find_containing_root(candidate, roots).is_some())
 }
 
 /// Resolve multiple paths against known roots (pure, offline).
@@ -347,6 +378,54 @@ mod tests {
         let roots = vec![make_test_root(1, "/a/b")];
         let result = resolve_path(Path::new("/nonexistent/path"), &roots, Path::new("/any"));
         assert!(result.is_none());
+    }
+
+    // ========================================================================
+    // normalization_candidates tests
+    // ========================================================================
+
+    /// A composed `ë` (U+00EB) and its decomposed twin (`e` + U+0308) —
+    /// the two byte-forms of one visible character.
+    const NFC_DIR: &str = "caf\u{e9}";
+    const NFD_DIR: &str = "cafe\u{301}";
+
+    #[test]
+    fn normalization_candidates_ascii_is_a_single_identity_candidate() {
+        assert_eq!(normalization_candidates("/a/b/c"), vec!["/a/b/c"]);
+        assert_eq!(normalization_candidates(""), vec![""]);
+    }
+
+    #[test]
+    fn normalization_candidates_are_deduped_as_given_first() {
+        // An NFC argument: itself, then its NFD twin — two candidates, the
+        // NFC form appearing once even though it is also the NFC candidate.
+        let from_nfc = normalization_candidates(NFC_DIR);
+        assert_eq!(from_nfc, vec![NFC_DIR.to_string(), NFD_DIR.to_string()]);
+
+        // An NFD argument: itself first, then its NFC twin.
+        let from_nfd = normalization_candidates(NFD_DIR);
+        assert_eq!(from_nfd, vec![NFD_DIR.to_string(), NFC_DIR.to_string()]);
+    }
+
+    #[test]
+    fn resolve_path_matches_a_root_stored_in_the_other_form() {
+        let roots = vec![make_test_root(1, &format!("/mnt/{NFD_DIR}"))];
+        // Argument typed in NFC; the root is stored NFD.
+        let resolved = resolve_path(
+            Path::new(&format!("/mnt/{NFC_DIR}/photos")),
+            &roots,
+            Path::new("/any"),
+        );
+        assert_eq!(resolved.unwrap(), format!("/mnt/{NFD_DIR}/photos"));
+
+        // And the other direction.
+        let roots = vec![make_test_root(1, &format!("/mnt/{NFC_DIR}"))];
+        let resolved = resolve_path(
+            Path::new(&format!("/mnt/{NFD_DIR}/photos")),
+            &roots,
+            Path::new("/any"),
+        );
+        assert_eq!(resolved.unwrap(), format!("/mnt/{NFC_DIR}/photos"));
     }
 
     #[test]

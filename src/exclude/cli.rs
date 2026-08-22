@@ -373,14 +373,17 @@ pub fn exclude_duplicates(
         vec![]
     };
     validate_paths_in_roots(&scope_prefixes, &all_roots)?;
-    crate::core::ops::scope::validate_sources_exist(conn, &scope_prefixes, &all_roots)?;
+    let scope_prefixes =
+        crate::core::ops::scope::validate_sources_exist(conn, &scope_prefixes, &all_roots)?;
     let prefer_prefix = resolve_path(prefer_path, &all_roots, &cwd)?;
     validate_paths_in_roots(std::slice::from_ref(&prefer_prefix), &all_roots)?;
-    crate::core::ops::scope::validate_sources_exist(
+    let prefer_prefix = crate::core::ops::scope::validate_sources_exist(
         conn,
         std::slice::from_ref(&prefer_prefix),
         &all_roots,
-    )?;
+    )?
+    .pop()
+    .expect("the gate returns one path per input");
 
     // Plan
     let scopes = classify_all_indexed(conn, &scope_prefixes)?;
@@ -838,6 +841,44 @@ mod tests {
 
     fn setup_test_db() -> RusqliteConnection {
         open_in_memory_for_test()
+    }
+
+    /// `exclude duplicates` names two load-bearing locations: the scope it
+    /// judges and the prefer path holding the copies that survive. Neither
+    /// can be set aside — a dismissal decided against a location Canon knows
+    /// nothing about would be a dismissal decided against nothing. The
+    /// carve-out from the scope boundary's proceed-and-state policy.
+    #[test]
+    fn exclude_duplicates_still_aborts_on_a_sourceless_prefer_path() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_root(&conn, "/archive", "archive", false);
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, size, mtime, partial_hash,
+                                  scanned_at, last_seen_at, device, inode, present)
+             VALUES (?, 'a.jpg', 10, 0, '', 0, 0, 1, 1, 1)",
+            rusqlite::params![root_id],
+        )
+        .unwrap();
+        let mut db = crate::core::repo::Db::from_connection(conn);
+
+        let result = exclude_duplicates(
+            &mut db,
+            Path::new("/archive/nothing-here"),
+            Some(Path::new("/photos")),
+            &[],
+            true,
+            true,
+            "test",
+            &LedgerConfig::default(),
+            true,
+            None,
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no sources known at /archive/nothing-here"),
+            "{err}"
+        );
     }
 
     /// Insert a test root and return its ID

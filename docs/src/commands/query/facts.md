@@ -56,7 +56,12 @@ canon facts --key source.ext --group-by 'source.mtime|year'
 canon facts --key source.ext --by-root --group-by 'content.Make'
 ```
 
-The output begins with a scope header showing what's being queried (`Facts: /path` or `Facts: all roots`).
+The output begins with a scope header showing what's being queried (`Facts: /path` or `Facts: all roots`). It is printed whether or not anything matched, so a report of nothing says where Canon looked:
+
+```
+Facts: /mnt/old-drive/photos
+No sources match the given filters.
+```
 
 Example output:
 ```

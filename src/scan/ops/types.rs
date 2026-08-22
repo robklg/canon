@@ -380,6 +380,11 @@ pub struct MarkMissingPathResult {
     pub root_id: i64,
     /// Absolute path of that root (for source-local receipt placement).
     pub root_path: String,
+    /// The path's remainder below its root — the folder the deletion was
+    /// aimed at. Empty when the whole root was named. The caller records it
+    /// as the decision's scope, so the trail says where this happened rather
+    /// than falling back to `global`.
+    pub rel_prefix: String,
     /// How many present sources were flipped to absent.
     pub missing_count: u64,
     /// Deletion-receipt items captured before the flip. Empty when receipt

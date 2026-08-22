@@ -58,6 +58,66 @@ canon survey --global
 | `--verbose` | Show all locations (summary) or all paths per location (detail views). |
 | `-0` | Null-delimited output for `--detail unique`, `--detail overlap`, or `--detail residual`. |
 
+## Surveying an archive location
+
+Survey reads source-side selections. Archive content is its outward side,
+always visible in the archive sections, so an archive location has no
+selection of its own to survey. A scope that lies entirely inside archive
+roots is stated rather than surveyed, and the command exits non-zero:
+
+```
+Survey: /archive/media/2014-holiday
+This place is inside the archive root /archive.
+Survey reads source-side selections; archive content is its outward
+side, always visible — nothing here has a source-side selection to survey.
+For what stands here and where it came from: canon trail
+For a listing of what's here: canon ls
+```
+
+When several archive places are named, each root is listed with the places
+asked for under it, and the frame is still stated once:
+
+```
+Survey: /archive/media, /archive2/old
+inside archive root /archive: /archive/media
+inside archive root /archive2: /archive2/old
+Survey reads source-side selections; archive content is its outward
+side, always visible — nothing here has a source-side selection to survey.
+For what stands here and where it came from: canon trail
+For a listing of what's here: canon ls
+```
+
+Under `-0` with a machine-rendering detail view the statement goes to stderr,
+leaving the requested stream on stdout empty; the non-zero exit still carries
+the refusal.
+
+This is decided from the roles of the containing roots, not from an empty
+result: a source-side scope that genuinely selects nothing still shows the
+ordinary summary with zero counts. The statement never lists what stands in
+the archive location.
+
+A scope that is partly source-side proceeds on the source side and names what
+it set aside, one line per archive root. The reason is stated once for the view,
+however many roots the places fall under:
+
+```
+Survey: /mnt/old-drive/exports
+set aside — inside archive root /archive: /archive/media
+set aside — inside archive root /archive2: /archive2/old
+(survey reads source-side selections; archive content is its outward side, always visible; for these places see canon trail or canon ls)
+  517 sources here (0 unhashed, 517 hashed)
+```
+
+`--include archived` is refused for the same reason:
+
+```
+Error: --include archived is not valid for survey.
+Survey reads source-side selections; archive content is its outward
+side, always visible.
+For what stands in an archive location: canon trail
+For a listing of what's there: canon ls
+```
+
 ## Reading the output
 
 ### Summary view (default)

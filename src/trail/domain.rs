@@ -2,5 +2,6 @@
 //! I/O anywhere in this layer.
 
 pub(super) mod composition;
+pub(super) mod place;
 pub(super) mod placement;
 pub(super) mod timeline;

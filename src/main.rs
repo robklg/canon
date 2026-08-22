@@ -937,7 +937,7 @@ fn main() -> Result<()> {
             if resolved.auto_include_archived {
                 include.archived = true;
             }
-            scope::print_list_scope(&resolved);
+            scope::print_list_scope(&mut std::io::stderr(), &resolved);
             worklist::run(
                 &mut db,
                 &resolved.prefixes,
@@ -980,7 +980,7 @@ fn main() -> Result<()> {
 
             let use_relative = resolved.from_cwd;
 
-            scope::print_list_scope(&resolved);
+            scope::print_list_scope(&mut std::io::stderr(), &resolved);
 
             if duplicates {
                 ls::show_duplicates(
@@ -1034,6 +1034,7 @@ fn main() -> Result<()> {
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved =
                         core::ops::scope::resolve_scope(db.conn(), &paths, false, &all_roots)?;
+                    scope::print_scope_set_asides(&resolved);
                     // Same visibility a read at this scope would get: the
                     // archive-CWD auto-enable, and nothing else. Deletion
                     // acts on what the matching `ls` would have listed.
@@ -1165,7 +1166,13 @@ fn main() -> Result<()> {
             // refused, and the archive-CWD auto-enable other commands honor
             // does not apply here.
             if include.includes_archived() {
-                bail!("--include archived is not valid for survey");
+                bail!(
+                    "--include archived is not valid for survey.\n\
+                     Survey reads source-side selections; archive content is its outward\n\
+                     side, always visible.\n\
+                     For what stands in an archive location: canon trail\n\
+                     For a listing of what's there: canon ls"
+                );
             }
             let all_roots = core::repo::root::fetch_all(db.conn())?;
             let resolved = core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
@@ -1182,7 +1189,15 @@ fn main() -> Result<()> {
                 verbose,
                 scope: resolved,
             };
-            survey::run(&mut db, &scope_prefixes, &expanded, &options)?;
+            // A refused frame is a well-formed question survey is the wrong
+            // instrument for, not an error: non-zero, no `Error:` prefix —
+            // the shape compare uses for a non-identical result.
+            if matches!(
+                survey::run(&mut db, &scope_prefixes, &expanded, &options)?,
+                survey::SurveyExit::FrameRefused
+            ) {
+                std::process::exit(1);
+            }
         }
         Commands::Sweep { limit, all } => sweep::run(&mut db, limit, all)?,
         Commands::Compare {
@@ -1237,6 +1252,7 @@ fn main() -> Result<()> {
                 let all_roots = core::repo::root::fetch_all(db.conn())?;
                 let resolved =
                     core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+                scope::print_scope_set_asides(&resolved);
                 let options = archive::GenerateOptions {
                     force,
                     allow_archived: allow.contains(&ClusterAllow::Archived),
@@ -1366,6 +1382,7 @@ fn main() -> Result<()> {
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved =
                         core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+                    scope::print_scope_set_asides(&resolved);
                     exclude::set(
                         &mut db,
                         &resolved.prefixes,
@@ -1391,6 +1408,7 @@ fn main() -> Result<()> {
                 let all_roots = core::repo::root::fetch_all(db.conn())?;
                 let resolved =
                     core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+                scope::print_scope_set_asides(&resolved);
                 exclude::clear(
                     &mut db,
                     &resolved.prefixes,
@@ -1464,6 +1482,7 @@ fn main() -> Result<()> {
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved =
                         core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+                    scope::print_scope_set_asides(&resolved);
                     if resolved.prefixes.is_empty() && filters.is_empty() {
                         anyhow::bail!("Provide a hash (--hash), file path, or filters (--where)");
                     }
@@ -1532,20 +1551,29 @@ fn main() -> Result<()> {
             jsonl,
         } => match action {
             Some(TrailAction::Show { id }) => trail::run_show(&mut db, id)?,
-            None => trail::run(
-                &mut db,
-                trail::TrailArgs {
-                    paths,
-                    global,
-                    today,
-                    since,
-                    on,
-                    limit,
-                    all,
-                    no_notes,
-                    jsonl,
-                },
-            )?,
+            None => {
+                // A place Canon has never known is a well-formed question
+                // answered, not an error: non-zero, no `Error:` prefix.
+                if matches!(
+                    trail::run(
+                        &mut db,
+                        trail::TrailArgs {
+                            paths,
+                            global,
+                            today,
+                            since,
+                            on,
+                            limit,
+                            all,
+                            no_notes,
+                            jsonl,
+                        },
+                    )?,
+                    trail::TrailExit::PlaceUnknown
+                ) {
+                    std::process::exit(1);
+                }
+            }
         },
         Commands::Roots {
             action,

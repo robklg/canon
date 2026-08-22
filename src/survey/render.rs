@@ -23,8 +23,105 @@ const DETAIL_SHOW_ALL_THRESHOLD: usize = 20;
 const DEFAULT_LOCATION_CAP: usize = 10;
 const NOTE_DISPLAY_CAP: usize = 5;
 
+/// Survey's frame, in the one sentence every statement about it uses.
+const FRAME: &str = "Survey reads source-side selections; archive content is its outward\n\
+                     side, always visible";
+
+/// The whole asked-for scope lies inside the archive: state the frame and
+/// the way back, rather than rendering an empty result for a place that is
+/// full. Never lists what stands there — that would answer the question
+/// survey has just declined.
+pub(super) fn print_archive_scope_statement(
+    header: &HeaderScope<'_>,
+    roots: &[(String, Vec<String>)],
+    machine_stream: bool,
+) {
+    if machine_stream {
+        write_archive_scope_statement(&mut std::io::stderr().lock(), header, roots);
+    } else {
+        write_archive_scope_statement(&mut std::io::stdout().lock(), header, roots);
+    }
+}
+
+fn write_archive_scope_statement(
+    handle: &mut impl std::io::Write,
+    header: &HeaderScope<'_>,
+    roots: &[(String, Vec<String>)],
+) {
+    crate::scope::print_report_scope(handle, "Survey", header.scope);
+
+    // One place under one root is what the scope line above already named,
+    // so the sentence just says where it sits. Anything more says which
+    // places sit under which root — a singular "This place" repeated once
+    // per root would be reporting several places in the deictic for one.
+    match roots {
+        [(root_path, prefixes)] if prefixes.len() == 1 => {
+            let _ = writeln!(handle, "This place is inside the archive root {root_path}.");
+        }
+        _ => {
+            for (root_path, prefixes) in roots {
+                let _ = writeln!(
+                    handle,
+                    "inside archive root {root_path}: {}",
+                    prefixes.join(", ")
+                );
+            }
+        }
+    }
+    let _ = writeln!(
+        handle,
+        "{FRAME} — nothing here has a source-side selection to survey."
+    );
+    let _ = writeln!(
+        handle,
+        "For what stands here and where it came from: canon trail"
+    );
+    let _ = writeln!(handle, "For a listing of what's here: canon ls");
+}
+
+/// A mixed scope proceeds source-side; the archive-side places it could not
+/// answer for are named directly under the scope line, one line per archive
+/// root, and the frame is stated **once for the view** rather than repeated
+/// per root — the places multiply, the reason does not.
+fn write_archive_side_set_asides(
+    handle: &mut impl std::io::Write,
+    roots: &[(String, Vec<String>)],
+) {
+    if roots.is_empty() {
+        return;
+    }
+    for (root_path, prefixes) in roots {
+        let _ = writeln!(
+            handle,
+            "set aside — inside archive root {root_path}: {}",
+            prefixes.join(", ")
+        );
+    }
+    let _ = writeln!(
+        handle,
+        "({}; for these places see canon trail or canon ls)",
+        FRAME.replace('\n', " ").to_lowercase()
+    );
+}
+
+/// What the header states about where the survey looked: the scope it
+/// surveyed, and the archive-side places it set aside. The two always travel
+/// together — the second is what keeps the first from overstating the view.
+pub(super) struct HeaderScope<'a> {
+    pub scope: &'a ResolvedScope,
+    pub archive_set_aside: &'a [(String, Vec<String>)],
+}
+
+/// State both kinds of set-aside on stderr, for a detail view that renders a
+/// bare stream and carries no header — the stream on stdout stays exactly
+/// what was asked for, and what was skipped is still said.
+pub(super) fn eprint_set_asides(header: &HeaderScope<'_>) {
+    crate::scope::eprint_scope_set_asides(header.scope);
+    write_archive_side_set_asides(&mut std::io::stderr().lock(), header.archive_set_aside);
+}
+
 pub(super) fn print_survey_header(
-    scope: &ResolvedScope,
+    header: &HeaderScope<'_>,
     original_filters: &[String],
     total: usize,
     unhashed: usize,
@@ -33,7 +130,8 @@ pub(super) fn print_survey_header(
     unique_count: Option<usize>,
 ) {
     let mut handle = std::io::stdout().lock();
-    crate::scope::print_report_scope(&mut handle, "Survey", scope);
+    crate::scope::print_report_scope(&mut handle, "Survey", header.scope);
+    write_archive_side_set_asides(&mut handle, header.archive_set_aside);
     drop(handle);
 
     if !original_filters.is_empty() {

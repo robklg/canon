@@ -36,6 +36,17 @@ canon exclude clear --yes
 
 When excluding or clearing more than one source, a confirmation prompt shows the count, root spread, and (for `exclude set`) archive coverage before proceeding. Use `--yes` to skip the prompt, or `--dry-run` to preview without executing.
 
+Given several paths, one that holds no known sources (an empty folder matched by a shell glob, say) is skipped and named before the ceremony, and the rest proceed:
+
+```
+$ canon exclude set /photos/2011 /photos/2012 --dry-run
+no sources known at /photos/2012 — skipped
+Would exclude 1 sources:
+  /photos/2011/a.jpg
+```
+
+The line appears before any confirmation, under `--yes` and `--dry-run` alike. A skipped path never enters the decision record. See [Path scope](../index.md#common-options) for the rule in full.
+
 ## canon exclude duplicates
 
 Automatically exclude duplicate files while keeping copies in a preferred location.

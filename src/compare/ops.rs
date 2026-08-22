@@ -55,7 +55,12 @@ pub fn run_compare(
     let prefix_a = resolve_path(path_a, &all_roots, &cwd)?;
     let prefix_b = resolve_path(path_b, &all_roots, &cwd)?;
 
-    validate_sources_exist(conn, &[prefix_a.clone(), prefix_b.clone()], &all_roots)?;
+    // The gate hands back the byte-form the index stores, so both sides
+    // select the rows they name.
+    let stored = validate_sources_exist(conn, &[prefix_a, prefix_b], &all_roots)?;
+    let [prefix_a, prefix_b] = stored
+        .try_into()
+        .expect("the gate returns one path per input");
 
     // The two selection calls share one connection and must stay
     // sequential — select_sources takes &mut Connection, so side A must
@@ -171,6 +176,28 @@ mod tests {
 
     fn setup() -> Connection {
         setup_test_db()
+    }
+
+    /// Compare's two sides are both load-bearing: a missing side does not
+    /// narrow the question, it removes it. The carve-out from the scope
+    /// boundary's proceed-and-state policy — the abort stays.
+    #[test]
+    fn compare_still_aborts_on_a_sourceless_side() {
+        let mut conn = setup();
+        let root_a = insert_root(&conn, "/a", "source", false);
+        insert_root(&conn, "/b", "archive", false);
+        let obj = insert_object(&conn, "hash1", false);
+        insert_source_with_size(&conn, root_a, "file.bin", Some(obj), 100);
+
+        let result = run_compare(
+            &mut conn,
+            Path::new("/a"),
+            Path::new("/b/nothing-here"),
+            &[],
+            &IncludeSet::default(),
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no sources known at /b/nothing-here"), "{err}");
     }
 
     #[test]

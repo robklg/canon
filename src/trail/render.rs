@@ -836,6 +836,7 @@ mod tests {
     fn relativize_against_single_prefix() {
         let scoped = ResolvedScope {
             prefixes: vec!["/photos".to_string()],
+            set_aside: Vec::new(),
             from_cwd: true,
             auto_include_archived: false,
         };
@@ -847,6 +848,7 @@ mod tests {
 
         let global = ResolvedScope {
             prefixes: Vec::new(),
+            set_aside: Vec::new(),
             from_cwd: false,
             auto_include_archived: false,
         };
@@ -860,6 +862,7 @@ mod tests {
         // must be what comes back, or the narration falls out of alignment.
         let global = ResolvedScope {
             prefixes: Vec::new(),
+            set_aside: Vec::new(),
             from_cwd: false,
             auto_include_archived: false,
         };
@@ -885,6 +888,7 @@ mod tests {
     fn event_cells_returns_one_cell_per_extraction_row() {
         let global = ResolvedScope {
             prefixes: Vec::new(),
+            set_aside: Vec::new(),
             from_cwd: false,
             auto_include_archived: false,
         };
@@ -917,6 +921,7 @@ mod tests {
         // location — the mirror of the extraction-aspect cell.
         let scoped = ResolvedScope {
             prefixes: vec!["/Archive/Media".to_string()],
+            set_aside: Vec::new(),
             from_cwd: true,
             auto_include_archived: false,
         };
@@ -932,6 +937,7 @@ mod tests {
     fn event_cells_arrival_at_the_viewed_prefix_itself_renders_dot() {
         let scoped = ResolvedScope {
             prefixes: vec!["/Archive/Media/2016/Italy".to_string()],
+            set_aside: Vec::new(),
             from_cwd: true,
             auto_include_archived: false,
         };
@@ -950,6 +956,7 @@ mod tests {
         // arrival cell.
         let scoped = ResolvedScope {
             prefixes: vec!["/Volumes/old-laptop".to_string()],
+            set_aside: Vec::new(),
             from_cwd: true,
             auto_include_archived: false,
         };
@@ -972,6 +979,7 @@ mod tests {
         // precision-readiness step for finer rows.)
         let global = ResolvedScope {
             prefixes: Vec::new(),
+            set_aside: Vec::new(),
             from_cwd: false,
             auto_include_archived: false,
         };
@@ -999,6 +1007,7 @@ mod tests {
         // drawn-from location and the arrival's destination.
         let scoped = ResolvedScope {
             prefixes: vec!["/Volumes/old-laptop".to_string()],
+            set_aside: Vec::new(),
             from_cwd: true,
             auto_include_archived: false,
         };

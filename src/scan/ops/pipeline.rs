@@ -986,6 +986,7 @@ pub fn mark_missing_path(
     Ok(MarkMissingPathResult {
         root_id,
         root_path,
+        rel_prefix,
         missing_count,
         deleted_items,
     })
@@ -3819,6 +3820,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(work_present, 2);
+    }
+
+    #[test]
+    fn mark_missing_path_returns_the_rel_prefix_it_resolved() {
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        repo::insert_test_source(&conn, root_id, "vacation/img.jpg", 1, 200, 1000, 1000);
+
+        let result = mark_missing_path(
+            &conn,
+            Path::new("/photos/vacation"),
+            &all_roots(&conn),
+            Path::new("/"),
+            9999,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.rel_prefix, "vacation");
+        assert_eq!(result.root_path, "/photos");
+
+        // The whole root named: no remainder, and the scope is the root.
+        let whole = mark_missing_path(
+            &conn,
+            Path::new("/photos"),
+            &all_roots(&conn),
+            Path::new("/"),
+            9999,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(whole.rel_prefix, "");
     }
 
     #[test]

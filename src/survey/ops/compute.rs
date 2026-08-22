@@ -43,6 +43,31 @@ pub enum SurveyOutcome {
     Empty,
     /// All unhashed — display header and hashing guidance.
     AllUnhashed { total_count: usize },
+    /// The whole asked-for scope lies inside archive roots, so survey has no
+    /// selection to make there. Decided from the roles of the containing
+    /// roots at resolution — never inferred from a count, which is why this
+    /// is constructed before any selection exists. A source-side scope that
+    /// genuinely selects nothing is still [`Empty`](Self::Empty).
+    ArchiveScope(ArchiveScopeStatement),
+}
+
+/// What the archive-scope statement names: each archive root once, with the
+/// asked-for prefixes that fell under it.
+pub struct ArchiveScopeStatement {
+    pub roots: Vec<(String, Vec<String>)>,
+}
+
+/// Group `(prefix, archive-root path)` pairs so each root is named once,
+/// in the order the roots were first asked about.
+pub fn group_by_archive_root(archive_side: &[(String, String)]) -> Vec<(String, Vec<String>)> {
+    let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
+    for (prefix, root_path) in archive_side {
+        match grouped.iter_mut().find(|(r, _)| r == root_path) {
+            Some((_, prefixes)) => prefixes.push(prefix.clone()),
+            None => grouped.push((root_path.clone(), vec![prefix.clone()])),
+        }
+    }
+    grouped
 }
 
 pub struct SurveyResult {

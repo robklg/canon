@@ -58,6 +58,41 @@ impl RootSpec {
 /// # Returns
 /// Some((root_id, root_path, role, relative_path)) if the path is under a root,
 /// None otherwise.
+/// How a set of resolved prefixes divides by the role of the root that
+/// contains each one.
+///
+/// Source-side and archive-side are different questions, not different
+/// amounts of the same one, so a command whose frame reads only one side
+/// can say which of the asked-for places it cannot answer for.
+#[derive(Debug, Default)]
+pub struct RolePartition {
+    /// Prefixes under a source root, or under no known root at all.
+    pub source_side: Vec<String>,
+    /// `(prefix, containing archive-root path)` — the root path is carried so
+    /// a statement can name each archive root once rather than repeating it
+    /// per prefix.
+    pub archive_side: Vec<(String, String)>,
+}
+
+/// Split resolved prefixes by the role of their containing root.
+///
+/// Pure: role attribution is derivable from `(prefixes, roots)`, so it is
+/// computed where it is needed rather than carried as state. Suspension is
+/// not consulted — a suspended root's role is still its role, and what a
+/// closed door permits is the suspension law's own question.
+pub fn partition_prefixes_by_role(prefixes: &[String], roots: &[Root]) -> RolePartition {
+    let mut partition = RolePartition::default();
+    for prefix in prefixes {
+        match find_containing_root(prefix, roots) {
+            Some((_, root_path, role, _)) if role == "archive" => {
+                partition.archive_side.push((prefix.clone(), root_path));
+            }
+            _ => partition.source_side.push(prefix.clone()),
+        }
+    }
+    partition
+}
+
 pub fn find_containing_root(
     canonical_path: &str,
     roots: &[Root],

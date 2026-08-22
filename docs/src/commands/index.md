@@ -12,6 +12,39 @@ canon facts /path/to/photos
 canon coverage /path/to/photos
 ```
 
+A path that is not under any known root is an error. A path that is under a
+known root but holds no known sources depends on how many paths you gave:
+
+| Paths given | Behavior |
+|---|---|
+| One, no known sources | Error: `no sources known at <path>` |
+| Several, at least one with sources | The others are skipped and named; the command runs on the rest and exits 0 |
+| Several, none with sources | Error naming every path |
+
+A skipped path is always stated, never silently dropped:
+
+```
+no sources known at /path/to/photos/2012 — skipped
+```
+
+Where the line appears follows the command's own scope channel: stdout for
+report commands (`facts`, `coverage`, `survey`), stderr for list commands
+(`ls`, `worklist`), and in the ceremony before any confirmation for commands
+that change state (`exclude set/clear/set-object`, `cluster generate`,
+`facts delete`) — including under `--yes` and `--dry-run`. Display modes that
+render a bare stream and carry no scope header of their own
+(`coverage --compact`, `survey --detail unique`) state it on stderr, so what
+is on stdout stays exactly what was asked for. A skipped path never appears
+in the decision record.
+
+Four commands never skip, because a location they name is load-bearing to the
+question rather than one more place to look: both sides of `compare`, the
+scope and `--prefer` paths of `exclude duplicates`, and `survey --other`.
+These error as a single path does.
+
+Paths match the index whichever Unicode normalization form you type. Canon
+stores the form the disk gave it and matches your argument against that.
+
 **Filters**: Select sources using `--where` with boolean expressions:
 
 ```bash

@@ -44,6 +44,32 @@ impl DetailMode {
     }
 }
 
+/// The scope the header should name when part of what was asked lay on the
+/// archive side: the source side alone, since naming the rest would claim a
+/// view survey did not take.
+///
+/// Everything else on the resolved scope travels across untouched — above
+/// all its **set-asides**. Narrowing *which places were surveyed* must never
+/// drop *what was skipped*: the two are separate answers to separate
+/// questions, and a scope that happened to name an archive place would
+/// otherwise swallow the sourceless one beside it. Returns `None` when there
+/// is nothing to narrow, so the caller keeps the resolved scope as it stands.
+fn narrowed_header_scope(
+    resolved: &ResolvedScope,
+    source_side_prefixes: Vec<String>,
+    has_archive_side: bool,
+) -> Option<ResolvedScope> {
+    if !has_archive_side {
+        return None;
+    }
+    Some(ResolvedScope {
+        prefixes: source_side_prefixes,
+        set_aside: resolved.set_aside.clone(),
+        from_cwd: resolved.from_cwd,
+        auto_include_archived: resolved.auto_include_archived,
+    })
+}
+
 /// Whether an early-exit outcome (empty or all-unhashed selection) must
 /// suppress its human header: machine mode requested for a detail mode
 /// that renders a machine stream.
@@ -75,12 +101,24 @@ pub struct SurveyOptions {
     pub scope: ResolvedScope,
 }
 
+/// How a survey invocation ended, for the interface to turn into an exit
+/// code. `FrameRefused` is not an error: the question was well-formed, and
+/// survey answered it by saying it is the wrong instrument for this place —
+/// so it carries a non-zero exit without an `Error:` prefix, the shape
+/// `compare` uses for a non-identical result.
+#[must_use]
+#[derive(Debug, PartialEq, Eq)]
+pub enum SurveyExit {
+    Reported,
+    FrameRefused,
+}
+
 pub fn run(
     db: &mut repo::Db,
     scope_prefixes: &[String],
     filter_strs: &[String],
     options: &SurveyOptions,
-) -> Result<()> {
+) -> Result<SurveyExit> {
     // Validate --detail complement requires --where
     if options.detail == Some(DetailMode::Complement) && filter_strs.is_empty() {
         bail!("`--detail complement` requires `--where` filters to define matching content.");
@@ -119,22 +157,38 @@ pub fn run(
     let SurveyRun {
         outcome,
         note_context,
+        archive_side_set_aside,
+        source_side_prefixes,
         location_note_counts,
     } = run_survey(conn, scope_prefixes, filter_strs, &orchestration, &params)?;
 
+    let scope = narrowed_header_scope(
+        &options.scope,
+        source_side_prefixes,
+        !archive_side_set_aside.is_empty(),
+    );
+    let header = render::HeaderScope {
+        scope: scope.as_ref().unwrap_or(&options.scope),
+        archive_set_aside: &archive_side_set_aside,
+    };
+
     match outcome {
+        SurveyOutcome::ArchiveScope(statement) => {
+            // A refusal is a human statement, and stdout belongs to the
+            // machine stream whenever one was asked for: the exit code
+            // carries the refusal there, and the words go to stderr rather
+            // than arriving as one large bogus argument in an `xargs -0`.
+            render::print_archive_scope_statement(
+                &header,
+                &statement.roots,
+                suppress_early_exit_header(options.null_delim, options.detail),
+            );
+            return Ok(SurveyExit::FrameRefused);
+        }
         SurveyOutcome::Empty => {
             let suppress = suppress_early_exit_header(options.null_delim, options.detail);
             if !suppress {
-                render::print_survey_header(
-                    &options.scope,
-                    &options.original_filters,
-                    0,
-                    0,
-                    0,
-                    0,
-                    None,
-                );
+                render::print_survey_header(&header, &options.original_filters, 0, 0, 0, 0, None);
                 if let Some((ref ctx, ref scope_rel)) = note_context {
                     render::print_notes_section(ctx, scope_rel, options.verbose);
                 }
@@ -144,7 +198,7 @@ pub fn run(
             let suppress = suppress_early_exit_header(options.null_delim, options.detail);
             if !suppress {
                 render::print_survey_header(
-                    &options.scope,
+                    &header,
                     &options.original_filters,
                     total_count,
                     total_count,
@@ -168,7 +222,7 @@ pub fn run(
                 Some(DetailMode::Archived) => {
                     if !options.null_delim {
                         render::print_survey_header(
-                            &options.scope,
+                            &header,
                             &options.original_filters,
                             result.total_count,
                             result.unhashed_count,
@@ -196,7 +250,7 @@ pub fn run(
                 }
                 Some(DetailMode::Complement) => {
                     render::print_survey_header(
-                        &options.scope,
+                        &header,
                         &options.original_filters,
                         result.total_count,
                         result.unhashed_count,
@@ -218,7 +272,7 @@ pub fn run(
                 Some(DetailMode::Overlap) => {
                     if !options.null_delim {
                         render::print_survey_header(
-                            &options.scope,
+                            &header,
                             &options.original_filters,
                             result.total_count,
                             result.unhashed_count,
@@ -248,7 +302,7 @@ pub fn run(
                 Some(DetailMode::Residual) => {
                     if !options.null_delim {
                         render::print_survey_header(
-                            &options.scope,
+                            &header,
                             &options.original_filters,
                             result.total_count,
                             result.unhashed_count,
@@ -274,6 +328,10 @@ pub fn run(
                     );
                 }
                 Some(DetailMode::Unique) => {
+                    // The one detail view with no header of its own: its
+                    // stdout is a bare path stream, so the set-asides are
+                    // said on stderr rather than not at all.
+                    render::eprint_set_asides(&header);
                     let cwd = if options.null_delim {
                         None
                     } else {
@@ -283,7 +341,7 @@ pub fn run(
                 }
                 None => {
                     render::print_survey_header(
-                        &options.scope,
+                        &header,
                         &options.original_filters,
                         result.total_count,
                         result.unhashed_count,
@@ -329,7 +387,7 @@ pub fn run(
         }
     }
 
-    Ok(())
+    Ok(SurveyExit::Reported)
 }
 
 // =============================================================================
@@ -355,6 +413,7 @@ mod tests {
             verbose: false,
             scope: ResolvedScope {
                 prefixes: vec!["/mnt/drive".to_string()],
+                set_aside: Vec::new(),
                 from_cwd: false,
                 auto_include_archived: false,
             },
@@ -389,6 +448,54 @@ mod tests {
             Some(DetailMode::Archived)
         ));
         assert!(!suppress_early_exit_header(true, None));
+    }
+
+    /// Narrowing the header to the surveyed side must not lose the boundary's
+    /// own set-asides — a mixed scope names both, or it under-reports what it
+    /// was asked to do.
+    #[test]
+    fn narrowing_the_header_scope_keeps_the_boundary_set_asides() {
+        let resolved = ResolvedScope {
+            prefixes: vec!["/photos/2011".to_string(), "/archive/media".to_string()],
+            set_aside: vec!["/photos/empty".to_string()],
+            from_cwd: false,
+            auto_include_archived: true,
+        };
+
+        let narrowed =
+            narrowed_header_scope(&resolved, vec!["/photos/2011".to_string()], true).unwrap();
+        assert_eq!(narrowed.prefixes, vec!["/photos/2011".to_string()]);
+        assert_eq!(narrowed.set_aside, vec!["/photos/empty".to_string()]);
+        assert!(narrowed.auto_include_archived);
+
+        // Nothing on the archive side: nothing to narrow, and the caller
+        // keeps the resolved scope untouched.
+        assert!(
+            narrowed_header_scope(&resolved, vec!["/photos/2011".to_string()], false).is_none()
+        );
+    }
+
+    /// The frame refusal reaches the interface as a value, not an error —
+    /// so `main.rs` can give it a non-zero exit with no `Error:` prefix.
+    #[test]
+    fn cli_run_returns_frame_refused_for_an_archive_scope() {
+        let conn = open_in_memory_for_test();
+        let archive = insert_root(&conn, "/archive", "archive", false);
+        let obj = insert_object(&conn, "hash_001", false);
+        insert_source(&conn, archive, "media/a.jpg", Some(obj));
+
+        let options = SurveyOptions {
+            scope: ResolvedScope {
+                prefixes: vec!["/archive/media".to_string()],
+                set_aside: Vec::new(),
+                from_cwd: false,
+                auto_include_archived: true,
+            },
+            ..test_options()
+        };
+        let mut db = repo::Db::from_connection(conn);
+        let exit = run(&mut db, &["/archive/media".to_string()], &[], &options).unwrap();
+        assert_eq!(exit, SurveyExit::FrameRefused);
     }
 
     #[test]

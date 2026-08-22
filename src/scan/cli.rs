@@ -7,7 +7,7 @@ use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
-use crate::core::ops::scope::resolve_root_path_any;
+use crate::core::ops::scope::{cwd_for, resolve_root_path_any};
 use crate::core::repo::{self, Connection, Db};
 use crate::progress::Progress;
 use crate::scan::ops::hash::HashProgress;
@@ -119,15 +119,23 @@ pub fn run(
         paths.to_vec()
     };
 
-    // Canonicalize the scan paths so they can be matched to their roots. A path
-    // that won't canonicalize, or that isn't under a known root yet (a `--add`
-    // root doesn't exist at start()), simply produces no DecisionScope — the
-    // type makes a stray "." unrecordable, and record_scopes() captures the new
-    // root at completion.
+    // Canonicalize the scan paths so they can be matched to their roots. A
+    // path the disk can no longer answer for — the `--missing` case, whose
+    // whole premise is that the folder is gone — still resolves lexically
+    // against the roots Canon already knows, so the decision is scoped from
+    // the start rather than only at completion. A path that isn't under a
+    // known root at all (a `--add` root doesn't exist at start()) simply
+    // produces no DecisionScope — the type makes a stray "." unrecordable,
+    // and record_scopes() captures the new root at completion.
     let scan_scope: Vec<String> = paths_to_scan
         .iter()
-        .filter_map(|p| std::fs::canonicalize(p).ok())
-        .map(|c| c.to_string_lossy().to_string())
+        .filter_map(|p| match std::fs::canonicalize(p) {
+            Ok(c) => Some(c.to_string_lossy().into_owned()),
+            Err(_) => {
+                let cwd = cwd_for(std::slice::from_ref(&p.as_path())).ok()?;
+                crate::core::domain::path::resolve_path(p, &roots, &cwd)
+            }
+        })
         .collect();
     let decision = DecisionParams {
         command: DecisionCommand::Scan,
@@ -142,190 +150,237 @@ pub fn run(
     };
     let mut recorder = DecisionRecorder::start(conn, &decision, None);
 
-    let mut total_stats = ScanStats::default();
-    let mut all_files_to_hash: Vec<FileToHash> = Vec::new();
-    // Deletions grouped by the root that lost them — one source-local receipt each.
-    let mut deleted_by_root: Vec<(i64, String, Vec<DeletionReceiptItem>)> = Vec::new();
-    // Resolved scope of each walked path, recorded at completion so a --add scan's
-    // freshly created root lands in the durable scope index (it didn't exist at start()).
-    let mut scope_pairs: Vec<DecisionScope> = Vec::new();
+    // Everything that can fail after the decision row exists runs inside this
+    // closure, so there is exactly one exit for a failure. Two-phase recording
+    // exists to bracket work that cannot be rolled back; a `started` row left
+    // behind by an early return would read as a scan killed mid-walk, which is
+    // a different and more alarming claim than the error that actually
+    // occurred.
+    let body = (|| -> Result<(ScanStats, String)> {
+        let mut total_stats = ScanStats::default();
+        let mut all_files_to_hash: Vec<FileToHash> = Vec::new();
+        // Deletions grouped by the root that lost them — one source-local receipt each.
+        let mut deleted_by_root: Vec<(i64, String, Vec<DeletionReceiptItem>)> = Vec::new();
+        // Resolved scope of each walked path, recorded at completion so a --add scan's
+        // freshly created root lands in the durable scope index (it didn't exist at start()).
+        let mut scope_pairs: Vec<DecisionScope> = Vec::new();
 
-    for path in &paths_to_scan {
-        let canonical = match fs::canonicalize(path) {
-            Ok(p) => p,
-            Err(e) => {
-                // Reaching this arm is the condition for --missing: the path
-                // could not be resolved, so it cannot be walked. Handling
-                // --missing anywhere else would mark live files deleted.
-                if missing {
-                    // The folder is gone, so it can't be walked — mark its sources
-                    // deleted directly, with the same stamp + source-local receipt
-                    // the sweep produces.
-                    let cwd = std::env::current_dir()?;
-                    let result = mark_missing_path(
-                        conn,
-                        path,
-                        &roots,
-                        &cwd,
-                        now,
-                        recorder.decision_id(),
-                        decision.receipt_enabled,
-                    )?;
-                    if result.missing_count == 0 {
-                        eprintln!("No present sources found under {}", path.display());
-                    } else {
-                        total_stats.missing += result.missing_count;
-                        if !result.deleted_items.is_empty() {
-                            deleted_by_root.push((
-                                result.root_id,
-                                result.root_path,
-                                result.deleted_items,
-                            ));
+        for path in &paths_to_scan {
+            let canonical = match fs::canonicalize(path) {
+                Ok(p) => p,
+                Err(e) => {
+                    // Reaching this arm is the condition for --missing: the path
+                    // could not be resolved, so it cannot be walked. Handling
+                    // --missing anywhere else would mark live files deleted.
+                    if missing {
+                        // The folder is gone, so it can't be walked — mark its sources
+                        // deleted directly, with the same stamp + source-local receipt
+                        // the sweep produces.
+                        let cwd = cwd_for(std::slice::from_ref(&path.as_path()))?;
+                        let result = mark_missing_path(
+                            conn,
+                            path,
+                            &roots,
+                            &cwd,
+                            now,
+                            recorder.decision_id(),
+                            decision.receipt_enabled,
+                        )?;
+                        // The folder this deletion was aimed at is the decision's
+                        // scope. Without it the record would say `global` — a
+                        // whole-universe claim for an act on one folder.
+                        scope_pairs.push(DecisionScope::new(
+                            result.root_id,
+                            result.root_path.clone(),
+                            result.rel_prefix.clone(),
+                        ));
+                        if result.missing_count == 0 {
+                            eprintln!("No present sources found under {}", path.display());
+                        } else {
+                            total_stats.missing += result.missing_count;
+                            if !result.deleted_items.is_empty() {
+                                deleted_by_root.push((
+                                    result.root_id,
+                                    result.root_path,
+                                    result.deleted_items,
+                                ));
+                            }
                         }
+                        continue;
                     }
+                    // A relative path against a working directory that no
+                    // longer exists fails as "no such file", which names the
+                    // wrong thing: the path may well be there, and only the
+                    // place it was to be resolved from is gone. Ask for the
+                    // directory this path actually needs and let its refusal
+                    // speak instead — a scan that could resolve nothing must
+                    // not report a walk of nothing.
+                    cwd_for(std::slice::from_ref(&path.as_path()))?;
+                    eprintln!("Warning: skipping {}: {}", path.display(), e);
                     continue;
                 }
-                eprintln!("Warning: skipping {}: {}", path.display(), e);
-                continue;
-            }
-        };
+            };
 
-        // Check if path is inside an existing root (including suspended)
-        let (root_id, root_path, scan_prefix, _root_role) = match resolve_root_path_any(
-            &roots, &canonical,
-        )? {
-            Some((id, root_path, existing_role, rel_path)) => {
-                // Path is inside an existing root - check if suspended using cached roots
-                let root = roots.iter().find(|r| r.id == id);
-                if let Some(r) = root {
-                    if r.is_suspended() {
-                        bail!(
+            // Check if path is inside an existing root (including suspended)
+            let (root_id, root_path, scan_prefix, _root_role) = match resolve_root_path_any(
+                &roots, &canonical,
+            )? {
+                Some((id, root_path, existing_role, rel_path)) => {
+                    // Path is inside an existing root - check if suspended using cached roots
+                    let root = roots.iter().find(|r| r.id == id);
+                    if let Some(r) = root {
+                        if r.is_suspended() {
+                            bail!(
                             "Root '{root_path}' is suspended. Use 'canon roots unsuspend' to reactivate."
                         );
+                        }
                     }
-                }
 
-                // Path is inside an existing active root
-                if add_root {
-                    bail!(
+                    // Path is inside an existing active root
+                    if add_root {
+                        bail!(
                         "Path '{}' is already inside {} root '{}'. Remove --add to scan as subtree.",
                         canonical.display(),
                         existing_role,
                         root_path
                     );
-                }
-                // Check role matches if --role was specified
-                if let Some(r) = role {
-                    if existing_role != r {
-                        bail!(
+                    }
+                    // Check role matches if --role was specified
+                    if let Some(r) = role {
+                        if existing_role != r {
+                            bail!(
                             "Root '{root_path}' has role '{existing_role}', cannot scan with --role {r}"
                         );
+                        }
                     }
+                    let scan_prefix = if rel_path.is_empty() {
+                        None // Scanning entire root
+                    } else {
+                        Some(rel_path) // Scanning subtree
+                    };
+                    (id, PathBuf::from(root_path), scan_prefix, existing_role)
                 }
-                let scan_prefix = if rel_path.is_empty() {
-                    None // Scanning entire root
-                } else {
-                    Some(rel_path) // Scanning subtree
-                };
-                (id, PathBuf::from(root_path), scan_prefix, existing_role)
-            }
-            None => {
-                // Path is not inside any root
-                if !add_root {
-                    bail!(
+                None => {
+                    // Path is not inside any root
+                    if !add_root {
+                        bail!(
                         "Path '{}' is not inside any existing root. Use --add to create a new root.",
                         canonical.display()
                     );
+                    }
+                    // role is guaranteed to be Some when add_root is true (validated in main.rs)
+                    let new_role = role.expect("--role is required with --add");
+                    crate::scan::domain::check_no_overlap(&roots, &canonical)?;
+                    let new_root = create_root(conn, &canonical, new_role, comment)?;
+                    (new_root.id, canonical.clone(), None, new_role.to_string())
                 }
-                // role is guaranteed to be Some when add_root is true (validated in main.rs)
-                let new_role = role.expect("--role is required with --add");
-                crate::scan::domain::check_no_overlap(&roots, &canonical)?;
-                let new_root = create_root(conn, &canonical, new_role, comment)?;
-                (new_root.id, canonical.clone(), None, new_role.to_string())
-            }
-        };
+            };
 
-        // Record this path's resolved scope (root + subtree). Captures roots just
-        // created above, which weren't present for the start()-time decomposition.
-        scope_pairs.push(DecisionScope::new(
-            root_id,
-            root_path.to_string_lossy().to_string(),
-            scan_prefix.clone().unwrap_or_default(),
-        ));
-
-        // Determine if we should hash this root
-        // Default: hash new/changed files; --no-hash to skip; --verify to rehash all
-        let scan_options = ScanOptions {
-            hash: !no_hash,
-            hash_all: verify,
-            ignore_device_id,
-        };
-
-        // Create directory walker — the interface owns walk configuration
-        let walk_path = match &scan_prefix {
-            Some(prefix) => root_path.join(prefix),
-            None => root_path.clone(),
-        };
-        let walker = scan_walker(&walk_path);
-
-        let result = scan_root(
-            conn,
-            root_id,
-            root_path.to_str().context("Root path is not valid UTF-8")?,
-            scan_prefix.as_deref(),
-            walker,
-            &scan_options,
-            &StderrProgress,
-            now,
-            recorder.decision_id(),
-            decision.receipt_enabled,
-        )?;
-
-        // Display warnings from ops layer
-        for warning in &result.warnings {
-            eprintln!("Warning: {warning}");
-        }
-
-        // Update last_scanned_at only for full root scans (not subdirectory scans)
-        if scan_prefix.is_none() {
-            crate::scan::repo::root::update_last_scanned_at(conn, root_id, now)?;
-        }
-
-        total_stats.absorb(&result.stats);
-
-        // Collect files for hashing
-        all_files_to_hash.extend(result.files_to_hash);
-
-        // Group deletions by their root for source-local receipts.
-        if !result.deleted_items.is_empty() {
-            deleted_by_root.push((
+            // Record this path's resolved scope (root + subtree). Captures roots just
+            // created above, which weren't present for the start()-time decomposition.
+            scope_pairs.push(DecisionScope::new(
                 root_id,
                 root_path.to_string_lossy().to_string(),
-                result.deleted_items,
+                scan_prefix.clone().unwrap_or_default(),
             ));
+
+            // Determine if we should hash this root
+            // Default: hash new/changed files; --no-hash to skip; --verify to rehash all
+            let scan_options = ScanOptions {
+                hash: !no_hash,
+                hash_all: verify,
+                ignore_device_id,
+            };
+
+            // Create directory walker — the interface owns walk configuration
+            let walk_path = match &scan_prefix {
+                Some(prefix) => root_path.join(prefix),
+                None => root_path.clone(),
+            };
+            let walker = scan_walker(&walk_path);
+
+            let result = scan_root(
+                conn,
+                root_id,
+                root_path.to_str().context("Root path is not valid UTF-8")?,
+                scan_prefix.as_deref(),
+                walker,
+                &scan_options,
+                &StderrProgress,
+                now,
+                recorder.decision_id(),
+                decision.receipt_enabled,
+            )?;
+
+            // Display warnings from ops layer
+            for warning in &result.warnings {
+                eprintln!("Warning: {warning}");
+            }
+
+            // Update last_scanned_at only for full root scans (not subdirectory scans)
+            if scan_prefix.is_none() {
+                crate::scan::repo::root::update_last_scanned_at(conn, root_id, now)?;
+            }
+
+            total_stats.absorb(&result.stats);
+
+            // Collect files for hashing
+            all_files_to_hash.extend(result.files_to_hash);
+
+            // Group deletions by their root for source-local receipts.
+            if !result.deleted_items.is_empty() {
+                deleted_by_root.push((
+                    root_id,
+                    root_path.to_string_lossy().to_string(),
+                    result.deleted_items,
+                ));
+            }
         }
-    }
 
-    // Hash collected files via ops layer, then read what is still unhashed in
-    // the scanned scope — one call, so the debt can only ever be counted after
-    // the pay-down it survived.
-    let hash_progress = StderrHashProgress::default();
-    let pass = run_hash_pass(conn, &all_files_to_hash, &scope_pairs, &hash_progress)?;
-    total_stats.carry_hash_pass(&pass);
+        // Hash collected files via ops layer, then read what is still unhashed in
+        // the scanned scope — one call, so the debt can only ever be counted after
+        // the pay-down it survived.
+        let hash_progress = StderrHashProgress::default();
+        let pass = run_hash_pass(conn, &all_files_to_hash, &scope_pairs, &hash_progress)?;
+        total_stats.carry_hash_pass(&pass);
 
-    // Print summary (composed by ops)
-    let summary = total_stats.compose_summary();
-    println!("{}", summary);
+        // Print summary (composed by ops)
+        let summary = total_stats.compose_summary();
+        println!("{}", summary);
 
-    // Record the scope index for every walked root (including any created this run)
-    // before linking receipts to those roots. Idempotent with the start()-time write.
-    scope_pairs.sort();
-    scope_pairs.dedup();
-    recorder.record_scopes(conn, &scope_pairs);
+        // Record the scope index for every walked root (including any created this run)
+        // before linking receipts to those roots. Idempotent with the start()-time write.
+        scope_pairs.sort();
+        scope_pairs.dedup();
+        recorder.record_scopes(conn, &scope_pairs);
 
-    // Write source-local deletion receipts (one per root that lost sources) before
-    // finalizing the decision. Skipped when receipts are disabled or nothing was deleted.
-    write_deletion_receipts(conn, &mut recorder, &decision, deleted_by_root, &summary);
+        // Write source-local deletion receipts (one per root that lost sources) before
+        // finalizing the decision. Skipped when receipts are disabled or nothing was deleted.
+        write_deletion_receipts(conn, &mut recorder, &decision, deleted_by_root, &summary);
+
+        Ok((total_stats, summary))
+    })();
+
+    let (total_stats, summary) = match body {
+        Ok(finished) => finished,
+        Err(e) => {
+            recorder.complete(
+                conn,
+                DecisionStatus::Interrupted,
+                DecisionCounts {
+                    attempted: None,
+                    completed: None,
+                    failed: None,
+                    skipped: None,
+                },
+                &format!("interrupted: {e}"),
+            );
+            for w in recorder.take_warnings() {
+                eprintln!("{w}");
+            }
+            return Err(e);
+        }
+    };
 
     // Complete decision recording
     let total_processed =
@@ -468,6 +523,147 @@ mod tests {
 
     // Pipeline tests (process_file, mark_missing_sources) and mark_missing_path
     // (relocated in the deletion-fate work) live in ops::pipeline::tests.
+
+    // =========================================================================
+    // Scan honesty: what a --missing scan records, and what an error leaves behind
+    // =========================================================================
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_scan(db: &Db, paths: &[PathBuf], missing: bool) -> Result<()> {
+        run(
+            db,
+            paths,
+            None,
+            false,
+            None,
+            false,
+            true,
+            false,
+            true,
+            missing,
+            "canon scan",
+            &LedgerConfig {
+                recording: RecordingMode::Records,
+                ..LedgerConfig::default()
+            },
+            true,
+            None,
+        )
+    }
+
+    /// A deletion aimed at one folder must be recorded against that folder.
+    /// Without its own scope the decision reads `global` in the trail — a
+    /// whole-universe claim for an act on one place.
+    #[test]
+    fn a_missing_scan_records_the_folder_it_was_aimed_at() {
+        let conn = repo::open_in_memory_for_test();
+        // Neither the root nor the folder exists on disk — which is the whole
+        // premise of `--missing`.
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, size, mtime, partial_hash,
+                                  scanned_at, last_seen_at, device, inode, present)
+             VALUES (?, 'vacation/img.jpg', 10, 1000, '', 1000, 1000, 1, 200, 1)",
+            rusqlite::params![root_id],
+        )
+        .unwrap();
+        let db = Db::from_connection(conn);
+
+        run_scan(&db, &[PathBuf::from("/photos/vacation")], true).unwrap();
+
+        let (root, rel): (i64, String) = db
+            .conn()
+            .query_row("SELECT root_id, rel_prefix FROM decision_scopes", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(root, root_id);
+        assert_eq!(rel, "vacation");
+
+        // And the display column the trail renders is not NULL.
+        let scope: Option<String> = db
+            .conn()
+            .query_row("SELECT scope FROM decisions", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            scope
+                .as_deref()
+                .unwrap_or_default()
+                .contains("/photos/vacation"),
+            "the display column names the folder, not the whole universe: {scope:?}"
+        );
+    }
+
+    /// Start-time decomposition falls back to lexical resolution, so the
+    /// scope is on the record from the moment the decision row exists — not
+    /// only backfilled at completion.
+    ///
+    /// The distinction is only visible on a run that never *reaches*
+    /// completion, which is what this drives: a suspended root makes the
+    /// `--missing` arm bail after `start()`, so `record_scopes` never runs
+    /// and the only scope row that can exist is the one start-time wrote.
+    /// Deleting the lexical fallback leaves an interrupted decision claiming
+    /// nowhere.
+    #[test]
+    fn a_scan_scope_survives_a_path_that_no_longer_canonicalizes() {
+        assert!(
+            std::fs::canonicalize("/photos/vacation").is_err(),
+            "the fixture path must not exist on disk"
+        );
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", true);
+        let db = Db::from_connection(conn);
+
+        let err = run_scan(&db, &[PathBuf::from("/photos/vacation")], true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("suspended"), "{err}");
+
+        let status: String = db
+            .conn()
+            .query_row("SELECT status FROM decisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "interrupted", "the run must not reach completion");
+
+        let (root, rel): (i64, String) = db
+            .conn()
+            .query_row("SELECT root_id, rel_prefix FROM decision_scopes", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .expect("start-time decomposition must have written the scope row");
+        assert_eq!(root, root_id);
+        assert_eq!(rel, "vacation");
+    }
+
+    /// The two-phase recorder exists to bracket work that cannot be rolled
+    /// back. An error after `start()` must close its own row: a `started` row
+    /// left behind reads as a scan killed mid-walk, which is a different and
+    /// more alarming claim than the error that actually happened.
+    #[test]
+    fn a_scan_that_errors_after_start_completes_its_decision_as_interrupted() {
+        let conn = repo::open_in_memory_for_test();
+        // A suspended root: the walk arm refuses it, after the decision row
+        // has already been opened.
+        repo::insert_test_root(&conn, "/photos", "source", true);
+        let db = Db::from_connection(conn);
+
+        let err = run_scan(&db, &[PathBuf::from("/photos")], true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("suspended"), "{err}");
+
+        let (status, summary): (String, Option<String>) = db
+            .conn()
+            .query_row("SELECT status, summary FROM decisions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(status, "interrupted");
+        assert!(
+            summary.as_deref().unwrap_or_default().contains("suspended"),
+            "the summary carries the error: {summary:?}"
+        );
+    }
 
     // =========================================================================
     // .canon-ledger/ scan exclusion tests

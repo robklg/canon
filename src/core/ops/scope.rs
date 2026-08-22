@@ -14,7 +14,7 @@
 //! pattern for source-querying
 //! commands (file-accessing commands like `scan` use `fs::canonicalize` directly).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
 use super::fs::canonicalize_maybe_missing;
@@ -84,8 +84,16 @@ fn indexed_as_file(conn: &Connection, path: &str, roots: &[Root]) -> Result<bool
 /// Result of resolving scope for a discovery command.
 #[derive(Debug)]
 pub struct ResolvedScope {
-    /// Resolved scope path strings (empty = global).
+    /// Resolved scope path strings (empty = global), in the byte-form the
+    /// index stores.
     pub prefixes: Vec<String>,
+    /// Paths that were asked for, sit under a known root, and have no known
+    /// sources — set aside rather than run. Never empty without
+    /// [`prefixes`](Self::prefixes) also being non-empty: a scope that kept
+    /// nothing is an error, not a silent narrowing. Every command states
+    /// these on the channel it states its scope on; nothing acts on them,
+    /// and they never become a recorded decision scope.
+    pub set_aside: Vec<String>,
     /// Whether the scope came from CWD defaulting (controls relative path display).
     pub from_cwd: bool,
     /// Whether to auto-include archived sources (scope is inside an archive root).
@@ -123,9 +131,38 @@ pub fn resolve_path(path: &Path, roots: &[Root], cwd: &Path) -> Result<String> {
     }
 }
 
+/// The first relative path among the inputs, if any — the only case that
+/// needs a current directory at all. Pure.
+pub fn needs_cwd<'a>(paths: &[&'a Path]) -> Option<&'a Path> {
+    paths.iter().copied().find(|p| p.is_relative())
+}
+
+/// A current directory to resolve these paths against.
+///
+/// A working directory can be deleted out from under a running process, and
+/// asking for one that no longer exists fails. That failure is only fatal
+/// when it is actually needed: an absolute path is resolved without ever
+/// reading the CWD, so `canon scan /some/absolute/path` must not depend on
+/// where it was launched from. When every input is absolute the placeholder
+/// is never read — [`clean_path`] ignores its `cwd` argument for absolute
+/// inputs. When a relative path is present, the error names it.
+pub fn cwd_for(paths: &[&Path]) -> Result<PathBuf> {
+    match std::env::current_dir() {
+        Ok(cwd) => Ok(cwd),
+        Err(_) => match needs_cwd(paths) {
+            None => Ok(PathBuf::from("/")),
+            Some(relative) => bail!(
+                "cannot resolve relative path '{}': the current directory is unavailable",
+                relative.display()
+            ),
+        },
+    }
+}
+
 /// Resolve multiple paths against known roots.
 pub fn resolve_paths(paths: &[PathBuf], roots: &[Root]) -> Result<Vec<String>> {
-    let cwd = std::env::current_dir().context("Failed to determine current directory")?;
+    let refs: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
+    let cwd = cwd_for(&refs)?;
     domain::path::resolve_paths(paths, roots, &cwd)
         .into_iter()
         .zip(paths.iter())
@@ -176,7 +213,7 @@ fn parse_root_spec_impl(
             (root.id, root.role.clone())
         }
         RootSpec::ByPath(ref path) => {
-            let cwd = std::env::current_dir().context("Failed to determine current directory")?;
+            let cwd = cwd_for(&[Path::new(path)])?;
             // Resolve against ALL roots (including suspended) for path recognition
             let canonical = resolve_path(Path::new(path), roots, &cwd)?;
             // Find among filtered candidates (respects suspension filter)
@@ -223,7 +260,7 @@ fn resolve_root_path_impl(
     path: &Path,
     include_suspended: bool,
 ) -> Result<Option<(i64, String, String, String)>> {
-    let cwd = std::env::current_dir().context("Failed to determine current directory")?;
+    let cwd = cwd_for(&[path])?;
     // Resolve against ALL roots for path recognition (soft resolution)
     let path_str = resolve_path(path, roots, &cwd)?;
 
@@ -249,7 +286,7 @@ fn resolve_root_path_impl(
 pub fn resolve_archive_path(roots: &[Root], path: &Path) -> Result<(i64, String, String)> {
     // Soft resolution: try matching against known roots first (works offline),
     // then fall back to canonicalize_maybe_missing (tolerates non-existent subdirs)
-    let cwd = std::env::current_dir().context("Failed to determine current directory")?;
+    let cwd = cwd_for(&[path])?;
     let cleaned = clean_path(path, &cwd);
     let cleaned_str = cleaned.to_string_lossy();
 
@@ -313,15 +350,16 @@ pub fn resolve_scope(
     if !explicit_paths.is_empty() {
         let prefixes = resolve_paths(explicit_paths, roots)?;
         validate_paths_in_roots(&prefixes, roots)?;
-        validate_sources_exist(conn, &prefixes, roots)?;
-        // Check if any path is inside an archive root
-        let auto_include_archived = prefixes.iter().any(|p| {
-            domain::root::find_containing_root(p, roots)
-                .map(|(_, _, role, _)| role == "archive")
-                .unwrap_or(false)
-        });
+        let ScopePartition { kept, set_aside } =
+            apply_source_existence_policy(conn, prefixes, roots)?;
+        // One derivation of "is any of this inside an archive root": the
+        // same role partition survey reads for its frame statement.
+        let auto_include_archived = !domain::root::partition_prefixes_by_role(&kept, roots)
+            .archive_side
+            .is_empty();
         return Ok(ResolvedScope {
-            prefixes,
+            prefixes: kept,
+            set_aside,
             from_cwd: false,
             auto_include_archived,
         });
@@ -331,6 +369,7 @@ pub fn resolve_scope(
     if global {
         return Ok(ResolvedScope {
             prefixes: Vec::new(),
+            set_aside: Vec::new(),
             from_cwd: false,
             auto_include_archived: false,
         });
@@ -342,6 +381,7 @@ pub fn resolve_scope(
         Err(_) => {
             return Ok(ResolvedScope {
                 prefixes: Vec::new(),
+                set_aside: Vec::new(),
                 from_cwd: false,
                 auto_include_archived: false,
             });
@@ -352,11 +392,13 @@ pub fn resolve_scope(
     match resolve_root_path(roots, &cwd)? {
         Some((_, _, role, _)) => Ok(ResolvedScope {
             prefixes: resolve_paths(&[cwd], roots)?,
+            set_aside: Vec::new(),
             from_cwd: true,
             auto_include_archived: role == "archive",
         }),
         None => Ok(ResolvedScope {
             prefixes: Vec::new(),
+            set_aside: Vec::new(),
             from_cwd: false,
             auto_include_archived: false,
         }),
@@ -376,35 +418,134 @@ pub fn resolve_history_scope(explicit_paths: &[PathBuf], roots: &[Root]) -> Opti
     }
     let prefixes = resolve_paths(explicit_paths, roots).ok()?;
     validate_paths_in_roots(&prefixes, roots).ok()?;
-    let auto_include_archived = prefixes.iter().any(|p| {
-        domain::root::find_containing_root(p, roots)
-            .map(|(_, _, role, _)| role == "archive")
-            .unwrap_or(false)
-    });
+    let auto_include_archived = !domain::root::partition_prefixes_by_role(&prefixes, roots)
+        .archive_side
+        .is_empty();
     Some(ResolvedScope {
         prefixes,
+        set_aside: Vec::new(),
         from_cwd: false,
         auto_include_archived,
     })
 }
 
-/// Validate that sources exist at each scope path.
-/// Errors on the first path with no known sources.
-/// Skips root-level paths (empty rel_path) — roots are always valid.
-/// Assumes paths are already validated as under known roots.
-pub fn validate_sources_exist(conn: &Connection, paths: &[String], roots: &[Root]) -> Result<()> {
-    for path in paths {
-        if let Some((root_id, _root_path, _role, rel_path)) =
-            domain::root::find_containing_root(path, roots)
-        {
-            if !rel_path.is_empty()
-                && !repo::source::sources_exist_at_scope(conn, root_id, &rel_path)?
-            {
-                bail!("no sources known at {path}");
-            }
+/// The index's answer to "which byte-form of this path does Canon know?" —
+/// the form-tolerance rule at the source-existence gate.
+///
+/// The path's root has already been matched (root containment is
+/// form-tolerant in its own right); only the relative remainder is retried
+/// here, so a root and the content beneath it may each have been stored in
+/// whichever form their disk handed over. Returns the path rebuilt from the
+/// candidate the index knows sources under — the stored bytes, which is what
+/// every downstream comparison (Rust prefix matching, the SQL boundary
+/// spellings) must see. `None` means no form of this path has sources: it is
+/// genuinely sourceless, and only then does policy see it.
+///
+/// Root-level paths (empty remainder) are always known — a root is valid
+/// whether or not anything has been scanned into it yet.
+fn stored_form_with_sources(
+    conn: &Connection,
+    path: &str,
+    roots: &[Root],
+) -> Result<Option<String>> {
+    let Some((root_id, root_path, _role, rel_path)) =
+        domain::root::find_containing_root(path, roots)
+    else {
+        // Not under any known root: root membership is validated separately
+        // and this gate has nothing to say about it.
+        return Ok(Some(path.to_string()));
+    };
+    if rel_path.is_empty() {
+        return Ok(Some(path.to_string()));
+    }
+    for candidate in domain::path::normalization_candidates(&rel_path) {
+        if repo::source::sources_exist_at_scope(conn, root_id, &candidate)? {
+            return Ok(Some(
+                Path::new(&root_path)
+                    .join(&candidate)
+                    .to_string_lossy()
+                    .into_owned(),
+            ));
         }
     }
-    Ok(())
+    Ok(None)
+}
+
+/// How a scope's asked-for paths came out of the source-existence gate.
+#[derive(Debug)]
+pub struct ScopePartition {
+    /// Paths with known sources, in the byte-form the index stores.
+    pub kept: Vec<String>,
+    /// Paths under a known root with no known sources, in any form.
+    pub set_aside: Vec<String>,
+}
+
+/// The source-existence policy at the scope boundary, spoken once.
+///
+/// What was asked and what runs is never a silent difference. A path under a
+/// known root that Canon has no sources for cannot be worked on — but among
+/// several paths, one empty folder is a reason to say so, not a reason to
+/// refuse the whole invocation. The rules:
+///
+/// - root-level paths (empty remainder) are always kept — a root is valid
+///   whether or not anything has been scanned into it yet;
+/// - a single path with no sources is an error, unchanged: with nothing else
+///   asked for there is no work left to do, and "scan first" is the honest
+///   answer;
+/// - several paths with at least one keeper proceed, and the rest come back
+///   as set-asides for the caller to state;
+/// - several paths with no keeper at all is an error naming every one of
+///   them — a scope that kept nothing must never look like a narrowing.
+///
+/// Paths not under any known root are a separate, harder failure and are
+/// rejected before this is reached.
+fn apply_source_existence_policy(
+    conn: &Connection,
+    paths: Vec<String>,
+    roots: &[Root],
+) -> Result<ScopePartition> {
+    let single = paths.len() == 1;
+    let mut kept = Vec::new();
+    let mut set_aside = Vec::new();
+    for path in paths {
+        match stored_form_with_sources(conn, &path, roots)? {
+            Some(stored) => kept.push(stored),
+            None if single => bail!("no sources known at {path}"),
+            None => set_aside.push(path),
+        }
+    }
+    if kept.is_empty() {
+        bail!("no sources known at {}", set_aside.join(", "));
+    }
+    Ok(ScopePartition { kept, set_aside })
+}
+
+/// Validate that sources exist at each scope path, returning the paths in
+/// the byte-form the index stores them under.
+///
+/// Errors on the first path with no known sources — the abort spelling of
+/// the source-existence gate. Its callers are exactly the carve-outs from
+/// the boundary's proceed-and-state policy: locations that are load-bearing
+/// to the question being asked, where proceeding without one would change
+/// the question rather than narrow it (`compare`'s two sides,
+/// `exclude duplicates`' scope and prefer paths, `survey --other`'s
+/// reference location). Every other scope-taking command goes through
+/// [`resolve_scope`], which sets a sourceless path aside and says so.
+///
+/// Skips root-level paths (empty rel_path) — roots are always valid.
+/// Assumes paths are already validated as under known roots.
+pub fn validate_sources_exist(
+    conn: &Connection,
+    paths: &[String],
+    roots: &[Root],
+) -> Result<Vec<String>> {
+    paths
+        .iter()
+        .map(|path| match stored_form_with_sources(conn, path, roots)? {
+            Some(stored) => Ok(stored),
+            None => bail!("no sources known at {path}"),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -551,6 +692,248 @@ mod tests {
 
         let result = resolve_scope(&conn, &[PathBuf::from("/photos/2011")], false, &roots).unwrap();
         assert_eq!(result.prefixes, vec!["/photos/2011".to_string()]);
+    }
+
+    // ========================================================================
+    // Lazy CWD: a working directory is read only when one is needed
+    // ========================================================================
+
+    #[test]
+    fn needs_cwd_names_the_first_relative_path() {
+        let a = Path::new("/abs/one");
+        let b = Path::new("rel/two");
+        let c = Path::new("rel/three");
+        assert_eq!(needs_cwd(&[a, b, c]), Some(b));
+    }
+
+    #[test]
+    fn needs_cwd_is_none_when_every_path_is_absolute() {
+        assert_eq!(needs_cwd(&[Path::new("/a"), Path::new("/b")]), None);
+        assert_eq!(needs_cwd(&[]), None);
+    }
+
+    // ========================================================================
+    // The scope-boundary honesty policy
+    // ========================================================================
+
+    /// A scope with two folders where one is empty is a scope with one
+    /// folder's worth of work in it — and a line saying so.
+    #[test]
+    fn a_multi_path_scope_proceeds_past_a_sourceless_member() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "2011/file.jpg", None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let resolved = resolve_scope(
+            &conn,
+            &[PathBuf::from("/photos/2011"), PathBuf::from("/photos/2012")],
+            false,
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(resolved.prefixes, vec!["/photos/2011".to_string()]);
+        assert_eq!(resolved.set_aside, vec!["/photos/2012".to_string()]);
+    }
+
+    /// The "scan first" contract: with nothing else asked for, there is no
+    /// work left to narrow to.
+    #[test]
+    fn a_single_sourceless_path_still_errors() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "2011/file.jpg", None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let result = resolve_scope(&conn, &[PathBuf::from("/photos/2012")], false, &roots);
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no sources known at /photos/2012"), "{err}");
+    }
+
+    #[test]
+    fn an_all_sourceless_multi_path_scope_errors_naming_every_path() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "2011/file.jpg", None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let result = resolve_scope(
+            &conn,
+            &[PathBuf::from("/photos/2012"), PathBuf::from("/photos/2013")],
+            false,
+            &roots,
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("/photos/2012"), "{err}");
+        assert!(err.contains("/photos/2013"), "{err}");
+    }
+
+    /// Root membership is the harder failure and keeps its precedence: a path
+    /// under no known root is refused whatever else was asked for — never set
+    /// aside beside the keepers. The temp directory stands in for "a real
+    /// place on disk that Canon has never been told about", so resolution
+    /// succeeds and root membership is what does the refusing.
+    #[test]
+    fn a_non_root_path_errors_even_beside_valid_members() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "2011/file.jpg", None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let outsider = std::env::temp_dir();
+        let result = resolve_scope(
+            &conn,
+            &[PathBuf::from("/photos/2011"), outsider],
+            false,
+            &roots,
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not under any known root"), "{err}");
+    }
+
+    #[test]
+    fn root_level_paths_are_always_kept() {
+        let conn = setup_test_db();
+        // Nothing has ever been scanned into this root.
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let other_id = insert_root(&conn, "/scans", "source", false);
+        insert_source(&conn, other_id, "a.jpg", None);
+        let roots = vec![
+            make_test_root(root_id, "/photos", "source"),
+            make_test_root(other_id, "/scans", "source"),
+        ];
+
+        let resolved = resolve_scope(
+            &conn,
+            &[PathBuf::from("/photos"), PathBuf::from("/scans")],
+            false,
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.prefixes,
+            vec!["/photos".to_string(), "/scans".to_string()]
+        );
+        assert!(resolved.set_aside.is_empty());
+    }
+
+    /// The record must never claim a place the invocation did not touch.
+    /// Decomposition reads the kept prefixes; a set-aside is not among them.
+    #[test]
+    fn a_set_aside_never_becomes_a_decision_scope() {
+        use crate::core::domain::scope::DecisionScope;
+
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "2011/file.jpg", None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let resolved = resolve_scope(
+            &conn,
+            &[PathBuf::from("/photos/2011"), PathBuf::from("/photos/2012")],
+            false,
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(resolved.set_aside, vec!["/photos/2012".to_string()]);
+
+        let scopes = DecisionScope::decompose(&resolved.prefixes, &roots);
+        assert_eq!(
+            scopes,
+            vec![DecisionScope::new(
+                root_id,
+                "/photos".to_string(),
+                "2011".to_string()
+            )]
+        );
+        assert!(scopes.iter().all(|sc| sc.rel_prefix != "2012"));
+    }
+
+    // ========================================================================
+    // Form tolerance at the source-existence gate
+    // ========================================================================
+
+    /// A composed `é` (U+00E9) and its decomposed twin (`e` + U+0301) — one
+    /// visible folder name, two byte-forms.
+    const NFC_DIR: &str = "caf\u{e9}";
+    const NFD_DIR: &str = "cafe\u{301}";
+
+    #[test]
+    fn an_nfc_argument_finds_sources_stored_in_nfd() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, &format!("{NFD_DIR}/file.jpg"), None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let resolved = resolve_scope(
+            &conn,
+            &[PathBuf::from(format!("/photos/{NFC_DIR}"))],
+            false,
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(resolved.prefixes, vec![format!("/photos/{NFD_DIR}")]);
+    }
+
+    #[test]
+    fn an_nfd_argument_finds_sources_stored_in_nfc() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, &format!("{NFC_DIR}/file.jpg"), None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let resolved = resolve_scope(
+            &conn,
+            &[PathBuf::from(format!("/photos/{NFD_DIR}"))],
+            false,
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(resolved.prefixes, vec![format!("/photos/{NFC_DIR}")]);
+    }
+
+    /// The form-tolerance rule's pin: the argument bends to the stored form,
+    /// and the kept prefix is the stored bytes — so it actually selects the
+    /// rows it names, in Rust and in SQL alike.
+    #[test]
+    fn the_kept_prefix_is_byte_identical_to_the_stored_form() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let stored_rel = format!("{NFD_DIR}/file.jpg");
+        insert_source(&conn, root_id, &stored_rel, None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let resolved = resolve_scope(
+            &conn,
+            &[PathBuf::from(format!("/photos/{NFC_DIR}"))],
+            false,
+            &roots,
+        )
+        .unwrap();
+
+        let kept = &resolved.prefixes[0];
+        let (_, _, _, rel) = domain::root::find_containing_root(kept, &roots).unwrap();
+        assert_eq!(rel.as_bytes(), NFD_DIR.as_bytes());
+        assert!(repo::source::sources_exist_at_scope(&conn, root_id, &rel).unwrap());
+    }
+
+    #[test]
+    fn a_path_sourceless_under_every_form_reaches_the_policy_as_sourceless() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "2011/file.jpg", None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        // Neither form of this folder is known — the gate says so rather
+        // than silently keeping one of the candidates.
+        let result = resolve_scope(
+            &conn,
+            &[PathBuf::from(format!("/photos/{NFC_DIR}"))],
+            false,
+            &roots,
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no sources known"), "error was: {err}");
     }
 
     #[test]

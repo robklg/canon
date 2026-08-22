@@ -82,6 +82,9 @@ fn display_compact_scoped(stats: &CoverageStats, scope: &ResolvedScope) {
     } else {
         "(scoped)".to_string()
     };
+    // Compact is one line on stdout by design and carries no scope header,
+    // so the boundary's set-asides go to stderr rather than going unsaid.
+    crate::scope::eprint_scope_set_asides(scope);
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     let _ = print_compact_line(&mut handle, &label, stats, true);

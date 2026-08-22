@@ -53,6 +53,21 @@ The listing is capped at the 20 most recent decisions; the footer tells you what
 
 The trail is the sequence view: what happened here, in order. Its shape-first counterpart is [`canon roots story`](../roots/story.md), which renders a whole root as a map of places and hands each place back to the trail for its full event story.
 
+### Places with no history
+
+A folder holding no sources still has a story when something records it: a file that once stood there, a note, an `apply` that drew from or placed into it, or a decision scoped there or inside it. Those places render normally, which is what keeps a folder emptied by a move-mode `apply` from disappearing from its own history.
+
+A path that none of those record is stated rather than rendered, and the command exits non-zero:
+
+```
+No history known at /mnt/old-drive/191 — no sources, notes, or decisions record this place.
+(Did you mean 'canon trail show 191'?)
+```
+
+The second line appears only when the argument is all digits, where `trail show <id>` is the likely intent. A decision scoped at a parent folder does not make a path beneath it a known place.
+
+The same answer comes back whether you name the place or stand in it: a bare `canon trail` scoped to the current directory is held to the same test. A root's own top is exempt, and `--global` is unaffected.
+
 ## The outbound direction: what left from here
 
 Standing at a source location, an `apply` that drew content out of this scope shows up too, even though the apply's own selection scope may have been global or elsewhere. It renders in the *extraction aspect*, replacing the usual summary line:

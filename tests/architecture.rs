@@ -2357,16 +2357,19 @@ fn s() -> Connection {
                 "ArrivalRollup",
                 "ExtractionRollup",
                 "RearrangementRollup",
+                "TrailExit",
             ],
         ),
         ("sweep", &["run"]),
         // main.rs reaches DetailMode/SurveyOptions/run for the survey
-        // command; the contentless-law canary reaches the rest.
+        // command, and SurveyExit to turn a refused frame into an exit code;
+        // the contentless-law canary reaches the rest.
         (
             "survey",
             &[
                 "DetailMode",
                 "ObjectIndex",
+                "SurveyExit",
                 "SurveyOptions",
                 "SurveyOutcome",
                 "SurveyParams",

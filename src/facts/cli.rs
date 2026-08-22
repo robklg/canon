@@ -81,6 +81,17 @@ pub fn run(
     let source_ids = sel.source_ids();
     let total_sources = source_ids.len();
 
+    // The scope line comes before the report, including the report that says
+    // there is nothing to report: "no matches" is only meaningful once the
+    // reader knows where Canon looked.
+    {
+        use std::io::Write as _;
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        crate::scope::print_report_scope(&mut handle, "Facts", scope);
+        let _ = handle.flush();
+    }
+
     if total_sources == 0 {
         println!("No sources match the given filters.");
         if !include.includes_excluded() && sel.excluded_count > 0 {
@@ -98,7 +109,6 @@ pub fn run(
         use std::io::Write;
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
-        crate::scope::print_report_scope(&mut handle, "Facts", scope);
         if include.is_expanded()
             && (sel.included_excluded_count > 0 || sel.included_archived_count > 0)
         {
