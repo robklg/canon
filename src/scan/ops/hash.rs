@@ -8,10 +8,10 @@ use rusqlite::{Transaction, TransactionBehavior};
 
 use crate::core::domain::scope::DecisionScope;
 use crate::core::repo::{self, Connection};
-use crate::scan::domain::outermost_scopes;
+use crate::scan::domain::{outermost_scopes, StandingDebt};
 use crate::scan::repo as scan_repo;
 
-use super::types::{current_timestamp, FileToHash, HashNeed};
+use super::types::{current_timestamp, FileToHash, HashNeed, HashPassResult, HashStats};
 
 /// Observability for the hash pipeline. The interface implements this
 /// to display progress bars, emit warnings, etc.
@@ -21,20 +21,6 @@ pub trait HashProgress {
     fn on_hash_error(&self, path: &Path, error: &str);
     fn on_unexpected_change(&self, path: &Path);
     fn on_finish(&self);
-}
-
-/// Result of the hash pipeline.
-#[derive(Default)]
-pub struct HashStats {
-    pub hashed: u64,
-    /// How many of `hashed` were standing debt rather than work this scan's
-    /// walk caused. Counted here, beside the success it reports, because it
-    /// qualifies `hashed` and a qualifier that outruns what it qualifies is a
-    /// number no reader can make sense of: a file queued from the backlog and
-    /// then found unreadable was not paid off.
-    pub backlog_hashed: u64,
-    pub unexpected_hash_changes: u64,
-    pub errors: u64,
 }
 
 /// Hash files collected during scan, linking each to its content object.
@@ -67,7 +53,11 @@ pub fn hash_files(
             Ok(h) => h,
             Err(e) => {
                 progress.on_hash_error(&file.full_path, &format!("{:#}", e));
-                stats.errors += 1;
+                // The id, not just a tally: what the summary states is how much
+                // of the debt still standing at the end of the scan is content
+                // this pass could not read, and only the debt query can say
+                // that.
+                stats.errored_ids.push(file.source_id);
                 continue;
             }
         };
@@ -122,13 +112,6 @@ pub fn hash_files(
     Ok(stats)
 }
 
-/// What the hash pass did, and what it left standing.
-pub struct HashPassResult {
-    pub stats: HashStats,
-    /// Present sources in the walked scopes that still hold no identity.
-    pub standing_debt: u64,
-}
-
 /// Run the hash pass and then ask what debt remains — one call, because the
 /// order is the whole meaning of the number. Asked first, the count would say
 /// what was owed before the scan paid; asked after, it says what a declined,
@@ -143,7 +126,7 @@ pub fn run_hash_pass(
     progress: &dyn HashProgress,
 ) -> Result<HashPassResult> {
     let stats = hash_files(conn, files, progress)?;
-    let standing_debt = count_standing_debt(conn, walked)?;
+    let standing_debt = count_standing_debt(conn, walked, &stats.errored_ids)?;
 
     Ok(HashPassResult {
         stats,
@@ -163,15 +146,31 @@ pub fn run_hash_pass(
 /// Bounded to the scopes the scan walked — a scan speaks about its own scope —
 /// and narrowed to the outermost of them, so overlapping paths on one command
 /// line cannot report the same standing source twice.
-pub fn count_standing_debt(conn: &Connection, walked: &[DecisionScope]) -> Result<u64> {
-    let mut total: i64 = 0;
+///
+/// `unreadable` names the sources this scan's pass could not read. Each scope
+/// answers for its own share of them in the same statement that counts its
+/// debt, so the qualifier the summary prints is always a part of the number it
+/// qualifies — a file that failed and was hashed a moment later by a concurrent
+/// scan leaves both counts together, and one that failed outside the walked
+/// scopes enters neither.
+pub fn count_standing_debt(
+    conn: &Connection,
+    walked: &[DecisionScope],
+    unreadable: &[i64],
+) -> Result<StandingDebt> {
+    let mut debt = StandingDebt::default();
 
     for scope in outermost_scopes(walked) {
         let prefix = Some(scope.rel_prefix.as_str()).filter(|p| !p.is_empty());
-        total += scan_repo::source::count_unhashed(conn, scope.root_id, prefix)?;
+        debt.add(scan_repo::source::count_unhashed(
+            conn,
+            scope.root_id,
+            prefix,
+            unreadable,
+        )?);
     }
 
-    Ok(total as u64)
+    Ok(debt)
 }
 
 /// Get or create an object by hash, returning the Object.
@@ -246,7 +245,7 @@ mod tests {
         let stats = hash_files(&conn, &[], &progress).unwrap();
 
         assert_eq!(stats.hashed, 0);
-        assert_eq!(stats.errors, 0);
+        assert_eq!(stats.errored_ids.len(), 0);
         assert_eq!(stats.unexpected_hash_changes, 0);
         assert_eq!(progress.started.get(), 0);
         assert!(!progress.finished.get());
@@ -273,7 +272,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(stats.hashed, 1);
-        assert_eq!(stats.errors, 0);
+        assert_eq!(stats.errored_ids.len(), 0);
         assert_eq!(stats.unexpected_hash_changes, 0);
         assert_eq!(progress.started.get(), 1);
         assert_eq!(progress.hashed.get(), 1);
@@ -422,7 +421,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!((stats.hashed, stats.errors), (1, 1));
+        assert_eq!((stats.hashed, stats.errored_ids.len()), (1, 1));
         assert_eq!(stats.backlog_hashed, 1, "one was paid off, not two");
         assert!(stats.backlog_hashed <= stats.hashed);
     }
@@ -473,13 +472,13 @@ mod tests {
         let b = indexed_source(&conn, "/backup", "three.jpg", false);
 
         let walked = [scope(a, "/photos", ""), scope(b, "/backup", "")];
-        assert_eq!(count_standing_debt(&conn, &walked).unwrap(), 3);
+        assert_eq!(count_standing_debt(&conn, &walked, &[]).unwrap().total, 3);
 
         // A root the scan never walked is not this scan's subject: its debt is
         // real, but claiming it here would make the number say something the
         // scan did not observe.
         assert_eq!(
-            count_standing_debt(&conn, &walked[..1]).unwrap(),
+            count_standing_debt(&conn, &walked[..1], &[]).unwrap().total,
             2,
             "a scan speaks about the scope it walked"
         );
@@ -498,10 +497,10 @@ mod tests {
             scope(root_id, "/photos", "2024"),
             scope(root_id, "/photos", ""),
         ];
-        assert_eq!(count_standing_debt(&conn, &walked).unwrap(), 2);
+        assert_eq!(count_standing_debt(&conn, &walked, &[]).unwrap().total, 2);
 
         let scoped = [scope(root_id, "/photos", "2024")];
-        assert_eq!(count_standing_debt(&conn, &scoped).unwrap(), 1);
+        assert_eq!(count_standing_debt(&conn, &scoped, &[]).unwrap().total, 1);
     }
 
     #[test]
@@ -530,7 +529,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(pass.stats.hashed, 1);
-        assert_eq!(pass.standing_debt, 0, "the debt it just paid is not debt");
+        assert_eq!(
+            pass.standing_debt.total, 0,
+            "the debt it just paid is not debt"
+        );
     }
 
     #[test]
@@ -550,7 +552,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(pass.stats.hashed, 0);
-        assert_eq!(pass.standing_debt, 2);
+        assert_eq!(pass.standing_debt.total, 2);
     }
 
     #[test]
@@ -564,7 +566,7 @@ mod tests {
         let root_id = repo::root::fetch_all(&conn).unwrap()[0].id;
         let walked = [scope(root_id, &root_path, "")];
         assert_eq!(
-            count_standing_debt(&conn, &walked).unwrap(),
+            count_standing_debt(&conn, &walked, &[]).unwrap().total,
             1,
             "photo.jpg is the only row yet, and it owes"
         );
@@ -592,9 +594,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!((stats.hashed, stats.errors), (1, 1));
+        assert_eq!((stats.hashed, stats.errored_ids.len()), (1, 1));
         assert_eq!(
-            count_standing_debt(&conn, &walked).unwrap(),
+            count_standing_debt(&conn, &walked, &[]).unwrap().total,
             1,
             "now it is gone.jpg that owes: the file that could not be hashed is \
              still content Canon cannot see"
@@ -634,7 +636,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(stats.errors, 1);
+        assert_eq!(stats.errored_ids.len(), 1);
         assert_eq!(stats.hashed, 1);
         assert_eq!(progress.errors.get(), 1);
         assert!(progress.finished.get());

@@ -116,6 +116,16 @@ The files count as `new`, and stay that way: the old path keeps its own source u
 
 The same line appears for one scan after a root is remounted, because the remount renumbers the storage and the recorded identifiers have not caught up. Scanning that root refreshes them.
 
+**Skipped entries.** Only regular files become sources. Symlinks are skipped, and never followed. Named pipes, sockets and devices are skipped too, counted separately as `special files`. Both counts reach the summary, so a path visible on disk and absent from the index is accounted for:
+
+```
+Scanned 1043 files: 1043 new, 0 updated, 0 moved, 0 unchanged, 0 missing, skipped 214 symlinks
+```
+
+The counts say what the walk saw, so they repeat on every scan of the same directory, where `new` and `moved` say what changed.
+
+Some network clients, SMB shares in particular, present a symlink to the operating system as an ordinary file. Canon indexes what the operating system presents, so such a link becomes a source and is not counted here. Its content is the target's content, so both paths resolve to the same object.
+
 ### Hash debt
 
 A source with no content hash is invisible to everything that reads content: coverage, duplicate detection, and cluster selection all pass over it. Canon states how many sources a scan leaves in that state:
@@ -125,7 +135,17 @@ Scanned 4820 files: 4820 new, 0 updated, 0 moved, 0 unchanged, 0 missing
 4820 sources remain unhashed
 ```
 
-The count covers the paths this scan walked, and appears after any scan that leaves sources unhashed, including one where individual files could not be read.
+The count covers the paths this scan walked, and appears after any scan that leaves sources unhashed. When some of that debt is content the scan tried to read and could not, the line says how much:
+
+```
+Scanned 3 files: 0 new, 0 updated, 0 moved, 3 unchanged, 0 missing
+Hashed 2 files (2 from backlog)
+1 sources remain unhashed (1 could not be read)
+```
+
+The qualifier counts what is still in debt when the scan ends, so it is always part of the number in front of it, and it covers only files that hold no hash at all. Two neighbouring cases are reported elsewhere: a file that cannot be read during the walk never becomes a source, and appears as `skipped (read errors)` on the first line; and a file that `--verify` cannot re-read keeps the hash it already had, so it is not in debt and is reported only as a warning.
+
+Files that could not be read do not change the exit status: the non-zero exit is reserved for hash mismatches, which say something about the content rather than about access to it.
 
 The next scan that hashes reads them, whatever else it finds: a file Canon has never read is hashed even when nothing about it changed. The summary separates that backlog from work this scan caused, so a large pay-down is readable:
 
@@ -134,7 +154,7 @@ Scanned 4820 files: 0 new, 0 updated, 0 moved, 4820 unchanged, 0 missing
 Hashed 4820 files (4820 from backlog)
 ```
 
-Clearing a root indexed with `--no-hash` can take as long as hashing it the first time would have. The pass can be interrupted: what remains unhashed is reported again, and the next scan continues from there. A file that could not be read this time is warned about individually and stays in debt until a later scan reads it.
+Clearing a root indexed with `--no-hash` can take as long as hashing it the first time would have. The pass can be interrupted: what remains unhashed is reported again, and the next scan continues from there. A file that could not be read this time is warned about individually, counted in the line above, and stays in debt until a later scan reads it.
 
 `--verify` re-reads every file regardless, so it clears debt as a side effect and reports no backlog count.
 

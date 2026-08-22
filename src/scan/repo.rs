@@ -17,7 +17,7 @@ pub(crate) mod source {
     use crate::core::repo::source::{
         fetch_by_id, fetch_by_path, source_from_row, BATCH_SIZE, SOURCE_COLUMNS, SOURCE_FROM,
     };
-    use crate::scan::domain::{FileObservation, Reconciliation};
+    use crate::scan::domain::{FileObservation, Reconciliation, StandingDebt};
 
     /// Nominate the present sources carrying this inode.
     ///
@@ -347,34 +347,78 @@ pub(crate) mod source {
     /// its own scope, and the boundary stops at the path separator, so a scan of
     /// "vacation" never counts "vacation-2023" (the shared predicate, spelled
     /// once).
+    /// `unreadable` names the sources this scan tried to hash and could not.
+    /// The count of those that are still standing debt comes back beside the
+    /// total, from the same statement over the same rows, so the summary's
+    /// whole-and-part sentence cannot print an impossible pair: a subset
+    /// computed apart from its whole is only ever *usually* contained by it.
     pub fn count_unhashed(
         conn: &Connection,
         root_id: i64,
         scan_prefix: Option<&str>,
-    ) -> Result<i64> {
-        let count = match scan_prefix {
-            Some(prefix) => {
-                let prefix = prefix.trim_end_matches('/');
-                let sql = format!(
-                    "SELECT COUNT(*) FROM sources
-                     WHERE root_id = ? AND present = 1 AND object_id IS NULL AND {}",
-                    crate::core::repo::db::path_at_or_under_sql("rel_path")
-                );
-                conn.query_row(
-                    &sql,
-                    rusqlite::params![root_id, prefix, prefix, prefix],
-                    |row| row.get(0),
-                )?
-            }
-            None => conn.query_row(
-                "SELECT COUNT(*) FROM sources
-                 WHERE root_id = ? AND present = 1 AND object_id IS NULL",
-                rusqlite::params![root_id],
-                |row| row.get(0),
-            )?,
+        unreadable: &[i64],
+    ) -> Result<StandingDebt> {
+        // The predicate is spelled once and shared by both shapes below. Only
+        // the SELECT list and the join differ; the row set they count over is
+        // the same by construction, which is what makes the part a part.
+        let prefix = scan_prefix.map(|p| p.trim_end_matches('/'));
+        let mut where_sql = String::from("s.root_id = ? AND s.present = 1 AND s.object_id IS NULL");
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&root_id];
+        if let Some(prefix) = prefix.as_ref() {
+            where_sql.push_str(" AND ");
+            where_sql.push_str(&crate::core::repo::db::path_at_or_under_sql("s.rel_path"));
+            // The boundary helper binds its prefix three times, in order.
+            params.extend_from_slice(&[prefix, prefix, prefix]);
+        }
+
+        // Nothing failed, so nothing can be a failure: the join is skipped
+        // rather than run against an empty table, leaving the ordinary path
+        // exactly the query it has always been.
+        let sql = if unreadable.is_empty() {
+            format!("SELECT COUNT(*), 0 FROM sources s WHERE {where_sql}")
+        } else {
+            stage_unreadable(conn, unreadable)?;
+            format!(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(CASE WHEN u.id IS NOT NULL THEN 1 ELSE 0 END), 0)
+                 FROM sources s
+                 LEFT JOIN temp_hash_errors u ON u.id = s.id
+                 WHERE {where_sql}"
+            )
         };
 
-        Ok(count)
+        let (total, unreadable): (i64, i64) = conn.query_row(&sql, params.as_slice(), |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+
+        Ok(StandingDebt {
+            total: total as u64,
+            unreadable: unreadable as u64,
+        })
+    }
+
+    /// Put the ids this scan could not read where the debt count can join them.
+    ///
+    /// A session-scoped temp table rather than an `IN`-list: the list has no
+    /// bound, and chunking it would break the very guarantee the join exists to
+    /// give, since a per-chunk total is not the scope's total. The table is
+    /// scan's own, not the shared `temp_sources` that `populate_temp_sources`
+    /// fills, so neither can surprise the other.
+    ///
+    /// Plain inserts, no transaction: this stratum opens none, and a temp table
+    /// is private to the connection, so there is no one to see a half-filled
+    /// one. Normally there is nothing to insert at all.
+    fn stage_unreadable(conn: &Connection, ids: &[i64]) -> Result<()> {
+        conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS temp_hash_errors (id INTEGER PRIMARY KEY)",
+            [],
+        )?;
+        conn.execute("DELETE FROM temp_hash_errors", [])?;
+        let mut stmt = conn.prepare("INSERT OR IGNORE INTO temp_hash_errors (id) VALUES (?)")?;
+        for id in ids {
+            stmt.execute([id])?;
+        }
+        Ok(())
     }
 
     /// A source snapshot captured for a receipt, resolved while the source is still
@@ -1545,7 +1589,7 @@ pub(crate) mod source {
             insert_source(&conn, root_id, "unhashed2.jpg", None, true, false);
             insert_source(&conn, root_id, "hashed.jpg", Some(object_id), true, false);
 
-            assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 2);
+            assert_eq!(count_unhashed(&conn, root_id, None, &[]).unwrap().total, 2);
         }
 
         #[test]
@@ -1559,7 +1603,7 @@ pub(crate) mod source {
             // Debt is about content Canon could still read. A source that is no
             // longer on disk was never going to be hashed, and counting it would
             // make a scan's debt line grow with every deletion.
-            assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 1);
+            assert_eq!(count_unhashed(&conn, root_id, None, &[]).unwrap().total, 1);
         }
 
         #[test]
@@ -1571,7 +1615,7 @@ pub(crate) mod source {
             insert_source(&conn, root_id, "mine.jpg", None, true, false);
             insert_source(&conn, other_id, "theirs.jpg", None, true, false);
 
-            assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 1);
+            assert_eq!(count_unhashed(&conn, root_id, None, &[]).unwrap().total, 1);
         }
 
         #[test]
@@ -1586,13 +1630,20 @@ pub(crate) mod source {
             // The debt a scan reports is the debt inside the scope it walked;
             // a string-prefix sibling was never in scope, and a count that swept
             // one in would report work this scan neither did nor could do.
-            assert_eq!(count_unhashed(&conn, root_id, Some("vacation")).unwrap(), 1);
-            // The trailing-slash spelling names the same scope.
             assert_eq!(
-                count_unhashed(&conn, root_id, Some("vacation/")).unwrap(),
+                count_unhashed(&conn, root_id, Some("vacation"), &[])
+                    .unwrap()
+                    .total,
                 1
             );
-            assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 3);
+            // The trailing-slash spelling names the same scope.
+            assert_eq!(
+                count_unhashed(&conn, root_id, Some("vacation/"), &[])
+                    .unwrap()
+                    .total,
+                1
+            );
+            assert_eq!(count_unhashed(&conn, root_id, None, &[]).unwrap().total, 3);
         }
 
         #[test]
@@ -1605,7 +1656,9 @@ pub(crate) mod source {
 
             // '_' and '%' in a scope path are path bytes, never wildcards.
             assert_eq!(
-                count_unhashed(&conn, root_id, Some("alpha_beta")).unwrap(),
+                count_unhashed(&conn, root_id, Some("alpha_beta"), &[])
+                    .unwrap()
+                    .total,
                 1
             );
         }
@@ -1625,7 +1678,118 @@ pub(crate) mod source {
             // Identity claims *about* empty content are vacuous, but the hash is
             // still computed for one, so an unhashed empty source is debt exactly
             // as a photograph is. Nothing here optimizes it out of the queue.
-            assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 1);
+            assert_eq!(count_unhashed(&conn, root_id, None, &[]).unwrap().total, 1);
+        }
+
+        #[test]
+        fn the_unreadable_count_is_a_part_of_the_debt_it_qualifies() {
+            // The summary prints these two numbers as one sentence, so a
+            // subset computed apart from its whole could print an impossible
+            // pair. It cannot here: both come from one statement over one row
+            // set, and every case below is a row leaving the whole and taking
+            // its own membership of the part with it.
+            let conn = setup_test_db();
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            let object_id = insert_object(&conn, "known", false);
+
+            let failed =
+                insert_source(&conn, root_id, "vacation/unreadable.jpg", None, true, false);
+            insert_source(&conn, root_id, "vacation/never-read.jpg", None, true, false);
+            // Failed in the pass, then linked before the count ran — a
+            // concurrent scan got there first. It is not debt, so it is not
+            // unreadable debt either.
+            let raced = insert_source(
+                &conn,
+                root_id,
+                "vacation/raced.jpg",
+                Some(object_id),
+                true,
+                false,
+            );
+            // Failed, but outside the scope this scan walked: in neither
+            // number, because a scan speaks about its own scope.
+            let elsewhere = insert_source(&conn, root_id, "archive/far.jpg", None, true, false);
+            // Failed, and gone from disk before the count: debt is content
+            // Canon could still read.
+            let vanished = insert_source(&conn, root_id, "vacation/gone.jpg", None, false, false);
+            // The boundary sibling, which was never in scope at all.
+            let sibling = insert_source(
+                &conn,
+                root_id,
+                "vacation-2023/unreadable.jpg",
+                None,
+                true,
+                false,
+            );
+
+            let unreadable = [failed, raced, elsewhere, vanished, sibling];
+            let debt = count_unhashed(&conn, root_id, Some("vacation"), &unreadable).unwrap();
+
+            assert_eq!(
+                debt,
+                StandingDebt {
+                    total: 2,
+                    unreadable: 1
+                },
+                "only the row that is both standing debt and inside the walked \
+                 scope counts as unreadable debt"
+            );
+            assert!(debt.unreadable <= debt.total);
+        }
+
+        #[test]
+        fn the_debt_total_is_the_same_whether_or_not_anything_failed() {
+            // The empty-input path skips the join rather than running it
+            // against an empty table, so there are two SELECT shapes. They
+            // share one spelling of the predicate, and this is what says so:
+            // the whole must not move when only the subset's input does.
+            let conn = setup_test_db();
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            let object_id = insert_object(&conn, "known", false);
+            insert_source(&conn, root_id, "a.jpg", None, true, false);
+            insert_source(&conn, root_id, "b.jpg", None, true, false);
+            let hashed = insert_source(&conn, root_id, "c.jpg", Some(object_id), true, false);
+
+            let quiet = count_unhashed(&conn, root_id, None, &[]).unwrap();
+            // An id that matches no standing debt exercises the joined shape
+            // without changing what it should count.
+            let joined = count_unhashed(&conn, root_id, None, &[hashed]).unwrap();
+
+            assert_eq!(quiet.total, joined.total);
+            assert_eq!((quiet.unreadable, joined.unreadable), (0, 0));
+        }
+
+        #[test]
+        fn a_second_debt_count_does_not_inherit_the_first_ones_failures() {
+            // The staged ids live in a session temp table, so the second call
+            // in one scan would see the first call's rows if the fill did not
+            // clear it — and a scope with no failures of its own would report
+            // another scope's.
+            let conn = setup_test_db();
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            let first = insert_source(&conn, root_id, "one.jpg", None, true, false);
+            let second = insert_source(&conn, root_id, "two.jpg", None, true, false);
+
+            assert_eq!(
+                count_unhashed(&conn, root_id, None, &[first])
+                    .unwrap()
+                    .unreadable,
+                1
+            );
+            assert_eq!(
+                count_unhashed(&conn, root_id, None, &[second])
+                    .unwrap()
+                    .unreadable,
+                1,
+                "the second call answers for its own ids, not the first call's"
+            );
+            assert_eq!(
+                count_unhashed(&conn, root_id, None, &[])
+                    .unwrap()
+                    .unreadable,
+                0,
+                "and a call with nothing failed reports nothing unreadable"
+            );
         }
 
         // =========================================================================

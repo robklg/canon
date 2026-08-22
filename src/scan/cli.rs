@@ -311,10 +311,7 @@ pub fn run(
     // the pay-down it survived.
     let hash_progress = StderrHashProgress::default();
     let pass = run_hash_pass(conn, &all_files_to_hash, &scope_pairs, &hash_progress)?;
-    total_stats.hashed = pass.stats.hashed;
-    total_stats.hash_backlog = pass.stats.backlog_hashed;
-    total_stats.unexpected_hash_changes = pass.stats.unexpected_hash_changes;
-    total_stats.unhashed = pass.standing_debt;
+    total_stats.carry_hash_pass(&pass);
 
     // Print summary (composed by ops)
     let summary = total_stats.compose_summary();

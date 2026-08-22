@@ -125,7 +125,17 @@ pub fn scan_root(
             continue;
         }
 
+        // Only regular files become sources. The walk does not follow links, so
+        // a symlink arrives here as itself whatever it points at — a symlink to
+        // a directory never reaches the branch above. Both counts are stated in
+        // the summary: skipping silently would leave a path the user can see on
+        // disk missing from the index with nothing to explain it.
         if !entry.file_type().is_file() {
+            if entry.file_type().is_symlink() {
+                stats.symlinks_skipped += 1;
+            } else {
+                stats.special_skipped += 1;
+            }
             continue;
         }
 
@@ -2619,7 +2629,9 @@ mod tests {
     // Hash debt — content Canon has never identified
     // =========================================================================
 
-    use crate::scan::ops::hash::{hash_files, HashProgress, HashStats};
+    use crate::core::domain::scope::DecisionScope;
+    use crate::scan::ops::hash::{hash_files, run_hash_pass, HashProgress};
+    use crate::scan::ops::types::HashStats;
     use crate::scan::repo::source::count_unhashed;
 
     struct NoopHashProgress;
@@ -2762,7 +2774,7 @@ mod tests {
 
         scan_pass(&conn, root_id, temp.path(), Some(1));
         assert_eq!(object_of(&conn, root_id, "photos/holiday.jpg"), None);
-        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 1);
+        assert_eq!(count_unhashed(&conn, root_id, None, &[]).unwrap().total, 1);
 
         // The next plain scan finds nothing about the file changed — and reads
         // it anyway, counting it as debt rather than as work the walk caused.
@@ -2779,7 +2791,7 @@ mod tests {
         assert_eq!((paid.hashed, paid.backlog_hashed), (1, 1));
 
         assert!(object_of(&conn, root_id, "photos/holiday.jpg").is_some());
-        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 0);
+        assert_eq!(count_unhashed(&conn, root_id, None, &[]).unwrap().total, 0);
 
         // And the debt does not come back: the scan after the pay-down queues
         // nothing.
@@ -2801,7 +2813,7 @@ mod tests {
 
         scan_pass(&conn, root_id, temp.path(), Some(1));
         let source_id = row(&conn, root_id, "inbox/photo.jpg").unwrap().id;
-        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 1);
+        assert_eq!(count_unhashed(&conn, root_id, None, &[]).unwrap().total, 1);
 
         std::fs::create_dir_all(temp.path().join("sorted")).unwrap();
         std::fs::rename(&original, temp.path().join("sorted/photo.jpg")).unwrap();
@@ -2829,7 +2841,7 @@ mod tests {
         let paid = pay(&conn, &result);
         assert_eq!((paid.hashed, paid.backlog_hashed), (1, 1));
         assert!(object_of(&conn, root_id, "sorted/photo.jpg").is_some());
-        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 0);
+        assert_eq!(count_unhashed(&conn, root_id, None, &[]).unwrap().total, 0);
         assert_second_scan_quiet(&conn, root_id, temp.path());
     }
 
@@ -2857,9 +2869,9 @@ mod tests {
             need: HashNeed::Basis,
         }];
         let failed = hash_files(&conn, &vanished, &NoopHashProgress).unwrap();
-        assert_eq!((failed.errors, failed.hashed), (1, 0));
+        assert_eq!((failed.errored_ids.len(), failed.hashed), (1, 0));
         assert_eq!(object_of(&conn, root_id, "photo.jpg"), None);
-        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 1);
+        assert_eq!(count_unhashed(&conn, root_id, None, &[]).unwrap().total, 1);
 
         // The retry needs no repair command and no flag: it is the ordinary
         // next scan, which finds the file unchanged and the debt standing.
@@ -2869,7 +2881,84 @@ mod tests {
         assert_eq!(retry.files_to_hash[0].need, HashNeed::Backlog);
         let paid = pay(&conn, &retry);
         assert_eq!((paid.hashed, paid.backlog_hashed), (1, 1));
-        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 0);
+        assert_eq!(count_unhashed(&conn, root_id, None, &[]).unwrap().total, 0);
+    }
+
+    #[test]
+    fn a_scan_that_could_not_read_a_file_says_so_in_the_summary() {
+        // End to end, across the hand-off: the pass records which files it
+        // could not read, the debt count answers how much of what still stands
+        // that accounts for, and the carry puts both where the summary can
+        // state them. The summary is also the durable decision record's, so a
+        // scan that failed on a file is distinguishable months later from one
+        // that was simply told not to hash.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_path = temp.path().to_str().unwrap().to_string();
+        let root_id = repo::insert_test_root(&conn, &root_path, "source", false);
+        write_at(temp.path(), "readable.jpg", "photo bytes");
+        write_at(temp.path(), "unreadable.jpg", "photo bytes");
+
+        let walked = plain_scan(&conn, root_id, temp.path(), Some(1));
+        let mut total = ScanStats::default();
+        total.absorb(&walked.stats);
+
+        // The pass reads files after the walk has moved on, so one can be gone,
+        // locked, or unreadable by the time its turn comes. Point that one at a
+        // path that is not there and leave the disk alone.
+        let queued: Vec<FileToHash> = walked
+            .files_to_hash
+            .into_iter()
+            .map(|f| {
+                let missing = f.full_path.ends_with("unreadable.jpg");
+                FileToHash {
+                    full_path: if missing {
+                        temp.path().join("no-such-file.jpg")
+                    } else {
+                        f.full_path
+                    },
+                    ..f
+                }
+            })
+            .collect();
+
+        let scope = DecisionScope::new(root_id, root_path.clone(), String::new());
+        let pass = run_hash_pass(
+            &conn,
+            &queued,
+            std::slice::from_ref(&scope),
+            &NoopHashProgress,
+        )
+        .unwrap();
+        total.carry_hash_pass(&pass);
+
+        assert_eq!(pass.stats.errored_ids.len(), 1);
+        assert_eq!(
+            (total.unhashed, total.unhashed_unreadable),
+            (1, 1),
+            "the one file left in debt is the one that could not be read"
+        );
+        assert!(total
+            .compose_summary()
+            .contains("1 sources remain unhashed (1 could not be read)"));
+
+        // Hash errors are an access failure, not a corruption claim: the exit
+        // gate reads unexpected changes and nothing else, so this scan leaves
+        // it untouched.
+        assert_eq!(total.unexpected_hash_changes, 0);
+
+        // The next scan reads the file where it really is, clears the debt, and
+        // the qualifier goes with it — the bare line is what a clean scan says.
+        let retry = plain_scan(&conn, root_id, temp.path(), Some(2));
+        let mut second = ScanStats::default();
+        second.absorb(&retry.stats);
+        let pass = run_hash_pass(&conn, &retry.files_to_hash, &[scope], &NoopHashProgress).unwrap();
+        second.carry_hash_pass(&pass);
+
+        let summary = second.compose_summary();
+        assert_eq!((second.unhashed, second.unhashed_unreadable), (0, 0));
+        assert!(!summary.contains("could not be read"));
+        assert!(!summary.contains("remain unhashed"));
     }
 
     #[test]
@@ -2956,7 +3045,7 @@ mod tests {
         write_at(temp.path(), "other/b.jpg", "b bytes");
 
         scan_pass(&conn, root_id, temp.path(), Some(1));
-        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 2);
+        assert_eq!(count_unhashed(&conn, root_id, None, &[]).unwrap().total, 2);
 
         let scoped = scan_root(
             &conn,
@@ -2986,8 +3075,13 @@ mod tests {
             None,
             "content outside the walked scope is untouched"
         );
-        assert_eq!(count_unhashed(&conn, root_id, Some("vacation")).unwrap(), 0);
-        assert_eq!(count_unhashed(&conn, root_id, None).unwrap(), 1);
+        assert_eq!(
+            count_unhashed(&conn, root_id, Some("vacation"), &[])
+                .unwrap()
+                .total,
+            0
+        );
+        assert_eq!(count_unhashed(&conn, root_id, None, &[]).unwrap().total, 1);
     }
 
     // =========================================================================
@@ -3417,6 +3511,104 @@ mod tests {
             })
             .unwrap();
         assert_eq!(present, 1);
+    }
+
+    // =========================================================================
+    // Entries the walk will not index
+    // =========================================================================
+
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_is_counted_and_never_becomes_a_source() {
+        // A symlink holds a reference, not content. Indexing one would claim
+        // content for a path that has none of its own, and following it would
+        // index the target twice. It is skipped — and said, because a path the
+        // user can see on disk and cannot find in the index is otherwise a
+        // mystery with nothing to explain it.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let (root_id, dir) = root_at(&conn, temp.path(), "photos");
+        write_at(&dir, "real.jpg", "content");
+        std::os::unix::fs::symlink(dir.join("real.jpg"), dir.join("link.jpg")).unwrap();
+        // A symlink to a directory too: the walk does not follow links, so it
+        // arrives as itself rather than at the directory branch.
+        std::fs::create_dir(dir.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("shortcut")).unwrap();
+
+        let stats = scan_pass(&conn, root_id, &dir, Some(1)).stats;
+
+        assert_eq!(stats.symlinks_skipped, 2);
+        assert_eq!(stats.special_skipped, 0);
+        assert_eq!(stats.scanned, 1, "only the regular file was observed");
+        assert_eq!(counts(&stats), (1, 0, 0, 0, 0));
+        assert!(row(&conn, root_id, "link.jpg").is_none());
+        assert!(row(&conn, root_id, "shortcut").is_none());
+        assert!(row(&conn, root_id, "real.jpg").is_some());
+
+        // The counts are observations, not events: a second scan of the same
+        // unchanged disk still reports the two symlinks it saw, while every
+        // event counter stays at zero.
+        let second = scan_pass(&conn, root_id, &dir, Some(2)).stats;
+        assert_eq!(second.symlinks_skipped, 2);
+        assert_eq!(counts(&second), (0, 0, 0, 0, 0));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_special_file_is_counted_apart_from_a_symlink() {
+        // Fifos, sockets and devices are not content: nothing a hash or a copy
+        // could meaningfully take. Counted in their own right, so the summary
+        // does not report a symlink where there is none.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let (root_id, dir) = root_at(&conn, temp.path(), "photos");
+        write_at(&dir, "real.jpg", "content");
+        let fifo = dir.join("pipe");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(
+            unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) },
+            0,
+            "mkfifo failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let stats = scan_pass(&conn, root_id, &dir, Some(1)).stats;
+
+        assert_eq!(stats.special_skipped, 1);
+        assert_eq!(stats.symlinks_skipped, 0);
+        assert_eq!(stats.scanned, 1);
+        assert!(row(&conn, root_id, "pipe").is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_file_replaced_by_a_symlink_goes_missing_like_any_other() {
+        // Skipping is not a way of holding a row open. The path no longer holds
+        // content Canon indexed, so the row follows ordinary missing detection
+        // rather than quietly staying present behind a link.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let (root_id, dir) = root_at(&conn, temp.path(), "photos");
+        write_at(&dir, "keeper.jpg", "kept");
+        let path = write_at(&dir, "photo.jpg", "content");
+        scan_pass(&conn, root_id, &dir, Some(1));
+        let indexed = row(&conn, root_id, "photo.jpg").expect("indexed by the first scan");
+
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(dir.join("keeper.jpg"), &path).unwrap();
+
+        let stats = scan_pass(&conn, root_id, &dir, Some(2)).stats;
+
+        assert_eq!(stats.symlinks_skipped, 1);
+        assert_eq!(stats.missing, 1, "the content that stood there is gone");
+        let present: i64 = conn
+            .query_row(
+                "SELECT present FROM sources WHERE id = ?",
+                [indexed.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(present, 0);
     }
 
     #[test]

@@ -1,7 +1,11 @@
 //! Scan's shared result/parameter types: the pipeline's per-file outcome and
-//! stats types, options, the walk-observability trait, the deletion receipt's
-//! document shape, and the shared timestamp helper the other four stratum
-//! files call.
+//! stats types — the walk's and the hash pass's alike — options, the
+//! walk-observability trait, the deletion receipt's document shape, and the
+//! shared timestamp helper the other four stratum files call.
+//!
+//! The hash pass's `HashStats` lives here rather than beside the pass, because
+//! its whole field list is handed to `ScanStats` through one guarded carry: the
+//! two structs are read together, so they are declared together.
 //!
 //! The receipt body lives here rather than beside the writer in `receipt.rs`
 //! because the pipeline's result types carry it as a field; this is the one
@@ -16,6 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::core::ops::receipt::ReceiptMeta;
+use crate::scan::domain::StandingDebt;
 
 /// Deletion receipt — written when `canon scan` observes sources gone from disk
 /// (`present → absent`). Source-root-local: it lists exactly the sources deleted
@@ -78,6 +83,12 @@ pub struct ScanStats {
     /// `hashed` — it is a fact about what stands at the end, not a per-root
     /// tally, so it is deliberately outside the fold.
     pub unhashed: u64,
+    /// How many of `unhashed` this scan tried to read and could not. Rides the
+    /// debt line as its qualifier, the way the backlog count rides `hashed`,
+    /// so a scan that failed on forty files does not report the same standing
+    /// debt as one that was told not to hash. Never exceeds `unhashed`: both
+    /// come from one query over one row set.
+    pub unhashed_unreadable: u64,
     /// Number of walk roots where missing detection was skipped (mount guard).
     /// Counted in the stats — and thus the durable decision summary — so a scan
     /// that *couldn't verify* absence is distinguishable from one that verified
@@ -102,6 +113,19 @@ pub struct ScanStats {
     /// the tree went unseen, and unseen must never read as deleted — and lands
     /// in the durable decision summary like the mount-guard skip.
     pub walk_errors: u64,
+    /// Symlinks the walk saw and did not index. Canon indexes what a path
+    /// holds, and a symlink holds a reference rather than content: following
+    /// one would index the target twice, once under each path, and claim
+    /// content for a path that has none of its own. Counted rather than
+    /// silently dropped, because a path visible on disk and absent from the
+    /// index is otherwise a mystery — the user sees a file, `canon ls` does
+    /// not, and nothing says why.
+    pub symlinks_skipped: u64,
+    /// Everything else the walk saw that is not a regular file — fifos,
+    /// sockets, block and character devices. Not content, and nothing a hash
+    /// or a copy could meaningfully take, so they are skipped for the same
+    /// reason and stated for the same reason.
+    pub special_skipped: u64,
     /// Files the hash pass read because the row carried no content identity,
     /// not because anything about them changed — standing debt this scan paid
     /// off. A root indexed once with `--no-hash` pays its whole backlog on the
@@ -123,10 +147,10 @@ impl ScanStats {
     /// enumerated beside the struct that declares them — a scan of several
     /// roots reports one summary, and a counter that reaches the per-root
     /// result but not this fold is computed correctly and then dropped on the
-    /// floor. `hashed`, `hash_backlog`, `unexpected_hash_changes` and
-    /// `unhashed` are deliberately absent: the hash pass runs once, after every
-    /// root, and those four are set directly from what it did, how much of that
-    /// was debt, and what it left standing.
+    /// floor. The hash pass's five counters are deliberately absent: the pass
+    /// runs once, after every root, so they are carried rather than folded —
+    /// by `carry_hash_pass` below, which is guarded the same way for the same
+    /// reason.
     pub fn absorb(&mut self, root: &ScanStats) {
         self.scanned += root.scanned;
         self.new += root.new;
@@ -140,6 +164,39 @@ impl ScanStats {
         self.hardlink_companions += root.hardlink_companions;
         self.moves_unverified += root.moves_unverified;
         self.walk_errors += root.walk_errors;
+        self.symlinks_skipped += root.symlinks_skipped;
+        self.special_skipped += root.special_skipped;
+    }
+
+    /// Carry the hash pass's answer into the totals.
+    ///
+    /// The twin of `absorb`, and rest-less for the same reason: the pass runs
+    /// once after every root, so its counters are set here rather than folded,
+    /// and a field added to `HashStats` must fail the build until someone
+    /// decides where it lands. It went unguarded for the project's whole life,
+    /// and the cost was exactly the failure the shape predicts — the count of
+    /// files the pass could not read was computed correctly, dropped at this
+    /// hand-off, and absent from every durable record of every scan.
+    pub fn carry_hash_pass(&mut self, pass: &HashPassResult) {
+        let HashPassResult {
+            stats:
+                HashStats {
+                    hashed,
+                    backlog_hashed,
+                    unexpected_hash_changes,
+                    // Spent, not carried: the ids are what the debt query below
+                    // joins against, and the number the reader is told is that
+                    // query's answer, never this list's length.
+                    errored_ids: _spent,
+                },
+            standing_debt: StandingDebt { total, unreadable },
+        } = pass;
+
+        self.hashed = *hashed;
+        self.hash_backlog = *backlog_hashed;
+        self.unexpected_hash_changes = *unexpected_hash_changes;
+        self.unhashed = *total;
+        self.unhashed_unreadable = *unreadable;
     }
 
     /// Compose the scan summary message.
@@ -189,6 +246,19 @@ impl ScanStats {
         if self.disconnected > 0 {
             summary.push_str(&format!(", {} skipped (disconnected)", self.disconnected));
         }
+        // Entries the walk saw and deliberately did not index. Stated for the
+        // same reason every other skip is: a path visible on disk and absent
+        // from the index must never be a mystery. "skipped" leads the pair so
+        // the special-file count is not left standing as a bare number with no
+        // verb when it is the only one there.
+        match (self.symlinks_skipped, self.special_skipped) {
+            (0, 0) => {}
+            (links, 0) => summary.push_str(&format!(", skipped {links} symlinks")),
+            (0, special) => summary.push_str(&format!(", skipped {special} special files")),
+            (links, special) => summary.push_str(&format!(
+                ", skipped {links} symlinks, {special} special files"
+            )),
+        }
         if self.hashed > 0 {
             // The backlog annotation rides the hashed count for the same reason
             // the companions annotation rides "new": it explains that number and
@@ -212,10 +282,59 @@ impl ScanStats {
             // unnoticed from one January to the following August. Under
             // --no-hash this is the debt the user declined to pay; after a
             // hashing scan it is what a failed pay-down left standing.
-            summary.push_str(&format!("\n{} sources remain unhashed", self.unhashed));
+            //
+            // When some of it could not be read, that rides the line as its
+            // qualifier — the same shape the backlog count takes on "hashed" —
+            // so the reader can tell debt Canon was told to leave from debt it
+            // tried to clear and could not. The per-file reasons stay on
+            // stderr; this is the standing fact, and the durable record needs
+            // it more than the terminal does.
+            if self.unhashed_unreadable > 0 {
+                summary.push_str(&format!(
+                    "\n{} sources remain unhashed ({} could not be read)",
+                    self.unhashed, self.unhashed_unreadable
+                ));
+            } else {
+                summary.push_str(&format!("\n{} sources remain unhashed", self.unhashed));
+            }
         }
         summary
     }
+}
+
+/// Result of the hash pipeline.
+///
+/// Lives here beside `ScanStats` rather than with the pass that produces it,
+/// because the hand-off between the two is guarded by `carry_hash_pass` above:
+/// a guard that forces a decision about every field reads as one piece only
+/// when the two field lists sit together. `hash.rs` already depends on this
+/// stratum, so the pair costs no edge against the grain.
+#[derive(Default)]
+pub struct HashStats {
+    pub hashed: u64,
+    /// How many of `hashed` were standing debt rather than work this scan's
+    /// walk caused. Counted here, beside the success it reports, because it
+    /// qualifies `hashed` and a qualifier that outruns what it qualifies is a
+    /// number no reader can make sense of: a file queued from the backlog and
+    /// then found unreadable was not paid off.
+    pub backlog_hashed: u64,
+    pub unexpected_hash_changes: u64,
+    /// The sources this pass tried to read and could not — kept as ids, not a
+    /// tally, because the number that reaches the summary is not this one. A
+    /// file that failed here may have been hashed a moment later by a
+    /// concurrent scan, or may sit outside the scopes this scan speaks about;
+    /// what the reader is told is how much of the *standing debt* is
+    /// unreadable, which only a query over the same rows as the debt itself
+    /// can answer. These ids are that query's input.
+    pub errored_ids: Vec<i64>,
+}
+
+/// What the hash pass did, and what it left standing.
+pub struct HashPassResult {
+    pub stats: HashStats,
+    /// Present sources in the walked scopes that still hold no identity, and
+    /// how much of that this scan could not read.
+    pub standing_debt: StandingDebt,
 }
 
 /// Why the hash pass must visit a file. Decided once by the walk's gate and
@@ -410,6 +529,9 @@ mod tests {
             moves_unverified: 12,
             walk_errors: 10,
             hash_backlog: 13,
+            symlinks_skipped: 14,
+            special_skipped: 15,
+            unhashed_unreadable: 400,
         };
 
         let mut total = ScanStats::default();
@@ -433,6 +555,9 @@ mod tests {
             moves_unverified,
             walk_errors,
             hash_backlog,
+            symlinks_skipped,
+            special_skipped,
+            unhashed_unreadable,
         } = total;
 
         // An array rather than a tuple: the counters outgrew the arity Rust's
@@ -451,16 +576,72 @@ mod tests {
                 missing_detection_skipped,
                 hardlink_companions,
                 moves_unverified,
-                walk_errors
+                walk_errors,
+                symlinks_skipped,
+                special_skipped
             ],
-            [2, 4, 6, 8, 10, 12, 14, 16, 18, 22, 24, 20]
+            [2, 4, 6, 8, 10, 12, 14, 16, 18, 22, 24, 20, 28, 30]
         );
         // Set once from the hash pass after every root — what it did, how much
         // of that was debt, and what it left standing — never folded per root.
         assert_eq!(
-            (hashed, hash_backlog, unexpected_hash_changes, unhashed),
-            (0, 0, 0, 0)
+            (
+                hashed,
+                hash_backlog,
+                unexpected_hash_changes,
+                unhashed,
+                unhashed_unreadable
+            ),
+            (0, 0, 0, 0, 0)
         );
+    }
+
+    #[test]
+    fn carry_hash_pass_places_every_counter_the_pass_produces() {
+        // The twin of the fold guard above. `carry_hash_pass` destructures
+        // `HashStats` with no `..` rest, so a counter added to the pass fails
+        // to compile until someone decides where it lands. The hole that closed
+        // was exactly this shape: the count of files the pass could not read
+        // was produced correctly for the project's whole life and dropped at
+        // this hand-off, so no durable record of any scan ever held it.
+        let pass = HashPassResult {
+            stats: HashStats {
+                hashed: 7,
+                backlog_hashed: 3,
+                unexpected_hash_changes: 1,
+                errored_ids: vec![41, 42],
+            },
+            standing_debt: StandingDebt {
+                total: 9,
+                unreadable: 2,
+            },
+        };
+
+        let mut total = ScanStats {
+            new: 5,
+            ..Default::default()
+        };
+        total.carry_hash_pass(&pass);
+
+        assert_eq!(
+            (
+                total.hashed,
+                total.hash_backlog,
+                total.unexpected_hash_changes,
+                total.unhashed,
+                total.unhashed_unreadable
+            ),
+            (7, 3, 1, 9, 2)
+        );
+
+        // What the reader is told is the debt query's answer, not the length of
+        // the id list: two ids failed here and two are still standing debt only
+        // because this fixture made them agree. They are separate numbers, and
+        // the summary must speak the one bounded to what the scan walked.
+        assert_eq!(pass.stats.errored_ids.len(), 2);
+
+        // The walk's own counters are untouched: carrying is not folding.
+        assert_eq!(total.new, 5);
     }
 
     #[test]
@@ -594,6 +775,88 @@ mod tests {
         assert!(!ScanStats::default()
             .compose_summary()
             .contains("remain unhashed"));
+    }
+
+    #[test]
+    fn compose_summary_qualifies_debt_the_scan_could_not_read() {
+        // Debt Canon was told to leave and debt it tried to clear and could not
+        // are different facts, and only one of them means something is wrong
+        // with the storage. The per-file reasons go to stderr and are gone; the
+        // durable decision record is where the standing fact has to live.
+        let residue = ScanStats {
+            scanned: 40,
+            hashed: 37,
+            hash_backlog: 37,
+            unhashed: 3,
+            unhashed_unreadable: 3,
+            ..Default::default()
+        };
+        assert!(residue
+            .compose_summary()
+            .contains("3 sources remain unhashed (3 could not be read)"));
+
+        // A part, not the whole: forty standing, three of them unreadable.
+        let mixed = ScanStats {
+            scanned: 40,
+            unhashed: 40,
+            unhashed_unreadable: 3,
+            ..Default::default()
+        };
+        assert!(mixed
+            .compose_summary()
+            .contains("40 sources remain unhashed (3 could not be read)"));
+
+        // Nothing failed: the line reads exactly as it does without the
+        // qualifier, which is additive and never a permanent change of shape.
+        let declined = ScanStats {
+            scanned: 40,
+            unhashed: 40,
+            ..Default::default()
+        };
+        let summary = declined.compose_summary();
+        assert!(summary.contains("40 sources remain unhashed"));
+        assert!(!summary.contains("could not be read"));
+    }
+
+    #[test]
+    fn compose_summary_states_the_entries_the_walk_would_not_index() {
+        // A path the user can see on disk and cannot find in the index must
+        // never be silent. Both counts reach the durable decision summary, and
+        // "skipped" leads the pair so neither reads as a bare number.
+        let both = ScanStats {
+            scanned: 10,
+            symlinks_skipped: 4,
+            special_skipped: 2,
+            ..Default::default()
+        };
+        assert!(both
+            .compose_summary()
+            .contains(", skipped 4 symlinks, 2 special files"));
+
+        let links_only = ScanStats {
+            scanned: 10,
+            symlinks_skipped: 4,
+            ..Default::default()
+        };
+        let summary = links_only.compose_summary();
+        assert!(summary.contains(", skipped 4 symlinks"));
+        assert!(!summary.contains("special"));
+
+        // A special file alone still says what happened to it.
+        let special_only = ScanStats {
+            scanned: 10,
+            special_skipped: 2,
+            ..Default::default()
+        };
+        let summary = special_only.compose_summary();
+        assert!(summary.contains(", skipped 2 special files"));
+        assert!(!summary.contains("symlink"));
+
+        // Nothing skipped, nothing said — the annotation is additive, never a
+        // permanent change of shape.
+        let quiet = ScanStats::default().compose_summary();
+        assert!(!quiet.contains("symlink"));
+        assert!(!quiet.contains("special"));
     }
 
     #[test]

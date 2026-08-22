@@ -516,6 +516,35 @@ pub fn find_missing(expected_ids: &HashSet<i64>, seen_ids: &HashSet<i64>) -> Vec
     expected_ids.difference(seen_ids).copied().collect()
 }
 
+/// The hash debt a scan leaves standing, and how much of it this scan could
+/// not read.
+///
+/// The two numbers are one sentence — "N sources remain unhashed (M could not
+/// be read)" — so `unreadable` must never outrun `total`. That containment is
+/// not a promise the callers keep: both numbers come from one query over one
+/// row set, per walked scope, so a row that leaves the whole leaves the part
+/// with it. A file that failed here and was hashed a moment later by a
+/// concurrent scan drops out of both; one that failed outside the walked
+/// scopes appears in neither.
+///
+/// Summing across scopes preserves it, because `outermost_scopes` hands back
+/// disjoint scopes: the sum of parts of disjoint wholes is a part of the sum.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StandingDebt {
+    /// Present sources in the scope that hold no content identity.
+    pub total: u64,
+    /// How many of `total` this scan tried to read and could not.
+    pub unreadable: u64,
+}
+
+impl StandingDebt {
+    /// Fold one scope's answer into a running total.
+    pub fn add(&mut self, scope: StandingDebt) {
+        self.total += scope.total;
+        self.unreadable += scope.unreadable;
+    }
+}
+
 /// Narrow the scopes a scan walked to the outermost ones, per root.
 ///
 /// One invocation can be handed several paths, and one may sit inside another
