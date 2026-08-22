@@ -34,9 +34,11 @@ pub use ops::selection::{select_sources, RolePolicy, SelectionParams};
 // Alias expansion, which runs before anything else parses a filter.
 pub use ops::alias::expand_filter_strings;
 
-// The shaping half: a pattern, parsed, inspected for the keys it needs, and
-// evaluated against a source.
-pub use domain::pattern::{evaluate, extract_fact_keys, parse_pattern, EvalContext, Pattern};
+// The shaping half: a pattern, parsed, inspected for the keys it needs, read
+// for the placement it commits to, and evaluated against a source.
+pub use domain::pattern::{
+    evaluate, extract_fact_keys, parse_pattern, placement_shape, EvalContext, Pattern,
+};
 
 // Resolving a key to a value, and rendering one for display.
 pub use domain::value::{fact_value_to_display, get_builtin_value, resolve_fact_value};

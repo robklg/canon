@@ -93,15 +93,17 @@ Use `--root` to apply only a subset of sources from the manifest. Useful for sta
 
 **Pre-flight checks** (mandatory):
 
-1. **Destination collisions** - If multiple sources would map to the same destination path (e.g., using `{filename}` when sources have duplicate names), apply aborts with an error showing which files conflict.
+1. **Blocked destination directories** - If a file stands where a destination directory has to go, apply refuses the whole run before transferring anything, naming the file and the destinations it blocks. This check also runs with `--resume`: a file in the way is not evidence of an earlier run's progress. Move or rename the file, or edit the pattern.
 
-2. **Destination path conflicts** - In regular mode (without `--resume`), checks if any destination paths are already occupied (registered in the database or existing on disk). If conflicts are found, apply suggests using `--resume` to skip already-copied files.
+2. **Destination collisions** - If multiple sources would map to the same destination path (e.g., using `{filename}` when sources have duplicate names), apply aborts with an error showing which files conflict.
 
-3. **Stale destination records** - If the database shows files as present in the archive but they're missing from disk, apply aborts. Run `canon scan <archive>` to update the database before retrying.
+3. **Destination path conflicts** - In regular mode (without `--resume`), checks if any destination paths are already occupied (registered in the database or existing on disk). If conflicts are found, apply suggests using `--resume` to skip already-copied files.
 
-4. **Archive conflicts** - Checks if files already exist in the destination archive or other archives. Empty files are exempt: they are [contentless](../../concepts/object.md#empty-files-are-contentless), so an empty file being applied never conflicts with empty files already in the archive.
+4. **Stale destination records** - If the database shows files as present in the archive but they're missing from disk, apply aborts. Run `canon scan <archive>` to update the database before retrying.
 
-5. **Excluded sources** - Blocks if any sources in the manifest are marked as excluded.
+5. **Archive conflicts** - Checks if files already exist in the destination archive or other archives. Empty files are exempt: they are [contentless](../../concepts/object.md#empty-files-are-contentless), so an empty file being applied never conflicts with empty files already in the archive.
+
+6. **Excluded sources** - Blocks if any sources in the manifest are marked as excluded.
 
 Edit the manifest's `[output]` section to customize the destination:
 

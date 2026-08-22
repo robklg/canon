@@ -2283,6 +2283,7 @@ fn s() -> Connection {
                 "expand_filter_strings",
                 "parse_pattern",
                 "extract_fact_keys",
+                "placement_shape",
                 "evaluate",
                 "Pattern",
                 "EvalContext",

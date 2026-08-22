@@ -13,6 +13,7 @@ use crate::ceremony;
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::format::first_chars;
+use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
@@ -286,6 +287,44 @@ pub fn run(
         eprintln!("\nPattern requires facts that are missing for these sources.");
         eprintln!("Use 'canon facts' to check fact coverage, or adjust the pattern.");
         bail!("Aborting due to pattern expansion failures");
+    }
+
+    // A file where a directory has to go blocks every destination beneath it,
+    // and no retry changes that. Refusing here — in resume mode too — keeps the
+    // answer to one message instead of one per transfer, with nothing moved.
+    if !v.ancestor_collisions.is_empty() {
+        let blocked: usize = v.ancestor_collisions.iter().map(|c| c.blocked_count).sum();
+        eprintln!(
+            "Preflight failed: {} destination paths are blocked by {} files standing where a directory must go.",
+            format_count(blocked),
+            format_count(v.ancestor_collisions.len())
+        );
+        eprintln!();
+        for collision in v.ancestor_collisions.iter().take(10) {
+            eprintln!(
+                "  {} blocks {} destinations:",
+                collision.blocking_path,
+                format_count(collision.blocked_count)
+            );
+            for dest in &collision.sample_dests {
+                eprintln!("    {dest}");
+            }
+            if collision.blocked_count > collision.sample_dests.len() {
+                eprintln!(
+                    "    ... and {} more",
+                    format_count(collision.blocked_count - collision.sample_dests.len())
+                );
+            }
+        }
+        if v.ancestor_collisions.len() > 10 {
+            eprintln!(
+                "  ... and {} more",
+                format_count(v.ancestor_collisions.len() - 10)
+            );
+        }
+        eprintln!();
+        eprintln!("Move or rename the file in the way, or edit the pattern in your manifest.");
+        bail!("Aborting due to files blocking destination directories");
     }
 
     if !v.escaped_paths.is_empty() {

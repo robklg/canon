@@ -188,6 +188,81 @@ pub fn extract_fact_keys(pattern: &Pattern) -> Vec<String> {
     keys
 }
 
+/// What a pattern can say about where files land before a single value is
+/// resolved: the directory prefix every placement shares, and whether
+/// expansion can open further directories below it.
+///
+/// The prefix is the literal directory path standing before the first
+/// expression — `photos/2024/{filename}` places everything in `photos/2024`,
+/// while `{content.Make}/{filename}` promises no shared directory at all.
+/// `None` means the pattern commits to none.
+///
+/// The second half is deliberately conservative: it answers *can* this fan
+/// out, not *will* it. A separator in a later literal fans out, and so does an
+/// expression that may expand into more than one component — a path-valued key
+/// carries whole directory chains (`{source.rel_path}` is `trip/day1/x.jpg`),
+/// which the pattern text alone does not show. Reading a fan-out as flat would
+/// name one directory as the destination when files land all over the tree; the
+/// other way round only costs a hedge.
+pub fn placement_shape(pattern: &Pattern) -> (Option<String>, bool) {
+    // Everything literal before the first expression is fixed text; the
+    // directory part of it is what every placement shares.
+    let mut head = String::new();
+    let mut rest = pattern.segments.iter();
+    let mut first_expr = None;
+    for segment in rest.by_ref() {
+        match segment {
+            PatternSegment::Literal(text) => head.push_str(text),
+            PatternSegment::Expr(expr) => {
+                first_expr = Some(expr);
+                break;
+            }
+        }
+    }
+
+    // Cut at the last separator: what follows it is the start of a filename,
+    // not a directory of its own.
+    //
+    // The head goes through the same sanitizing and normalizing that
+    // evaluation puts the whole expansion through, and for the same reason:
+    // this must name the directory files *land* in, not the one the pattern
+    // text says. A leading slash is stripped at evaluation, so a prefix that
+    // kept it would be an absolute path — which silently replaces the archive
+    // root when joined onto it — and `..` becomes `_` there, so a prefix
+    // holding `..` would name a directory that never exists.
+    let prefix = match head.rfind('/') {
+        Some(cut) => {
+            let dir = normalize_pattern_result(&head[..cut].replace("..", "_"));
+            (!dir.is_empty()).then_some(dir)
+        }
+        None => None,
+    };
+
+    let fans_out = first_expr.is_some_and(expression_may_nest)
+        || rest.any(|segment| match segment {
+            PatternSegment::Literal(text) => text.contains('/'),
+            PatternSegment::Expr(expr) => expression_may_nest(expr),
+        });
+
+    (prefix, fans_out)
+}
+
+/// Whether one expression may expand into more than one path component.
+fn expression_may_nest(expr: &PatternExpr) -> bool {
+    // An index accessor picks a single component out of a path, whatever the
+    // path held.
+    if matches!(expr.accessor, Some(PathAccessor::Index(_))) {
+        return false;
+    }
+    // The scope-relative path is derived at evaluation time and carries no
+    // built-in key, but it is a path like any other.
+    if expr.key == "scope.rel_path" {
+        return true;
+    }
+    BuiltinKey::from_str(&expr.key)
+        .is_some_and(|key| matches!(key.fact_type(), crate::core::domain::fact::FactType::Path))
+}
+
 // ============================================================================
 // Pattern Evaluation
 // ============================================================================
@@ -627,5 +702,92 @@ mod tests {
         ctx.set_source_rel_path("subdir/file.jpg".to_string());
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "subdir/file.jpg");
+    }
+
+    // =========================================================================
+    // placement_shape — what a pattern promises about where files land
+    // =========================================================================
+
+    fn shape(pattern: &str) -> (Option<String>, bool) {
+        placement_shape(&parse_pattern(pattern).unwrap())
+    }
+
+    #[test]
+    fn placement_shape_reads_a_literal_directory_prefix() {
+        assert_eq!(
+            shape("photos/2024/{filename}"),
+            (Some("photos/2024".to_string()), false)
+        );
+    }
+
+    #[test]
+    fn placement_shape_finds_no_prefix_when_an_expression_comes_first() {
+        assert_eq!(shape("{content.Make}/{filename}"), (None, true));
+        assert_eq!(shape("{filename}"), (None, false));
+    }
+
+    #[test]
+    fn placement_shape_cuts_a_partial_component_off_the_prefix() {
+        // "img_" starts a filename, not a directory.
+        assert_eq!(
+            shape("photos/img_{filename}"),
+            (Some("photos".to_string()), false)
+        );
+    }
+
+    #[test]
+    fn placement_shape_reports_fan_out_from_a_later_separator() {
+        assert_eq!(
+            shape("photos/{content.DateTimeOriginal|year}/{filename}"),
+            (Some("photos".to_string()), true)
+        );
+    }
+
+    #[test]
+    fn placement_shape_reports_fan_out_for_a_path_valued_key() {
+        // The separators live in the value, not in the pattern text: reading
+        // this as flat would name one directory while files land all over it.
+        assert_eq!(shape("{source.rel_path}"), (None, true));
+        assert_eq!(shape("{scope.rel_path}"), (None, true));
+        assert_eq!(
+            shape("archive/{source.rel_path}"),
+            (Some("archive".to_string()), true)
+        );
+    }
+
+    #[test]
+    fn placement_shape_reads_a_single_component_accessor_as_flat() {
+        // One component out of a path is one component.
+        assert_eq!(shape("{source.rel_path[-1]}"), (None, false));
+        assert_eq!(shape("{source.rel_path[0]}/{filename}"), (None, true));
+    }
+
+    #[test]
+    fn placement_shape_normalizes_the_prefix_the_way_evaluation_does() {
+        // A leading slash is stripped when the pattern is evaluated, so a
+        // prefix that kept it would name an absolute path — and joining one
+        // onto the archive root discards the root entirely.
+        assert_eq!(
+            shape("/2024/{filename}"),
+            (Some("2024".to_string()), false)
+        );
+        // `..` becomes `_` at evaluation; the prefix must name the directory
+        // files actually land in.
+        assert_eq!(
+            shape("../2024/{filename}"),
+            (Some("_/2024".to_string()), false)
+        );
+        // A prefix that normalizes to nothing is no prefix.
+        assert_eq!(shape("/{filename}"), (None, false));
+        assert_eq!(shape("./{filename}"), (None, false));
+    }
+
+    #[test]
+    fn placement_shape_reads_a_fully_literal_pattern() {
+        assert_eq!(
+            shape("archive/one.jpg"),
+            (Some("archive".to_string()), false)
+        );
+        assert_eq!(shape("one.jpg"), (None, false));
     }
 }

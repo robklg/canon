@@ -91,6 +91,8 @@ archive_root_id = 2
 - **Cluster Summary** is regenerated on each `cluster refresh`, showing current source counts, root breakdown, and archive coverage.
 - **Notes** section is preserved across refreshes — add your own comments here.
 - **`pattern`** starts at `{scope.rel_path}` when the generation was scoped to a single path, and at `{source.rel_path}` otherwise: files keep the folder structure they were found in. Edit it to organize them differently. An existing manifest keeps the pattern it recorded.
+
+  Writing the manifest inside the destination is fine, but a manifest whose own path is a directory the pattern needs blocks every file below it. Generate and refresh warn when that is the case, naming both paths; [`apply`](apply.md) refuses the run. This is easy to hit by naming a manifest after a folder whose name contains a dot: `-o`/`-O` append `.toml` only when the name has no extension, so `-O photos.2024` writes exactly that name.
 - **`version`** field tracks the manifest format version.
 - **`[options]`** records which `--allow` flags were used during generation. [`cluster refresh`](cluster.md) reads them, because it re-selects sources from the same query. [`apply`](apply.md) reads only `duplicates`, which speaks to the content it is about to transfer; `archived` acknowledged a selection that has already happened, and apply selects nothing. What apply needs acknowledged, it asks for on its own flags.
 

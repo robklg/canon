@@ -12,7 +12,7 @@
 //! the same question the planning does — what stands in the way — so they sit
 //! here rather than in the filesystem layer every subsystem shares.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -129,6 +129,24 @@ pub struct ApplyViolations {
     pub missing_sources: Vec<(i64, String)>,
     /// Source files that exist but are not readable (permission denied).
     pub unreadable_sources: Vec<(i64, String)>,
+    /// Files standing where a destination's directory chain has to go.
+    pub ancestor_collisions: Vec<AncestorCollision>,
+}
+
+/// A file standing where a directory must be created.
+///
+/// Every destination below it is blocked, and no amount of retrying will
+/// change that — `create_dir_all` cannot make a directory out of a file. One
+/// of these refuses the whole run, so the answer arrives once instead of
+/// arriving per transfer while the successful ones move.
+#[derive(Debug)]
+pub struct AncestorCollision {
+    /// The file in the way, absolute.
+    pub blocking_path: String,
+    /// How many destinations it blocks.
+    pub blocked_count: usize,
+    /// A few of the blocked destinations, for the refusal to show.
+    pub sample_dests: Vec<String>,
 }
 
 /// A source whose state has changed since the lock file was generated.
@@ -534,6 +552,32 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
         transfers.retain(|t| pending_ids.contains(&t.source_id));
     }
 
+    // --- Check ancestor collisions ---
+    // After the resume trimming above, so the check reads the list that will
+    // actually be transferred. Unlike the destination-conflict check, this one
+    // runs in resume mode as well: a file standing where a directory must go is
+    // never evidence of an earlier run's progress.
+    if !transfers.is_empty() {
+        let archive_root_path =
+            params
+                .root_paths
+                .get(&params.archive_root_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Archive root {} not found in root_paths",
+                        params.archive_root_id
+                    )
+                })?;
+        let archive_root = Path::new(archive_root_path);
+        let base_dir = if params.base_dir_rel.is_empty() {
+            archive_root.to_path_buf()
+        } else {
+            archive_root.join(params.base_dir_rel)
+        };
+        violations.ancestor_collisions =
+            check_ancestor_collisions(&transfers, &base_dir, archive_root);
+    }
+
     // --- Check archive conflicts ---
     // Deliberately last: in resume mode the transfers above have been trimmed
     // to the ones still pending, and this check must not see the rest. What an
@@ -641,6 +685,105 @@ pub fn filter_by_roots<'a>(
         .iter()
         .filter(|s| root_ids.contains(&s.root_id))
         .collect())
+}
+
+/// Every directory the transfers need, each named once.
+///
+/// A manifest of five thousand files usually lands in a handful of
+/// directories, and the chains they share are walked once. Deduping before the
+/// filesystem is touched is the whole point: over a network mount, one stat per
+/// transfer is the difference between a preflight and a stall.
+fn ancestor_directories(
+    transfers: &[ApplyTransfer],
+    base_dir: &Path,
+    archive_root: &Path,
+) -> BTreeSet<PathBuf> {
+    let mut dirs = BTreeSet::new();
+    let mut record = |start: &Path| {
+        for dir in start.ancestors() {
+            if !dir.starts_with(archive_root) {
+                break;
+            }
+            // Already recorded means its whole chain above is too.
+            if !dirs.insert(dir.to_path_buf()) {
+                break;
+            }
+        }
+    };
+
+    // base_dir itself and everything it hangs from, whatever the destinations
+    // turn out to be: the run needs it to be a directory even if every
+    // placement lands directly in it.
+    record(base_dir);
+
+    // Then each destination's own chain — the file itself is not a directory
+    // the run must create, so the walk starts at its parent.
+    for dest in transfers.iter().map(|t| base_dir.join(&t.dest_rel_path)) {
+        if let Some(parent) = dest.parent() {
+            record(parent);
+        }
+    }
+
+    dirs
+}
+
+/// Files standing where the run's destination directories have to go.
+///
+/// Checked before any transfer, and in resume mode too: a file in the way is
+/// never evidence of progress, unlike the destination records an interrupted
+/// run leaves behind.
+pub fn check_ancestor_collisions(
+    transfers: &[ApplyTransfer],
+    base_dir: &Path,
+    archive_root: &Path,
+) -> Vec<AncestorCollision> {
+    const SAMPLES: usize = 3;
+
+    let mut blockers: Vec<PathBuf> = Vec::new();
+    // The set is ordered, so a parent is always considered before its
+    // children: once a chain is blocked, nothing below it is worth a stat.
+    for dir in ancestor_directories(transfers, base_dir, archive_root) {
+        if blockers.iter().any(|b: &PathBuf| dir.starts_with(b)) {
+            continue;
+        }
+        if let Some(blocker) = blocking_file(&dir) {
+            blockers.push(blocker);
+        }
+    }
+
+    blockers
+        .into_iter()
+        .map(|blocker| {
+            let blocked: Vec<String> = transfers
+                .iter()
+                .map(|t| base_dir.join(&t.dest_rel_path))
+                .filter(|dest| dest.starts_with(&blocker))
+                .map(|dest| dest.display().to_string())
+                .collect();
+            AncestorCollision {
+                blocking_path: blocker.display().to_string(),
+                blocked_count: blocked.len(),
+                sample_dests: blocked.into_iter().take(SAMPLES).collect(),
+            }
+        })
+        .collect()
+}
+
+/// Whether this path holds something that is not a directory.
+///
+/// A symlink is judged by what it resolves to, because that is what deciding
+/// to create a directory here runs into: a link to a directory is a directory
+/// for this purpose, and one pointing at nothing is as solid an obstacle as a
+/// file — the path exists, and no directory can be made at it.
+fn blocking_file(dir: &Path) -> Option<PathBuf> {
+    let meta = fs::symlink_metadata(dir).ok()?;
+    if meta.is_dir() {
+        return None;
+    }
+    if meta.is_symlink() && fs::metadata(dir).is_ok_and(|m| m.is_dir()) {
+        return None;
+    }
+    Some(dir.to_path_buf())
 }
 
 /// Check for on-disk destination conflicts not already captured by DB checks.
@@ -1901,6 +2044,249 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+        }
+    }
+
+    // =========================================================================
+    // Ancestor collisions — a file standing where a directory has to go
+    // =========================================================================
+
+    /// A source tree and an archive root, with sources named by the caller.
+    /// `source_exists` says whether the file is actually on disk — a lock
+    /// entry for a file that has since gone is what resume trims away.
+    fn ancestor_fixture(
+        conn: &Connection,
+        archive_root: &Path,
+        sources: &[(&str, bool)],
+    ) -> (i64, Vec<LockEntry>, HashMap<i64, String>, tempfile::TempDir) {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source_root_path = source_dir.path().to_str().unwrap().to_string();
+        let source_id = insert_root(conn, &source_root_path, "source", false);
+        let archive_id = insert_root(conn, archive_root.to_str().unwrap(), "archive", false);
+
+        let mut entries = Vec::new();
+        for (i, (name, source_exists)) in sources.iter().enumerate() {
+            if *source_exists {
+                let file = source_dir.path().join(name);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, b"x").unwrap();
+            }
+            let obj = insert_object(conn, &format!("hash{i}"), false);
+            let src = insert_source_with_metadata(conn, source_id, name, Some(obj), 1, 0);
+            entries.push(make_lock_entry(
+                src,
+                source_id,
+                &format!("{source_root_path}/{name}"),
+                Some(obj),
+                Some(&format!("hash{i}")),
+            ));
+        }
+
+        let mut root_paths = HashMap::new();
+        root_paths.insert(source_id, source_root_path);
+        root_paths.insert(archive_id, archive_root.to_str().unwrap().to_string());
+        (archive_id, entries, root_paths, source_dir)
+    }
+
+    #[test]
+    fn an_ancestor_file_refuses_the_whole_run_before_any_transfer() {
+        let archive = tempfile::tempdir().unwrap();
+        // The user's own manifest, sitting where the pattern needs a directory.
+        std::fs::write(archive.path().join("2024"), b"a manifest, say").unwrap();
+
+        let mut conn = setup_test_db();
+        let (archive_id, entries, root_paths, _sources) =
+            ancestor_fixture(&conn, archive.path(), &[("a.jpg", true)]);
+        let sources: Vec<&LockEntry> = entries.iter().collect();
+        let pattern = parse_pattern("2024/{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
+        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+
+        let plan = plan_apply(&mut conn, &params).unwrap();
+
+        let collisions = &plan.violations.ancestor_collisions;
+        assert_eq!(collisions.len(), 1, "got: {collisions:?}");
+        assert_eq!(
+            collisions[0].blocking_path,
+            archive.path().join("2024").display().to_string()
+        );
+        assert_eq!(collisions[0].blocked_count, 1);
+        assert_eq!(collisions[0].sample_dests.len(), 1);
+        // Nothing was moved to find this out — planning touches no destination.
+        assert!(!archive.path().join("2024/a.jpg").exists());
+    }
+
+    #[test]
+    fn a_file_blocking_some_destinations_refuses_all() {
+        let archive = tempfile::tempdir().unwrap();
+        // Blocks what lands in day2; day1 is perfectly clear.
+        std::fs::write(archive.path().join("day2"), b"in the way").unwrap();
+
+        let mut conn = setup_test_db();
+        let (archive_id, entries, root_paths, _sources) = ancestor_fixture(
+            &conn,
+            archive.path(),
+            &[("day1/a.jpg", true), ("day2/b.jpg", true)],
+        );
+        let sources: Vec<&LockEntry> = entries.iter().collect();
+        let pattern = parse_pattern("{source.rel_path}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
+        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+
+        let plan = plan_apply(&mut conn, &params).unwrap();
+
+        let collisions = &plan.violations.ancestor_collisions;
+        assert_eq!(collisions.len(), 1, "got: {collisions:?}");
+        assert!(
+            collisions[0].blocking_path.ends_with("/day2"),
+            "got: {collisions:?}"
+        );
+        assert_eq!(collisions[0].blocked_count, 1, "only day2 is blocked");
+        // The clear destination is still in the plan: what makes this refuse
+        // the whole run is the interface aborting on a non-empty violation,
+        // not the plan dropping the transfers that would have worked.
+        assert_eq!(plan.transfers.len(), 2);
+    }
+
+    /// The check reads the post-trim list. Only one of resume's four outcomes
+    /// can reach the check having been trimmed — `already_there`, whose
+    /// destination file exists and whose chain is therefore all directories,
+    /// so it can carry no blocker. This drives the trimming through
+    /// `source_lost` instead, which the command refuses before the ancestor
+    /// block is reached: what is pinned here is the reading of the list, not a
+    /// standing the user can arrive at.
+    #[test]
+    fn resume_checks_ancestors_over_the_trimmed_list() {
+        let archive = tempfile::tempdir().unwrap();
+        std::fs::write(archive.path().join("day2"), b"in the way").unwrap();
+
+        let mut conn = setup_test_db();
+        // The day2 source is gone from disk: resume classifies it source-lost
+        // and trims it, so the directory only it needed stops being this
+        // run's problem. The day1 source is still there and still pending.
+        let (archive_id, entries, root_paths, _sources) = ancestor_fixture(
+            &conn,
+            archive.path(),
+            &[("day1/a.jpg", true), ("day2/b.jpg", false)],
+        );
+        let sources: Vec<&LockEntry> = entries.iter().collect();
+        let pattern = parse_pattern("{source.rel_path}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
+        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+
+        let full = plan_apply(&mut conn, &params).unwrap();
+        assert_eq!(
+            full.violations.ancestor_collisions.len(),
+            1,
+            "outside resume the whole list is checked: {:?}",
+            full.violations.ancestor_collisions
+        );
+
+        params.resume = true;
+        let resumed = plan_apply(&mut conn, &params).unwrap();
+        assert_eq!(resumed.transfers.len(), 1, "the lost entry is trimmed");
+        assert!(
+            resumed.violations.ancestor_collisions.is_empty(),
+            "a directory no pending transfer needs is not the resume's problem: {:?}",
+            resumed.violations.ancestor_collisions
+        );
+    }
+
+    #[test]
+    fn resume_still_refuses_a_blocker_in_the_pending_list() {
+        let archive = tempfile::tempdir().unwrap();
+        std::fs::write(archive.path().join("2024"), b"in the way").unwrap();
+
+        let mut conn = setup_test_db();
+        let (archive_id, entries, root_paths, _sources) =
+            ancestor_fixture(&conn, archive.path(), &[("a.jpg", true)]);
+        let sources: Vec<&LockEntry> = entries.iter().collect();
+        let pattern = parse_pattern("2024/{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
+        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        params.resume = true;
+
+        let plan = plan_apply(&mut conn, &params).unwrap();
+
+        // Unlike a destination already registered in the archive, a file in
+        // the way is never evidence of an earlier run's progress.
+        assert_eq!(plan.violations.ancestor_collisions.len(), 1);
+    }
+
+    /// The stat loop runs over this set, one call per element, so pinning the
+    /// set is pinning what the filesystem is asked. It is the input, not a
+    /// count of calls: a future check that stats inside the grouping pass
+    /// would leave this green.
+    #[test]
+    fn the_ancestor_check_asks_about_each_distinct_directory_once() {
+        let archive = Path::new("/archive");
+        let base = Path::new("/archive/photos");
+
+        // Five hundred files, two directories: the chains they share are
+        // walked once, so the filesystem is asked four times, not five hundred.
+        let transfers: Vec<ApplyTransfer> = (0..500)
+            .map(|i| {
+                let day = if i % 2 == 0 { "day1" } else { "day2" };
+                transfer_to(&format!("{day}/img{i}.jpg"))
+            })
+            .collect();
+
+        let dirs = ancestor_directories(&transfers, base, archive);
+        let named: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+        assert_eq!(
+            named,
+            vec![
+                "/archive".to_string(),
+                "/archive/photos".to_string(),
+                "/archive/photos/day1".to_string(),
+                "/archive/photos/day2".to_string(),
+            ],
+            "one entry per distinct directory, parents before children"
+        );
+    }
+
+    #[test]
+    fn a_blocker_above_a_nested_base_dir_is_found() {
+        let archive = tempfile::tempdir().unwrap();
+        // The manifest places into <archive>/2024/vacation; a file stands at
+        // 2024, above base_dir itself rather than on a destination's chain.
+        std::fs::write(archive.path().join("2024"), b"in the way").unwrap();
+
+        let mut conn = setup_test_db();
+        let (archive_id, entries, root_paths, _sources) =
+            ancestor_fixture(&conn, archive.path(), &[("a.jpg", true)]);
+        let sources: Vec<&LockEntry> = entries.iter().collect();
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
+        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        params.base_dir_rel = "2024/vacation";
+
+        let plan = plan_apply(&mut conn, &params).unwrap();
+
+        let collisions = &plan.violations.ancestor_collisions;
+        assert_eq!(collisions.len(), 1, "got: {collisions:?}");
+        assert_eq!(
+            collisions[0].blocking_path,
+            archive.path().join("2024").display().to_string()
+        );
+        assert_eq!(collisions[0].blocked_count, 1);
+    }
+
+    /// A transfer that only carries a destination — the rest is not what the
+    /// ancestor check reads.
+    fn transfer_to(dest_rel_path: &str) -> ApplyTransfer {
+        ApplyTransfer {
+            source_id: 1,
+            source_path: format!("/photos/{dest_rel_path}"),
+            source_root_path: "/photos".to_string(),
+            source_rel_path: dest_rel_path.to_string(),
+            dest_rel_path: dest_rel_path.to_string(),
+            archive_rel_path: dest_rel_path.to_string(),
+            object_id: None,
+            partial_hash: "testhash".to_string(),
+            size: 4,
+            mtime: 0,
+            hash: None,
         }
     }
 

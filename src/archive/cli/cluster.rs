@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::archive::domain::{parse_manifest_allow, validate_manifest_version, ManifestConfig};
 use crate::archive::ops::generate::{
@@ -137,6 +137,8 @@ pub fn generate(
     }
 
     println!("{}", full_summary);
+
+    warn_if_written_file_blocks_placement(&result.pattern, dest, &[output_path, &lock_path]);
 
     if !options.no_edit {
         if let Err(e) = open_editor(output_path) {
@@ -308,6 +310,19 @@ fn refresh_with_editor(
 
     // Execute
     let lock_path = config_path.with_extension("lock");
+
+    // Where this manifest's files would land, for the write-time collision
+    // warning below. The loop that produces the collision is generate (no
+    // prefix) → edit adds one → refresh, so the rewrite is usually the moment
+    // it becomes knowable. A manifest naming a root that is gone gets no
+    // warning rather than an error: the refresh itself is still legitimate.
+    let refresh_roots = repo::root::fetch_all(conn)?;
+    let placement_root = refresh_roots
+        .iter()
+        .find(|r| r.id == config.output.archive_root_id)
+        .map(|r| Path::new(&r.path).join(&config.output.base_dir));
+    let written_pattern = config.output.pattern.clone();
+
     let exec_params = ExecuteRefreshParams {
         lock_path: lock_path.clone(),
         manifest_path: config_path.to_path_buf(),
@@ -323,11 +338,14 @@ fn refresh_with_editor(
     if plan.lock_entries.is_empty() {
         generate_ops::execute_refresh(&plan, &exec_params)?;
         println!("No sources matched the query");
+        // The manifest only: this arm removed the lock file, and a warning
+        // about a file standing in the way would be naming one that no longer
+        // stands anywhere.
+        if let Some(root) = &placement_root {
+            warn_if_written_file_blocks_placement(&written_pattern, root, &[config_path]);
+        }
         return Ok(());
     }
-
-    // Decompose the manifest's scope to known roots for the decision record.
-    let refresh_roots = repo::root::fetch_all(conn)?;
 
     let decision = DecisionParams {
         command: DecisionCommand::ClusterRefresh,
@@ -374,12 +392,78 @@ fn refresh_with_editor(
         eprintln!("{w}");
     }
 
+    if let Some(root) = &placement_root {
+        warn_if_written_file_blocks_placement(&r.pattern, root, &[config_path, &lock_path]);
+    }
+
     Ok(())
 }
 
 // ============================================================================
 // Display helpers
 // ============================================================================
+
+/// Say so when the file just written stands where the pattern's placements
+/// need a directory.
+///
+/// The apply would fail on it later, one transfer at a time; here it is one
+/// line at the moment the arrangement was made, naming both paths.
+///
+/// Both sides are resolved to the same form first, because they arrive in
+/// different ones: the manifest path as the user typed it on the command line,
+/// the destination from the archive root's stored canonical path. On a machine
+/// where a mount or a temp directory is reached through a symlink, the two
+/// spellings of one place never compare equal, and the warning would simply
+/// never fire. A file that does not exist yet resolves through its parent,
+/// which does.
+fn placement_warning(
+    pattern: &str,
+    placement_root: &Path,
+    written_paths: &[&Path],
+) -> Option<String> {
+    let resolve = |p: &Path| -> PathBuf {
+        if let Ok(real) = fs::canonicalize(p) {
+            return real;
+        }
+        let through_parent = match (p.parent(), p.file_name()) {
+            (Some(parent), Some(name)) => fs::canonicalize(parent).ok().map(|real| real.join(name)),
+            _ => None,
+        };
+        through_parent.unwrap_or_else(|| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()))
+    };
+    let root = resolve(placement_root);
+    let written: Vec<PathBuf> = written_paths.iter().map(|p| resolve(p)).collect();
+    let refs: Vec<&Path> = written.iter().map(|p| p.as_path()).collect();
+
+    let (blocker, blocked) =
+        generate_ops::placement_blocked_by_written_file(pattern, &root, &refs)?;
+    let situation = if blocker == blocked {
+        format!(
+            "Warning: {} is also the directory this manifest's pattern places files into.",
+            blocker.display()
+        )
+    } else {
+        format!(
+            "Warning: {} stands in the way of {}, where this manifest's pattern places files.",
+            blocker.display(),
+            blocked.display()
+        )
+    };
+    Some(format!(
+        "{situation}\n  Apply will refuse until one of them moves: write the manifest \
+         elsewhere (-o/-O), or edit the pattern."
+    ))
+}
+
+fn warn_if_written_file_blocks_placement(
+    pattern: &str,
+    placement_root: &Path,
+    written_paths: &[&Path],
+) {
+    if let Some(warning) = placement_warning(pattern, placement_root, written_paths) {
+        eprintln!("{warning}");
+    }
+}
 
 /// Display plan warnings (archived files, mixed types) to stderr.
 fn display_plan_warnings(plan: &ClusterGeneratePlan, options: &GenerateOptions) {
@@ -710,6 +794,136 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&lock_path).unwrap(),
             "the lock from last time\n"
+        );
+    }
+
+    // =========================================================================
+    // The write-time collision warning
+    // =========================================================================
+
+    /// Driven with exactly the arguments `generate` passes: the destination
+    /// the user named as the placement root, the manifest and its lock as the
+    /// files being written.
+    ///
+    /// Generation cannot reach this state today: it writes the default
+    /// pattern, and both defaults commit to no directory below the
+    /// destination, so nothing the manifest could be named would stand in the
+    /// way. The call site is wired all the same, and this holds it to its
+    /// behaviour for the day a chosen pattern reaches generation.
+    #[test]
+    fn generate_warns_when_the_manifest_stands_in_the_placement_path() {
+        let dest = Path::new("/archive/photos");
+        let manifest = Path::new("/archive/photos/2024");
+        let lock = Path::new("/archive/photos/2024.lock");
+
+        let warning = placement_warning("2024/{filename}", dest, &[manifest, lock])
+            .expect("the manifest occupies the directory the pattern needs");
+        assert!(warning.contains("/archive/photos/2024"), "got: {warning}");
+        assert!(warning.contains("edit the pattern"), "got: {warning}");
+
+        // The lock file blocks just as well as the manifest does.
+        let lock_blocker = Path::new("/archive/photos/2024");
+        assert!(
+            placement_warning("2024/{filename}", dest, &[lock_blocker]).is_some(),
+            "a lock file standing in the path is the same collision"
+        );
+    }
+
+    /// The refresh twin: the placement root is the manifest's own archive root
+    /// joined with its recorded base_dir, and the pattern is the one the
+    /// manifest carries — the prefix an edit added is exactly what makes the
+    /// collision knowable at this moment.
+    #[test]
+    fn refresh_warns_when_the_manifest_stands_in_the_placement_path() {
+        let placement_root = Path::new("/archive").join("photos");
+        let manifest = Path::new("/archive/photos/2024");
+
+        assert!(
+            placement_warning("2024/{filename}", &placement_root, &[manifest]).is_some(),
+            "the edited prefix put the manifest in the placement path"
+        );
+        // Before the edit added the prefix there was nothing to warn about.
+        assert!(
+            placement_warning("{filename}", &placement_root, &[manifest]).is_none(),
+            "a flat pattern needs no directory below the destination"
+        );
+    }
+
+    /// The shape this warning was written for: a manifest named after a folder
+    /// whose name carries a dot, written into the archive with `-O`. The dot
+    /// reads as an extension so no `.toml` is appended, the bare name lands in
+    /// the destination, and the pattern the user then edits in names that same
+    /// directory. Dotted folder names are exactly what people name a manifest
+    /// after, which is why this coincidence is not the freak it looks like.
+    #[test]
+    fn the_dotted_manifest_name_that_collided_with_its_own_pattern_is_named() {
+        let placement_root = Path::new("/Volumes/Archive").join("Projects");
+        let manifest = Path::new("/Volumes/Archive/Projects/example.org");
+
+        let warning =
+            placement_warning("example.org/{scope.rel_path}", &placement_root, &[manifest])
+                .expect("the manifest is the directory its own pattern needs");
+        assert!(warning.contains("example.org"), "got: {warning}");
+        assert!(
+            warning.contains("Apply will refuse"),
+            "the warning says what happens next: {warning}"
+        );
+    }
+
+    /// The two sides arrive spelled differently — the manifest as typed, the
+    /// destination from the archive root's stored canonical path. Comparing
+    /// the two spellings without resolving them finds nothing, and finds it
+    /// silently: a warning that cannot see the collision is indistinguishable
+    /// from a warning with nothing to say. The symlink is built here rather
+    /// than borrowed from the platform's temp path, so the guard holds
+    /// wherever it runs.
+    #[cfg(unix)]
+    #[test]
+    fn the_warning_sees_through_a_symlinked_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = fs::canonicalize(dir.path()).unwrap().join("archive");
+        fs::create_dir(&real).unwrap();
+        let linked = fs::canonicalize(dir.path()).unwrap().join("link");
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+
+        // The manifest as the user typed it, through the link; the
+        // destination as the database stored it, resolved.
+        let manifest = linked.join("2024.toml");
+        fs::write(&manifest, "").unwrap();
+        assert_ne!(manifest, real.join("2024.toml"), "the two spellings differ");
+        assert!(
+            placement_warning("2024.toml/{filename}", &real, &[&manifest]).is_some(),
+            "the same place spelled two ways must still compare equal"
+        );
+    }
+
+    #[test]
+    fn a_manifest_beside_the_placement_path_draws_no_warning() {
+        let dest = Path::new("/archive/photos");
+        assert!(
+            placement_warning(
+                "2024/{filename}",
+                dest,
+                &[Path::new("/archive/photos/manifest.toml")]
+            )
+            .is_none(),
+            "an ordinary manifest beside the destination blocks nothing"
+        );
+    }
+
+    #[test]
+    fn a_file_standing_above_the_placement_path_is_caught_too() {
+        // The chain is checked, not just its last component: a file at
+        // /archive/photos blocks /archive/photos/2024/raw just as thoroughly.
+        let dest = Path::new("/archive");
+        assert!(
+            placement_warning(
+                "photos/2024/raw/{filename}",
+                dest,
+                &[Path::new("/archive/photos")]
+            )
+            .is_some(),
+            "a blocker anywhere on the chain stops the directories below it"
         );
     }
 
