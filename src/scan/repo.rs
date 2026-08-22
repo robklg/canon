@@ -11,7 +11,6 @@ use crate::core::repo::Connection;
 pub(crate) mod source {
     use anyhow::Result;
     use rusqlite::types::Value;
-    use rusqlite::OptionalExtension;
 
     use super::Connection;
     use crate::core::domain::source::Source;
@@ -20,28 +19,32 @@ pub(crate) mod source {
     };
     use crate::scan::domain::{FileObservation, Reconciliation};
 
-    /// Fetch a source by its device and inode.
+    /// Nominate the present sources carrying this inode.
     ///
-    /// Searches across ALL roots to detect file moves (including cross-root moves).
-    /// Returns None if no present source exists with matching device+inode.
+    /// Nomination is by inode alone. Device is deliberately not part of the key:
+    /// a remount renumbers it wholesale, and a lookup that demanded agreement
+    /// would nominate nothing at exactly the moment the whole library looks new.
+    /// The stored device survives as a hint the pairing rule may weigh, never as
+    /// a filter here.
     ///
-    /// # Note
-    /// This search is global across all roots because files can be moved between roots.
-    /// The caller should use the returned source's root_id to detect cross-root moves.
-    pub fn fetch_by_inode(conn: &Connection, device: u64, inode: u64) -> Result<Option<Source>> {
-        let sql = format!(
-            "SELECT {SOURCE_COLUMNS} {SOURCE_FROM} WHERE s.present = 1 AND s.device = ? AND s.inode = ?",
-        );
+    /// Plural by contract, for two reasons: one inode legitimately holds many
+    /// rows (hardlink twins are ordinary sources sharing physical storage), and
+    /// an inode number recycled after a delete can collide across volumes. What
+    /// comes back is a candidate list — evidence decides which, if any, is the
+    /// same file.
+    ///
+    /// Searches across all roots, since a file can be moved between them; the
+    /// caller reads each candidate's `root_id` to see a cross-root move.
+    pub fn fetch_by_inode(conn: &Connection, inode: u64) -> Result<Vec<Source>> {
+        let sql =
+            format!("SELECT {SOURCE_COLUMNS} {SOURCE_FROM} WHERE s.present = 1 AND s.inode = ?");
 
-        let result = conn
-            .query_row(
-                &sql,
-                rusqlite::params![device as i64, inode as i64],
-                source_from_row,
-            )
-            .optional()?;
+        let rows = conn
+            .prepare(&sql)?
+            .query_map(rusqlite::params![inode as i64], source_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(result)
+        Ok(rows)
     }
 
     /// Apply a reconciliation outcome to the database.
@@ -482,22 +485,32 @@ pub(crate) mod source {
         // fetch_by_inode tests
         // =========================================================================
 
+        /// Insert a present source at a chosen device+inode.
+        fn insert_at(
+            conn: &RusqliteConnection,
+            root_id: i64,
+            rel_path: &str,
+            device: i64,
+            inode: i64,
+            present: bool,
+        ) {
+            conn.execute(
+                "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, scanned_at, last_seen_at, present)
+                 VALUES (?, ?, ?, ?, 1000, 1700000000, 'hash', 0, 0, ?)",
+                rusqlite::params![root_id, rel_path, device, inode, present as i64],
+            ).unwrap();
+        }
+
         #[test]
         fn fetch_by_inode_exists() {
             let conn = setup_test_db();
 
             let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            insert_at(&conn, root_id, "file.jpg", 100, 12345, true);
 
-            // Insert source with specific device/inode
-            conn.execute(
-                "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, scanned_at, last_seen_at, present)
-                 VALUES (?, 'file.jpg', 100, 12345, 1000, 1700000000, 'hash', 0, 0, 1)",
-                rusqlite::params![root_id],
-            ).unwrap();
-
-            let result = fetch_by_inode(&conn, 100, 12345).unwrap();
-            assert!(result.is_some());
-            assert_eq!(result.unwrap().rel_path, "file.jpg");
+            let result = fetch_by_inode(&conn, 12345).unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].rel_path, "file.jpg");
         }
 
         #[test]
@@ -506,20 +519,14 @@ pub(crate) mod source {
 
             let root1 = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             let _root2 = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
+            insert_at(&conn, root1, "original.jpg", 100, 12345, true);
 
-            // Insert source in root1 with specific device/inode
-            conn.execute(
-                "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, scanned_at, last_seen_at, present)
-                 VALUES (?, 'original.jpg', 100, 12345, 1000, 1700000000, 'hash', 0, 0, 1)",
-                rusqlite::params![root1],
-            ).unwrap();
-
-            // Should find it even though we're not specifying root
-            let result = fetch_by_inode(&conn, 100, 12345).unwrap();
-            assert!(result.is_some());
-            let source = result.unwrap();
-            assert_eq!(source.rel_path, "original.jpg");
-            assert_eq!(source.root_id, root1);
+            // Nomination is global: a file can be moved between roots, so the
+            // caller must be able to see a candidate wherever it stands.
+            let result = fetch_by_inode(&conn, 12345).unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].rel_path, "original.jpg");
+            assert_eq!(result[0].root_id, root1);
         }
 
         #[test]
@@ -529,9 +536,8 @@ pub(crate) mod source {
             let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
             insert_source(&conn, root_id, "file.jpg", None, true, false);
 
-            // Query for non-existent device/inode
-            let result = fetch_by_inode(&conn, 999, 999).unwrap();
-            assert!(result.is_none());
+            let result = fetch_by_inode(&conn, 999).unwrap();
+            assert!(result.is_empty());
         }
 
         #[test]
@@ -539,17 +545,46 @@ pub(crate) mod source {
             let conn = setup_test_db();
 
             let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            insert_at(&conn, root_id, "deleted.jpg", 100, 12345, false);
 
-            // Insert non-present source with specific device/inode
-            conn.execute(
-                "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime, partial_hash, scanned_at, last_seen_at, present)
-                 VALUES (?, 'deleted.jpg', 100, 12345, 1000, 1700000000, 'hash', 0, 0, 0)",
-                rusqlite::params![root_id],
-            ).unwrap();
+            // An absent row is not a candidate: nothing stands at its path to
+            // move anywhere.
+            let result = fetch_by_inode(&conn, 12345).unwrap();
+            assert!(result.is_empty());
+        }
 
-            // Should not find it (present=0)
-            let result = fetch_by_inode(&conn, 100, 12345).unwrap();
-            assert!(result.is_none());
+        #[test]
+        fn fetch_by_inode_returns_every_row_sharing_the_inode() {
+            // A hardlink group is many paths over one inode, and each is an
+            // ordinary source. Nomination hands back the whole group and lets
+            // evidence decide — returning only the first would make the choice
+            // silently, by row order.
+            let conn = setup_test_db();
+
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            insert_at(&conn, root_id, "albums/trip.jpg", 100, 12345, true);
+            insert_at(&conn, root_id, "by-year/2024/trip.jpg", 100, 12345, true);
+            insert_at(&conn, root_id, "unrelated.jpg", 100, 999, true);
+
+            let result = fetch_by_inode(&conn, 12345).unwrap();
+            let mut paths: Vec<&str> = result.iter().map(|s| s.rel_path.as_str()).collect();
+            paths.sort();
+            assert_eq!(paths, ["albums/trip.jpg", "by-year/2024/trip.jpg"]);
+        }
+
+        #[test]
+        fn fetch_by_inode_ignores_the_stored_device() {
+            // The case the whole demotion exists for: a remount renumbers every
+            // device, so rows stored under the old number must still nominate.
+            // A device-qualified lookup would go blind exactly here.
+            let conn = setup_test_db();
+
+            let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+            insert_at(&conn, root_id, "old-device.jpg", 100, 12345, true);
+            insert_at(&conn, root_id, "new-device.jpg", 200, 12345, true);
+
+            let result = fetch_by_inode(&conn, 12345).unwrap();
+            assert_eq!(result.len(), 2, "the stored device plays no role");
         }
 
         // =========================================================================

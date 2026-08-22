@@ -5,7 +5,7 @@
 //! sources, and returns typed results. A `ScanProgress` trait provides
 //! per-file observability without writing to stderr.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -13,10 +13,12 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use rusqlite::{Transaction, TransactionBehavior};
 
+use crate::core::domain::source::Source;
 use crate::core::ops::fs::compute_partial_hash;
 use crate::core::repo::{self, Connection};
 use crate::scan::domain::{
-    find_missing, reconcile, reconcile_at_path, FileObservation, Reconciliation,
+    find_missing, reconcile_at_path, reconcile_pathless, resolve_moves, DeferredMove,
+    FileObservation, MoveCandidate, MoveResolution, OldPathCheck, PathlessOutcome, Reconciliation,
 };
 use crate::scan::repo as scan_repo;
 
@@ -61,6 +63,15 @@ pub fn scan_root(
 
     // Batch buffer for unchanged file updates (source_id, device, inode)
     let mut unchanged_batch: Vec<(i64, i64, i64)> = Vec::new();
+
+    // Observations held back for end-of-walk move resolution, with the rows
+    // they corroborated against. The rows are kept as walked so resolution can
+    // compare them against a fresh read and notice anything that moved since.
+    let mut deferred: Vec<DeferredMove> = Vec::new();
+    let mut donors: HashMap<i64, Source> = HashMap::new();
+    // Roots whose own paths could not be checked, and how many nominations each
+    // cost. Ordered so the warnings read the same on every run.
+    let mut unverified_by_root: BTreeMap<String, u64> = BTreeMap::new();
 
     // Snapshot the walk path's device ID before the walk starts.
     // If the mount disappears mid-scan (NAS disconnect, volume ejected),
@@ -162,31 +173,54 @@ pub fn scan_root(
             }
         };
 
+        let ReconcileResult {
+            observation,
+            outcome,
+            source_at_path,
+            companions,
+            unverified,
+            unverified_roots,
+        } = reconciled;
+
         // Persist: unchanged files are batched, others get individual transactions
-        let (action, source_id, old_object_id) = match &reconciled.reconciliation {
-            Reconciliation::Unchanged { source_id } => {
-                unchanged_batch.push((*source_id, device, inode));
+        let (action, source_id, old_object_id) = match outcome {
+            ReconcileOutcome::Deferred(corroborated) => {
+                for donor in &corroborated {
+                    donors.entry(donor.id).or_insert_with(|| donor.clone());
+                }
+                deferred.push(DeferredMove {
+                    observation,
+                    candidate_ids: corroborated.iter().map(|d| d.id).collect(),
+                });
+                // Held back deliberately: nothing about this file is persisted,
+                // counted, or reported until the walk has seen every path, so
+                // that which observation takes which row is decided globally
+                // rather than by whichever the walker reached first.
+                continue;
+            }
+            ReconcileOutcome::Settled(Reconciliation::Unchanged { source_id }) => {
+                unchanged_batch.push((source_id, device, inode));
                 if unchanged_batch.len() >= UNCHANGED_BATCH_SIZE {
                     flush_unchanged(conn, &unchanged_batch, now)?;
                     unchanged_batch.clear();
                 }
                 (
                     FileAction::Unchanged,
-                    *source_id,
-                    reconciled.source_at_path.and_then(|s| s.object_id),
+                    source_id,
+                    source_at_path.and_then(|s| s.object_id),
                 )
             }
-            _ => {
+            ReconcileOutcome::Settled(reconciliation) => {
                 // Only New reconciliations receive decision_id (conservative scan semantics).
                 // Modified, Moved preserve the existing value via omission in SQL.
-                let file_decision_id = match &reconciled.reconciliation {
+                let file_decision_id = match &reconciliation {
                     Reconciliation::New => decision_id,
                     _ => None,
                 };
                 let source = match persist_file(
                     conn,
-                    &reconciled.observation,
-                    &reconciled.reconciliation,
+                    &observation,
+                    &reconciliation,
                     now,
                     file_decision_id,
                 ) {
@@ -197,19 +231,32 @@ pub fn scan_root(
                         continue;
                     }
                 };
-                let (action, old_oid) = match &reconciled.reconciliation {
-                    Reconciliation::New => (FileAction::New, None),
-                    Reconciliation::Modified { old_object_id, .. } => {
-                        (FileAction::Modified, *old_object_id)
-                    }
-                    Reconciliation::Moved { old_object_id, .. } => {
-                        (FileAction::Moved, *old_object_id)
-                    }
-                    Reconciliation::Unchanged { .. } => unreachable!(),
-                };
-                (action, source.id, old_oid)
+                (
+                    action_for(&reconciliation),
+                    source.id,
+                    old_object_link(&reconciliation),
+                )
             }
         };
+
+        // Both counters are per *file*, not per nomination, and both are
+        // incremented only now — after the file is persisted. The arm reports
+        // how many rows were still standing or unreachable, which is several
+        // for a group of twins; but these two numbers describe files. The
+        // companion count qualifies the `new` count ("N new, of which M are
+        // companions") and would describe nothing if it could exceed it, which
+        // it can if a file that failed to persist still counted. A file can
+        // make at most one move, so an unverifiable check costs one, however
+        // many rows it could not ask about.
+        if companions > 0 {
+            stats.hardlink_companions += 1;
+        }
+        if unverified > 0 {
+            stats.moves_unverified += 1;
+        }
+        for root in unverified_roots {
+            *unverified_by_root.entry(root).or_default() += 1;
+        }
 
         // Notify progress
         progress.on_file(rel_path_str, &action);
@@ -244,6 +291,77 @@ pub fn scan_root(
 
     // Flush remaining unchanged files
     flush_unchanged(conn, &unchanged_batch, now)?;
+
+    // Decide the held-back moves. This sits here, after the walk and *before*
+    // the missing-detection block below, for one reason: a row claimed by a
+    // move must already be in the seen set when `find_missing` computes its
+    // difference. Resolve after it and every move would be reported as a
+    // deletion and an arrival of the same file.
+    for resolution in resolve_moves(deferred, &donors) {
+        let (rel_path, claimed) = match &resolution {
+            MoveResolution::Moved {
+                observation,
+                source_id,
+            } => (observation.rel_path.clone(), Some(*source_id)),
+            MoveResolution::New { observation } => (observation.rel_path.clone(), None),
+        };
+        let (action, source_id, old_object_id) =
+            match persist_resolution(conn, resolution, &donors, now, decision_id) {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    progress.on_process_error(
+                        &root_path.join(&rel_path).display().to_string(),
+                        &e.to_string(),
+                    );
+                    stats.skipped += 1;
+                    // A write that failed is not evidence that the donor's file
+                    // is gone. Left out of the seen set it would fall to
+                    // missing detection, which would flip a present row to
+                    // absent and write a deletion receipt for content this very
+                    // walk observed on disk.
+                    if let Some(donor) = claimed {
+                        seen_source_ids.insert(donor);
+                        outcomes.push((donor, SourceOutcome::Seen));
+                    }
+                    continue;
+                }
+            };
+
+        progress.on_file(&rel_path, &action);
+        seen_source_ids.insert(source_id);
+        outcomes.push((source_id, SourceOutcome::Seen));
+
+        match action {
+            FileAction::New => stats.new += 1,
+            FileAction::Modified => stats.updated += 1,
+            FileAction::Moved => stats.moved += 1,
+            FileAction::Unchanged => stats.unchanged += 1,
+        }
+
+        if options.hash {
+            let needs_hash = match action {
+                FileAction::New | FileAction::Modified => true,
+                FileAction::Moved | FileAction::Unchanged => options.hash_all,
+            };
+            if needs_hash {
+                files_to_hash.push(FileToHash {
+                    source_id,
+                    full_path: root_path.join(&rel_path),
+                    old_object_id,
+                    basis_changed: matches!(action, FileAction::New | FileAction::Modified),
+                });
+            }
+        }
+    }
+
+    // A nomination Canon could not check is stated with the root that could not
+    // answer, so "new" on an unreachable-root universe never passes silently
+    // for "not moved".
+    for (root, count) in &unverified_by_root {
+        warnings.push(format!(
+            "{count} possible moves could not be verified — root {root} unreachable"
+        ));
+    }
 
     // Check if the mount is still the same device after the walk.
     // If the device changed (or disappeared), the mount was disrupted during
@@ -317,13 +435,94 @@ pub fn scan_root(
 /// Intermediate result from reconciling a file against DB state (before persistence).
 struct ReconcileResult {
     observation: FileObservation,
-    reconciliation: Reconciliation,
+    outcome: ReconcileOutcome,
     /// The source at this path before reconciliation (for old_object_id on Unchanged).
-    source_at_path: Option<crate::core::domain::source::Source>,
+    source_at_path: Option<Source>,
+    /// Nominated rows still standing at their own paths — this file is their
+    /// sibling, not their former self. Counted because during convergence there
+    /// are tens of thousands of them, and an unexplained flood of "new" reads
+    /// like data loss.
+    companions: u32,
+    /// Nominations whose own paths could not be checked — the arm's own count,
+    /// which is what the summary reports.
+    unverified: u32,
+    /// Which roots could not answer, one entry per unverifiable nomination. A
+    /// declared projection of `unverified` for the warning's sake: the arm
+    /// decides, this only says where. Pinned to agree by
+    /// `an_unverifiable_nomination_is_counted_and_its_root_named`.
+    unverified_roots: Vec<String>,
+}
+
+/// Whether a file's outcome is decided, or waits for the end of the walk.
+enum ReconcileOutcome {
+    Settled(Reconciliation),
+    /// Corroborated rows, gone from their own paths, one of which this
+    /// observation may claim once every path has been seen.
+    Deferred(Vec<Source>),
+}
+
+/// The report's word for a persisted reconciliation. One mapping, consumed by
+/// the walk and by end-of-walk resolution alike.
+fn action_for(reconciliation: &Reconciliation) -> FileAction {
+    match reconciliation {
+        Reconciliation::New => FileAction::New,
+        Reconciliation::Modified { .. } => FileAction::Modified,
+        Reconciliation::Moved { .. } => FileAction::Moved,
+        Reconciliation::Unchanged { .. } => FileAction::Unchanged,
+    }
+}
+
+/// The object link a reconciliation carried in, for the hash pass's
+/// unexpected-change check. `New` has no predecessor, and `Unchanged` reads the
+/// still-standing row rather than this.
+fn old_object_link(reconciliation: &Reconciliation) -> Option<i64> {
+    match reconciliation {
+        Reconciliation::New | Reconciliation::Unchanged { .. } => None,
+        Reconciliation::Modified { old_object_id, .. }
+        | Reconciliation::Moved { old_object_id, .. } => *old_object_id,
+    }
+}
+
+/// What the disk says about a nominated row's own path.
+///
+/// The distinction this draws is between absence and ignorance, and it is the
+/// whole reason the check exists. A file gone from the storage that recorded it
+/// is evidence: something happened there, and a move is one explanation.
+/// Anything else — a permission error, an I/O failure, an unreachable root —
+/// says only that Canon cannot see, and a claim built on not seeing is a guess.
+///
+/// **Absence has to be absence from the right storage.** A root's path is a
+/// directory, and a directory whose volume is not mounted is still a directory:
+/// it answers, it is empty, and every file ever recorded under it reads as gone.
+/// That is not absence, it is a mountpoint with nothing behind it — so the
+/// check confirms it is looking at the same storage the row was recorded on, by
+/// the stored device the row carries. This is device serving as *mount-presence*
+/// evidence, which is the one job it keeps here and the same job it does in the
+/// empty-directory classifier; it is not identity, and nothing about the file is
+/// decided by it.
+///
+/// The cost is deliberate and one-sided: for the first scan after a genuine
+/// remount the stored devices are stale, so moves out of that root degrade to
+/// new paths until it is scanned again and its rows refresh. Refusing to answer
+/// costs a conservative verdict; answering from a mountpoint shell costs a row
+/// relocated away from content that is sitting untouched on an unplugged disk.
+fn check_old_path(candidate: &Source) -> OldPathCheck {
+    let root = Path::new(&candidate.root_path);
+    match fs::metadata(root.join(&candidate.rel_path)) {
+        Ok(_) => OldPathCheck::Present,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match fs::metadata(root).map(|meta| meta.dev() as i64) {
+                Ok(device) if device == candidate.device => OldPathCheck::Vacated,
+                _ => OldPathCheck::Unverifiable,
+            }
+        }
+        Err(_) => OldPathCheck::Unverifiable,
+    }
 }
 
 /// Reconcile a single file: read DB state, determine outcome, compute partial hash if needed.
-/// Does NOT persist — caller decides how to write (batch or individual transaction).
+/// Does NOT persist — caller decides how to write (batch, individual
+/// transaction, or end-of-walk resolution).
 #[allow(clippy::too_many_arguments)]
 fn reconcile_file(
     conn: &Connection,
@@ -349,28 +548,24 @@ fn reconcile_file(
 
     // Every partial hash below is computed outside the transaction — filesystem
     // I/O can be slow on NAS/network storage and must not hold the write lock.
-    let reconciliation = match source_at_path.as_ref() {
-        Some(existing) => {
-            // The path holds a row, so the row is this file's; the only question
-            // is whether the content under it moved. The head read is demanded
-            // exactly when the inode changed beneath a standing path — that is
-            // the one case where a bit-identical recreation and a real edit look
-            // alike from metadata alone. A stored inode of 0 was never tracked
-            // (a platform that records none), so nothing says it moved and the
-            // fingerprint decides, as it always has.
-            let inode_changed = existing.inode != 0 && existing.inode as u64 != observation.inode;
-            if inode_changed {
-                observation.partial_hash = Some(compute_partial_hash(full_path, size as u64)?);
-            }
-            reconcile_at_path(&observation, existing, observation.partial_hash.as_deref())
-                .into_reconciliation()
-        }
-        None => {
-            let source_by_inode =
-                scan_repo::source::fetch_by_inode(conn, device as u64, inode as u64)?;
-            reconcile(source_by_inode.as_ref())
-        }
+    let Some(existing) = source_at_path.as_ref() else {
+        return reconcile_pathless_file(conn, observation, full_path, size, inode);
     };
+
+    // The path holds a row, so the row is this file's; the only question is
+    // whether the content under it moved. The head read is demanded exactly
+    // when the inode changed beneath a standing path — that is the one case
+    // where a bit-identical recreation and a real edit look alike from metadata
+    // alone. A stored inode of 0 was never tracked (a platform that records
+    // none), so nothing says it moved and the fingerprint decides, as it always
+    // has.
+    let inode_changed = existing.inode != 0 && existing.inode as u64 != observation.inode;
+    if inode_changed {
+        observation.partial_hash = Some(compute_partial_hash(full_path, size as u64)?);
+    }
+    let reconciliation =
+        reconcile_at_path(&observation, existing, observation.partial_hash.as_deref())
+            .into_reconciliation();
 
     // A head read taken for the decision is the one the write needs — a file is
     // never opened twice for the same observation.
@@ -380,9 +575,154 @@ fn reconcile_file(
 
     Ok(ReconcileResult {
         observation,
-        reconciliation,
+        outcome: ReconcileOutcome::Settled(reconciliation),
         source_at_path,
+        companions: 0,
+        unverified: 0,
+        unverified_roots: Vec::new(),
     })
+}
+
+/// The pathless half: nominate by inode, ask the disk about each nomination,
+/// then let the domain arm decide.
+///
+/// The head read is unconditional here, and free: a new path's INSERT stores a
+/// partial hash whatever the outcome, so corroborating with it costs nothing
+/// that was not already owed.
+fn reconcile_pathless_file(
+    conn: &Connection,
+    mut observation: FileObservation,
+    full_path: &Path,
+    size: i64,
+    inode: i64,
+) -> Result<ReconcileResult> {
+    let partial_hash = compute_partial_hash(full_path, size as u64)?;
+    observation.partial_hash = Some(partial_hash.clone());
+
+    let candidates: Vec<MoveCandidate> = scan_repo::source::fetch_by_inode(conn, inode as u64)?
+        .into_iter()
+        // A suspended root is one the user has closed the door on: its content
+        // keeps exactly the standing it had, and a scan of some other root may
+        // not reach in and relocate a row out of it. Nominations from there are
+        // dropped rather than counted — the parked root's story is unchanged,
+        // and this root's report is accurate without mentioning it.
+        .filter(|source| !source.root_suspended)
+        .map(|source| {
+            let old_path = check_old_path(&source);
+            MoveCandidate { source, old_path }
+        })
+        .collect();
+
+    match reconcile_pathless(&observation, &candidates, &partial_hash) {
+        PathlessOutcome::New {
+            companions,
+            unverified,
+        } => {
+            let mut unverified_roots: Vec<String> = candidates
+                .iter()
+                .filter(|c| c.old_path == OldPathCheck::Unverifiable)
+                .map(|c| c.source.root_path.clone())
+                .collect();
+            // One entry per root, not per row: the warning counts files whose
+            // move that root could not settle, and a file nominating five rows
+            // on one unreachable root is still one file.
+            unverified_roots.sort();
+            unverified_roots.dedup();
+            Ok(ReconcileResult {
+                observation,
+                outcome: ReconcileOutcome::Settled(Reconciliation::New),
+                source_at_path: None,
+                companions,
+                unverified,
+                unverified_roots,
+            })
+        }
+        PathlessOutcome::Deferred {
+            corroborated_candidate_ids,
+        } => {
+            let corroborated = candidates
+                .into_iter()
+                .filter(|c| corroborated_candidate_ids.contains(&c.source.id))
+                .map(|c| c.source)
+                .collect();
+            Ok(ReconcileResult {
+                observation,
+                outcome: ReconcileOutcome::Deferred(corroborated),
+                source_at_path: None,
+                companions: 0,
+                unverified: 0,
+                unverified_roots: Vec::new(),
+            })
+        }
+    }
+}
+
+/// Persist one resolved move, re-checking the claim inside the transaction.
+///
+/// Between the walk and this moment another process may have moved, deleted or
+/// replaced the row about to be claimed — canon is explicitly a
+/// several-processes-at-once tool. The check is deliberately *inside* the write
+/// transaction, because a check outside it answers a question about the past.
+/// If the row is not exactly as it was nominated — same root, same path, same
+/// inode, still present — the observation degrades to a new path, which costs
+/// one row and claims nothing.
+fn persist_resolution(
+    conn: &Connection,
+    resolution: MoveResolution,
+    nominated_as: &HashMap<i64, Source>,
+    now: i64,
+    decision_id: Option<i64>,
+) -> Result<(FileAction, i64, Option<i64>)> {
+    let (observation, claim) = match resolution {
+        MoveResolution::Moved {
+            source_id,
+            observation,
+        } => (observation, Some(source_id)),
+        MoveResolution::New { observation } => (observation, None),
+    };
+
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+
+    let reconciliation = match claim.and_then(|id| nominated_as.get(&id).map(|row| (id, row))) {
+        Some((source_id, nominated)) => {
+            let unchanged_since_the_walk =
+                repo::source::fetch_by_id(&tx, source_id)?.is_some_and(|current| {
+                    current.root_id == nominated.root_id
+                        && current.rel_path == nominated.rel_path
+                        && current.inode == nominated.inode
+                });
+            if unchanged_since_the_walk {
+                Reconciliation::Moved {
+                    source_id,
+                    from_root_id: nominated.root_id,
+                    from_path: nominated.rel_path.clone(),
+                    old_object_id: nominated.object_id,
+                }
+            } else {
+                Reconciliation::New
+            }
+        }
+        None => Reconciliation::New,
+    };
+
+    let file_decision_id = match reconciliation {
+        Reconciliation::New => decision_id,
+        _ => None,
+    };
+    let source = scan_repo::source::apply_reconciliation(
+        &tx,
+        &observation,
+        &reconciliation,
+        now,
+        file_decision_id,
+    )?;
+    tx.commit()?;
+
+    Ok((
+        action_for(&reconciliation),
+        source.id,
+        old_object_link(&reconciliation),
+    ))
 }
 
 /// Persist a non-unchanged reconciliation in its own transaction.
@@ -690,38 +1030,29 @@ mod tests {
             conn, root_id, rel_path, full_path, device, inode, size, mtime,
         )?;
 
-        match &reconciled.reconciliation {
-            Reconciliation::Unchanged { source_id } => {
+        match reconciled.outcome {
+            // This helper drives one file in isolation, and a deferred move is
+            // by definition undecidable in isolation — it waits for the walk to
+            // see every path. Tests about moves go through `scan_pass`.
+            ReconcileOutcome::Deferred(_) => {
+                panic!("a deferred move is resolved at end of walk — drive it through scan_pass")
+            }
+            ReconcileOutcome::Settled(Reconciliation::Unchanged { source_id }) => {
                 // Persist unchanged inline (no batching in tests)
-                flush_unchanged(conn, &[(*source_id, device, inode)], now)?;
+                flush_unchanged(conn, &[(source_id, device, inode)], now)?;
                 Ok(ProcessResult {
-                    source_id: *source_id,
+                    source_id,
                     action: FileAction::Unchanged,
                     old_object_id: reconciled.source_at_path.and_then(|s| s.object_id),
                 })
             }
-            _ => {
-                let source = persist_file(
-                    conn,
-                    &reconciled.observation,
-                    &reconciled.reconciliation,
-                    now,
-                    None,
-                )?;
-                let (action, old_object_id) = match &reconciled.reconciliation {
-                    Reconciliation::New => (FileAction::New, None),
-                    Reconciliation::Modified { old_object_id, .. } => {
-                        (FileAction::Modified, *old_object_id)
-                    }
-                    Reconciliation::Moved { old_object_id, .. } => {
-                        (FileAction::Moved, *old_object_id)
-                    }
-                    Reconciliation::Unchanged { .. } => unreachable!(),
-                };
+            ReconcileOutcome::Settled(reconciliation) => {
+                let source =
+                    persist_file(conn, &reconciled.observation, &reconciliation, now, None)?;
                 Ok(ProcessResult {
                     source_id: source.id,
-                    action,
-                    old_object_id,
+                    action: action_for(&reconciliation),
+                    old_object_id: old_object_link(&reconciliation),
                 })
             }
         }
@@ -851,43 +1182,6 @@ mod tests {
         .unwrap();
 
         assert!(matches!(result.action, FileAction::Modified));
-    }
-
-    #[test]
-    fn process_file_moved() {
-        let conn = repo::open_in_memory_for_test();
-        let temp_dir = TempDir::new().unwrap();
-        let root_id =
-            repo::insert_test_root(&conn, temp_dir.path().to_str().unwrap(), "source", false);
-
-        let (path, device, inode, size, mtime) =
-            create_temp_file(&temp_dir, "new_name.txt", "content");
-
-        repo::insert_test_source(
-            &conn,
-            root_id,
-            "old_name.txt",
-            device as i64,
-            inode as i64,
-            size,
-            mtime,
-        );
-
-        let now = current_timestamp();
-        let result = process_file(
-            &conn,
-            root_id,
-            "new_name.txt",
-            &path,
-            device as i64,
-            inode as i64,
-            size,
-            mtime,
-            now,
-        )
-        .unwrap();
-
-        assert!(matches!(result.action, FileAction::Moved));
     }
 
     #[test]
@@ -1301,12 +1595,24 @@ mod tests {
         dir: &Path,
         decision_id: Option<i64>,
     ) -> ScanRootResult {
+        scan_pass_with(conn, root_id, dir, walk(dir), decision_id)
+    }
+
+    /// The same pass, over an entry stream the test controls — for the cases
+    /// where *when* the walker reaches a path is the thing under test.
+    fn scan_pass_with(
+        conn: &Connection,
+        root_id: i64,
+        dir: &Path,
+        entries: impl Iterator<Item = Result<walkdir::DirEntry, walkdir::Error>>,
+        decision_id: Option<i64>,
+    ) -> ScanRootResult {
         scan_root(
             conn,
             root_id,
             dir.to_str().unwrap(),
             None,
-            walk(dir),
+            entries,
             &no_hash_options(),
             &NoopProgress,
             current_timestamp(),
@@ -1314,6 +1620,54 @@ mod tests {
             false,
         )
         .unwrap()
+    }
+
+    /// The five report counters, as one comparable tuple.
+    fn counts(stats: &ScanStats) -> (u64, u64, u64, u64, u64) {
+        (
+            stats.new,
+            stats.updated,
+            stats.moved,
+            stats.missing,
+            stats.skipped,
+        )
+    }
+
+    /// Every row's provenance link, for the whole-table assertion that an
+    /// observation re-stamped nothing.
+    fn all_decision_ids(conn: &Connection) -> Vec<(i64, Option<i64>)> {
+        conn.prepare("SELECT id, decision_id FROM sources ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    /// Renumber a column across every row — how a remount or a filesystem that
+    /// synthesizes inodes per session looks from Canon's side.
+    fn renumber(conn: &Connection, column: &str, by: i64) {
+        conn.execute(&format!("UPDATE sources SET {column} = {column} + ?"), [by])
+            .unwrap();
+    }
+
+    fn row(conn: &Connection, root_id: i64, rel_path: &str) -> Option<Source> {
+        repo::source::fetch_by_path(conn, root_id, rel_path).unwrap()
+    }
+
+    /// A root directory under `base`, registered and ready to scan.
+    fn root_at(conn: &Connection, base: &Path, name: &str) -> (i64, PathBuf) {
+        let dir = base.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = repo::insert_test_root(conn, dir.to_str().unwrap(), "source", false);
+        (id, dir)
+    }
+
+    fn write_at(dir: &Path, rel_path: &str, content: &str) -> PathBuf {
+        let path = dir.join(rel_path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        path
     }
 
     /// The headline invariant, asserted wherever a test has just changed state:
@@ -1519,6 +1873,845 @@ mod tests {
         assert_eq!(stats.unchanged, 2, "no head read where the inode stood");
         assert_eq!(stats.updated, 1, "a head read where the inode moved");
         assert_eq!(stats.new, 0);
+
+        assert_second_scan_quiet(&conn, root_id, temp.path());
+    }
+
+    // =========================================================================
+    // Moves and per-path grain (scan_root, end to end)
+    // =========================================================================
+
+    #[test]
+    fn a_remount_rescan_reports_nothing_and_restamps_nothing() {
+        // The measured failure this whole story exists to kill: a NAS remount
+        // renumbered the device and a scan reported tens of thousands of files
+        // new and moved on a disk where nothing had happened — stamping
+        // decision_id across the library, which story, trail and book then
+        // narrate as judgment. The report must speak about the user's disk.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        for name in ["a.txt", "sub/b.txt", "sub/c.txt"] {
+            write_at(temp.path(), name, &format!("contents of {name}"));
+        }
+
+        let first = scan_pass(&conn, root_id, temp.path(), Some(1)).stats;
+        assert_eq!(first.new, 3);
+        let provenance_before = all_decision_ids(&conn);
+
+        renumber(&conn, "device", 7);
+
+        let stats = scan_pass(&conn, root_id, temp.path(), Some(2)).stats;
+        assert_eq!(
+            counts(&stats),
+            (0, 0, 0, 0, 0),
+            "a remount is an event about mounts, not about files"
+        );
+        assert_eq!(stats.unchanged, 3);
+        assert_eq!(
+            all_decision_ids(&conn),
+            provenance_before,
+            "no row's provenance link may move on a scan that observed nothing"
+        );
+    }
+
+    #[test]
+    fn an_inode_renumbering_rescan_reports_nothing() {
+        // The harder half of the same failure: a filesystem that synthesizes
+        // inodes afresh per session. Every stored inode is wrong at once, so
+        // nomination is useless — the path holds the row, and the head read
+        // confirms the content. Nothing defers, because no path is pathless.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        for name in ["a.txt", "sub/b.txt"] {
+            write_at(temp.path(), name, &format!("contents of {name}"));
+        }
+
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let provenance_before = all_decision_ids(&conn);
+
+        renumber(&conn, "inode", 1_000_000);
+        renumber(&conn, "device", 3);
+
+        let stats = scan_pass(&conn, root_id, temp.path(), Some(2)).stats;
+        assert_eq!(counts(&stats), (0, 0, 0, 0, 0));
+        assert_eq!(stats.unchanged, 2);
+        assert_eq!(all_decision_ids(&conn), provenance_before);
+    }
+
+    #[test]
+    fn a_new_hardlink_twin_is_new_never_moved() {
+        // Disk truth, end to end. A second path onto the same inode is an
+        // ordinary source sharing content — never a move, because the file the
+        // row names is still exactly where it was. Getting this wrong is what
+        // made ~27.9K twin paths churn as "moved" on every scan, forever.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let original = write_at(temp.path(), "albums/trip.jpg", "photo bytes");
+
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let before = row(&conn, root_id, "albums/trip.jpg").unwrap();
+
+        std::fs::create_dir_all(temp.path().join("by-year")).unwrap();
+        std::fs::hard_link(&original, temp.path().join("by-year/trip.jpg")).unwrap();
+
+        let stats = scan_pass(&conn, root_id, temp.path(), Some(2)).stats;
+        assert_eq!(stats.new, 1, "the twin path is a source of its own");
+        assert_eq!(stats.moved, 0, "and nothing moved");
+        assert_eq!(stats.missing, 0);
+        assert_eq!(stats.hardlink_companions, 1, "counted, never silent");
+
+        let after = row(&conn, root_id, "albums/trip.jpg").unwrap();
+        assert_eq!(
+            (after.id, after.inode, after.basis_rev, after.decision_id),
+            (
+                before.id,
+                before.inode,
+                before.basis_rev,
+                before.decision_id
+            ),
+            "the twin's arrival left the original's row untouched"
+        );
+
+        assert_second_scan_quiet(&conn, root_id, temp.path());
+    }
+
+    #[test]
+    fn a_genuine_move_is_reported_once() {
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let original = write_at(temp.path(), "inbox/photo.jpg", "photo bytes");
+
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let before = row(&conn, root_id, "inbox/photo.jpg").unwrap();
+
+        std::fs::create_dir_all(temp.path().join("sorted")).unwrap();
+        std::fs::rename(&original, temp.path().join("sorted/photo.jpg")).unwrap();
+
+        let stats = scan_pass(&conn, root_id, temp.path(), Some(2)).stats;
+        assert_eq!(counts(&stats), (0, 0, 1, 0, 0), "one move, nothing else");
+
+        let after = row(&conn, root_id, "sorted/photo.jpg").unwrap();
+        assert_eq!(after.id, before.id, "the same row, at its new path");
+        assert!(row(&conn, root_id, "inbox/photo.jpg").is_none());
+
+        assert_second_scan_quiet(&conn, root_id, temp.path());
+    }
+
+    #[test]
+    fn a_moved_and_modified_file_degrades_to_new_and_missing() {
+        // Both the path and the content changed, so no trusted evidence ties
+        // the two together — inode agreement alone is exactly the guess this
+        // story refuses. Conservative degradation: two rows, both truthful, and
+        // the deletion receipt keeps the old row's provenance reachable.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let original = write_at(temp.path(), "drafts/doc.txt", "first draft");
+
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+
+        let moved_to = temp.path().join("final/doc.txt");
+        std::fs::create_dir_all(moved_to.parent().unwrap()).unwrap();
+        std::fs::rename(&original, &moved_to).unwrap();
+        std::fs::write(&moved_to, "a thoroughly rewritten document").unwrap();
+
+        let stats = scan_pass(&conn, root_id, temp.path(), Some(2)).stats;
+        assert_eq!(stats.new, 1);
+        assert_eq!(stats.missing, 1);
+        assert_eq!(stats.moved, 0, "a guess is not a move");
+
+        assert_second_scan_quiet(&conn, root_id, temp.path());
+    }
+
+    #[test]
+    fn twin_sequencing_is_order_independent() {
+        // Which twin the walker reaches first must not change what the scan
+        // decides. Forward and reversed entry orders over identical fixtures
+        // must land in identical end states.
+        /// Every row's shape, plus the report — the whole observable end state.
+        type EndState = (Vec<(String, i64, i64)>, (u64, u64, u64, u64, u64));
+
+        let end_state = |reverse: bool| -> EndState {
+            let conn = repo::open_in_memory_for_test();
+            let temp = TempDir::new().unwrap();
+            let root_id =
+                repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+            let original = write_at(temp.path(), "albums/trip.jpg", "photo bytes");
+            scan_pass(&conn, root_id, temp.path(), Some(1));
+
+            std::fs::create_dir_all(temp.path().join("by-year")).unwrap();
+            std::fs::hard_link(&original, temp.path().join("by-year/trip.jpg")).unwrap();
+
+            let mut entries: Vec<_> = walk(temp.path()).collect();
+            if reverse {
+                entries.reverse();
+            }
+            let stats =
+                scan_pass_with(&conn, root_id, temp.path(), entries.into_iter(), Some(2)).stats;
+
+            let rows = conn
+                .prepare("SELECT rel_path, present, size FROM sources ORDER BY rel_path")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            (rows, counts(&stats))
+        };
+
+        assert_eq!(end_state(false), end_state(true));
+    }
+
+    #[test]
+    fn a_scoped_scan_sees_a_move_into_its_scope() {
+        // The old-path check is a point stat, not a walk requirement, so a scan
+        // narrowed to the destination still recognises the move — it asks the
+        // disk about one path rather than needing to have walked it.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_path = temp.path().to_str().unwrap();
+        let root_id = repo::insert_test_root(&conn, root_path, "source", false);
+        let original = write_at(temp.path(), "a/x.jpg", "content");
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let before = row(&conn, root_id, "a/x.jpg").unwrap();
+
+        let destination = temp.path().join("b");
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::rename(&original, destination.join("x.jpg")).unwrap();
+
+        let result = scan_root(
+            &conn,
+            root_id,
+            root_path,
+            Some("b"),
+            walk(&destination),
+            &no_hash_options(),
+            &NoopProgress,
+            current_timestamp(),
+            Some(2),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.stats.moved, 1);
+        assert_eq!(result.stats.new, 0);
+        assert_eq!(row(&conn, root_id, "b/x.jpg").unwrap().id, before.id);
+    }
+
+    #[test]
+    fn an_unverifiable_nomination_is_counted_and_its_root_named() {
+        // The root holding the nominated row is gone, so Canon cannot tell
+        // whether the old file left or is merely out of view. Ignorance never
+        // claims — and it is stated, with the root that could not answer, so
+        // "new" never passes silently for "not moved".
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let (detached_id, detached) = root_at(&conn, temp.path(), "detached");
+        let (live_id, live) = root_at(&conn, temp.path(), "live");
+
+        let parked = write_at(&detached, "parked.jpg", "photo bytes");
+        scan_pass(&conn, detached_id, &detached, Some(1));
+
+        // The file reappears in the live root, and the root it came from is
+        // no longer there to be asked.
+        std::fs::rename(&parked, live.join("arrived.jpg")).unwrap();
+        std::fs::remove_dir_all(&detached).unwrap();
+
+        let result = scan_pass(&conn, live_id, &live, Some(2));
+        assert_eq!(result.stats.new, 1);
+        assert_eq!(result.stats.moved, 0);
+        assert_eq!(result.stats.moves_unverified, 1);
+        assert!(
+            result.warnings.iter().any(|w| {
+                w.contains("could not be verified") && w.contains(detached.to_str().unwrap())
+            }),
+            "the warning names the root that could not answer: {:?}",
+            result.warnings
+        );
+
+        // The unreachable root's row is untouched — nothing was claimed from it.
+        assert!(row(&conn, detached_id, "parked.jpg").is_some());
+    }
+
+    #[test]
+    fn deleting_one_companion_touches_only_its_own_row() {
+        // Per-path grain, in the direction that matters most: twins are
+        // ordinary sources, so removing one path is one deletion and the
+        // sibling that still exists is left entirely alone.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let original = write_at(temp.path(), "albums/trip.jpg", "photo bytes");
+        std::fs::create_dir_all(temp.path().join("by-year")).unwrap();
+        let twin = temp.path().join("by-year/trip.jpg");
+        std::fs::hard_link(&original, &twin).unwrap();
+
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let kept_before = row(&conn, root_id, "albums/trip.jpg").unwrap();
+
+        std::fs::remove_file(&twin).unwrap();
+
+        let stats = scan_pass(&conn, root_id, temp.path(), Some(2)).stats;
+        assert_eq!(stats.missing, 1);
+        assert_eq!(stats.new, 0);
+        assert_eq!(stats.moved, 0);
+
+        assert!(row(&conn, root_id, "by-year/trip.jpg").is_none());
+        let kept_after = row(&conn, root_id, "albums/trip.jpg").unwrap();
+        assert_eq!(
+            (kept_after.id, kept_after.decision_id, kept_after.basis_rev),
+            (
+                kept_before.id,
+                kept_before.decision_id,
+                kept_before.basis_rev
+            )
+        );
+
+        assert_second_scan_quiet(&conn, root_id, temp.path());
+    }
+
+    #[test]
+    fn inode_reuse_never_relocates_a_row() {
+        // An inode number returns after a delete and names different content.
+        // The nomination is real and worthless: corroboration refuses, the new
+        // path is new, the old row goes missing at its own path — and that path
+        // is never rewritten, which is the damage a false move would do.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+
+        let arrived = write_at(temp.path(), "arrived.bin", "brand new content here");
+        let inode = inode_of(&arrived) as i64;
+        // A row that once held this inode, at a path nothing stands at now. It
+        // carries the root's real device, so the old-path check reaches a
+        // genuine Vacated and the refusal below is corroboration's, not the
+        // storage check's — the two arms reach the same verdict by different
+        // routes, and this test is about the second one.
+        let device = get_dir_device(temp.path()).unwrap();
+        let recycled =
+            repo::insert_test_source(&conn, root_id, "gone.bin", device, inode, 999_999, 1);
+
+        let stats = scan_pass(&conn, root_id, temp.path(), Some(2)).stats;
+        assert_eq!(stats.new, 1);
+        assert_eq!(stats.moved, 0);
+        assert_eq!(stats.missing, 1);
+
+        let (rel_path, present): (String, i64) = conn
+            .query_row(
+                "SELECT rel_path, present FROM sources WHERE id = ?",
+                [recycled],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            rel_path, "gone.bin",
+            "the old row's path is never rewritten"
+        );
+        assert_eq!(present, 0);
+    }
+
+    #[test]
+    fn a_candidate_mutated_before_resolution_degrades_to_new() {
+        // The third gate. Canon is a several-processes-at-once tool: between
+        // the walk nominating a row and resolution claiming it, another scan
+        // may have taken it. The re-check runs inside the write transaction,
+        // and a row that is no longer as nominated is not claimed at all.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let original = write_at(temp.path(), "inbox/photo.jpg", "photo bytes");
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let claimed_id = row(&conn, root_id, "inbox/photo.jpg").unwrap().id;
+
+        std::fs::create_dir_all(temp.path().join("sorted")).unwrap();
+        std::fs::rename(&original, temp.path().join("sorted/photo.jpg")).unwrap();
+
+        // A harmless trailing entry (a non-empty directory, which the walk
+        // skips) whose *yielding* mutates the nominated row — after the walk
+        // has deferred the move, before resolution decides it.
+        let trailing = walk(&temp.path().join("sorted")).next().unwrap();
+        let entries = walk(temp.path()).chain(std::iter::once_with(|| {
+            conn.execute(
+                "UPDATE sources SET inode = inode + 1 WHERE id = ?",
+                [claimed_id],
+            )
+            .unwrap();
+            trailing
+        }));
+
+        let stats = scan_pass_with(&conn, root_id, temp.path(), entries, Some(2)).stats;
+        assert_eq!(stats.moved, 0, "a row that changed under us is not claimed");
+        assert_eq!(stats.new, 1);
+        assert_eq!(stats.missing, 1);
+    }
+
+    #[test]
+    fn a_claimed_row_is_seen_and_the_unclaimed_one_goes_missing() {
+        // Two rows corroborate one observation, and a row can be claimed only
+        // once. The winner is seen — never reported deleted and re-found — and
+        // the loser falls through to ordinary missing detection.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let first = write_at(temp.path(), "a.jpg", "photo bytes");
+        let second = temp.path().join("b.jpg");
+        std::fs::hard_link(&first, &second).unwrap();
+
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        // Insertion order is the walker's, not alphabetical — the rule is
+        // "lowest id", so the test asks which that is rather than assuming.
+        let a_id = row(&conn, root_id, "a.jpg").unwrap().id;
+        let b_id = row(&conn, root_id, "b.jpg").unwrap().id;
+
+        // One twin renamed, the other removed: both rows are now vacated, and
+        // both corroborate the single file that remains.
+        std::fs::rename(&first, temp.path().join("c.jpg")).unwrap();
+        std::fs::remove_file(&second).unwrap();
+
+        let stats = scan_pass(&conn, root_id, temp.path(), Some(2)).stats;
+        assert_eq!(stats.moved, 1);
+        assert_eq!(stats.missing, 1);
+        assert_eq!(stats.new, 0);
+        assert_eq!(
+            row(&conn, root_id, "c.jpg").unwrap().id,
+            a_id.min(b_id),
+            "the lowest-id candidate wins a tie, deterministically"
+        );
+
+        assert_second_scan_quiet(&conn, root_id, temp.path());
+    }
+
+    #[test]
+    fn a_whole_group_move_pairs_each_row_to_its_own_path() {
+        // Two hardlinked files renamed together: every observation corroborates
+        // every candidate, because they are literally the same content. Only
+        // the pairing rule can decide, and it must give each row back its own
+        // filename rather than crossing them.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let a = write_at(temp.path(), "old/a.jpg", "shared bytes");
+        std::fs::hard_link(&a, temp.path().join("old/b.jpg")).unwrap();
+
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let a_id = row(&conn, root_id, "old/a.jpg").unwrap().id;
+        let b_id = row(&conn, root_id, "old/b.jpg").unwrap().id;
+
+        std::fs::rename(temp.path().join("old"), temp.path().join("new")).unwrap();
+
+        let stats = scan_pass(&conn, root_id, temp.path(), Some(2)).stats;
+        assert_eq!(counts(&stats), (0, 0, 2, 0, 0), "two moves, nothing else");
+        assert_eq!(row(&conn, root_id, "new/a.jpg").unwrap().id, a_id);
+        assert_eq!(row(&conn, root_id, "new/b.jpg").unwrap().id, b_id);
+
+        assert_second_scan_quiet(&conn, root_id, temp.path());
+    }
+
+    #[test]
+    fn a_root_whose_storage_is_not_mounted_never_claims_a_move() {
+        // A mountpoint with nothing behind it is still a directory: it answers,
+        // it is empty, and every file ever recorded under it reads as gone. That
+        // is not absence — it is Canon looking at the wrong storage. Without the
+        // device check the whole root's content would be permanently claimable
+        // by any file that happened to collide on an inode number and agree on
+        // content, which an rsync copy of that very root supplies wholesale.
+        //
+        // The shell is simulated by its signature rather than by unmounting: a
+        // root directory that exists but whose device is not the one the row was
+        // recorded on. The control below is the identical fixture with the row's
+        // device matching the directory's, and it moves — so the refusal is the
+        // storage mismatch alone, not the fixture.
+        let outcome = |device_matches: bool| -> (u64, u64, u64) {
+            let conn = repo::open_in_memory_for_test();
+            let temp = TempDir::new().unwrap();
+            let (parked_id, parked_dir) = root_at(&conn, temp.path(), "parked");
+            let (live_id, live_dir) = root_at(&conn, temp.path(), "live");
+
+            let file = write_at(&parked_dir, "photo.jpg", "photo bytes");
+            scan_pass(&conn, parked_id, &parked_dir, Some(1));
+            std::fs::rename(&file, live_dir.join("photo.jpg")).unwrap();
+
+            if !device_matches {
+                // The volume went away; the mountpoint directory did not.
+                conn.execute(
+                    "UPDATE sources SET device = device + 1 WHERE root_id = ?",
+                    [parked_id],
+                )
+                .unwrap();
+            }
+
+            let stats = scan_pass(&conn, live_id, &live_dir, Some(2)).stats;
+            (stats.new, stats.moved, stats.moves_unverified)
+        };
+
+        assert_eq!(
+            outcome(false),
+            (1, 0, 1),
+            "no claim against storage Canon cannot confirm it is looking at, and the doubt is stated"
+        );
+        assert_eq!(
+            outcome(true),
+            (0, 1, 0),
+            "the same storage, and the move is followed"
+        );
+    }
+
+    #[test]
+    fn a_suspended_roots_row_is_never_relocated() {
+        // Suspension is the user closing the door on a root: everything inside
+        // keeps exactly the standing it had, and a scan of some *other* root may
+        // not reach in and relocate a row out of it. The control below runs the
+        // identical fixture unsuspended and gets the move, so what refuses here
+        // is the closed door and nothing else.
+        let outcome = |suspended: bool| -> (u64, u64, u64, bool) {
+            let conn = repo::open_in_memory_for_test();
+            let temp = TempDir::new().unwrap();
+            let (parked_id, parked_dir) = root_at(&conn, temp.path(), "parked");
+            let (live_id, live_dir) = root_at(&conn, temp.path(), "live");
+
+            let file = write_at(&parked_dir, "photo.jpg", "photo bytes");
+            scan_pass(&conn, parked_id, &parked_dir, Some(1));
+            let parked_row = row(&conn, parked_id, "photo.jpg").unwrap().id;
+
+            std::fs::rename(&file, live_dir.join("photo.jpg")).unwrap();
+            if suspended {
+                conn.execute("UPDATE roots SET suspended = 1 WHERE id = ?", [parked_id])
+                    .unwrap();
+            }
+
+            let stats = scan_pass(&conn, live_id, &live_dir, Some(2)).stats;
+            // Followed by id: in the control the row legitimately changes root,
+            // which is the difference the test is about.
+            let still_parked: bool = conn
+                .query_row(
+                    "SELECT root_id = ? AND rel_path = 'photo.jpg' FROM sources WHERE id = ?",
+                    [parked_id, parked_row],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            (stats.new, stats.moved, stats.moves_unverified, still_parked)
+        };
+
+        assert_eq!(
+            outcome(true),
+            (1, 0, 0, true),
+            "the parked root's row stands where it stood, and the arrival is simply new"
+        );
+        assert_eq!(
+            outcome(false),
+            (0, 1, 0, false),
+            "unsuspended, the identical fixture is a move — so suspension is what refused"
+        );
+    }
+
+    #[test]
+    fn an_empty_file_never_takes_another_rows_path() {
+        // The contentless law on the live move path, not merely in the
+        // predicate. Every empty file's content agrees with every other's, so a
+        // vacated empty row would corroborate any empty file appearing
+        // anywhere — and a relocation is a claim about where content *was*.
+        // Refused, so the arriving path is new and the vacated row goes missing
+        // at its own path, which is what actually happened.
+        //
+        // The control below is the same fixture with one byte in each file, and
+        // it moves — so the refusal is the emptiness and nothing else.
+        let outcome = |bytes: &str| -> (u64, u64, u64, String) {
+            let conn = repo::open_in_memory_for_test();
+            let temp = TempDir::new().unwrap();
+            let root_id =
+                repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+            let original = write_at(temp.path(), "was/here.log", bytes);
+            scan_pass(&conn, root_id, temp.path(), Some(1));
+            let source_id = row(&conn, root_id, "was/here.log").unwrap().id;
+
+            std::fs::create_dir_all(temp.path().join("now")).unwrap();
+            std::fs::rename(&original, temp.path().join("now/here.log")).unwrap();
+
+            let stats = scan_pass(&conn, root_id, temp.path(), Some(2)).stats;
+            let rel_path: String = conn
+                .query_row(
+                    "SELECT rel_path FROM sources WHERE id = ?",
+                    [source_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            (stats.new, stats.moved, stats.missing, rel_path)
+        };
+
+        assert_eq!(
+            outcome(""),
+            (1, 0, 1, "was/here.log".to_string()),
+            "no empty file earns a relocation, and the old row keeps its path"
+        );
+        assert_eq!(
+            outcome("x"),
+            (0, 1, 0, "now/here.log".to_string()),
+            "one byte of content is enough to say which file this is"
+        );
+    }
+
+    #[test]
+    fn a_move_carries_the_previous_object_link_to_the_hash_pass() {
+        // Moved is the arm that *keeps* its object link: the content did not
+        // change, only where it sits. The hash pass reads the link it came in
+        // with to spot content changing under an unchanged fingerprint, so the
+        // link has to survive the trip through end-of-walk resolution — which
+        // is where a move is now decided, well after the walk that saw it.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let original = write_at(temp.path(), "inbox/photo.jpg", "photo bytes");
+
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let source_id = row(&conn, root_id, "inbox/photo.jpg").unwrap().id;
+        conn.execute(
+            "INSERT INTO objects (hash_type, hash_value) VALUES ('sha256', 'known')",
+            [],
+        )
+        .unwrap();
+        let object_id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE sources SET object_id = ? WHERE id = ?",
+            [object_id, source_id],
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(temp.path().join("sorted")).unwrap();
+        std::fs::rename(&original, temp.path().join("sorted/photo.jpg")).unwrap();
+
+        let result = scan_root(
+            &conn,
+            root_id,
+            temp.path().to_str().unwrap(),
+            None,
+            walk(temp.path()),
+            &ScanOptions {
+                hash: true,
+                hash_all: true,
+                ignore_device_id: false,
+            },
+            &NoopProgress,
+            current_timestamp(),
+            Some(2),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.stats.moved, 1);
+        let queued: Vec<_> = result
+            .files_to_hash
+            .iter()
+            .filter(|f| f.source_id == source_id)
+            .collect();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(
+            queued[0].old_object_id,
+            Some(object_id),
+            "the link the row came in with reaches the hash pass"
+        );
+        assert!(
+            !queued[0].basis_changed,
+            "a move is not a content change, so an altered hash here is unexpected"
+        );
+    }
+
+    #[test]
+    fn a_move_still_resolves_when_the_walk_could_not_finish() {
+        // Missing detection is gated on a complete, stable walk because absence
+        // there is *inferred* — unseen must never read as deleted. A move is
+        // not inferred at any step: the file was observed and read, its old
+        // path was checked on disk, the content corroborated, and the row
+        // re-checked at write time. So resolution deliberately runs above that
+        // gate, and a row follows its file even on a walk that could not see
+        // everything — while the same walk still refuses to call anything gone.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let original = write_at(temp.path(), "inbox/photo.jpg", "photo bytes");
+        write_at(temp.path(), "other/keep.txt", "kept");
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let source_id = row(&conn, root_id, "inbox/photo.jpg").unwrap().id;
+
+        std::fs::create_dir_all(temp.path().join("sorted")).unwrap();
+        std::fs::rename(&original, temp.path().join("sorted/photo.jpg")).unwrap();
+        // The file this walk never reaches, and must not conclude anything about.
+        std::fs::remove_file(temp.path().join("other/keep.txt")).unwrap();
+
+        let broken = WalkDir::new(temp.path().join("no-such-dir"))
+            .into_iter()
+            .next()
+            .unwrap()
+            .unwrap_err();
+        let entries = walk(temp.path()).chain(std::iter::once(Err(broken)));
+
+        let result = scan_pass_with(&conn, root_id, temp.path(), entries, Some(2));
+
+        assert_eq!(result.stats.walk_errors, 1);
+        assert_eq!(result.stats.moved, 1, "positive evidence still decides");
+        assert_eq!(
+            result.stats.missing, 0,
+            "and inferred absence still does not"
+        );
+        assert_eq!(
+            row(&conn, root_id, "sorted/photo.jpg").unwrap().id,
+            source_id
+        );
+    }
+
+    // =========================================================================
+    // Convergence — the first scan after per-path grain arrives
+    // =========================================================================
+
+    /// Seed one row for a path, the way the old grain left the database: one
+    /// row per hardlink group, every other path in the group unrepresented.
+    fn seed_old_grain(conn: &Connection, root_id: i64, dir: &Path, rel_path: &str) -> i64 {
+        let full = dir.join(rel_path);
+        let meta = fs::metadata(&full).unwrap();
+        let partial_hash = compute_partial_hash(&full, meta.size()).unwrap();
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, device, inode, size, mtime,
+                                  partial_hash, scanned_at, last_seen_at, present, decision_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 1, 77)",
+            rusqlite::params![
+                root_id,
+                rel_path,
+                meta.dev() as i64,
+                meta.ino() as i64,
+                meta.size() as i64,
+                meta.mtime(),
+                partial_hash,
+            ],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// A hardlink group: one real file and `twins` further paths onto it.
+    fn hardlink_group(dir: &Path, stem: &str, twins: usize) -> PathBuf {
+        let original = write_at(
+            dir,
+            &format!("originals/{stem}.jpg"),
+            &format!("bytes {stem}"),
+        );
+        for i in 0..twins {
+            let twin = dir.join(format!("links/{i}/{stem}.jpg"));
+            std::fs::create_dir_all(twin.parent().unwrap()).unwrap();
+            std::fs::hard_link(&original, &twin).unwrap();
+        }
+        original
+    }
+
+    #[test]
+    fn convergence_indexes_every_twin_path_and_then_goes_quiet() {
+        // The migration story, which is deliberately not a migration: the first
+        // scan after per-path grain arrives finds every twin path unrepresented
+        // and indexes it, annotating why. The second scan reports nothing. Done
+        // when quiet — a property the user can check for themselves.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+
+        hardlink_group(temp.path(), "one", 2);
+        hardlink_group(temp.path(), "two", 1);
+        let grain_one = seed_old_grain(&conn, root_id, temp.path(), "originals/one.jpg");
+        let grain_two = seed_old_grain(&conn, root_id, temp.path(), "originals/two.jpg");
+
+        let result = scan_pass(&conn, root_id, temp.path(), Some(5));
+        assert_eq!(result.stats.new, 3, "the three unrepresented twin paths");
+        assert_eq!(
+            result.stats.hardlink_companions, 3,
+            "and each is explained — counted per file, so it can never exceed the new count"
+        );
+        assert_eq!(result.stats.moved, 0, "no row was relocated to reach them");
+        assert_eq!(result.stats.missing, 0);
+        assert_eq!(result.stats.unchanged, 2);
+        assert!(result
+            .stats
+            .compose_summary()
+            .contains("hardlink companions of already-indexed files"));
+
+        // Provenance-preserving: the rows that already existed still point at
+        // the decisions that made them, not at the convergence scan.
+        for grain in [grain_one, grain_two] {
+            assert_eq!(row_decision_id(&conn, grain), Some(77));
+        }
+
+        assert_second_scan_quiet(&conn, root_id, temp.path());
+    }
+
+    #[test]
+    fn an_interrupted_convergence_finishes_on_the_next_scan() {
+        // Convergence is ordinary scanning, so an interruption needs no repair
+        // command: whatever was indexed stays indexed, and the next scan picks
+        // up the rest. Fix-forward, and the end state is the same either way.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        hardlink_group(temp.path(), "one", 3);
+        seed_old_grain(&conn, root_id, temp.path(), "originals/one.jpg");
+
+        // A scan that stopped early: some entries processed, then the walk
+        // could not continue. Missing detection is gated off by the error, which
+        // is exactly right — an incomplete walk has no evidence of absence.
+        let broken = WalkDir::new(temp.path().join("no-such-dir"))
+            .into_iter()
+            .next()
+            .unwrap()
+            .unwrap_err();
+        let partial = walk(temp.path())
+            .take(4)
+            .chain(std::iter::once(Err(broken)));
+        let interrupted = scan_pass_with(&conn, root_id, temp.path(), partial, Some(5));
+        assert_eq!(interrupted.stats.missing, 0);
+        assert_eq!(interrupted.stats.walk_errors, 1);
+
+        // The next ordinary scan finishes the job.
+        scan_pass(&conn, root_id, temp.path(), Some(6));
+
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE root_id = ? AND present = 1",
+                [root_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 4, "one original and its three twin paths");
+
+        assert_second_scan_quiet(&conn, root_id, temp.path());
+    }
+
+    #[test]
+    fn a_large_convergence_never_defers_a_single_file() {
+        // The scale claim, and the reason convergence costs nothing beyond the
+        // walk: during a flood every nominated row is still on disk, so the
+        // companion fast path takes all of it and the deferred set stays empty.
+        // Deferral is memory held across a whole walk; a flood that deferred
+        // would hold the library.
+        //
+        // The deferred set is internal, so it is observed by its consequences:
+        // deferral is the only route to `moved`, and every one of these paths is
+        // reported new and counted as a companion.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+
+        const GROUPS: usize = 250;
+        const TWINS: usize = 3;
+        for i in 0..GROUPS {
+            hardlink_group(temp.path(), &format!("f{i}"), TWINS);
+            seed_old_grain(&conn, root_id, temp.path(), &format!("originals/f{i}.jpg"));
+        }
+
+        let stats = scan_pass(&conn, root_id, temp.path(), Some(5)).stats;
+        assert_eq!(stats.new as usize, GROUPS * TWINS);
+        assert_eq!(stats.hardlink_companions as usize, GROUPS * TWINS);
+        assert_eq!(stats.moved, 0, "nothing deferred, so nothing moved");
+        assert_eq!(stats.unchanged as usize, GROUPS);
+        assert_eq!(stats.missing, 0);
 
         assert_second_scan_quiet(&conn, root_id, temp.path());
     }

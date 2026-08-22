@@ -78,6 +78,20 @@ pub struct ScanStats {
     /// that *couldn't verify* absence is distinguishable from one that verified
     /// nothing was missing.
     pub missing_detection_skipped: u64,
+    /// New paths that share content with a file already indexed at another
+    /// path, all of which are still standing on disk — hardlink companions.
+    /// Counted per path, and only where the content agrees: this annotates the
+    /// `new` count, so it must never exceed it, and it makes a claim about
+    /// shared content that a bare inode-number collision does not support.
+    /// Its job is the one-time convergence flood, when every twin path gains a
+    /// row at once, which must read as bookkeeping catching up rather than as
+    /// a library that suddenly grew.
+    pub hardlink_companions: u64,
+    /// Files whose possible move could not be checked, because a root holding
+    /// a nominated row did not answer. Never claimed as moves; counted per
+    /// file — a file can make at most one move — and the root is named, so
+    /// ignorance is stated rather than passing for "not moved".
+    pub moves_unverified: u64,
     /// Number of walk entries that could not be read (permissions, I/O). A
     /// non-zero count gates missing detection for the affected root — part of
     /// the tree went unseen, and unseen must never read as deleted — and lands
@@ -104,15 +118,38 @@ impl ScanStats {
         self.disconnected += root.disconnected;
         self.skipped += root.skipped;
         self.missing_detection_skipped += root.missing_detection_skipped;
+        self.hardlink_companions += root.hardlink_companions;
+        self.moves_unverified += root.moves_unverified;
         self.walk_errors += root.walk_errors;
     }
 
     /// Compose the scan summary message.
     pub fn compose_summary(&self) -> String {
+        // The companions annotation rides the "new" count rather than trailing
+        // the line, because it explains that number and nothing else. The first
+        // scan after per-path grain arrives reports every hardlink twin at once
+        // — tens of thousands of them on a deduplicated library — and a flood of
+        // unexplained "new" is indistinguishable from something having gone
+        // wrong. Stated whenever there are any, never only when the number is
+        // large: the user decides what is surprising.
+        let new_clause = if self.hardlink_companions > 0 {
+            format!(
+                "{} new ({} hardlink companions of already-indexed files)",
+                self.new, self.hardlink_companions
+            )
+        } else {
+            format!("{} new", self.new)
+        };
         let mut summary = format!(
-            "Scanned {} files: {} new, {} updated, {} moved, {} unchanged, {} missing",
-            self.scanned, self.new, self.updated, self.moved, self.unchanged, self.missing
+            "Scanned {} files: {}, {} updated, {} moved, {} unchanged, {} missing",
+            self.scanned, new_clause, self.updated, self.moved, self.unchanged, self.missing
         );
+        if self.moves_unverified > 0 {
+            summary.push_str(&format!(
+                ", {} possible moves could not be verified",
+                self.moves_unverified
+            ));
+        }
         if self.missing_detection_skipped == 1 {
             summary.push_str(", missing detection skipped (mount unstable)");
         } else if self.missing_detection_skipped > 1 {
@@ -311,6 +348,8 @@ mod tests {
             hashed: 100,
             unexpected_hash_changes: 200,
             missing_detection_skipped: 9,
+            hardlink_companions: 11,
+            moves_unverified: 12,
             walk_errors: 10,
         };
 
@@ -330,6 +369,8 @@ mod tests {
             hashed,
             unexpected_hash_changes,
             missing_detection_skipped,
+            hardlink_companions,
+            moves_unverified,
             walk_errors,
         } = total;
 
@@ -344,9 +385,11 @@ mod tests {
                 disconnected,
                 skipped,
                 missing_detection_skipped,
+                hardlink_companions,
+                moves_unverified,
                 walk_errors
             ),
-            (2, 4, 6, 8, 10, 12, 14, 16, 18, 20)
+            (2, 4, 6, 8, 10, 12, 14, 16, 18, 22, 24, 20)
         );
         // Set once by the hash pass after every root, never folded per root.
         assert_eq!((hashed, unexpected_hash_changes), (0, 0));
@@ -377,6 +420,50 @@ mod tests {
         assert!(!ScanStats::default()
             .compose_summary()
             .contains("missing detection"));
+    }
+
+    #[test]
+    fn compose_summary_annotates_the_companion_flood() {
+        // The convergence line, in the durable decision summary: the trail must
+        // be able to say later *why* one scan indexed thirty thousand files.
+        let stats = ScanStats {
+            scanned: 40,
+            new: 30,
+            hardlink_companions: 28,
+            ..Default::default()
+        };
+        assert!(stats
+            .compose_summary()
+            .contains("30 new (28 hardlink companions of already-indexed files)"));
+
+        // With no companions the line reads exactly as it always has — the
+        // annotation is additive, never a permanent change of shape.
+        let plain = ScanStats {
+            scanned: 40,
+            new: 30,
+            ..Default::default()
+        };
+        assert!(plain.compose_summary().contains("30 new,"));
+        assert!(!plain.compose_summary().contains("companions"));
+    }
+
+    #[test]
+    fn compose_summary_records_unverified_moves() {
+        // Ignorance reaches the durable record too: a scan that could not check
+        // whether files moved must not read like one that checked and found
+        // none.
+        let stats = ScanStats {
+            scanned: 5,
+            new: 2,
+            moves_unverified: 2,
+            ..Default::default()
+        };
+        assert!(stats
+            .compose_summary()
+            .contains("2 possible moves could not be verified"));
+        assert!(!ScanStats::default()
+            .compose_summary()
+            .contains("could not be verified"));
     }
 
     #[test]

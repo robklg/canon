@@ -422,6 +422,15 @@ fn migrations() -> Migrations<'static> {
                 Ok(())
             },
         ),
+        // 7: inode-only nomination index. Move detection looks a file up by
+        //    inode alone — a remount renumbers the device, so a device-leading
+        //    key cannot serve the lookup at all. The old (device, inode) index
+        //    stays: released schema is never edited, and it still serves
+        //    device-qualified reads.
+        M::up(
+            "CREATE INDEX IF NOT EXISTS sources_inode
+                 ON sources(inode) WHERE present = 1;",
+        ),
     ])
 }
 
@@ -808,6 +817,38 @@ mod tests {
         assert_eq!(get(99).as_deref(), Some("/gone/root"));
         // Dangling row with an ambiguous match: stays NULL, never guessed.
         assert_eq!(get(98), None);
+    }
+
+    /// Whether an index of this name exists.
+    fn has_index(conn: &Connection, index: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
+            [index],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
+
+    #[test]
+    fn fresh_db_has_the_inode_nomination_index() {
+        let conn = open_in_memory_for_test();
+        assert!(has_index(&conn, "sources_inode"));
+        // The device-leading index it supplements is untouched — a released
+        // migration is never edited, only added to.
+        assert!(has_index(&conn, "sources_device_inode"));
+    }
+
+    #[test]
+    fn migrating_v6_adds_the_inode_nomination_index() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 6).unwrap();
+        assert!(!has_index(&conn, "sources_inode"));
+
+        migrations().to_latest(&mut conn).unwrap();
+
+        assert!(has_index(&conn, "sources_inode"));
+        assert!(has_index(&conn, "sources_device_inode"));
     }
 
     #[test]

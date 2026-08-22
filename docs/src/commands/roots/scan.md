@@ -95,3 +95,44 @@ Hashed 105 files
 ```
 
 **Reading the counts:** `new` counts paths the index has not held before. `updated` counts files whose content changed at a path already indexed, whichever way the application saved them: written in place, or written to a temporary file and renamed over the path. A file whose content is recreated exactly as it was, by a restore or a deduplication pass, is neither new nor updated: it counts as unchanged, and the scan records where the file now sits.
+
+`moved` counts files found at a new path that Canon can tie to a path it already knew. A move is reported only when the content matches and the old path is confirmed gone. When either test fails, the file counts as `new` and the old path counts as `missing`: two accurate records rather than one guess. Rescanning storage that was remounted, or whose filesystem hands out fresh internal identifiers each session, reports nothing at all.
+
+**Hardlink companions.** A file can occupy several paths at once through hardlinks. Each path is its own source, sharing content with the others. A path that appears alongside an already-indexed file counts as `new`, and the summary states how many of the new paths are companions:
+
+```
+Scanned 31892 files: 27753 new (27751 hardlink companions of already-indexed files), 0 updated, 0 moved, 4139 unchanged, 0 missing
+```
+
+The first scan after upgrading reports this once, for every companion path in the library, and the counts can be large. The scan is otherwise ordinary: it can be interrupted and re-run, and the next scan reports nothing.
+
+**Unverified moves.** Checking whether a file moved means checking whether its old path is gone from the storage that recorded it. Two things make that check impossible: the root holding the old path cannot be read at all, or its directory is readable but its storage is not currently mounted, so everything under it would read as gone whether it is or not. Either way the summary says so rather than assuming an answer:
+
+```
+Scanned 12 files: 3 new, 0 updated, 0 moved, 9 unchanged, 0 missing, 2 possible moves could not be verified
+```
+
+The files count as `new`, and stay that way: the old path keeps its own source until the root holding it is scanned again, which reports it missing. Canon does not join the two records afterwards.
+
+The same line appears for one scan after a root is remounted, because the remount renumbers the storage and the recorded identifiers have not caught up. Scanning that root refreshes them.
+
+### Keeping continuity across a move
+
+Canon follows files that move within or between roots, provided it sees the destination:
+
+```bash
+# Index where the files are now
+canon scan /Volumes/Photos
+
+# Reorganize on disk
+mv /Volumes/Photos/inbox/trip /Volumes/Photos/2024/trip
+
+# Scan again: the sources keep their history at the new paths
+canon scan /Volumes/Photos
+```
+
+Scanning a subtree is enough, as long as the destination is inside it: Canon checks the old path directly rather than needing to have walked it. Moving files to a different root works the same way, and only the destination root needs scanning for the move to be recognized.
+
+Two cases are not followed. Edit the files and move them in the same step, and Canon reports `new` plus `missing` instead: nothing ties the two paths together once both the location and the content have changed. And a move out of a [suspended](roots.md) root is not followed, because a suspended root's contents keep the standing they had; unsuspend it and scan again.
+
+In both cases the records stay: the new path is indexed, the old path is reported missing when its root is scanned, and the old path's deletion receipt names the decision that preceded it.

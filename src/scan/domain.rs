@@ -6,7 +6,8 @@
 //! - `same_physical_file()`: The physical-identity law — the one place Canon
 //!   decides whether an observation and a stored row are the same file
 //! - `reconcile_at_path()`: The same-path arm, deciding unchanged vs. updated
-//! - `reconcile()`: Pure function encoding the reconciliation rules
+//! - `reconcile_pathless()`: The pathless arm, deciding new vs. deferred move
+//! - `resolve_moves()`: Deterministic end-of-walk pairing of moves to rows
 //! - `find_missing()`: Pure function for detecting missing files
 //! - `check_no_overlap()`: Pure predicate guarding new-root creation
 //!
@@ -20,7 +21,7 @@
 use crate::core::domain::root::Root;
 use crate::core::domain::source::Source;
 use anyhow::{bail, Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// What scan observes about a file on disk.
@@ -250,33 +251,251 @@ pub fn reconcile_at_path(
     }
 }
 
-/// Determine the reconciliation outcome for an observation whose path holds no
-/// source — the other half of `reconcile_at_path`.
+/// What the disk says about a candidate's own path, checked at nomination time.
 ///
-/// A path Canon already holds a row for is that row's, whatever the filesystem
-/// renumbered underneath it; this arm is for the paths it does not. A stored
-/// row carrying the same (device, inode) is the one thread suggesting the file
-/// was moved here from somewhere else; with no such nomination, the path is new.
+/// The question a content comparison cannot answer: a file that still stands
+/// where Canon recorded it did not move, however perfectly its evidence agrees
+/// with something found elsewhere. Hardlink twins are exactly this — one inode,
+/// many paths, all of them real — and without this check the first twin walked
+/// would steal the other's row every scan, forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OldPathCheck {
+    /// The candidate's file is still at its recorded path. It is a sibling of
+    /// what was observed, not its former self.
+    Present,
+
+    /// The candidate's path is empty and its root answered — the file that was
+    /// there is gone from there. This is the one state a move can be claimed
+    /// from, and only with corroboration on top.
+    Vacated,
+
+    /// The check could not be made: the root is unreachable, or the stat failed
+    /// for a reason that is not absence. Ignorance, not evidence — never
+    /// claimed, always counted.
+    Unverifiable,
+}
+
+/// A stored row nominated by inode, paired with what the disk says about the
+/// path it claims to occupy.
+#[derive(Debug, Clone)]
+pub struct MoveCandidate {
+    pub source: Source,
+    pub old_path: OldPathCheck,
+}
+
+/// What the pathless arm decided about an observation whose path holds no row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathlessOutcome {
+    /// A path Canon has not held. Reached four ways — nothing was nominated,
+    /// every nomination is still on disk (companions), the evidence failed, or
+    /// the old paths could not be checked — and the two counts are the ones the
+    /// summary owes the user when the number is large.
+    New { companions: u32, unverified: u32 },
+
+    /// At least one nominated row is gone from its own path and its content
+    /// corroborates. Not yet a move: which observation takes which row is a
+    /// question about the whole walk, answered once at the end.
+    Deferred {
+        corroborated_candidate_ids: Vec<i64>,
+    },
+}
+
+/// Reconcile an observation whose path holds no source — the other half of
+/// `reconcile_at_path`.
 ///
-/// This function ONLY processes files that exist on disk. It does NOT perform
-/// device ID checking — that happens at the command layer for empty directories
-/// via `classify_sources_in_empty_dir()`.
+/// A move is the only reason a path Canon has never held should take over an
+/// existing row rather than start a new one, and claiming one wrongly rewrites
+/// where content was. So the claim is built from three independent things, and
+/// this function owns the first two:
 ///
-/// # Arguments
-/// - `source_by_inode`: Existing source with this (device, inode), if any
-pub fn reconcile(source_by_inode: Option<&Source>) -> Reconciliation {
-    if let Some(existing) = source_by_inode {
-        // Nominated by inode from another path = moved
-        Reconciliation::Moved {
-            source_id: existing.id,
-            from_root_id: existing.root_id,
-            from_path: existing.rel_path.clone(),
-            old_object_id: existing.object_id,
+/// 1. **Nomination** — the caller's inode lookup. A hint, and the only thread
+///    that suggests looking at all; it decides nothing.
+/// 2. **Disk truth** — a nominated file still standing at its own path is a
+///    sibling, not a former self. Refused before evidence is even consulted,
+///    because no amount of agreement makes two files that both exist into one.
+/// 3. **Corroboration** — the physical-identity law at `Relocation` grade, which
+///    is where a contentless candidate's vacuous evidence is refused.
+///
+/// The third gate — a re-check when the row is actually claimed — lives at
+/// resolution, because it is about time passing, not about this observation.
+///
+/// Anything that fails a gate is simply a new path, which is the truthful
+/// reading: content Canon cannot account for elsewhere is content it is seeing
+/// for the first time. Two failure modes are counted rather than silent — a
+/// companion, because during convergence there will be tens of thousands of them
+/// and an unexplained flood of "new" reads like data loss; and an unverifiable
+/// check, because ignorance stated is not the same as absence observed.
+pub fn reconcile_pathless(
+    observation: &FileObservation,
+    candidates: &[MoveCandidate],
+    observed_partial_hash: &str,
+) -> PathlessOutcome {
+    let mut companions = 0u32;
+    let mut unverified = 0u32;
+    let mut corroborated_candidate_ids = Vec::new();
+
+    for candidate in candidates {
+        // Disk truth is read first and short-circuits: a candidate still
+        // standing at its own path never reaches the law at all. The ordering
+        // is the rule, not an optimisation — asking the law first and applying
+        // the disk check to its verdict would make the two co-equal filters,
+        // and "disk truth outranks evidence" would be a convention held by call
+        // order rather than a shape. Guard: `a_present_twin_is_never_a_move_donor`,
+        // which corroborates perfectly and must still be refused.
+        match candidate.old_path {
+            OldPathCheck::Present => {
+                // The refusal above is unconditional; the *count* is a separate
+                // claim and is not. Calling this new path a companion says its
+                // content is shared with a file already indexed, and two rows
+                // agreeing on an inode number agree on nothing when they sit on
+                // different volumes — inode numbers are small integers, reused
+                // freely across filesystems. So the count is made only where
+                // the evidence supports it, at the grade that refuses vacuous
+                // agreement: an empty file matches every other empty file, and
+                // "companion" is exactly the kind of identity claim the
+                // contentless law says may not rest on that.
+                if same_physical_file(
+                    &candidate.source,
+                    observation,
+                    Some(observed_partial_hash),
+                    IdentityClaim::Relocation,
+                ) {
+                    companions += 1;
+                }
+            }
+            OldPathCheck::Unverifiable => unverified += 1,
+            OldPathCheck::Vacated => {
+                if same_physical_file(
+                    &candidate.source,
+                    observation,
+                    Some(observed_partial_hash),
+                    IdentityClaim::Relocation,
+                ) {
+                    corroborated_candidate_ids.push(candidate.source.id);
+                }
+            }
+        }
+    }
+
+    if corroborated_candidate_ids.is_empty() {
+        PathlessOutcome::New {
+            companions,
+            unverified,
         }
     } else {
-        // No row at this path and none nominated = a path Canon has not held
-        Reconciliation::New
+        PathlessOutcome::Deferred {
+            corroborated_candidate_ids,
+        }
     }
+}
+
+/// An observation held back from the walk because at least one nominated row
+/// corroborated it. Carries the observation itself — including the partial hash
+/// already computed for it — so resolution needs nothing from the walk that has
+/// since ended.
+#[derive(Debug, Clone)]
+pub struct DeferredMove {
+    pub observation: FileObservation,
+    pub candidate_ids: Vec<i64>,
+}
+
+/// What pairing decided for one held-back observation.
+#[derive(Debug, Clone)]
+pub enum MoveResolution {
+    /// This observation takes that row: the file moved.
+    Moved {
+        source_id: i64,
+        observation: FileObservation,
+    },
+    /// No row was left for it — every corroborating candidate went to a better
+    /// claimant. An ordinary new path, decided rather than defaulted.
+    New { observation: FileObservation },
+}
+
+/// How many trailing path components two relative paths share.
+///
+/// The similarity that survives a move: renaming a folder changes the head of
+/// every path under it and leaves the tail alone, so agreement counted from the
+/// end is what tells `old/a.jpg → new/a.jpg` from `old/a.jpg → new/b.jpg`.
+fn trailing_components_in_common(a: &str, b: &str) -> usize {
+    a.rsplit('/')
+        .zip(b.rsplit('/'))
+        .take_while(|(x, y)| x == y)
+        .count()
+}
+
+/// Pair held-back observations with the rows they claim, deterministically.
+///
+/// When a whole folder of hardlinked or identical files is renamed at once,
+/// every observation corroborates every candidate — the content genuinely
+/// cannot tell them apart. Something must still decide which row lands at which
+/// path, and if that something is iteration order, two scans of the same disk
+/// produce different histories. So the rule is fixed and total:
+///
+/// 1. Observations are considered in `(root_id, rel_path)` order — the walk's
+///    order never reaches this decision.
+/// 2. Each takes its best **unclaimed** candidate, preferring more shared
+///    trailing path components; a file renamed within its folder keeps its own
+///    row rather than swapping with a sibling.
+/// 3. Ties go to the candidate whose **stored device** matches the observation.
+///    This is device's one remaining job — a hint that breaks a tie it could
+///    never have decided, and which disqualifies nothing when it disagrees.
+/// 4. Anything still tied goes to the lowest source id, which is arbitrary and
+///    stable, and the point is the second half.
+///
+/// Every candidate is claimed at most once: two paths cannot be the same row.
+/// An observation left with nothing is New — the honest reading when the rows
+/// it could have taken were better claimed elsewhere.
+///
+/// **Deliberately nomination-agnostic**: nothing here knows candidates arrived
+/// by inode. A future assisted move-suggestion tool nominating by content reuses
+/// this unchanged, adding only its own ceremony.
+pub fn resolve_moves(
+    mut deferred: Vec<DeferredMove>,
+    candidates: &HashMap<i64, Source>,
+) -> Vec<MoveResolution> {
+    deferred.sort_by(|a, b| {
+        (a.observation.root_id, &a.observation.rel_path)
+            .cmp(&(b.observation.root_id, &b.observation.rel_path))
+    });
+
+    let mut claimed: HashSet<i64> = HashSet::new();
+    let mut resolutions = Vec::with_capacity(deferred.len());
+
+    for item in deferred {
+        let best = item
+            .candidate_ids
+            .iter()
+            .filter(|id| !claimed.contains(*id))
+            .filter_map(|id| candidates.get(id).map(|source| (*id, source)))
+            .min_by_key(|(id, source)| {
+                (
+                    // Reversed: more agreement is a better claim.
+                    std::cmp::Reverse(trailing_components_in_common(
+                        &item.observation.rel_path,
+                        &source.rel_path,
+                    )),
+                    std::cmp::Reverse(source.device as u64 == item.observation.device),
+                    *id,
+                )
+            })
+            .map(|(id, _)| id);
+
+        resolutions.push(match best {
+            Some(source_id) => {
+                claimed.insert(source_id);
+                MoveResolution::Moved {
+                    source_id,
+                    observation: item.observation,
+                }
+            }
+            None => MoveResolution::New {
+                observation: item.observation,
+            },
+        });
+    }
+
+    resolutions
 }
 
 /// Identify source IDs that were expected but not seen during the walk.
@@ -640,49 +859,447 @@ mod tests {
     }
 
     // =========================================================================
-    // reconcile() tests
+    // reconcile_pathless() — the pathless arm
     // =========================================================================
 
-    #[test]
-    fn reconcile_new_file() {
-        // Nothing nominated → a path Canon has not held is new
-        let result = reconcile(None);
-        assert_eq!(result, Reconciliation::New);
+    /// A candidate whose stored evidence agrees with `make_observation`'s, so
+    /// each test below varies exactly one thing: what the disk says, or what
+    /// the content says.
+    fn candidate(id: i64, rel_path: &str, old_path: OldPathCheck) -> MoveCandidate {
+        MoveCandidate {
+            source: make_source(id, rel_path),
+            old_path,
+        }
     }
 
     #[test]
-    fn reconcile_moved_file() {
-        // A row nominated by inode from another path → Moved
-        let existing = make_source(1, "old_location.txt");
-
-        let result = reconcile(Some(&existing));
+    fn an_observation_with_nothing_nominated_is_new() {
+        let obs = make_observation("fresh.txt");
         assert_eq!(
-            result,
-            Reconciliation::Moved {
-                source_id: 1,
-                from_root_id: 1,
-                from_path: "old_location.txt".to_string(),
-                old_object_id: Some(42)
+            reconcile_pathless(&obs, &[], "abc123"),
+            PathlessOutcome::New {
+                companions: 0,
+                unverified: 0
             }
         );
     }
 
     #[test]
-    fn reconcile_moved_cross_root() {
-        // A nomination from a different root → Moved carrying that root
-        let mut existing = make_source(1, "original.txt");
-        existing.root_id = 2; // Different root
+    fn a_present_twin_is_never_a_move_donor() {
+        // The hardlink case, and the reason disk truth outranks evidence: both
+        // paths hold the same inode and the same bytes, so the content agrees
+        // perfectly — and agreement is beside the point, because the candidate
+        // is still standing where Canon left it. Claiming a move here would
+        // relocate a row away from a file that exists, and the twin would steal
+        // it back on the next scan, forever.
+        let obs = make_observation("by-year/2024/trip.jpg");
+        let candidates = [
+            candidate(1, "albums/trip.jpg", OldPathCheck::Present),
+            candidate(2, "originals/trip.jpg", OldPathCheck::Present),
+        ];
 
-        let result = reconcile(Some(&existing));
         assert_eq!(
-            result,
-            Reconciliation::Moved {
-                source_id: 1,
-                from_root_id: 2,
-                from_path: "original.txt".to_string(),
-                old_object_id: Some(42)
+            reconcile_pathless(&obs, &candidates, "abc123"),
+            PathlessOutcome::New {
+                companions: 2,
+                unverified: 0
+            },
+            "a file that still exists is a sibling, not a former self"
+        );
+    }
+
+    #[test]
+    fn a_vacated_corroborated_candidate_is_deferred() {
+        // Gone from its own path, and the content says it is the same file.
+        // Still not a move yet — which observation takes this row is a question
+        // about the whole walk.
+        let obs = make_observation("sorted/2024/photo.jpg");
+        let candidates = [candidate(7, "inbox/photo.jpg", OldPathCheck::Vacated)];
+
+        assert_eq!(
+            reconcile_pathless(&obs, &candidates, "abc123"),
+            PathlessOutcome::Deferred {
+                corroborated_candidate_ids: vec![7]
             }
         );
+    }
+
+    #[test]
+    fn an_uncorroborated_nomination_degrades_to_new() {
+        // Inode reuse: the number came back around after a delete, and now
+        // names different content. The nomination is real and worthless — a
+        // path holding content Canon cannot account for elsewhere is a path it
+        // is seeing for the first time.
+        let obs = make_observation("recycled.bin");
+        let mut stale = candidate(7, "deleted-last-week.bin", OldPathCheck::Vacated);
+        stale.source.size = 999_999;
+
+        assert_eq!(
+            reconcile_pathless(&obs, &[stale], "abc123"),
+            PathlessOutcome::New {
+                companions: 0,
+                unverified: 0
+            }
+        );
+
+        // A head read that disagrees refuses it just as flatly, with the
+        // fingerprint agreeing exactly — the strong corroborator doing its job.
+        let matching_shape = candidate(8, "coincidence.bin", OldPathCheck::Vacated);
+        assert_eq!(
+            reconcile_pathless(&obs, &[matching_shape], "different-content"),
+            PathlessOutcome::New {
+                companions: 0,
+                unverified: 0
+            }
+        );
+    }
+
+    #[test]
+    fn an_unverifiable_old_path_is_counted_never_claimed() {
+        // The root is unreachable, so Canon does not know whether the old file
+        // is gone. Ignorance is not evidence: no claim, and the count carries
+        // to the summary so silence never passes for certainty.
+        let obs = make_observation("maybe-moved.txt");
+        let candidates = [
+            candidate(1, "offline-drive/a.txt", OldPathCheck::Unverifiable),
+            candidate(2, "offline-drive/b.txt", OldPathCheck::Unverifiable),
+        ];
+
+        assert_eq!(
+            reconcile_pathless(&obs, &candidates, "abc123"),
+            PathlessOutcome::New {
+                companions: 0,
+                unverified: 2
+            }
+        );
+    }
+
+    #[test]
+    fn candidates_partition_by_what_the_disk_says() {
+        // One of each, with content that would corroborate all three: only the
+        // vacated one can be claimed, and the other two are counted separately
+        // because they mean different things to the reader.
+        let obs = make_observation("destination.txt");
+        let mixed = [
+            candidate(1, "still-here.txt", OldPathCheck::Present),
+            candidate(2, "cannot-say.txt", OldPathCheck::Unverifiable),
+            candidate(3, "was-here.txt", OldPathCheck::Vacated),
+        ];
+
+        assert_eq!(
+            reconcile_pathless(&obs, &mixed, "abc123"),
+            PathlessOutcome::Deferred {
+                corroborated_candidate_ids: vec![3]
+            }
+        );
+
+        // Drop the vacated one and the same set reads as new, each reason
+        // counted in its own register.
+        assert_eq!(
+            reconcile_pathless(&obs, &mixed[..2], "abc123"),
+            PathlessOutcome::New {
+                companions: 1,
+                unverified: 1
+            }
+        );
+    }
+
+    #[test]
+    fn every_corroborated_candidate_is_offered_to_resolution() {
+        // A whole hardlink group renamed at once: several rows are vacated and
+        // every one of them corroborates, because they are the same content.
+        // Choosing between them here — by row order, or by taking the first —
+        // is exactly the decision that belongs to deterministic pairing.
+        let obs = make_observation("renamed/trip.jpg");
+        let group = [
+            candidate(3, "old/c.jpg", OldPathCheck::Vacated),
+            candidate(1, "old/a.jpg", OldPathCheck::Vacated),
+            candidate(2, "old/b.jpg", OldPathCheck::Vacated),
+        ];
+
+        assert_eq!(
+            reconcile_pathless(&obs, &group, "abc123"),
+            PathlessOutcome::Deferred {
+                corroborated_candidate_ids: vec![3, 1, 2]
+            },
+            "all of them, in the order nominated — resolution decides"
+        );
+    }
+
+    #[test]
+    fn a_contentless_candidate_is_never_a_donor() {
+        // Every empty file's content agrees with every other's, so a vacated
+        // empty row would corroborate any empty file appearing anywhere — the
+        // law refuses the relocating claim outright. The control below carries
+        // the identical evidence shape with actual content and is claimed, so
+        // what the refusal turns on is the emptiness and nothing else.
+        let mut obs = make_observation("moved/empty.log");
+        obs.size = 0;
+        let mut empty = candidate(1, "was/empty.log", OldPathCheck::Vacated);
+        empty.source.size = 0;
+
+        assert_eq!(
+            reconcile_pathless(&obs, &[empty], "abc123"),
+            PathlessOutcome::New {
+                companions: 0,
+                unverified: 0
+            }
+        );
+
+        let obs = make_observation("moved/data.bin");
+        let data = candidate(1, "was/data.bin", OldPathCheck::Vacated);
+        assert_eq!(
+            reconcile_pathless(&obs, &[data], "abc123"),
+            PathlessOutcome::Deferred {
+                corroborated_candidate_ids: vec![1]
+            }
+        );
+    }
+
+    // =========================================================================
+    // resolve_moves() — deterministic pairing
+    // =========================================================================
+
+    /// A deferred observation at `rel_path` corroborated by `candidate_ids`.
+    fn deferred(rel_path: &str, candidate_ids: &[i64]) -> DeferredMove {
+        DeferredMove {
+            observation: make_observation(rel_path),
+            candidate_ids: candidate_ids.to_vec(),
+        }
+    }
+
+    /// Build the candidate map from (id, rel_path) pairs, in the given order —
+    /// insertion order is a variable the determinism test permutes.
+    fn candidate_map(rows: &[(i64, &str)]) -> HashMap<i64, Source> {
+        let mut map = HashMap::new();
+        for (id, rel_path) in rows {
+            map.insert(*id, make_source(*id, rel_path));
+        }
+        map
+    }
+
+    /// Each resolution as (destination path, claimed row) — `None` for New.
+    fn pairs(resolutions: &[MoveResolution]) -> Vec<(String, Option<i64>)> {
+        resolutions
+            .iter()
+            .map(|r| match r {
+                MoveResolution::Moved {
+                    source_id,
+                    observation,
+                } => (observation.rel_path.clone(), Some(*source_id)),
+                MoveResolution::New { observation } => (observation.rel_path.clone(), None),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn resolve_moves_pairs_a_single_move() {
+        let candidates = candidate_map(&[(7, "inbox/photo.jpg")]);
+        let resolved = resolve_moves(vec![deferred("sorted/photo.jpg", &[7])], &candidates);
+        assert_eq!(
+            pairs(&resolved),
+            [("sorted/photo.jpg".to_string(), Some(7))]
+        );
+    }
+
+    #[test]
+    fn resolve_moves_handles_empty_input() {
+        assert!(resolve_moves(vec![], &candidate_map(&[])).is_empty());
+    }
+
+    #[test]
+    fn resolve_moves_prefers_the_more_similar_path() {
+        // Two files swapped folders. Content cannot tell them apart — both
+        // corroborate both — so the tail of the path decides, and each keeps
+        // its own row instead of the two rows crossing.
+        let candidates = candidate_map(&[(1, "old/a.jpg"), (2, "old/b.jpg")]);
+        let resolved = resolve_moves(
+            vec![
+                deferred("new/a.jpg", &[1, 2]),
+                deferred("new/b.jpg", &[1, 2]),
+            ],
+            &candidates,
+        );
+        assert_eq!(
+            pairs(&resolved),
+            [
+                ("new/a.jpg".to_string(), Some(1)),
+                ("new/b.jpg".to_string(), Some(2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_moves_counts_agreement_from_the_end() {
+        // A renamed parent folder changes the head of every path under it and
+        // leaves the tail alone — which is why similarity is counted backwards.
+        // Here the deeper tail agreement wins over a shallower one.
+        let candidates = candidate_map(&[(1, "old/2024/trip.jpg"), (2, "elsewhere/trip.jpg")]);
+        let resolved = resolve_moves(vec![deferred("new/2024/trip.jpg", &[1, 2])], &candidates);
+        assert_eq!(
+            pairs(&resolved),
+            [("new/2024/trip.jpg".to_string(), Some(1))]
+        );
+    }
+
+    #[test]
+    fn resolve_moves_breaks_a_path_tie_on_the_stored_device() {
+        // Device's one remaining job: both candidates agree on the path score
+        // and on content, so the hint breaks a tie it could never have decided
+        // by itself. Note the lower id is the *loser* here — without the device
+        // rule the final tiebreak would have taken it.
+        let mut candidates = candidate_map(&[(1, "old/x.jpg"), (2, "other/x.jpg")]);
+        candidates.get_mut(&1).unwrap().device = 999;
+        candidates.get_mut(&2).unwrap().device = 100; // the observation's device
+
+        let resolved = resolve_moves(vec![deferred("new/x.jpg", &[1, 2])], &candidates);
+        assert_eq!(pairs(&resolved), [("new/x.jpg".to_string(), Some(2))]);
+    }
+
+    #[test]
+    fn a_disagreeing_stored_device_never_disqualifies_a_candidate() {
+        // The demotion, at the pairing rung: after a remount every stored
+        // device disagrees, and the only candidate must still be claimable.
+        let mut candidates = candidate_map(&[(1, "old/x.jpg")]);
+        candidates.get_mut(&1).unwrap().device = 999_999;
+
+        let resolved = resolve_moves(vec![deferred("new/x.jpg", &[1])], &candidates);
+        assert_eq!(pairs(&resolved), [("new/x.jpg".to_string(), Some(1))]);
+    }
+
+    #[test]
+    fn resolve_moves_claims_each_candidate_at_most_once() {
+        // Two observations, one row: two paths cannot be the same row, so the
+        // second is New rather than a duplicate claim.
+        let candidates = candidate_map(&[(1, "old/x.jpg")]);
+        let resolved = resolve_moves(
+            vec![deferred("new/a.jpg", &[1]), deferred("new/b.jpg", &[1])],
+            &candidates,
+        );
+        assert_eq!(
+            pairs(&resolved),
+            [
+                ("new/a.jpg".to_string(), Some(1)),
+                ("new/b.jpg".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_moves_leaves_surplus_candidates_unclaimed() {
+        // Three rows vacated, one file observed: the two unclaimed rows are
+        // untouched here and fall through to ordinary missing detection.
+        let candidates = candidate_map(&[(1, "old/a.jpg"), (2, "old/b.jpg"), (3, "old/c.jpg")]);
+        let resolved = resolve_moves(vec![deferred("new/b.jpg", &[1, 2, 3])], &candidates);
+        assert_eq!(pairs(&resolved), [("new/b.jpg".to_string(), Some(2))]);
+    }
+
+    #[test]
+    fn resolve_moves_is_identical_under_permuted_input_order() {
+        // The determinism pin. A whole hardlink group renamed at once: every
+        // observation corroborates every candidate, so *something* must choose,
+        // and if that something is iteration order then two scans of the same
+        // disk write two different histories. Every order the caller could hand
+        // in — the walk's entry order, the map's iteration order, the
+        // nomination list's row order — is permuted here, and the pairing must
+        // not move.
+        let rows: [(i64, &str); 3] = [(11, "old/a.jpg"), (22, "old/b.jpg"), (33, "old/c.jpg")];
+        let all_ids = [11, 22, 33];
+        let paths = ["new/a.jpg", "new/b.jpg", "new/c.jpg"];
+
+        let expected = vec![
+            ("new/a.jpg".to_string(), Some(11)),
+            ("new/b.jpg".to_string(), Some(22)),
+            ("new/c.jpg".to_string(), Some(33)),
+        ];
+
+        // Six permutations of the observation order, each crossed with a
+        // reversed candidate-id list and a reversed map insertion order.
+        let orders = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        for order in orders {
+            for reversed_ids in [false, true] {
+                for reversed_rows in [false, true] {
+                    let mut ids = all_ids;
+                    if reversed_ids {
+                        ids.reverse();
+                    }
+                    let mut row_order = rows;
+                    if reversed_rows {
+                        row_order.reverse();
+                    }
+                    let candidates = candidate_map(&row_order);
+                    let deferred_moves: Vec<DeferredMove> =
+                        order.iter().map(|i| deferred(paths[*i], &ids)).collect();
+
+                    let mut got = pairs(&resolve_moves(deferred_moves, &candidates));
+                    got.sort();
+                    assert_eq!(
+                        got, expected,
+                        "order {order:?}, ids reversed {reversed_ids}, rows reversed {reversed_rows}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_moves_orders_observations_by_root_then_path() {
+        // The sort is (root_id, rel_path), and root leads: two observations at
+        // the same rel_path in different roots must resolve in root order, not
+        // by whichever the walk reached first.
+        let candidates = candidate_map(&[(1, "shared.jpg")]);
+        let mut first = deferred("shared.jpg", &[1]);
+        first.observation.root_id = 1;
+        let mut second = deferred("shared.jpg", &[1]);
+        second.observation.root_id = 2;
+
+        // Handed in reversed; the lower root still takes the row.
+        let resolved = resolve_moves(vec![second, first], &candidates);
+        let claimed: Vec<Option<i64>> = resolved
+            .iter()
+            .map(|r| match r {
+                MoveResolution::Moved {
+                    source_id,
+                    observation,
+                } => {
+                    assert_eq!(observation.root_id, 1);
+                    Some(*source_id)
+                }
+                MoveResolution::New { observation } => {
+                    assert_eq!(observation.root_id, 2);
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(claimed, [Some(1), None]);
+    }
+
+    #[test]
+    fn resolve_moves_new_when_every_candidate_is_taken() {
+        // A candidate id that names no known row is not a claim either — the
+        // observation resolves as New rather than silently pointing at nothing.
+        let resolved = resolve_moves(vec![deferred("new/x.jpg", &[404])], &candidate_map(&[]));
+        assert_eq!(pairs(&resolved), [("new/x.jpg".to_string(), None)]);
+    }
+
+    #[test]
+    fn trailing_agreement_counts_whole_components() {
+        // "photo.jpg" and "other-photo.jpg" share a suffix as text and nothing
+        // as a path — the count must be of components, not characters.
+        assert_eq!(trailing_components_in_common("a/b/c.jpg", "x/b/c.jpg"), 2);
+        assert_eq!(
+            trailing_components_in_common("a/photo.jpg", "a/x-photo.jpg"),
+            0
+        );
+        assert_eq!(trailing_components_in_common("same.jpg", "same.jpg"), 1);
+        assert_eq!(trailing_components_in_common("a/b.jpg", "b.jpg"), 1);
     }
 
     // =========================================================================
