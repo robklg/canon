@@ -229,7 +229,7 @@ A removed origin that left through [`canon roots retire`](../roots/retire.md) po
 
 No section when the decision drew from nowhere (every other decision kind).
 
-`show` lists where the decision's [receipts](../../concepts/decisions.md) live on disk, including one receipt per source root for deletions. It does not print receipt contents; open the file to see the per-item record. When there is no receipt, the reason is stated (`no receipt (--no-receipt)` or `no receipt recorded`); absence is never silent. A receipt pointer whose root has since been removed renders as `root #N (removed)/…`: the receipt was written, but the file now lives on storage Canon no longer indexes.
+`show` lists where the decision's [receipts](../../concepts/decisions.md) live on disk, including one receipt per source root for deletions. It does not print receipt contents; open the file to see the per-item record. When there is no receipt, the reason is stated (`no receipt (--no-receipt)`, `no receipt (nothing transferred)` for a run that completed no transfer, or `no receipt recorded`); absence is never silent. A finished decision's receipt pointer names a file that exists: a run whose receipt was never written carries no pointer rather than a dangling one. A receipt pointer whose root has since been removed renders as `root #N (removed)/…`: the receipt was written, but the file now lives on storage Canon no longer indexes.
 
 ## After retirement: the trail stays whole
 

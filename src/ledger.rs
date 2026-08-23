@@ -114,13 +114,13 @@ mod tests {
     #[test]
     fn report_includes_reasons_per_category() {
         let mut result = base_result();
-        result.no_receipt = vec![(12, "recording mode had receipts off".to_string())];
+        result.no_receipt = vec![(12, "no receipt location recorded".to_string())];
         result.unreachable = vec![(
             87,
             "root path not present (offline?): /Volumes/x".to_string(),
         )];
         let report = format_report(&result, false);
-        assert!(report.contains("#12  recording mode had receipts off"));
+        assert!(report.contains("#12  no receipt location recorded"));
         assert!(report.contains("#87  root path not present (offline?): /Volumes/x"));
     }
 

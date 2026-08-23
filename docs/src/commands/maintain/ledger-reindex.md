@@ -23,7 +23,7 @@ It never touches receipts, decision records, or any other table; only `decision_
 
 `reindex` walks every `apply` decision and, for each one, tries to read its receipt:
 
-- No receipt was ever recorded (`--no-receipt`, or recording mode had receipts off) → reported as **no receipt**: nothing to recover, by construction.
+- The decision records no receipt location (`--no-receipt`, receipts off for that run, or a receipt whose write never completed) → reported as **no receipt**: nothing to recover from the row. The reason states what the row shows, not why — the row cannot tell those cases apart.
 - A receipt was recorded but isn't reachable right now (its root is gone, offline, or the file itself is missing) → reported as **unreachable**, distinct from "no receipt": nothing is concluded from not being able to check today, and it is retried on the next run.
 - The receipt reads but fails an integrity check (bad TOML, a decision id that doesn't match) → reported as **malformed**, skipped.
 - The receipt reads cleanly → its items are aggregated into extraction rows, the same way a live `apply` does. If some item's source root is no longer recognized, that root is reported separately as a partial-index gap rather than silently dropped.
@@ -38,7 +38,7 @@ Scanned 214 apply decisions.
   indexed:          182 decisions (317 rows)
   already current:  24
   no receipt:       6
-    #12  recording mode had receipts off
+    #12  no receipt location recorded
     #31  --no-receipt
   unreachable:      2
     #87   root path not present (offline?): /Volumes/archive-b

@@ -16,6 +16,7 @@ use anyhow::Result;
 
 use crate::core::domain::decision::{Decision, DecisionCommand};
 use crate::core::domain::extraction::DecisionExtraction;
+use crate::core::domain::fate::{decision_family, DecisionFamily};
 use crate::core::domain::root::Root;
 use crate::core::repo::{self, Connection};
 use crate::trail::domain::placement::{aggregate_placement_lines, RowAspect};
@@ -156,10 +157,25 @@ pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
             .collect();
 
     let receipt_absence = if receipts.is_empty() {
-        // The opt-out is recorded in the command line itself; beyond that the
-        // row can't say whether recording mode or placement suppressed it.
+        // The opt-out is recorded in the command line itself. A run that
+        // transferred nothing is readable from the row's own counts: the
+        // receipt gate is the per-item transition, and the row records none.
+        // Beyond those two the row can't say whether recording mode or
+        // placement suppressed it.
+        //
+        // The counts alone are not enough to say it. Commands that never write
+        // a receipt at all can also land at zero completed — an import whose
+        // records all went stale reads the same in the counts — and telling
+        // that reader "nothing transferred" names work its command never does.
+        // Only the archive family transfers.
+        let nothing_transferred =
+            matches!(decision_family(&decision.command), DecisionFamily::Archive)
+                && decision.count_completed == Some(0)
+                && decision.count_attempted.is_some_and(|n| n > 0);
         Some(if decision.command_line.contains("--no-receipt") {
             "no receipt (--no-receipt)".to_string()
+        } else if nothing_transferred {
+            "no receipt (nothing transferred)".to_string()
         } else {
             "no receipt recorded".to_string()
         })

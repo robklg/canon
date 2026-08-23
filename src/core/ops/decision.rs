@@ -90,6 +90,30 @@ pub struct DecisionCounts {
     pub skipped: Option<i64>,
 }
 
+/// What a decision row's receipt columns currently claim.
+///
+/// The columns are written prospectively at `start()`, before the artifact they
+/// name exists. The recorder is the claim's lifecycle owner — it registers the
+/// path, so it is the one that must retract it — and this is what it tracks to
+/// know whether a retraction is owed.
+#[derive(Debug, PartialEq, Eq)]
+enum ReceiptClaim {
+    /// Nothing was ever claimed.
+    Unclaimed,
+    /// A path was registered at `start()`; nothing has been written there.
+    Registered,
+    /// The registered receipt is on disk, under its `.incomplete` name.
+    Written,
+    /// The registered receipt is on disk under its final name. Terminal: the
+    /// claim is true and settling again must not touch it — a second finalize
+    /// would fail on a file that is already where it belongs, and retract a
+    /// claim that is on disk.
+    Finalized,
+    /// The columns were pointed at a durable artifact that is not a receipt —
+    /// the retirement book. Not the recorder's to retract.
+    Artifact,
+}
+
 /// Records a decision. Created before execution, completed after.
 /// Catches its own errors — recording failure collects warnings, never halts the command.
 ///
@@ -110,6 +134,9 @@ pub struct DecisionRecorder {
     /// Held so `record_scopes` can backfill scopes discovered after `start()`
     /// (a `scan --add` root) without re-reading the row.
     scope_display: Vec<String>,
+    /// What the row's receipt columns currently claim, so an unwritten claim
+    /// can be retracted rather than left pointing at nothing.
+    claim: ReceiptClaim,
     warnings: Vec<String>,
 }
 
@@ -170,6 +197,7 @@ impl DecisionRecorder {
                 receipt_ref: None,
                 receipt_abs_path: None,
                 scope_display: Vec::new(),
+                claim: ReceiptClaim::Unclaimed,
                 warnings: Vec::new(),
             };
         }
@@ -194,6 +222,7 @@ impl DecisionRecorder {
                     receipt_ref: None,
                     receipt_abs_path: None,
                     scope_display: Vec::new(),
+                    claim: ReceiptClaim::Unclaimed,
                     warnings: vec![format!("Warning: failed to record decision: {e}")],
                 };
             }
@@ -216,18 +245,25 @@ impl DecisionRecorder {
             (None, None)
         };
 
+        let claim = if receipt_abs_path.is_some() {
+            ReceiptClaim::Registered
+        } else {
+            ReceiptClaim::Unclaimed
+        };
+
         DecisionRecorder {
             id: Some(id),
             receipt_ref,
             receipt_abs_path,
             scope_display,
+            claim,
             warnings,
         }
     }
 
     /// Update the DB record with completion data only — does NOT finalize the
     /// receipt file. Use inside a transaction; write+finalize the receipt file
-    /// after commit via `write_receipt_file` + `finalize_receipt_file`. No-op if
+    /// after commit via `write_receipt_file` + `settle_receipt_claim`. No-op if
     /// disabled or start failed. Collects a warning if the UPDATE fails.
     pub fn complete_db(
         &mut self,
@@ -259,8 +295,9 @@ impl DecisionRecorder {
     /// failure is collected as a warning. No-op if no receipt path was set up.
     pub fn write_receipt_file<T: Serialize>(&mut self, receipt: &T, summary: &str) {
         if let Some(path) = self.receipt_abs_path().map(|p| p.to_owned()) {
-            if let Err(e) = write_receipt(&path, receipt, summary) {
-                self.push_warning(format!("Receipt write failed: {e:#}"));
+            match write_receipt(&path, receipt, summary) {
+                Ok(()) => self.claim = ReceiptClaim::Written,
+                Err(e) => self.push_warning(format!("Receipt write failed: {e:#}")),
             }
         }
     }
@@ -323,15 +360,55 @@ impl DecisionRecorder {
         Some(ReceiptRef { root_id, rel_path })
     }
 
-    /// Finalize the receipt file: rename `.incomplete` → `.toml`. A failure is
-    /// collected as a warning. No-op if no receipt path was set up.
-    pub fn finalize_receipt_file(&mut self) {
-        if let Some(ref path) = self.receipt_abs_path {
-            if let Err(e) = finalize_receipt(path) {
-                self.warnings
-                    .push(format!("Warning: failed to finalize receipt: {e}"));
+    /// Settle what the row claims about its receipt: finalize the file that was
+    /// written (rename `.incomplete` → `.toml`), or retract a claim whose file
+    /// never appeared.
+    ///
+    /// This is the last act of a decision on every shape that can register a
+    /// claim — `complete()`, the commit-then-write shape that settles on its own
+    /// after its transaction, and the paths that abandon a run before it moves
+    /// anything. A path registered at `start()` that was never written is
+    /// retracted here: the row would otherwise cite a receipt that does not
+    /// exist, and every reader of the trail treats those columns as the index
+    /// over what is on disk. Nothing was written, so there is nothing to
+    /// finalize either — which is why the old spurious "failed to finalize"
+    /// warning on that path is gone rather than silenced.
+    ///
+    /// Idempotent: settling an already-settled claim does nothing.
+    pub fn settle_receipt_claim(&mut self, conn: &Connection) {
+        match self.claim {
+            ReceiptClaim::Written => {
+                if let Some(path) = self.receipt_abs_path.clone() {
+                    if let Err(e) = finalize_receipt(&path) {
+                        // The body is still on disk under `.incomplete`, but
+                        // the columns name the finalized path, and that file
+                        // does not exist. A rename that fails leaves the same
+                        // missing artifact a failed write does, so it is
+                        // settled the same way.
+                        self.warnings
+                            .push(format!("Warning: failed to finalize receipt: {e}"));
+                        self.retract_claim(conn);
+                    } else {
+                        self.claim = ReceiptClaim::Finalized;
+                    }
+                }
             }
+            ReceiptClaim::Registered => self.retract_claim(conn),
+            ReceiptClaim::Unclaimed | ReceiptClaim::Artifact | ReceiptClaim::Finalized => {}
         }
+    }
+
+    /// Clear the receipt columns of a claim whose artifact was never written.
+    fn retract_claim(&mut self, conn: &Connection) {
+        let Some(id) = self.id else {
+            return;
+        };
+        if let Err(e) = repo::decision::update_receipt_path(conn, id, None, None) {
+            self.warnings
+                .push(format!("Warning: failed to clear the receipt claim: {e}"));
+            return;
+        }
+        self.claim = ReceiptClaim::Unclaimed;
     }
 
     /// Idempotently record additional typed scopes discovered after `start()`.
@@ -392,7 +469,7 @@ impl DecisionRecorder {
         summary: &str,
     ) {
         self.complete_db(conn, status, counts, summary);
-        self.finalize_receipt_file();
+        self.settle_receipt_claim(conn);
     }
 
     /// Write `receipt` (when a receipt path was set up and `receipt` is `Some`),
@@ -428,7 +505,11 @@ impl DecisionRecorder {
             self.warnings.push(format!(
                 "Warning: failed to record the artifact pointer: {e}"
             ));
+            return;
         }
+        // The columns now name something that exists independently of any
+        // receipt, so the unwritten-claim retraction must leave them alone.
+        self.claim = ReceiptClaim::Artifact;
     }
 
     /// Drain accumulated warnings. Returns an empty vec if no warnings.
@@ -904,6 +985,235 @@ mod tests {
         assert!(recorder.receipt_abs_path().is_none());
     }
 
+    /// A registered claim is retracted when the write it named fails, not only
+    /// when no write was attempted. The write failure still surfaces as a
+    /// warning — the user is told the receipt is missing — but the row stops
+    /// pointing at a file that was never created.
+    #[test]
+    fn a_failed_receipt_write_clears_the_claim() {
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = make_receipt_params();
+        let ctx = ReceiptPlacement::Targeted {
+            archive_root_id: 1,
+            archive_root_path: dir.path().to_str().unwrap().to_string(),
+            base_dir_rel: String::new(),
+        };
+
+        let mut recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
+        let id = recorder.decision_id().unwrap();
+        let claimed = recorder.receipt_abs_path().unwrap().to_path_buf();
+
+        // Put a file where the ledger directory has to be, so the write fails.
+        let ledger_dir = claimed.parent().unwrap().to_path_buf();
+        std::fs::remove_dir_all(&ledger_dir).unwrap();
+        std::fs::write(&ledger_dir, b"not a directory").unwrap();
+        recorder.write_receipt_file(&toml_body(), "one file");
+
+        recorder.complete(
+            &conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(1),
+                completed: Some(1),
+                failed: Some(0),
+                skipped: None,
+            },
+            "one file",
+        );
+
+        assert!(
+            recorder
+                .warnings
+                .iter()
+                .any(|w| w.contains("Receipt write failed")),
+            "the failure must still be reported: {:?}",
+            recorder.warnings
+        );
+
+        let row = repo::decision::fetch_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(row.receipt_root_id, None);
+        assert_eq!(row.receipt_rel_path, None);
+        assert!(!claimed.exists());
+    }
+
+    /// Settling is idempotent, and the finalized case is the one that has to
+    /// be: a second finalize would rename a file that is already where it
+    /// belongs, fail, and retract a claim whose artifact is on disk — the law
+    /// broken from the other side.
+    #[test]
+    fn settling_a_finalized_claim_again_leaves_it_alone() {
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = make_receipt_params();
+        let ctx = ReceiptPlacement::Targeted {
+            archive_root_id: 1,
+            archive_root_path: dir.path().to_str().unwrap().to_string(),
+            base_dir_rel: String::new(),
+        };
+
+        let mut recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
+        let id = recorder.decision_id().unwrap();
+        let claimed = recorder.receipt_abs_path().unwrap().to_path_buf();
+        recorder.write_receipt_file(&toml_body(), "one file");
+
+        recorder.settle_receipt_claim(&conn);
+        recorder.settle_receipt_claim(&conn);
+
+        assert!(claimed.exists());
+        assert!(
+            recorder.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            recorder.warnings
+        );
+        let row = repo::decision::fetch_by_id(&conn, id).unwrap().unwrap();
+        assert!(row.receipt_rel_path.is_some(), "claim must survive");
+    }
+
+    /// A rename that fails leaves the receipt body under `.incomplete`, so the
+    /// finalized path the columns name does not exist. That is the same missing
+    /// artifact a failed write leaves, and it is settled the same way — the
+    /// asymmetry would otherwise let a `completed` row cite a file that is not
+    /// there.
+    #[test]
+    fn a_failed_finalize_clears_the_claim() {
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = make_receipt_params();
+        let ctx = ReceiptPlacement::Targeted {
+            archive_root_id: 1,
+            archive_root_path: dir.path().to_str().unwrap().to_string(),
+            base_dir_rel: String::new(),
+        };
+
+        let mut recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
+        let id = recorder.decision_id().unwrap();
+        let claimed = recorder.receipt_abs_path().unwrap().to_path_buf();
+        recorder.write_receipt_file(&toml_body(), "one file");
+
+        // Occupy the finalized name with a directory, so the rename fails.
+        std::fs::create_dir(&claimed).unwrap();
+
+        recorder.complete(
+            &conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(1),
+                completed: Some(1),
+                failed: Some(0),
+                skipped: None,
+            },
+            "one file",
+        );
+
+        assert!(
+            recorder
+                .warnings
+                .iter()
+                .any(|w| w.contains("failed to finalize")),
+            "the failure must still be reported: {:?}",
+            recorder.warnings
+        );
+        let row = repo::decision::fetch_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(row.receipt_root_id, None);
+        assert_eq!(row.receipt_rel_path, None);
+    }
+
+    /// The retraction governs the slot registered at `start()` and nothing
+    /// else. Retirement points the same columns at the book, which exists
+    /// independently of any receipt — a recorder that then completes must
+    /// leave the pointer alone.
+    #[test]
+    fn an_artifact_pointer_survives_completion() {
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = make_receipt_params();
+        let ctx = ReceiptPlacement::Targeted {
+            archive_root_id: 1,
+            archive_root_path: dir.path().to_str().unwrap().to_string(),
+            base_dir_rel: String::new(),
+        };
+
+        let mut recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
+        let id = recorder.decision_id().unwrap();
+        recorder.record_artifact_pointer(&conn, 1, "books/drive-1/story.md");
+
+        recorder.complete(
+            &conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(1),
+                completed: Some(1),
+                failed: Some(0),
+                skipped: None,
+            },
+            "retired",
+        );
+
+        let row = repo::decision::fetch_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(row.receipt_root_id, Some(1));
+        assert_eq!(
+            row.receipt_rel_path.as_deref(),
+            Some("books/drive-1/story.md")
+        );
+    }
+
+    /// A post-hoc receipt registers no claim at `start()` — scan computes its
+    /// path only after the walk, and links it through the scope index rather
+    /// than the decision's own columns. Completion must not invent a
+    /// finalization for a slot that was never filled: the receipt is already
+    /// final on disk, and a spurious warning about it would be the only visible
+    /// symptom.
+    #[test]
+    fn a_post_hoc_receipt_leaves_the_columns_alone() {
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = make_receipt_params();
+
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+        let id = recorder.decision_id().unwrap();
+        let placed = recorder.write_placed_receipt(
+            &ReceiptPlacement::LedgerRoot {
+                root_id: 1,
+                root_path: dir.path().to_str().unwrap().to_string(),
+            },
+            "scan",
+            &toml_body(),
+            "one file",
+        );
+        recorder.complete(
+            &conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(1),
+                completed: Some(0),
+                failed: Some(0),
+                skipped: Some(1),
+            },
+            "scanned",
+        );
+
+        // The placed receipt is on disk and stays there; the decision's own
+        // columns were never the place it was recorded.
+        let placed = placed.unwrap();
+        assert!(dir.path().join(&placed.rel_path).exists());
+        let row = repo::decision::fetch_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(row.receipt_root_id, None);
+        assert_eq!(row.receipt_rel_path, None);
+        assert!(
+            recorder.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            recorder.warnings
+        );
+    }
+
+    /// The smallest thing that serializes to a receipt body.
+    fn toml_body() -> std::collections::BTreeMap<String, String> {
+        let mut body = std::collections::BTreeMap::new();
+        body.insert("summary".to_string(), "one file".to_string());
+        body
+    }
+
     #[test]
     fn test_recorder_complete_finalizes_receipt() {
         let conn = setup_test_db();
@@ -917,11 +1227,15 @@ mod tests {
 
         let mut recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
 
-        // Manually create the .incomplete file so finalize_receipt has something to rename
+        // Write through the recorder, as production does: what makes a claim
+        // finalizable rather than retractable is that the recorder wrote it.
         let receipt_path = recorder.receipt_abs_path().unwrap().to_path_buf();
         let incomplete = receipt_path.with_extension("incomplete");
-        std::fs::create_dir_all(incomplete.parent().unwrap()).unwrap();
-        std::fs::write(&incomplete, b"receipt content").unwrap();
+        recorder.write_receipt_file(&toml_body(), "Applied 1 file");
+        assert!(
+            incomplete.exists(),
+            ".incomplete should exist before complete()"
+        );
 
         recorder.complete(
             &conn,

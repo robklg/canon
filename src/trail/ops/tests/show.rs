@@ -4,7 +4,9 @@ use crate::core::repo::insert_test_root;
 use crate::core::repo::Connection;
 use crate::trail::ops::show::{compute_show, PointerRelocation};
 
-use super::fixtures::{extraction_row, insert_decision_at, insert_decision_full};
+use super::fixtures::{
+    extraction_row, insert_decision_at, insert_decision_full, insert_zero_transfer_decision,
+};
 
 #[test]
 fn show_lists_receipt_pointers_per_root() {
@@ -333,6 +335,36 @@ fn show_explains_receipt_absence() {
         Some("no receipt (--no-receipt)")
     );
     let show = compute_show(&conn, plain).unwrap().unwrap();
+    assert_eq!(show.receipt_absence.as_deref(), Some("no receipt recorded"));
+}
+
+/// A run that transferred nothing writes no receipt, and since the recorder
+/// retracts the claim the row has no pointer either. The absence is not mute:
+/// the row's own counts say why, and `show` reads them rather than leaving the
+/// reader with the generic arm.
+#[test]
+fn trail_show_says_nothing_transferred_for_a_receiptless_zero_transfer_decision() {
+    let conn = open_in_memory_for_test();
+    let failed = insert_zero_transfer_decision(&conn, "apply", 300, 1240);
+
+    let show = compute_show(&conn, failed).unwrap().unwrap();
+    assert_eq!(
+        show.receipt_absence.as_deref(),
+        Some("no receipt (nothing transferred)")
+    );
+}
+
+/// Zero completed out of some attempted is a shape many commands can land in,
+/// and most of them never write a receipt under any circumstance. An import
+/// whose records all went stale reads exactly like a failed apply in the
+/// counts — but nothing was ever going to be transferred, so saying so would
+/// name work the command does not do.
+#[test]
+fn a_zero_completed_import_still_takes_the_generic_arm() {
+    let conn = open_in_memory_for_test();
+    let stale = insert_zero_transfer_decision(&conn, "import_facts", 400, 12);
+
+    let show = compute_show(&conn, stale).unwrap().unwrap();
     assert_eq!(show.receipt_absence.as_deref(), Some("no receipt recorded"));
 }
 

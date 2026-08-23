@@ -58,7 +58,7 @@ where
             if let Some(receipt) = receipt.as_ref() {
                 r.write_receipt_file(receipt, summary);
             }
-            r.finalize_receipt_file();
+            r.settle_receipt_claim(conn);
             r.take_warnings()
         }
         None => Vec::new(),

@@ -30,6 +30,32 @@ pub(super) fn insert_decision_full(
     conn.last_insert_rowid()
 }
 
+/// A decision that attempted work and completed none of it — the shape an
+/// apply leaves when every transfer failed.
+pub(super) fn insert_zero_transfer_decision(
+    conn: &Connection,
+    command: &str,
+    created_at: i64,
+    attempted: i64,
+) -> i64 {
+    conn.execute(
+        "INSERT INTO decisions
+           (command, command_line, status, canon_version, created_at,
+            count_attempted, count_completed, count_failed)
+         VALUES (?1, ?2, 'partial', 'test', ?3, ?4, 0, ?4)",
+        rusqlite::params![
+            command,
+            // The command line must match the command: these rows are read by
+            // tests whose whole subject is which command a row belongs to.
+            format!("canon {}", command.replace('_', " ")),
+            created_at,
+            attempted
+        ],
+    )
+    .unwrap();
+    conn.last_insert_rowid()
+}
+
 pub(super) fn insert_note_at(conn: &Connection, root_id: i64, rel_path: &str, created_at: i64) {
     conn.execute(
         "INSERT INTO notes (root_id, rel_path, text, created_at) VALUES (?1, ?2, 'thought', ?3)",

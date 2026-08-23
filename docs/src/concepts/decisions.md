@@ -121,6 +121,8 @@ recording = "Full"   # Full | Records | Off
 layout = "Central"   # Central | Alongside
 ```
 
+A decision's recorded receipt location is settled at the decision's last act, so a finished row names a file that exists. The location is reserved when the run starts, before the receipt is written; if the receipt never appears — nothing transitioned, the write failed, or the run refused before moving anything — the reservation is withdrawn rather than left pointing at nothing, and [`trail show`](../commands/query/trail.md) states why. The counts carry the reason: a receipt records per-item transitions, so a run with none has nothing to receipt. A run killed outright never reaches its last act; its row stays `started`, which is the state to look for when recovering from a crash.
+
 If no archive root is configured, exclusion decisions are still recorded, but no receipt can be written; Canon warns you so the gap is visible rather than silent. Deletion receipts have no such dependency: they live on the source root, which always exists, so deletions from a root that was never archived are still recorded in full.
 
 ## Annotating Decisions with `--reason`

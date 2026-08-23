@@ -143,10 +143,16 @@ pub(crate) fn read_apply_receipt(decision: &Decision, roots: &[Root]) -> Receipt
     let (Some(receipt_root_id), Some(receipt_rel_path)) =
         (decision.receipt_root_id, decision.receipt_rel_path.as_ref())
     else {
+        // The opt-out is in the command line, so it can be named. Anything
+        // else is inference: the row's empty columns mean no receipt location
+        // is recorded, which happens when receipts were off, when none was
+        // ever written, and when a write or its finalize did not complete.
+        // The row cannot tell those apart, and a book bound from this reason
+        // is never rewritten — so it says what is observed, not a cause.
         let reason = if decision.command_line.contains("--no-receipt") {
             "--no-receipt".to_string()
         } else {
-            "recording mode had receipts off".to_string()
+            "no receipt location recorded".to_string()
         };
         return ReceiptRead::NoReceipt { reason };
     };
@@ -419,7 +425,7 @@ mtime = 0
         .unwrap();
 
         let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
-        assert_eq!(result.no_receipt[0].1, "recording mode had receipts off");
+        assert_eq!(result.no_receipt[0].1, "no receipt location recorded");
     }
 
     #[test]
