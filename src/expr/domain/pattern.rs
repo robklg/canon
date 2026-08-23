@@ -767,10 +767,7 @@ mod tests {
         // A leading slash is stripped when the pattern is evaluated, so a
         // prefix that kept it would name an absolute path — and joining one
         // onto the archive root discards the root entirely.
-        assert_eq!(
-            shape("/2024/{filename}"),
-            (Some("2024".to_string()), false)
-        );
+        assert_eq!(shape("/2024/{filename}"), (Some("2024".to_string()), false));
         // `..` becomes `_` at evaluation; the prefix must name the directory
         // files actually land in.
         assert_eq!(
