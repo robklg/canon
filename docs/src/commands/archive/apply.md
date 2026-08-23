@@ -150,6 +150,23 @@ Use `--root` to apply only a subset of sources from the manifest. Useful for sta
 
 6. **Excluded sources** - Blocks if any sources in the manifest are marked as excluded.
 
+7. **Stale sources** - If a source changed since the manifest was generated, apply refuses before transferring anything and names what changed. When the refusal names the stale files in full, it hands them back as the command to re-observe just those:
+
+   ```
+   Error: 2 sources have changed since manifest was generated:
+     /Volumes/Photos/2024/img_0042.jpg: size: 4211 → 4230, mtime: 1787482715 → 1787482733
+     /Volumes/Photos/2024/img_0043.jpg: mtime: 1787482715 → 1787482733
+
+   Re-observe just these files, then refresh:
+     canon scan /Volumes/Photos/2024/img_0042.jpg /Volumes/Photos/2024/img_0043.jpg
+     canon cluster refresh trip.toml
+
+   If more than these has changed, run `canon scan` then `cluster refresh` to regenerate the lock file.
+   Error: Aborting due to stale sources in manifest
+   ```
+
+   Past ten stale files the listing truncates and the whole-root remedy is offered alone. The same two lines answer both staleness conditions: when only the lock is behind, `cluster refresh` does the work and the scan finds nothing to do; when the files changed on disk since the last scan, the scan is what brings the database current for the refresh to read. A stale file that was deleted meanwhile is skipped by `canon scan` with a warning; assert the deletion with [`canon scan --missing`](../roots/scan.md) and refresh, and it leaves the lock.
+
 Edit the manifest's `[output]` section to customize the destination:
 
 ```toml

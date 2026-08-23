@@ -25,7 +25,7 @@ use crate::core::repo::{self, Connection};
 
 use super::receipt::{ApplyReceipt, ApplyReceiptItem};
 
-use super::plan::{ensure_parent_dir, ApplyPlan, ApplyTransfer, StaleSource};
+use super::plan::{ensure_parent_dir, staleness_lines, ApplyPlan, ApplyTransfer, StaleSource};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferMode {
@@ -282,14 +282,15 @@ pub fn execute_apply(
         let stale = validate_transfers_disk(&transfers_to_execute, progress);
         if !stale.is_empty() {
             settle_abandoned_claim(conn, recorder.as_mut());
-            bail!(
-                "{} sources have changed since manifest was generated. \
-                 Run `canon scan` then `cluster refresh` to regenerate the lock file. \
-                 First: {} ({})",
-                stale.len(),
-                stale[0].path,
-                stale[0].reason
+            let mut message = format!(
+                "{} sources have changed since manifest was generated:",
+                stale.len()
             );
+            for line in staleness_lines(&stale, &params.manifest_display) {
+                message.push('\n');
+                message.push_str(&line);
+            }
+            bail!(message);
         }
     }
 
@@ -2592,6 +2593,94 @@ mod tests {
             receipt_files.len(),
             1,
             "Expected one receipt in alongside layout"
+        );
+    }
+
+    /// The pre-transfer bail is one of three staleness printers, and the only
+    /// one whose output a test can reach — the other two speak through
+    /// `eprintln!`. It must list the sources it refuses over, because the
+    /// remedy below the listing says "just these files" and needs a "these" to
+    /// mean.
+    ///
+    /// What this pins is that the site prints the shared body rather than a
+    /// second spelling of it: break the composer and this fails, inline a
+    /// listing here and it fails too.
+    #[test]
+    fn the_pre_transfer_bail_prints_the_shared_staleness_body() {
+        use std::io::Write;
+        let conn = setup_test_db();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::File::create(&src_file)
+            .unwrap()
+            .write_all(b"image data")
+            .unwrap();
+
+        // The lock remembers a size the file no longer has: stale on disk,
+        // which is what the batch sweep before the transfer loop refuses on.
+        let plan = ApplyPlan {
+            transfers: vec![ApplyTransfer {
+                source_id: 1,
+                source_path: src_file.display().to_string(),
+                source_root_path: src_dir.path().display().to_string(),
+                source_rel_path: "photo.jpg".to_string(),
+                dest_rel_path: "photo.jpg".to_string(),
+                archive_rel_path: "photo.jpg".to_string(),
+                object_id: None,
+                partial_hash: "deadbeef".to_string(),
+                size: 999_999,
+                mtime: 0,
+                hash: None,
+            }],
+            violations: ApplyViolations::default(),
+            stale_sources: vec![],
+            already_archived_count: 0,
+            resume_already_there: vec![],
+            resume_already_there_source_present: 0,
+            resume_source_lost: vec![],
+            resume_size_mismatches: vec![],
+        };
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "trip.toml".to_string(),
+            receipt_ctx: None,
+        };
+
+        let err = match execute_apply(&conn, &plan, &params, &NoopProgress, None) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a stale source must refuse the run before any transfer"),
+        };
+
+        let stale = vec![StaleSource {
+            path: src_file.display().to_string(),
+            reason: String::new(),
+        }];
+        for line in staleness_lines(&stale, "trip.toml") {
+            if line.is_empty() {
+                continue;
+            }
+            assert!(
+                err.contains(line.trim_end()),
+                "the bail carries the shared body's line {line:?}:\n{err}"
+            );
+        }
+        assert!(
+            err.contains(&src_file.display().to_string()),
+            "and names the file it refused over: {err}"
         );
     }
 

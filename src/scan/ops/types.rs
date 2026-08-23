@@ -373,6 +373,20 @@ pub struct ScanRootResult {
     pub warnings: Vec<String>,
 }
 
+/// Where `--missing` would act: the root that holds the path, and the path's
+/// own remainder below it. Produced by `resolve_missing_target`, which is the
+/// one place the act's preconditions are asked — by the act, and by the
+/// interface deciding whether to suggest it.
+#[derive(Debug)]
+pub struct MissingTarget {
+    pub root_id: i64,
+    /// Absolute path of the containing root.
+    pub root_path: String,
+    /// The path's remainder below its root. Empty when the root itself was
+    /// named.
+    pub rel_prefix: String,
+}
+
 /// Result of marking a path's sources deleted via `--missing`.
 #[derive(Debug)]
 pub struct MarkMissingPathResult {

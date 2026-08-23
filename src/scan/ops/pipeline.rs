@@ -23,8 +23,8 @@ use crate::scan::domain::{
 use crate::scan::repo as scan_repo;
 
 use super::types::{
-    DeletionReceiptItem, FileAction, FileToHash, HashNeed, MarkMissingPathResult, ScanOptions,
-    ScanProgress, ScanRootResult, ScanStats, SourceOutcome,
+    DeletionReceiptItem, FileAction, FileToHash, HashNeed, MarkMissingPathResult, MissingTarget,
+    ScanOptions, ScanProgress, ScanRootResult, ScanStats, SourceOutcome,
 };
 
 /// Scan a root directory, processing each entry through the
@@ -429,6 +429,224 @@ pub fn scan_root(
         stats,
         files_to_hash,
         deleted_items,
+        warnings,
+    })
+}
+
+/// Observe one named file, the way [`scan_root`] observes a subtree of one.
+///
+/// The uniform observe contract: a path argument names a place, and a place
+/// that happens to be a single file is observed singly rather than walked. The
+/// reconciliation is the walk's own — `reconcile_file` decides at the path or
+/// pathlessly, `persist_file`/`flush_unchanged`/`persist_resolution` write, the
+/// hash gate is asked exactly as it is asked in the walk — so a file named on
+/// its own reaches the same verdict it would have reached inside a walk of its
+/// directory.
+///
+/// **Nothing here infers absence, and that is structural rather than
+/// remembered.** Deletion in the walk is detected by *difference* — expected
+/// minus seen — and a single observation has no difference to compute: one file
+/// says nothing about any other. Recording a deletion stays `--missing`'s
+/// explicit assertion. This function therefore takes no `capture_deletions`
+/// flag and returns no deletion items: there is no arm for it to reach. A path
+/// the disk cannot answer for is skipped here as it is anywhere else — the
+/// caller usually catches that first, at canonicalization, but nothing below
+/// depends on it having done so.
+///
+/// A move *into* the named path is followed, under the same three gates the
+/// walk applies — disk truth, corroboration at `Relocation` grade, and the
+/// in-transaction re-check — because pairing runs over this one observation the
+/// same way it runs over a whole walk's held-back set.
+#[allow(clippy::too_many_arguments)]
+pub fn observe_file(
+    conn: &Connection,
+    root_id: i64,
+    root_path: &str,
+    rel_path: &str,
+    full_path: &Path,
+    options: &ScanOptions,
+    progress: &dyn ScanProgress,
+    now: i64,
+    decision_id: Option<i64>,
+) -> Result<ScanRootResult> {
+    let mut stats = ScanStats::default();
+    let mut files_to_hash: Vec<FileToHash> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    let metadata = match fs::metadata(full_path) {
+        Ok(m) => m,
+        Err(e) => {
+            progress.on_process_error(
+                &full_path.display().to_string(),
+                &format!("Failed to stat: {e}"),
+            );
+            stats.skipped += 1;
+            return Ok(ScanRootResult {
+                stats,
+                files_to_hash,
+                deleted_items: Vec::new(),
+                warnings,
+            });
+        }
+    };
+
+    // Only regular files become sources here too, and what is declined is
+    // counted rather than dropped in silence. A symlink never arrives: the
+    // caller canonicalizes, so a named link is observed as whatever it points
+    // at. What is left is the residue — fifos, sockets, devices.
+    if !metadata.is_file() {
+        stats.special_skipped += 1;
+        return Ok(ScanRootResult {
+            stats,
+            files_to_hash,
+            deleted_items: Vec::new(),
+            warnings,
+        });
+    }
+
+    let device = metadata.dev() as i64;
+    let inode = metadata.ino() as i64;
+    let size = metadata.size() as i64;
+    let mtime = metadata.mtime();
+
+    stats.scanned += 1;
+
+    let reconciled = match reconcile_file(
+        conn, root_id, rel_path, full_path, device, inode, size, mtime,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            progress.on_process_error(&full_path.display().to_string(), &e.to_string());
+            stats.skipped += 1;
+            return Ok(ScanRootResult {
+                stats,
+                files_to_hash,
+                deleted_items: Vec::new(),
+                warnings,
+            });
+        }
+    };
+
+    let ReconcileResult {
+        observation,
+        outcome,
+        source_at_path,
+        companions,
+        unverified,
+        unverified_roots,
+    } = reconciled;
+
+    let (action, source_id, old_object_id) = match outcome {
+        ReconcileOutcome::Deferred(corroborated) => {
+            // Pairing runs over a set of one. It is still `resolve_moves` doing
+            // it, so the claim is decided by the same rules, and
+            // `persist_resolution` still re-reads the row inside its own
+            // transaction before believing it.
+            let donors: HashMap<i64, Source> =
+                corroborated.iter().map(|d| (d.id, d.clone())).collect();
+            let deferred = vec![DeferredMove {
+                observation,
+                candidate_ids: corroborated.iter().map(|d| d.id).collect(),
+            }];
+            let mut resolved = None;
+            for resolution in resolve_moves(deferred, &donors) {
+                let rel = match &resolution {
+                    MoveResolution::Moved { observation, .. } => observation.rel_path.clone(),
+                    MoveResolution::New { observation } => observation.rel_path.clone(),
+                };
+                match persist_resolution(conn, resolution, &donors, now, decision_id) {
+                    Ok(r) => resolved = Some(r),
+                    Err(e) => {
+                        progress.on_process_error(
+                            &Path::new(root_path).join(&rel).display().to_string(),
+                            &e.to_string(),
+                        );
+                        stats.skipped += 1;
+                    }
+                }
+            }
+            match resolved {
+                Some(r) => r,
+                None => {
+                    return Ok(ScanRootResult {
+                        stats,
+                        files_to_hash,
+                        deleted_items: Vec::new(),
+                        warnings,
+                    })
+                }
+            }
+        }
+        ReconcileOutcome::Settled(Reconciliation::Unchanged { source_id }) => {
+            flush_unchanged(conn, &[(source_id, device, inode)], now)?;
+            (
+                FileAction::Unchanged,
+                source_id,
+                source_at_path.and_then(|s| s.object_id),
+            )
+        }
+        ReconcileOutcome::Settled(reconciliation) => {
+            let file_decision_id = match &reconciliation {
+                Reconciliation::New => decision_id,
+                _ => None,
+            };
+            let source =
+                match persist_file(conn, &observation, &reconciliation, now, file_decision_id) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        progress.on_process_error(&full_path.display().to_string(), &e.to_string());
+                        stats.skipped += 1;
+                        return Ok(ScanRootResult {
+                            stats,
+                            files_to_hash,
+                            deleted_items: Vec::new(),
+                            warnings,
+                        });
+                    }
+                };
+            (
+                action_for(&reconciliation),
+                source.id,
+                old_object_link(&reconciliation),
+            )
+        }
+    };
+
+    if companions > 0 {
+        stats.hardlink_companions += 1;
+    }
+    if unverified > 0 {
+        stats.moves_unverified += 1;
+    }
+    for root in unverified_roots {
+        warnings.push(format!(
+            "1 possible move could not be verified — root {root} unreachable"
+        ));
+    }
+
+    progress.on_file(rel_path, &action);
+
+    match action {
+        FileAction::New => stats.new += 1,
+        FileAction::Modified => stats.updated += 1,
+        FileAction::Moved => stats.moved += 1,
+        FileAction::Unchanged => stats.unchanged += 1,
+    }
+
+    if let Some(need) = needs_hash(&action, options, old_object_id) {
+        queue_for_hash(
+            &mut files_to_hash,
+            need,
+            source_id,
+            full_path.to_path_buf(),
+            old_object_id,
+        );
+    }
+
+    Ok(ScanRootResult {
+        stats,
+        files_to_hash,
+        deleted_items: Vec::new(),
         warnings,
     })
 }
@@ -934,16 +1152,30 @@ fn capture_deletion_items(
 /// otherwise this errors. A path that matches a root but has no present sources
 /// returns `missing_count = 0` and no items — the caller decides how to report it.
 ///
-/// [`write_deletion_receipts`]: super::receipt::write_deletion_receipts
-pub fn mark_missing_path(
-    conn: &Connection,
+/// Where `--missing` would act, and whether it would be accepted at all.
+///
+/// **The act's preconditions are spelled here once, because something other
+/// than the act asks about them.** The interface offers a `--missing` hint on
+/// the arm where a path could not be resolved, and a hint that names an act
+/// the act itself would refuse is worse than no hint: it sends the user
+/// somewhere Canon has already decided not to go. Re-deriving the conditions
+/// at the interface is how the two drift, and they drift silently, because
+/// nothing fails when a suggestion and a refusal disagree.
+///
+/// Two refusals, both the walk path's own. A path under no known root has no
+/// root whose sources could be marked. A **suspended** root is the user's own
+/// closed door, and it matters most here: a suspended root is precisely one
+/// whose path tends to fail canonicalization, so `--missing` is the arm that
+/// would otherwise reach in and mark a parked drive's sources deleted.
+///
+/// What this deliberately does *not* ask is whether the storage is currently
+/// there. `--missing` is the user's explicit assertion, and taking their word
+/// is the whole point of it — see the caller that does ask, and why.
+pub fn resolve_missing_target(
     path: &Path,
     roots: &[crate::core::domain::root::Root],
     cwd: &Path,
-    now: i64,
-    decision_id: Option<i64>,
-    capture_deletions: bool,
-) -> Result<MarkMissingPathResult> {
+) -> Result<MissingTarget> {
     let cleaned = crate::core::domain::path::clean_path(path, cwd);
     let cleaned_str = cleaned.to_string_lossy();
 
@@ -956,15 +1188,34 @@ pub fn mark_missing_path(
             ),
         };
 
-    // The same suspended-root refusal the walk path makes. It matters most
-    // here: a suspended root is precisely one whose path fails to
-    // canonicalize, so --missing is the arm that would otherwise reach it
-    // and mark a disconnected drive's sources deleted.
     if let Some(root) = roots.iter().find(|r| r.id == root_id) {
         if root.is_suspended() {
             bail!("Root '{root_path}' is suspended. Use 'canon roots unsuspend' to reactivate.");
         }
     }
+
+    Ok(MissingTarget {
+        root_id,
+        root_path,
+        rel_prefix,
+    })
+}
+
+/// [`write_deletion_receipts`]: super::receipt::write_deletion_receipts
+pub fn mark_missing_path(
+    conn: &Connection,
+    path: &Path,
+    roots: &[crate::core::domain::root::Root],
+    cwd: &Path,
+    now: i64,
+    decision_id: Option<i64>,
+    capture_deletions: bool,
+) -> Result<MarkMissingPathResult> {
+    let MissingTarget {
+        root_id,
+        root_path,
+        rel_prefix,
+    } = resolve_missing_target(path, roots, cwd)?;
 
     let prefix_arg = if rel_prefix.is_empty() {
         None
@@ -4023,5 +4274,187 @@ mod tests {
             .unwrap();
         assert_eq!(present, 0);
         assert_eq!(did, Some(99));
+    }
+
+    // =========================================================================
+    // File grain: one named path, observed singly (observe_file)
+    // =========================================================================
+
+    /// One named file, observed as the interface drives it.
+    fn observe_pass(
+        conn: &Connection,
+        root_id: i64,
+        dir: &Path,
+        rel_path: &str,
+        decision_id: Option<i64>,
+    ) -> ScanRootResult {
+        observe_file(
+            conn,
+            root_id,
+            dir.to_str().unwrap(),
+            rel_path,
+            &dir.join(rel_path),
+            &no_hash_options(),
+            &NoopProgress,
+            current_timestamp(),
+            decision_id,
+        )
+        .unwrap()
+    }
+
+    /// The uniform observe contract, on the modified case the remedy exists
+    /// for: a file named on its own reaches the verdict a walk of its
+    /// directory would have reached for it, and leaves the same row behind.
+    #[test]
+    fn a_scanned_file_is_reobserved_like_a_subtree_of_one() {
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        write_at(temp.path(), "inbox/photo.jpg", "photo bytes");
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        // Give the row a real content identity, so the clear below is
+        // observable rather than a comparison of None with None.
+        conn.execute(
+            "INSERT INTO objects (id, hash_type, hash_value) VALUES (7, 'sha256', 'abc123')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE sources SET object_id = 7 WHERE root_id = ? AND rel_path = 'inbox/photo.jpg'",
+            [root_id],
+        )
+        .unwrap();
+        let before = row(&conn, root_id, "inbox/photo.jpg").unwrap();
+        assert_eq!(
+            before.object_id,
+            Some(7),
+            "the premise: the row holds an identity going in"
+        );
+
+        write_at(
+            temp.path(),
+            "inbox/photo.jpg",
+            "photo bytes, edited and longer",
+        );
+        let result = observe_pass(&conn, root_id, temp.path(), "inbox/photo.jpg", Some(2));
+
+        assert_eq!(
+            counts(&result.stats),
+            (0, 1, 0, 0, 0),
+            "one updated file, nothing else"
+        );
+        let after = row(&conn, root_id, "inbox/photo.jpg").unwrap();
+        assert_eq!(after.id, before.id, "the same row");
+        assert_eq!(after.size, "photo bytes, edited and longer".len() as i64);
+        assert!(
+            after.basis_rev > before.basis_rev,
+            "the basis moved: {} → {}",
+            before.basis_rev,
+            after.basis_rev
+        );
+        assert_eq!(
+            after.object_id, None,
+            "a changed path holds no identity until the hash pass"
+        );
+        // And the hash pass is asked for it — without this the refreshed lock
+        // would drop the very file the remedy exists to save.
+        assert_eq!(result.files_to_hash.len(), 0, "hashing is off in this pass");
+        let hashing = observe_file(
+            &conn,
+            root_id,
+            temp.path().to_str().unwrap(),
+            "inbox/photo.jpg",
+            &temp.path().join("inbox/photo.jpg"),
+            &ScanOptions {
+                hash: true,
+                hash_all: false,
+                ignore_device_id: false,
+            },
+            &NoopProgress,
+            current_timestamp(),
+            Some(3),
+        )
+        .unwrap();
+        assert_eq!(
+            hashing.files_to_hash.len(),
+            1,
+            "the observed file is queued for hashing"
+        );
+    }
+
+    /// A path no walk has seen becomes a source, stamped by the decision that
+    /// indexed it — the same New arm the walk uses.
+    #[test]
+    fn a_new_file_named_positionally_is_indexed() {
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        write_at(temp.path(), "inbox/new.jpg", "fresh bytes");
+
+        let stats = observe_pass(&conn, root_id, temp.path(), "inbox/new.jpg", Some(7)).stats;
+
+        assert_eq!(counts(&stats), (1, 0, 0, 0, 0), "one new file");
+        let indexed = row(&conn, root_id, "inbox/new.jpg").unwrap();
+        assert_eq!(indexed.decision_id, Some(7));
+    }
+
+    /// The destination-side promise at file grain: only the destination needs
+    /// observing. Pairing runs over a set of one, through the same gates.
+    #[test]
+    fn a_move_into_a_named_file_path_is_followed() {
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let original = write_at(temp.path(), "inbox/photo.jpg", "photo bytes");
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let before = row(&conn, root_id, "inbox/photo.jpg").unwrap();
+
+        std::fs::create_dir_all(temp.path().join("sorted")).unwrap();
+        std::fs::rename(&original, temp.path().join("sorted/photo.jpg")).unwrap();
+
+        let stats = observe_pass(&conn, root_id, temp.path(), "sorted/photo.jpg", Some(2)).stats;
+
+        assert_eq!(counts(&stats), (0, 0, 1, 0, 0), "one move, nothing else");
+        let after = row(&conn, root_id, "sorted/photo.jpg").unwrap();
+        assert_eq!(after.id, before.id, "the same row, at its new path");
+        assert!(row(&conn, root_id, "inbox/photo.jpg").is_none());
+    }
+
+    /// Deletion is detected by difference, and one observation has no
+    /// difference to compute. Observing one file must leave every other row
+    /// exactly as it stood — including a sibling that really is gone from disk.
+    #[test]
+    fn observing_one_file_infers_nothing_about_any_other() {
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        write_at(temp.path(), "inbox/kept.jpg", "kept bytes");
+        let doomed = write_at(temp.path(), "inbox/gone.jpg", "gone bytes");
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        std::fs::remove_file(&doomed).unwrap();
+
+        write_at(temp.path(), "inbox/kept.jpg", "kept bytes, edited");
+        let result = observe_pass(&conn, root_id, temp.path(), "inbox/kept.jpg", Some(2));
+
+        assert_eq!(
+            result.stats.updated, 1,
+            "the observation really happened — the assertions below are not vacuous"
+        );
+        assert_eq!(result.stats.missing, 0, "nothing was inferred missing");
+        assert!(
+            result.deleted_items.is_empty(),
+            "and nothing was captured for a deletion receipt"
+        );
+        let present: i64 = conn
+            .query_row(
+                "SELECT present FROM sources WHERE root_id = ? AND rel_path = 'inbox/gone.jpg'",
+                [root_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            present, 1,
+            "the row for the deleted sibling stands untouched — the assertion is --missing's"
+        );
     }
 }

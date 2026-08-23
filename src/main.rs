@@ -120,9 +120,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     // -- Scan --
-    /// Scan directories and add files to the index
+    /// Scan directories or single files and add them to the index
     Scan {
-        /// Paths to scan (not required if --all is used)
+        /// Paths to scan — a directory is walked, a single file observed (not required if --all is used)
         paths: Vec<PathBuf>,
         /// Role for new roots: 'source' or 'archive' (required with --add, optional filter with --all)
         #[arg(long)]

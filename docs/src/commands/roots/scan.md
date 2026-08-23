@@ -2,7 +2,7 @@
 
 Scan directories and index files.
 
-When you scan a [root](../../concepts/roots.md), Canon walks the directory tree starting at the given path(s).
+When you scan a [root](../../concepts/roots.md), Canon walks the directory tree starting at the given path(s). A path that names a single file is observed on its own, without a walk.
 For each file it collects basic metadata, such as last modification time and size, and by default computes the content hash.
 After scanning, Canon knows about the existence of all [sources](../../concepts/source.md) in that root; hashed sources are linked to [objects](../../concepts/object.md).
 
@@ -38,6 +38,9 @@ canon scan /path/to/photos
 # Scan just a subtree within an existing root
 canon scan /path/to/photos/2024
 
+# Scan a single file within an existing root
+canon scan /path/to/photos/2024/img_0042.jpg
+
 # Scan without computing hashes (just index files)
 canon scan --no-hash /path/to/photos
 
@@ -66,6 +69,31 @@ Candidate roots to add:
 ```
 
 Directories under existing roots are skipped. When multiple subdirectories share a common ancestor that could be added as a single root, they're rolled up (unless that ancestor contains an existing root).
+
+**Scanning single files:** A path argument names a place, and a place can be a single file. Canon observes that file the way it observes a subtree of one: metadata read, the index updated, the content hashed. Nothing else under the root is looked at, so bringing a handful of changed files current costs a handful of reads rather than a walk:
+
+```bash
+# Re-observe two files that changed
+canon scan /Volumes/Photos/2024/img_0042.jpg /Volumes/Photos/2024/img_0043.jpg
+```
+
+```
+Scanned 2 files: 0 new, 2 updated, 0 moved, 0 unchanged, 0 missing
+Hashed 2 files
+```
+
+The decision is recorded against the paths it was aimed at, so [`canon trail`](../query/trail.md) shows it at those files.
+
+A named file that is gone is skipped with a warning, never recorded as deleted: one look cannot tell a deleted file from an unmounted or a mistyped one. The warning says where to make that assertion:
+
+```
+Warning: skipping /Volumes/Photos/2024/img_0042.jpg: No such file or directory (os error 2)
+  If it is gone for good, record it with: canon scan --missing /Volumes/Photos/2024/img_0042.jpg
+```
+
+The pointer to `--missing` appears only where asserting a deletion would be sound: inside a live root, below its top, and with the root's own path answering on disk. Storage that is not currently there makes everything under it read as gone, at every depth, so a path Canon cannot reach gets the warning alone. `--missing` works at file grain with the same recording as a folder, described below.
+
+A root is a folder, so `--add` and `--candidates` refuse a file argument and name the directory to use instead.
 
 **Marking deleted paths as missing:** When you delete a folder that was under a scanned root, Canon still considers those files present. Re-scanning the parent would let Canon discover they're gone, but that can be expensive when the parent holds many other files. Use `--missing` to tell Canon directly that a path no longer exists:
 
@@ -181,7 +209,7 @@ mv /Volumes/Photos/inbox/trip /Volumes/Photos/2024/trip
 canon scan /Volumes/Photos
 ```
 
-Scanning a subtree is enough, as long as the destination is inside it: Canon checks the old path directly rather than needing to have walked it. Moving files to a different root works the same way, and only the destination root needs scanning for the move to be recognized.
+Scanning a subtree is enough, as long as the destination is inside it, and so is naming the moved file's new path on its own: Canon checks the old path directly rather than needing to have walked it. Moving files to a different root works the same way, and only the destination root needs scanning for the move to be recognized.
 
 Two cases are not followed. Edit the files and move them in the same step, and Canon reports `new` plus `missing` instead: nothing ties the two paths together once both the location and the content have changed. And a move out of a [suspended](roots.md) root is not followed, because a suspended root's contents keep the standing they had; unsuspend it and scan again.
 

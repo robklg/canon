@@ -503,13 +503,9 @@ pub fn run(
             "Error: {} sources have changed since manifest was generated:",
             plan.stale_sources.len()
         );
-        for s in plan.stale_sources.iter().take(10) {
-            eprintln!("  {}: {}", s.path, s.reason);
+        for line in plan::staleness_lines(&plan.stale_sources, &config_path.display().to_string()) {
+            eprintln!("{line}");
         }
-        if plan.stale_sources.len() > 10 {
-            eprintln!("  ... and {} more", plan.stale_sources.len() - 10);
-        }
-        eprintln!("\nRun `canon scan` then `cluster refresh` to regenerate the lock file.");
         bail!("Aborting due to stale sources in manifest");
     }
 
@@ -605,13 +601,14 @@ pub fn run(
             "\nSkipped {} files that changed during apply:",
             result.skipped_stale.len()
         );
-        for s in result.skipped_stale.iter().take(10) {
-            eprintln!("  {}: {}", s.path, s.reason);
+        for line in plan::staleness_lines(&result.skipped_stale, &config_path.display().to_string())
+        {
+            eprintln!("{line}");
         }
-        if result.skipped_stale.len() > 10 {
-            eprintln!("  ... and {} more", result.skipped_stale.len() - 10);
-        }
-        eprintln!("Run `canon scan` then `cluster refresh` to regenerate the lock file.");
+        // This site reports on a run that already moved files, so its retry is
+        // not the other two sites' retry: a plain re-apply would collide with
+        // everything this run placed and be sent here anyway.
+        eprintln!("  canon apply --resume {}", lock_path.display());
     }
 
     // Summary output

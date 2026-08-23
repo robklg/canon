@@ -21,7 +21,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::archive::domain::LockEntry;
 use crate::core::domain::fact::FactEntry;
-use crate::core::domain::format::first_chars;
+use crate::core::domain::format::{first_chars, shell_quote};
 use crate::core::domain::path::path_strip_prefix;
 use crate::core::repo::{self, Connection};
 use crate::expr::Pattern;
@@ -171,6 +171,59 @@ pub struct AncestorCollision {
 pub struct StaleSource {
     pub path: String,
     pub reason: String,
+}
+
+/// How many stale sources a refusal names before it truncates. The remedy is
+/// keyed on the same number, which is why it is one constant: a list the user
+/// can see in full is a list the remedy can hand back.
+pub const STALE_SHOWN: usize = 10;
+
+/// What a staleness site says below its own headline: which sources went
+/// stale, and what to do about it.
+///
+/// **One body, three printers** — the preflight refusal, the pre-transfer bail
+/// and the during-run skip differ in their headline and in nothing else, so
+/// the listing, the truncation and the remedy are spoken here once. Only the
+/// headline is each site's own, because only the headline differs in kind: a
+/// refusal, a refusal, and a report of what was passed over.
+///
+/// The remedy is scaled to how much went stale. Re-observing three named files
+/// costs three stats; scanning the library they sit in costs a walk of every
+/// file in it. So when the stale set is small enough to have been named in
+/// full, the remedy names it back — and the whole-root remedy stays stated
+/// either way, because staleness that is widespread is not fixed by a list,
+/// and a list that was truncated is not a remedy at all.
+pub fn staleness_lines(stale: &[StaleSource], manifest: &str) -> Vec<String> {
+    let mut lines: Vec<String> = stale
+        .iter()
+        .take(STALE_SHOWN)
+        .map(|s| format!("  {}: {}", s.path, s.reason))
+        .collect();
+    if stale.len() > STALE_SHOWN {
+        lines.push(format!("  ... and {} more", stale.len() - STALE_SHOWN));
+    }
+    lines.push(String::new());
+    lines.extend(staleness_remedy(stale, manifest));
+    lines
+}
+
+/// The remedy half of [`staleness_lines`], separated only so the size
+/// judgement it makes is testable on its own.
+fn staleness_remedy(stale: &[StaleSource], manifest: &str) -> Vec<String> {
+    let whole_root = "run `canon scan` then `cluster refresh` to regenerate the lock file";
+    if stale.is_empty() || stale.len() > STALE_SHOWN {
+        let mut sentence = whole_root.to_string();
+        sentence[..1].make_ascii_uppercase();
+        return vec![format!("{sentence}.")];
+    }
+    let paths: Vec<String> = stale.iter().map(|s| shell_quote(&s.path)).collect();
+    vec![
+        "Re-observe just these files, then refresh:".to_string(),
+        format!("  canon scan {}", paths.join(" ")),
+        format!("  canon cluster refresh {}", shell_quote(manifest)),
+        String::new(),
+        format!("If more than these has changed, {whole_root}."),
+    ]
 }
 
 /// Compute the archive-relative path from base_dir_rel and dest_rel.
@@ -2888,5 +2941,71 @@ mod tests {
         let path = dir.path().join("file.txt");
         ensure_parent_dir(&path).unwrap();
         assert!(dir.path().exists());
+    }
+
+    fn stale(paths: &[&str]) -> Vec<StaleSource> {
+        paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| StaleSource {
+                path: (*p).to_string(),
+                reason: format!("size: {} → {}", 10 + i, 20 + i),
+            })
+            .collect()
+    }
+
+    /// A refusal over three named files must not cost a walk of the library
+    /// they sit in. All three staleness sites — the preflight refusal, the
+    /// pre-transfer bail and the during-run skip — print this one body below
+    /// their own headline, so what is pinned here is what all three say.
+    #[test]
+    fn a_staleness_refusal_offers_the_targeted_remedy() {
+        let lines = staleness_lines(&stale(&["/src/a.jpg", "/src/b c.jpg"]), "/work/trip.toml");
+
+        assert_eq!(
+            lines,
+            vec![
+                "  /src/a.jpg: size: 10 → 20",
+                "  /src/b c.jpg: size: 11 → 21",
+                "",
+                "Re-observe just these files, then refresh:",
+                // Quoted, so the line survives a shell.
+                "  canon scan /src/a.jpg '/src/b c.jpg'",
+                "  canon cluster refresh /work/trip.toml",
+                "",
+                "If more than these has changed, run `canon scan` then `cluster refresh` \
+                 to regenerate the lock file.",
+            ]
+        );
+    }
+
+    /// Past the point where the listing truncates, a targeted remedy would name
+    /// *some* of the stale files — which fixes nothing and reads as if it fixed
+    /// everything. Widespread staleness gets the whole-root remedy and only
+    /// that, and the listing says how much it is not showing.
+    #[test]
+    fn widespread_staleness_gets_the_whole_root_remedy_alone() {
+        let many: Vec<String> = (0..STALE_SHOWN + 3)
+            .map(|i| format!("/src/{i}.jpg"))
+            .collect();
+        let refs: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+        let lines = staleness_lines(&stale(&refs), "/work/trip.toml");
+
+        assert_eq!(
+            lines.len(),
+            STALE_SHOWN + 3,
+            "ten listed, the count, a blank, the remedy"
+        );
+        assert_eq!(lines[0], "  /src/0.jpg: size: 10 → 20");
+        assert_eq!(lines[STALE_SHOWN], "  ... and 3 more");
+        assert_eq!(lines[STALE_SHOWN + 1], "");
+        assert_eq!(
+            lines[STALE_SHOWN + 2],
+            "Run `canon scan` then `cluster refresh` to regenerate the lock file."
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("canon scan /src/")),
+            "no command names a subset of the stale files: {lines:?}"
+        );
     }
 }
