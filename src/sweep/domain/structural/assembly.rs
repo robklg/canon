@@ -14,8 +14,9 @@ use super::weights::compute_matched;
 /// The finding's natural next move, derived from structural facts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FindingNature {
-    /// The counterpart lives on a suspended root: nothing reads as safe
-    /// until that root is reconnected and re-verified.
+    /// The counterpart lives on a suspended root: the user closed the door
+    /// on the place this claim rests on. Consumed by the lens, which sets
+    /// such a place aside rather than ranking it.
     Verify,
     /// The subject's content is essentially archive-covered.
     Dismiss,
@@ -148,8 +149,13 @@ fn assemble_finding(
             ..
         }
     );
-    // Verify outranks Dismiss: an archive-covered claim whose counterpart
-    // sits on a disconnected drive is not actionable until re-verified.
+    // Verify outranks Dismiss in the derivation: a claim whose counterpart
+    // stands behind a closed door is not one the board should invite action
+    // on, whatever the coverage says. Suspension is an act about the user's
+    // attention and never about mount state — a suspended root is not a
+    // disconnected drive, and custody stands either way: suspending never
+    // un-archives. What becomes unavailable is the board's willingness to
+    // *invite* the action, not the truth of the claim.
     let nature = if counterpart_suspended {
         FindingNature::Verify
     } else if archive_cover_pct >= params.lifting_tolerance {

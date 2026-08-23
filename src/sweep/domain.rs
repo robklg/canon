@@ -11,7 +11,7 @@ mod tests;
 // only crate-external surface is `sweep.rs`'s own sealed `pub use cli::run`)
 // so `ops.rs`/`cli.rs`, siblings of this module under `sweep`, can reach the
 // structural/lens items they compose without piercing the outer barrel.
-pub use lens::{reduction_lens, HubEntry, LeaderboardEntry};
+pub use lens::{reduction_lens, HubEntry, LeaderboardEntry, SuspendedRootTally};
 pub use structural::{
     compute_structural, Location, RelationClass, RelationShape, StructuralFinding, SweepParams,
     SweepStats,

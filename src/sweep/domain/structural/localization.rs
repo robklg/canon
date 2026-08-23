@@ -54,6 +54,12 @@ pub enum RelationShape {
         locations: usize,
         /// How many of those roots are archive roots.
         archived_locations: usize,
+        /// How many of those roots the user has suspended. Stated beside the
+        /// archived count, and changing no other number: scattered evidence
+        /// behind a closed door is still evidence, and the place is neither
+        /// sunk nor demoted for it — it has live evidence too, and the user
+        /// judges.
+        suspended_locations: usize,
     },
 }
 
@@ -231,7 +237,7 @@ fn localize_one(
         });
     }
 
-    // The best scope carries the pair statement iff it concentrates the
+    // The cited scope carries the pair statement iff it concentrates the
     // match; otherwise the honest statement is coverage-shaped.
     scopes.sort_by(|a, b| {
         b.subject_bytes.cmp(&a.subject_bytes).then_with(|| {
@@ -255,8 +261,39 @@ fn localize_one(
         matched_bytes > 0
             && sc.subject_bytes as f64 >= params.concentration_threshold * matched_bytes as f64
     };
-    let (shape, context_from) = match scopes.first() {
-        Some(best) if concentrated(best) => {
+    // Suspension decides which place is cited as evidence, never what the
+    // evidence says: prefer a witness the user can look at. Because the sort
+    // is by `subject_bytes` descending and `concentrated()` tests against that
+    // same quantity, "the first, if it concentrates" and "the first that
+    // concentrates" name the same scope — so this is a strictly narrowing
+    // selection over an unchanged sort. It fires only where a live scope also
+    // qualifies; where none does, the parked scope is cited exactly as before.
+    // Citing a different place moves the percentages that describe the *cited
+    // relation* (`pair_size_pct`, `counterpart_share_pct`, possibly `class`)
+    // and moves nothing computed over every location from `raw` — gain,
+    // residual, containment. The citation changed; the evidence did not.
+    //
+    // One consequence beyond the percentages, stated because it is not
+    // obvious: the cited counterpart is also the key
+    // `dedup_reciprocal_mirrors` matches on, so re-pointing a citation
+    // rewires the reciprocity graph — a mirror pair that used to collapse may
+    // not, and a different one collapses instead. Which of two mirror places
+    // carries the statement can therefore change, and with it which of them
+    // the board shows. Both outcomes are honest statements about the same
+    // content; what must not happen is a quantity moving, and none does.
+    //
+    // The cited scope is tracked by index, not by "the first one": before this
+    // preference the two were the same operation, and this is the change that
+    // separates them. Context relations are every scope except the cited one,
+    // so a parked scope that loses the citation stays visible as testimony —
+    // stated, never headlined.
+    let cited = scopes
+        .iter()
+        .position(|sc| concentrated(sc) && !roots[sc.root_idx].suspended)
+        .or_else(|| scopes.iter().position(&concentrated));
+    let (shape, cited_idx) = match cited {
+        Some(idx) => {
+            let best = &scopes[idx];
             let root = &roots[best.root_idx];
             let pair_size_pct = if raw.total_bytes > 0 {
                 best.subject_bytes as f64 / raw.total_bytes as f64
@@ -286,24 +323,26 @@ fn localize_one(
                     counterpart_is_archive: root.role == "archive",
                     counterpart_last_scanned_at: root.last_scanned_at,
                 },
-                1,
+                Some(idx),
             )
         }
-        _ => (
+        None => (
             RelationShape::Coverage {
                 locations: involved.len(),
                 archived_locations: involved
                     .iter()
                     .filter(|&&ri| roots[ri].role == "archive")
                     .count(),
+                suspended_locations: involved.iter().filter(|&&ri| roots[ri].suspended).count(),
             },
-            0,
+            None,
         ),
     };
     let context: Vec<ContextRelation> = scopes
         .iter()
-        .skip(context_from)
-        .map(|sc| ContextRelation {
+        .enumerate()
+        .filter(|(idx, _)| Some(*idx) != cited_idx)
+        .map(|(_, sc)| ContextRelation {
             location: location(sc),
             size_pct: if raw.total_bytes > 0 {
                 sc.subject_bytes as f64 / raw.total_bytes as f64

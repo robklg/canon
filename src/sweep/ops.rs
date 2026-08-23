@@ -16,8 +16,8 @@ use crate::core::domain::source::Source;
 use crate::core::repo::{self, Connection};
 use crate::notes::{fetch_by_roots, Note};
 use crate::sweep::domain::{
-    compute_structural, reduction_lens, LeaderboardEntry, Location, RelationShape, SweepParams,
-    SweepStats,
+    compute_structural, reduction_lens, LeaderboardEntry, Location, RelationShape,
+    SuspendedRootTally, SweepParams, SweepStats,
 };
 
 /// Default number of leaderboard entries shown; a hub occupies one.
@@ -47,6 +47,10 @@ pub struct SweepReport {
     pub entries: Vec<LeaderboardEntry>,
     /// Ranked entries trimmed by the cap (0 under `--all`).
     pub beyond_cap: usize,
+    /// Places the lens set aside behind a closed door, per suspended root,
+    /// ordered by root path. Carried under `--all` too: `--all` reveals what
+    /// the floors and the cap hid, never a door the user closed.
+    pub suspended: Vec<SuspendedRootTally>,
     /// Computation honesty counts, including the below-floor subject count
     /// (those findings are inside `entries` only under `--all`).
     pub stats: SweepStats,
@@ -70,10 +74,13 @@ pub fn compute_sweep(conn: &Connection, options: &SweepOptions) -> Result<SweepO
     let all_sources = repo::source::batch_fetch_by_roots(conn, &root_ids)?;
 
     // Inclusion policy: present (baked into the fetch), non-excluded,
-    // carrying content. Suspended roots stay in — their findings are shown
-    // and flagged, never filtered. Exclusion resolves rather than overlaps:
-    // excluded sources leave the comparison entirely and return only as
-    // per-subject context counts.
+    // carrying content. Suspended roots stay in — computed always, ranked
+    // never: dropping them from the universe would falsify claims about live
+    // places, because a live folder duplicated entirely inside a parked root
+    // would then read as unique. Which places earn a slot is a *board*
+    // question and belongs to the lens, which sets parked places aside there.
+    // Exclusion resolves rather than overlaps: excluded sources leave the
+    // comparison entirely and return only as per-subject context counts.
     let mut kept: Vec<&Source> = Vec::new();
     let mut excluded: Vec<&Source> = Vec::new();
     let mut empty_files_ignored = 0usize;
@@ -98,6 +105,8 @@ pub fn compute_sweep(conn: &Connection, options: &SweepOptions) -> Result<SweepO
     };
     let ranked = reduction_lens(compute_structural(&kept, &roots, &params));
 
+    // The cap runs after the lens, so it trims a board the set-aside has
+    // already left: the board refills from below rather than keeping holes.
     let mut entries = ranked.entries;
     let beyond_cap = if options.all {
         0
@@ -144,6 +153,7 @@ pub fn compute_sweep(conn: &Connection, options: &SweepOptions) -> Result<SweepO
     Ok(SweepOutcome::Report(SweepReport {
         entries,
         beyond_cap,
+        suspended: ranked.suspended,
         stats: ranked.stats,
         empty_files_ignored,
         excluded_context,
@@ -187,7 +197,7 @@ mod tests {
         setup_test_db,
     };
     use crate::notes::insert;
-    use crate::sweep::domain::structural::FindingNature;
+    use crate::sweep::domain::structural::{compute_structural, FindingNature};
 
     /// Two roots with one 20 MB duplicated folder (`big` ↔ `q`) and unique
     /// noise keeping the subjects from lifting to the whole root.
@@ -261,14 +271,20 @@ mod tests {
     }
 
     #[test]
-    fn suspended_counterpart_stays_in_the_universe_as_verify() {
-        // The sweep deliberately keeps suspended roots in its universe — the
-        // one inclusion policy that diverges from the query surfaces' active-
-        // only convention. Unifying it would delete the whole reconnect-to-
-        // verify surface, and worse: the residual would stop counting the
-        // suspended drive's copies, so content that exists elsewhere would
-        // read as unique. This drives the policy through compute_sweep's own
-        // fetch, which the domain-level suspension tests bypass.
+    fn a_suspended_root_stays_in_the_universe_but_leaves_the_board() {
+        // The two halves of "computed always, ranked never", driven through
+        // compute_sweep's own fetch — which the domain-level suspension tests
+        // bypass. Dropping a suspended root from the universe would falsify
+        // claims about live places: `/r1/big` exists entirely inside `/r2`,
+        // and if `/r2` left the computation it would read as unique. So the
+        // residual must still count the parked root's copies — and the place
+        // whose evidence sits behind that door must still leave the board.
+        //
+        // The residual half is the reason this test is here and must not be
+        // simplified away: it is the one place the inclusion half of the
+        // ruling becomes checkable, and unifying the sweep's inclusion policy
+        // with the query surfaces' active-only convention would break it
+        // silently everywhere else.
         let conn = setup_test_db();
         let r1 = insert_root(&conn, "/r1", "source", false);
         let r2 = insert_root(&conn, "/r2", "source", true);
@@ -278,15 +294,176 @@ mod tests {
         let noise = insert_object(&conn, "noise", false);
         insert_source_with_size(&conn, r1, "noise/u", Some(noise), 5_000_000);
 
+        // Computed: the finding exists, with the parked copy counted as gain
+        // rather than residual.
+        let structural = {
+            let roots = repo::root::fetch_all(&conn).unwrap();
+            let sources = repo::source::batch_fetch_by_roots(
+                &conn,
+                &roots.iter().map(|r| r.id).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let kept: Vec<&Source> = sources.iter().collect();
+            compute_structural(&kept, &roots, &SweepParams::default())
+        };
+        let big = structural
+            .findings
+            .iter()
+            .find(|f| f.subject.root_path == "/r1" && f.subject.rel_prefix == "big")
+            .expect("the place is computed, parked counterpart and all");
+        assert_eq!(big.gain_bytes, 20_000_000);
+        assert_eq!(big.residual_bytes, 0, "a parked copy is still a copy");
+        assert_eq!(big.nature, FindingNature::Verify);
+
+        // Ranked never: it holds no slot, and the board says why.
         let report = report(&conn, &default_options());
-        assert!(subject_prefixes(&report).contains(&("/r1".to_string(), "big".to_string())));
-        let verify = report.entries.iter().any(|e| match e {
-            LeaderboardEntry::Single(f) => f.nature == FindingNature::Verify,
-            LeaderboardEntry::Hub(h) => h.counterpart_suspended,
-        });
+        assert!(!subject_prefixes(&report).contains(&("/r1".to_string(), "big".to_string())));
+        assert_eq!(report.suspended.len(), 1);
+        let tally = &report.suspended[0];
+        assert_eq!(tally.root_path, "/r2");
+        // One line, both causes: `/r2` is entirely matched, so it stands as a
+        // place on the parked root itself, and `/r1/big` is a place whose
+        // copies are on it. Each counted once, on the one root.
+        assert_eq!(tally.places_on_it, 1);
+        assert_eq!(tally.places_with_copies_on_it, 1);
+        // And the two masses stay apart. This universe holds 25 MB in total,
+        // 20 MB of it the duplicated content at stake — which the two causes
+        // see from opposite sides, `/r2` holding the copies that make
+        // `/r1/big` redundant. Adding them would publish 40 MB for a 25 MB
+        // universe on a board whose currency is recoverable gain.
+        assert_eq!(tally.gain_bytes_on_it, 20_000_000);
+        assert_eq!(tally.gain_bytes_with_copies_on_it, 20_000_000);
+    }
+
+    /// `seed_basic` plus a heavier duplicated folder standing on a suspended
+    /// root — the shape that used to fill the board. The extra noise on `/r2`
+    /// keeps that root from lifting whole, so the live board is exactly the
+    /// `big` finding.
+    fn seed_with_a_parked_root(conn: &Connection) -> i64 {
+        let (_, r2) = seed_basic(conn);
+        let rs = insert_root(conn, "/rs", "source", true);
+        let obj = insert_object(conn, "parked-dup", false);
+        insert_source_with_size(conn, rs, "heavy/f", Some(obj), 40_000_000);
+        insert_source_with_size(conn, r2, "heavy-copy/f", Some(obj), 40_000_000);
+        let noise = insert_object(conn, "r2-noise", false);
+        insert_source_with_size(conn, r2, "r2-noise/u", Some(noise), 45_000_000);
+        rs
+    }
+
+    #[test]
+    fn the_cap_refills_the_board_from_below_after_set_aside() {
+        // The parked place outweighs the live one, so under the old order it
+        // took the only slot. The cap runs after the set-aside: the slot goes
+        // to the live place, and `beyond_cap` counts only what the cap trimmed.
+        let conn = setup_test_db();
+        seed_with_a_parked_root(&conn);
+        let capped = report(
+            &conn,
+            &SweepOptions {
+                limit: Some(1),
+                all: false,
+            },
+        );
+        assert_eq!(capped.entries.len(), 1);
+        // The 40 MB parked place outweighs `big` and would have held this
+        // slot; the set-aside runs first, so the slot refills from below.
+        assert!(subject_prefixes(&capped).contains(&("/r1".to_string(), "big".to_string())));
+        assert_eq!(
+            capped.beyond_cap, 0,
+            "the cap trims a board the set-aside has already left"
+        );
+        assert_eq!(capped.suspended.len(), 1);
+        assert_eq!(capped.suspended[0].root_path, "/rs");
+        assert_eq!(capped.suspended[0].places_on_it, 1);
+        assert_eq!(capped.suspended[0].places_with_copies_on_it, 1);
+    }
+
+    #[test]
+    fn all_does_not_reveal_set_aside_or_sunk_places() {
+        // `--all` reveals what the floors and the cap hid; suspension is a
+        // door the user closed, and the way back is `roots unsuspend` alone.
+        let conn = setup_test_db();
+        seed_with_a_parked_root(&conn);
+        let all = report(
+            &conn,
+            &SweepOptions {
+                limit: None,
+                all: true,
+            },
+        );
+        // Neither the place standing on the parked root...
+        assert!(!subject_prefixes(&all).iter().any(|(root, _)| root == "/rs"));
+        // ...nor the live place whose evidence stands on it.
+        assert!(!subject_prefixes(&all).contains(&("/r2".to_string(), "heavy-copy".to_string())));
+        assert_eq!(all.suspended.len(), 1);
+        assert_eq!(all.suspended[0].root_path, "/rs");
+    }
+
+    #[test]
+    fn an_all_suspended_universe_states_the_count_rather_than_nothing_found() {
+        // The empty-board path already prints the footers, so "every root
+        // suspended" states the count and the mass rather than a bare
+        // nothing-found — which would be a false "empty".
+        let conn = setup_test_db();
+        let r1 = insert_root(&conn, "/r1", "source", true);
+        let r2 = insert_root(&conn, "/r2", "source", true);
+        let obj = insert_object(&conn, "dup", false);
+        insert_source_with_size(&conn, r1, "big/f", Some(obj), 20_000_000);
+        insert_source_with_size(&conn, r2, "q/f", Some(obj), 20_000_000);
+        let noise = insert_object(&conn, "noise", false);
+        insert_source_with_size(&conn, r1, "noise/u", Some(noise), 5_000_000);
+
+        let report = report(&conn, &default_options());
+        assert!(report.entries.is_empty());
+        assert!(!report.suspended.is_empty());
+        let places: usize = report
+            .suspended
+            .iter()
+            .map(|t| t.places_on_it + t.places_with_copies_on_it)
+            .sum();
+        assert!(places > 0);
+    }
+
+    #[test]
+    fn below_floor_minus_set_aside_equals_what_rendered_under_all() {
+        // The arithmetic the reader is asked to do on one screen: the
+        // below-floor count includes places behind a closed door, so `--all`
+        // reveals fewer than that count offers, and the suspended lines are
+        // what explain the difference. Every finding here is below the floors.
+        let conn = setup_test_db();
+        let live = insert_root(&conn, "/r1", "source", false);
+        let other = insert_root(&conn, "/r2", "source", false);
+        let parked = insert_root(&conn, "/rs", "source", true);
+        let a = insert_object(&conn, "small-a", false);
+        insert_source_with_size(&conn, live, "small/f", Some(a), 2_000_000);
+        insert_source_with_size(&conn, other, "copy-a/f", Some(a), 2_000_000);
+        let b = insert_object(&conn, "small-b", false);
+        insert_source_with_size(&conn, parked, "small/f", Some(b), 2_000_000);
+        insert_source_with_size(&conn, other, "copy-b/f", Some(b), 2_000_000);
+
+        let all = report(
+            &conn,
+            &SweepOptions {
+                limit: None,
+                all: true,
+            },
+        );
+        let set_aside: usize = all
+            .suspended
+            .iter()
+            .map(|t| t.places_on_it + t.places_with_copies_on_it)
+            .sum();
         assert!(
-            verify,
-            "the suspended counterpart's finding must flag Verify"
+            set_aside > 0,
+            "the fixture must set at least one place aside"
+        );
+        assert!(
+            !all.entries.is_empty(),
+            "the fixture must also render something, or the arithmetic is vacuous"
+        );
+        assert_eq!(
+            all.stats.below_floor_subjects - set_aside,
+            all.entries.len()
         );
     }
 

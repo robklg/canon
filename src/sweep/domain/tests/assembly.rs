@@ -260,7 +260,8 @@ fn scale_synthetic_star_scatter_and_siblings() {
         scatter.shape,
         RelationShape::Coverage {
             locations: 2,
-            archived_locations: 0
+            archived_locations: 0,
+            suspended_locations: 0
         }
     );
 
