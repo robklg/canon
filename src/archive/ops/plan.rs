@@ -28,6 +28,21 @@ use crate::expr::Pattern;
 
 use super::pattern::evaluate_pattern;
 
+/// Progress notification for planning's own per-source sweep.
+///
+/// Planning stats and opens every source in the manifest before it decides
+/// anything. That is a disk round-trip per source, so on a network volume the
+/// wait is long enough to need a voice; the interface supplies one, or `None`
+/// and planning stays silent.
+pub trait PlanProgress {
+    /// Called before the sweep begins, with the number of sources it will touch.
+    fn on_preflight_start(&self, total: usize);
+    /// Called after each source, with how many are done.
+    fn on_preflight_progress(&self, done: usize);
+    /// Called once the sweep ends.
+    fn on_preflight_finish(&self);
+}
+
 /// Parameters for planning an apply operation.
 pub struct ApplyPlanParams<'a> {
     /// Filtered sources from the lock file (already filtered by --root).
@@ -46,6 +61,8 @@ pub struct ApplyPlanParams<'a> {
     pub base_dir_rel: &'a str,
     /// Whether this is a resume operation.
     pub resume: bool,
+    /// Where to report the per-source sweep's progress, if anywhere.
+    pub progress: Option<&'a dyn PlanProgress>,
 }
 
 /// A source validated and ready for transfer, with pre-computed destination.
@@ -386,7 +403,12 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     // --- Source existence and readability preflight ---
     // In resume mode, skip this — classify_resume_entries handles source state.
     // In regular mode, check all transfers.
-    for transfer in transfers.iter().filter(|_| !params.resume) {
+    if !params.resume {
+        if let Some(p) = params.progress {
+            p.on_preflight_start(transfers.len());
+        }
+    }
+    for (i, transfer) in transfers.iter().enumerate().filter(|_| !params.resume) {
         let path = Path::new(&transfer.source_path);
         match fs::metadata(path) {
             Ok(meta) => {
@@ -428,6 +450,14 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
                     .missing_sources
                     .push((transfer.source_id, transfer.source_path.clone()));
             }
+        }
+        if let Some(p) = params.progress {
+            p.on_preflight_progress(i + 1);
+        }
+    }
+    if !params.resume {
+        if let Some(p) = params.progress {
+            p.on_preflight_finish();
         }
     }
 
@@ -955,12 +985,78 @@ mod tests {
             archive_root_id,
             base_dir_rel: "",
             resume: false,
+            progress: None,
         }
     }
 
     // =========================================================================
     // Pattern expansion and destination computation
     // =========================================================================
+
+    /// Records every planning progress call in order.
+    #[derive(Default)]
+    struct RecordingPlanProgress {
+        events: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl PlanProgress for RecordingPlanProgress {
+        fn on_preflight_start(&self, total: usize) {
+            self.events.borrow_mut().push(format!("start {total}"));
+        }
+        fn on_preflight_progress(&self, done: usize) {
+            self.events.borrow_mut().push(format!("step {done}"));
+        }
+        fn on_preflight_finish(&self) {
+            self.events.borrow_mut().push("finish".to_string());
+        }
+    }
+
+    /// Planning stats and opens every source before deciding anything — a disk
+    /// round-trip each, long enough on a network volume to look like a hang.
+    /// It reports what it is working through.
+    ///
+    /// Resume mode does not run the sweep at all (source state comes from the
+    /// resume classification instead), so it must not announce one either: a
+    /// heading over no work is its own kind of lie.
+    #[test]
+    fn plan_preflight_progress_is_reported_per_source() {
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let archive_id = insert_root(&conn, "/archive", "archive", false);
+        let obj_a = insert_object(&conn, "hash1", false);
+        let obj_b = insert_object(&conn, "hash2", false);
+        let src_a =
+            insert_source_with_metadata(&conn, root_id, "a.jpg", Some(obj_a), 1000, 1704067200);
+        let src_b =
+            insert_source_with_metadata(&conn, root_id, "b.jpg", Some(obj_b), 1000, 1704067200);
+
+        let entry_a = make_lock_entry(src_a, root_id, "/photos/a.jpg", Some(obj_a), Some("hash1"));
+        let entry_b = make_lock_entry(src_b, root_id, "/photos/b.jpg", Some(obj_b), Some("hash2"));
+        let sources: Vec<&LockEntry> = vec![&entry_a, &entry_b];
+        let pattern = parse_pattern("{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
+        let mut root_paths = HashMap::new();
+        root_paths.insert(root_id, "/photos".to_string());
+        root_paths.insert(archive_id, "/archive".to_string());
+
+        let progress = RecordingPlanProgress::default();
+        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        params.progress = Some(&progress);
+        plan_apply(&mut conn, &params).unwrap();
+
+        assert_eq!(
+            progress.events.borrow().as_slice(),
+            ["start 2", "step 1", "step 2", "finish"]
+        );
+
+        let resumed = RecordingPlanProgress::default();
+        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        params.resume = true;
+        params.progress = Some(&resumed);
+        plan_apply(&mut conn, &params).unwrap();
+
+        assert!(resumed.events.borrow().is_empty());
+    }
 
     #[test]
     fn test_plan_apply_computes_dest_paths() {

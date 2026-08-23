@@ -52,6 +52,51 @@ Sources from:
   /Volumes/Drive2  (50 files)
 ```
 
+**Confirmation summary:**
+
+The summary previews the directory files actually enter, which is the manifest's
+`base_dir` plus whatever literal directories the pattern begins with:
+
+```
+Destination: /Volumes/Archive
+Pattern: 2024/{filename}
+...
+Destination current contents (/Volumes/Archive/2024):
+  (will be created)
+```
+
+A pattern whose directories come from content has no single placement directory. The
+preview shows the directory they all sit under and says so:
+
+```
+Pattern: sorted/{source.rel_path}
+...
+Destination current contents (/Volumes/Archive/sorted):
+  (placements fan out under this directory by pattern)
+  2023/
+  2024/
+```
+
+**Progress before anything moves:**
+
+Apply reads every source in the manifest before it transfers the first file: once while
+planning, then twice more before the transfer loop. On a network volume each pass is a
+round-trip per source, so each one names itself and counts:
+
+```
+Running preflight checks...
+  100% (1234/1234)
+Checking destination write permissions...
+Checking 1,234 sources can be read...
+  100% (1234/1234)
+Verifying 1,234 sources against the lock file (reading file heads)...
+  100% (1234/1234)
+```
+
+The two passes before the transfer loop stay separate: an unreadable source is refused
+before any file's content is read. `--dry-run` returns after planning, so it never runs
+them.
+
 **Resume mode (`--resume`):**
 
 Use `--resume` to continue a previously interrupted apply. This is useful when:

@@ -62,6 +62,23 @@ pub enum TransferOutcome {
     Error(String),
 }
 
+/// Which preflight sweep is running.
+///
+/// The two sweeps stay separate on purpose: every source is opened first, so an
+/// unreadable one is refused before a single file's content has been read. That
+/// ordering is what keeps a refusal cheap, and it is why the sweeps are reported
+/// as two passes rather than one — a single count over both would have to hide
+/// the boundary that makes the refusal cheap.
+///
+/// Ops names the sweep; the interface owns the words for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationSweep {
+    /// Every source is opened, to refuse an unreadable one before reading any.
+    Readability,
+    /// Every source is measured and read against what the lock file recorded.
+    LockAgreement,
+}
+
 /// Progress notification for file transfer operations.
 /// The interface implements this to display progress, verbose logging, etc.
 /// Fire-and-forget — does not affect the operation's behavior.
@@ -81,6 +98,19 @@ pub trait TransferProgress {
     fn on_interrupt(&self);
     /// Called once after the transfer loop ends.
     fn on_finish(&self);
+
+    /// Called before a preflight sweep begins, with which sweep it is and how
+    /// many sources it will touch.
+    ///
+    /// Each sweep touches every source on disk before anything moves, which on
+    /// a network volume is minutes of otherwise silent work. These three
+    /// default to nothing, so an implementation written before the sweeps had
+    /// a voice still compiles and still runs.
+    fn on_validation_start(&self, _sweep: ValidationSweep, _total: usize) {}
+    /// Called after each source in the current sweep, with how many are done.
+    fn on_validation_progress(&self, _done: usize) {}
+    /// Called once the current sweep ends, however it ended.
+    fn on_validation_finish(&self) {}
 }
 
 /// Parameters for executing an apply operation.
@@ -192,10 +222,13 @@ pub fn execute_apply(
 
     // --- Source readability pre-check ---
     let mut unreadable: Vec<(String, String)> = Vec::new();
-    for transfer in &plan.transfers {
+    progress.on_validation_start(ValidationSweep::Readability, plan.transfers.len());
+    for (i, transfer) in plan.transfers.iter().enumerate() {
         match File::open(&transfer.source_path) {
             Ok(_) => {}
-            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            // A source that is simply gone is not unreadable; the sweep below
+            // names the absence.
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) if e.kind() == ErrorKind::PermissionDenied => {
                 unreadable.push((
                     transfer.source_path.clone(),
@@ -206,7 +239,9 @@ pub fn execute_apply(
                 unreadable.push((transfer.source_path.clone(), e.to_string()));
             }
         }
+        progress.on_validation_progress(i + 1);
     }
+    progress.on_validation_finish();
     if !unreadable.is_empty() {
         bail!(
             "{} sources are not readable: {}",
@@ -226,7 +261,7 @@ pub fn execute_apply(
 
     // --- Batch staleness validation ---
     if !transfers_to_execute.is_empty() {
-        let stale = validate_transfers_disk(&transfers_to_execute);
+        let stale = validate_transfers_disk(&transfers_to_execute, progress);
         if !stale.is_empty() {
             bail!(
                 "{} sources have changed since manifest was generated. \
@@ -703,16 +738,22 @@ fn validate_source_state(transfer: &ApplyTransfer) -> std::result::Result<(), St
 }
 
 /// Batch validate source file states against disk.
-fn validate_transfers_disk(transfers: &[&ApplyTransfer]) -> Vec<StaleSource> {
+fn validate_transfers_disk(
+    transfers: &[&ApplyTransfer],
+    progress: &dyn TransferProgress,
+) -> Vec<StaleSource> {
     let mut stale = Vec::new();
-    for transfer in transfers {
+    progress.on_validation_start(ValidationSweep::LockAgreement, transfers.len());
+    for (i, transfer) in transfers.iter().enumerate() {
         if let Err(reason) = validate_source_state(transfer) {
             stale.push(StaleSource {
                 path: transfer.source_path.clone(),
                 reason,
             });
         }
+        progress.on_validation_progress(i + 1);
     }
+    progress.on_validation_finish();
     stale
 }
 
@@ -1428,6 +1469,11 @@ mod tests {
     // =========================================================================
 
     /// No-op progress implementation for testing.
+    ///
+    /// It implements only the four transfer-loop methods, which is what makes
+    /// it the standing check that the validation methods stay defaulted: give
+    /// any of them a body in the trait and this — and every caller like it —
+    /// stops compiling.
     struct NoopProgress;
 
     impl TransferProgress for NoopProgress {
@@ -1763,6 +1809,93 @@ mod tests {
             resume_size_mismatches: vec![],
         };
         (plan, size, mtime)
+    }
+
+    /// Records every progress call in order, so a test can read what a run
+    /// said rather than that it said something.
+    #[derive(Default)]
+    struct RecordingProgress {
+        events: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl TransferProgress for RecordingProgress {
+        fn on_start(&self, _total: usize) {}
+        fn on_transfer(
+            &self,
+            _index: usize,
+            _total: usize,
+            _source_path: &str,
+            _dest_path: &str,
+            _outcome: &TransferOutcome,
+        ) {
+        }
+        fn on_interrupt(&self) {}
+        fn on_finish(&self) {}
+
+        fn on_validation_start(&self, sweep: ValidationSweep, total: usize) {
+            self.events
+                .borrow_mut()
+                .push(format!("start {sweep:?} {total}"));
+        }
+        fn on_validation_progress(&self, done: usize) {
+            self.events.borrow_mut().push(format!("step {done}"));
+        }
+        fn on_validation_finish(&self) {
+            self.events.borrow_mut().push("finish".to_string());
+        }
+    }
+
+    /// The preflight reads every source before anything moves — minutes on a
+    /// network volume. It reports each sweep it starts and each source it
+    /// finishes, so a long wait is legible as work rather than as a stall.
+    ///
+    /// The two sweeps stay two: the readability pass refuses before any
+    /// content is read, and a single merged count would have to hide the
+    /// boundary that keeps that refusal cheap.
+    #[test]
+    fn validation_progress_is_reported_per_file() {
+        let conn = setup_test_db();
+        let src_dir = tempfile::tempdir().unwrap();
+        insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+
+        let (mut plan, _, _) = single_transfer_plan(src_dir.path(), "a.jpg", "a.jpg", b"hi");
+        let (second, _, _) = single_transfer_plan(src_dir.path(), "b.jpg", "b.jpg", b"there");
+        plan.transfers.extend(second.transfers);
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: None,
+        };
+        let progress = RecordingProgress::default();
+        let result = execute_apply(&conn, &plan, &params, &progress, None).unwrap();
+        assert_eq!(result.copied, 2);
+
+        assert_eq!(
+            progress.events.borrow().as_slice(),
+            [
+                "start Readability 2",
+                "step 1",
+                "step 2",
+                "finish",
+                "start LockAgreement 2",
+                "step 1",
+                "step 2",
+                "finish",
+            ]
+        );
     }
 
     #[test]

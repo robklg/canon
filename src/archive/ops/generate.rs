@@ -1501,6 +1501,7 @@ mod tests {
                 archive_root_id: archive,
                 base_dir_rel: "",
                 resume: false,
+                progress: None,
             },
         )
         .unwrap();

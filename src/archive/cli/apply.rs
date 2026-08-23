@@ -18,7 +18,7 @@ use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
 use crate::core::repo::{self, Db};
-use crate::expr::{extract_fact_keys, parse_pattern, Pattern};
+use crate::expr::{extract_fact_keys, parse_pattern, placement_shape, Pattern};
 
 pub struct ApplyOptions {
     pub dry_run: bool,
@@ -183,9 +183,10 @@ pub fn run(
         vec![]
     };
 
+    let destination = Destination::compute(&base_dir, &pattern);
     print_apply_summary(
         &config_path,
-        &base_dir,
+        &destination,
         &config.output.pattern,
         &filtered_sources,
         options,
@@ -200,6 +201,7 @@ pub fn run(
     // --- Plan: compute all DB-based preflight checks and destination paths ---
 
     eprintln!("Running preflight checks...");
+    let progress_impl = CliTransferProgress::new(options.verbose);
     let plan = plan::plan_apply(
         conn,
         &plan::ApplyPlanParams {
@@ -211,6 +213,7 @@ pub fn run(
             archive_root_id: config.output.archive_root_id,
             base_dir_rel: &config.output.base_dir,
             resume: options.resume,
+            progress: Some(&progress_impl),
         },
     )?;
 
@@ -579,7 +582,6 @@ pub fn run(
         None
     };
 
-    let progress_impl = CliTransferProgress::new(options.verbose);
     let result = execute::execute_apply(
         conn,
         &plan,
@@ -739,7 +741,7 @@ fn compute_sample_destinations(
 
 fn print_apply_summary(
     config_path: &Path,
-    base_dir: &Path,
+    destination: &Destination,
     pattern: &str,
     sources: &[&LockEntry],
     options: &ApplyOptions,
@@ -749,7 +751,7 @@ fn print_apply_summary(
     eprintln!();
     eprintln!("=== Apply Summary ===");
     eprintln!("Manifest: {}", config_path.display());
-    eprintln!("Destination: {}", base_dir.display());
+    eprintln!("Destination: {}", destination.base_dir.display());
     eprintln!("Pattern: {pattern}");
 
     let mode_name = match options.transfer_mode {
@@ -794,17 +796,56 @@ fn print_apply_summary(
         }
     }
 
-    // Show destination preview if exists
-    if base_dir.exists() {
-        eprintln!();
-        eprintln!("Destination current contents:");
-        show_directory_preview(base_dir, 5);
+    // Show the contents of the directory files actually enter.
+    eprintln!();
+    eprintln!("{}", destination.placement_label());
+    if destination.fans_out {
+        eprintln!("  (placements fan out under this directory by pattern)");
+    }
+    if destination.placement_dir.exists() {
+        show_directory_preview(&destination.placement_dir, 5);
     } else {
-        eprintln!();
-        eprintln!("Destination: (will be created)");
+        eprintln!("  (will be created)");
     }
 
     eprintln!();
+}
+
+/// Where an apply puts files: the manifest's base directory, the directory the
+/// pattern actually places into, and whether it spreads them across directories
+/// below that one.
+///
+/// The two directories differ because `base_dir` is where the pattern starts,
+/// not where files land: a pattern opening with literal directories places
+/// everything below them, so previewing `base_dir` itself would show a folder
+/// the run may never write a file into. The preview label always names the
+/// directory it is showing, so what is on screen and what it is are never two
+/// separate readings.
+struct Destination {
+    base_dir: PathBuf,
+    placement_dir: PathBuf,
+    fans_out: bool,
+}
+
+impl Destination {
+    fn compute(base_dir: &Path, pattern: &Pattern) -> Self {
+        let (static_prefix, fans_out) = placement_shape(pattern);
+        Self {
+            base_dir: base_dir.to_path_buf(),
+            placement_dir: match static_prefix {
+                Some(prefix) => base_dir.join(prefix),
+                None => base_dir.to_path_buf(),
+            },
+            fans_out,
+        }
+    }
+
+    fn placement_label(&self) -> String {
+        format!(
+            "Destination current contents ({}):",
+            self.placement_dir.display()
+        )
+    }
 }
 
 fn show_directory_preview(dir: &Path, max_items: usize) {
@@ -881,6 +922,7 @@ fn display_dry_run_plan(plan: &plan::ApplyPlan, base_dir: &Path, mode: TransferM
 struct CliTransferProgress {
     verbose: bool,
     progress: std::cell::RefCell<Option<crate::progress::Progress>>,
+    validation: std::cell::RefCell<Option<crate::progress::Progress>>,
 }
 
 impl CliTransferProgress {
@@ -888,6 +930,7 @@ impl CliTransferProgress {
         Self {
             verbose,
             progress: std::cell::RefCell::new(None),
+            validation: std::cell::RefCell::new(None),
         }
     }
 }
@@ -946,5 +989,110 @@ impl execute::TransferProgress for CliTransferProgress {
         if let Some(ref p) = *self.progress.borrow() {
             p.finish();
         }
+    }
+
+    fn on_validation_start(&self, sweep: execute::ValidationSweep, total: usize) {
+        if total == 0 {
+            return;
+        }
+        // Each sweep says what it is about to do to every source, so a wait is
+        // legible as the work it is rather than as a stall.
+        match sweep {
+            execute::ValidationSweep::Readability => eprintln!(
+                "Checking {} sources can be read...",
+                format_count(total as u64)
+            ),
+            execute::ValidationSweep::LockAgreement => eprintln!(
+                "Verifying {} sources against the lock file (reading file heads)...",
+                format_count(total as u64)
+            ),
+        }
+        *self.validation.borrow_mut() = Some(crate::progress::Progress::new(total));
+    }
+
+    fn on_validation_progress(&self, done: usize) {
+        if let Some(ref p) = *self.validation.borrow() {
+            p.update(done);
+        }
+    }
+
+    fn on_validation_finish(&self) {
+        if let Some(p) = self.validation.borrow_mut().take() {
+            p.finish();
+        }
+    }
+}
+
+/// Planning's sweep shares the command's one progress voice. It runs under the
+/// `Running preflight checks...` line, which already names the work, so it
+/// shows a bar and adds no second heading.
+impl plan::PlanProgress for CliTransferProgress {
+    fn on_preflight_start(&self, total: usize) {
+        if total > 0 {
+            *self.validation.borrow_mut() = Some(crate::progress::Progress::new(total));
+        }
+    }
+
+    fn on_preflight_progress(&self, done: usize) {
+        if let Some(ref p) = *self.validation.borrow() {
+            p.update(done);
+        }
+    }
+
+    fn on_preflight_finish(&self) {
+        if let Some(p) = self.validation.borrow_mut().take() {
+            p.finish();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pattern that opens with literal directories places every file below
+    /// them, so the previewed directory is the one files enter — not the
+    /// manifest's base_dir, which the run may never write a file into.
+    #[test]
+    fn the_preview_names_the_effective_placement_directory() {
+        let pattern = parse_pattern("2024/{filename}").unwrap();
+        let destination = Destination::compute(Path::new("/Volumes/Archive"), &pattern);
+
+        assert_eq!(
+            destination.placement_dir,
+            PathBuf::from("/Volumes/Archive/2024")
+        );
+        assert!(!destination.fans_out);
+        assert_eq!(
+            destination.placement_label(),
+            "Destination current contents (/Volumes/Archive/2024):"
+        );
+    }
+
+    /// A pattern whose directories come from the content has no single
+    /// placement directory. The preview falls back to the common one it does
+    /// know, and says so rather than presenting it as the whole answer.
+    #[test]
+    fn the_preview_states_fan_out_and_falls_back_labeled() {
+        let pattern = parse_pattern("{source.rel_path}").unwrap();
+        let destination = Destination::compute(Path::new("/Volumes/Archive"), &pattern);
+
+        assert_eq!(destination.placement_dir, PathBuf::from("/Volumes/Archive"));
+        assert!(destination.fans_out);
+        assert_eq!(
+            destination.placement_label(),
+            "Destination current contents (/Volumes/Archive):"
+        );
+
+        // A literal head still narrows the fallback: the fan-out happens under
+        // the directory the pattern names, not at the top.
+        let nested = parse_pattern("photos/{source.rel_path}").unwrap();
+        let destination = Destination::compute(Path::new("/Volumes/Archive"), &nested);
+
+        assert_eq!(
+            destination.placement_dir,
+            PathBuf::from("/Volumes/Archive/photos")
+        );
+        assert!(destination.fans_out);
     }
 }
