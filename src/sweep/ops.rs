@@ -16,8 +16,8 @@ use crate::core::domain::source::Source;
 use crate::core::repo::{self, Connection};
 use crate::notes::{fetch_by_roots, Note};
 use crate::sweep::domain::{
-    compute_structural, reduction_lens, LeaderboardEntry, Location, RelationShape,
-    SuspendedRootTally, SweepParams, SweepStats,
+    compute_structural, reduction_lens, LeaderboardEntry, LensParams, Location, RelationShape,
+    RootNearness, SuspendedRootTally, SweepParams, SweepStats,
 };
 
 /// Default number of leaderboard entries shown; a hub occupies one.
@@ -39,7 +39,10 @@ pub enum SweepOutcome {
     /// Roots exist but nothing comparison-participating is hashed — point
     /// at the enrichment workflow.
     NoHashedContent,
-    Report(SweepReport),
+    /// Boxed: the report is the only variant carrying data, and it grew past
+    /// the point where every `SweepOutcome` value would pay for it. One
+    /// allocation per run, on a command that runs once.
+    Report(Box<SweepReport>),
 }
 
 pub struct SweepReport {
@@ -54,6 +57,9 @@ pub struct SweepReport {
     /// Computation honesty counts, including the below-floor subject count
     /// (those findings are inside `entries` only under `--all`).
     pub stats: SweepStats,
+    /// Roots whose remainder the board states beside an entry, by root id.
+    /// The lens decides where the fact appears; the interface only renders it.
+    pub stated_remainders: HashMap<i64, i64>,
     /// Present, non-excluded sources set aside as contentless.
     pub empty_files_ignored: usize,
     /// Excluded present sources under each subject, where substantial
@@ -103,7 +109,24 @@ pub fn compute_sweep(conn: &Connection, options: &SweepOptions) -> Result<SweepO
         assemble_below_floors: options.all,
         ..SweepParams::default()
     };
-    let ranked = reduction_lens(compute_structural(&kept, &roots, &params));
+
+    // Root-nearness: the retirement readiness review's own remainder measure,
+    // per source root. One extra batch read over object ids already in hand —
+    // the sweep must never make a second full pass for a ranking term, and the
+    // naive per-root shape (`fetch_root_story` or `build_account` once per
+    // root) would issue two queries per root.
+    let mut object_ids: Vec<i64> = all_sources.iter().filter_map(|s| s.object_id).collect();
+    object_ids.sort_unstable();
+    object_ids.dedup();
+    let archived = repo::object::batch_check_archived(conn, &object_ids, None)?;
+    let nearness = RootNearness::project(&roots, &all_sources, &archived);
+
+    let lens_params = LensParams::default();
+    let ranked = reduction_lens(
+        compute_structural(&kept, &roots, &params),
+        &nearness,
+        &lens_params,
+    );
 
     // The cap runs after the lens, so it trims a board the set-aside has
     // already left: the board refills from below rather than keeping holes.
@@ -150,19 +173,25 @@ pub fn compute_sweep(conn: &Connection, options: &SweepOptions) -> Result<SweepO
         }
     }
 
-    Ok(SweepOutcome::Report(SweepReport {
+    Ok(SweepOutcome::Report(Box::new(SweepReport {
         entries,
         beyond_cap,
         suspended: ranked.suspended,
+        stated_remainders: ranked.stated_remainders,
         stats: ranked.stats,
         empty_files_ignored,
         excluded_context,
         notes,
-    }))
+    })))
 }
 
 /// The locations a note surfaces at: the subject and, for pair relations,
 /// the counterpart (hubs: the shared counterpart plus each member subject).
+///
+/// A **root entry** names only its root. Its headline is the whole root, and
+/// the note lookup matches a location's whole subtree, so every note on the
+/// root already surfaces there — listing the members too would print each of
+/// them a second time. One entry about one root speaks once about it.
 fn note_locations(entry: &LeaderboardEntry) -> Vec<&Location> {
     match entry {
         LeaderboardEntry::Single(f) => {
@@ -172,6 +201,7 @@ fn note_locations(entry: &LeaderboardEntry) -> Vec<&Location> {
             }
             locs
         }
+        LeaderboardEntry::Root(r) => vec![&r.root],
         LeaderboardEntry::Hub(h) => {
             let mut locs = vec![&h.counterpart];
             locs.extend(h.members.iter().map(|m| &m.subject));
@@ -181,10 +211,13 @@ fn note_locations(entry: &LeaderboardEntry) -> Vec<&Location> {
 }
 
 /// The subject locations of an entry — where "here" points in the excluded
-/// context line.
+/// context line. A root entry points at its root, for the same reason its
+/// notes do: the count under the headline is the root's own, and a per-member
+/// count beside it would partition the same number twice over.
 fn subject_locations(entry: &LeaderboardEntry) -> Vec<&Location> {
     match entry {
         LeaderboardEntry::Single(f) => vec![&f.subject],
+        LeaderboardEntry::Root(r) => vec![&r.root],
         LeaderboardEntry::Hub(h) => h.members.iter().map(|m| &m.subject).collect(),
     }
 }
@@ -214,7 +247,7 @@ mod tests {
 
     fn report(conn: &Connection, options: &SweepOptions) -> SweepReport {
         match compute_sweep(conn, options).unwrap() {
-            SweepOutcome::Report(r) => r,
+            SweepOutcome::Report(r) => *r,
             SweepOutcome::NoRoots => panic!("unexpected NoRoots"),
             SweepOutcome::NoHashedContent => panic!("unexpected NoHashedContent"),
         }
@@ -227,11 +260,21 @@ mod tests {
         }
     }
 
+    /// Every place a report puts on the board, root-entry members included.
+    /// Deliberately not `subject_locations`, which answers a narrower
+    /// production question ("where does `here` point?") and names a root entry
+    /// by its root rather than by the places inside it. These fixtures are
+    /// small enough that most of their roots read as near-done, so a helper
+    /// that could not see inside a root entry would quietly stop seeing most
+    /// of the board.
     fn subject_prefixes(report: &SweepReport) -> Vec<(String, String)> {
         report
             .entries
             .iter()
-            .flat_map(subject_locations)
+            .flat_map(|entry| match entry {
+                LeaderboardEntry::Root(r) => r.members.iter().map(|m| &m.subject).collect(),
+                other => subject_locations(other),
+            })
             .map(|l| (l.root_path.clone(), l.rel_prefix.clone()))
             .collect()
     }

@@ -4,17 +4,20 @@
 // ---------------------------------------------------------------------------
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::structural::{
     FindingNature, FindingTier, Location, RelationShape, StructuralFinding, StructuralSweep,
     SweepStats,
 };
+use crate::core::domain::resolution::unresolved_remainder;
+use crate::core::domain::root::Root;
+use crate::core::domain::source::Source;
 
 /// The leaderboard as the reduction lens ranks it: findings sharing a
 /// counterpart grouped into hubs, everything ordered by the opinionated
-/// default — tier, then archive standing, then weight, then counterpart
-/// standing, then residual burden —
+/// default — tier, then archive standing, then root nearness, then weight,
+/// then counterpart standing, then residual burden —
 /// with a path tie-break so identical input always ranks identically.
 /// Places behind a closed door are not in `entries` at all; they are
 /// counted in `suspended`.
@@ -24,7 +27,154 @@ pub struct RankedSweep {
     /// One entry per suspended root whose door kept places off the board,
     /// ordered by root path.
     pub suspended: Vec<SuspendedRootTally>,
+    /// Roots whose remainder the board states beside an entry, by root id —
+    /// exactly those inside the lens's regime. The board carries no composite
+    /// score, so the order explains itself by stating its factors, and this
+    /// line's presence is the explanation for a place that outranked a
+    /// heavier one.
+    ///
+    /// **The set is the regime, and so is the ordering term.** Every ordering
+    /// key reads `ranking_bucket`, which ties every root above the regime, so
+    /// "the board states this root" and "nearness could have separated this
+    /// entry" are one condition rather than two rules that could drift.
+    ///
+    /// It is regime membership, **not** a per-board counterfactual: two
+    /// entries inside the regime and on the same bucket both state their
+    /// remainder though nearness separated neither of them. That reading was
+    /// weighed and declined — computing it would mean sorting the board twice
+    /// to see what moved.
+    pub stated_remainders: HashMap<i64, i64>,
     pub stats: SweepStats,
+}
+
+/// Per-root remainder, projected from the resolution account: the retirement
+/// readiness review's own measure of what is left on a root, never a second
+/// count of the same thing.
+///
+/// **Source roots only.** An archive root is never retired, so nearness says
+/// nothing about one; it carries no projection and buckets at the far end of
+/// the scale, where every archive subject ties and the order falls through to
+/// gain.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RootNearness {
+    remaining: HashMap<i64, i64>,
+}
+
+impl RootNearness {
+    /// Project every source root's remainder from rows already fetched.
+    ///
+    /// `sources` is the sweep's **whole** fetch, not its kept slice: the two
+    /// give the same count today (excluded and contentless rows classify as
+    /// neither unresolved nor anything this reads), but the whole fetch is
+    /// the identical *input* the readiness review itself passes, so the two
+    /// cannot diverge if `classify_present` ever changes. The kept slice is
+    /// right there and looks like the obvious saving; this is why it is not
+    /// taken.
+    pub fn project(roots: &[Root], sources: &[Source], archived: &HashSet<i64>) -> Self {
+        let mut by_root: HashMap<i64, Vec<&Source>> = HashMap::new();
+        for source in sources {
+            by_root.entry(source.root_id).or_default().push(source);
+        }
+        let remaining = roots
+            .iter()
+            .filter(|root| root.role != "archive")
+            .map(|root| {
+                let rows = by_root.remove(&root.id).unwrap_or_default();
+                (root.id, unresolved_remainder(&rows, archived))
+            })
+            .collect();
+        Self { remaining }
+    }
+
+    pub fn remaining(&self, root_id: i64) -> Option<i64> {
+        self.remaining.get(&root_id).copied()
+    }
+
+    /// Order of magnitude, ascending: 0 → 0, 1..9 → 1, 10..99 → 2,
+    /// 100..999 → 3, 1000 and up → 4; the `u8` maximum — the far end of the
+    /// scale — where there is no projection.
+    ///
+    /// This is the **only** place the cut points are written. They are coarse
+    /// on purpose: a leaderboard that reshuffles when nothing the user did
+    /// changed reads as broken, so a root's remainder moving by one never
+    /// moves the board unless it crosses a decade. Bucket 0 is exactly
+    /// `Readiness::NoBlockersFound` — a join with the review's own verdict,
+    /// not a taste.
+    ///
+    /// The raw measure. Nothing **orders** on it: every ordering key reads
+    /// `ranking_bucket` instead.
+    pub fn bucket(&self, root_id: i64) -> u8 {
+        match self.remaining(root_id) {
+            None => OUT_OF_REGIME,
+            Some(n) if n <= 0 => 0,
+            Some(n) if n < 10 => 1,
+            Some(n) if n < 100 => 2,
+            Some(n) if n < 1_000 => 3,
+            Some(_) => 4,
+        }
+    }
+
+    /// The bucket **as the ordering key reads it**: itself inside the lens's
+    /// regime, and a single tie value above it.
+    ///
+    /// This is what makes the board's promise hold in both directions. The
+    /// term exists for roots *near retirement*; letting it separate two roots
+    /// that are both far from done bought nothing the reader could act on and
+    /// demoted heavier findings for a reason no line could explain, because
+    /// the line only ever speaks inside the regime. Tying above it makes
+    /// ranking and statement coextensive by construction rather than by a
+    /// second rule that could drift from the first.
+    pub fn ranking_bucket(&self, root_id: i64, params: &LensParams) -> u8 {
+        let bucket = self.bucket(root_id);
+        if bucket <= params.nearness_render_bucket {
+            bucket
+        } else {
+            OUT_OF_REGIME
+        }
+    }
+}
+
+/// Where every root that nearness does not separate ties: roots above the
+/// lens's regime, and roots with no projection at all (archive roots). One
+/// value, so "nearness decided nothing here" is a single fact.
+const OUT_OF_REGIME: u8 = u8::MAX;
+
+/// The lens's own calibratable constants, kept apart from the structural
+/// `SweepParams` so the separation law reads in the types: recalibrating what
+/// the board *shows* is a different act from recalibrating what the engine
+/// *finds*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LensParams {
+    /// At or below this bucket, a source root claims its places into one root
+    /// entry. Default 1 — fewer than ten unresolved sources remain.
+    pub root_entry_bucket: u8,
+    /// The lens's **regime**: at or below this bucket nearness both separates
+    /// entries in the ordering and is stated on them; above it every root ties
+    /// on the term and gain leads. Default 2.
+    pub nearness_render_bucket: u8,
+}
+
+/// **`root_entry_bucket` must not exceed `nearness_render_bucket`.**
+///
+/// A root entry **always** states its remainder — that is the entry kind's own
+/// criterion, not a consequence of the regime. So a root qualifying for one
+/// from outside the regime would state a term that did **not** order it: its
+/// key ties like every other out-of-regime root, and the line would appear
+/// with nothing behind it. This invariant is what keeps that unreachable, and
+/// it is why `stated_root`'s root-entry arm may answer unconditionally where
+/// the single-finding arm must test. The two constants are free to move, but
+/// not past each other.
+pub const fn lens_params_invariant_holds(params: &LensParams) -> bool {
+    params.root_entry_bucket <= params.nearness_render_bucket
+}
+
+impl Default for LensParams {
+    fn default() -> Self {
+        Self {
+            root_entry_bucket: 1,
+            nearness_render_bucket: 2,
+        }
+    }
 }
 
 /// One suspended root's effect on the board: places on it, and places whose
@@ -63,12 +213,56 @@ pub struct SuspendedRootTally {
     pub gain_bytes_with_copies_on_it: u64,
 }
 
-/// One leaderboard slot: a single finding, or a hub of findings that share
-/// one counterpart.
+/// One leaderboard slot: a single finding, a near-retirable root claiming
+/// every place on it, or a hub of findings that share one counterpart.
+///
+/// **A slot is claimed by exactly one axis**, and the axes apply in a fixed
+/// precedence: set-aside and sink first (the closed door, above), then
+/// `Root`, then `Hub`, then `Single` for everything left. A place claimed by
+/// an earlier axis is unavailable to a later one — which is why a root entry
+/// can leave a hub with one member, degrading it to singles by the hub's own
+/// existing rule.
 #[derive(Debug, PartialEq)]
 pub enum LeaderboardEntry {
     Single(StructuralFinding),
+    Root(RootEntry),
     Hub(HubEntry),
+}
+
+/// Every place on one near-retirable source root, as a single slot: finishing
+/// a root resolves more than any one place on it, and the board must say so
+/// once rather than once per place left. Without this, nearness would rebuild
+/// the flooding it was added to fix, on exactly the roots the work means to
+/// celebrate.
+///
+/// The entry **states a remainder and never claims readiness**. Canon can
+/// prove NOT READY and never proves the other side; the review the handoff
+/// points at is what is entitled to judge.
+#[derive(Debug, PartialEq)]
+pub struct RootEntry {
+    /// The root's own top — `rel_prefix` is empty by construction.
+    pub root: Location,
+    /// The retirement readiness review's own remainder measure, projected
+    /// (`core::domain::resolution::unresolved_remainder`). A fact about the
+    /// root; never a verdict about it.
+    pub unresolved_remaining: i64,
+    /// Ranked within by the same key that orders the leaderboard.
+    pub members: Vec<StructuralFinding>,
+    /// **An upper bound, and never a total.** `HubEntry.total_gain_bytes` is
+    /// not a precedent: a hub's members all point *into* a counterpart that is
+    /// never itself a member, so its summands are separated **by role** — the
+    /// members are co-dismissable — and that is exactly the property a root's
+    /// own places lack. Intra-root duplication is subtracted from the copies'
+    /// common ancestor **upward** (`weights.rs`), so two sibling places below
+    /// that ancestor each legitimately count the shared bytes as "exists
+    /// outside me", and at most one of the two can ever be let go. Both
+    /// numbers are true; their sum is not a statement about content.
+    ///
+    /// What is exactly true is the inequality, so this is rendered `up to`
+    /// and **must never be named `gain`** — the same discipline the suspended
+    /// footer's figures carry, for the same reason.
+    pub gain_bytes_upper: u64,
+    pub gain_files_upper: u32,
 }
 
 /// Findings sharing one counterpart, presented as one entry: a star reads
@@ -80,6 +274,16 @@ pub struct HubEntry {
     pub counterpart_last_scanned_at: Option<i64>,
     /// Ranked within by the same key that orders the leaderboard.
     pub members: Vec<StructuralFinding>,
+    /// The member root whose nearness set this hub's ordering term, when that
+    /// term is inside the regime; `None` when nearness ties for this hub.
+    /// Its `rel_prefix` is empty — a root as a place, the same shape
+    /// `RootEntry.root` uses.
+    ///
+    /// Chosen deterministically (lowest bucket, then root path) and **carried
+    /// rather than re-derived**: the interface must not pick which member
+    /// explains the hub's position, and the ordering key reads this same field,
+    /// so the rank and the line it prints cannot disagree.
+    pub nearness_root: Option<Location>,
     /// Gain sums attribute each subject once — members are distinct
     /// subjects, deduped by the structural computation.
     pub total_gain_bytes: u64,
@@ -87,7 +291,15 @@ pub struct HubEntry {
 }
 
 /// Rank the structural findings under the reduction lens.
-pub fn reduction_lens(sweep: StructuralSweep) -> RankedSweep {
+pub fn reduction_lens(
+    sweep: StructuralSweep,
+    nearness: &RootNearness,
+    params: &LensParams,
+) -> RankedSweep {
+    debug_assert!(
+        lens_params_invariant_holds(params),
+        "a root entry must not be able to form outside the regime that states it"
+    );
     // Places behind a closed door are computed always and ranked never: the
     // registry permits a suspended root exactly four things, and reading a
     // parked place for resolution is none of them — the default for a view
@@ -126,8 +338,55 @@ pub fn reduction_lens(sweep: StructuralSweep) -> RankedSweep {
     suspended.sort_by(|a, b| a.root_path.cmp(&b.root_path));
 
     let mut entries: Vec<LeaderboardEntry> = Vec::new();
-    let mut by_counterpart: HashMap<Location, Vec<StructuralFinding>> = HashMap::new();
+
+    // Axis 2 — the root, claiming ahead of the hub. Finishing a root resolves
+    // more than any one place on it, so the root's claim on a place outranks a
+    // shared counterpart's. Archive roots are excluded here by the projection
+    // itself and not by a second test: `RootNearness` holds source roots only
+    // (an archive root is never retired), so an archive subject buckets past
+    // any threshold and never qualifies — one rule, spoken where nearness is
+    // defined.
+    let mut by_root: HashMap<i64, Vec<StructuralFinding>> = HashMap::new();
+    let mut unclaimed: Vec<StructuralFinding> = Vec::new();
     for finding in claimable {
+        if nearness.bucket(finding.subject.root_id) <= params.root_entry_bucket {
+            by_root
+                .entry(finding.subject.root_id)
+                .or_default()
+                .push(finding);
+        } else {
+            unclaimed.push(finding);
+        }
+    }
+    for (root_id, mut members) in by_root {
+        // One place is already one slot: a root entry there would be
+        // furniture, not information — and the place carries the remainder
+        // fact and the retirement handoff itself.
+        if members.len() < 2 {
+            unclaimed.extend(members);
+            continue;
+        }
+        members.sort_by(|a, b| {
+            rank_key(a, nearness, params)
+                .cmp(&rank_key(b, nearness, params))
+                .then_with(|| subject_path(a).cmp(&subject_path(b)))
+        });
+        let root = Location {
+            root_id,
+            root_path: members[0].subject.root_path.clone(),
+            rel_prefix: String::new(),
+        };
+        entries.push(LeaderboardEntry::Root(RootEntry {
+            root,
+            unresolved_remaining: nearness.remaining(root_id).unwrap_or(0),
+            gain_bytes_upper: members.iter().map(|m| m.gain_bytes).sum(),
+            gain_files_upper: members.iter().map(|m| m.gain_files).sum(),
+            members,
+        }));
+    }
+
+    let mut by_counterpart: HashMap<Location, Vec<StructuralFinding>> = HashMap::new();
+    for finding in unclaimed {
         match &finding.shape {
             RelationShape::Pair { counterpart, .. } => by_counterpart
                 .entry(counterpart.clone())
@@ -142,8 +401,8 @@ pub fn reduction_lens(sweep: StructuralSweep) -> RankedSweep {
             continue;
         }
         members.sort_by(|a, b| {
-            rank_key(a)
-                .cmp(&rank_key(b))
+            rank_key(a, nearness, params)
+                .cmp(&rank_key(b, nearness, params))
                 .then_with(|| subject_path(a).cmp(&subject_path(b)))
         });
         let status = pair_counterpart_status(&members[0]);
@@ -156,21 +415,93 @@ pub fn reduction_lens(sweep: StructuralSweep) -> RankedSweep {
             counterpart,
             counterpart_is_archive,
             counterpart_last_scanned_at,
+            nearness_root: hub_nearness_root(&members, nearness, params),
             total_gain_bytes: members.iter().map(|m| m.gain_bytes).sum(),
             total_gain_files: members.iter().map(|m| m.gain_files).sum(),
             members,
         }));
     }
     entries.sort_by(|a, b| {
-        entry_key(a)
-            .cmp(&entry_key(b))
+        entry_key(a, nearness, params)
+            .cmp(&entry_key(b, nearness, params))
             .then_with(|| entry_path(a).cmp(&entry_path(b)))
     });
+    // The remainder is stated exactly where nearness is in play — inside the
+    // regime — and is silent everywhere else, which is the same set the
+    // ordering term can separate on, because the key ties outside it. So the
+    // line's absence now carries meaning too: nearness could not have moved
+    // this entry. Its presence means nearness was in play here, which is
+    // weaker than "nearness moved this one" and is the claim the board makes.
+    //
+    // Ranked, not *shown*: the cap runs after the lens, so this can carry a
+    // root whose entry the cap later trims. Harmless — nothing renders a
+    // remainder for an entry that is off the screen.
+    let mut stated_remainders: HashMap<i64, i64> = HashMap::new();
+    for entry in &entries {
+        if let Some(root_id) = stated_root(entry, nearness, params) {
+            if let Some(remaining) = nearness.remaining(root_id) {
+                stated_remainders.insert(root_id, remaining);
+            }
+        }
+    }
     RankedSweep {
         entries,
         suspended,
+        stated_remainders,
         stats: sweep.stats,
     }
+}
+
+/// The root an entry states a remainder for, or `None` where nearness
+/// separated nothing. Read the *subject* side only: nearness is a fact about
+/// the place being read for resolution, never about the counterpart it is
+/// measured against.
+///
+/// This is the one place the board's rule lives — **a line appears exactly
+/// where the entry's nearness term is inside the regime** — and every arm
+/// answers from the same field the ordering key reads, so the two cannot
+/// disagree. A root entry always states, unconditionally: its root cleared
+/// `root_entry_bucket`, which the invariant keeps inside the regime.
+fn stated_root(
+    entry: &LeaderboardEntry,
+    nearness: &RootNearness,
+    params: &LensParams,
+) -> Option<i64> {
+    match entry {
+        LeaderboardEntry::Single(f) => {
+            let root_id = f.subject.root_id;
+            (nearness.ranking_bucket(root_id, params) <= params.nearness_render_bucket)
+                .then_some(root_id)
+        }
+        LeaderboardEntry::Root(r) => Some(r.root.root_id),
+        LeaderboardEntry::Hub(h) => h.nearness_root.as_ref().map(|l| l.root_id),
+    }
+}
+
+/// The member root that set a hub's nearness term: lowest bucket, root path
+/// as the tie-break so an unchanged database always names the same member.
+/// `None` when no member is inside the regime, which is exactly when the hub
+/// ties on the term.
+fn hub_nearness_root(
+    members: &[StructuralFinding],
+    nearness: &RootNearness,
+    params: &LensParams,
+) -> Option<Location> {
+    members
+        .iter()
+        .map(|m| &m.subject)
+        .filter(|s| nearness.ranking_bucket(s.root_id, params) <= params.nearness_render_bucket)
+        .min_by(|a, b| {
+            nearness
+                .ranking_bucket(a.root_id, params)
+                .cmp(&nearness.ranking_bucket(b.root_id, params))
+                .then_with(|| a.root_path.cmp(&b.root_path))
+        })
+        .map(|s| Location {
+            root_id: s.root_id,
+            root_path: s.root_path.clone(),
+            rel_prefix: String::new(),
+        })
 }
 
 fn tally<'a>(
@@ -252,8 +583,9 @@ pub fn counterpart_standing(finding: &StructuralFinding) -> u8 {
     }
 }
 
-/// The reduction lens's ordering: tier, archive standing, weight (size-led),
-/// counterpart standing, residual burden. Lower sorts first.
+/// The reduction lens's ordering: tier, archive standing, root nearness,
+/// weight (size-led), counterpart standing, residual burden. Lower sorts
+/// first.
 ///
 /// Archive standing sits directly after tier, ahead of weight: this is a
 /// *reduction* board, and a place already standing in the archive holds no
@@ -261,24 +593,65 @@ pub fn counterpart_standing(finding: &StructuralFinding) -> u8 {
 /// alone. Demoted, never removed — it keeps its `(in the archive)` marker and
 /// its claiming value. Tier still leads: whether the statement is trustworthy
 /// enough to act on is a prior question to what acting would resolve.
-fn rank_key(finding: &StructuralFinding) -> (u8, u8, Reverse<u64>, u8, u64) {
+///
+/// Root nearness sits directly after archive standing and **ahead of weight**,
+/// which is the whole point of the term: the places left on a root near the
+/// end of its story are small by definition, so behind a size-led key they are
+/// invisible exactly when they matter most. Finishing a root resolves more
+/// than reclaiming bytes off one barely started. It sits *behind* archive
+/// standing deliberately — nearness says nothing about an archive root, so
+/// archive subjects tie there and fall through to gain.
+fn rank_key(
+    finding: &StructuralFinding,
+    nearness: &RootNearness,
+    params: &LensParams,
+) -> (u8, u8, u8, Reverse<u64>, u8, u64) {
     (
         tier_rank(finding.tier),
         u8::from(finding.subject_is_archive),
+        nearness.ranking_bucket(finding.subject.root_id, params),
         Reverse(finding.gain_bytes),
         counterpart_standing(finding),
         finding.residual_bytes,
     )
 }
 
-/// A hub competes as its aggregate: best member tier, best member archive
-/// standing, summed gain, best member safety, summed residual. The archive
-/// term reads the *members'* subjects, so a hub of live source places under
-/// an archive counterpart still competes as source and may top the board —
-/// the rule is about the subject side only.
-fn entry_key(entry: &LeaderboardEntry) -> (u8, u8, Reverse<u64>, u8, u64) {
+/// A hub competes as its aggregate: best member on each ordinal term (tier,
+/// archive standing, nearness, counterpart safety), summed on each
+/// quantitative one. The archive term reads the *members'* subjects, so a hub
+/// of live source places under an archive counterpart still competes as source
+/// and may top the board — the rule is about the subject side only, and
+/// nearness reads the same side for the same reason.
+fn entry_key(
+    entry: &LeaderboardEntry,
+    nearness: &RootNearness,
+    params: &LensParams,
+) -> (u8, u8, u8, Reverse<u64>, u8, u64) {
     match entry {
-        LeaderboardEntry::Single(f) => rank_key(f),
+        LeaderboardEntry::Single(f) => rank_key(f, nearness, params),
+        // A root entry competes the same way a hub does — best member on each
+        // ordinal term, summed on each quantitative one — except on nearness,
+        // which is the root's own and is what put the entry here.
+        LeaderboardEntry::Root(r) => (
+            r.members
+                .iter()
+                .map(|m| tier_rank(m.tier))
+                .min()
+                .unwrap_or(u8::MAX),
+            r.members
+                .iter()
+                .map(|m| u8::from(m.subject_is_archive))
+                .min()
+                .unwrap_or(u8::MAX),
+            nearness.ranking_bucket(r.root.root_id, params),
+            Reverse(r.gain_bytes_upper),
+            r.members
+                .iter()
+                .map(counterpart_standing)
+                .min()
+                .unwrap_or(u8::MAX),
+            r.members.iter().map(|m| m.residual_bytes).sum(),
+        ),
         LeaderboardEntry::Hub(h) => (
             h.members
                 .iter()
@@ -290,6 +663,13 @@ fn entry_key(entry: &LeaderboardEntry) -> (u8, u8, Reverse<u64>, u8, u64) {
                 .map(|m| u8::from(m.subject_is_archive))
                 .min()
                 .unwrap_or(u8::MAX),
+            // The carried field, not a fresh minimum over the members: the
+            // line the interface prints reads the same value, so the hub's
+            // position and its explanation are one derivation.
+            h.nearness_root
+                .as_ref()
+                .map(|l| nearness.ranking_bucket(l.root_id, params))
+                .unwrap_or(OUT_OF_REGIME),
             Reverse(h.total_gain_bytes),
             h.members
                 .iter()
@@ -308,6 +688,7 @@ fn subject_path(finding: &StructuralFinding) -> (&str, &str) {
 fn entry_path(entry: &LeaderboardEntry) -> (&str, &str) {
     match entry {
         LeaderboardEntry::Single(f) => subject_path(f),
+        LeaderboardEntry::Root(r) => (&r.root.root_path, &r.root.rel_prefix),
         LeaderboardEntry::Hub(h) => (&h.counterpart.root_path, &h.counterpart.rel_prefix),
     }
 }

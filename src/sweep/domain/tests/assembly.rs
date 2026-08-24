@@ -283,3 +283,49 @@ fn determinism_run_twice_identical() {
     let b = run_structural(&sources, &roots, &low_floors());
     assert_eq!(a, b);
 }
+
+#[test]
+fn subject_is_root_top_is_derived_not_inferred() {
+    // The marker comes from the folder tree — the top is the one node with no
+    // parent — and never from a path being empty. The two agree here, which is
+    // the point: the *engine* establishes the fact and the interface reads the
+    // field, so a surface can never be caught inferring root-ness from an
+    // empty prefix. The interface half is pinned by
+    // `the_whole_root_marker_is_derived_not_inferred` in `sweep/cli.rs`.
+    let roots = vec![
+        make_root(1, "/r1"),
+        make_root(2, "/r2"),
+        make_root(3, "/r3"),
+        make_root(4, "/r4"),
+    ];
+    let sources = vec![
+        // `/r1` is mirrored whole on `/r2/keep`, so its subject lifts to its
+        // own top; noise keeps `/r2` from lifting with it.
+        make_source(1, 1, "a/f", 10_000_000, Some(10)),
+        make_source(2, 1, "b/f", 10_000_000, Some(20)),
+        make_source(3, 2, "keep/a/f", 10_000_000, Some(10)),
+        make_source(4, 2, "keep/b/f", 10_000_000, Some(20)),
+        make_source(5, 2, "noise/u", 30_000_000, Some(90)),
+        // A second pair whose subject sits *inside* its root, so one run
+        // carries both cases.
+        make_source(6, 3, "inner/f", 10_000_000, Some(30)),
+        make_source(7, 3, "noise/u", 30_000_000, Some(91)),
+        make_source(8, 4, "q/f", 10_000_000, Some(30)),
+        make_source(9, 4, "noise/u", 30_000_000, Some(92)),
+    ];
+    let sweep = run_structural(&sources, &roots, &low_floors());
+    let whole = find_finding(&sweep, "/r1", "");
+    assert!(whole.subject_is_root_top);
+    assert!(
+        sweep
+            .findings
+            .iter()
+            .any(|f| !f.subject_is_root_top && !f.subject.rel_prefix.is_empty()),
+        "the fixture must also produce a subject inside a root"
+    );
+    // Every finding agrees with the tree, which is what makes the flag safe to
+    // read anywhere: no surface needs to know how the top was found.
+    for f in &sweep.findings {
+        assert_eq!(f.subject_is_root_top, f.subject.rel_prefix.is_empty());
+    }
+}

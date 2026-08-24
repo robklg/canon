@@ -1,15 +1,21 @@
 //! Reduction lens tests — the v1 ranking derivation over the structural
 //! computation.
 
+use std::collections::HashSet;
+
 use crate::sweep::domain::lens::{
-    counterpart_standing, reduction_lens, LeaderboardEntry, RankedSweep, SuspendedRootTally,
+    counterpart_standing, lens_params_invariant_holds, reduction_lens, LeaderboardEntry,
+    LensParams, RankedSweep, RootEntry, RootNearness, SuspendedRootTally,
 };
 use crate::sweep::domain::structural::{
     FindingNature, FindingTier, Location, RelationClass, RelationShape, StructuralFinding,
     StructuralSweep, SweepStats,
 };
 
-use super::fixtures::{lens_finding, lens_loc, low_floors, run_structural, scale_fixture};
+use super::fixtures::{
+    lens_finding, lens_loc, low_floors, make_archive_root, make_root, make_source, nearness,
+    run_structural, scale_fixture,
+};
 
 fn lens_pair(counterpart: Location) -> RelationShape {
     RelationShape::Pair {
@@ -70,15 +76,39 @@ fn tally<'a>(ranked: &'a RankedSweep, root_path: &str) -> &'a SuspendedRootTally
         .unwrap_or_else(|| panic!("no tally for {root_path}"))
 }
 
-fn lens(findings: Vec<StructuralFinding>) -> RankedSweep {
-    reduction_lens(StructuralSweep {
-        findings,
-        stats: SweepStats {
-            ubiquitous_objects_dropped: 0,
-            ubiquitous_bytes_dropped: 0,
-            below_floor_subjects: 0,
+fn lens_with(
+    findings: Vec<StructuralFinding>,
+    nearness: &RootNearness,
+    params: &LensParams,
+) -> RankedSweep {
+    reduction_lens(
+        StructuralSweep {
+            findings,
+            stats: SweepStats {
+                ubiquitous_objects_dropped: 0,
+                ubiquitous_bytes_dropped: 0,
+                below_floor_subjects: 0,
+            },
         },
-    })
+        nearness,
+        params,
+    )
+}
+
+/// The lens with nothing projected: every root buckets at the far end of the
+/// scale, so the nearness term ties everywhere and the order is the one the
+/// board had before nearness existed.
+fn lens(findings: Vec<StructuralFinding>) -> RankedSweep {
+    lens_with(findings, &RootNearness::default(), &LensParams::default())
+}
+
+/// Move a finding onto a named root. Nearness is keyed by root **id** and the
+/// board's last tie-break reads the root **path**, so a fixture that moves one
+/// without the other tests neither.
+fn on_root(mut f: StructuralFinding, root_id: i64, root_path: &str) -> StructuralFinding {
+    f.subject.root_id = root_id;
+    f.subject.root_path = root_path.to_string();
+    f
 }
 
 fn entry_labels(ranked: &RankedSweep) -> Vec<String> {
@@ -87,6 +117,7 @@ fn entry_labels(ranked: &RankedSweep) -> Vec<String> {
         .iter()
         .map(|e| match e {
             LeaderboardEntry::Single(f) => f.subject.rel_prefix.clone(),
+            LeaderboardEntry::Root(r) => format!("root:{}", r.root.root_path),
             LeaderboardEntry::Hub(h) => format!("hub:{}", h.counterpart.rel_prefix),
         })
         .collect()
@@ -138,6 +169,186 @@ fn weight_orders_within_tier() {
         ),
     ]);
     assert_eq!(entry_labels(&ranked), ["heavier", "lighter"]);
+}
+
+// Root nearness — closing a root outranks reclaiming bytes.
+
+#[test]
+fn a_small_place_on_a_nearly_done_root_outranks_a_large_one_on_a_fresh_root() {
+    // The whole point of the term. Under a size-led key the small place is
+    // invisible exactly when it matters most: what is left on a root near the
+    // end of its story is small *by definition*.
+    use FindingNature::Consolidate;
+    let ranked = lens_with(
+        vec![
+            on_root(
+                lens_finding(
+                    "heavy",
+                    FindingTier::Clean,
+                    50_000_000_000,
+                    0,
+                    Consolidate,
+                    lens_pair(lens_loc("/rx", "a")),
+                ),
+                7,
+                "/r7",
+            ),
+            on_root(
+                lens_finding(
+                    "light",
+                    FindingTier::Clean,
+                    1_000,
+                    0,
+                    Consolidate,
+                    lens_pair(lens_loc("/rx", "b")),
+                ),
+                8,
+                "/r8",
+            ),
+        ],
+        // Root 8 has three sources left; root 7 has five hundred.
+        &nearness(&[(7, 500), (8, 3)]),
+        &LensParams::default(),
+    );
+    assert_eq!(entry_labels(&ranked), ["light", "heavy"]);
+}
+
+#[test]
+fn archive_subjects_tie_on_nearness_and_fall_through_to_gain() {
+    // Nearness is meaningless for an archive root — one is never retired — so
+    // archive subjects carry no projection, tie on the term, and are ordered
+    // by gain among themselves. Archive standing sorting *ahead* of nearness
+    // is what makes that tie reachable.
+    use FindingNature::Consolidate;
+    let archive = |mut f: StructuralFinding| {
+        f.subject_is_archive = true;
+        f
+    };
+    let ranked = lens_with(
+        vec![
+            archive(on_root(
+                lens_finding(
+                    "arch-light",
+                    FindingTier::Clean,
+                    1_000,
+                    0,
+                    Consolidate,
+                    lens_pair(lens_loc("/rx", "a")),
+                ),
+                20,
+                "/a20",
+            )),
+            archive(on_root(
+                lens_finding(
+                    "arch-heavy",
+                    FindingTier::Clean,
+                    9_000,
+                    0,
+                    Consolidate,
+                    lens_pair(lens_loc("/rx", "b")),
+                ),
+                21,
+                "/a21",
+            )),
+        ],
+        // Neither archive root is in the projection at all; the two source
+        // roots present here are irrelevant to both subjects.
+        &nearness(&[(7, 0), (8, 900)]),
+        &LensParams::default(),
+    );
+    assert_eq!(entry_labels(&ranked), ["arch-heavy", "arch-light"]);
+}
+
+#[test]
+fn a_remainder_changing_by_one_does_not_reshuffle_the_board() {
+    // Stability is part of the requirement: a leaderboard that reshuffles when
+    // nothing the user did changed reads as broken. The buckets are
+    // order-of-magnitude, so a remainder must cross a decade to move anything.
+    use FindingNature::Consolidate;
+    let board = |near| {
+        entry_labels(&lens_with(
+            vec![
+                on_root(
+                    lens_finding(
+                        "heavy",
+                        FindingTier::Clean,
+                        50_000,
+                        0,
+                        Consolidate,
+                        lens_pair(lens_loc("/rx", "a")),
+                    ),
+                    7,
+                    "/r7",
+                ),
+                on_root(
+                    lens_finding(
+                        "light",
+                        FindingTier::Clean,
+                        1_000,
+                        0,
+                        Consolidate,
+                        lens_pair(lens_loc("/rx", "b")),
+                    ),
+                    8,
+                    "/r8",
+                ),
+            ],
+            &near,
+            &LensParams::default(),
+        ))
+    };
+    let settled = board(nearness(&[(7, 40), (8, 4)]));
+    assert_eq!(settled, ["light", "heavy"]);
+    // One more source left on each root, inside the same decade: unmoved.
+    assert_eq!(board(nearness(&[(7, 41), (8, 5)])), settled);
+    // Crossing the decade is what moves it — both roots now read as tens.
+    assert_eq!(board(nearness(&[(7, 40), (8, 10)])), ["heavy", "light"]);
+}
+
+#[test]
+fn bucket_zero_agrees_with_no_blockers_found() {
+    // Bucket 0 is the retirement review's `NoBlockersFound`, not an arbitrary
+    // cut — the join is what licenses reading "close to done" off the bucket
+    // at all. It is pinned in two halves because `Readiness` lives behind
+    // `retire`'s barrel and a sweep test may not name it: this half fixes
+    // bucket 0 to a zero remainder, and
+    // `a_zero_remainder_is_exactly_no_blockers_found` in
+    // `retire/domain/readiness.rs` fixes a zero remainder to the verdict.
+    let near = nearness(&[(1, 0), (2, 1), (3, 9), (4, 10), (5, 99), (6, 100)]);
+    assert_eq!(near.bucket(1), 0);
+    assert_eq!(near.remaining(1), Some(0));
+    for root_id in [2, 3] {
+        assert_eq!(near.bucket(root_id), 1, "one to nine is the next bucket up");
+    }
+    assert_eq!(near.bucket(4), 2);
+    assert_eq!(near.bucket(5), 2);
+    assert_eq!(near.bucket(6), 3);
+    // A root with no projection sorts last, never first.
+    assert!(near.bucket(99) > near.bucket(6));
+    assert_eq!(near.remaining(99), None);
+}
+
+#[test]
+fn identical_state_yields_identical_ordering_with_nearness() {
+    // Determinism survives the new term: two runs over one unchanged state
+    // give one order, including the roots whose remainder the board states.
+    let (sources, roots) = scale_fixture();
+    let near = nearness(&[(1, 3), (2, 40), (3, 0), (4, 700)]);
+    let run = || {
+        lens_with(
+            run_structural(&sources, &roots, &low_floors()).findings,
+            &near,
+            &LensParams::default(),
+        )
+    };
+    let a = run();
+    let b = run();
+    assert_eq!(entry_labels(&a), entry_labels(&b));
+    assert_eq!(a.stated_remainders, b.stated_remainders);
+    assert!(
+        !a.stated_remainders.is_empty(),
+        "the fixture must state something, or determinism here is vacuous"
+    );
 }
 
 #[test]
@@ -361,7 +572,7 @@ fn coverage_findings_never_group() {
 fn lens_groups_scale_star_into_one_hub() {
     let (sources, roots) = scale_fixture();
     let sweep = run_structural(&sources, &roots, &low_floors());
-    let ranked = reduction_lens(sweep);
+    let ranked = reduction_lens(sweep, &RootNearness::default(), &LensParams::default());
     let star = ranked
         .entries
         .iter()
@@ -774,4 +985,399 @@ fn a_hub_of_source_subjects_under_an_archive_counterpart_still_tops_the_board() 
         )),
     ]);
     assert_eq!(entry_labels(&ranked), ["hub:media", "heavy-archived"]);
+}
+
+// The regime — nearness separates only where the board can say so.
+
+#[test]
+fn nearness_ties_above_the_regime_and_gain_leads() {
+    // The reproduced case that drove the rule: 400 sources left against 4,000
+    // is not a difference this board ranks on. Neither root is anywhere near
+    // done, so letting the term separate them demoted a finding fifty times
+    // heavier for a reason no line could ever explain — the line only speaks
+    // inside the regime. Above it every root ties and weight leads again.
+    use FindingNature::Consolidate;
+    let ranked = lens_with(
+        vec![
+            on_root(
+                lens_finding(
+                    "heavy-50gb",
+                    FindingTier::Clean,
+                    50_000_000_000,
+                    0,
+                    Consolidate,
+                    lens_pair(lens_loc("/rx", "a")),
+                ),
+                8,
+                "/r8",
+            ),
+            on_root(
+                lens_finding(
+                    "light-1gb",
+                    FindingTier::Clean,
+                    1_000_000_000,
+                    0,
+                    Consolidate,
+                    lens_pair(lens_loc("/rx", "b")),
+                ),
+                7,
+                "/r7",
+            ),
+        ],
+        &nearness(&[(7, 400), (8, 4_000)]),
+        &LensParams::default(),
+    );
+    assert_eq!(entry_labels(&ranked), ["heavy-50gb", "light-1gb"]);
+    assert!(
+        ranked.stated_remainders.is_empty(),
+        "nothing separated, so nothing is stated"
+    );
+}
+
+#[test]
+fn a_hub_lifted_by_an_in_regime_member_names_that_members_root() {
+    // "Option A covers hubs automatically" holds only at root-entry grade: a
+    // member inside the regime but above `root_entry_bucket` is not claimed
+    // away, so it lifts the hub — and the hub must say which root did it.
+    let shared = lens_loc("/rx", "shared");
+    let member = |rel: &str, root_id: i64, root_path: &str| {
+        on_root(
+            lens_finding(
+                rel,
+                FindingTier::Clean,
+                10_000,
+                0,
+                FindingNature::Consolidate,
+                lens_pair(shared.clone()),
+            ),
+            root_id,
+            root_path,
+        )
+    };
+    // Root 7 is at bucket 2 — inside the regime, above the root-entry bucket,
+    // so it stays a hub member. The others are far from done.
+    let ranked = lens_with(
+        vec![
+            member("a", 7, "/r7"),
+            member("b", 8, "/r8"),
+            member("c", 9, "/r9"),
+        ],
+        &nearness(&[(7, 40), (8, 4_000), (9, 4_000)]),
+        &LensParams::default(),
+    );
+    let hub = match &ranked.entries[0] {
+        LeaderboardEntry::Hub(h) => h,
+        other => panic!("expected a hub, got {other:?}"),
+    };
+    let named = hub
+        .nearness_root
+        .as_ref()
+        .expect("the hub names the root that lifted it");
+    assert_eq!(named.root_id, 7);
+    assert_eq!(named.root_path, "/r7");
+    assert_eq!(named.rel_prefix, "", "a root as a place");
+    assert_eq!(ranked.stated_remainders.get(&7), Some(&40));
+    // Only the root that set the term is stated — the other members are
+    // outside the regime and contributed nothing to explain.
+    assert_eq!(ranked.stated_remainders.len(), 1);
+}
+
+#[test]
+fn a_hub_outside_the_regime_names_no_root() {
+    // The other direction of the same rule: nearness tied for every member, so
+    // it moved the hub nowhere and the hub states nothing.
+    let shared = lens_loc("/rx", "shared");
+    let member = |rel: &str, root_id: i64, root_path: &str| {
+        on_root(
+            lens_finding(
+                rel,
+                FindingTier::Clean,
+                10_000,
+                0,
+                FindingNature::Consolidate,
+                lens_pair(shared.clone()),
+            ),
+            root_id,
+            root_path,
+        )
+    };
+    let ranked = lens_with(
+        vec![member("a", 8, "/r8"), member("b", 9, "/r9")],
+        &nearness(&[(8, 4_000), (9, 900)]),
+        &LensParams::default(),
+    );
+    let hub = match &ranked.entries[0] {
+        LeaderboardEntry::Hub(h) => h,
+        other => panic!("expected a hub, got {other:?}"),
+    };
+    assert!(hub.nearness_root.is_none());
+    assert!(ranked.stated_remainders.is_empty());
+}
+
+#[test]
+fn a_root_entry_can_never_form_outside_the_regime_that_states_it() {
+    // The invariant `root_entry_bucket <= nearness_render_bucket`, and why it
+    // is load-bearing rather than tidy. A root entry states its remainder
+    // *unconditionally* — that is the entry kind's own criterion — so one
+    // qualifying from outside the regime would state a term that did not
+    // order it: its key would tie like every other out-of-regime root, and
+    // the line would appear with nothing behind it.
+    let params = LensParams::default();
+    assert!(lens_params_invariant_holds(&params));
+
+    // The property the invariant buys, over every bucket a root can hold:
+    // whatever qualifies for a root entry is inside the regime, so the
+    // unconditional statement on that entry always has an ordering term
+    // behind it.
+    let near = nearness(&[(1, 0), (2, 5), (3, 40), (4, 400), (5, 4_000)]);
+    for root_id in 1..=5 {
+        if near.bucket(root_id) <= params.root_entry_bucket {
+            assert_eq!(
+                near.ranking_bucket(root_id, &params),
+                near.bucket(root_id),
+                "a root that can form an entry must not be tied out of the regime"
+            );
+        }
+    }
+    // And the predicate refuses the arrangement that would break it.
+    assert!(!lens_params_invariant_holds(&LensParams {
+        root_entry_bucket: 3,
+        nearness_render_bucket: 2,
+    }));
+}
+
+// Axis 2 — one root, one slot.
+
+/// A place on the given root pointing at its own counterpart, so nothing here
+/// forms a hub by accident.
+fn place_on(rel: &str, root_id: i64, root_path: &str, gain_bytes: u64) -> StructuralFinding {
+    on_root(
+        lens_finding(
+            rel,
+            FindingTier::Clean,
+            gain_bytes,
+            0,
+            FindingNature::Consolidate,
+            lens_pair(lens_loc("/rx", rel)),
+        ),
+        root_id,
+        root_path,
+    )
+}
+
+fn root_entry<'a>(ranked: &'a RankedSweep, root_path: &str) -> &'a RootEntry {
+    ranked
+        .entries
+        .iter()
+        .find_map(|e| match e {
+            LeaderboardEntry::Root(r) if r.root.root_path == root_path => Some(r),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no root entry for {root_path}"))
+}
+
+#[test]
+fn a_near_retirable_root_takes_one_slot_carrying_its_places() {
+    // Nearness alone would make the board worse: every place on a nearly-done
+    // root inherits the boost, so three places left becomes three top slots.
+    // The root takes one slot and carries them.
+    let ranked = lens_with(
+        vec![
+            place_on("pictures", 7, "/r7", 30_000),
+            place_on("music", 7, "/r7", 20_000),
+            place_on("docs", 7, "/r7", 10_000),
+        ],
+        &nearness(&[(7, 3)]),
+        &LensParams::default(),
+    );
+    assert_eq!(entry_labels(&ranked), ["root:/r7"]);
+    let entry = root_entry(&ranked, "/r7");
+    assert_eq!(entry.root.rel_prefix, "", "the headline is the root's top");
+    assert_eq!(entry.unresolved_remaining, 3);
+    assert_eq!(entry.members.len(), 3);
+    // Members are ranked within by the board's own key, heaviest first here.
+    assert_eq!(
+        entry
+            .members
+            .iter()
+            .map(|m| m.subject.rel_prefix.as_str())
+            .collect::<Vec<_>>(),
+        ["pictures", "music", "docs"]
+    );
+    assert_eq!(entry.gain_files_upper, 30);
+    // And the board states the root's remainder beside it.
+    assert_eq!(ranked.stated_remainders.get(&7), Some(&3));
+}
+
+#[test]
+fn a_root_far_from_done_forms_no_entry_and_its_places_compete_individually() {
+    // The axis is about roots near the end of their story. A root barely
+    // started has nothing to celebrate and its places compete on their own
+    // merits, exactly as before.
+    let ranked = lens_with(
+        vec![
+            place_on("pictures", 7, "/r7", 30_000),
+            place_on("music", 7, "/r7", 20_000),
+            place_on("docs", 7, "/r7", 10_000),
+        ],
+        &nearness(&[(7, 500)]),
+        &LensParams::default(),
+    );
+    assert_eq!(entry_labels(&ranked), ["pictures", "music", "docs"]);
+    assert!(ranked.stated_remainders.is_empty());
+}
+
+#[test]
+fn a_qualifying_root_with_one_place_forms_no_entry() {
+    // One place is already one slot: a root entry there is furniture, not
+    // information — and the place carries the remainder fact and the
+    // retirement handoff itself.
+    let ranked = lens_with(
+        vec![place_on("pictures", 7, "/r7", 30_000)],
+        &nearness(&[(7, 2)]),
+        &LensParams::default(),
+    );
+    assert_eq!(entry_labels(&ranked), ["pictures"]);
+    // The fact still reaches the board — it is why this place ranks where it
+    // does, and the entry that would have carried it does not exist.
+    assert_eq!(ranked.stated_remainders.get(&7), Some(&2));
+}
+
+#[test]
+fn a_root_entry_claims_places_away_from_a_hub_which_degrades() {
+    // A slot is claimed by exactly one axis, and the root claims ahead of the
+    // hub: finishing a root resolves more than any one place on it. The hub
+    // that loses two of its three members falls below two and degrades to
+    // singles, which is its own existing rule and not a new one.
+    let shared = lens_loc("/rx", "shared");
+    let member = |rel: &str, root_id: i64, root_path: &str| {
+        on_root(
+            lens_finding(
+                rel,
+                FindingTier::Clean,
+                10_000,
+                0,
+                FindingNature::Consolidate,
+                lens_pair(shared.clone()),
+            ),
+            root_id,
+            root_path,
+        )
+    };
+    // Without the root axis all three form one hub.
+    let hub_only = lens_with(
+        vec![
+            member("a", 7, "/r7"),
+            member("b", 7, "/r7"),
+            member("c", 8, "/r8"),
+        ],
+        &nearness(&[(7, 500), (8, 500)]),
+        &LensParams::default(),
+    );
+    assert_eq!(entry_labels(&hub_only), ["hub:shared"]);
+
+    // With root 7 near done, its two places leave for the root entry and the
+    // hub's one survivor degrades.
+    let ranked = lens_with(
+        vec![
+            member("a", 7, "/r7"),
+            member("b", 7, "/r7"),
+            member("c", 8, "/r8"),
+        ],
+        &nearness(&[(7, 3), (8, 500)]),
+        &LensParams::default(),
+    );
+    let mut labels = entry_labels(&ranked);
+    labels.sort();
+    assert_eq!(labels, ["c", "root:/r7"]);
+    assert_eq!(root_entry(&ranked, "/r7").members.len(), 2);
+}
+
+#[test]
+fn an_archive_root_never_forms_a_root_entry() {
+    // An archive root is never retired, so nearness says nothing about one.
+    // That is spoken once, in the projection: `RootNearness` holds source
+    // roots only, so an archive subject buckets past every threshold and can
+    // never qualify. No second test guards it here, deliberately — a second
+    // spelling of one rule is what lets the two disagree later.
+    let archive = make_archive_root(9, "/a9");
+    let rows = [
+        make_source(1, 9, "x/f", 100, None),
+        make_source(2, 9, "y/f", 100, None),
+    ];
+    let near = RootNearness::project(&[archive], &rows, &HashSet::new());
+    assert_eq!(near.remaining(9), None, "archive roots carry no nearness");
+
+    let on_archive = |rel: &str| {
+        let mut f = place_on(rel, 9, "/a9", 10_000);
+        f.subject_is_archive = true;
+        f
+    };
+    let ranked = lens_with(
+        vec![on_archive("x"), on_archive("y")],
+        &near,
+        &LensParams::default(),
+    );
+    let mut labels = entry_labels(&ranked);
+    labels.sort();
+    assert_eq!(labels, ["x", "y"]);
+    assert!(ranked.stated_remainders.is_empty());
+}
+
+#[test]
+fn a_root_entrys_gain_does_not_double_count_content_shared_between_its_members() {
+    // The summands are **not** byte-disjoint, and this is the corpus where the
+    // exposure is live. `/r1/A/x` and `/r1/A/y` each hold a 10 MB object that
+    // exists nowhere else, plus 30 MB of their own that is copied on `/r2`.
+    // LCA subtraction removes the intra-root duplication from `A` **upward**,
+    // so both siblings — sitting below `A` — legitimately count the shared
+    // 10 MB as "exists outside me". Both numbers are true.
+    //
+    // Their sum is not a statement about content: letting both places go would
+    // destroy the shared object outright, so what is actually recoverable
+    // while keeping one copy of everything is 70 MB, not 80. The entry's
+    // figure is therefore an upper bound, is named `gain_bytes_upper`, and is
+    // rendered `up to` — pinned on the surface by
+    // `a_root_entry_states_a_bound_and_never_calls_it_gain`.
+    let roots = vec![make_root(1, "/r1"), make_root(2, "/r2")];
+    let mut sources = Vec::new();
+    let mut id = 0i64;
+    let mut next = |root_id: i64, rel: String, size: i64, oid: Option<i64>| {
+        id += 1;
+        make_source(id, root_id, &rel, size, oid)
+    };
+    for i in 0..10 {
+        // The shared object, in both siblings and nowhere else.
+        sources.push(next(1, format!("A/x/o{i}"), 1_000_000, Some(100 + i)));
+        sources.push(next(1, format!("A/y/o{i}"), 1_000_000, Some(100 + i)));
+        // Each sibling's own content, copied on the other root.
+        sources.push(next(1, format!("A/x/p{i}"), 3_000_000, Some(200 + i)));
+        sources.push(next(2, format!("q/p{i}"), 3_000_000, Some(200 + i)));
+        sources.push(next(1, format!("A/y/q{i}"), 3_000_000, Some(300 + i)));
+        sources.push(next(2, format!("q/q{i}"), 3_000_000, Some(300 + i)));
+        // Noise keeping `/r2` from lifting whole.
+        sources.push(next(2, format!("noise/n{i}"), 5_000_000, Some(400 + i)));
+    }
+    let findings = run_structural(&sources, &roots, &low_floors()).findings;
+    let ranked = lens_with(
+        findings,
+        &nearness(&[(1, 3), (2, 900)]),
+        &LensParams::default(),
+    );
+    let entry = root_entry(&ranked, "/r1");
+    assert_eq!(entry.members.len(), 2);
+    for member in &entry.members {
+        assert_eq!(
+            member.gain_bytes, 40_000_000,
+            "each sibling truthfully counts the shared object as existing outside it"
+        );
+    }
+    assert_eq!(entry.gain_bytes_upper, 80_000_000);
+    // 30 MB + 30 MB copied on `/r2`, plus one copy of the shared 10 MB: the
+    // bound overstates by exactly the object counted twice.
+    let actually_recoverable = 70_000_000u64;
+    assert!(
+        entry.gain_bytes_upper > actually_recoverable,
+        "if this ever holds with equality the corpus stopped exercising the exposure"
+    );
 }

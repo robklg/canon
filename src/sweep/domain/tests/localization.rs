@@ -2,7 +2,7 @@
 //! concentration walk, and reciprocal-mirror dedup.
 
 use crate::core::domain::root::Root;
-use crate::sweep::domain::lens::{reduction_lens, LeaderboardEntry};
+use crate::sweep::domain::lens::{reduction_lens, LeaderboardEntry, LensParams, RootNearness};
 use crate::sweep::domain::structural::{
     FindingNature, FindingTier, LocalizedSubject, RelationClass, RelationShape, StructuralFinding,
     Universe,
@@ -343,10 +343,10 @@ fn a_place_covered_by_a_live_archive_does_not_sink_when_a_suspended_root_sorts_f
     let (sources, roots) = two_witnesses(true);
     let sweep = run_structural(&sources, &roots, &low_floors());
     assert_ne!(subject_a(&sweep).nature, FindingNature::Verify);
-    let ranked = reduction_lens(sweep);
+    let ranked = reduction_lens(sweep, &RootNearness::default(), &LensParams::default());
     assert!(ranked.entries.iter().any(|e| match e {
         LeaderboardEntry::Single(f) => f.subject.root_path == "/r1" && f.subject.rel_prefix == "a",
-        LeaderboardEntry::Hub(_) => false,
+        LeaderboardEntry::Root(_) | LeaderboardEntry::Hub(_) => false,
     }));
     // Nothing on the parked root's line on the subject's account.
     assert!(ranked
@@ -370,7 +370,7 @@ fn the_sink_still_fires_when_no_live_scope_qualifies() {
     ];
     let sweep = run_structural(&sources, &roots, &low_floors());
     assert_eq!(subject_a(&sweep).nature, FindingNature::Verify);
-    let ranked = reduction_lens(sweep);
+    let ranked = reduction_lens(sweep, &RootNearness::default(), &LensParams::default());
     assert!(ranked.entries.is_empty());
     assert_eq!(ranked.suspended.len(), 1);
     assert_eq!(ranked.suspended[0].root_path, "/r0-other");
@@ -495,10 +495,10 @@ fn a_suspended_location_changes_no_count_and_no_percentage() {
     assert_eq!((lo, ao, ro), (lp, ap, rp));
     assert!((co - cp).abs() < 1e-12);
     // ...and the entry is neither sunk nor demoted for it.
-    let ranked = reduction_lens(parked);
+    let ranked = reduction_lens(parked, &RootNearness::default(), &LensParams::default());
     assert!(ranked.entries.iter().any(|e| match e {
         LeaderboardEntry::Single(f) =>
             f.subject.root_path == "/r1" && f.subject.rel_prefix == "scatter",
-        LeaderboardEntry::Hub(_) => false,
+        LeaderboardEntry::Root(_) | LeaderboardEntry::Hub(_) => false,
     }));
 }

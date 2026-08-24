@@ -128,6 +128,39 @@ pub fn classify_present(
     }
 }
 
+/// The readiness review's own remainder measure, computed where the
+/// archived-from-here evidence is not on hand: how many of these present
+/// rows are neither archived, nor covered, nor excluded, nor empty.
+///
+/// Routing through `classify_present` is what makes this **one law with two
+/// call shapes**, not a second spelling of "unresolved". It is sound because
+/// `archived_from_here` only ever splits `Archived` from `Covered`, and
+/// neither of those is unresolved — so any value of it leaves this count
+/// alone. The two sets are built so that `archived_from_here` is a subset of
+/// `archived` (both SQL projections demand a present, non-empty archive-role
+/// copy; the from-here half only adds the extraction join), which is the
+/// premise that argument rests on. Pinned by
+/// `archived_from_here_never_moves_the_unresolved_count`.
+///
+/// The contentless law is inherited rather than restated: `classify_present`
+/// buckets an empty source as `Contentless` before any identity test, so a
+/// root holding only empty files reads zero here.
+pub fn unresolved_remainder(present: &[&Source], archived: &HashSet<i64>) -> i64 {
+    // No archived-from-here evidence in hand. Passing the empty set reads
+    // every such row as `Covered` instead of `Archived` — a distinction this
+    // count cannot see, which is exactly the pinned fact above.
+    let none: HashSet<i64> = HashSet::new();
+    present
+        .iter()
+        .filter(|source| {
+            matches!(
+                classify_present(source, archived, &none),
+                StandingBucket::Unresolved { .. }
+            )
+        })
+        .count() as i64
+}
+
 /// Deleted iff the stamp is Observe-family — the trail's presence-axis rule:
 /// "deleted reads only the absent bucket of Observe-family decisions".
 pub fn classify_absent(family: Option<DecisionFamily>) -> AbsentBucket {
@@ -226,6 +259,29 @@ mod tests {
     fn stamped(mut s: Source, decision_id: i64) -> Source {
         s.decision_id = Some(decision_id);
         s
+    }
+
+    fn empty(mut s: Source) -> Source {
+        s.size = 0;
+        s
+    }
+
+    /// One corpus exercising every arm of `classify_present`: two rows whose
+    /// objects stand in the archive, two dismissed (source- and
+    /// object-excluded), two genuinely unresolved (hashed and never hashed),
+    /// and two empty ones — the contentless arm, including the unhashed
+    /// empty that must not read as a blocker.
+    fn remainder_corpus() -> Vec<Source> {
+        vec![
+            source(1, Some(10), false, false),
+            source(2, Some(11), false, false),
+            source(3, Some(12), true, false),
+            source(4, Some(13), false, true),
+            source(5, Some(20), false, false),
+            source(6, None, false, false),
+            empty(source(7, Some(10), false, false)),
+            empty(source(8, None, false, false)),
+        ]
     }
 
     fn extraction(
@@ -385,6 +441,89 @@ mod tests {
             classify_present(&s, &archived_set(&[10]), &archived_set(&[10])),
             StandingBucket::Archived
         );
+    }
+
+    // unresolved_remainder — the readiness review's measure, projected
+
+    #[test]
+    fn archived_from_here_never_moves_the_unresolved_count() {
+        // The whole soundness argument for `unresolved_remainder`, pinned: if
+        // this fails the projection is unsound and the sweep's nearness term
+        // is wrong, not merely buggy.
+        //
+        // `archived_from_here` only ever splits `Archived` from `Covered`,
+        // and neither of those is unresolved — so no value of it can move
+        // this count. Checked over every subset of the archived set, which is
+        // "arbitrary archived_from_here" in the only form the two SQL
+        // projections can produce: both demand a present, non-empty
+        // archive-role copy, and the from-here half only adds the extraction
+        // join, so it is always a subset.
+        let archived_ids = [10i64, 11, 12, 13];
+        let corpus = remainder_corpus();
+        let refs: Vec<&Source> = corpus.iter().collect();
+        let archived = archived_set(&archived_ids);
+        let baseline = unresolved_remainder(&refs, &archived);
+        assert_eq!(baseline, 2, "the corpus must have something left to lose");
+
+        for mask in 0..(1u32 << archived_ids.len()) {
+            let from_here: HashSet<i64> = archived_ids
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(_, &id)| id)
+                .collect();
+            let counted = refs
+                .iter()
+                .filter(|s| {
+                    matches!(
+                        classify_present(s, &archived, &from_here),
+                        StandingBucket::Unresolved { .. }
+                    )
+                })
+                .count() as i64;
+            assert_eq!(
+                counted, baseline,
+                "archived_from_here {from_here:?} moved the unresolved count"
+            );
+        }
+    }
+
+    #[test]
+    fn a_root_holding_only_empty_files_reads_zero_remaining() {
+        // The contentless law, load-bearing here: empty files never block a
+        // retirement and must not read as a remainder either — including the
+        // unhashed ones on a root nobody ever enriched.
+        let corpus = [
+            empty(source(1, Some(10), false, false)),
+            empty(source(2, None, false, false)),
+            empty(source(3, Some(11), false, false)),
+        ];
+        let refs: Vec<&Source> = corpus.iter().collect();
+        assert_eq!(unresolved_remainder(&refs, &archived_set(&[])), 0);
+        assert_eq!(unresolved_remainder(&refs, &archived_set(&[10, 11])), 0);
+    }
+
+    #[test]
+    fn the_remainder_matches_the_readiness_account_on_the_same_root() {
+        // Not two measures that happen to agree: the same rows and the same
+        // archived set give the same number, with the account exercising the
+        // one arm the remainder deliberately cannot see.
+        let present = remainder_corpus();
+        let refs: Vec<&Source> = present.iter().collect();
+        let archived = archived_set(&[10, 11, 12, 13]);
+        let account = build_account(
+            &present,
+            &[],
+            &archived,
+            &archived_set(&[11]),
+            &[],
+            &HashMap::new(),
+        );
+        assert!(
+            account.archived_standing > 0,
+            "the account must exercise the Archived arm the remainder cannot see"
+        );
+        assert_eq!(unresolved_remainder(&refs, &archived), account.unresolved);
     }
 
     // classify_absent — Deleted iff Observe

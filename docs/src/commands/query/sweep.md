@@ -9,7 +9,7 @@ canon sweep
 # More entries
 canon sweep --limit 25
 
-# Everything: all entries, all hub members, findings below the emit floors
+# Everything: all entries, all members, findings below the emit floors
 canon sweep --all
 ```
 
@@ -20,7 +20,7 @@ The sweep takes no paths and no filters; it is universe-wide, computed fresh fro
 | Flag | Description |
 |------|-------------|
 | `--limit <N>` | Show up to N leaderboard entries (default: 10). |
-| `--all` | No cap: every entry, every hub member, and findings below the emit floors. |
+| `--all` | No cap: every entry, every member of a multi-place entry, and findings below the emit floors. |
 
 ## Reading a finding
 
@@ -41,6 +41,8 @@ The sweep takes no paths and no filters; it is universe-wide, computed fresh fro
 When the subject is not fully hashed, the finding says so (`compared on 92% by size`): unhashed content is unverified, never silently omitted. Notes you've left on the subject or counterpart (`canon note`) surface beside the finding.
 
 A subject that itself stands on an archive root is marked `(in the archive)` and ranks below an equivalent place on a source root: its content is already resolved, so it does not compete for triage attention, and the real opportunity usually sits on the counterpart side. It is demoted, not removed, and the relation is stated anyway; the sweep compares any location to any other. A hub headlined by an archive counterpart is untouched by this: its members are the subjects, and live source members keep the hub competing at full weight.
+
+A subject that is a whole root, rather than a folder inside one, is marked `(whole root)`. Both markers appear where both apply.
 
 ### Scattered findings
 
@@ -72,15 +74,49 @@ Many places pointing into one counterpart render as a single leaderboard entry:
 
 The hub occupies one leaderboard slot and shares one handoff: surveying the counterpart shows every member as a related location.
 
+### Roots close to done
+
+A source root with few [unresolved](../../concepts/resolution.md) sources left takes one leaderboard slot of its own, headlined by the root and carrying its places as members:
+
+```
+#1  /Volumes/oldmac  (whole root)
+    3 unresolved sources remain
+    6 places, up to 1,204 files · 41.3 GB
+      /Volumes/oldmac/Pictures/2019  mirrors · 100% · archived · 612 files · 22.1 GB
+      /Volumes/oldmac/Pictures/2020  98% inside · archived · 431 files · 14.8 GB
+      … 4 more (--all)
+    → canon roots retire path:/Volumes/oldmac --dry-run
+```
+
+The count is the same remainder the [retirement](../roots/retire.md) readiness review measures: sources on the root that are neither archived, nor covered, nor excluded, nor empty. It is a fact about the root and not a verdict about it; the review the handoff names is what judges whether the root is ready, and `--dry-run` reports that verdict rather than acting on it. A zero remainder reads `no unresolved sources remain`.
+
+The figure is an upper bound (`up to`), not a total. Places on one root can be each other's evidence: two folders holding copies of each other both report those bytes, and only one of them can be let go, so what acting would actually resolve is never more than the figure shown.
+
+Each member states its own counterpart [standing](../../concepts/resolution.md#standings), which is what makes acting on it safe; hub members take theirs from the hub's headline instead. Members are capped like hub members, with the omission counted and `--all` revealing the rest. A qualifying root with only one place forms no such entry: one place is already one slot. Archive roots never form one; they are not retired.
+
 ## Ranking
 
 There is no composite score: every ranking factor is visible on the finding, in this order:
 
 1. **Cleanliness**: ready-to-assess findings (at or above the lifting tolerance) above consolidation-grade overlap.
 2. **Archive standing**: a place standing on a source root above an equivalent place standing in the archive.
-3. **Weight**: resolution gain, size-led (counts always shown beside sizes).
-4. **Counterpart standing**: archived above merely-present; scattered content with nothing archived last.
-5. **Residual burden**: content existing nowhere else penalizes; a clean dismissal outranks one that needs a rescue first.
+3. **Root nearness**: a place on a source root with little left unresolved above a place on a root barely started. Archive roots carry no nearness and tie here.
+4. **Weight**: resolution gain, size-led (counts always shown beside sizes).
+5. **Counterpart standing**: archived above merely-present; scattered content with nothing archived last.
+6. **Residual burden**: content existing nowhere else penalizes; a clean dismissal outranks one that needs a rescue first.
+
+Nearness sorts ahead of weight, so a small place on a root close to done outranks a large one elsewhere. Where it applies, the finding says so on its own line:
+
+```
+#1  /Volumes/oldmac/Pictures/2019
+    mirrors /Volumes/Archive/Media/2019  (100% by size · 100% by count)
+    counterpart: archived, scanned today · subject scanned today
+    20 unresolved sources remain on /Volumes/oldmac
+    gain: 30 files · 61.4 KB     residual: none
+    → canon survey . --other /Volumes/Archive/Media/2019
+```
+
+The line appears only where nearness is in play; its absence means the order rests on the other factors. Nearness separates entries only among roots close enough to done for the board to say so; above that, roots tie on it and weight leads. The remainder is bucketed by order of magnitude, so it takes a tenfold change to move a place on the board.
 
 Two runs against an unchanged database produce identical output.
 

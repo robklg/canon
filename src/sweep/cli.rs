@@ -14,13 +14,16 @@ use crate::core::domain::format::{format_count, format_size, shell_quote};
 use crate::core::repo::Db;
 use crate::notes::format_note_date;
 use crate::sweep::domain::{
-    HubEntry, LeaderboardEntry, Location, RelationClass, RelationShape, StructuralFinding,
-    SuspendedRootTally, SweepParams,
+    HubEntry, LeaderboardEntry, Location, RelationClass, RelationShape, RootEntry,
+    StructuralFinding, SuspendedRootTally, SweepParams,
 };
 use crate::sweep::ops::{compute_sweep, SweepOptions, SweepOutcome, SweepReport};
 
-/// Hub members shown before the "… N more" footer; `--all` shows all.
-const HUB_MEMBER_CAP: usize = 5;
+/// Members shown on a multi-place entry before the "… N more" footer; `--all`
+/// shows all. Shared by both entry kinds deliberately: the hub already solved
+/// member flooding inside one slot, and the root entry must not re-manufacture
+/// the problem in its own.
+const ENTRY_MEMBER_CAP: usize = 5;
 
 /// Above this many suspended roots the footer counts roots rather than
 /// naming them, and the way back becomes the suspended-root listing.
@@ -85,6 +88,9 @@ fn print_report(report: &SweepReport, now: i64, all: bool) {
         match entry {
             LeaderboardEntry::Single(finding) => {
                 print_finding(i + 1, finding, report, now, &handoff_line)
+            }
+            LeaderboardEntry::Root(root) => {
+                print_root_entry(i + 1, root, report, all, &handoff_line)
             }
             LeaderboardEntry::Hub(hub) => print_hub(i + 1, hub, report, now, all, &handoff_line),
         }
@@ -293,7 +299,7 @@ fn print_finding(
     println!(
         "#{rank}  {}{}",
         abs_path(&finding.subject),
-        archive_mark(finding)
+        markers(finding)
     );
     match &finding.shape {
         RelationShape::Pair {
@@ -362,6 +368,9 @@ fn print_finding(
     if finding.hash_coverage_pct < 0.9995 {
         println!("    compared on {} by size", pct(finding.hash_coverage_pct));
     }
+    if let Some(line) = nearness_line(&finding.subject, report) {
+        println!("    {line}");
+    }
     println!(
         "    gain: {} · {}     residual: {}",
         files_phrase(finding.gain_files),
@@ -391,55 +400,16 @@ fn print_hub(
     all: bool,
     handoff_line: &str,
 ) {
-    // A hub's headline is the shared counterpart, not any one subject — the
-    // reverse of a single finding, and the line below states that out loud
-    // because readers assume the subject otherwise.
-    println!("#{rank}  {}", abs_path(&hub.counterpart));
-    let status = if hub.counterpart_is_archive {
-        format!("archived, {}", age(hub.counterpart_last_scanned_at, now))
-    } else {
-        age(hub.counterpart_last_scanned_at, now)
-    };
-    println!(
-        "    shared counterpart — {} hold copies inside it · {status}",
-        counted_phrase(hub.members.len(), "place")
-    );
-    println!(
-        "    total gain: {} · {}",
-        files_phrase(hub.total_gain_files),
-        format_size(hub.total_gain_bytes as i64)
-    );
+    let about = hub_lines(hub, report, now);
+    let mut about = about.into_iter();
+    println!("#{rank}  {}", about.next().unwrap_or_default());
+    for line in about {
+        println!("    {line}");
+    }
     print_notes(&hub.counterpart, report, "    ", None);
-    let shown = if all {
-        hub.members.len()
-    } else {
-        hub.members.len().min(HUB_MEMBER_CAP)
-    };
+    let shown = shown_members(hub.members.len(), all);
     for member in &hub.members[..shown] {
-        // Hub members are pair-shaped by construction; the coverage arm is
-        // the same defensive fold the trail uses — render, never panic on a
-        // line the interface cannot repair.
-        let relation = match &member.shape {
-            RelationShape::Pair {
-                class: RelationClass::Mirror,
-                pair_size_pct,
-                ..
-            } => format!("mirrors · {}", pct(*pair_size_pct)),
-            RelationShape::Pair { pair_size_pct, .. } => {
-                format!("{} inside", pct(*pair_size_pct))
-            }
-            RelationShape::Coverage { .. } => {
-                format!("{} elsewhere", pct(member.containment_size_pct))
-            }
-        };
-        println!(
-            "      {}{}  {} · {} · {}",
-            abs_path(&member.subject),
-            archive_mark(member),
-            relation,
-            files_phrase(member.gain_files),
-            format_size(member.gain_bytes as i64)
-        );
+        println!("      {}", member_line(member, false));
         print_excluded_context(&member.subject, report, "        ");
         print_notes(&member.subject, report, "        ", None);
     }
@@ -452,14 +422,222 @@ fn print_hub(
     println!("    {handoff_line}");
 }
 
-/// A subject standing on an archive root is already resolved under the
-/// triage lens — stated on the finding, never silently.
-fn archive_mark(finding: &StructuralFinding) -> &'static str {
-    if finding.subject_is_archive {
-        "  (in the archive)"
-    } else {
-        ""
+/// A near-retirable source root as one slot: the root headlines, its places
+/// are the members. The board must say "this root is nearly done" once rather
+/// than once per place left on it.
+///
+/// **The entry states a remainder and nothing more.** No "ready", no "almost
+/// done", no congratulation: Canon proves NOT READY and never proves the other
+/// side, and the review the handoff names is what is entitled to judge. A
+/// compliment here would be a readiness claim wearing one.
+fn print_root_entry(
+    rank: usize,
+    entry: &RootEntry,
+    report: &SweepReport,
+    all: bool,
+    handoff_line: &str,
+) {
+    let (about, members) = root_entry_lines(entry, all);
+    let mut about = about.into_iter();
+    println!("#{rank}  {}", about.next().unwrap_or_default());
+    for line in about {
+        println!("    {line}");
     }
+    print_excluded_context(&entry.root, report, "    ");
+    print_notes(&entry.root, report, "    ", None);
+    for line in members {
+        println!("      {line}");
+    }
+    println!("    {handoff_line}");
+}
+
+/// A root entry's own text: what it says about the root, then one line per
+/// shown member (with the omission count where the cap trimmed). Returned
+/// rather than printed so the surface is testable — the same discipline
+/// `suspended_lines` follows, and the reason a struct-only test would not be
+/// enough here.
+fn root_entry_lines(entry: &RootEntry, all: bool) -> (Vec<String>, Vec<String>) {
+    let about = vec![
+        format!("{}  (whole root)", abs_path(&entry.root)),
+        remainder_line(entry.unresolved_remaining, None),
+        // `up to`, and never `total gain:`. The board earns the word "gain"
+        // for a hub because its members point into a counterpart that is never
+        // itself a member, so they are co-dismissable; a root's own places have
+        // no such role separation and can be each other's evidence, so at most
+        // one of a duplicated pair is ever recoverable. The inequality is what
+        // is exactly true.
+        format!(
+            "{}, up to {} · {}",
+            counted_phrase(entry.members.len(), "place"),
+            files_phrase(entry.gain_files_upper),
+            format_size(entry.gain_bytes_upper as i64)
+        ),
+    ];
+    let shown = shown_members(entry.members.len(), all);
+    let mut members: Vec<String> = entry.members[..shown]
+        .iter()
+        .map(|m| member_line(m, true))
+        .collect();
+    if entry.members.len() > shown {
+        members.push(format!(
+            "… {} more (--all)",
+            format_count(entry.members.len() - shown)
+        ));
+    }
+    (about, members)
+}
+
+/// The remainder, stated where nearness is in play. The lens decides which
+/// roots those are and this only renders what it decided — and the absence of
+/// the line now carries meaning too, because the ordering term ties outside
+/// the lens's regime: no line means nearness could not have moved this entry.
+/// Presence means nearness was in play, which is weaker than "nearness moved
+/// this one" — two entries tying on the same bucket both state it. The root is
+/// named because a place path is not its root.
+fn nearness_line(subject: &Location, report: &SweepReport) -> Option<String> {
+    report
+        .stated_remainders
+        .get(&subject.root_id)
+        .map(|remaining| remainder_line(*remaining, Some(&subject.root_path)))
+}
+
+/// A hub's own lines: the shared counterpart it is headlined by, what that
+/// counterpart is, the nearness fact where one applies, and the summed gain.
+/// Returned rather than printed for the same reason `root_entry_lines` is —
+/// a printed surface cannot be pinned, and the nearness line here is a branch
+/// no test could otherwise reach.
+///
+/// A hub's headline is the shared counterpart, not any one subject — the
+/// reverse of a single finding, and the second line states that out loud
+/// because readers assume the subject otherwise.
+fn hub_lines(hub: &HubEntry, report: &SweepReport, now: i64) -> Vec<String> {
+    let status = if hub.counterpart_is_archive {
+        format!("archived, {}", age(hub.counterpart_last_scanned_at, now))
+    } else {
+        age(hub.counterpart_last_scanned_at, now)
+    };
+    let mut lines = vec![
+        abs_path(&hub.counterpart),
+        format!(
+            "shared counterpart — {} hold copies inside it · {status}",
+            counted_phrase(hub.members.len(), "place")
+        ),
+    ];
+    // The same line a single finding carries, naming the member root that set
+    // this hub's nearness term. Which member that is arrives on the entry; the
+    // interface never picks one.
+    if let Some(line) = hub
+        .nearness_root
+        .as_ref()
+        .and_then(|r| nearness_line(r, report))
+    {
+        lines.push(line);
+    }
+    lines.push(format!(
+        "total gain: {} · {}",
+        files_phrase(hub.total_gain_files),
+        format_size(hub.total_gain_bytes as i64)
+    ));
+    lines
+}
+
+fn shown_members(total: usize, all: bool) -> usize {
+    if all {
+        total
+    } else {
+        total.min(ENTRY_MEMBER_CAP)
+    }
+}
+
+/// One member of a multi-place entry, on one line. Members are pair-shaped on
+/// a hub by construction; the coverage arm is the same defensive fold the
+/// trail uses — render, never panic on a line the interface cannot repair —
+/// and on a root entry it is an ordinary case, since a root's places include
+/// scattered ones.
+///
+/// `with_standing` states each member's counterpart standing on its own line.
+/// A hub does not need it and passes `false`: its members share one
+/// counterpart and the hub's headline already states that counterpart's
+/// standing. A root entry's members each have their own, so without this the
+/// entry would rank on `counterpart_standing` and state it nowhere — the one
+/// thing the board's "every ranking factor is a stated fact" rule forbids.
+fn member_line(member: &StructuralFinding, with_standing: bool) -> String {
+    let relation = match &member.shape {
+        RelationShape::Pair {
+            class: RelationClass::Mirror,
+            pair_size_pct,
+            ..
+        } => format!("mirrors · {}", pct(*pair_size_pct)),
+        RelationShape::Pair { pair_size_pct, .. } => {
+            format!("{} inside", pct(*pair_size_pct))
+        }
+        RelationShape::Coverage { .. } => {
+            format!("{} elsewhere", pct(member.containment_size_pct))
+        }
+    };
+    let standing = if with_standing {
+        format!("{} · ", member_standing(member))
+    } else {
+        String::new()
+    };
+    format!(
+        "{}{}  {} · {standing}{} · {}",
+        abs_path(&member.subject),
+        markers(member),
+        relation,
+        files_phrase(member.gain_files),
+        format_size(member.gain_bytes as i64)
+    )
+}
+
+/// A member's counterpart standing, in the words the rest of the surface
+/// already uses: `counterpart_line`'s `archived`/`present` for a pair, and the
+/// scattered qualifier's archived-location count for coverage. It is what
+/// makes acting on the member safe, and it is a ranking term on this board.
+fn member_standing(member: &StructuralFinding) -> String {
+    match &member.shape {
+        RelationShape::Pair {
+            counterpart_is_archive: true,
+            ..
+        } => "archived".to_string(),
+        RelationShape::Pair { .. } => "present".to_string(),
+        RelationShape::Coverage {
+            archived_locations, ..
+        } => format!("{} archived", format_count(*archived_locations)),
+    }
+}
+
+/// The remainder, stated as a fact and never as a verdict. Zero renders as a
+/// fact too — "no unresolved sources remain" is an observation about rows;
+/// "ready" would be a judgment, and that one is the user's alone.
+///
+/// One builder, two callers: a root entry headlines its root and needs no
+/// name, a single finding headlines a place inside one and does.
+fn remainder_line(remaining: i64, root_path: Option<&str>) -> String {
+    let where_ = root_path.map(|p| format!(" on {p}")).unwrap_or_default();
+    if remaining == 0 {
+        return format!("no unresolved sources remain{where_}");
+    }
+    // The verb agrees with the count: exactly one source *remains*.
+    let verb = if remaining == 1 { "remains" } else { "remain" };
+    format!(
+        "{} {verb}{where_}",
+        counted_phrase_i64(remaining, "unresolved source")
+    )
+}
+
+/// What a subject's place *is* and where it stands, composed: a root's own
+/// top says so, and an archive subject says so, and both may apply. Derived
+/// on the finding in domain — the interface never infers either from a path.
+fn markers(finding: &StructuralFinding) -> String {
+    let mut out = String::new();
+    if finding.subject_is_root_top {
+        out.push_str("  (whole root)");
+    }
+    if finding.subject_is_archive {
+        out.push_str("  (in the archive)");
+    }
+    out
 }
 
 fn print_excluded_context(subject: &Location, report: &SweepReport, indent: &str) {
@@ -523,6 +701,21 @@ fn handoff(entry: &LeaderboardEntry) -> (String, Vec<String>) {
             ],
             RelationShape::Coverage { .. } => vec!["canon".into(), "survey".into(), ".".into()],
         },
+        // A root entry hands off to the review entitled to judge readiness —
+        // the one judgment this board never makes. `--dry-run` is a report and
+        // exits 0 on either verdict, so the printed command runs as printed on
+        // a root that is not ready. One precondition sits ahead of the review
+        // and is not a verdict: with no archive root registered the ceremony
+        // refuses, because the book would have no shelf. The board can reach
+        // that state — with no archive root nothing reads as covered, so only
+        // a root holding very few sources buckets low enough to form an entry.
+        LeaderboardEntry::Root(entry) => vec![
+            "canon".into(),
+            "roots".into(),
+            "retire".into(),
+            format!("path:{}", entry.root.root_path),
+            "--dry-run".into(),
+        ],
         LeaderboardEntry::Hub(hub) => {
             vec!["canon".into(), "survey".into(), abs_path(&hub.counterpart)]
         }
@@ -553,6 +746,14 @@ fn pct(fraction: f64) -> String {
 }
 
 fn counted_phrase(count: usize, noun: &str) -> String {
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{} {noun}{plural}", format_count(count))
+}
+
+/// `counted_phrase` over a signed count. The remainder comes off the
+/// resolution account as an `i64` and is never negative; a negative would be a
+/// projection defect, and printing it as it stands is louder than hiding it.
+fn counted_phrase_i64(count: i64, noun: &str) -> String {
     let plural = if count == 1 { "" } else { "s" };
     format!("{} {noun}{plural}", format_count(count))
 }
@@ -606,6 +807,7 @@ mod tests {
             subject: loc("/r1", "subject"),
             subject_suspended: false,
             subject_is_archive: false,
+            subject_is_root_top: false,
             subject_last_scanned_at: None,
             tier: FindingTier::Clean,
             below_floors: false,
@@ -652,6 +854,7 @@ mod tests {
                 counterpart: loc("/r2", "hub"),
                 counterpart_is_archive: false,
                 counterpart_last_scanned_at: None,
+                nearness_root: None,
                 members: vec![finding(pair(loc("/r2", "hub")))],
                 total_gain_bytes: 1_000,
                 total_gain_files: 10,
@@ -685,6 +888,7 @@ mod tests {
                 ubiquitous_bytes_dropped: 0,
                 below_floor_subjects: 0,
             },
+            stated_remainders: std::collections::HashMap::new(),
             empty_files_ignored: 0,
             excluded_context: std::collections::HashMap::new(),
             notes: std::collections::HashMap::new(),
@@ -789,11 +993,23 @@ mod tests {
             parked("/c", 1, 0, 1, 0),
             parked("/d", 1, 0, 1, 0),
         ]));
+        // The root entry's way back is a handoff, not a footer line, and joins
+        // the same law: `roots retire` takes a root specifier, never a bare
+        // path, and `--dry-run` is a report that exits 0 whatever the verdict —
+        // so what is printed runs as printed on a root that is not ready.
+        emitted.push(handoff(&LeaderboardEntry::Root(root_entry(
+            "/Volumes/My Drive",
+            3,
+            2,
+        ))));
         for (display, argv) in &emitted {
             assert!(display.contains("canon roots "));
             crate::Cli::try_parse_from(argv)
                 .unwrap_or_else(|e| panic!("emitted command must parse: {display}\n{e}"));
         }
+        let (display, argv) = emitted.last().unwrap();
+        assert!(display.contains("roots retire 'path:/Volumes/My Drive' --dry-run"));
+        assert_eq!(argv[3], "path:/Volumes/My Drive");
         // The spaced path is quoted for display and raw in the argv, the same
         // discipline the handoff lines follow.
         assert!(emitted[1].0.contains("'path:/Volumes/My Drive'"));
@@ -835,5 +1051,320 @@ mod tests {
     #[test]
     fn degenerate_messages_are_distinct() {
         assert_ne!(NO_ROOTS_MSG, NO_HASHED_MSG);
+    }
+
+    // The root entry's surface.
+
+    fn root_entry(root_path: &str, remaining: i64, places: usize) -> RootEntry {
+        let members: Vec<StructuralFinding> = (0..places)
+            .map(|i| {
+                let mut f = finding(pair(loc("/r2", "q")));
+                f.subject = loc(root_path, &format!("place{i}"));
+                f
+            })
+            .collect();
+        RootEntry {
+            root: Location {
+                root_id: 1,
+                root_path: root_path.to_string(),
+                rel_prefix: String::new(),
+            },
+            unresolved_remaining: remaining,
+            gain_bytes_upper: members.iter().map(|m| m.gain_bytes).sum(),
+            gain_files_upper: members.iter().map(|m| m.gain_files).sum(),
+            members,
+        }
+    }
+
+    #[test]
+    fn a_root_entry_states_a_remainder_and_never_claims_readiness() {
+        // Canon proves NOT READY and never proves the other side. An earlier
+        // draft of this entry carried "finishing this root is the decision
+        // here" and it was cut: that sentence is a readiness claim wearing a
+        // compliment. The entry states a remainder, and the review the handoff
+        // names is what is entitled to judge.
+        let (about, _) = root_entry_lines(&root_entry("/Volumes/oldmac", 3, 2), false);
+        assert_eq!(about[0], "/Volumes/oldmac  (whole root)");
+        assert_eq!(about[1], "3 unresolved sources remain");
+        let text = about.join(" ").to_lowercase();
+        for forbidden in ["ready", "almost", "nearly", "finish", "congrat", "done"] {
+            assert!(
+                !text.contains(forbidden),
+                "the entry must not say {forbidden:?}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_root_entry_states_a_bound_and_never_calls_it_gain() {
+        // A root's own places can be each other's evidence — two siblings
+        // holding copies of one object both count it, and at most one can go —
+        // so their sum overstates without a bound. `total gain:` asserts an
+        // achievability this figure does not have; `up to` is the whole claim.
+        // The arithmetic is pinned in the lens by
+        // `a_root_entrys_gain_does_not_double_count_content_shared_between_its_members`.
+        let (about, _) = root_entry_lines(&root_entry("/Volumes/oldmac", 3, 2), false);
+        assert_eq!(about[2], "2 places, up to 20 files · 2.0 KB");
+        assert!(
+            !about.join(" ").contains("gain"),
+            "the board's word for what acting resolves is not this figure's"
+        );
+    }
+
+    #[test]
+    fn a_zero_remainder_renders_as_a_fact() {
+        // Zero is an observation about rows, not a verdict: "no unresolved
+        // sources remain" is a fact, "ready" would be a judgment, and that one
+        // is the user's alone.
+        let (about, _) = root_entry_lines(&root_entry("/Volumes/oldmac", 0, 2), false);
+        assert_eq!(about[1], "no unresolved sources remain");
+        // Same fact beside a single place, which needs its root named.
+        assert_eq!(
+            remainder_line(0, Some("/Volumes/oldmac")),
+            "no unresolved sources remain on /Volumes/oldmac"
+        );
+        assert_eq!(
+            remainder_line(1, Some("/Volumes/oldmac")),
+            "1 unresolved source remains on /Volumes/oldmac"
+        );
+    }
+
+    /// A board built through the real lens, so this can assert **movement**
+    /// and not merely presence. Both directions, which is the whole point: the
+    /// ordering term ties outside the lens's regime, so a line appears on
+    /// exactly the entries nearness separated.
+    #[test]
+    fn the_nearness_line_appears_only_where_nearness_moved_the_order() {
+        use crate::core::domain::root::Root;
+        use crate::core::domain::source::Source;
+        use crate::sweep::domain::structural::StructuralSweep;
+        use crate::sweep::domain::{reduction_lens, LensParams, RootNearness, SweepStats};
+        use std::collections::HashSet;
+
+        fn root(id: i64) -> Root {
+            Root {
+                id,
+                path: format!("/r{id}"),
+                role: "source".to_string(),
+                comment: None,
+                last_scanned_at: None,
+                suspended: false,
+            }
+        }
+        // Unhashed rows are unresolved by the classifier's last arm — the
+        // cheapest honest way to give a root a remainder of exactly n.
+        fn rows(root_id: i64, n: i64, first_id: i64) -> Vec<Source> {
+            (0..n)
+                .map(|i| Source {
+                    id: first_id + i,
+                    root_id,
+                    root_path: format!("/r{root_id}"),
+                    rel_path: format!("f{i}"),
+                    object_id: None,
+                    size: 100,
+                    mtime: 0,
+                    excluded: false,
+                    object_excluded: None,
+                    device: 0,
+                    inode: 0,
+                    partial_hash: String::new(),
+                    basis_rev: 0,
+                    root_role: "source".to_string(),
+                    root_suspended: false,
+                    decision_id: None,
+                })
+                .collect()
+        }
+        fn place(root_id: i64, gain_bytes: u64) -> StructuralFinding {
+            let mut f = finding(pair(loc("/elsewhere", &format!("c{root_id}"))));
+            f.subject = Location {
+                root_id,
+                root_path: format!("/r{root_id}"),
+                rel_prefix: "place".to_string(),
+            };
+            f.gain_bytes = gain_bytes;
+            f
+        }
+        // `light` stands on the first root, `heavy` on the second.
+        fn board(
+            light_root: i64,
+            light_left: i64,
+            heavy_root: i64,
+            heavy_left: i64,
+        ) -> SweepReport {
+            let roots = vec![root(light_root), root(heavy_root)];
+            let mut sources = rows(light_root, light_left, 1_000);
+            sources.extend(rows(heavy_root, heavy_left, 100_000));
+            let nearness = RootNearness::project(&roots, &sources, &HashSet::new());
+            let ranked = reduction_lens(
+                StructuralSweep {
+                    findings: vec![
+                        place(light_root, 1_000_000_000),
+                        place(heavy_root, 50_000_000_000),
+                    ],
+                    stats: SweepStats {
+                        ubiquitous_objects_dropped: 0,
+                        ubiquitous_bytes_dropped: 0,
+                        below_floor_subjects: 0,
+                    },
+                },
+                &nearness,
+                &LensParams::default(),
+            );
+            let mut report = report_with(Vec::new(), 0);
+            report.entries = ranked.entries;
+            report.stated_remainders = ranked.stated_remainders;
+            report
+        }
+        fn first_subject(report: &SweepReport) -> &Location {
+            match &report.entries[0] {
+                LeaderboardEntry::Single(f) => &f.subject,
+                other => panic!("expected singles, got {other:?}"),
+            }
+        }
+        fn lines(report: &SweepReport) -> Vec<Option<String>> {
+            report
+                .entries
+                .iter()
+                .map(|e| match e {
+                    LeaderboardEntry::Single(f) => nearness_line(&f.subject, report),
+                    other => panic!("expected singles, got {other:?}"),
+                })
+                .collect()
+        }
+
+        // Inside the regime, nearness moves the order: a 1 GB place on a root
+        // with 3 left stands above a 50 GB place on a root with 40 left. Both
+        // entries carry the line, and it is what explains the inversion.
+        let moved = board(7, 3, 8, 40);
+        assert_eq!(first_subject(&moved).root_id, 7, "nearness moved the order");
+        assert_eq!(
+            lines(&moved),
+            vec![
+                Some("3 unresolved sources remain on /r7".to_string()),
+                Some("40 unresolved sources remain on /r8".to_string()),
+            ]
+        );
+
+        // Above the regime nearness ties, so it moves nothing and says
+        // nothing: 400 left against 4,000 left is not a difference this board
+        // ranks on, and the 50 GB place takes the slot on weight.
+        let tied = board(7, 400, 8, 4_000);
+        assert_eq!(first_subject(&tied).root_id, 8, "weight leads once it ties");
+        assert_eq!(lines(&tied), vec![None, None]);
+    }
+
+    #[test]
+    fn an_archive_root_top_gets_markers_but_no_retirement_handoff() {
+        // A place that *is* a root's top says so wherever it appears, and an
+        // archive root's top says both things — but an archive root is never
+        // retired, so it is handed off to judgment like any other place.
+        let mut f = finding(pair(loc("/a1", "q")));
+        f.subject = loc("/a1", "");
+        f.subject_is_root_top = true;
+        f.subject_is_archive = true;
+        assert_eq!(markers(&f), "  (whole root)  (in the archive)");
+        let (display, argv) = handoff(&LeaderboardEntry::Single(f));
+        assert!(display.starts_with("→ canon survey"));
+        assert!(!display.contains("retire"));
+        crate::Cli::try_parse_from(&argv).expect("handoff must parse");
+    }
+
+    #[test]
+    fn the_whole_root_marker_is_derived_not_inferred() {
+        // The criterion forbids the interface reading root-ness off the path.
+        // A subject with an empty prefix whose flag is unset renders nothing:
+        // if this line ever prints, something started inferring. The domain
+        // half is `subject_is_root_top_is_derived_not_inferred` in
+        // `sweep/domain/tests/assembly.rs`.
+        let mut f = finding(pair(loc("/r2", "q")));
+        f.subject = loc("/r1", "");
+        assert!(!f.subject_is_root_top);
+        assert_eq!(markers(&f), "");
+    }
+
+    #[test]
+    fn a_root_entrys_members_state_their_counterpart_standing() {
+        // Every ranking factor is a stated fact on the entry, and a root entry
+        // ranks on `counterpart_standing` aggregated over its members. A hub
+        // can leave it off a member line because its members share one
+        // counterpart whose standing is on the hub's own headline; a root
+        // entry's members each have their own, so it goes on the line. It is
+        // also the fact that makes acting on a member safe.
+        let mut entry = root_entry("/Volumes/oldmac", 3, 2);
+        if let RelationShape::Pair {
+            counterpart_is_archive,
+            ..
+        } = &mut entry.members[0].shape
+        {
+            *counterpart_is_archive = true;
+        }
+        entry.members[1].shape = RelationShape::Coverage {
+            locations: 7,
+            archived_locations: 2,
+            suspended_locations: 0,
+        };
+        let (_, members) = root_entry_lines(&entry, false);
+        assert!(members[0].contains("96% inside · archived · 10 files"));
+        assert!(members[1].contains("96% elsewhere · 2 archived · 10 files"));
+        // A hub member says it once, on the hub's headline, and not per line.
+        assert!(!member_line(&entry.members[0], false).contains("archived ·"));
+    }
+
+    #[test]
+    fn a_hub_lifted_from_inside_the_regime_prints_the_line_naming_that_root() {
+        // The rendered half of the hub extension. The domain pins that the
+        // lens picks the right root; this pins that the line actually reaches
+        // the screen, which nothing did while the only hub fixture here
+        // carried `nearness_root: None`.
+        let hub = |nearness_root| HubEntry {
+            counterpart: loc("/r2", "store"),
+            counterpart_is_archive: false,
+            counterpart_last_scanned_at: None,
+            nearness_root,
+            members: vec![finding(pair(loc("/r2", "store")))],
+            total_gain_bytes: 1_000,
+            total_gain_files: 10,
+        };
+        let root = Location {
+            root_id: 7,
+            root_path: "/r7".to_string(),
+            rel_prefix: String::new(),
+        };
+        let mut report = report_with(Vec::new(), 0);
+        report.stated_remainders.insert(7, 40);
+
+        let lifted = hub_lines(&hub(Some(root)), &report, 0);
+        assert!(lifted.contains(&"40 unresolved sources remain on /r7".to_string()));
+        // It sits above the gain line, where a single finding carries it too.
+        let nearness = lifted
+            .iter()
+            .position(|l| l.contains("unresolved"))
+            .unwrap();
+        let gain = lifted
+            .iter()
+            .position(|l| l.starts_with("total gain:"))
+            .unwrap();
+        assert!(nearness < gain);
+
+        // Nearness tied for this hub: no line, and the rest is unchanged.
+        let tied = hub_lines(&hub(None), &report, 0);
+        assert!(!tied.iter().any(|l| l.contains("unresolved")));
+        assert_eq!(tied.len(), lifted.len() - 1);
+    }
+
+    #[test]
+    fn root_entry_members_are_capped_and_the_omission_counted() {
+        // The hub already solved member flooding inside one slot; the root
+        // entry reuses the cap rather than re-manufacturing the problem.
+        let entry = root_entry("/Volumes/oldmac", 3, ENTRY_MEMBER_CAP + 4);
+        let (_, members) = root_entry_lines(&entry, false);
+        assert_eq!(members.len(), ENTRY_MEMBER_CAP + 1);
+        assert_eq!(members.last().unwrap(), "… 4 more (--all)");
+        // `--all` reveals what the cap hid — the floors and the cap, never a
+        // door the user closed.
+        let (_, all_members) = root_entry_lines(&entry, true);
+        assert_eq!(all_members.len(), ENTRY_MEMBER_CAP + 4);
+        assert!(all_members.iter().all(|l| !l.contains("more (--all)")));
     }
 }

@@ -61,7 +61,7 @@ mod tests {
     use super::*;
     use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
     use crate::core::domain::fate::DecisionFamily;
-    use crate::core::domain::resolution::build_account;
+    use crate::core::domain::resolution::{build_account, unresolved_remainder};
     use crate::core::domain::source::Source;
 
     fn source(id: i64, object_id: Option<i64>, excluded: bool, object_excluded: bool) -> Source {
@@ -289,5 +289,51 @@ mod tests {
         assert!(!not_ready.blocks(true));
         assert!(!Readiness::NoBlockersFound.blocks(false));
         assert!(!Readiness::NoBlockersFound.blocks(true));
+    }
+    #[test]
+    fn a_zero_remainder_is_exactly_no_blockers_found() {
+        // Half of the join the sweep's root-nearness bucket 0 rests on: the
+        // remainder projection and this verdict are one fact read two ways, so
+        // a board reading "bucket 0" is reading NoBlockersFound. The other
+        // half — bucket 0 iff a zero remainder — is
+        // `bucket_zero_agrees_with_no_blockers_found` in the sweep's lens
+        // tests, which cannot name `Readiness` through this subsystem's seal.
+        // Two tests, because the seal is real; one claim.
+        let archived = archived_set(&[10]);
+        let mut rows = vec![
+            source(1, Some(10), false, false), // covered
+            source(2, Some(11), true, false),  // excluded
+        ];
+        let refs: Vec<&Source> = rows.iter().collect();
+        assert_eq!(unresolved_remainder(&refs, &archived), 0);
+        let account = build_account(
+            &rows,
+            &[],
+            &archived,
+            &archived_set(&[]),
+            &[],
+            &HashMap::new(),
+        );
+        assert_eq!(derive_readiness(&account), Readiness::NoBlockersFound);
+
+        // One row left standing moves both together, in the same direction.
+        rows.push(source(3, Some(12), false, false));
+        let refs: Vec<&Source> = rows.iter().collect();
+        assert_eq!(unresolved_remainder(&refs, &archived), 1);
+        let account = build_account(
+            &rows,
+            &[],
+            &archived,
+            &archived_set(&[]),
+            &[],
+            &HashMap::new(),
+        );
+        assert_eq!(
+            derive_readiness(&account),
+            Readiness::NotReady {
+                unresolved: 1,
+                unhashed: 0
+            }
+        );
     }
 }

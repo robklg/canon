@@ -2,8 +2,11 @@
 //! cross-cutting helpers only; a helper used by a single test file lives
 //! there instead.
 
+use std::collections::HashSet;
+
 use crate::core::domain::root::Root;
 use crate::core::domain::source::Source;
+use crate::sweep::domain::lens::RootNearness;
 use crate::sweep::domain::structural::{
     build_universe, compute_structural, FindingNature, FindingTier, LocalizedSubject, Location,
     RelationShape, StructuralFinding, StructuralSweep, SweepParams, Universe,
@@ -149,6 +152,34 @@ pub(super) fn scale_fixture() -> (Vec<Source>, Vec<Root>) {
     (sources, roots)
 }
 
+/// A nearness projection built the way production builds it — real roots,
+/// real rows, the real remainder — rather than a hand-stuffed map, so a test
+/// can never assert a bucket the projection could not produce. Each pair is
+/// `(root id, unresolved rows to give it)`; the rows are unhashed, which is
+/// the classifier's own last arm and the cheapest honest way to land on
+/// exactly N.
+pub(super) fn nearness(remainders: &[(i64, i64)]) -> RootNearness {
+    let roots: Vec<Root> = remainders
+        .iter()
+        .map(|&(id, _)| make_root(id, &format!("/r{id}")))
+        .collect();
+    let mut sources: Vec<Source> = Vec::new();
+    let mut next_id = 1i64;
+    for &(root_id, count) in remainders {
+        for _ in 0..count {
+            sources.push(make_source(
+                next_id,
+                root_id,
+                &format!("f{next_id}"),
+                100,
+                None,
+            ));
+            next_id += 1;
+        }
+    }
+    RootNearness::project(&roots, &sources, &HashSet::new())
+}
+
 pub(super) fn lens_loc(root_path: &str, rel: &str) -> Location {
     Location {
         root_id: 1,
@@ -169,6 +200,7 @@ pub(super) fn lens_finding(
         subject: lens_loc("/r1", rel),
         subject_suspended: false,
         subject_is_archive: false,
+        subject_is_root_top: false,
         subject_last_scanned_at: None,
         tier,
         below_floors: false,

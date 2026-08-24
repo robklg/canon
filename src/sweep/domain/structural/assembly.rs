@@ -33,6 +33,13 @@ pub struct StructuralFinding {
     /// The subject stands on an archive root — under the triage lens its
     /// content is already resolved; surfaces honestly marked.
     pub subject_is_archive: bool,
+    /// The subject *is* the root's own top — the whole root, not a place
+    /// inside it. Derived here from the folder tree (the top is the one node
+    /// with no parent) for the same reason `subject_is_archive` is derived
+    /// here: the interface must never infer root-ness from an empty path
+    /// prefix. A field, not a computation — nothing about what is discovered
+    /// or emitted moves with it.
+    pub subject_is_root_top: bool,
     pub subject_last_scanned_at: Option<i64>,
     pub tier: FindingTier,
     /// True when this finding sits below the emit floors — discovered by the
@@ -171,6 +178,7 @@ fn assemble_finding(
         },
         subject_suspended: root.suspended,
         subject_is_archive: root.role == "archive",
+        subject_is_root_top: rd.tree.parent(raw.fid).is_none(),
         subject_last_scanned_at: root.last_scanned_at,
         tier: raw.tier,
         below_floors: raw.below_floors,
