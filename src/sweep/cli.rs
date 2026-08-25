@@ -14,7 +14,7 @@ use crate::core::domain::format::{format_count, format_size, shell_quote};
 use crate::core::repo::Db;
 use crate::notes::format_note_date;
 use crate::sweep::domain::{
-    HubEntry, LeaderboardEntry, Location, RelationClass, RelationShape, RootEntry,
+    HubEntry, LeaderboardEntry, Location, ParentEntry, RelationClass, RelationShape, RootEntry,
     StructuralFinding, SuspendedRootTally, SweepParams,
 };
 use crate::sweep::ops::{compute_sweep, SweepOptions, SweepOutcome, SweepReport};
@@ -91,6 +91,9 @@ fn print_report(report: &SweepReport, now: i64, all: bool) {
             }
             LeaderboardEntry::Root(root) => {
                 print_root_entry(i + 1, root, report, all, &handoff_line)
+            }
+            LeaderboardEntry::Parent(parent) => {
+                print_parent_entry(i + 1, parent, report, all, &handoff_line)
             }
             LeaderboardEntry::Hub(hub) => print_hub(i + 1, hub, report, now, all, &handoff_line),
         }
@@ -368,6 +371,9 @@ fn print_finding(
     if finding.hash_coverage_pct < 0.9995 {
         println!("    compared on {} by size", pct(finding.hash_coverage_pct));
     }
+    if let Some(line) = reciprocity_line(&finding.subject, report) {
+        println!("    {line}");
+    }
     if let Some(line) = nearness_line(&finding.subject, report) {
         println!("    {line}");
     }
@@ -451,6 +457,84 @@ fn print_root_entry(
     println!("    {handoff_line}");
 }
 
+/// A run of siblings as one slot, headlined by the parent they share. Ten
+/// month folders each mirroring their own counterpart are one situation told
+/// ten ways, and the board owes it one line.
+fn print_parent_entry(
+    rank: usize,
+    entry: &ParentEntry,
+    report: &SweepReport,
+    all: bool,
+    handoff_line: &str,
+) {
+    let (about, members) = parent_entry_lines(entry, report, all);
+    let mut about = about.into_iter();
+    println!("#{rank}  {}", about.next().unwrap_or_default());
+    for line in about {
+        println!("    {line}");
+    }
+    print_excluded_context(&entry.parent, report, "    ");
+    print_notes(&entry.parent, report, "    ", None);
+    for line in members {
+        println!("      {line}");
+    }
+    println!("    {handoff_line}");
+}
+
+/// A parent entry's own text: the parent, what the run is and how much of the
+/// parent it accounts for, the bound, then one line per shown member.
+/// Returned rather than printed for the same reason `root_entry_lines` is.
+///
+/// **No coined noun.** "N places under here", a percentage of the parent, and
+/// the members — the surface never names the shape, because naming it would
+/// mint a domain word `/vision` withheld with the bar set.
+///
+/// **The nearness line is not optional here.** A run's members share one root,
+/// the entry ranks on that root's nearness like any other entry, and the board
+/// carries no composite score — so a factor that ordered this slot and appears
+/// nowhere on it would break the rule that a line's absence means nearness
+/// could not have moved the entry.
+fn parent_entry_lines(
+    entry: &ParentEntry,
+    report: &SweepReport,
+    all: bool,
+) -> (Vec<String>, Vec<String>) {
+    let mut about = vec![
+        abs_path(&entry.parent),
+        format!(
+            "{} under here · {} of this folder",
+            counted_phrase(entry.members.len(), "place"),
+            pct(entry.coverage)
+        ),
+    ];
+    if let Some(line) = nearness_line(&entry.parent, report) {
+        about.push(line);
+    }
+    about.extend([
+        // `up to`, and never `total gain:` — the root entry's discipline at a
+        // third site, and a sibling run is the exact shape it was written
+        // from. Two siblings below their content's common ancestor each
+        // truthfully count the other's copies, and at most one can be let go.
+        format!(
+            "up to {} · {}",
+            files_phrase(entry.gain_files_upper),
+            format_size(entry.gain_bytes_upper as i64)
+        ),
+    ]);
+    let shown = shown_members(entry.members.len(), all);
+    let mut members: Vec<String> = entry.members[..shown]
+        .iter()
+        .map(|m| member_line(m, true))
+        .collect();
+    if entry.members.len() > shown {
+        members.push(format!(
+            "… {} more (--all)",
+            format_count(entry.members.len() - shown)
+        ));
+    }
+    (about, members)
+}
+
 /// A root entry's own text: what it says about the root, then one line per
 /// shown member (with the omission count where the cap trimmed). Returned
 /// rather than printed so the surface is testable — the same discipline
@@ -499,6 +583,20 @@ fn nearness_line(subject: &Location, report: &SweepReport) -> Option<String> {
         .stated_remainders
         .get(&subject.root_id)
         .map(|remaining| remainder_line(*remaining, Some(&subject.root_path)))
+}
+
+/// That another place mirrors this one back. Two places mirroring each other
+/// are one overlap told twice and take one slot — but the collapse must not
+/// delete the fact, because the other place really does mirror this one and
+/// one decision resolves both. The lens decides which side stayed; this only
+/// renders what it decided.
+fn reciprocity_line(subject: &Location, report: &SweepReport) -> Option<String> {
+    report.reciprocal_places.get(subject).map(|other| {
+        format!(
+            "also mirrored by {} — one decision resolves both",
+            abs_path(other)
+        )
+    })
 }
 
 /// A hub's own lines: the shared counterpart it is headlined by, what that
@@ -558,9 +656,11 @@ fn shown_members(total: usize, all: bool) -> usize {
 /// `with_standing` states each member's counterpart standing on its own line.
 /// A hub does not need it and passes `false`: its members share one
 /// counterpart and the hub's headline already states that counterpart's
-/// standing. A root entry's members each have their own, so without this the
-/// entry would rank on `counterpart_standing` and state it nowhere — the one
-/// thing the board's "every ranking factor is a stated fact" rule forbids.
+/// standing. A root entry's and a parent entry's members each have their own,
+/// so without this those entries would rank on `counterpart_standing` and
+/// state it nowhere — the one thing the board's "every ranking factor is a
+/// stated fact" rule forbids. It is also the fact that makes acting on a
+/// member safe.
 fn member_line(member: &StructuralFinding, with_standing: bool) -> String {
     let relation = match &member.shape {
         RelationShape::Pair {
@@ -716,6 +816,14 @@ fn handoff(entry: &LeaderboardEntry) -> (String, Vec<String>) {
             format!("path:{}", entry.root.root_path),
             "--dry-run".into(),
         ],
+        // The headline is where the decision is, and the handoff goes there
+        // too. Surveying the parent is right at any coverage the gate admits,
+        // because survey shows the **whole** parent — including the part no
+        // member accounts for — which is the honest picture rather than a
+        // narrowed one.
+        LeaderboardEntry::Parent(entry) => {
+            vec!["canon".into(), "survey".into(), abs_path(&entry.parent)]
+        }
         LeaderboardEntry::Hub(hub) => {
             vec!["canon".into(), "survey".into(), abs_path(&hub.counterpart)]
         }
@@ -860,6 +968,12 @@ mod tests {
                 total_gain_files: 10,
             }),
             LeaderboardEntry::Single(finding(pair(loc("/Volumes/My Drive", "old backup/photos")))),
+            // A run hands off to its parent — the headline is where the
+            // decision is, and the handoff goes there too. Surveying the
+            // parent shows the whole of it, including the part no member
+            // accounts for, which is the honest picture rather than a
+            // narrowed one.
+            LeaderboardEntry::Parent(parent_entry("photos", 0.88, 3)),
         ];
         for entry in &entries {
             let (display, argv) = handoff(entry);
@@ -878,6 +992,42 @@ mod tests {
         assert_eq!(argv.last().unwrap(), "/Volumes/My Drive/old backup/photos");
     }
 
+    /// A source root at `/r<id>`, and one of its rows. Second use is where
+    /// duplication is extracted: two tests here build boards out of real
+    /// `Root`/`Source` values, and a second hand-spelled copy of a struct with
+    /// this many fields is where the two quietly start to differ.
+    fn source_root(id: i64) -> crate::core::domain::root::Root {
+        crate::core::domain::root::Root {
+            id,
+            path: format!("/r{id}"),
+            role: "source".to_string(),
+            comment: None,
+            last_scanned_at: None,
+            suspended: false,
+        }
+    }
+
+    fn source_row(id: i64, root_id: i64, rel: &str) -> crate::core::domain::source::Source {
+        crate::core::domain::source::Source {
+            id,
+            root_id,
+            root_path: format!("/r{root_id}"),
+            rel_path: rel.to_string(),
+            object_id: None,
+            size: 100,
+            mtime: 0,
+            excluded: false,
+            object_excluded: None,
+            device: 0,
+            inode: 0,
+            partial_hash: String::new(),
+            basis_rev: 0,
+            root_role: "source".to_string(),
+            root_suspended: false,
+            decision_id: None,
+        }
+    }
+
     fn report_with(suspended: Vec<SuspendedRootTally>, beyond_cap: usize) -> SweepReport {
         SweepReport {
             entries: Vec::new(),
@@ -889,6 +1039,7 @@ mod tests {
                 below_floor_subjects: 0,
             },
             stated_remainders: std::collections::HashMap::new(),
+            reciprocal_places: std::collections::HashMap::new(),
             empty_files_ignored: 0,
             excluded_context: std::collections::HashMap::new(),
             notes: std::collections::HashMap::new(),
@@ -1135,44 +1286,18 @@ mod tests {
     /// exactly the entries nearness separated.
     #[test]
     fn the_nearness_line_appears_only_where_nearness_moved_the_order() {
-        use crate::core::domain::root::Root;
         use crate::core::domain::source::Source;
         use crate::sweep::domain::structural::StructuralSweep;
-        use crate::sweep::domain::{reduction_lens, LensParams, RootNearness, SweepStats};
+        use crate::sweep::domain::{
+            reduction_lens, LensParams, PlaceCensus, RootNearness, SweepStats,
+        };
         use std::collections::HashSet;
 
-        fn root(id: i64) -> Root {
-            Root {
-                id,
-                path: format!("/r{id}"),
-                role: "source".to_string(),
-                comment: None,
-                last_scanned_at: None,
-                suspended: false,
-            }
-        }
         // Unhashed rows are unresolved by the classifier's last arm — the
         // cheapest honest way to give a root a remainder of exactly n.
         fn rows(root_id: i64, n: i64, first_id: i64) -> Vec<Source> {
             (0..n)
-                .map(|i| Source {
-                    id: first_id + i,
-                    root_id,
-                    root_path: format!("/r{root_id}"),
-                    rel_path: format!("f{i}"),
-                    object_id: None,
-                    size: 100,
-                    mtime: 0,
-                    excluded: false,
-                    object_excluded: None,
-                    device: 0,
-                    inode: 0,
-                    partial_hash: String::new(),
-                    basis_rev: 0,
-                    root_role: "source".to_string(),
-                    root_suspended: false,
-                    decision_id: None,
-                })
+                .map(|i| source_row(first_id + i, root_id, &format!("f{i}")))
                 .collect()
         }
         fn place(root_id: i64, gain_bytes: u64) -> StructuralFinding {
@@ -1192,7 +1317,7 @@ mod tests {
             heavy_root: i64,
             heavy_left: i64,
         ) -> SweepReport {
-            let roots = vec![root(light_root), root(heavy_root)];
+            let roots = vec![source_root(light_root), source_root(heavy_root)];
             let mut sources = rows(light_root, light_left, 1_000);
             sources.extend(rows(heavy_root, heavy_left, 100_000));
             let nearness = RootNearness::project(&roots, &sources, &HashSet::new());
@@ -1209,6 +1334,7 @@ mod tests {
                     },
                 },
                 &nearness,
+                &PlaceCensus::default(),
                 &LensParams::default(),
             );
             let mut report = report_with(Vec::new(), 0);
@@ -1351,6 +1477,205 @@ mod tests {
         let tied = hub_lines(&hub(None), &report, 0);
         assert!(!tied.iter().any(|l| l.contains("unresolved")));
         assert_eq!(tied.len(), lifted.len() - 1);
+    }
+
+    // The parent entry's surface.
+
+    /// A run of `places` siblings under one parent, each pointing at its own
+    /// counterpart.
+    fn parent_entry(parent_rel: &str, coverage: f64, places: usize) -> ParentEntry {
+        let members: Vec<StructuralFinding> = (0..places)
+            .map(|i| {
+                let mut f = finding(pair(loc("/r2", "q")));
+                f.subject = loc("/r1", &format!("{parent_rel}/place{i}"));
+                f
+            })
+            .collect();
+        ParentEntry {
+            parent: loc("/r1", parent_rel),
+            coverage,
+            gain_bytes_upper: members.iter().map(|m| m.gain_bytes).sum(),
+            gain_files_upper: members.iter().map(|m| m.gain_files).sum(),
+            members,
+        }
+    }
+
+    #[test]
+    fn each_member_states_its_own_counterpart_standing() {
+        // Every ranking factor is a stated fact on the entry, and a parent
+        // entry ranks on `counterpart_standing` aggregated over its members. A
+        // hub can leave it off a member line because its members share one
+        // counterpart whose standing sits on the hub's own headline; a run's
+        // members each pair with their own, so it goes on the line. It is also
+        // the fact that makes acting on a member safe.
+        let mut entry = parent_entry("photos", 0.88, 2);
+        if let RelationShape::Pair {
+            counterpart_is_archive,
+            ..
+        } = &mut entry.members[0].shape
+        {
+            *counterpart_is_archive = true;
+        }
+        entry.members[1].shape = RelationShape::Coverage {
+            locations: 7,
+            archived_locations: 2,
+            suspended_locations: 0,
+        };
+        let (_, members) = parent_entry_lines(&entry, &report_with(Vec::new(), 0), false);
+        assert!(members[0].contains("96% inside · archived · 10 files"));
+        assert!(members[1].contains("96% elsewhere · 2 archived · 10 files"));
+    }
+
+    #[test]
+    fn a_parent_entry_states_a_bound_and_never_calls_it_gain() {
+        // A run's members can be each other's evidence — two siblings below
+        // their content's common ancestor each count the other's copies, and
+        // at most one can go — so their sum overstates without a bound.
+        // `total gain:` asserts an achievability this figure does not have;
+        // `up to` is the whole claim. The arithmetic is pinned in the lens by
+        // `a_parent_entrys_gain_does_not_double_count_content_shared_between_its_members`.
+        let (about, _) = parent_entry_lines(
+            &parent_entry("photos", 0.88, 2),
+            &report_with(Vec::new(), 0),
+            false,
+        );
+        assert!(
+            about.contains(&"up to 20 files · 2.0 KB".to_string()),
+            "{about:?}"
+        );
+        assert!(
+            !about.join(" ").contains("gain"),
+            "the board's word for what acting resolves is not this figure's"
+        );
+    }
+
+    #[test]
+    fn a_parent_entry_states_its_coverage() {
+        // The entry's claim is that this parent is where the decision is, and
+        // the coverage figure is what makes that claim checkable: how much of
+        // the parent the run actually accounts for. Stated in the surface's
+        // own registered words — places, a percentage — and never a coined
+        // noun for the shape.
+        let (about, _) = parent_entry_lines(
+            &parent_entry("photos", 0.7, 33),
+            &report_with(Vec::new(), 0),
+            false,
+        );
+        assert_eq!(about[0], "/r1/photos");
+        assert_eq!(about[1], "33 places under here · 70% of this folder");
+        let text = about.join(" ").to_lowercase();
+        for coined in ["sibling", "run", "cluster", "group"] {
+            assert!(
+                !text.contains(coined),
+                "the surface must not name the shape: {coined:?} in {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_parent_entry_states_the_remainder_that_ranked_it() {
+        // Driven through the real lens so this observes **movement**, not
+        // presence. A run worth 1 GB on a root with forty left outranks a
+        // 50 GB place on a root with four thousand left — nearness is what
+        // inverts them, and the board carries no composite score, so the entry
+        // that won must say what won it. Without the line the reader sees a
+        // light entry above a heavy one with nothing explaining the order.
+        use crate::core::domain::source::Source;
+        use crate::sweep::domain::structural::StructuralSweep;
+        use crate::sweep::domain::{
+            reduction_lens, LensParams, PlaceCensus, RootNearness, SweepStats,
+        };
+        use std::collections::HashSet;
+
+        fn place(root_id: i64, rel: &str, gain_bytes: u64) -> StructuralFinding {
+            let mut f = finding(pair(loc("/elsewhere", "c")));
+            f.subject = Location {
+                root_id,
+                root_path: format!("/r{root_id}"),
+                rel_prefix: rel.to_string(),
+            };
+            f.gain_bytes = gain_bytes;
+            f
+        }
+
+        // 40 unresolved on /r7 — above `root_entry_bucket`, so the root axis
+        // does not claim it, and inside `nearness_render_bucket`, so nearness
+        // both ranks it and is stated. 4,000 on /r8 ties out of the regime.
+        let roots = vec![source_root(7), source_root(8)];
+        let mut sources: Vec<Source> = (0..40)
+            .map(|i| source_row(1_000 + i, 7, &format!("photos/{}/f{i}", i % 2)))
+            .collect();
+        sources.extend((0..4_000).map(|i| source_row(100_000 + i, 8, &format!("heavy/f{i}"))));
+        let nearness = RootNearness::project(&roots, &sources, &HashSet::new());
+        let refs: Vec<&Source> = sources.iter().collect();
+        let census = PlaceCensus::project(refs.iter().copied());
+        let ranked = reduction_lens(
+            StructuralSweep {
+                findings: vec![
+                    place(7, "photos/0", 500_000_000),
+                    place(7, "photos/1", 500_000_000),
+                    place(8, "heavy", 50_000_000_000),
+                ],
+                stats: SweepStats {
+                    ubiquitous_objects_dropped: 0,
+                    ubiquitous_bytes_dropped: 0,
+                    below_floor_subjects: 0,
+                },
+            },
+            &nearness,
+            &census,
+            &LensParams::default(),
+        );
+        let mut report = report_with(Vec::new(), 0);
+        report.entries = ranked.entries;
+        report.stated_remainders = ranked.stated_remainders;
+
+        let entry = match &report.entries[0] {
+            LeaderboardEntry::Parent(p) => p,
+            other => panic!("the run must take the top slot: {other:?}"),
+        };
+        let (about, _) = parent_entry_lines(entry, &report, false);
+        assert_eq!(about[0], "/r7/photos");
+        assert!(
+            about.contains(&"40 unresolved sources remain on /r7".to_string()),
+            "the entry must state the term that ranked it: {about:?}"
+        );
+        // It sits above the bound, where every other entry kind carries it.
+        let nearness_at = about.iter().position(|l| l.contains("unresolved")).unwrap();
+        let bound_at = about.iter().position(|l| l.starts_with("up to")).unwrap();
+        assert!(nearness_at < bound_at);
+        // And nearness really did move the order: the 50 GB place is below.
+        assert!(matches!(report.entries[1], LeaderboardEntry::Single(_)));
+    }
+
+    #[test]
+    fn parent_entry_members_are_capped_and_the_omission_counted() {
+        // The hub solved member flooding inside one slot and the root entry
+        // reused the cap; a third entry kind must not re-manufacture the
+        // problem in its own. Omissions counted, `--all` revealing them.
+        let entry = parent_entry("photos", 0.7, ENTRY_MEMBER_CAP + 4);
+        let (_, members) = parent_entry_lines(&entry, &report_with(Vec::new(), 0), false);
+        assert_eq!(members.len(), ENTRY_MEMBER_CAP + 1);
+        assert_eq!(members.last().unwrap(), "… 4 more (--all)");
+        let (_, all_members) = parent_entry_lines(&entry, &report_with(Vec::new(), 0), true);
+        assert_eq!(all_members.len(), ENTRY_MEMBER_CAP + 4);
+        assert!(all_members.iter().all(|l| !l.contains("more (--all)")));
+    }
+
+    #[test]
+    fn a_reciprocal_survivor_states_it_on_the_board() {
+        // The rendered half of the collapse. The lens decides which side
+        // stayed; this pins that the fact reaches the screen, and that a place
+        // with no reciprocal partner says nothing.
+        let mut report = report_with(Vec::new(), 0);
+        report
+            .reciprocal_places
+            .insert(loc("/r1", "downloads/tools"), loc("/r1", "tools"));
+        assert_eq!(
+            reciprocity_line(&loc("/r1", "downloads/tools"), &report),
+            Some("also mirrored by /r1/tools — one decision resolves both".to_string())
+        );
+        assert_eq!(reciprocity_line(&loc("/r1", "tools"), &report), None);
     }
 
     #[test]

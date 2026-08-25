@@ -16,8 +16,8 @@ use crate::core::domain::source::Source;
 use crate::core::repo::{self, Connection};
 use crate::notes::{fetch_by_roots, Note};
 use crate::sweep::domain::{
-    compute_structural, reduction_lens, LeaderboardEntry, LensParams, Location, RelationShape,
-    RootNearness, SuspendedRootTally, SweepParams, SweepStats,
+    compute_structural, reduction_lens, LeaderboardEntry, LensParams, Location, PlaceCensus,
+    RelationShape, RootNearness, SuspendedRootTally, SweepParams, SweepStats,
 };
 
 /// Default number of leaderboard entries shown; a hub occupies one.
@@ -60,6 +60,10 @@ pub struct SweepReport {
     /// Roots whose remainder the board states beside an entry, by root id.
     /// The lens decides where the fact appears; the interface only renders it.
     pub stated_remainders: HashMap<i64, i64>,
+    /// Places that mirror each other, by the surviving place's subject: where
+    /// two entries stated one overlap from opposite ends the board shows one,
+    /// and says on it that the other place mirrors back.
+    pub reciprocal_places: HashMap<Location, Location>,
     /// Present, non-excluded sources set aside as contentless.
     pub empty_files_ignored: usize,
     /// Excluded present sources under each subject, where substantial
@@ -121,10 +125,17 @@ pub fn compute_sweep(conn: &Connection, options: &SweepOptions) -> Result<SweepO
     let archived = repo::object::batch_check_archived(conn, &object_ids, None)?;
     let nearness = RootNearness::project(&roots, &all_sources, &archived);
 
+    // The sibling-parent axis's coverage figure, projected from the same slice
+    // the structural computation is given — numerator and denominator over one
+    // population, and no second query: the sweep already holds every present
+    // source in the universe.
+    let census = PlaceCensus::project(kept.iter().copied());
+
     let lens_params = LensParams::default();
     let ranked = reduction_lens(
         compute_structural(&kept, &roots, &params),
         &nearness,
+        &census,
         &lens_params,
     );
 
@@ -178,6 +189,7 @@ pub fn compute_sweep(conn: &Connection, options: &SweepOptions) -> Result<SweepO
         beyond_cap,
         suspended: ranked.suspended,
         stated_remainders: ranked.stated_remainders,
+        reciprocal_places: ranked.reciprocal_places,
         stats: ranked.stats,
         empty_files_ignored,
         excluded_context,
@@ -188,10 +200,11 @@ pub fn compute_sweep(conn: &Connection, options: &SweepOptions) -> Result<SweepO
 /// The locations a note surfaces at: the subject and, for pair relations,
 /// the counterpart (hubs: the shared counterpart plus each member subject).
 ///
-/// A **root entry** names only its root. Its headline is the whole root, and
-/// the note lookup matches a location's whole subtree, so every note on the
-/// root already surfaces there — listing the members too would print each of
-/// them a second time. One entry about one root speaks once about it.
+/// A **root entry** names only its root, and a **parent entry** only its
+/// parent. The headline is the place the whole entry is about, and the note
+/// lookup matches a location's whole subtree, so every note under it already
+/// surfaces there — listing the members too would print each of them a second
+/// time. One entry about one place speaks once about it.
 fn note_locations(entry: &LeaderboardEntry) -> Vec<&Location> {
     match entry {
         LeaderboardEntry::Single(f) => {
@@ -202,6 +215,7 @@ fn note_locations(entry: &LeaderboardEntry) -> Vec<&Location> {
             locs
         }
         LeaderboardEntry::Root(r) => vec![&r.root],
+        LeaderboardEntry::Parent(p) => vec![&p.parent],
         LeaderboardEntry::Hub(h) => {
             let mut locs = vec![&h.counterpart];
             locs.extend(h.members.iter().map(|m| &m.subject));
@@ -211,13 +225,15 @@ fn note_locations(entry: &LeaderboardEntry) -> Vec<&Location> {
 }
 
 /// The subject locations of an entry — where "here" points in the excluded
-/// context line. A root entry points at its root, for the same reason its
-/// notes do: the count under the headline is the root's own, and a per-member
-/// count beside it would partition the same number twice over.
+/// context line. A root entry points at its root and a parent entry at its
+/// parent, for the same reason their notes do: the count under the headline is
+/// that place's own, and a per-member count beside it would partition the same
+/// number twice over.
 fn subject_locations(entry: &LeaderboardEntry) -> Vec<&Location> {
     match entry {
         LeaderboardEntry::Single(f) => vec![&f.subject],
         LeaderboardEntry::Root(r) => vec![&r.root],
+        LeaderboardEntry::Parent(p) => vec![&p.parent],
         LeaderboardEntry::Hub(h) => h.members.iter().map(|m| &m.subject).collect(),
     }
 }
@@ -231,6 +247,7 @@ mod tests {
     };
     use crate::notes::insert;
     use crate::sweep::domain::structural::{compute_structural, FindingNature};
+    use crate::sweep::domain::LensParams;
 
     /// Two roots with one 20 MB duplicated folder (`big` ↔ `q`) and unique
     /// noise keeping the subjects from lifting to the whole root.
@@ -262,8 +279,8 @@ mod tests {
 
     /// Every place a report puts on the board, root-entry members included.
     /// Deliberately not `subject_locations`, which answers a narrower
-    /// production question ("where does `here` point?") and names a root entry
-    /// by its root rather than by the places inside it. These fixtures are
+    /// production question ("where does `here` point?") and names a root or
+    /// parent entry by its headline rather than by the places inside it. These fixtures are
     /// small enough that most of their roots read as near-done, so a helper
     /// that could not see inside a root entry would quietly stop seeing most
     /// of the board.
@@ -273,6 +290,7 @@ mod tests {
             .iter()
             .flat_map(|entry| match entry {
                 LeaderboardEntry::Root(r) => r.members.iter().map(|m| &m.subject).collect(),
+                LeaderboardEntry::Parent(p) => p.members.iter().map(|m| &m.subject).collect(),
                 other => subject_locations(other),
             })
             .map(|l| (l.root_path.clone(), l.rel_prefix.clone()))
@@ -633,6 +651,77 @@ mod tests {
             .notes
             .keys()
             .all(|loc| !(loc.root_id == r1 && loc.rel_prefix == "noise")));
+    }
+
+    #[test]
+    fn the_coverage_denominator_counts_only_comparison_participating_rows() {
+        // The judgment this pins end to end: a parent entry's coverage is
+        // measured over the **kept** slice — present, non-excluded,
+        // non-contentless — and not over every present source.
+        //
+        // It is a flip, not a rounding difference. Under `photos` sit 70 kept
+        // rows, of which 60 lie under the two members, plus 100 excluded rows
+        // and 50 empty ones. Over the kept slice the run accounts for 60/70 =
+        // 86% and the entry forms; over every present row it would read
+        // 60/220 = 27%, fall under the gate, and no entry would exist at all.
+        // So swapping the population at the one projection site in this file
+        // fails here rather than silently changing what the board shows.
+        //
+        // Excluded content is resolution rather than overlap and puts nothing
+        // further at stake under the parent; an empty source travels with its
+        // place and is resolved with the place's own fate. Neither belongs in
+        // a figure about how much of the parent this run accounts for.
+        let conn = setup_test_db();
+        let r1 = insert_root(&conn, "/r1", "source", false);
+        let r2 = insert_root(&conn, "/r2", "source", false);
+        for i in 0..30 {
+            let a = insert_object(&conn, &format!("a{i}"), false);
+            insert_source_with_size(&conn, r1, &format!("photos/a/f{i}"), Some(a), 1_000_000);
+            insert_source_with_size(&conn, r2, &format!("one/f{i}"), Some(a), 1_000_000);
+            let b = insert_object(&conn, &format!("b{i}"), false);
+            insert_source_with_size(&conn, r1, &format!("photos/b/f{i}"), Some(b), 1_000_000);
+            insert_source_with_size(&conn, r2, &format!("two/f{i}"), Some(b), 1_000_000);
+        }
+        // Unmatched content directly under `photos`, so the descent reaches
+        // the two children rather than stopping at the parent.
+        for i in 0..10 {
+            let u = insert_object(&conn, &format!("u{i}"), false);
+            insert_source_with_size(&conn, r1, &format!("photos/misc/u{i}"), Some(u), 1_000_000);
+        }
+        // The two populations part company here: excluded and empty rows sit
+        // under the parent and under no member.
+        for i in 0..100 {
+            insert_source_excluded(&conn, r1, &format!("photos/junk/e{i}"), None);
+        }
+        let empty = insert_object(&conn, "empty", false);
+        for i in 0..50 {
+            insert_source_with_size(&conn, r1, &format!("photos/void/z{i}"), Some(empty), 0);
+        }
+        // Noise keeping `/r2` from lifting whole.
+        for i in 0..10 {
+            let n = insert_object(&conn, &format!("n{i}"), false);
+            insert_source_with_size(&conn, r2, &format!("noise/n{i}"), Some(n), 5_000_000);
+        }
+
+        let report = report(&conn, &default_options());
+        let entry = report
+            .entries
+            .iter()
+            .find_map(|e| match e {
+                LeaderboardEntry::Parent(p) if p.parent.rel_prefix == "photos" => Some(p),
+                _ => None,
+            })
+            .expect("the run forms — over the kept slice it clears the gate");
+        assert_eq!(entry.members.len(), 2);
+        assert!(
+            (entry.coverage - 60.0 / 70.0).abs() < 1e-9,
+            "{}",
+            entry.coverage
+        );
+        assert!(
+            entry.coverage > LensParams::default().sibling_parent_coverage,
+            "and the other population would put it under the gate"
+        );
     }
 
     #[test]

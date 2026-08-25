@@ -12,8 +12,8 @@ mod tests;
 // so `ops.rs`/`cli.rs`, siblings of this module under `sweep`, can reach the
 // structural/lens items they compose without piercing the outer barrel.
 pub use lens::{
-    reduction_lens, HubEntry, LeaderboardEntry, LensParams, RootEntry, RootNearness,
-    SuspendedRootTally,
+    reduction_lens, HubEntry, LeaderboardEntry, LensParams, ParentEntry, PlaceCensus, RootEntry,
+    RootNearness, SuspendedRootTally,
 };
 pub use structural::{
     compute_structural, Location, RelationClass, RelationShape, StructuralFinding, SweepParams,

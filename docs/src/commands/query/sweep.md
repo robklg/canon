@@ -94,6 +94,65 @@ The figure is an upper bound (`up to`), not a total. Places on one root can be e
 
 Each member states its own counterpart [standing](../../concepts/resolution.md#standings), which is what makes acting on it safe; hub members take theirs from the hub's headline instead. Members are capped like hub members, with the omission counted and `--all` revealing the rest. A qualifying root with only one place forms no such entry: one place is already one slot. Archive roots never form one; they are not retired.
 
+### Sibling folders under one parent
+
+When several places under one parent each pair with their own counterpart, they take one
+leaderboard slot headlined by the parent, carrying the places as members:
+
+```
+#1  /Volumes/Backup/photos
+    10 places under here · 88% of this folder
+    up to 4,102 files · 61.4 GB
+      /Volumes/Backup/photos/set-01  mirrors · 100% · archived · 402 files · 6.1 GB
+      /Volumes/Backup/photos/set-02  98% inside · archived · 388 files · 5.9 GB
+      … 8 more (--all)
+    → canon survey /Volumes/Backup/photos
+```
+
+The percentage on the second line is the share of the parent's own sources that lie under the
+members. It is what the entry claims: that the parent is where one decision covers the whole
+situation. Sources under the parent that no member accounts for are the rest of that figure, and
+the handoff surveys the whole parent rather than the members, so what the members leave out stays
+visible.
+
+Where places could group either way, the parent claims them: a hub groups places by the
+counterpart they share, a parent groups them by the one decision that covers them. Places under
+different roots never group together, whatever they hold in common. The parent may be a root's own
+top, when the places sit directly on it; the entry then reads as a bare root path and hands off to
+`canon survey` at that root.
+
+A parent whose members account for less than 60% of it forms no entry, and its places compete
+individually as they otherwise would. Nothing is hidden either way. Grouping applies at the
+immediate parent only and never recurses, so a folder and its own child can each headline an
+entry.
+
+The members share one root, so the entry carries that root's remainder line where nearness is in
+play, above the figure, exactly as a single finding does.
+
+The figure is an upper bound (`up to`), not a total, for the same reason a root entry's is: two
+places under one parent can be each other's evidence, and only one of them can be let go. Each
+member states its own counterpart [standing](../../concepts/resolution.md#standings). Members are
+capped like hub members, with the omission counted and `--all` revealing the rest. Two places
+under one parent are enough to group; one place is already one slot.
+
+### Places that mirror each other
+
+Two places can each mirror a folder inside the other, which is one overlap stated from both ends.
+They take one slot, and the entry that keeps it says so:
+
+```
+#7  /Volumes/Backup/downloads/tools
+    mirrors /Volumes/Backup/tools/vendor/app  (100% by size · 100% by count)
+    counterpart: present, scanned today · subject scanned today
+    also mirrored by /Volumes/Backup/tools — one decision resolves both
+    gain: 812 files · 3.2 GB     residual: none
+    → canon survey . --other /Volumes/Backup/tools/vendor/app
+```
+
+Which of the two keeps the slot is decided by path, so an unchanged database always shows the
+same one. A place inside a second, with that second inside a third, is not this shape: those are
+two situations and both keep their slots.
+
 ## Ranking
 
 There is no composite score: every ranking factor is visible on the finding, in this order:

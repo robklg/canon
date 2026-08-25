@@ -3,13 +3,15 @@
 
 use std::collections::HashSet;
 
+use crate::core::domain::path::path_is_under;
+use crate::core::domain::source::Source;
 use crate::sweep::domain::lens::{
     counterpart_standing, lens_params_invariant_holds, reduction_lens, LeaderboardEntry,
-    LensParams, RankedSweep, RootEntry, RootNearness, SuspendedRootTally,
+    LensParams, ParentEntry, PlaceCensus, RankedSweep, RootEntry, RootNearness, SuspendedRootTally,
 };
 use crate::sweep::domain::structural::{
     FindingNature, FindingTier, Location, RelationClass, RelationShape, StructuralFinding,
-    StructuralSweep, SweepStats,
+    StructuralSweep, SweepParams, SweepStats,
 };
 
 use super::fixtures::{
@@ -81,6 +83,20 @@ fn lens_with(
     nearness: &RootNearness,
     params: &LensParams,
 ) -> RankedSweep {
+    lens_with_census(findings, nearness, &PlaceCensus::default(), params)
+}
+
+/// The lens with a census projected from real rows — what the sibling-parent
+/// axis needs, since an entry that cannot state its coverage does not form.
+/// `lens_with` passes an empty one deliberately: a fixture that builds
+/// findings by hand and no sources has no population to measure, and the axis
+/// correctly declines rather than inventing a figure.
+fn lens_with_census(
+    findings: Vec<StructuralFinding>,
+    nearness: &RootNearness,
+    census: &PlaceCensus<'_>,
+    params: &LensParams,
+) -> RankedSweep {
     reduction_lens(
         StructuralSweep {
             findings,
@@ -91,6 +107,7 @@ fn lens_with(
             },
         },
         nearness,
+        census,
         params,
     )
 }
@@ -118,6 +135,9 @@ fn entry_labels(ranked: &RankedSweep) -> Vec<String> {
         .map(|e| match e {
             LeaderboardEntry::Single(f) => f.subject.rel_prefix.clone(),
             LeaderboardEntry::Root(r) => format!("root:{}", r.root.root_path),
+            LeaderboardEntry::Parent(p) => {
+                format!("parent:{}:{}", p.parent.root_path, p.parent.rel_prefix)
+            }
             LeaderboardEntry::Hub(h) => format!("hub:{}", h.counterpart.rel_prefix),
         })
         .collect()
@@ -572,7 +592,12 @@ fn coverage_findings_never_group() {
 fn lens_groups_scale_star_into_one_hub() {
     let (sources, roots) = scale_fixture();
     let sweep = run_structural(&sources, &roots, &low_floors());
-    let ranked = reduction_lens(sweep, &RootNearness::default(), &LensParams::default());
+    let ranked = reduction_lens(
+        sweep,
+        &RootNearness::default(),
+        &PlaceCensus::default(),
+        &LensParams::default(),
+    );
     let star = ranked
         .entries
         .iter()
@@ -1143,6 +1168,7 @@ fn a_root_entry_can_never_form_outside_the_regime_that_states_it() {
     assert!(!lens_params_invariant_holds(&LensParams {
         root_entry_bucket: 3,
         nearness_render_bucket: 2,
+        ..LensParams::default()
     }));
 }
 
@@ -1380,4 +1406,597 @@ fn a_root_entrys_gain_does_not_double_count_content_shared_between_its_members()
         entry.gain_bytes_upper > actually_recoverable,
         "if this ever holds with equality the corpus stopped exercising the exposure"
     );
+}
+
+// Axis 3 — one situation, one slot.
+
+/// Rows standing at the given paths on one root. The sibling-parent axis asks
+/// the census exactly one question — how many sources stand under a place — so
+/// the rows need nothing but their paths, and projecting a census the way
+/// production does keeps a fixture from asserting a coverage the projection
+/// could not produce.
+fn rows_on(root_id: i64, paths: &[&str]) -> Vec<Source> {
+    paths
+        .iter()
+        .enumerate()
+        .map(|(i, p)| make_source(root_id * 1_000 + i as i64, root_id, p, 100, None))
+        .collect()
+}
+
+fn parent_entry<'a>(ranked: &'a RankedSweep, root_path: &str, rel: &str) -> &'a ParentEntry {
+    ranked
+        .entries
+        .iter()
+        .find_map(|e| match e {
+            LeaderboardEntry::Parent(p)
+                if p.parent.root_path == root_path && p.parent.rel_prefix == rel =>
+            {
+                Some(p)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no parent entry for {root_path} :: {rel}"))
+}
+
+/// Every finding the board carries, members included — the set the
+/// disjointness invariant is a claim about.
+fn board_findings(ranked: &RankedSweep) -> Vec<&StructuralFinding> {
+    ranked
+        .entries
+        .iter()
+        .flat_map(|e| match e {
+            LeaderboardEntry::Single(f) => vec![f],
+            LeaderboardEntry::Root(r) => r.members.iter().collect(),
+            LeaderboardEntry::Parent(p) => p.members.iter().collect(),
+            LeaderboardEntry::Hub(h) => h.members.iter().collect(),
+        })
+        .collect()
+}
+
+/// Two places sharing one counterpart, so the hub axis would take them if the
+/// sibling run did not claim first.
+fn sibling(root_id: i64, root_path: &str, rel: &str, shared: &Location) -> StructuralFinding {
+    on_root(
+        lens_finding(
+            rel,
+            FindingTier::Clean,
+            10_000,
+            0,
+            FindingNature::Consolidate,
+            lens_pair(shared.clone()),
+        ),
+        root_id,
+        root_path,
+    )
+}
+
+#[test]
+fn a_sibling_run_claims_ahead_of_a_hub() {
+    // Decision-grouping precedes evidence-grouping. These two places share one
+    // counterpart, so the hub axis would take them — but they are siblings
+    // under one parent, and one act at that parent covers both. This is a
+    // decision board and the headline is where the decision is, so the run
+    // claims first and the hub is the residual grouping for places with no
+    // common decision unit.
+    let shared = lens_loc("/rx", "store");
+    let findings = || {
+        vec![
+            sibling(1, "/r1", "photos/2020", &shared),
+            sibling(1, "/r1", "photos/2021", &shared),
+        ]
+    };
+    let sources = rows_on(
+        1,
+        &[
+            "photos/2020/a",
+            "photos/2020/b",
+            "photos/2021/a",
+            "photos/2021/b",
+        ],
+    );
+    let census = PlaceCensus::project(sources.iter());
+
+    let ranked = lens_with_census(
+        findings(),
+        &RootNearness::default(),
+        &census,
+        &LensParams::default(),
+    );
+    assert_eq!(entry_labels(&ranked), ["parent:/r1:photos"]);
+    let entry = parent_entry(&ranked, "/r1", "photos");
+    assert_eq!(entry.members.len(), 2);
+    assert_eq!(entry.coverage, 1.0, "the run accounts for the whole parent");
+
+    // The same two findings with nothing to measure them against: the axis
+    // declines rather than inventing a figure, and the hub takes them — which
+    // is exactly what the run claimed ahead of.
+    let hubbed = lens_with(findings(), &RootNearness::default(), &LensParams::default());
+    assert_eq!(entry_labels(&hubbed), ["hub:store"]);
+}
+
+#[test]
+fn sibling_runs_on_two_roots_form_two_entries() {
+    // The grouping key is the root **and** the path, so a run cannot span two
+    // roots. That split is *correct* rather than a limitation: places under one
+    // root's folder and places under another's are two decisions, not one,
+    // however much they hold in common — and it is the price of claiming ahead
+    // of the hub, paid knowingly.
+    let shared = lens_loc("/rx", "store");
+    let mut sources = rows_on(1, &["photos/2020/a", "photos/2021/a"]);
+    sources.extend(rows_on(2, &["photos/2020/a", "photos/2021/a"]));
+    let census = PlaceCensus::project(sources.iter());
+    let ranked = lens_with_census(
+        vec![
+            sibling(1, "/r1", "photos/2020", &shared),
+            sibling(1, "/r1", "photos/2021", &shared),
+            sibling(2, "/r2", "photos/2020", &shared),
+            sibling(2, "/r2", "photos/2021", &shared),
+        ],
+        &RootNearness::default(),
+        &census,
+        &LensParams::default(),
+    );
+    let mut labels = entry_labels(&ranked);
+    labels.sort();
+    assert_eq!(labels, ["parent:/r1:photos", "parent:/r2:photos"]);
+    // One counterpart, four places, and still two entries: the hub would have
+    // merged them into one slot for two separate decisions.
+    assert_eq!(parent_entry(&ranked, "/r1", "photos").members.len(), 2);
+    assert_eq!(parent_entry(&ranked, "/r2", "photos").members.len(), 2);
+}
+
+#[test]
+fn a_parent_entry_creates_no_finding_for_the_parent() {
+    // The parent is an **entry**, never a **finding**. Nothing is emitted for
+    // it, no containment is computed for it, and the findings the board carries
+    // are exactly the ones the lens was handed. This is the property that
+    // leaves the disjointness invariant untouched by construction rather than
+    // by care: there is no parent finding for a child finding to sit under.
+    let shared = lens_loc("/rx", "store");
+    let sources = rows_on(1, &["photos/2020/a", "photos/2021/a"]);
+    let census = PlaceCensus::project(sources.iter());
+    let ranked = lens_with_census(
+        vec![
+            sibling(1, "/r1", "photos/2020", &shared),
+            sibling(1, "/r1", "photos/2021", &shared),
+        ],
+        &RootNearness::default(),
+        &census,
+        &LensParams::default(),
+    );
+    let entry = parent_entry(&ranked, "/r1", "photos");
+    assert_eq!(entry.parent.rel_prefix, "photos");
+    assert_eq!(
+        board_findings(&ranked)
+            .iter()
+            .map(|f| f.subject.rel_prefix.as_str())
+            .collect::<Vec<_>>(),
+        ["photos/2020", "photos/2021"],
+    );
+    assert!(
+        board_findings(&ranked)
+            .iter()
+            .all(|f| f.subject.rel_prefix != "photos"),
+        "the headline place is on no finding anywhere"
+    );
+}
+
+#[test]
+fn the_disjointness_invariant_survives_parent_grouping() {
+    // Emission at the maximal subject is the correctness heart, and grouping
+    // must not reach around it. Driven through the real engine so the pairs
+    // checked here are the ones the descent actually produced: `photos` carries
+    // enough unmatched content of its own to fail the lifting tolerance, so the
+    // descent continues past it and both month folders emit.
+    let roots = vec![make_root(1, "/r1"), make_root(2, "/r2")];
+    let mut sources = Vec::new();
+    let mut id = 0i64;
+    let mut next = |root_id: i64, rel: String, oid: Option<i64>| {
+        id += 1;
+        make_source(id, root_id, &rel, 1_000_000, oid)
+    };
+    for i in 0..30i64 {
+        sources.push(next(1, format!("photos/2020/f{i}"), Some(100 + i)));
+        sources.push(next(2, format!("one/f{i}"), Some(100 + i)));
+        sources.push(next(1, format!("photos/2021/f{i}"), Some(200 + i)));
+        sources.push(next(2, format!("two/f{i}"), Some(200 + i)));
+    }
+    // Unmatched content directly under `photos`, keeping it below the lifting
+    // tolerance so the descent reaches the months.
+    for i in 0..10i64 {
+        sources.push(next(1, format!("photos/misc/u{i}"), Some(300 + i)));
+    }
+    let findings = run_structural(&sources, &roots, &SweepParams::default()).findings;
+    let census = PlaceCensus::project(sources.iter());
+    let ranked = lens_with_census(
+        findings,
+        &RootNearness::default(),
+        &census,
+        &LensParams::default(),
+    );
+
+    let entry = parent_entry(&ranked, "/r1", "photos");
+    assert_eq!(
+        entry
+            .members
+            .iter()
+            .map(|m| m.subject.rel_prefix.as_str())
+            .collect::<Vec<_>>(),
+        ["photos/2020", "photos/2021"],
+    );
+    // 60 of the parent's 70 sources lie under the run; the 10 under `misc` are
+    // what the entry does not account for, and the figure says so.
+    assert!((entry.coverage - 60.0 / 70.0).abs() < 1e-9);
+
+    // No finding on the board sits under another. The invariant is a claim
+    // about findings, and grouping added none.
+    let places: Vec<(i64, &str)> = board_findings(&ranked)
+        .iter()
+        .map(|f| (f.subject.root_id, f.subject.rel_prefix.as_str()))
+        .collect();
+    for (i, a) in places.iter().enumerate() {
+        for (j, b) in places.iter().enumerate() {
+            assert!(
+                i == j || a.0 != b.0 || !path_is_under(b.1, a.1),
+                "{b:?} sits under {a:?}"
+            );
+        }
+    }
+}
+
+// Axis 3 — the two constants.
+
+#[test]
+fn two_siblings_are_enough_to_group() {
+    // Grouping at two is rare rather than trigger-happy: on the board this was
+    // calibrated against, only four runs existed across seventy-two subject
+    // places. One place is already one slot and never groups; two is a run.
+    let shared = lens_loc("/rx", "store");
+    let sources = rows_on(1, &["photos/2020/a", "photos/2021/a"]);
+    let census = PlaceCensus::project(sources.iter());
+    let run = |rels: &[&str]| {
+        lens_with_census(
+            rels.iter()
+                .map(|rel| sibling(1, "/r1", rel, &shared))
+                .collect(),
+            &RootNearness::default(),
+            &census,
+            &LensParams::default(),
+        )
+    };
+    assert_eq!(
+        entry_labels(&run(&["photos/2020", "photos/2021"])),
+        ["parent:/r1:photos"]
+    );
+    // One place under the parent: no run, and the place keeps its own slot.
+    assert_eq!(entry_labels(&run(&["photos/2020"])), ["photos/2020"]);
+}
+
+#[test]
+fn a_parent_below_the_coverage_gate_does_not_group_and_its_places_compete_individually() {
+    // At low coverage the parent is not where the decision is: dismissing it
+    // would reach far beyond the situation, so it must not be the headline.
+    // **Nothing is hidden below the gate** — the places fall through and
+    // compete exactly as they did before this axis existed.
+    let shared = lens_loc("/rx", "store");
+    let mut paths = vec!["backups/phone/a", "backups/tablet/a"];
+    // Eight more sources under the parent that no member accounts for: the run
+    // covers two of ten.
+    let rest: Vec<String> = (0..8).map(|i| format!("backups/other/f{i}")).collect();
+    paths.extend(rest.iter().map(String::as_str));
+    let sources = rows_on(1, &paths);
+    let census = PlaceCensus::project(sources.iter());
+    let findings = vec![
+        sibling(1, "/r1", "backups/phone", &shared),
+        sibling(1, "/r1", "backups/tablet", &shared),
+    ];
+    let ranked = lens_with_census(
+        findings,
+        &RootNearness::default(),
+        &census,
+        &LensParams::default(),
+    );
+    // Not a parent entry — and the two places are still both on the board,
+    // grouped by the evidence they share, which is what they were before.
+    assert_eq!(entry_labels(&ranked), ["hub:store"]);
+    assert_eq!(
+        board_findings(&ranked)
+            .iter()
+            .map(|f| f.subject.rel_prefix.as_str())
+            .collect::<Vec<_>>(),
+        ["backups/phone", "backups/tablet"],
+    );
+}
+
+#[test]
+fn grouping_never_recurses_past_the_immediate_parent() {
+    // The nested case, and it is decisive. A folder and its own child can both
+    // be run parents — from different sets of findings, since a parent is
+    // never itself a finding. Grouping at each keeps two honest entries;
+    // recursing would merge them into one headlined further up, and lifting
+    // trades slots for honesty while coverage collapses fast. One level is
+    // where the trade still pays, which is why the depth is not a constant: a
+    // configurable one would invite a value the evidence says is always wrong.
+    let shared = lens_loc("/rx", "store");
+    let mut paths = vec![
+        "phone/2020/01/a",
+        "phone/2020/01/b",
+        "phone/2020/02/a",
+        "phone/2020/02/b",
+    ];
+    let notes: Vec<String> = (0..5).map(|i| format!("phone/notes/f{i}")).collect();
+    let misc: Vec<String> = (0..5).map(|i| format!("phone/misc/f{i}")).collect();
+    paths.extend(notes.iter().chain(misc.iter()).map(String::as_str));
+    let sources = rows_on(1, &paths);
+    let census = PlaceCensus::project(sources.iter());
+    let ranked = lens_with_census(
+        vec![
+            sibling(1, "/r1", "phone/2020/01", &shared),
+            sibling(1, "/r1", "phone/2020/02", &shared),
+            sibling(1, "/r1", "phone/notes", &shared),
+            sibling(1, "/r1", "phone/misc", &shared),
+        ],
+        &RootNearness::default(),
+        &census,
+        &LensParams::default(),
+    );
+    let mut labels = entry_labels(&ranked);
+    labels.sort();
+    assert_eq!(labels, ["parent:/r1:phone", "parent:/r1:phone/2020"]);
+    // Each entry carries its own two members, and the months never lift into
+    // the grandparent's entry.
+    assert_eq!(
+        parent_entry(&ranked, "/r1", "phone/2020")
+            .members
+            .iter()
+            .map(|m| m.subject.rel_prefix.as_str())
+            .collect::<Vec<_>>(),
+        ["phone/2020/01", "phone/2020/02"],
+    );
+    assert_eq!(
+        parent_entry(&ranked, "/r1", "phone")
+            .members
+            .iter()
+            .map(|m| m.subject.rel_prefix.as_str())
+            .collect::<Vec<_>>(),
+        ["phone/misc", "phone/notes"],
+    );
+}
+
+#[test]
+fn the_coverage_figure_is_the_parents_own_sources_not_its_members() {
+    // The denominator is the parent's own population, not the members'. A
+    // figure over the members would be 100% by construction and would say
+    // nothing — the question the entry answers is how much of the parent this
+    // run accounts for, which is what makes it the place the decision is.
+    let shared = lens_loc("/rx", "store");
+    let mut paths = vec![
+        "photos/2020/a",
+        "photos/2020/b",
+        "photos/2020/c",
+        "photos/2021/a",
+        "photos/2021/b",
+        "photos/2021/c",
+    ];
+    let rest: Vec<String> = (0..4).map(|i| format!("photos/misc/f{i}")).collect();
+    paths.extend(rest.iter().map(String::as_str));
+    let sources = rows_on(1, &paths);
+    let census = PlaceCensus::project(sources.iter());
+    let ranked = lens_with_census(
+        vec![
+            sibling(1, "/r1", "photos/2020", &shared),
+            sibling(1, "/r1", "photos/2021", &shared),
+        ],
+        &RootNearness::default(),
+        &census,
+        &LensParams::default(),
+    );
+    // Six of the parent's ten sources lie under the run — exactly the default
+    // gate, which admits at its own value rather than above it.
+    let entry = parent_entry(&ranked, "/r1", "photos");
+    assert_eq!(entry.coverage, 0.6);
+    assert_eq!(
+        entry.coverage,
+        LensParams::default().sibling_parent_coverage
+    );
+    assert_eq!(entry.members.len(), 2);
+}
+
+#[test]
+fn a_parent_entrys_gain_does_not_double_count_content_shared_between_its_members() {
+    // A sibling run is the exact shape the exposure was described from, and
+    // this is the corpus where it is live. `/r1/A/x` and `/r1/A/y` each hold a
+    // 10 MB object that exists nowhere else, plus 30 MB of their own copied on
+    // `/r2`. LCA subtraction removes the intra-root duplication from `A`
+    // **upward**, so both siblings — sitting below `A` — legitimately count the
+    // shared 10 MB as "exists outside me". Both numbers are true.
+    //
+    // Their sum is not a statement about content: letting both go would
+    // destroy the shared object outright, so what is recoverable while keeping
+    // one copy of everything is 70 MB, not 80. `HubEntry.total_gain_bytes` is
+    // no precedent — a hub's members point into a counterpart that is never
+    // itself a member, so its summands are separated by role, and a run has no
+    // such structure. Hence `gain_bytes_upper`, rendered `up to`, pinned on the
+    // surface by `a_parent_entry_states_a_bound_and_never_calls_it_gain`.
+    let roots = vec![make_root(1, "/r1"), make_root(2, "/r2")];
+    let mut sources = Vec::new();
+    let mut id = 0i64;
+    let mut next = |root_id: i64, rel: String, size: i64, oid: Option<i64>| {
+        id += 1;
+        make_source(id, root_id, &rel, size, oid)
+    };
+    for i in 0..10 {
+        // The shared object, in both siblings and nowhere else.
+        sources.push(next(1, format!("A/x/o{i}"), 1_000_000, Some(100 + i)));
+        sources.push(next(1, format!("A/y/o{i}"), 1_000_000, Some(100 + i)));
+        // Each sibling's own content, copied on the other root.
+        sources.push(next(1, format!("A/x/p{i}"), 3_000_000, Some(200 + i)));
+        sources.push(next(2, format!("q/p{i}"), 3_000_000, Some(200 + i)));
+        sources.push(next(1, format!("A/y/q{i}"), 3_000_000, Some(300 + i)));
+        sources.push(next(2, format!("q/q{i}"), 3_000_000, Some(300 + i)));
+        // Noise keeping `/r2` from lifting whole.
+        sources.push(next(2, format!("noise/n{i}"), 5_000_000, Some(400 + i)));
+    }
+    let findings = run_structural(&sources, &roots, &low_floors()).findings;
+    let census = PlaceCensus::project(sources.iter());
+    // Both roots far from done, so the root axis claims nothing and the run
+    // takes the two siblings — ahead of the hub they would otherwise form
+    // around the counterpart they share.
+    let ranked = lens_with_census(
+        findings,
+        &nearness(&[(1, 900), (2, 900)]),
+        &census,
+        &LensParams::default(),
+    );
+    let entry = parent_entry(&ranked, "/r1", "A");
+    assert_eq!(entry.members.len(), 2);
+    assert_eq!(entry.coverage, 1.0);
+    for member in &entry.members {
+        assert_eq!(
+            member.gain_bytes, 40_000_000,
+            "each sibling truthfully counts the shared object as existing outside it"
+        );
+    }
+    assert_eq!(entry.gain_bytes_upper, 80_000_000);
+    let actually_recoverable = 70_000_000u64;
+    assert!(
+        entry.gain_bytes_upper > actually_recoverable,
+        "if this ever holds with equality the corpus stopped exercising the exposure"
+    );
+}
+
+// Shape (b) — one overlap told from both ends.
+
+/// A place mirroring a **child** of another place: the shape the engine's own
+/// reciprocal-mirror dedup cannot see, because it matches on the cited
+/// counterpart being the same place and these two sit at different depths.
+fn mirrors(rel: &str, counterpart: Location, gain_bytes: u64) -> StructuralFinding {
+    lens_finding(
+        rel,
+        FindingTier::Clean,
+        gain_bytes,
+        0,
+        FindingNature::Consolidate,
+        RelationShape::Pair {
+            counterpart,
+            class: RelationClass::Mirror,
+            pair_size_pct: 1.0,
+            pair_count_pct: 1.0,
+            counterpart_share_pct: 1.0,
+            counterpart_suspended: false,
+            counterpart_is_archive: false,
+            counterpart_last_scanned_at: None,
+        },
+    )
+}
+
+/// The observed live pair: each place mirrors a child of the other, so one
+/// overlap takes two slots.
+fn reciprocal_pair() -> Vec<StructuralFinding> {
+    vec![
+        mirrors(
+            "downloads/tools",
+            lens_loc("/r1", "tools/vendor/app"),
+            30_000,
+        ),
+        mirrors(
+            "tools",
+            lens_loc("/r1", "downloads/tools/vendor/app"),
+            20_000,
+        ),
+    ]
+}
+
+#[test]
+fn a_reciprocal_pair_at_different_depths_collapses_to_one_entry() {
+    // The requester's original `#1`/`#2` shape, recurring on a live root. The
+    // engine's dedup misses it because the two subjects sit at different
+    // paths; each mirrors a child of the other, so it is one overlap stated
+    // from both ends and owes the board one slot.
+    let ranked = lens(reciprocal_pair());
+    assert_eq!(entry_labels(&ranked), ["downloads/tools"]);
+}
+
+#[test]
+fn the_survivor_states_the_reciprocity() {
+    // Collapsing the duplicate slot must not suppress the fact: the other
+    // place really does mirror this one, and one decision resolves both.
+    let ranked = lens(reciprocal_pair());
+    assert_eq!(
+        ranked
+            .reciprocal_places
+            .get(&lens_loc("/r1", "downloads/tools")),
+        Some(&lens_loc("/r1", "tools")),
+    );
+}
+
+#[test]
+fn a_chain_of_places_is_not_reciprocal_and_does_not_collapse() {
+    // Reciprocity is the whole criterion and is never weakened to one
+    // direction. `a` inside `b` and `b` inside `c` share the place `b` in
+    // opposite roles, but they are two genuine situations and both keep their
+    // slots — only entries pointing at *each other* are one.
+    let ranked = lens(vec![
+        mirrors("a", lens_loc("/r1", "b"), 30_000),
+        mirrors("b", lens_loc("/r1", "c"), 20_000),
+    ]);
+    let mut labels = entry_labels(&ranked);
+    labels.sort();
+    assert_eq!(labels, ["a", "b"]);
+    assert!(ranked.reciprocal_places.is_empty());
+}
+
+#[test]
+fn collapse_is_deterministic_across_runs() {
+    // Which side survives is decided by subject path and by nothing else, so
+    // an unchanged database always keeps the same place — input order, which
+    // the engine's own sort already fixes, must not be able to change it
+    // either.
+    let forward = lens(reciprocal_pair());
+    let mut reversed_input = reciprocal_pair();
+    reversed_input.reverse();
+    let reversed = lens(reversed_input);
+    assert_eq!(entry_labels(&forward), entry_labels(&reversed));
+    assert_eq!(forward.reciprocal_places, reversed.reciprocal_places);
+    // The heavier place is not the one kept: the tie-break is the path, so the
+    // rule cannot drift into a weight judgment.
+    assert_eq!(entry_labels(&forward), ["downloads/tools"]);
+}
+
+#[test]
+fn two_reciprocal_subsets_are_not_one_situation_and_both_keep_their_slots() {
+    // The collapse is a claim about **mirrors**, and the topology alone does
+    // not carry it. These two places contain each other's counterpart exactly
+    // as a reciprocal mirror pair does, but each is only a *subset* of what it
+    // points at: most of each place is content the other never mentions. They
+    // are two overlaps, not one told twice, and folding them would delete a
+    // real opportunity while printing "one decision resolves both" over what
+    // survived.
+    let subset = |rel: &str, counterpart: Location, gain_bytes: u64| {
+        lens_finding(
+            rel,
+            FindingTier::Candidate,
+            gain_bytes,
+            0,
+            FindingNature::Consolidate,
+            RelationShape::Pair {
+                counterpart,
+                class: RelationClass::Subset,
+                pair_size_pct: 0.6,
+                pair_count_pct: 0.6,
+                counterpart_share_pct: 0.95,
+                counterpart_suspended: false,
+                counterpart_is_archive: false,
+                counterpart_last_scanned_at: None,
+            },
+        )
+    };
+    let ranked = lens(vec![
+        subset("photos", lens_loc("/r1", "docs/photo-backup"), 60_000),
+        subset("docs", lens_loc("/r1", "photos/doc-scans"), 30_000),
+    ]);
+    let mut labels = entry_labels(&ranked);
+    labels.sort();
+    assert_eq!(labels, ["docs", "photos"]);
+    assert!(ranked.reciprocal_places.is_empty());
 }
