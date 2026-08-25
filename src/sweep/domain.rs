@@ -15,6 +15,12 @@ pub use lens::{
     reduction_lens, HubEntry, LeaderboardEntry, LensParams, ParentEntry, PlaceCensus, RootEntry,
     RootNearness, SuspendedRootTally,
 };
+
+// Riding the barrel for the domain test tree only (unused in production code,
+// which reaches the ordering through `reduction_lens`), the same treatment the
+// re-exports below get.
+#[allow(unused_imports)]
+pub use lens::entry_order;
 pub use structural::{
     compute_structural, Location, RelationClass, RelationShape, StructuralFinding, SweepParams,
     SweepStats,

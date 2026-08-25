@@ -6,8 +6,9 @@ use std::collections::HashSet;
 use crate::core::domain::path::path_is_under;
 use crate::core::domain::source::Source;
 use crate::sweep::domain::lens::{
-    counterpart_standing, lens_params_invariant_holds, reduction_lens, LeaderboardEntry,
-    LensParams, ParentEntry, PlaceCensus, RankedSweep, RootEntry, RootNearness, SuspendedRootTally,
+    counterpart_standing, entry_order, lens_params_invariant_holds, reduction_lens, HubEntry,
+    LeaderboardEntry, LensParams, ParentEntry, PlaceCensus, RankedSweep, RootEntry, RootNearness,
+    SuspendedRootTally,
 };
 use crate::sweep::domain::structural::{
     FindingNature, FindingTier, Location, RelationClass, RelationShape, StructuralFinding,
@@ -1999,4 +2000,85 @@ fn two_reciprocal_subsets_are_not_one_situation_and_both_keep_their_slots() {
     labels.sort();
     assert_eq!(labels, ["docs", "photos"]);
     assert!(ranked.reciprocal_places.is_empty());
+}
+
+#[test]
+fn the_board_order_is_total_so_a_full_tie_cannot_rest_on_construction_order() {
+    // Two entries can reach the same ranking key **and** the same place: a run
+    // headlined at `/r1/photos` and a hub whose members all point into
+    // `/r1/photos` sit at one path, and the aggregates here coincide term for
+    // term. Without a last discriminator the comparator is not total, and
+    // `sort_by` is stable, so such a pair keeps whatever order it was built in.
+    //
+    // Through `reduction_lens` that order is fixed today — the kinds are pushed
+    // by sequential loops — so driving the whole lens cannot tell a total
+    // comparator from a lucky one. This sorts the pair **already reversed**,
+    // which is exactly the arrangement a future reordering of those loops would
+    // produce, and asserts the comparator puts it back.
+    let shared = lens_loc("/r1", "photos");
+    let member = |rel: &str| {
+        on_root(
+            lens_finding(
+                rel,
+                FindingTier::Clean,
+                10_000,
+                0,
+                FindingNature::Consolidate,
+                lens_pair(shared.clone()),
+            ),
+            2,
+            "/r2",
+        )
+    };
+    let hub = LeaderboardEntry::Hub(HubEntry {
+        counterpart: shared.clone(),
+        counterpart_is_archive: false,
+        counterpart_last_scanned_at: None,
+        nearness_root: None,
+        members: vec![member("a"), member("b")],
+        total_gain_bytes: 20_000,
+        total_gain_files: 20,
+    });
+    let run = LeaderboardEntry::Parent(ParentEntry {
+        parent: shared.clone(),
+        coverage: 1.0,
+        members: vec![
+            sibling(1, "/r1", "photos/x", &lens_loc("/rx", "x")),
+            sibling(1, "/r1", "photos/y", &lens_loc("/rx", "y")),
+        ],
+        gain_bytes_upper: 20_000,
+        gain_files_upper: 20,
+    });
+    let nearness = RootNearness::default();
+    let params = LensParams::default();
+
+    // They really do tie: neither the key nor the place separates them.
+    assert_eq!(
+        entry_order(&run, &hub, &nearness, &params),
+        std::cmp::Ordering::Less,
+        "the kind is the only thing left to separate them"
+    );
+    assert_eq!(
+        entry_order(&hub, &run, &nearness, &params),
+        std::cmp::Ordering::Greater,
+        "and it must separate them the same way from either side"
+    );
+
+    // Built hub-first, the sort must still put the run first.
+    let mut entries = vec![hub, run];
+    entries.sort_by(|a, b| entry_order(a, b, &nearness, &params));
+    assert_eq!(
+        entry_labels(&RankedSweep {
+            entries,
+            suspended: Vec::new(),
+            stated_remainders: std::collections::HashMap::new(),
+            reciprocal_places: std::collections::HashMap::new(),
+            stats: SweepStats {
+                ubiquitous_objects_dropped: 0,
+                ubiquitous_bytes_dropped: 0,
+                below_floor_subjects: 0,
+            },
+        }),
+        ["parent:/r1:photos", "hub:photos"],
+    );
 }

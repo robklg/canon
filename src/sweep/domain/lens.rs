@@ -638,11 +638,7 @@ pub fn reduction_lens(
         }));
     }
     let reciprocal_places = collapse_reciprocal_places(&mut entries);
-    entries.sort_by(|a, b| {
-        entry_key(a, nearness, params)
-            .cmp(&entry_key(b, nearness, params))
-            .then_with(|| entry_path(a).cmp(&entry_path(b)))
-    });
+    entries.sort_by(|a, b| entry_order(a, b, nearness, params));
     // The remainder is stated exactly where nearness is in play — inside the
     // regime — and is silent everywhere else, which is the same set the
     // ordering term can separate on, because the key ties outside it. So the
@@ -1082,6 +1078,57 @@ fn entry_key(
 
 fn subject_path(finding: &StructuralFinding) -> (&str, &str) {
     (&finding.subject.root_path, &finding.subject.rel_prefix)
+}
+
+/// The board's ordering, in one place and **total**: the ranking key, then the
+/// place, then the kind.
+///
+/// Named rather than spelled inline at the one call site, because a total
+/// order is a claim that has to be checkable on its own — the tie it closes is
+/// not reachable through `reduction_lens`, whose construction order happens to
+/// separate the tied pair already, so a test driving the whole lens cannot
+/// tell a total comparator from a lucky one.
+pub fn entry_order(
+    a: &LeaderboardEntry,
+    b: &LeaderboardEntry,
+    nearness: &RootNearness,
+    params: &LensParams,
+) -> std::cmp::Ordering {
+    entry_key(a, nearness, params)
+        .cmp(&entry_key(b, nearness, params))
+        .then_with(|| entry_path(a).cmp(&entry_path(b)))
+        .then_with(|| entry_kind_rank(a).cmp(&entry_kind_rank(b)))
+}
+
+/// The last resort of the board's ordering, and the reason it is total.
+///
+/// Two entries can reach the same key **and** the same place: different kinds
+/// headline at the same path — a run at the folder a hub's members all point
+/// into, say — and their aggregates can coincide. Within one kind a path is
+/// unique by construction (subjects are deduped; roots, parents and
+/// counterparts are each a grouping key), so kind is the one discriminator
+/// that closes the order.
+///
+/// Without it the comparator is not total and `sort_by` is stable, so a full
+/// tie falls through to the order the entries were **built** in. Today that
+/// order is itself fixed — the kinds are pushed by sequential loops, and
+/// within any one loop a path is unique — so the board does not currently
+/// answer two ways. **The guarantee is real but incidental**, resting on a
+/// property of the construction loops that nothing states and any reordering
+/// would silently break. This moves it into the comparator, where it is a
+/// claim rather than a coincidence.
+///
+/// The tie itself is a coincidence rather than a judgment, so this does not
+/// try to be meaningful: what is owed is a fixed answer, spelled once. The
+/// order is the axes' own claiming precedence, because that is an order the
+/// reader has already met.
+fn entry_kind_rank(entry: &LeaderboardEntry) -> u8 {
+    match entry {
+        LeaderboardEntry::Root(_) => 0,
+        LeaderboardEntry::Parent(_) => 1,
+        LeaderboardEntry::Hub(_) => 2,
+        LeaderboardEntry::Single(_) => 3,
+    }
 }
 
 fn entry_path(entry: &LeaderboardEntry) -> (&str, &str) {
