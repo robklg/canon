@@ -2348,6 +2348,7 @@ fn s() -> Connection {
                 "run_show",
                 "TrailArgs",
                 "RowAspect",
+                "ScopeMatch",
                 "DayGroup",
                 "DayRollup",
                 "FateLine",

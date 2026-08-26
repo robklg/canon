@@ -11,6 +11,7 @@ use crate::trail::ops::compute::{
 
 use super::fixtures::{
     aspects_of, decision_ids, extraction_row, insert_decision_at, insert_note_at, params, scope,
+    scope_display,
 };
 
 #[test]
@@ -1390,4 +1391,171 @@ fn started_decision_appears_in_timeline() {
         },
         TrailView::Days(_) => panic!(),
     }
+}
+
+// ----------------------------------------------------------------------
+// The carried scope match — which of a decision's places brought it here
+// ----------------------------------------------------------------------
+
+/// The defect this story exists for. A scan naming many prefixes surfaced in
+/// a leaf folder labelled by its *first* recorded prefix, which had nothing
+/// to do with the view. Nothing pinned this before.
+#[test]
+fn a_multi_prefix_decision_names_the_prefix_that_matched() {
+    let conn = open_in_memory_for_test();
+    let root = insert_test_root(&conn, "/a", "source", false);
+    let d = insert_decision_at(&conn, "scan", 100);
+    // Recorded order puts the irrelevant prefix first, as a real scan does.
+    scope(&conn, d, root, "admin");
+    scope(&conn, d, root, "foto");
+    scope(&conn, d, root, "misc");
+    scope_display(&conn, d, &["/a/admin", "/a/foto", "/a/misc"]);
+
+    let result = compute_trail(&conn, &params(vec!["/a/foto".to_string()])).unwrap();
+    let m = result.scope_matches.get(&d).expect("a match was carried");
+    assert_eq!(m.matched, "/a/foto");
+    assert_eq!(m.other_count, 2);
+}
+
+/// A scope inside the view is a more precise statement of where the act was
+/// than an ancestor of it.
+#[test]
+fn the_deepest_matching_scope_wins_when_several_match() {
+    let conn = open_in_memory_for_test();
+    let root = insert_test_root(&conn, "/a", "source", false);
+    let d = insert_decision_at(&conn, "exclude_set", 100);
+    scope(&conn, d, root, ""); // the root itself — an ancestor
+    scope(&conn, d, root, "x"); // an ancestor, closer
+    scope(&conn, d, root, "x/y/z"); // inside the view
+
+    let result = compute_trail(&conn, &params(vec!["/a/x/y".to_string()])).unwrap();
+    assert_eq!(result.scope_matches[&d].matched, "/a/x/y/z");
+}
+
+/// The friction's own case: the only thing that matched *is* an ancestor, and
+/// naming it is the honest answer — the alternative is naming a sibling.
+#[test]
+fn an_ancestor_scope_is_named_when_it_is_the_only_match() {
+    let conn = open_in_memory_for_test();
+    let root = insert_test_root(&conn, "/a", "source", false);
+    let d = insert_decision_at(&conn, "scan", 100);
+    scope(&conn, d, root, "x");
+    scope(&conn, d, root, "w"); // a sibling of the view — must not be named
+
+    let result = compute_trail(&conn, &params(vec!["/a/x/y/z".to_string()])).unwrap();
+    assert_eq!(result.scope_matches[&d].matched, "/a/x");
+}
+
+/// A decision surfaced only by an extraction row has no `decision_scopes`
+/// row to match, so no match is carried and the display column answers.
+#[test]
+fn a_decision_with_no_scope_rows_falls_back_to_the_display_column() {
+    let conn = open_in_memory_for_test();
+    let source = insert_test_root(&conn, "/src", "source", false);
+    let archive = insert_test_root(&conn, "/archive", "archive", false);
+    let d = insert_decision_at(&conn, "apply", 100);
+    scope_display(&conn, d, &["/elsewhere"]);
+    repo::decision::replace_extractions(
+        &conn,
+        &[extraction_row(
+            d,
+            source,
+            "/src",
+            "photos",
+            5,
+            Some(50),
+            "/archive/2016",
+        )],
+    )
+    .unwrap();
+    let _ = archive;
+
+    let result = compute_trail(&conn, &params(vec!["/archive/2016".to_string()])).unwrap();
+    assert!(decision_ids(&result.view).contains(&d));
+    assert!(!result.scope_matches.contains_key(&d));
+}
+
+/// A global view matched nothing by construction, so it carries nothing.
+#[test]
+fn a_global_view_carries_no_scope_matches() {
+    let conn = open_in_memory_for_test();
+    let root = insert_test_root(&conn, "/a", "source", false);
+    let d = insert_decision_at(&conn, "scan", 100);
+    scope(&conn, d, root, "x");
+
+    let result = compute_trail(&conn, &params(Vec::new())).unwrap();
+    assert!(result.scope_matches.is_empty());
+    assert!(result.view_root.is_none());
+}
+
+/// `+N` counts the decision's other recorded places, read off its own display
+/// column — one less when the matched path appears there, the column whole
+/// when it does not (a scope row whose display entry was never backfilled).
+#[test]
+fn the_remainder_counts_the_decisions_other_recorded_places() {
+    let conn = open_in_memory_for_test();
+    let root = insert_test_root(&conn, "/a", "source", false);
+
+    let backfilled = insert_decision_at(&conn, "scan", 100);
+    scope(&conn, backfilled, root, "x");
+    scope(&conn, backfilled, root, "w");
+    scope_display(&conn, backfilled, &["/a/x", "/a/w"]);
+
+    let unbackfilled = insert_decision_at(&conn, "scan", 200);
+    scope(&conn, unbackfilled, root, "x");
+    scope_display(&conn, unbackfilled, &["/a/w", "/a/q"]);
+
+    let result = compute_trail(&conn, &params(vec!["/a/x".to_string()])).unwrap();
+    assert_eq!(result.scope_matches[&backfilled].other_count, 1);
+    assert_eq!(result.scope_matches[&unbackfilled].other_count, 2);
+}
+
+/// The single root a view sits in — what root-relative rendering measures
+/// from. `None` the moment there is no one root to name.
+#[test]
+fn view_root_is_the_single_containing_root() {
+    let conn = open_in_memory_for_test();
+    insert_test_root(&conn, "/a", "source", false);
+    insert_test_root(&conn, "/b", "source", false);
+
+    let single = compute_trail(&conn, &params(vec!["/a/x".to_string()])).unwrap();
+    assert_eq!(single.view_root.as_deref(), Some("/a"));
+
+    let at_root = compute_trail(&conn, &params(vec!["/a".to_string()])).unwrap();
+    assert_eq!(at_root.view_root.as_deref(), Some("/a"));
+
+    let multi =
+        compute_trail(&conn, &params(vec!["/a/x".to_string(), "/b/y".to_string()])).unwrap();
+    assert!(multi.view_root.is_none());
+
+    let two_prefixes_one_root =
+        compute_trail(&conn, &params(vec!["/a/x".to_string(), "/a/y".to_string()])).unwrap();
+    assert_eq!(two_prefixes_one_root.view_root.as_deref(), Some("/a"));
+}
+
+/// The machine-output contract: `--jsonl` serialises `d.scope` directly, so
+/// the match must ride a side map and never touch the display column — same
+/// entries, same recorded order, whatever matched.
+#[test]
+fn jsonl_scope_is_unchanged_when_a_match_is_carried() {
+    let conn = open_in_memory_for_test();
+    let root = insert_test_root(&conn, "/a", "source", false);
+    let d = insert_decision_at(&conn, "scan", 100);
+    scope(&conn, d, root, "admin");
+    scope(&conn, d, root, "foto");
+    scope_display(&conn, d, &["/a/admin", "/a/foto"]);
+
+    let result = compute_trail(&conn, &params(vec!["/a/foto".to_string()])).unwrap();
+    assert_eq!(result.scope_matches[&d].matched, "/a/foto");
+
+    let TrailView::Recent(events) = &result.view else {
+        panic!("scope lens");
+    };
+    let TimelineEvent::Decision(decision) = &events[0] else {
+        panic!("a decision");
+    };
+    assert_eq!(
+        decision.scope.as_deref(),
+        Some(["/a/admin".to_string(), "/a/foto".to_string()].as_slice())
+    );
 }

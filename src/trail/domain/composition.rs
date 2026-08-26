@@ -85,18 +85,59 @@ impl OriginLine {
     }
 }
 
-/// One line of the transitioned section: a present source last touched by a
+/// One line of the transitioned section: present sources last touched by a
 /// decision that isn't an apply or a scan — an exclusion, a restore, or any
 /// other command that can stamp `decision_id`. Origin is untracked here (the
 /// extraction ledger only attributes apply decisions).
+///
+/// Two shapes, because two of the four things this section says are not
+/// standings at all. The card is a **state** statement — the present-tense
+/// fact about a place — so a standing is *what stands here*, merged across
+/// every decision that produced it and carrying no decision id: the acts
+/// behind it are the timeline's to hold, directly above. A **gap** is the
+/// exception: a hole in the record *about one specific decision*, which is
+/// the whole reason it exists (self-explaining gaps, never silent), so it
+/// keeps its id and is never merged.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TransitionedLine {
-    pub decision_id: i64,
-    /// The registered transition word (`excluded`, `restored`, ...) when one
-    /// applies, else the raw command — self-explaining, never guessed.
-    pub label: String,
-    pub files: i64,
-    pub bytes: i64,
+pub enum TransitionedLine {
+    /// A standing, merged across every decision that produced it.
+    /// `label` is the registered transition word where one applies, the raw
+    /// command otherwise — derived, never a literal.
+    Standing {
+        label: String,
+        files: i64,
+        bytes: i64,
+    },
+    /// A gap in the record, about one specific decision — which is what makes
+    /// it self-explaining. Never merged.
+    Gap {
+        decision_id: i64,
+        label: String,
+        files: i64,
+        bytes: i64,
+    },
+}
+
+impl TransitionedLine {
+    pub fn label(&self) -> &str {
+        match self {
+            TransitionedLine::Standing { label, .. } => label,
+            TransitionedLine::Gap { label, .. } => label,
+        }
+    }
+
+    /// The line's counts, in the shape every other bucket of the card uses —
+    /// one accessor rather than a `files`/`bytes` pair, so the sum invariant
+    /// reads over lines exactly as it reads over the other buckets.
+    pub fn bucket(&self) -> BucketCount {
+        match self {
+            TransitionedLine::Standing { files, bytes, .. }
+            | TransitionedLine::Gap { files, bytes, .. } => BucketCount {
+                files: *files,
+                bytes: *bytes,
+            },
+        }
+    }
 }
 
 /// The composition card: what a location is made of, right now.
@@ -176,6 +217,24 @@ struct FromRootAcc {
     last_at: i64,
 }
 
+/// Fold one decision's bucket into the standing its label names.
+fn add_standing(standings: &mut HashMap<String, BucketCount>, label: &str, bucket: &BucketCount) {
+    let entry = standings.entry(label.to_string()).or_default();
+    entry.files += bucket.files;
+    entry.bytes += bucket.bytes;
+}
+
+/// A gap line's decision id, for its deterministic tie-break. Total by
+/// construction — only [`TransitionedLine::Gap`] ever reaches the gap
+/// ordering — but written as a match rather than an `unreachable!` so a
+/// future variant is a compile error, not a panic in a display path.
+fn gap_id(line: &TransitionedLine) -> i64 {
+    match line {
+        TransitionedLine::Gap { decision_id, .. } => *decision_id,
+        TransitionedLine::Standing { .. } => i64::MAX,
+    }
+}
+
 /// Whether an origin root contains the viewed scope — i.e. the content came
 /// from elsewhere *within this same root* rather than in from outside it.
 ///
@@ -211,7 +270,12 @@ pub fn build_card(
     let mut bytes = 0i64;
     let mut from_roots: HashMap<String, FromRootAcc> = HashMap::new();
     let mut origins: Vec<OriginLine> = Vec::new();
-    let mut transitioned: Vec<TransitionedLine> = Vec::new();
+    // Standings merge on their label — the card states what stands here, and
+    // "excluded" is one fact however many decisions produced it. Gaps stay
+    // per-decision: naming the one decision is what makes a gap
+    // self-explaining rather than a shrug.
+    let mut standings: HashMap<String, BucketCount> = HashMap::new();
+    let mut gaps: Vec<TransitionedLine> = Vec::new();
     let mut indexed_here: Option<BucketCount> = None;
     let mut untracked: Option<BucketCount> = None;
 
@@ -229,7 +293,7 @@ pub fn build_card(
                     // The stamp names a decision the index no longer holds.
                     // Say so on its own line: the content's standing is real,
                     // only the story behind it was lost.
-                    transitioned.push(TransitionedLine {
+                    gaps.push(TransitionedLine::Gap {
                         decision_id: *id,
                         label: "transition unrecorded".to_string(),
                         files: bucket.files,
@@ -265,12 +329,7 @@ pub fn build_card(
                                 .iter()
                                 .all(|row| classify_row(row, prefixes) == RowAspect::Rearrangement)
                         {
-                            transitioned.push(TransitionedLine {
-                                decision_id: *id,
-                                label: "rearranged".to_string(),
-                                files: bucket.files,
-                                bytes: bucket.bytes,
-                            });
+                            add_standing(&mut standings, "rearranged", bucket);
                             continue;
                         }
                         // Origin multiplicity is counted over distinct origin
@@ -289,7 +348,7 @@ pub fn build_card(
                                 // row exists to say from where — a gap must
                                 // read as a gap, not be silently folded into
                                 // another bucket or dropped.
-                                transitioned.push(TransitionedLine {
+                                gaps.push(TransitionedLine::Gap {
                                     decision_id: *id,
                                     label: "archived (origin unknown)".to_string(),
                                     files: bucket.files,
@@ -335,12 +394,7 @@ pub fn build_card(
                         let label = fate_transition(family, FateAspect::Present)
                             .map(|t| t.as_str().to_string())
                             .unwrap_or_else(|| decision.command.clone());
-                        transitioned.push(TransitionedLine {
-                            decision_id: *id,
-                            label,
-                            files: bucket.files,
-                            bytes: bucket.bytes,
-                        });
+                        add_standing(&mut standings, &label, bucket);
                     }
                 }
             }
@@ -369,11 +423,31 @@ pub fn build_card(
             .cmp(&a.files())
             .then(a.tie_break().cmp(&b.tie_break()))
     });
+    // Standings first, then gaps: a gap is an exception and belongs after
+    // the ordinary reading. Within each group, files descending — the card's
+    // established ordering — with a deterministic tie-break (label for a
+    // merged standing, which has no id; decision id for a gap, which does).
+    let mut transitioned: Vec<TransitionedLine> = standings
+        .into_iter()
+        .map(|(label, bucket)| TransitionedLine::Standing {
+            label,
+            files: bucket.files,
+            bytes: bucket.bytes,
+        })
+        .collect();
     transitioned.sort_by(|a, b| {
-        b.files
-            .cmp(&a.files)
-            .then(a.decision_id.cmp(&b.decision_id))
+        b.bucket()
+            .files
+            .cmp(&a.bucket().files)
+            .then(a.label().cmp(b.label()))
     });
+    gaps.sort_by(|a, b| {
+        b.bucket()
+            .files
+            .cmp(&a.bucket().files)
+            .then(gap_id(a).cmp(&gap_id(b)))
+    });
+    transitioned.extend(gaps);
 
     CompositionCard {
         files,
@@ -570,9 +644,15 @@ mod tests {
         );
 
         assert!(card.origins.is_empty());
-        assert_eq!(card.transitioned.len(), 1);
-        assert_eq!(card.transitioned[0].label, "archived (origin unknown)");
-        assert_eq!(card.transitioned[0].files, 3);
+        assert_eq!(
+            card.transitioned,
+            vec![TransitionedLine::Gap {
+                decision_id: 1,
+                label: "archived (origin unknown)".to_string(),
+                files: 3,
+                bytes: 300,
+            }]
+        );
         assert_eq!(card.files, 3);
     }
 
@@ -666,8 +746,7 @@ mod tests {
         assert!(card.origins.is_empty(), "a place is not its own origin");
         assert_eq!(
             card.transitioned,
-            vec![TransitionedLine {
-                decision_id: 42,
+            vec![TransitionedLine::Standing {
                 label: "rearranged".to_string(),
                 files: 47,
                 bytes: 3_900,
@@ -838,11 +917,19 @@ mod tests {
         assert_eq!(card.bytes, 7_400);
 
         let sum_files: i64 = card.origins.iter().map(|o| o.files()).sum::<i64>()
-            + card.transitioned.iter().map(|t| t.files).sum::<i64>()
+            + card
+                .transitioned
+                .iter()
+                .map(|t| t.bucket().files)
+                .sum::<i64>()
             + card.indexed_here.map(|b| b.files).unwrap_or(0)
             + card.untracked.map(|b| b.files).unwrap_or(0);
         let sum_bytes: i64 = card.origins.iter().map(origin_bytes).sum::<i64>()
-            + card.transitioned.iter().map(|t| t.bytes).sum::<i64>()
+            + card
+                .transitioned
+                .iter()
+                .map(|t| t.bucket().bytes)
+                .sum::<i64>()
             + card.indexed_here.map(|b| b.bytes).unwrap_or(0)
             + card.untracked.map(|b| b.bytes).unwrap_or(0);
         assert_eq!(sum_files, card.files);
@@ -904,10 +991,15 @@ mod tests {
             &view(),
         );
 
-        assert_eq!(card.transitioned.len(), 1);
-        assert_eq!(card.transitioned[0].label, "excluded");
-        assert_eq!(card.transitioned[0].decision_id, 1);
-        assert_eq!(card.transitioned[0].files, 4);
+        // A standing, not an event: the registered word, no decision id.
+        assert_eq!(
+            card.transitioned,
+            vec![TransitionedLine::Standing {
+                label: "excluded".to_string(),
+                files: 4,
+                bytes: 400,
+            }]
+        );
     }
 
     #[test]
@@ -925,7 +1017,261 @@ mod tests {
             &view(),
         );
 
-        assert_eq!(card.transitioned[0].label, "roots_rm");
+        assert_eq!(card.transitioned[0].label(), "roots_rm");
+    }
+
+    // The transitioned section's grain: standings merge, gaps do not.
+
+    /// The card is a state statement. Three exclude sessions leave one
+    /// standing — the acts behind it are the timeline's, directly above.
+    #[test]
+    fn standings_merge_across_decisions_and_carry_no_ids() {
+        let groups = HashMap::from([
+            (Some(1), bucket(20, 2_000)),
+            (Some(2), bucket(3, 300)),
+            (Some(3), bucket(5, 500)),
+        ]);
+        let decisions = HashMap::from([
+            (1, mk_decision(1, "exclude_set", 100)),
+            (2, mk_decision(2, "exclude_set", 200)),
+            (3, mk_decision(3, "exclude_set_object", 300)),
+        ]);
+        let card = build_card(
+            &groups,
+            &decisions,
+            &HashMap::new(),
+            &HashSet::new(),
+            &view(),
+        );
+
+        assert_eq!(
+            card.transitioned,
+            vec![TransitionedLine::Standing {
+                label: "excluded".to_string(),
+                files: 28,
+                bytes: 2_800,
+            }]
+        );
+    }
+
+    /// Both gap labels stay per-decision: naming the one decision is what
+    /// makes the gap self-explaining rather than a shrug.
+    #[test]
+    fn a_gap_line_keeps_its_decision_id_and_is_never_merged() {
+        // #1 and #2: applies with no extraction row (the ledger gap).
+        // #404 and #405: stamps naming decisions the index no longer holds.
+        let groups = HashMap::from([
+            (Some(1), bucket(9, 900)),
+            (Some(2), bucket(8, 800)),
+            (Some(404), bucket(7, 700)),
+            (Some(405), bucket(6, 600)),
+        ]);
+        let decisions = HashMap::from([
+            (1, mk_decision(1, "apply", 100)),
+            (2, mk_decision(2, "apply", 200)),
+        ]);
+        let card = build_card(
+            &groups,
+            &decisions,
+            &HashMap::new(),
+            &HashSet::new(),
+            &view(),
+        );
+
+        assert_eq!(
+            card.transitioned,
+            vec![
+                TransitionedLine::Gap {
+                    decision_id: 1,
+                    label: "archived (origin unknown)".to_string(),
+                    files: 9,
+                    bytes: 900,
+                },
+                TransitionedLine::Gap {
+                    decision_id: 2,
+                    label: "archived (origin unknown)".to_string(),
+                    files: 8,
+                    bytes: 800,
+                },
+                TransitionedLine::Gap {
+                    decision_id: 404,
+                    label: "transition unrecorded".to_string(),
+                    files: 7,
+                    bytes: 700,
+                },
+                TransitionedLine::Gap {
+                    decision_id: 405,
+                    label: "transition unrecorded".to_string(),
+                    files: 6,
+                    bytes: 600,
+                },
+            ]
+        );
+    }
+
+    /// "rearranged" is a statement about how much of what stands here was
+    /// moved within it — a standing, not a fact about one apply.
+    #[test]
+    fn rearranged_merges_like_any_other_standing() {
+        let groups = HashMap::from([(Some(41), bucket(10, 1_000)), (Some(42), bucket(4, 400))]);
+        let decisions = HashMap::from([
+            (41, mk_decision(41, "apply", 100)),
+            (42, mk_decision(42, "apply", 200)),
+        ]);
+        let mut row_a = mk_extraction(41, 7, "/archive");
+        row_a.rel_prefix = "2016".to_string();
+        row_a.destination_path = "/archive/2020".to_string();
+        let mut row_b = mk_extraction(42, 7, "/archive");
+        row_b.rel_prefix = "2017".to_string();
+        row_b.destination_path = "/archive/2021".to_string();
+        let extractions = HashMap::from([(41, vec![row_a]), (42, vec![row_b])]);
+
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &live(&["/archive"]),
+            &view(),
+        );
+
+        assert!(card.origins.is_empty());
+        assert_eq!(
+            card.transitioned,
+            vec![TransitionedLine::Standing {
+                label: "rearranged".to_string(),
+                files: 14,
+                bytes: 1_400,
+            }]
+        );
+    }
+
+    /// The raw-command fallback merges by command name — it is still a
+    /// standing, just one the fate vocabulary has no word for yet.
+    #[test]
+    fn an_unregistered_command_merges_by_its_command_name() {
+        let groups = HashMap::from([(Some(1), bucket(2, 200)), (Some(2), bucket(3, 300))]);
+        let decisions = HashMap::from([
+            (1, mk_decision(1, "roots_rm", 100)),
+            (2, mk_decision(2, "roots_rm", 200)),
+        ]);
+        let card = build_card(
+            &groups,
+            &decisions,
+            &HashMap::new(),
+            &HashSet::new(),
+            &view(),
+        );
+
+        assert_eq!(
+            card.transitioned,
+            vec![TransitionedLine::Standing {
+                label: "roots_rm".to_string(),
+                files: 5,
+                bytes: 500,
+            }]
+        );
+    }
+
+    /// The sum invariant is a law, and merging must not leak a bucket.
+    #[test]
+    fn the_sum_invariant_holds_with_merged_standings() {
+        let groups = HashMap::from([
+            (Some(1), bucket(10, 1_000)), // apply, real origin
+            (Some(2), bucket(20, 2_000)), // scan -> indexed_here
+            (Some(3), bucket(30, 3_000)), // exclude_set  \ merge
+            (Some(4), bucket(5, 500)),    // exclude_set  /
+            (Some(5), bucket(7, 700)),    // apply, no rows -> gap
+            (Some(404), bucket(6, 600)),  // missing decision -> gap
+            (None, bucket(40, 4_000)),    // untracked
+        ]);
+        let decisions = HashMap::from([
+            (1, mk_decision(1, "apply", 100)),
+            (2, mk_decision(2, "scan", 200)),
+            (3, mk_decision(3, "exclude_set", 300)),
+            (4, mk_decision(4, "exclude_set", 400)),
+            (5, mk_decision(5, "apply", 500)),
+        ]);
+        let extractions = HashMap::from([(1, vec![mk_extraction(1, 8, "/vol/a")])]);
+
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &live(&["/vol/a"]),
+            &view(),
+        );
+
+        assert_eq!(card.files, 118);
+        assert_eq!(card.bytes, 11_800);
+        let sum_files: i64 = card.origins.iter().map(|o| o.files()).sum::<i64>()
+            + card
+                .transitioned
+                .iter()
+                .map(|t| t.bucket().files)
+                .sum::<i64>()
+            + card.indexed_here.map(|b| b.files).unwrap_or(0)
+            + card.untracked.map(|b| b.files).unwrap_or(0);
+        let sum_bytes: i64 = card.origins.iter().map(origin_bytes).sum::<i64>()
+            + card
+                .transitioned
+                .iter()
+                .map(|t| t.bucket().bytes)
+                .sum::<i64>()
+            + card.indexed_here.map(|b| b.bytes).unwrap_or(0)
+            + card.untracked.map(|b| b.bytes).unwrap_or(0);
+        assert_eq!(sum_files, card.files);
+        assert_eq!(sum_bytes, card.bytes);
+    }
+
+    /// Files descending, label ascending as the deterministic tie-break — a
+    /// merged standing has no id to break the tie with.
+    #[test]
+    fn standings_sort_by_files_then_label() {
+        let groups = HashMap::from([
+            (Some(1), bucket(5, 500)),
+            (Some(2), bucket(5, 500)),
+            (Some(3), bucket(9, 900)),
+        ]);
+        let decisions = HashMap::from([
+            (1, mk_decision(1, "exclude_clear", 100)), // restored
+            (2, mk_decision(2, "exclude_set", 200)),   // excluded
+            (3, mk_decision(3, "roots_rm", 300)),      // roots_rm
+        ]);
+        let card = build_card(
+            &groups,
+            &decisions,
+            &HashMap::new(),
+            &HashSet::new(),
+            &view(),
+        );
+
+        let labels: Vec<&str> = card.transitioned.iter().map(|t| t.label()).collect();
+        assert_eq!(labels, vec!["roots_rm", "excluded", "restored"]);
+    }
+
+    /// A gap is an exception and belongs after the ordinary reading, however
+    /// many files it carries.
+    #[test]
+    fn gap_lines_render_after_standings() {
+        let groups = HashMap::from([
+            (Some(1), bucket(1, 100)),       // exclude -> standing, 1 file
+            (Some(404), bucket(999, 9_900)), // gap, far more files
+        ]);
+        let decisions = HashMap::from([(1, mk_decision(1, "exclude_set", 100))]);
+        let card = build_card(
+            &groups,
+            &decisions,
+            &HashMap::new(),
+            &HashSet::new(),
+            &view(),
+        );
+
+        assert_eq!(card.transitioned.len(), 2);
+        assert!(matches!(
+            card.transitioned[0],
+            TransitionedLine::Standing { .. }
+        ));
+        assert!(matches!(card.transitioned[1], TransitionedLine::Gap { .. }));
     }
 
     #[test]
@@ -963,7 +1309,11 @@ mod tests {
         assert_eq!(card.bytes, 10_000);
 
         let bucket_sum_files: i64 = card.origins.iter().map(|o| o.files()).sum::<i64>()
-            + card.transitioned.iter().map(|t| t.files).sum::<i64>()
+            + card
+                .transitioned
+                .iter()
+                .map(|t| t.bucket().files)
+                .sum::<i64>()
             + card.indexed_here.map(|b| b.files).unwrap_or(0)
             + card.untracked.map(|b| b.files).unwrap_or(0);
         assert_eq!(bucket_sum_files, card.files);
@@ -971,7 +1321,11 @@ mod tests {
         // Bytes too: a card whose files add up but whose sizes don't would
         // still be misreporting what stands here.
         let bucket_sum_bytes: i64 = card.origins.iter().map(origin_bytes).sum::<i64>()
-            + card.transitioned.iter().map(|t| t.bytes).sum::<i64>()
+            + card
+                .transitioned
+                .iter()
+                .map(|t| t.bucket().bytes)
+                .sum::<i64>()
             + card.indexed_here.map(|b| b.bytes).unwrap_or(0)
             + card.untracked.map(|b| b.bytes).unwrap_or(0);
         assert_eq!(bucket_sum_bytes, card.bytes);
@@ -995,7 +1349,7 @@ mod tests {
 
         assert_eq!(
             card.transitioned,
-            vec![TransitionedLine {
+            vec![TransitionedLine::Gap {
                 decision_id: 404,
                 label: "transition unrecorded".to_string(),
                 files: 6,

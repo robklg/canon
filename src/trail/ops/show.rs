@@ -11,6 +11,7 @@
 //! Read-only: no transactions, no stdio.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use anyhow::Result;
 
@@ -19,7 +20,7 @@ use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::fate::{decision_family, DecisionFamily};
 use crate::core::domain::root::Root;
 use crate::core::repo::{self, Connection};
-use crate::trail::domain::placement::{aggregate_placement_lines, RowAspect};
+use crate::trail::domain::placement::{aggregate_placement_lines, scopes_touch, RowAspect};
 
 /// A receipt's on-disk location, as a pointer (contents are never read here).
 pub struct ReceiptPointer {
@@ -73,6 +74,36 @@ pub struct ShowDrewDir {
     pub bytes: Option<i64>,
 }
 
+/// One recorded scope of a decision, with its relation to where the reader
+/// stands.
+///
+/// Classified here in ops via `scopes_touch` — the *same* bidirectional
+/// predicate that surfaced the decision in the timeline, which is what makes
+/// the two surfaces agree. A bespoke rule would make the marker worse than
+/// absent: it would say "this is why you're seeing it" about a decision the
+/// timeline surfaced for a different reason.
+///
+/// Used on **absolute display paths** rather than rel prefixes within a root:
+/// root identity is implied by an absolute path, so the root-id equality
+/// check `compute_trail` pairs the predicate with is unnecessary here, not
+/// omitted. Do not "fix" this into `placement_in_view` — a declared scope
+/// matches bidirectionally (the two-claims law).
+pub struct ShowScope {
+    pub display_path: String,
+    pub relation: ScopeRelation,
+}
+
+/// Where a recorded scope sits relative to the reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeRelation {
+    /// The scope is the CWD, or contains it — the case that answers
+    /// "why did this surface".
+    Here,
+    /// The CWD contains the scope.
+    WithinHere,
+    Unrelated,
+}
+
 pub struct ShowResult {
     pub decision: Decision,
     pub receipts: Vec<ReceiptPointer>,
@@ -81,9 +112,24 @@ pub struct ShowResult {
     /// What this decision drew from each source root, if any (the extraction
     /// ledger's per-decision view — the source side of an apply).
     pub extractions: Vec<ShowExtraction>,
+    /// The decision's recorded scopes, classified against where the reader
+    /// stands and ordered `Here`, `WithinHere`, `Unrelated` — **stable**
+    /// within each group, so recorded order survives. Empty for a global
+    /// decision.
+    ///
+    /// Hoisting is load-bearing, not cosmetic: the list is capped at the
+    /// interface, and with a cap and no hoist the one place the reader cares
+    /// about falls into the truncated remainder — the timeline's own defect,
+    /// reproduced one surface over.
+    pub scopes: Vec<ShowScope>,
 }
 
-pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
+/// A decision's full detail, read for someone standing at `cwd`.
+///
+/// `cwd` affects **arrangement and annotation only** — never which scopes are
+/// shown. `None` (an unresolvable working directory) yields recorded order
+/// with no markers, which is what the surface did before this existed.
+pub fn compute_show(conn: &Connection, id: i64, cwd: Option<&str>) -> Result<Option<ShowResult>> {
     let Some(decision) = repo::decision::fetch_by_id(conn, id)? else {
         return Ok(None);
     };
@@ -233,12 +279,53 @@ pub fn compute_show(conn: &Connection, id: i64) -> Result<Option<ShowResult>> {
         });
     }
 
+    let scopes = classify_scopes(decision.scope.as_deref().unwrap_or(&[]), cwd);
+
     Ok(Some(ShowResult {
         decision,
         receipts,
         receipt_absence,
         extractions,
+        scopes,
     }))
+}
+
+/// Classify a decision's recorded scopes against where the reader stands,
+/// then hoist the relevant ones.
+///
+/// Matching is [`scopes_touch`] — the same bidirectional predicate that
+/// surfaced the decision in the timeline. Its two directions are exactly the
+/// two markers: the scope contains the CWD (or equals it) reads `Here`, the
+/// CWD contains the scope reads `WithinHere`.
+///
+/// The sort is **stable**, so recorded order survives inside each group.
+fn classify_scopes(paths: &[String], cwd: Option<&str>) -> Vec<ShowScope> {
+    let mut scopes: Vec<ShowScope> = paths
+        .iter()
+        .map(|path| ShowScope {
+            relation: match cwd {
+                // `scopes_touch` is bidirectional; which side contains which
+                // is what distinguishes the two markers, so both directions
+                // are asked separately rather than through the predicate's
+                // combined answer.
+                Some(cwd) if scopes_touch(path, cwd) => {
+                    if Path::new(cwd).starts_with(path) {
+                        ScopeRelation::Here
+                    } else {
+                        ScopeRelation::WithinHere
+                    }
+                }
+                _ => ScopeRelation::Unrelated,
+            },
+            display_path: path.clone(),
+        })
+        .collect();
+    scopes.sort_by_key(|s| match s.relation {
+        ScopeRelation::Here => 0,
+        ScopeRelation::WithinHere => 1,
+        ScopeRelation::Unrelated => 2,
+    });
+    scopes
 }
 
 /// Where a retired root's receipt leads now. The book's location comes from

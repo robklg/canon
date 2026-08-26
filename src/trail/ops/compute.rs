@@ -4,15 +4,18 @@
 //! Read-only: no transactions, no stdio.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use anyhow::Result;
 use chrono::{Duration, Local, NaiveDate, TimeZone};
 
 use crate::core::domain::extraction::DecisionExtraction;
-use crate::core::domain::root::find_containing_root;
+use crate::core::domain::root::{find_containing_root, Root};
 use crate::core::repo::{self, Connection};
 use crate::notes::{fetch_all, fetch_by_roots};
-use crate::trail::domain::placement::{placement_in_view, row_aspect, scopes_touch, RowAspect};
+use crate::trail::domain::placement::{
+    placement_in_view, row_aspect, scopes_touch, RowAspect, ScopeMatch,
+};
 use crate::trail::domain::timeline::{
     group_by_day, merge_events, DayGroup, TimelineEvent, WhenValue,
 };
@@ -106,102 +109,147 @@ pub struct TrailResult {
     /// JSONL extraction data must read the same regardless of which view
     /// surfaced it.
     pub extractions_all: HashMap<i64, Vec<DecisionExtraction>>,
+    /// Which recorded scope pulled each decision into this view. Empty for
+    /// global views (no boundary, so nothing matched anything).
+    ///
+    /// A **side map**, never a mutation of `Decision.scope`: the durable
+    /// display column is never reordered or rewritten, so `--jsonl` — which
+    /// serialises `d.scope` directly — is unaffected by construction rather
+    /// than by care. Same shape as [`placements`](Self::placements), for the
+    /// same reason.
+    pub scope_matches: HashMap<i64, ScopeMatch>,
+    /// The single root containing every prefix of this view, when there is
+    /// one — what root-relative rendering measures from. `None` for global
+    /// and multi-root views, which render absolute.
+    ///
+    /// Derived here rather than in the interface: `ResolvedScope` carries
+    /// prefixes but no root, so answering "which root is this view in?" is a
+    /// business question, and `core::domain::root::find_containing_root`
+    /// already owns it.
+    pub view_root: Option<String>,
 }
 
 pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailResult> {
     let range = params.timeframe.map(when_range);
 
-    let (mut decisions, unscoped, notes, placements, rollups) = if params.prefixes.is_empty() {
-        let decisions = match range {
-            Some((start, end)) => crate::trail::repo::fetch_in_range(conn, start, end)?,
-            None => crate::trail::repo::fetch_recent(conn, None)?,
-        };
-        let notes = if params.include_notes {
-            fetch_all(conn)?
+    let (mut decisions, unscoped, notes, placements, rollups, scope_matches, view_root) =
+        if params.prefixes.is_empty() {
+            let decisions = match range {
+                Some((start, end)) => crate::trail::repo::fetch_in_range(conn, start, end)?,
+                None => crate::trail::repo::fetch_recent(conn, None)?,
+            };
+            let notes = if params.include_notes {
+                fetch_all(conn)?
+            } else {
+                Vec::new()
+            };
+            (
+                decisions,
+                0,
+                notes,
+                HashMap::new(),
+                Rollups::default(),
+                HashMap::new(),
+                None,
+            )
         } else {
-            Vec::new()
-        };
-        (decisions, 0, notes, HashMap::new(), Rollups::default())
-    } else {
-        let roots = repo::root::fetch_all(conn)?;
-        // The same decomposition the recorder used to populate the index.
-        let pairs: Vec<(i64, String)> = params
-            .prefixes
-            .iter()
-            .filter_map(|p| {
-                find_containing_root(p, &roots).map(|(root_id, _, _, rel)| (root_id, rel))
-            })
-            .collect();
-        let mut root_ids: Vec<i64> = pairs.iter().map(|(id, _)| *id).collect();
-        root_ids.sort_unstable();
-        root_ids.dedup();
-
-        let touches = |root_id: i64, rel_prefix: &str| {
-            pairs
+            let roots = repo::root::fetch_all(conn)?;
+            // The same decomposition the recorder used to populate the index.
+            let pairs: Vec<(i64, String)> = params
+                .prefixes
                 .iter()
-                .any(|(rid, rel)| *rid == root_id && scopes_touch(rel, rel_prefix))
+                .filter_map(|p| {
+                    find_containing_root(p, &roots).map(|(root_id, _, _, rel)| (root_id, rel))
+                })
+                .collect();
+            let mut root_ids: Vec<i64> = pairs.iter().map(|(id, _)| *id).collect();
+            root_ids.sort_unstable();
+            root_ids.dedup();
+
+            let touches = |root_id: i64, rel_prefix: &str| {
+                pairs
+                    .iter()
+                    .any(|(rid, rel)| *rid == root_id && scopes_touch(rel, rel_prefix))
+            };
+
+            let rows = repo::decision::fetch_scope_rows_by_roots(conn, &root_ids)?;
+            let matching: Vec<&repo::decision::DecisionScopeRow> = rows
+                .iter()
+                .filter(|row| touches(row.root_id, &row.rel_prefix))
+                .collect();
+            let mut ids: Vec<i64> = matching.iter().map(|row| row.decision_id).collect();
+
+            // The single root every prefix of this view sits in, if there is
+            // one — what root-relative rendering measures from.
+            let view_root = single_view_root(&pairs, &roots);
+
+            // Extraction rows this view reads — apply decisions that drew content
+            // out of here, delivered content into here, or moved content within
+            // here, even when the decision's *selection* scope was global or
+            // elsewhere entirely. Each row is classified by its own two recorded
+            // locations against the view boundary.
+            let all_ext_rows = crate::trail::repo::fetch_all_extractions(conn)?;
+            let placements = classify_extraction_rows(all_ext_rows, &pairs, &params.prefixes);
+
+            ids.extend(placements.keys().copied());
+            ids.sort_unstable();
+            ids.dedup();
+
+            let mut decisions = repo::decision::fetch_by_ids(conn, &ids)?;
+            if let Some((start, end)) = range {
+                decisions.retain(|d| d.created_at >= start && d.created_at < end);
+            }
+
+            let unscoped_raw = crate::trail::repo::count_unscoped(conn, range)?;
+            // Footer honesty: a decision surfaced here only via an extraction
+            // or arrival row (no decision_scopes row of its own) must not
+            // also be counted as "not shown" — restricted to ids that
+            // actually survived the time-range filter above, since a
+            // touching id outside --since/--on was never part of
+            // unscoped_raw's count either.
+            let shown_ids: HashSet<i64> = decisions.iter().map(|d| d.id).collect();
+            let shown_extraction_ids: Vec<i64> = placements
+                .keys()
+                .filter(|id| shown_ids.contains(id))
+                .copied()
+                .collect();
+            let unscoped_adjustment =
+                crate::trail::repo::filter_unscoped_ids(conn, &shown_extraction_ids)?.len() as i64;
+            let unscoped = unscoped_raw - unscoped_adjustment;
+
+            let notes = if params.include_notes {
+                fetch_by_roots(conn, &root_ids)?
+                    .into_iter()
+                    .filter(|n| touches(n.root_id, &n.rel_path))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // The join the filter above already computed, kept instead of
+            // discarded: which of a decision's recorded places is the one that
+            // brought it into this view. No new query — the rows are the ones
+            // just fetched, and `d.scope` is already loaded on the decision.
+            let scope_matches = build_scope_matches(&matching, &decisions);
+
+            // Whole-history rollups: every touching row, never capped by the
+            // decision-window limit. Scope-lens only — never a time-lens view.
+            let rollups = if range.is_none() {
+                build_rollups(&placements)
+            } else {
+                Rollups::default()
+            };
+
+            (
+                decisions,
+                unscoped,
+                notes,
+                placements,
+                rollups,
+                scope_matches,
+                view_root,
+            )
         };
-
-        let rows = repo::decision::fetch_scope_rows_by_roots(conn, &root_ids)?;
-        let mut ids: Vec<i64> = rows
-            .iter()
-            .filter(|row| touches(row.root_id, &row.rel_prefix))
-            .map(|row| row.decision_id)
-            .collect();
-
-        // Extraction rows this view reads — apply decisions that drew content
-        // out of here, delivered content into here, or moved content within
-        // here, even when the decision's *selection* scope was global or
-        // elsewhere entirely. Each row is classified by its own two recorded
-        // locations against the view boundary.
-        let all_ext_rows = crate::trail::repo::fetch_all_extractions(conn)?;
-        let placements = classify_extraction_rows(all_ext_rows, &pairs, &params.prefixes);
-
-        ids.extend(placements.keys().copied());
-        ids.sort_unstable();
-        ids.dedup();
-
-        let mut decisions = repo::decision::fetch_by_ids(conn, &ids)?;
-        if let Some((start, end)) = range {
-            decisions.retain(|d| d.created_at >= start && d.created_at < end);
-        }
-
-        let unscoped_raw = crate::trail::repo::count_unscoped(conn, range)?;
-        // Footer honesty: a decision surfaced here only via an extraction
-        // or arrival row (no decision_scopes row of its own) must not
-        // also be counted as "not shown" — restricted to ids that
-        // actually survived the time-range filter above, since a
-        // touching id outside --since/--on was never part of
-        // unscoped_raw's count either.
-        let shown_ids: HashSet<i64> = decisions.iter().map(|d| d.id).collect();
-        let shown_extraction_ids: Vec<i64> = placements
-            .keys()
-            .filter(|id| shown_ids.contains(id))
-            .copied()
-            .collect();
-        let unscoped_adjustment =
-            crate::trail::repo::filter_unscoped_ids(conn, &shown_extraction_ids)?.len() as i64;
-        let unscoped = unscoped_raw - unscoped_adjustment;
-
-        let notes = if params.include_notes {
-            fetch_by_roots(conn, &root_ids)?
-                .into_iter()
-                .filter(|n| touches(n.root_id, &n.rel_path))
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        // Whole-history rollups: every touching row, never capped by the
-        // decision-window limit. Scope-lens only — never a time-lens view.
-        let rollups = if range.is_none() {
-            build_rollups(&placements)
-        } else {
-            Rollups::default()
-        };
-
-        (decisions, unscoped, notes, placements, rollups)
-    };
 
     let total_decisions = decisions.len();
 
@@ -267,6 +315,8 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
         arrival_rollup: rollups.arrival,
         rearrangement_rollup: rollups.rearrangement,
         extractions_all,
+        scope_matches,
+        view_root,
     })
 }
 
@@ -278,6 +328,115 @@ fn group_extractions_by_decision(
         map.entry(row.decision_id).or_default().push(row);
     }
     map
+}
+
+/// The single root containing every prefix of this view, when there is one.
+///
+/// `None` for a global view (no prefixes), a view spanning several roots, and
+/// a view whose prefixes resolve to no root at all — each renders absolute,
+/// because there is no one root a reader could be told about once in the
+/// header.
+///
+/// `pub(super)`, not private: the externalized test module
+/// (`trail::ops::tests::compute`) exercises the multi-root and no-root arms
+/// directly.
+pub(super) fn single_view_root(pairs: &[(i64, String)], roots: &[Root]) -> Option<String> {
+    let mut ids = pairs.iter().map(|(id, _)| *id);
+    let first = ids.next()?;
+    if ids.any(|id| id != first) {
+        return None;
+    }
+    roots.iter().find(|r| r.id == first).map(|r| r.path.clone())
+}
+
+/// Which of each decision's recorded scopes brought it into this view.
+///
+/// One entry per decision that a `decision_scopes` row matched. Where several
+/// of a decision's rows match, the **deepest** wins: a scope inside the view
+/// is a more precise statement of where the act was than an ancestor of it,
+/// and an ancestor is what a 31-prefix scan used to be labelled by. Depth is
+/// measured in path segments, ties broken lexicographically so repeated runs
+/// render identically.
+///
+/// The display path is composed snapshot-first (`root_path` as written, then
+/// the live-root join) — the established order everywhere a scope row is
+/// rendered, so a removed root's scope still names a path rather than an id.
+///
+/// `other_count` is read off the decision's own `scope` display column rather
+/// than off the rows, so `+N` keeps meaning exactly what it means today and
+/// stays consistent with `trail show` and `--jsonl`, which both render that
+/// column. A decision whose display column never got the matched path
+/// backfilled counts the column whole — one more place, honestly, rather than
+/// a silent subtraction.
+///
+/// `pub(super)`, not private: the externalized test module
+/// (`trail::ops::tests::compute`) exercises the match rule directly, without
+/// building a database for every case.
+pub(super) fn build_scope_matches(
+    matching: &[&repo::decision::DecisionScopeRow],
+    decisions: &[crate::core::domain::decision::Decision],
+) -> HashMap<i64, ScopeMatch> {
+    let scopes_by_id: HashMap<i64, &Option<Vec<String>>> =
+        decisions.iter().map(|d| (d.id, &d.scope)).collect();
+
+    let mut best: HashMap<i64, String> = HashMap::new();
+    for row in matching {
+        let Some(display) = scope_row_display_path(row) else {
+            continue;
+        };
+        match best.get(&row.decision_id) {
+            Some(current) if !is_deeper(&display, current) => {}
+            _ => {
+                best.insert(row.decision_id, display);
+            }
+        }
+    }
+
+    best.into_iter()
+        .map(|(decision_id, matched)| {
+            let paths = scopes_by_id
+                .get(&decision_id)
+                .and_then(|s| s.as_ref())
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let other_count = if paths.iter().any(|p| p == &matched) {
+                paths.len() - 1
+            } else {
+                paths.len()
+            };
+            (
+                decision_id,
+                ScopeMatch {
+                    matched,
+                    other_count,
+                },
+            )
+        })
+        .collect()
+}
+
+/// A scope row's absolute display path, snapshot-first. `None` when the row
+/// carries no snapshot (a pre-migration row the recovery hook could not
+/// resolve) — such a row cannot name a place, and inventing one from its root
+/// id is exactly the guess the snapshot convention exists to avoid.
+fn scope_row_display_path(row: &repo::decision::DecisionScopeRow) -> Option<String> {
+    let root_path = row.root_path.as_ref()?;
+    if row.rel_prefix.is_empty() {
+        Some(root_path.clone())
+    } else {
+        Some(format!("{root_path}/{}", row.rel_prefix))
+    }
+}
+
+/// Whether `candidate` is a more precise statement of place than `current`:
+/// more path segments, or equal depth and lexicographically first.
+fn is_deeper(candidate: &str, current: &str) -> bool {
+    let depth = |p: &str| Path::new(p).components().count();
+    match depth(candidate).cmp(&depth(current)) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => candidate < current,
+    }
 }
 
 /// Every extraction row a decision renders in this view, each tagged with the

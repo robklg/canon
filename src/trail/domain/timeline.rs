@@ -12,8 +12,31 @@ use std::collections::HashMap;
 use chrono::{Datelike, Duration, NaiveDate, Weekday};
 
 use crate::core::domain::decision::Decision;
-use crate::core::domain::fate::{decision_family, DecisionFamily};
+use crate::core::domain::fate::{decision_family, fate_transition, DecisionFamily, FateAspect};
 use crate::notes::Note;
+
+/// A decision's **act**, for the timeline's act column: the registered
+/// transition word where one exists, the stored command identifier
+/// otherwise.
+///
+/// Derived, never a literal — the same one what-derivation the rollups and
+/// receipt `[meta]` use (`core::domain::fate::fate_transition`). The
+/// `Present` aspect is the timelines: a scope-lens row is about a place as
+/// it stands, and the `Absent` half (a scan's deletions) is the day
+/// rollup's, which already speaks it.
+///
+/// The fallback arm returns the command identifier as stored —
+/// `scan`, `cluster_generate`. Those underscored identifiers are **accepted
+/// residue, not a defect to fix here**: coining an act word is domain
+/// vocabulary, which `/vision` owns (`DecisionFamily`'s own doc comment
+/// routes the taxonomy there). This one arm is where that work attaches,
+/// which is why the derivation is one function rather than a match at the
+/// call site.
+pub fn decision_act(command: &str) -> &str {
+    fate_transition(decision_family(command), FateAspect::Present)
+        .map(|t| t.as_str())
+        .unwrap_or(command)
+}
 
 /// One event on the mixed timeline: an action (decision) or a thought (note).
 pub enum TimelineEvent {

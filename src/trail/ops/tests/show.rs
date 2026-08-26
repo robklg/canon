@@ -2,7 +2,7 @@ use crate::core::repo;
 use crate::core::repo::db::open_in_memory_for_test;
 use crate::core::repo::insert_test_root;
 use crate::core::repo::Connection;
-use crate::trail::ops::show::{compute_show, PointerRelocation};
+use crate::trail::ops::show::{compute_show, PointerRelocation, ScopeRelation};
 
 use super::fixtures::{
     extraction_row, insert_decision_at, insert_decision_full, insert_zero_transfer_decision,
@@ -20,7 +20,7 @@ fn show_lists_receipt_pointers_per_root() {
     repo::decision::set_scope_receipt(&conn, d, 999, "/gone", ".canon-ledger/000001-scan.toml")
         .unwrap();
 
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     assert_eq!(show.receipts.len(), 2);
     assert_eq!(show.receipts[0].root_display, "/a");
     // The removed root's pointer renders its snapshotted path — the
@@ -44,7 +44,7 @@ fn show_receipt_pointer_without_snapshot_renders_marked_fallback() {
     )
     .unwrap();
 
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     assert_eq!(show.receipts.len(), 1);
     assert_eq!(show.receipts[0].root_display, "root #999 (removed)");
     assert!(show.receipt_absence.is_none());
@@ -119,7 +119,7 @@ fn show_relocates_a_retired_roots_receipt_into_the_gathered_ledger() {
     std::fs::create_dir_all(&ledger_dir).unwrap();
     std::fs::write(ledger_dir.join("000042-scan.toml"), "x").unwrap();
 
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     assert_eq!(show.receipts.len(), 1);
     match &show.receipts[0].relocation {
         Some(PointerRelocation::Gathered { book_ledger_path }) => assert_eq!(
@@ -151,7 +151,7 @@ fn show_relocation_preserves_a_nested_receipt_subpath() {
     std::fs::create_dir_all(&ledger_dir).unwrap();
     std::fs::write(ledger_dir.join("000042-scan.toml"), "x").unwrap();
 
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     match &show.receipts[0].relocation {
         Some(PointerRelocation::Gathered { book_ledger_path }) => assert_eq!(
             book_ledger_path,
@@ -180,7 +180,7 @@ fn show_relocation_delegates_when_the_book_holds_no_gathered_copy() {
     // The book stands — retired on faith, no ledger/ inside.
     std::fs::create_dir_all(shelf.path().join("retired/gone")).unwrap();
 
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     match &show.receipts[0].relocation {
         Some(PointerRelocation::NotGathered { book_path }) => {
             assert_eq!(book_path, &format!("{archive_path}/retired/gone"));
@@ -206,7 +206,7 @@ fn show_relocation_hedges_when_the_book_is_unreachable() {
         "completed",
     );
 
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     match &show.receipts[0].relocation {
         Some(PointerRelocation::Unreachable { book_path }) => {
             assert_eq!(book_path, "/no/such/archive/retired/gone");
@@ -219,7 +219,7 @@ fn show_relocation_hedges_when_the_book_is_unreachable() {
     let conn = open_in_memory_for_test();
     let d = insert_deletion_on_removed_root(&conn, 999, "/gone", ".canon-ledger/000042-scan.toml");
     insert_retire_decision(&conn, 999, "/gone", 200, 777, "retired/gone", "completed");
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     match &show.receipts[0].relocation {
         Some(PointerRelocation::Unreachable { book_path }) => {
             assert_eq!(book_path, "root #777 (removed)/retired/gone");
@@ -234,7 +234,7 @@ fn show_relocation_ignores_a_plain_removed_root() {
     // no retire decision to project — today's pointer stands unchanged.
     let conn = open_in_memory_for_test();
     let d = insert_deletion_on_removed_root(&conn, 999, "/gone", ".canon-ledger/000042-scan.toml");
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     assert_eq!(show.receipts.len(), 1);
     assert!(show.receipts[0].relocation.is_none());
 }
@@ -274,7 +274,7 @@ fn show_relocates_every_pointer_on_a_retired_root() {
     std::fs::write(ledger_dir.join("000042-scan.toml"), "x").unwrap();
     std::fs::write(ledger_dir.join("000043-scan.toml"), "x").unwrap();
 
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     assert_eq!(show.receipts.len(), 2);
     for receipt in &show.receipts {
         assert!(matches!(
@@ -300,7 +300,7 @@ fn show_relocates_after_abandoned_bind_then_rm() {
     std::fs::create_dir_all(&ledger_dir).unwrap();
     std::fs::write(ledger_dir.join("000042-scan.toml"), "x").unwrap();
 
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     assert!(matches!(
         show.receipts[0].relocation,
         Some(PointerRelocation::Gathered { .. })
@@ -329,12 +329,12 @@ fn show_explains_receipt_absence() {
     );
     let plain = insert_decision_at(&conn, "exclude_set", 200);
 
-    let show = compute_show(&conn, quiet).unwrap().unwrap();
+    let show = compute_show(&conn, quiet, None).unwrap().unwrap();
     assert_eq!(
         show.receipt_absence.as_deref(),
         Some("no receipt (--no-receipt)")
     );
-    let show = compute_show(&conn, plain).unwrap().unwrap();
+    let show = compute_show(&conn, plain, None).unwrap().unwrap();
     assert_eq!(show.receipt_absence.as_deref(), Some("no receipt recorded"));
 }
 
@@ -347,7 +347,7 @@ fn trail_show_says_nothing_transferred_for_a_receiptless_zero_transfer_decision(
     let conn = open_in_memory_for_test();
     let failed = insert_zero_transfer_decision(&conn, "apply", 300, 1240);
 
-    let show = compute_show(&conn, failed).unwrap().unwrap();
+    let show = compute_show(&conn, failed, None).unwrap().unwrap();
     assert_eq!(
         show.receipt_absence.as_deref(),
         Some("no receipt (nothing transferred)")
@@ -364,14 +364,14 @@ fn a_zero_completed_import_still_takes_the_generic_arm() {
     let conn = open_in_memory_for_test();
     let stale = insert_zero_transfer_decision(&conn, "import_facts", 400, 12);
 
-    let show = compute_show(&conn, stale).unwrap().unwrap();
+    let show = compute_show(&conn, stale, None).unwrap().unwrap();
     assert_eq!(show.receipt_absence.as_deref(), Some("no receipt recorded"));
 }
 
 #[test]
 fn show_unknown_id_is_none() {
     let conn = open_in_memory_for_test();
-    assert!(compute_show(&conn, 12345).unwrap().is_none());
+    assert!(compute_show(&conn, 12345, None).unwrap().is_none());
 }
 
 #[test]
@@ -406,7 +406,7 @@ fn show_lists_extractions_including_removed_root_snapshot() {
     )
     .unwrap();
 
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     assert_eq!(show.extractions.len(), 2);
     let a = show
         .extractions
@@ -444,7 +444,7 @@ fn show_folds_placement_rows_into_per_root_lines_with_directories() {
     )
     .unwrap();
 
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     assert_eq!(show.extractions.len(), 1);
     let line = &show.extractions[0];
     assert_eq!(line.location, "/a/m");
@@ -472,7 +472,7 @@ fn show_does_not_mark_a_re_added_root_as_removed() {
     row.root_id = 999; // the id the root carried before it was re-added
     repo::decision::replace_extractions(&conn, &[row]).unwrap();
 
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     assert_eq!(show.extractions.len(), 1);
     assert!(
         !show.extractions[0].root_removed,
@@ -511,7 +511,7 @@ fn show_points_a_retired_origin_at_its_book() {
     )
     .unwrap();
 
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     assert_eq!(show.extractions.len(), 1);
     assert!(show.extractions[0].root_removed);
     assert_eq!(
@@ -524,6 +524,219 @@ fn show_points_a_retired_origin_at_its_book() {
 fn show_no_extractions_is_empty_not_absent() {
     let conn = open_in_memory_for_test();
     let d = insert_decision_at(&conn, "scan", 100);
-    let show = compute_show(&conn, d).unwrap().unwrap();
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
     assert!(show.extractions.is_empty());
+}
+
+// ----------------------------------------------------------------------
+// The scope list — classified against where the reader stands
+// ----------------------------------------------------------------------
+
+/// Set a decision's `scope` display column: the durable JSON list `show`
+/// renders.
+fn scope_display(conn: &Connection, decision_id: i64, paths: &[&str]) {
+    conn.execute(
+        "UPDATE decisions SET scope = ?2 WHERE id = ?1",
+        rusqlite::params![decision_id, serde_json::to_string(paths).unwrap()],
+    )
+    .unwrap();
+}
+
+fn relations(show: &crate::trail::ops::show::ShowResult) -> Vec<(&str, ScopeRelation)> {
+    show.scopes
+        .iter()
+        .map(|s| (s.display_path.as_str(), s.relation))
+        .collect()
+}
+
+/// The answer to "why did this surface": the scope that contains where I am
+/// stands first and is marked.
+#[test]
+fn a_scope_covering_the_cwd_is_marked_here_and_hoisted() {
+    let conn = open_in_memory_for_test();
+    let d = insert_decision_at(&conn, "scan", 100);
+    scope_display(&conn, d, &["/a/admin", "/a/foto", "/a/misc"]);
+
+    let show = compute_show(&conn, d, Some("/a/foto/2016/italy"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        relations(&show),
+        vec![
+            ("/a/foto", ScopeRelation::Here),
+            ("/a/admin", ScopeRelation::Unrelated),
+            ("/a/misc", ScopeRelation::Unrelated),
+        ]
+    );
+}
+
+#[test]
+fn a_scope_equal_to_the_cwd_is_marked_here() {
+    let conn = open_in_memory_for_test();
+    let d = insert_decision_at(&conn, "scan", 100);
+    scope_display(&conn, d, &["/a/foto"]);
+
+    let show = compute_show(&conn, d, Some("/a/foto")).unwrap().unwrap();
+    assert_eq!(relations(&show), vec![("/a/foto", ScopeRelation::Here)]);
+}
+
+#[test]
+fn a_scope_inside_the_cwd_is_marked_within_here() {
+    let conn = open_in_memory_for_test();
+    let d = insert_decision_at(&conn, "scan", 100);
+    scope_display(&conn, d, &["/a/foto/2016", "/b"]);
+
+    let show = compute_show(&conn, d, Some("/a/foto")).unwrap().unwrap();
+    assert_eq!(
+        relations(&show),
+        vec![
+            ("/a/foto/2016", ScopeRelation::WithinHere),
+            ("/b", ScopeRelation::Unrelated),
+        ]
+    );
+}
+
+/// Both markers at once, in their stated order: `Here` before `WithinHere`
+/// before the rest.
+#[test]
+fn here_is_hoisted_above_within_here() {
+    let conn = open_in_memory_for_test();
+    let d = insert_decision_at(&conn, "scan", 100);
+    scope_display(&conn, d, &["/z", "/a/foto/2016", "/a"]);
+
+    let show = compute_show(&conn, d, Some("/a/foto")).unwrap().unwrap();
+    assert_eq!(
+        relations(&show),
+        vec![
+            ("/a", ScopeRelation::Here),
+            ("/a/foto/2016", ScopeRelation::WithinHere),
+            ("/z", ScopeRelation::Unrelated),
+        ]
+    );
+}
+
+#[test]
+fn a_cwd_outside_every_scope_leaves_recorded_order_unmarked() {
+    let conn = open_in_memory_for_test();
+    let d = insert_decision_at(&conn, "scan", 100);
+    scope_display(&conn, d, &["/a/admin", "/a/foto"]);
+
+    let show = compute_show(&conn, d, Some("/elsewhere")).unwrap().unwrap();
+    assert_eq!(
+        relations(&show),
+        vec![
+            ("/a/admin", ScopeRelation::Unrelated),
+            ("/a/foto", ScopeRelation::Unrelated),
+        ]
+    );
+}
+
+/// An unresolvable working directory annotates nothing and reorders nothing
+/// — exactly what the surface did before markers existed.
+#[test]
+fn an_unresolvable_cwd_leaves_recorded_order_unmarked() {
+    let conn = open_in_memory_for_test();
+    let d = insert_decision_at(&conn, "scan", 100);
+    scope_display(&conn, d, &["/a/admin", "/a/foto"]);
+
+    let show = compute_show(&conn, d, None).unwrap().unwrap();
+    assert_eq!(
+        relations(&show),
+        vec![
+            ("/a/admin", ScopeRelation::Unrelated),
+            ("/a/foto", ScopeRelation::Unrelated),
+        ]
+    );
+}
+
+/// The reason hoisting exists. With a cap and no hoist the one place the
+/// reader cares about falls into the truncated remainder — the timeline's own
+/// defect, reproduced one surface over.
+#[test]
+fn the_marked_scope_survives_the_cap() {
+    let conn = open_in_memory_for_test();
+    let d = insert_decision_at(&conn, "scan", 100);
+    let mut paths: Vec<String> = (0..30).map(|i| format!("/a/dir{i:02}")).collect();
+    paths.push("/a/foto".to_string());
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    scope_display(&conn, d, &refs);
+
+    let show = compute_show(&conn, d, Some("/a/foto")).unwrap().unwrap();
+    assert_eq!(show.scopes.len(), 31);
+    assert_eq!(show.scopes[0].display_path, "/a/foto");
+    assert_eq!(show.scopes[0].relation, ScopeRelation::Here);
+}
+
+/// Recorded order survives inside each relation group — the sort is stable,
+/// so a decision's own ordering is not silently rewritten.
+#[test]
+fn recorded_order_is_stable_within_each_relation_group() {
+    let conn = open_in_memory_for_test();
+    let d = insert_decision_at(&conn, "scan", 100);
+    scope_display(&conn, d, &["/z", "/m", "/a/x", "/b", "/a/y"]);
+
+    let show = compute_show(&conn, d, Some("/a")).unwrap().unwrap();
+    let paths: Vec<&str> = show
+        .scopes
+        .iter()
+        .map(|s| s.display_path.as_str())
+        .collect();
+    // The two WithinHere scopes keep their recorded order, and so do the
+    // three unrelated ones.
+    assert_eq!(paths, vec!["/a/x", "/a/y", "/z", "/m", "/b"]);
+}
+
+#[test]
+fn a_global_decision_still_prints_global() {
+    let conn = open_in_memory_for_test();
+    let d = insert_decision_at(&conn, "import_facts", 100);
+
+    let show = compute_show(&conn, d, Some("/a")).unwrap().unwrap();
+    assert!(show.scopes.is_empty());
+}
+
+/// The coherence property, and the carrier of this story's recognition: a
+/// decision surfaced by a scope in a scoped view is marked when `show` runs
+/// from the same place. Both surfaces classify through `scopes_touch`; a
+/// bespoke rule on either side would make the marker say "this is why you're
+/// seeing it" about a decision surfaced for a different reason.
+#[test]
+fn show_and_the_timeline_agree_on_what_matched() {
+    let conn = open_in_memory_for_test();
+    let root = insert_test_root(&conn, "/a", "source", false);
+    let d = insert_decision_at(&conn, "scan", 100);
+    repo::decision::insert_scopes(
+        &conn,
+        d,
+        &[
+            (root, "/a".to_string(), "admin".to_string()),
+            (root, "/a".to_string(), "foto".to_string()),
+            (root, "/a".to_string(), "misc".to_string()),
+        ],
+    )
+    .unwrap();
+    scope_display(&conn, d, &["/a/admin", "/a/foto", "/a/misc"]);
+
+    let here = "/a/foto/2016";
+    let timeline = crate::trail::ops::compute::compute_trail(
+        &conn,
+        &crate::trail::ops::compute::TrailParams {
+            prefixes: vec![here.to_string()],
+            timeframe: None,
+            include_notes: false,
+            limit: None,
+        },
+    )
+    .unwrap();
+    let matched = &timeline.scope_matches[&d].matched;
+
+    let show = compute_show(&conn, d, Some(here)).unwrap().unwrap();
+    let marked: Vec<&str> = show
+        .scopes
+        .iter()
+        .filter(|s| s.relation != ScopeRelation::Unrelated)
+        .map(|s| s.display_path.as_str())
+        .collect();
+
+    assert_eq!(marked, vec![matched.as_str()]);
 }

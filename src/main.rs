@@ -449,6 +449,9 @@ enum Commands {
         /// Hide notes from the timeline
         #[arg(long)]
         no_notes: bool,
+        /// Multi-line entries with each place's full absolute path
+        #[arg(short = 'l', long)]
+        long: bool,
         /// Emit timeline events as JSONL (machine output)
         #[arg(long)]
         jsonl: bool,
@@ -1548,6 +1551,7 @@ fn main() -> Result<()> {
             limit,
             all,
             no_notes,
+            long,
             jsonl,
         } => match action {
             Some(TrailAction::Show { id }) => trail::run_show(&mut db, id)?,
@@ -1566,6 +1570,7 @@ fn main() -> Result<()> {
                             limit,
                             all,
                             no_notes,
+                            long,
                             jsonl,
                         },
                     )?,

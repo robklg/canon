@@ -21,7 +21,7 @@ pub use cli::{run, run_show, TrailArgs, TrailExit};
 // the barrel alongside the items an in-crate consumer names today, even
 // though nothing in this crate names them directly yet.
 #[allow(unused_imports)]
-pub use domain::placement::RowAspect;
+pub use domain::placement::{RowAspect, ScopeMatch};
 #[allow(unused_imports)]
 pub use domain::timeline::{DayGroup, DayRollup, FateLine, WhenValue};
 

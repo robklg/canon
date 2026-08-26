@@ -12,14 +12,15 @@ use crate::core::domain::format::{cap_path, format_count, format_size};
 use crate::core::domain::root::Root;
 use crate::core::ops::scope::ResolvedScope;
 use crate::trail::domain::composition::{CompositionCard, OriginLine, TransitionedLine};
-use crate::trail::domain::placement::{aggregate_placement_lines, RowAspect};
-use crate::trail::domain::timeline::{DayRollup, FateLine, TimelineEvent};
+use crate::trail::domain::placement::{aggregate_placement_lines, RowAspect, ScopeMatch};
+use crate::trail::domain::timeline::{decision_act, DayRollup, FateLine, TimelineEvent};
 use crate::trail::ops::compute::{
     ArrivalRollup, ExtractionRollup, RearrangementRollup, DEFAULT_LIMIT,
 };
 use crate::trail::ops::show::ShowExtraction;
 use crate::trail::{TrailResult, TrailView};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn print_human(
     result: &TrailResult,
     resolved: &ResolvedScope,
@@ -27,6 +28,7 @@ pub(super) fn print_human(
     roots: &HashMap<i64, Root>,
     limit: Option<usize>,
     card: Option<&CompositionCard>,
+    long: bool,
 ) {
     let scope_part = if resolved.is_global() {
         "all roots".to_string()
@@ -38,18 +40,66 @@ pub(super) fn print_human(
         None => println!("Decision trail: {scope_part}"),
     }
 
+    let view_root = result.view_root.as_deref();
+
     // Scope column: one width across the whole listing, capped so long
     // paths can't push the narration off-screen. Measured over the cells
     // that will actually be printed — extraction lines render the drawn-from
     // location, arrival lines the destination, neither the selection scope.
-    let width = |events: &[&TimelineEvent]| -> usize {
+    //
+    // The act column is measured in the same pass and over the same events,
+    // for the same reason: two passes disagreeing about what a row will
+    // print is what `event_cells` exists to prevent, and a second column
+    // sized independently would reintroduce it one column over.
+    let cells_of = |events: &[&TimelineEvent], root: Option<&str>| -> Vec<String> {
         events
             .iter()
-            .flat_map(|e| event_cells(e, resolved, roots, &result.placements))
+            .flat_map(|e| {
+                event_cells(
+                    e,
+                    resolved,
+                    roots,
+                    root,
+                    &result.placements,
+                    &result.scope_matches,
+                )
+            })
+            .collect()
+    };
+    let scope_width = |cells: &[String]| -> usize {
+        cells
+            .iter()
             .map(|cell| cell.chars().count())
             .max()
             .unwrap_or(0)
             .min(SCOPE_CELL_MAX)
+    };
+    let act_width = |events: &[&TimelineEvent]| -> usize {
+        events
+            .iter()
+            .filter_map(|e| event_act(e))
+            .map(|act| act.chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+
+    // The legend is printed exactly when the listing uses the shape it
+    // explains: a leading `/` means "measured from the root", which is
+    // indistinguishable from an absolute path without being told once. On a
+    // run where every place sits at or below the viewed folder, nothing here
+    // needs explaining and nothing is said.
+    //
+    // Whether the shape appears is decided by rendering the same cells with
+    // no root to measure from and comparing — exact, and asked of the one
+    // function that makes the choice, rather than sniffed back out of a
+    // string that no longer records which arm produced it.
+    let announce_root = |events: &[&TimelineEvent], cells: &[String]| {
+        if let Some(root) = view_root {
+            let absolute = cells_of(events, None);
+            if cells.iter().zip(&absolute).any(|(a, b)| a != b) {
+                println!("Places are relative to this folder; a leading / is relative to {root}.");
+            }
+        }
     };
     match &result.view {
         TrailView::Recent(events) => {
@@ -62,11 +112,37 @@ pub(super) fn print_human(
                 }
             }
             if !events.is_empty() {
-                println!();
-                let refs: Vec<&TimelineEvent> = events.iter().collect();
-                let w = width(&refs);
-                for event in events {
-                    print_event(event, true, resolved, roots, w, &result.placements);
+                if long {
+                    for event in events {
+                        println!();
+                        print_long_event(
+                            event,
+                            true,
+                            roots,
+                            &result.placements,
+                            &result.scope_matches,
+                        );
+                    }
+                } else {
+                    let refs: Vec<&TimelineEvent> = events.iter().collect();
+                    let cells = cells_of(&refs, view_root);
+                    announce_root(&refs, &cells);
+                    let w = scope_width(&cells);
+                    let aw = act_width(&refs);
+                    println!();
+                    for event in events {
+                        print_event(
+                            event,
+                            true,
+                            resolved,
+                            roots,
+                            view_root,
+                            w,
+                            aw,
+                            &result.placements,
+                            &result.scope_matches,
+                        );
+                    }
                 }
             }
         }
@@ -75,8 +151,16 @@ pub(super) fn print_human(
                 println!();
                 println!("No decisions {}.", time_label.unwrap_or("in range"));
             }
-            let refs: Vec<&TimelineEvent> = days.iter().flat_map(|d| &d.events).collect();
-            let w = width(&refs);
+            // Long mode sizes no columns: an entry is as tall as it needs
+            // to be, so there is nothing to measure and nothing to explain.
+            let (w, aw) = if long {
+                (0, 0)
+            } else {
+                let refs: Vec<&TimelineEvent> = days.iter().flat_map(|d| &d.events).collect();
+                let cells = cells_of(&refs, view_root);
+                announce_root(&refs, &cells);
+                (scope_width(&cells), act_width(&refs))
+            };
             for day in days {
                 println!();
                 let weekday = day.date.format("%A %Y-%m-%d");
@@ -87,7 +171,28 @@ pub(super) fn print_human(
                 }
                 println!();
                 for event in &day.events {
-                    print_event(event, false, resolved, roots, w, &result.placements);
+                    if long {
+                        print_long_event(
+                            event,
+                            false,
+                            roots,
+                            &result.placements,
+                            &result.scope_matches,
+                        );
+                        println!();
+                    } else {
+                        print_event(
+                            event,
+                            false,
+                            resolved,
+                            roots,
+                            view_root,
+                            w,
+                            aw,
+                            &result.placements,
+                            &result.scope_matches,
+                        );
+                    }
                 }
             }
         }
@@ -147,10 +252,17 @@ pub(super) fn print_human(
 }
 
 /// Maximum number of origin lines the composition card shows before an
-/// explicit remainder line — the origins section is the one that scales with
-/// a location's history (many source drives feeding one archive folder over
-/// years); transitioned/indexed-here/untracked stay small in practice.
+/// explicit remainder line — the origins section scales with a location's
+/// history (many source drives feeding one archive folder over years).
+/// Standings, indexed-here and untracked need no cap: each is merged, so its
+/// line count is bounded by the vocabulary. Gaps have their own cap below.
 const CARD_ORIGIN_CAP: usize = 10;
+
+/// Maximum number of gap lines the composition card shows before an explicit
+/// remainder line. Gaps are the one part of the transitioned section that
+/// stays per-decision, so they are the one part whose length tracks the
+/// history rather than the vocabulary.
+const CARD_GAP_CAP: usize = 5;
 
 /// Maximum origin directories a `drew from:` group lists before an explicit
 /// remainder line — a manifest pattern can fan one apply across many
@@ -209,10 +321,10 @@ fn print_composition_card(card: &CompositionCard) {
 }
 
 /// The card's body lines below the "Standing here" header: origins
-/// (files desc, capped with an explicit remainder), transitioned,
-/// indexed-here, untracked. Pure data — kept separate from
-/// `print_composition_card` so the cap and ordering are testable without
-/// capturing stdout.
+/// (files desc, capped with an explicit remainder), transitioned standings,
+/// transitioned gaps (capped likewise), indexed-here, untracked. Pure data —
+/// kept separate from `print_composition_card` so the caps and ordering are
+/// testable without capturing stdout.
 fn composition_card_lines(card: &CompositionCard) -> Vec<String> {
     let mut lines = Vec::new();
     for line in card.origins.iter().take(CARD_ORIGIN_CAP) {
@@ -226,8 +338,29 @@ fn composition_card_lines(card: &CompositionCard) -> Vec<String> {
             plural(more as i64, "origin")
         ));
     }
-    for line in &card.transitioned {
+    // Standings are unbounded — merging keys them on the label, so their
+    // count is bounded by the transition vocabulary, not by the history.
+    // Gaps stay per-decision and so *can* grow without limit; they take the
+    // same explicit-remainder cap the origins section uses, because
+    // per-decision and uncapped together is exactly the class this section
+    // was rewritten to remove.
+    let (standings, gaps): (Vec<&TransitionedLine>, Vec<&TransitionedLine>) = card
+        .transitioned
+        .iter()
+        .partition(|line| matches!(line, TransitionedLine::Standing { .. }));
+    for line in standings {
         lines.push(format_transitioned_line(line));
+    }
+    for line in gaps.iter().take(CARD_GAP_CAP) {
+        lines.push(format_transitioned_line(line));
+    }
+    if gaps.len() > CARD_GAP_CAP {
+        let more = gaps.len() - CARD_GAP_CAP;
+        lines.push(format!(
+            "\u{2026} and {} more {}.",
+            format_count(more as i64),
+            plural(more as i64, "gap")
+        ));
     }
     if let Some(bucket) = &card.indexed_here {
         lines.push(format!(
@@ -353,16 +486,31 @@ fn format_origin_line(line: &OriginLine) -> String {
     }
 }
 
-/// A transitioned line: `<label> here (#N)` — `label` is the registered
-/// transition word when one applies, else the raw command (self-explaining,
-/// never guessed).
+/// A transitioned line. A **standing** reads `<label>: N files (size)` — a
+/// present-tense fact about this place, merged across every decision that
+/// produced it, so it carries no id (the acts are the timeline's, directly
+/// above). A **gap** keeps the older `<label> here (#N)` shape: it is about
+/// one specific decision, and naming that decision is the whole point.
+///
+/// `label` is the registered transition word when one applies, else the raw
+/// command (self-explaining, never guessed).
 fn format_transitioned_line(line: &TransitionedLine) -> String {
-    format!(
-        "{} here (#{}): {}",
-        line.label,
-        line.decision_id,
-        format_bucket(line.files, line.bytes)
-    )
+    match line {
+        TransitionedLine::Standing {
+            label,
+            files,
+            bytes,
+        } => format!("{label}: {}", format_bucket(*files, *bytes)),
+        TransitionedLine::Gap {
+            decision_id,
+            label,
+            files,
+            bytes,
+        } => format!(
+            "{label} here (#{decision_id}): {}",
+            format_bucket(*files, *bytes)
+        ),
+    }
 }
 
 /// A single date, or a `first – last` range when the two differ (several
@@ -399,13 +547,17 @@ const SCOPE_CELL_MAX: usize = 35;
 /// view) renders once as the extraction-aspect line with its destination
 /// shown view-relative rather than absolute. Never both a selection line and
 /// an extraction/arrival line for the same decision.
+#[allow(clippy::too_many_arguments)]
 fn print_event(
     event: &TimelineEvent,
     with_date: bool,
     resolved: &ResolvedScope,
     roots: &HashMap<i64, Root>,
+    view_root: Option<&str>,
     width: usize,
+    act_width: usize,
     placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>,
+    scope_matches: &HashMap<i64, ScopeMatch>,
 ) {
     match event {
         TimelineEvent::Decision(d) => {
@@ -414,15 +566,9 @@ fn print_event(
             } else {
                 format_time(d.created_at)
             };
-            let suffix = |line: &mut String| {
-                if let Some(reason) = &d.reason {
-                    line.push_str(&format!(" \u{00b7} \"{reason}\""));
-                }
-                if d.status != "completed" {
-                    line.push_str(&format!("  [{}]", d.status));
-                }
-            };
-            let cells = event_cells(event, resolved, roots, placements);
+            let suffix = |line: &mut String| line.push_str(&decision_suffix(d));
+            let cells = event_cells(event, resolved, roots, view_root, placements, scope_matches);
+            let act = decision_act(&d.command);
             let lines = placements
                 .get(&d.id)
                 .map(|rows| aggregate_placement_lines(rows))
@@ -436,7 +582,7 @@ fn print_event(
                     let narration = match placement.aspect {
                         RowAspect::Rearrangement => extraction_narration_with_destination(
                             row,
-                            &relativize(&row.destination_path, resolved),
+                            &relativize(&row.destination_path, resolved, view_root),
                         ),
                         RowAspect::Arrival => arrival_narration(row, roots),
                         // `Outside` cannot reach here — such rows were dropped
@@ -446,27 +592,193 @@ fn print_event(
                         // way to repair.
                         RowAspect::Extraction | RowAspect::Outside => extraction_narration(row),
                     };
-                    let mut line = format!("#{:<4} {time}  {cell:<width$}  {}", d.id, narration);
+                    let mut line = format!(
+                        "#{:<4} {time}  {act:<act_width$}  {cell:<width$}  {}",
+                        d.id, narration
+                    );
                     suffix(&mut line);
                     println!("{line}");
                 }
                 return;
             }
             let cell = &cells[0];
-            let mut line = format!("#{:<4} {time}  {cell:<width$}  {}", d.id, headline(d));
+            let mut line = format!(
+                "#{:<4} {time}  {act:<act_width$}  {cell:<width$}  {}",
+                d.id,
+                headline(d)
+            );
             suffix(&mut line);
             println!("{line}");
         }
         TimelineEvent::Note(n) => {
-            let cell = cap_path(&scope_cell(event, resolved, roots), SCOPE_CELL_MAX);
+            let cell = cap_path(
+                &scope_cell(event, resolved, roots, view_root, scope_matches),
+                SCOPE_CELL_MAX,
+            );
             let time = if with_date {
                 format_datetime(n.created_at)
             } else {
                 format_time(n.created_at)
             };
-            println!("      {time}  {cell:<width$}  ~ {}", n.text);
+            // A note carries no act: it is a thought, not a decision. The
+            // column is held open rather than closed up, so the scope cells
+            // stay aligned down the listing; the `~` is what marks the voice.
+            let blank = "";
+            println!(
+                "      {time}  {blank:<act_width$}  {cell:<width$}  ~ {}",
+                n.text
+            );
         }
     }
+}
+
+/// Long mode's one left rail, matching the width of the `#{id:<4} ` field
+/// the column mode opens a decision line with. Every line below a header
+/// starts here, and a note's timestamp does too — three different indents on
+/// one listing is the ragged edge this mode exists to remove.
+const LONG_INDENT: &str = "      ";
+
+/// Print one timeline entry in long mode: several lines instead of several
+/// columns.
+///
+/// **Multi-line, not a wider column.** An uncapped scope column pushes the
+/// narration off the right of the screen; a taller entry survives any path
+/// length. That is also why the width pass does not run here — there is no
+/// column to size, so nothing measured and nothing printed can drift apart.
+///
+/// Places are **absolute, uncapped and unelided**: root-relative rendering
+/// is a scoped-view convenience, and this mode exists to be copied out of.
+/// The line shape is `<place>`, then `<narration>`, under a header line
+/// carrying the id, the time and the act.
+///
+/// Long mode changes only how an event renders — never which events are
+/// shown, never their order, never the rollups or the card below them.
+fn print_long_event(
+    event: &TimelineEvent,
+    with_date: bool,
+    roots: &HashMap<i64, Root>,
+    placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>,
+    scope_matches: &HashMap<i64, ScopeMatch>,
+) {
+    for line in long_event_lines(event, with_date, roots, placements, scope_matches) {
+        println!("{line}");
+    }
+}
+
+/// The lines of one long-mode entry, indentation included. Pure data — the
+/// same separation `drew_from_lines` and `composition_card_lines` keep, so
+/// the shape is testable without capturing stdout.
+fn long_event_lines(
+    event: &TimelineEvent,
+    with_date: bool,
+    roots: &HashMap<i64, Root>,
+    placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>,
+    scope_matches: &HashMap<i64, ScopeMatch>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    match event {
+        TimelineEvent::Decision(d) => {
+            let time = if with_date {
+                format_datetime(d.created_at)
+            } else {
+                format_time(d.created_at)
+            };
+            out.push(format!("#{:<4} {time}  {}", d.id, decision_act(&d.command)));
+
+            let lines = placements
+                .get(&d.id)
+                .map(|rows| aggregate_placement_lines(rows))
+                .unwrap_or_default();
+            if lines.is_empty() {
+                out.push(format!(
+                    "{LONG_INDENT}{}",
+                    long_decision_place(d, scope_matches)
+                ));
+                out.push(format!(
+                    "{LONG_INDENT}{}{}",
+                    headline(d),
+                    decision_suffix(d)
+                ));
+                return out;
+            }
+            // One place/narration pair per placement line, the same rows the
+            // column mode renders — absolute on both sides here, since a
+            // relative destination is not something you can paste.
+            for placement in &lines {
+                let row = &placement.row;
+                let (place, narration) = match placement.aspect {
+                    RowAspect::Arrival => {
+                        (row.destination_path.clone(), arrival_narration(row, roots))
+                    }
+                    RowAspect::Extraction | RowAspect::Rearrangement | RowAspect::Outside => {
+                        (row.drawn_from(), extraction_narration(row))
+                    }
+                };
+                out.push(format!("{LONG_INDENT}{place}"));
+                out.push(format!("{LONG_INDENT}{narration}{}", decision_suffix(d)));
+            }
+        }
+        TimelineEvent::Note(n) => {
+            let time = if with_date {
+                format_datetime(n.created_at)
+            } else {
+                format_time(n.created_at)
+            };
+            // No act word: a thought is not an act, and the `~` below is what
+            // marks the voice — the same rule the column mode's blank act
+            // cell keeps.
+            out.push(format!("{LONG_INDENT}{time}"));
+            out.push(format!("{LONG_INDENT}{}", note_absolute_path(n, roots)));
+            out.push(format!("{LONG_INDENT}~ {}", n.text));
+        }
+    }
+    out
+}
+
+/// A decision's place in long mode: the matched scope where one was carried,
+/// the display column's first entry otherwise — the same precedence the
+/// column mode uses, spelled out rather than abbreviated.
+fn long_decision_place(d: &Decision, scope_matches: &HashMap<i64, ScopeMatch>) -> String {
+    let (place, others) = match scope_matches.get(&d.id) {
+        Some(m) => (m.matched.clone(), m.other_count),
+        None => match &d.scope {
+            Some(paths) if !paths.is_empty() => (paths[0].clone(), paths.len() - 1),
+            _ => return "global".to_string(),
+        },
+    };
+    if others == 0 {
+        place
+    } else {
+        format!(
+            "{place}   (+{} other {})",
+            others,
+            plural(others as i64, "place")
+        )
+    }
+}
+
+/// A note's full location, absolute — long mode's whole point for notes,
+/// which the column mode can only show relativized and capped.
+fn note_absolute_path(n: &crate::notes::Note, roots: &HashMap<i64, Root>) -> String {
+    match roots.get(&n.root_id) {
+        Some(root) if n.rel_path.is_empty() => root.path.clone(),
+        Some(root) => format!("{}/{}", root.path, n.rel_path),
+        None => n.rel_path.clone(),
+    }
+}
+
+/// The reason-and-status tail a decision's narration carries. One spelling,
+/// both render modes — the two shapes differ in layout, never in what a row
+/// is allowed to say about itself.
+fn decision_suffix(d: &Decision) -> String {
+    let mut out = String::new();
+    if let Some(reason) = &d.reason {
+        out.push_str(&format!(" \u{00b7} \"{reason}\""));
+    }
+    if d.status != "completed" {
+        out.push_str(&format!("  [{}]", d.status));
+    }
+    out
 }
 
 /// Every scope cell an event will actually render — one per touching
@@ -483,7 +795,9 @@ fn event_cells(
     event: &TimelineEvent,
     resolved: &ResolvedScope,
     roots: &HashMap<i64, Root>,
+    view_root: Option<&str>,
     placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>,
+    scope_matches: &HashMap<i64, ScopeMatch>,
 ) -> Vec<String> {
     if let TimelineEvent::Decision(d) = event {
         if let Some(rows) = placements.get(&d.id) {
@@ -498,16 +812,25 @@ fn event_cells(
                             | RowAspect::Rearrangement
                             | RowAspect::Outside => placement.row.drawn_from(),
                         };
-                        cap_path(&relativize(&location, resolved), SCOPE_CELL_MAX)
+                        cap_path(&relativize(&location, resolved, view_root), SCOPE_CELL_MAX)
                     })
                     .collect();
             }
         }
     }
     vec![cap_path(
-        &scope_cell(event, resolved, roots),
+        &scope_cell(event, resolved, roots, view_root, scope_matches),
         SCOPE_CELL_MAX,
     )]
+}
+
+/// The act a timeline row states, or `None` for a note — a thought is not an
+/// act, and the column stays blank rather than borrowing a word.
+fn event_act(event: &TimelineEvent) -> Option<&str> {
+    match event {
+        TimelineEvent::Decision(d) => Some(decision_act(&d.command)),
+        TimelineEvent::Note(_) => None,
+    }
 }
 
 /// The extraction aspect's narration: `→ N files (size) to DEST (wording)`.
@@ -597,43 +920,65 @@ fn format_rearrangement_rollup(rollup: &RearrangementRollup) -> String {
     )
 }
 
-/// The location an event happened at, rendered for the scope column: relative
-/// to the viewed prefix when the view has one (the CWD case), otherwise the
-/// absolute path. Decisions with no recorded scope render as "global";
-/// multi-path scopes show the first plus a count.
+/// The location an event happened at, rendered for the scope column.
+///
+/// For a decision, the place named is the one the operations layer says
+/// **matched** this view (`TrailResult.scope_matches`) — the join the query
+/// already computed to decide the decision surfaces at all. Nothing is
+/// re-derived here: a 31-prefix scan used to be labelled by its *first*
+/// recorded prefix, which had nothing to do with the view the reader was
+/// standing in. `+N` counts the decision's other recorded places.
+///
+/// Falls back to the display column's first entry when no match was carried
+/// — a global view (which matched nothing by construction) and a decision
+/// with no `decision_scopes` rows of its own, surfaced by an extraction row
+/// instead. A decision with no recorded scope at all renders "global".
 fn scope_cell(
     event: &TimelineEvent,
     resolved: &ResolvedScope,
     roots: &HashMap<i64, Root>,
+    view_root: Option<&str>,
+    scope_matches: &HashMap<i64, ScopeMatch>,
 ) -> String {
-    let location = match event {
-        TimelineEvent::Decision(d) => match &d.scope {
-            Some(paths) if !paths.is_empty() => {
-                let first = relativize(&paths[0], resolved);
-                if paths.len() > 1 {
-                    format!("{first} +{}", paths.len() - 1)
-                } else {
-                    first
-                }
+    match event {
+        TimelineEvent::Decision(d) => {
+            if let Some(m) = scope_matches.get(&d.id) {
+                let matched = relativize(&m.matched, resolved, view_root);
+                return with_remainder(matched, m.other_count);
             }
-            _ => "global".to_string(),
-        },
-        TimelineEvent::Note(n) => {
-            let absolute = match roots.get(&n.root_id) {
-                Some(root) if n.rel_path.is_empty() => root.path.clone(),
-                Some(root) => format!("{}/{}", root.path, n.rel_path),
-                None => n.rel_path.clone(),
-            };
-            relativize(&absolute, resolved)
+            match &d.scope {
+                Some(paths) if !paths.is_empty() => {
+                    with_remainder(relativize(&paths[0], resolved, view_root), paths.len() - 1)
+                }
+                _ => "global".to_string(),
+            }
         }
-    };
-    location
+        TimelineEvent::Note(n) => relativize(&note_absolute_path(n, roots), resolved, view_root),
+    }
 }
 
-/// Render a location relative to a single-prefix view ("." for the prefix
-/// itself); fall back to the path as recorded (global views, multi-prefix
-/// views, ancestor scopes, historical relative records).
-fn relativize(path: &str, resolved: &ResolvedScope) -> String {
+/// `place` alone, or `place +N` when the decision names other places too.
+fn with_remainder(place: String, other_count: usize) -> String {
+    if other_count == 0 {
+        place
+    } else {
+        format!("{place} +{other_count}")
+    }
+}
+
+/// Render a location for the scope column, in three descending degrees of
+/// relativity.
+///
+/// **View-relative** first, when the view has one prefix ("." for the prefix
+/// itself) — the CWD case, unchanged. **Root-relative** next, measured from
+/// the single root that contains the whole view (`TrailResult.view_root`),
+/// which is what lets a scope *above* or *beside* the viewed folder render as
+/// something a reader can hold in one line; the header states that root once,
+/// so the leading `/` marks a path as root-relative rather than absolute.
+/// **Absolute** last — global views, multi-root views, and any path outside
+/// the view's root, where there is no shared frame to measure from and a
+/// shortened path would be a lie.
+fn relativize(path: &str, resolved: &ResolvedScope, view_root: Option<&str>) -> String {
     if resolved.prefixes.len() == 1 {
         let prefix = &resolved.prefixes[0];
         if path == prefix {
@@ -641,6 +986,14 @@ fn relativize(path: &str, resolved: &ResolvedScope) -> String {
         }
         if let Some(rel) = crate::core::domain::path_strip_prefix(path, prefix) {
             return rel.to_string();
+        }
+    }
+    if let Some(root) = view_root {
+        if path == root {
+            return "/".to_string();
+        }
+        if let Some(rel) = crate::core::domain::path_strip_prefix(path, root) {
+            return format!("/{rel}");
         }
     }
     path.to_string()
@@ -840,11 +1193,11 @@ mod tests {
             from_cwd: true,
             auto_include_archived: false,
         };
-        assert_eq!(relativize("/photos", &scoped), ".");
-        assert_eq!(relativize("/photos/italy", &scoped), "italy");
+        assert_eq!(relativize("/photos", &scoped, None), ".");
+        assert_eq!(relativize("/photos/italy", &scoped, None), "italy");
         // Ancestor of the view and unrelated paths stay absolute.
-        assert_eq!(relativize("/", &scoped), "/");
-        assert_eq!(relativize("/other", &scoped), "/other");
+        assert_eq!(relativize("/", &scoped, None), "/");
+        assert_eq!(relativize("/other", &scoped, None), "/other");
 
         let global = ResolvedScope {
             prefixes: Vec::new(),
@@ -852,7 +1205,177 @@ mod tests {
             from_cwd: false,
             auto_include_archived: false,
         };
-        assert_eq!(relativize("/photos/italy", &global), "/photos/italy");
+        assert_eq!(relativize("/photos/italy", &global, None), "/photos/italy");
+    }
+
+    /// The scope cell names the place the operations layer says matched —
+    /// never element zero of the display column, which is what labelled a
+    /// 31-prefix scan by a folder unrelated to the view.
+    #[test]
+    fn the_scope_cell_names_the_carried_match_not_the_first_recorded_place() {
+        let scoped = ResolvedScope {
+            prefixes: vec!["/a/foto".to_string()],
+            set_aside: Vec::new(),
+            from_cwd: true,
+            auto_include_archived: false,
+        };
+        let event = TimelineEvent::Decision(Box::new(mk_decision(
+            1,
+            Some(vec![
+                "/a/admin".to_string(),
+                "/a/foto".to_string(),
+                "/a/misc".to_string(),
+            ]),
+        )));
+        let matches = HashMap::from([(
+            1,
+            ScopeMatch {
+                matched: "/a/foto".to_string(),
+                other_count: 2,
+            },
+        )]);
+
+        assert_eq!(
+            scope_cell(&event, &scoped, &HashMap::new(), Some("/a"), &matches),
+            ". +2"
+        );
+    }
+
+    /// No match carried (a global view, or a decision surfaced by an
+    /// extraction row alone): today's behaviour, unchanged.
+    #[test]
+    fn the_scope_cell_falls_back_to_the_display_column_with_no_match() {
+        let global = ResolvedScope {
+            prefixes: Vec::new(),
+            set_aside: Vec::new(),
+            from_cwd: false,
+            auto_include_archived: false,
+        };
+        let event = TimelineEvent::Decision(Box::new(mk_decision(
+            1,
+            Some(vec!["/a/admin".to_string(), "/a/foto".to_string()]),
+        )));
+        assert_eq!(
+            scope_cell(&event, &global, &HashMap::new(), None, &HashMap::new()),
+            "/a/admin +1"
+        );
+    }
+
+    #[test]
+    fn a_decision_with_no_recorded_scope_still_renders_global() {
+        let global = ResolvedScope {
+            prefixes: Vec::new(),
+            set_aside: Vec::new(),
+            from_cwd: false,
+            auto_include_archived: false,
+        };
+        let event = TimelineEvent::Decision(Box::new(mk_decision(1, None)));
+        assert_eq!(
+            scope_cell(&event, &global, &HashMap::new(), None, &HashMap::new()),
+            "global"
+        );
+    }
+
+    /// Three descending frames. View-relative first (unchanged), then
+    /// root-relative for a place elsewhere in the view's root, then absolute
+    /// where there is no shared frame to measure from.
+    #[test]
+    fn places_render_root_relative_in_a_single_root_view() {
+        let scoped = ResolvedScope {
+            prefixes: vec!["/archive/2016".to_string()],
+            set_aside: Vec::new(),
+            from_cwd: true,
+            auto_include_archived: false,
+        };
+        let root = Some("/archive");
+        // View-relative wins: no regression on the `.`-and-below behaviour.
+        assert_eq!(relativize("/archive/2016", &scoped, root), ".");
+        assert_eq!(relativize("/archive/2016/03", &scoped, root), "03");
+        // Elsewhere in the root: measured from the root.
+        assert_eq!(relativize("/archive/2020", &scoped, root), "/2020");
+        assert_eq!(relativize("/archive", &scoped, root), "/");
+        // Outside the root: absolute, because nothing shared measures it.
+        assert_eq!(
+            relativize("/Volumes/sd/dcim", &scoped, root),
+            "/Volumes/sd/dcim"
+        );
+    }
+
+    #[test]
+    fn a_multi_root_view_renders_absolute() {
+        let scoped = ResolvedScope {
+            prefixes: vec!["/a/x".to_string(), "/b/y".to_string()],
+            set_aside: Vec::new(),
+            from_cwd: false,
+            auto_include_archived: false,
+        };
+        // `view_root` is None for a multi-root view; every place stays whole.
+        assert_eq!(relativize("/a/x", &scoped, None), "/a/x");
+        assert_eq!(relativize("/b/y/z", &scoped, None), "/b/y/z");
+    }
+
+    #[test]
+    fn a_global_view_renders_absolute() {
+        let global = ResolvedScope {
+            prefixes: Vec::new(),
+            set_aside: Vec::new(),
+            from_cwd: false,
+            auto_include_archived: false,
+        };
+        assert_eq!(relativize("/a/x", &global, None), "/a/x");
+    }
+
+    /// A place under the viewed prefix keeps its view-relative form even
+    /// though a root frame is available — the precedence is load-bearing.
+    #[test]
+    fn a_scope_under_the_viewed_prefix_still_renders_view_relative() {
+        let scoped = ResolvedScope {
+            prefixes: vec!["/archive/2016".to_string()],
+            set_aside: Vec::new(),
+            from_cwd: true,
+            auto_include_archived: false,
+        };
+        assert_eq!(
+            relativize("/archive/2016/03/raw", &scoped, Some("/archive")),
+            "03/raw"
+        );
+    }
+
+    // The act column — derived, never a coined literal.
+
+    #[test]
+    fn the_act_is_the_registered_transition_word_where_one_exists() {
+        assert_eq!(decision_act("apply"), "archived");
+        assert_eq!(decision_act("exclude_set"), "excluded");
+        assert_eq!(decision_act("exclude_duplicates"), "excluded");
+        assert_eq!(decision_act("exclude_clear"), "restored");
+    }
+
+    /// The fallback arm: the stored identifier, exactly as recorded. The
+    /// underscore is accepted residue — coining a word here is `/vision`'s.
+    #[test]
+    fn an_unregistered_command_renders_its_identifier() {
+        assert_eq!(decision_act("scan"), "scan");
+        assert_eq!(decision_act("cluster_generate"), "cluster_generate");
+        assert_eq!(decision_act("roots_rm"), "roots_rm");
+        // A command identifier from a newer Canon: rendered raw, never dropped.
+        assert_eq!(decision_act("some_future_command"), "some_future_command");
+    }
+
+    /// A note is a thought, not an act — the column stays blank and the `~`
+    /// keeps marking the voice.
+    #[test]
+    fn a_note_line_carries_no_act() {
+        let note = TimelineEvent::Note(crate::notes::Note {
+            id: 1,
+            root_id: 1,
+            rel_path: "x".to_string(),
+            text: "thought".to_string(),
+            created_at: 0,
+        });
+        assert_eq!(event_act(&note), None);
+        let decision = TimelineEvent::Decision(Box::new(mk_decision(1, None)));
+        assert_eq!(event_act(&decision), Some("archived"));
     }
 
     #[test]
@@ -875,12 +1398,26 @@ mod tests {
             vec![(mk_extraction_row(None, None), RowAspect::Extraction)],
         );
         // Capped at SCOPE_CELL_MAX like every other cell.
-        let cells = event_cells(&event, &global, &HashMap::new(), &placements);
+        let cells = event_cells(
+            &event,
+            &global,
+            &HashMap::new(),
+            None,
+            &placements,
+            &HashMap::new(),
+        );
         assert_eq!(cells, vec!["...mes/old-laptop/photos/2016/italy"]);
         assert!(cells[0].chars().count() <= SCOPE_CELL_MAX);
 
         // With no extraction rows the selection scope is the cell, as before.
-        let cells = event_cells(&event, &global, &HashMap::new(), &HashMap::new());
+        let cells = event_cells(
+            &event,
+            &global,
+            &HashMap::new(),
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(cells, vec!["/short"]);
     }
 
@@ -905,7 +1442,14 @@ mod tests {
             ],
         );
 
-        let cells = event_cells(&event, &global, &HashMap::new(), &placements);
+        let cells = event_cells(
+            &event,
+            &global,
+            &HashMap::new(),
+            None,
+            &placements,
+            &HashMap::new(),
+        );
         assert_eq!(
             cells,
             vec![
@@ -929,7 +1473,14 @@ mod tests {
         let mut placements = HashMap::new();
         placements.insert(1, vec![(mk_extraction_row(None, None), RowAspect::Arrival)]);
 
-        let cells = event_cells(&event, &scoped, &HashMap::new(), &placements);
+        let cells = event_cells(
+            &event,
+            &scoped,
+            &HashMap::new(),
+            None,
+            &placements,
+            &HashMap::new(),
+        );
         assert_eq!(cells, vec!["2016/Italy"]);
     }
 
@@ -945,7 +1496,14 @@ mod tests {
         let mut placements = HashMap::new();
         placements.insert(1, vec![(mk_extraction_row(None, None), RowAspect::Arrival)]);
 
-        let cells = event_cells(&event, &scoped, &HashMap::new(), &placements);
+        let cells = event_cells(
+            &event,
+            &scoped,
+            &HashMap::new(),
+            None,
+            &placements,
+            &HashMap::new(),
+        );
         assert_eq!(cells, vec!["."]);
     }
 
@@ -967,7 +1525,14 @@ mod tests {
             vec![(mk_extraction_row(None, None), RowAspect::Rearrangement)],
         );
 
-        let cells = event_cells(&event, &scoped, &HashMap::new(), &placements);
+        let cells = event_cells(
+            &event,
+            &scoped,
+            &HashMap::new(),
+            None,
+            &placements,
+            &HashMap::new(),
+        );
         assert_eq!(cells, vec!["photos/2016/italy"]);
     }
 
@@ -996,7 +1561,14 @@ mod tests {
             ],
         )]);
 
-        let cells = event_cells(&event, &global, &HashMap::new(), &placements);
+        let cells = event_cells(
+            &event,
+            &global,
+            &HashMap::new(),
+            None,
+            &placements,
+            &HashMap::new(),
+        );
         assert_eq!(cells, vec!["/Volumes/old-laptop/photos/2016"]);
     }
 
@@ -1026,11 +1598,226 @@ mod tests {
             ],
         )]);
 
-        let cells = event_cells(&event, &scoped, &HashMap::new(), &placements);
+        let cells = event_cells(
+            &event,
+            &scoped,
+            &HashMap::new(),
+            None,
+            &placements,
+            &HashMap::new(),
+        );
         assert_eq!(
             cells,
             vec!["photos/2016/italy", "/Archive/Media/2016/Italy"]
         );
+
+        // The act column is measured in the same pass, over the same events.
+        // A decision contributes one act however many rows it renders — the
+        // two columns are sized together so neither can drift from the other.
+        assert_eq!(event_act(&event), Some("archived"));
+    }
+
+    // ------------------------------------------------------------------
+    // Long mode — the pasteable shape
+    // ------------------------------------------------------------------
+
+    fn mk_note(rel_path: &str, text: &str) -> crate::notes::Note {
+        crate::notes::Note {
+            id: 1,
+            root_id: 1,
+            rel_path: rel_path.to_string(),
+            text: text.to_string(),
+            created_at: 0,
+        }
+    }
+
+    /// The mode's whole point: the location arrives whole, no cap, no
+    /// ellipsis — something you can paste.
+    #[test]
+    fn long_mode_renders_the_full_path_unelided() {
+        let event = TimelineEvent::Decision(Box::new(mk_decision(
+            71,
+            Some(vec![
+                "/Volumes/backup-drive/Media Archive/old laptop/albums/2007".to_string(),
+            ]),
+        )));
+        let lines = long_event_lines(
+            &event,
+            true,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            lines[1],
+            "      /Volumes/backup-drive/Media Archive/old laptop/albums/2007"
+        );
+        assert!(lines[1].chars().count() > SCOPE_CELL_MAX);
+        assert!(!lines.iter().any(|l| l.contains('\u{2026}')));
+    }
+
+    /// Root-relative rendering is a scoped-view convenience; this mode exists
+    /// to be copied out of, so the path stays absolute wherever it is run.
+    #[test]
+    fn long_mode_renders_absolute_paths_even_in_a_scoped_view() {
+        // `long_event_lines` takes no `ResolvedScope` and no `view_root` at
+        // all — the absoluteness is structural, not a branch that could be
+        // taken the other way by a caller.
+        let event = TimelineEvent::Decision(Box::new(mk_decision(
+            1,
+            Some(vec!["/archive/2016".to_string()]),
+        )));
+        let matches = HashMap::from([(
+            1,
+            ScopeMatch {
+                matched: "/archive/2016".to_string(),
+                other_count: 0,
+            },
+        )]);
+        let lines = long_event_lines(&event, true, &HashMap::new(), &HashMap::new(), &matches);
+        assert_eq!(lines[1], "      /archive/2016");
+    }
+
+    #[test]
+    fn long_mode_works_in_a_global_view() {
+        // A decision with no recorded scope at all still names its place.
+        let event = TimelineEvent::Decision(Box::new(mk_decision(1, None)));
+        let lines = long_event_lines(
+            &event,
+            true,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(lines[1], "      global");
+    }
+
+    #[test]
+    fn long_mode_gives_a_note_its_full_location() {
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/backup-drive/Media Archive"))]);
+        let event = TimelineEvent::Note(mk_note(
+            "old laptop/albums/trip_2007_2010",
+            "bulk-transfer this",
+        ));
+        let lines = long_event_lines(&event, true, &roots, &HashMap::new(), &HashMap::new());
+        assert_eq!(
+            lines[1],
+            "      /Volumes/backup-drive/Media Archive/old laptop/albums/trip_2007_2010"
+        );
+        // A thought, not an act: the `~` marks it and the act line stays bare.
+        assert_eq!(lines[2], "      ~ bulk-transfer this");
+        assert!(!lines[0].contains("note"));
+    }
+
+    /// `+3` in a column becomes words when there is room for words.
+    #[test]
+    fn long_mode_spells_out_the_remainder() {
+        let event = TimelineEvent::Decision(Box::new(mk_decision(1, None)));
+        let matches = HashMap::from([(
+            1,
+            ScopeMatch {
+                matched: "/a/foto".to_string(),
+                other_count: 30,
+            },
+        )]);
+        let lines = long_event_lines(&event, true, &HashMap::new(), &HashMap::new(), &matches);
+        assert_eq!(lines[1], "      /a/foto   (+30 other places)");
+
+        let one = HashMap::from([(
+            1,
+            ScopeMatch {
+                matched: "/a/foto".to_string(),
+                other_count: 1,
+            },
+        )]);
+        let lines = long_event_lines(&event, true, &HashMap::new(), &HashMap::new(), &one);
+        assert_eq!(lines[1], "      /a/foto   (+1 other place)");
+    }
+
+    /// Long mode changes how an event renders, never which events render —
+    /// it sees the same placement rows and produces one pair per line.
+    #[test]
+    fn long_mode_does_not_change_which_events_are_shown() {
+        let event = TimelineEvent::Decision(Box::new(mk_decision(42, None)));
+        let mut second = mk_extraction_row(None, None);
+        second.root_path = "/Volumes/nikon-sd".to_string();
+        second.rel_prefix = "dcim".to_string();
+        let placements = HashMap::from([(
+            42,
+            vec![
+                (mk_extraction_row(None, None), RowAspect::Extraction),
+                (second, RowAspect::Extraction),
+            ],
+        )]);
+
+        let long = long_event_lines(&event, true, &HashMap::new(), &placements, &HashMap::new());
+        let global = ResolvedScope {
+            prefixes: Vec::new(),
+            set_aside: Vec::new(),
+            from_cwd: false,
+            auto_include_archived: false,
+        };
+        let cells = event_cells(
+            &event,
+            &global,
+            &HashMap::new(),
+            None,
+            &placements,
+            &HashMap::new(),
+        );
+        // Header + one place/narration pair per row the column mode measures.
+        assert_eq!(long.len(), 1 + 2 * cells.len());
+        assert_eq!(long[1], "      /Volumes/old-laptop/photos/2016/italy");
+        assert_eq!(long[3], "      /Volumes/nikon-sd/dcim");
+    }
+
+    /// One left rail: every line below a header starts at the same column,
+    /// and a note's timestamp starts there too — the ragged edge is exactly
+    /// what this mode exists to remove.
+    #[test]
+    fn long_mode_lines_share_one_left_rail() {
+        let roots = HashMap::from([(1, mk_root(1, "/a"))]);
+        let decision = TimelineEvent::Decision(Box::new(mk_decision(1, None)));
+        let note = TimelineEvent::Note(mk_note("x", "thought"));
+
+        let d = long_event_lines(&decision, true, &roots, &HashMap::new(), &HashMap::new());
+        let n = long_event_lines(&note, true, &roots, &HashMap::new(), &HashMap::new());
+
+        // The header's `#{id:<4} ` field is the rail's width: the timestamp
+        // starts exactly where every line below it does.
+        let head: Vec<char> = d[0].chars().collect();
+        assert_eq!(head[LONG_INDENT.len() - 1], ' ');
+        assert!(head[LONG_INDENT.len()].is_ascii_digit(), "{:?}", d[0]);
+        for line in d[1..].iter().chain(n.iter()) {
+            assert!(line.starts_with(LONG_INDENT), "{line:?}");
+            assert!(!line.starts_with(&format!("{LONG_INDENT} ")), "{line:?}");
+        }
+    }
+
+    /// Inside a day group the date is already stated by the group header, so
+    /// the entry carries the time alone — the same rule the column mode has.
+    #[test]
+    fn long_mode_applies_inside_day_groups() {
+        let event = TimelineEvent::Decision(Box::new(mk_decision(7, None)));
+        let dated = long_event_lines(
+            &event,
+            true,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        let grouped = long_event_lines(
+            &event,
+            false,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(dated[0].starts_with("#7"));
+        assert!(grouped[0].starts_with("#7"));
+        assert!(dated[0].len() > grouped[0].len());
+        // Everything below the header is identical in both.
+        assert_eq!(dated[1..], grouped[1..]);
     }
 
     // ------------------------------------------------------------------
@@ -1493,17 +2280,29 @@ mod tests {
         );
     }
 
+    /// A standing is a present-tense fact: the word, the counts, no id.
     #[test]
-    fn format_transitioned_line_composition() {
-        let line = TransitionedLine {
-            decision_id: 30,
+    fn format_transitioned_line_standing_carries_no_id() {
+        let line = TransitionedLine::Standing {
             label: "excluded".to_string(),
+            files: 4,
+            bytes: 400,
+        };
+        assert_eq!(format_transitioned_line(&line), "excluded: 4 files (400 B)");
+    }
+
+    /// A gap is about one decision, and says which.
+    #[test]
+    fn format_transitioned_line_gap_keeps_its_id() {
+        let line = TransitionedLine::Gap {
+            decision_id: 30,
+            label: "transition unrecorded".to_string(),
             files: 4,
             bytes: 400,
         };
         assert_eq!(
             format_transitioned_line(&line),
-            "excluded here (#30): 4 files (400 B)"
+            "transition unrecorded here (#30): 4 files (400 B)"
         );
     }
 
@@ -1514,7 +2313,7 @@ mod tests {
         untracked: Option<crate::trail::domain::composition::BucketCount>,
     ) -> CompositionCard {
         let files = origins.iter().map(|o| o.files()).sum::<i64>()
-            + transitioned.iter().map(|t| t.files).sum::<i64>()
+            + transitioned.iter().map(|t| t.bucket().files).sum::<i64>()
             + indexed_here.map(|b| b.files).unwrap_or(0)
             + untracked.map(|b| b.files).unwrap_or(0);
         CompositionCard {
@@ -1531,8 +2330,7 @@ mod tests {
     fn composition_card_lines_order_origins_transitioned_indexed_untracked() {
         let card = mk_card(
             vec![mk_from_root("/a", false, 5, vec![1], 0, 0)],
-            vec![TransitionedLine {
-                decision_id: 2,
+            vec![TransitionedLine::Standing {
                 label: "excluded".to_string(),
                 files: 1,
                 bytes: 100,
@@ -1549,7 +2347,7 @@ mod tests {
         let lines = composition_card_lines(&card);
         assert_eq!(lines.len(), 4);
         assert!(lines[0].starts_with("from /a"));
-        assert!(lines[1].starts_with("excluded here"));
+        assert!(lines[1].starts_with("excluded:"));
         assert!(lines[2].starts_with("first indexed here"));
         assert!(lines[3].starts_with("untracked (predates recording)"));
     }
@@ -1564,6 +2362,44 @@ mod tests {
         // 10 origin lines + one remainder line.
         assert_eq!(lines.len(), 11);
         assert_eq!(lines[10], "\u{2026} and 2 more origins.");
+    }
+
+    /// Gaps stay per-decision, so they are the one part of the transitioned
+    /// section whose length tracks the history — they take the same
+    /// explicit-remainder cap the origins section uses, never a silent
+    /// truncation.
+    #[test]
+    fn gap_lines_cap_with_an_explicit_remainder() {
+        let gaps: Vec<TransitionedLine> = (0..8)
+            .map(|i| TransitionedLine::Gap {
+                decision_id: i,
+                label: "transition unrecorded".to_string(),
+                files: 1,
+                bytes: 100,
+            })
+            .collect();
+        let card = mk_card(Vec::new(), gaps, None, None);
+        let lines = composition_card_lines(&card);
+        // 5 gap lines + one remainder line.
+        assert_eq!(lines.len(), 6);
+        assert_eq!(lines[5], "\u{2026} and 3 more gaps.");
+    }
+
+    /// Standings are merged, so their count is bounded by the vocabulary,
+    /// not by the history — the gap cap must not reach them.
+    #[test]
+    fn standings_are_not_capped_by_the_gap_cap() {
+        let standings: Vec<TransitionedLine> = (0..8)
+            .map(|i| TransitionedLine::Standing {
+                label: format!("label{i}"),
+                files: 1,
+                bytes: 100,
+            })
+            .collect();
+        let card = mk_card(Vec::new(), standings, None, None);
+        let lines = composition_card_lines(&card);
+        assert_eq!(lines.len(), 8);
+        assert!(!lines.iter().any(|l| l.contains("more")));
     }
 
     #[test]

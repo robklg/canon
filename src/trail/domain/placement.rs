@@ -31,6 +31,35 @@ pub fn scopes_touch(view_prefix: &str, other_prefix: &str) -> bool {
         || Path::new(other_prefix).starts_with(view_prefix)
 }
 
+/// Which recorded scope brought a decision into the view, and how many other
+/// places the decision also names.
+///
+/// Derived once in the operations layer and carried on the result; **no
+/// surface re-derives the match**. The join is already computed there — the
+/// filter that decides which decisions surface at all — and discarding it
+/// only to have the interface guess again is how a 31-prefix scan came to be
+/// labelled by its *first* recorded prefix, a place with nothing to do with
+/// the view. The same carried-match discipline governs extraction-row
+/// classification (`ops::compute::classify_extraction_rows`) and
+/// `trail show`'s scope markers (`ops::show::ShowScope`).
+///
+/// Matching is [`scopes_touch`] — a `decision_scopes` row is a **declared
+/// scope** ("I acted on this subtree"), so an ancestor of the view genuinely
+/// matches it. Never `placement_in_view` here (the two-claims law).
+pub struct ScopeMatch {
+    /// Display path of the matching scope. Where several match, the
+    /// **deepest** wins — a scope inside the view is a more precise statement
+    /// of where the act was than an ancestor of it. Ties break
+    /// lexicographically, so repeated runs render identically.
+    pub matched: String,
+    /// The decision's other recorded places, for the `+N` remainder. Counted
+    /// from the decision's own display column so `+N` keeps meaning what it
+    /// means today and stays consistent with `show` and `--jsonl`: one less
+    /// than its length when `matched` appears there, its full length when it
+    /// does not (a scope row whose display entry was never backfilled).
+    pub other_count: usize,
+}
+
 /// Whether an **observed placement** lies within the viewed scope:
 /// descendant-or-equal only, segment-aware, never bidirectional.
 ///

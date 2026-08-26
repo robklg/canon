@@ -19,7 +19,7 @@ use crate::trail::domain::timeline::{parse_when, WhenValue};
 use crate::trail::jsonl::{print_jsonl, JsonRetiredScopeEvent};
 use crate::trail::ops;
 use crate::trail::ops::compute::{TrailParams, DEFAULT_LIMIT};
-use crate::trail::ops::show::PointerRelocation;
+use crate::trail::ops::show::{PointerRelocation, ScopeRelation, ShowScope};
 use crate::trail::render::{
     drew_from_lines, format_counts, format_date_only, format_datetime, print_human,
 };
@@ -33,6 +33,9 @@ pub struct TrailArgs {
     pub limit: Option<usize>,
     pub all: bool,
     pub no_notes: bool,
+    /// `-l`/`--long`: multi-line entries carrying each place's full absolute
+    /// path, uncapped and unelided — the pasteable mode.
+    pub long: bool,
     pub jsonl: bool,
 }
 
@@ -191,6 +194,7 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<TrailExit> {
             &roots_map,
             limit,
             card.as_ref(),
+            args.long,
         );
     }
     Ok(TrailExit::Reported)
@@ -267,7 +271,16 @@ fn print_retired_statement(s: &crate::retire::RetiredScope) {
 }
 
 pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
-    let Some(show) = crate::trail::ops::show::compute_show(db.conn(), id)? else {
+    // Environment access is the interface's. Cleaned lexically and never
+    // canonicalized — the trail's standing treatment of paths, because an old
+    // mount path need not exist to be asked about. A failure yields `None`,
+    // which produces no markers and recorded order.
+    let cwd = std::env::current_dir().ok().map(|cwd| {
+        crate::core::domain::path::clean_path(&cwd, &cwd)
+            .to_string_lossy()
+            .into_owned()
+    });
+    let Some(show) = crate::trail::ops::show::compute_show(db.conn(), id, cwd.as_deref())? else {
         return Err(anyhow!("no decision #{id}"));
     };
     let d = &show.decision;
@@ -279,9 +292,12 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
         println!("  reason:   \"{reason}\"");
     }
     println!("  command:  {}", d.command_line);
-    match &d.scope {
-        Some(scope) if !scope.is_empty() => println!("  scope:    {}", scope.join(", ")),
-        _ => println!("  scope:    global"),
+    if show.scopes.is_empty() {
+        println!("  scope:    global");
+    } else {
+        for line in show_scope_lines(&show.scopes) {
+            println!("{line}");
+        }
     }
     if !show.extractions.is_empty() {
         println!("  drew from:");
@@ -322,6 +338,42 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Maximum scopes `trail show` lists before an explicit remainder line —
+/// the value `drew_from_lines` uses in this same file, for the same reason:
+/// one decision can name dozens of places, and a wall of them is unreadable.
+const SHOW_SCOPE_CAP: usize = 5;
+
+/// The `scope:` block's lines, indentation included: one place per line,
+/// the ones bearing on where the reader stands first and marked, capped with
+/// an explicit remainder. Pure data — testable without capturing stdout, the
+/// same separation `drew_from_lines` keeps eight lines below it.
+///
+/// The markers name the relation ops classified; this function renders and
+/// never classifies. Ordering is ops' too — the hoist is what keeps the
+/// relevant place out of the truncated remainder, so it must not be
+/// re-decided here.
+fn show_scope_lines(scopes: &[ShowScope]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, scope) in scopes.iter().take(SHOW_SCOPE_CAP).enumerate() {
+        let label = if i == 0 { "  scope:  " } else { "          " };
+        let marker = match scope.relation {
+            ScopeRelation::Here => "  (here)",
+            ScopeRelation::WithinHere => "  (within here)",
+            ScopeRelation::Unrelated => "",
+        };
+        out.push(format!("{label}  {}{marker}", scope.display_path));
+    }
+    let more = scopes.len().saturating_sub(SHOW_SCOPE_CAP);
+    if more > 0 {
+        out.push(format!(
+            "            \u{2026} and {} more {}",
+            crate::core::domain::format::format_count(more),
+            if more == 1 { "place" } else { "places" }
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +397,50 @@ mod tests {
             &["/photos/2012".to_string()],
             &roots
         ));
+    }
+
+    fn mk_scope(path: &str, relation: ScopeRelation) -> ShowScope {
+        ShowScope {
+            display_path: path.to_string(),
+            relation,
+        }
+    }
+
+    /// The comma-wall becomes a list — the same idiom `drew_from_lines`
+    /// applies eight lines below it, to the same shape of data.
+    #[test]
+    fn show_renders_one_scope_per_line() {
+        let lines = show_scope_lines(&[
+            mk_scope("/a/foto", ScopeRelation::Here),
+            mk_scope("/a/admin", ScopeRelation::Unrelated),
+        ]);
+        assert_eq!(
+            lines,
+            vec![
+                "  scope:    /a/foto  (here)".to_string(),
+                "            /a/admin".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn show_marks_a_scope_inside_the_cwd() {
+        let lines = show_scope_lines(&[mk_scope("/a/foto/2016", ScopeRelation::WithinHere)]);
+        assert_eq!(lines, vec!["  scope:    /a/foto/2016  (within here)"]);
+    }
+
+    /// Capped with an explicit remainder, never a silent truncation. Ops has
+    /// already hoisted the marked scope, which is why the cap is safe here.
+    #[test]
+    fn show_caps_the_scope_list_with_an_explicit_remainder() {
+        let mut scopes = vec![mk_scope("/a/foto", ScopeRelation::Here)];
+        scopes
+            .extend((0..30).map(|i| mk_scope(&format!("/a/dir{i:02}"), ScopeRelation::Unrelated)));
+
+        let lines = show_scope_lines(&scopes);
+        assert_eq!(lines.len(), 6);
+        assert_eq!(lines[0], "  scope:    /a/foto  (here)");
+        assert_eq!(lines[5], "            \u{2026} and 26 more places");
     }
 
     /// A path under no known root cannot be gated on evidence it could never

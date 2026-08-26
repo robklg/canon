@@ -80,6 +80,19 @@ pub(super) fn scope(conn: &Connection, decision_id: i64, root_id: i64, rel_prefi
     .unwrap();
 }
 
+/// Set a decision's `scope` display column — the durable JSON list every
+/// surface renders, and what `+N` is counted from. Separate from
+/// [`scope`], which writes the index rows: production writes both, and a
+/// test that needs only one must be able to say so (a scope row whose
+/// display entry was never backfilled is a real shape).
+pub(super) fn scope_display(conn: &Connection, decision_id: i64, paths: &[&str]) {
+    conn.execute(
+        "UPDATE decisions SET scope = ?2 WHERE id = ?1",
+        rusqlite::params![decision_id, serde_json::to_string(paths).unwrap()],
+    )
+    .unwrap();
+}
+
 pub(super) fn params(prefixes: Vec<String>) -> TrailParams {
     TrailParams {
         prefixes,

@@ -224,7 +224,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(card.files, 1); // exclusion does not remove standing
-        assert_eq!(card.transitioned[0].label, "excluded");
+        assert_eq!(card.transitioned[0].label(), "excluded");
     }
 
     #[test]
@@ -314,7 +314,7 @@ mod tests {
             .unwrap();
         assert!(card.origins.is_empty());
         assert_eq!(card.transitioned.len(), 1);
-        assert_eq!(card.transitioned[0].label, "rearranged");
+        assert_eq!(card.transitioned[0].label(), "rearranged");
         assert_eq!(card.files, 1);
 
         // The narrower view sees the same content arrive from outside it.

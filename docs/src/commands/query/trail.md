@@ -25,6 +25,9 @@ canon trail --on 2026-05-12
 
 # One decision in full
 canon trail show 61
+
+# Full paths, for copying
+canon trail -l
 ```
 
 `trail` is a pure query command; it never changes anything.
@@ -36,10 +39,10 @@ With no time flags, `trail` lists the decisions that touched the current scope, 
 ```
 Decision trail: /mnt/old-drive/photos
 
-#42   2026-05-12 14:03  .       Applied italy-2016: 47 copied, 0 errors
-#57   2026-07-11 15:10  .       Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
-#61   2026-07-11 16:42  misc    Excluded 210 duplicates (kept 105) · "redundant backup"
-      2026-07-11 16:50  italy   ~ unsure about the RAW files — revisit
+#42   2026-05-12 14:03  archived  .      Applied italy-2016: 47 copied, 0 errors
+#57   2026-07-11 15:10  scan      .      Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
+#61   2026-07-11 16:42  excluded  misc   Excluded 210 duplicates (kept 105) · "redundant backup"
+      2026-07-11 16:50            italy  ~ unsure about the RAW files — revisit
 
 12 earlier decisions not shown (--limit N or --all; showing 20).
 2 global decisions not shown (--global).
@@ -47,7 +50,23 @@ Decision trail: /mnt/old-drive/photos
 
 A decision *touches* the scope in either direction: a decision on a parent folder happened to this folder too, and a decision on a subfolder is activity here. Sibling folders' decisions don't appear. That rule applies to a decision's *acted-on scope*. The extraction and arrival lines below follow recorded *placements* instead, which appear only in views that contain them (see [the extraction ledger](../../concepts/decisions.md#the-extraction-ledger--the-trails-outbound-direction)).
 
-Each line carries the decision id, timestamp, the scope it acted on, the completion summary, and your `--reason` (quoted). The scope column is relative to what you're viewing (`.` is the viewed folder itself); in global views it shows the path, capped from the left. Decisions recorded without a scope show `global`. Decisions that did not complete cleanly are marked (`[partial]`, `[interrupted]`, `[started]`).
+Each line carries the decision id, timestamp, the act, the place, the completion summary, and your `--reason` (quoted). Decisions that did not complete cleanly are marked (`[partial]`, `[interrupted]`, `[started]`).
+
+The **act** is the registered transition word where the decision has one (`archived`, `excluded`, `restored`, `deleted`) and the stored command identifier otherwise (`scan`, `cluster_generate`). Notes carry no act; the `~` marks them.
+
+The **place** is the one of the decision's recorded scopes that brought it into this view, with `+N` for its other places. Where several of its scopes match, the deepest is named: a scope inside the view says more about where the act was than an ancestor of it does. Decisions recorded without a scope show `global`.
+
+The place is rendered relative to what you're viewing (`.` is the viewed folder itself). A place elsewhere in the same root is measured from that root and carries a leading `/`; when the listing contains one, a line under the header names the root:
+
+```
+Decision trail: /archive/2016
+Places are relative to this folder; a leading / is relative to /archive.
+
+#71   2026-08-02 10:56  scan  /       Scanned 99,801 files: 97,746 new, 2,049 unchanged
+#84   2026-08-02 11:31  archived  /2020  Applied curation-2020: 412 copied, 0 errors
+```
+
+Views spanning several roots, and global views, render full paths, capped from the left. `-l` renders every place in full, absolute and uncapped (see [Full paths](#full-paths--l)).
 
 The listing is capped at the 20 most recent decisions; the footer tells you what's beyond the cap (`--limit N` or `--all` to widen). Global decisions can't be attributed to any folder, so scoped views count them in a footer rather than hiding them.
 
@@ -73,10 +92,10 @@ The same answer comes back whether you name the place or stand in it: a bare `ca
 Standing at a source location, an `apply` that drew content out of this scope shows up too, even though the apply's own selection scope may have been global or elsewhere. It renders in the *extraction aspect*, replacing the usual summary line:
 
 ```
-#42   2026-05-12 14:02  2016/italy   → 47 files (3.9 GB) to /Archive/Media/2016/Italy (copied; originals remain) · "italy assembly"
+#42   2026-05-12 14:02  archived  2016/italy   → 47 files (3.9 GB) to /Archive/Media/2016/Italy (copied; originals remain) · "italy assembly"
 ```
 
-The scope cell is the drawn-from location, not the destination; the disposition tells you whether the originals remain (`copied`) or are gone from here (`moved`). A decision appears once per view, never as both a selection line and an extraction line.
+The place cell is the drawn-from location, not the destination; the disposition tells you whether the originals remain (`copied`) or are gone from here (`moved`). A decision appears once per view, never as both a selection line and an extraction line.
 
 The ledger records an apply per directory it drew from, so a view shows only what actually left *it*: an apply that drew from two sibling folders never surfaces at a third, and standing inside one of them you see that folder's share of the draw, not the apply-wide total.
 
@@ -93,10 +112,10 @@ Omitted when nothing has ever been drawn from here. Sizes are omitted, not guess
 Standing at a destination, the same apply shows up too: files it placed inside this scope are enough, regardless of where its source root sits. It renders in the *arrival aspect*:
 
 ```
-#42   2026-05-12 14:03  .   ← 47 files (3.9 GB) from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain) · "italy assembly"
+#42   2026-05-12 14:03  archived  .   ← 47 files (3.9 GB) from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain) · "italy assembly"
 ```
 
-The scope cell is the destination this time, view-relative (`.` for the viewed folder itself); the wording mirrors the outbound direction (`copied in; originals remain` / `moved in`). A source root the live index no longer knows renders with `(root removed)` appended, matching `trail show`'s `drew from:` lines.
+The place cell is the destination this time, view-relative (`.` for the viewed folder itself); the wording mirrors the outbound direction (`copied in; originals remain` / `moved in`). A source root the live index no longer knows renders with `(root removed)` appended, matching `trail show`'s `drew from:` lines.
 
 When a decision's origin *and* destination both sit inside the view (content rearranged entirely within one scope), it renders once, not twice: the extraction-aspect line, with the destination shown view-relative instead of absolute. Both endpoints stay visible in that one line.
 
@@ -142,7 +161,11 @@ Standing here: 3 files (21 B)
 
 "Arrived here" is an event total and never shrinks; "Standing here" is a state total and can be smaller. `Arrived here: 5 files` next to `Standing here: 3 files` means some of what arrived was later deleted or moved elsewhere; neither number is wrong.
 
-Origin lines come first, busiest first: a single-origin root that fed this location across one or more applies merges into one `from <root>` line (listing every contributing decision id and the date range, if more than one); an apply that drew from several roots in a single decision gets its own `via apply #N from M origins` line, since its content isn't merge-worthy with anything else. After origins: other transitions that touched present content here (`excluded here (#30)`, etc.), a `first indexed here` bucket for content this location saw first via a scan, and an `untracked (predates recording)` bucket for content whose stamp predates recording entirely. A long list of origins is capped, with an explicit remainder line (`… and 2 more origins.`), never a silent truncation.
+Origin lines come first, busiest first: a single-origin root that fed this location across one or more applies merges into one `from <root>` line (listing every contributing decision id and the date range, if more than one); an apply that drew from several roots in a single decision gets its own `via apply #N from M origins` line, since its content isn't merge-worthy with anything else. After origins come **standings**: what present content here was last touched by, one line per transition (`excluded: 28,412 files (19.2 GB)`), merged across every decision that produced it. A standing is a statement about this place now, so it carries no decision id; the decisions behind it are the timeline above. Then a `first indexed here` bucket for content this location saw first via a scan, and an `untracked (predates recording)` bucket for content whose stamp predates recording entirely.
+
+Where the record has a **gap**, the line names the one decision it is about, after the standings: `archived (origin unknown) here (#88)` for an apply the extraction ledger cannot attribute, `transition unrecorded here (#404)` for a stamp whose decision row no longer exists. A gap must read as a gap, so it is never merged away.
+
+Long lists are capped with an explicit remainder line (`… and 2 more origins.`, `… and 3 more gaps.`), never a silent truncation.
 
 An origin line names a place other than this one. Two cases follow from that, both mirroring the boundary rule above:
 
@@ -150,13 +173,13 @@ An origin line names a place other than this one. Two cases follow from that, bo
 Standing here: 500 files (12.9 GB)
   from /Volumes/old-laptop: 300 files (7.1 GB) · #12, #18 · 2026-03-02 – 2026-05-01
   from elsewhere in /archive: 47 files (3.9 GB) · #42 · 2026-05-12
-  rearranged here (#51): 12 files (800.0 MB)
+  rearranged: 12 files (800.0 MB)
   first indexed here: 141 files (1.1 GB)
 ```
 
 `from elsewhere in <root>` means the content genuinely arrived (its origin sits outside the viewed scope) while the origin root *contains* where you're standing. Origin lines are anchored on the root, so a bare `from /archive` while standing in `/archive/2020` would name the place you are already in. The root is still named rather than left implicit, because a view can span several roots.
 
-`rearranged here (#N)` means the content didn't arrive at all: every row of that apply was drawn from inside this view, so there is no elsewhere to name. Unlike the rollups, the card classifies per *decision* rather than per row: a source's stamp records which decision last touched it, not which row of that decision, so for an apply spanning several origins the card cannot tell which surviving files came from which side. Any row from outside keeps the origin line, rather than claiming a rearrangement the index can't substantiate.
+`rearranged` means the content didn't arrive at all: every row of the applies behind it was drawn from inside this view, so there is no elsewhere to name. Unlike the rollups, the card classifies per *decision* rather than per row: a source's stamp records which decision last touched it, not which row of that decision, so for an apply spanning several origins the card cannot tell which surviving files came from which side. Any row from outside keeps the origin line, rather than claiming a rearrangement the index can't substantiate.
 
 Origin attribution is root-level throughout: `from /Volumes/old-laptop`, not the subfolder within it. The card merges applies across time, and the root is the stable unit; for the exact subfolder of any one decision, `canon trail show <id>` lists it under `drew from:`.
 
@@ -171,10 +194,10 @@ Decision trail: all roots — today
 
 Saturday 2026-07-12 — deleted 1,350 files (35.0 GB), archived 47 files (3.9 GB), excluded 210 files — and 2 other actions
 
-#63   09:14  /mnt/old-disk         Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
-      09:40  /mnt/old-disk/photos  ~ unsure about the RAW files — revisit
-#64   11:02  ...ive/photos/italy   Applied italy-2016: 47 copied, 0 errors
-#65   11:30  /mnt/old-disk/misc    Excluded 210 duplicates (kept 105) · "redundant backup"
+#63   09:14  scan      /mnt/old-disk         Scanned 4,120 files: 12 new, 1,350 missing · "verified duplicates"
+      09:40            /mnt/old-disk/photos  ~ unsure about the RAW files — revisit
+#64   11:02  archived  ...ive/photos/italy   Applied italy-2016: 47 copied, 0 errors
+#65   11:30  excluded  /mnt/old-disk/misc    Excluded 210 duplicates (kept 105) · "redundant backup"
 ```
 
 `<when>` accepts `today`, `yesterday`, a weekday name (the most recent one, today included), or a date (`YYYY-MM-DD`). Days follow your local timezone.
@@ -185,7 +208,25 @@ Scope still applies: `canon trail --today` inside a root shows that folder's day
 
 ## Notes in the timeline
 
-Notes ([`canon note`](../manage/note.md)) interleave with decisions by default, marked with `~` and carrying no id, counts, or status: a thought never reads as an action. The trail holds actions ("what did I do?"); notes hold thoughts ("what did I think?"). Use `--no-notes` for decisions only.
+Notes ([`canon note`](../manage/note.md)) interleave with decisions by default, marked with `~` and carrying no id, act, counts, or status: a thought never reads as an action. The trail holds actions ("what did I do?"); notes hold thoughts ("what did I think?"). Use `--no-notes` for decisions only.
+
+## Full paths: `-l`
+
+The place column is capped, which is the wrong shape when what you want is the path itself. `-l` (or `--long`) renders each entry over several lines instead, with the full absolute path, uncapped:
+
+```
+$ canon trail -l
+
+#71   2026-08-02 10:56  scan
+      /mnt/old-drive/photo library/imported 2007-2010   (+30 other places)
+      Scanned 99,801 files: 97,746 new, 2,049 unchanged
+
+      2026-08-02 15:02
+      /mnt/old-drive/photo library/imported 2007-2010/raw
+      ~ this should probably just be bulk-transferred
+```
+
+Paths are absolute in this mode wherever you run it, scoped views included: relative rendering is a convenience for reading, and this mode exists to be copied from. `-l` changes only how an event renders, never which events appear, and has no effect under `--jsonl`.
 
 ## Inspecting one decision: `trail show`
 
@@ -199,7 +240,7 @@ Decision #61 — exclude_duplicates
   counts:   attempted 315, completed 210, failed 0, skipped 105
   reason:   "redundant backup"
   command:  canon exclude duplicates /mnt/old-drive/photos --prefer /archive ...
-  scope:    /mnt/old-drive/photos
+  scope:    /mnt/old-drive/photos  (here)
   version:  0.5.2
   summary:  Excluded 210 duplicates (kept 105)
   receipts:
@@ -230,6 +271,23 @@ A removed origin that left through [`canon roots retire`](../roots/retire.md) po
 No section when the decision drew from nowhere (every other decision kind).
 
 `show` lists where the decision's [receipts](../../concepts/decisions.md) live on disk, including one receipt per source root for deletions. It does not print receipt contents; open the file to see the per-item record. When there is no receipt, the reason is stated (`no receipt (--no-receipt)`, `no receipt (nothing transferred)` for a run that completed no transfer, or `no receipt recorded`); absence is never silent. A finished decision's receipt pointer names a file that exists: a run whose receipt was never written carries no pointer rather than a dangling one. A receipt pointer whose root has since been removed renders as `root #N (removed)/…`: the receipt was written, but the file now lives on storage Canon no longer indexes.
+
+### `show`'s scope list
+
+A decision can name many places. `show` lists them one per line, capped at five with an explicit remainder, and puts the ones bearing on where you are standing first:
+
+```
+  scope:    /mnt/old-drive/photos  (here)
+            /mnt/old-drive/photos/2016  (within here)
+            /mnt/old-drive/admin
+            /mnt/old-drive/misc
+            /mnt/old-drive/scratch
+            … and 26 more places
+```
+
+`(here)` marks a scope that is the current directory or contains it; `(within here)` marks one the current directory contains. **`trail show <id>` therefore reads differently depending on where you run it** — the same scopes are always listed, only their order and these markers change. Run from outside every scope, or where the working directory cannot be resolved, the list is in recorded order with no markers.
+
+The markers use the same rule that decides whether a decision appears in a scoped `canon trail` at all, so a scope marked `(here)` is the reason that decision surfaces where you are standing.
 
 ## After retirement: the trail stays whole
 
@@ -273,4 +331,5 @@ canon trail --today --global --jsonl | jq -r 'select(.type=="decision") | .summa
 | `--limit N` | Show at most N decisions (default 20) |
 | `--all` | No cap |
 | `--no-notes` | Decisions only |
+| `-l`, `--long` | Multi-line entries with each place's full absolute path |
 | `--jsonl` | Machine output (JSONL on stdout) |
