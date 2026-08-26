@@ -25,7 +25,7 @@ Any fact key can be used in a pattern:
 
 The `content.` prefix is optional for content facts, so `{Make}` is equivalent to `{content.Make}`.
 
-`{scope.rel_path}` is not a fact: it is the source's path below the path scope recorded in the manifest, and needs that scope to be there. [`cluster generate`](../commands/archive/cluster.md) records one when the generation was scoped to a single path.
+`{scope.rel_path}` is not a fact: it is the source's path below the *vantage* — the deepest directory containing every scope the manifest records that lies in that source's own root. With one scope the vantage is that scope. With several, it is the directory they share, so each scope's own name survives in the result. Scopes in different roots each get their own vantage. [`cluster generate`](../commands/archive/cluster.md) records the paths it was scoped to; where the manifest records no scope, or none in a source's root, the pattern is refused rather than guessed.
 
 ## Modifiers
 

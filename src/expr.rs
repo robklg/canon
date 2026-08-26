@@ -35,16 +35,22 @@ pub use ops::selection::{select_sources, RolePolicy, SelectionParams};
 pub use ops::alias::expand_filter_strings;
 
 // The shaping half: a pattern, parsed, inspected for the keys it needs, read
-// for the placement it commits to, and evaluated against a source.
+// for the placement it commits to, and evaluated against a source — together
+// with the place a scope-relative path measures from, derived once per run by
+// the caller and handed to every evaluation.
 pub use domain::pattern::{
     evaluate, extract_fact_keys, parse_pattern, placement_shape, EvalContext, Pattern,
 };
+pub use domain::vantage::ScopeVantage;
 
 // Resolving a key to a value, and rendering one for display.
 pub use domain::value::{fact_value_to_display, get_builtin_value, resolve_fact_value};
 
-// The key vocabulary: what a key may name, and what a written one parsed to.
-pub use domain::key::{BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey};
+// The key vocabulary: what a key may name, and what a written one parsed to —
+// plus the one spelling of the pattern-only key, which a manifest writes down.
+pub use domain::key::{
+    BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey, SCOPE_REL_PATH,
+};
 
 // The transforms a value can be put through.
 pub use domain::transform::{apply_accessor, apply_modifier, Modifier, ModifierCategory};

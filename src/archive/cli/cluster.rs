@@ -272,13 +272,9 @@ fn refresh_with_editor(
         );
     }
 
-    // Split back apart what generation joined. A directory name containing
-    // the separator shreds into prefixes that match nothing, and the refresh
-    // then re-queries a different set than the one asked for.
-    let scope_prefixes: Vec<String> = match &config.meta.scope {
-        Some(s) => s.split(", ").map(|p| p.to_string()).collect(),
-        None => vec![],
-    };
+    // Taken as recorded — no split, nothing to reconstruct. Owned because
+    // the config itself is handed on to the refresh below.
+    let scope_prefixes = config.meta.scope.clone();
 
     // Parse filters from config
     let parsed_filters: Vec<Filter> = config

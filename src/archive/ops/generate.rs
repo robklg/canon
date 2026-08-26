@@ -14,14 +14,15 @@ use anyhow::{bail, Context, Result};
 
 use crate::archive::domain::{
     extract_notes_raw, LockEntry, ManifestConfig, ManifestMeta, ManifestOptions, ManifestOutput,
+    CURRENT_MANIFEST_VERSION,
 };
 use crate::core::domain::include::IncludeSet;
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::{FactEntry, FactType, FactValue};
 use crate::core::repo::{self, Connection};
-use crate::expr::BuiltinKey;
 use crate::expr::Filter;
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
+use crate::expr::{BuiltinKey, SCOPE_REL_PATH};
 
 use super::manifest::{write_and_sync, write_lock_file};
 
@@ -311,24 +312,11 @@ pub fn execute_generate(
     // Compute lock file hash
     let lock_hash = crate::core::ops::fs::compute_full_hash(&params.lock_path)?;
 
-    // Build ManifestConfig
-    // Several prefixes are joined into one string here and split back apart
-    // by the commands that read the manifest. A directory name containing the
-    // separator will not survive the round trip, and one reader consumes the
-    // joined string whole rather than splitting it.
-    let scope = if params.scope_prefixes.len() == 1 {
-        Some(params.scope_prefixes[0].clone())
-    } else if params.scope_prefixes.is_empty() {
-        None
-    } else {
-        Some(params.scope_prefixes.join(", "))
-    };
-
     let config = ManifestConfig {
         meta: ManifestMeta {
-            version: 1,
+            version: CURRENT_MANIFEST_VERSION,
             query: params.expanded_filters.clone(),
-            scope,
+            scope: params.scope_prefixes.clone(),
             generated_at: current_timestamp(),
             lock_hash,
         },
@@ -396,7 +384,11 @@ pub fn execute_refresh(
 
     let config = ManifestConfig {
         meta: ManifestMeta {
-            version: params.config.meta.version,
+            // A refresh rewrites the whole document, so what lands on disk is
+            // this version's format whatever the old one declared. Carrying
+            // the old number forward would put a v1 stamp on a v2 body — the
+            // one thing the version field exists to stop.
+            version: CURRENT_MANIFEST_VERSION,
             query: params.config.meta.query.clone(),
             scope: params.config.meta.scope.clone(),
             generated_at: current_timestamp(),
@@ -447,21 +439,18 @@ const EMPTY_NOTES: &str = "\n#\n";
 /// archive unrecoverable by hand. It also spares the run the collisions a flat
 /// default guarantees, where every folder contributes its own `IMG_0001.jpg`.
 ///
-/// One scope measures from the scope, which is the place the user named and
-/// the shape they are looking at. Anything else measures from each source's
-/// own root: with no scope there is nothing else to measure from, and with
-/// several the manifest stores them joined into one string that
-/// `scope.rel_path` cannot match — its fallback for a non-matching scope is
-/// the full rel_path, which happens to be right here but is a wart to lean on
-/// rather than a contract.
+/// Any scope at all measures from the scope — the place the user named and
+/// the shape they were looking at, however many paths they named. No scope
+/// measures from each source's own root, because there is nothing else to
+/// measure from.
 ///
 /// It is a default, not a rule: the pattern is the line of the manifest the
 /// user is most invited to edit, and `{filename}` remains one edit away.
 fn default_pattern(scope_prefixes: &[String]) -> &'static str {
-    if scope_prefixes.len() == 1 {
-        "{scope.rel_path}"
-    } else {
+    if scope_prefixes.is_empty() {
         "{source.rel_path}"
+    } else {
+        "{scope.rel_path}"
     }
 }
 
@@ -532,7 +521,7 @@ fn assemble_manifest(
     let fact_help = generate_fact_help(
         plan.lock_entries.len(),
         &plan.full_coverage_facts,
-        config.meta.scope.is_some(),
+        !config.meta.scope.is_empty(),
     );
 
     let toml_str = toml::to_string_pretty(config).context("Failed to serialize manifest config")?;
@@ -795,7 +784,7 @@ fn generate_fact_help(
     if has_scope {
         help.push_str(&format!(
             "#   {:18} {:6} - {}\n",
-            "scope.rel_path", "path", "Path relative to the manifest scope"
+            SCOPE_REL_PATH, "path", "Path relative to the manifest scope"
         ));
     }
     help.push_str("#\n");
@@ -907,7 +896,7 @@ mod tests {
             meta: ManifestMeta {
                 version: 1,
                 query: vec![],
-                scope: None,
+                scope: vec![],
                 generated_at: "2026-01-01T00:00:00Z".to_string(),
                 lock_hash: "old".to_string(),
             },
@@ -1417,22 +1406,35 @@ mod tests {
         );
     }
 
+    /// E3 — with no scope there is nothing else to measure from, so each
+    /// source measures from its own root.
     #[test]
     fn default_pattern_is_root_relative_when_unscoped() {
         assert_eq!(generated_pattern(vec![]), "{source.rel_path}");
     }
 
+    /// E2 — any scope at all measures from the scope, not just one. Several
+    /// scopes measure from their shared vantage, which keeps each scope's own
+    /// name at the destination.
     #[test]
-    fn default_pattern_is_root_relative_for_multiple_scopes() {
-        // Several prefixes are stored joined into one string, which
-        // `scope.rel_path` cannot match; each source measures from its own
-        // root instead of leaning on the non-matching fallback.
+    fn a_scoped_generation_starts_at_the_scope_relative_pattern() {
         assert_eq!(
             generated_pattern(vec![
                 "/photos/trip".to_string(),
                 "/photos/scans".to_string()
             ]),
-            "{source.rel_path}"
+            "{scope.rel_path}"
+        );
+    }
+
+    /// E4 — the one place the key cannot be written as the const: the default
+    /// is a `&'static str` literal. This is what carries the one spelling
+    /// across it.
+    #[test]
+    fn the_default_pattern_names_the_key_by_its_one_spelling() {
+        assert_eq!(
+            generated_pattern(vec!["/photos/trip".to_string()]),
+            format!("{{{SCOPE_REL_PATH}}}")
         );
     }
 
@@ -1443,7 +1445,7 @@ mod tests {
     #[test]
     fn the_default_pattern_keeps_a_nested_tree_apart_at_apply_time() {
         use crate::archive::ops::plan::{plan_apply, ApplyPlanParams};
-        use crate::expr::{extract_fact_keys, parse_pattern};
+        use crate::expr::{extract_fact_keys, parse_pattern, ScopeVantage};
 
         let tree = tempfile::tempdir().unwrap();
         let root_path = tree.path().to_str().unwrap().to_string();
@@ -1490,13 +1492,17 @@ mod tests {
         let mut root_paths = HashMap::new();
         root_paths.insert(root, root_path.clone());
         root_paths.insert(archive, "/archive".to_string());
+        // The vantage apply would derive: read off the manifest's own
+        // recorded scope, not rebuilt from the literal above.
+        let vantage =
+            ScopeVantage::new(&config.meta.scope, root_paths.values().map(|p| p.as_str()));
         let apply_plan = plan_apply(
             &mut conn,
             &ApplyPlanParams {
                 sources: &sources,
                 pattern: &pattern,
                 needed_keys: &needed_keys,
-                scope_prefix: Some(&scope),
+                vantage: &vantage,
                 root_paths: &root_paths,
                 archive_root_id: archive,
                 base_dir_rel: "",
@@ -1518,6 +1524,105 @@ mod tests {
             .collect();
         dests.sort();
         assert_eq!(dests, vec!["day1/IMG_0001.jpg", "day2/IMG_0001.jpg"]);
+    }
+
+    /// E1 — the test that would have caught this. Generating over two sibling
+    /// scopes and planning the apply must keep each scope's own name at the
+    /// destination, and must not merge the two trees into one. The pattern is
+    /// read back off the written manifest rather than repeated as a literal,
+    /// so what apply plans with is what generation wrote.
+    ///
+    /// Under the rejected per-source-own-scope reading both files would render
+    /// as `src/main.c`, so the empty-collisions assertion is the second thing
+    /// this test pins.
+    #[test]
+    fn sibling_scopes_keep_their_own_names_at_the_destination() {
+        use crate::archive::ops::plan::{plan_apply, ApplyPlanParams};
+        use crate::expr::{extract_fact_keys, parse_pattern, ScopeVantage};
+
+        let tree = tempfile::tempdir().unwrap();
+        let root_path = tree.path().to_str().unwrap().to_string();
+        for project in ["proj-v1", "proj-v2"] {
+            let dir = tree.path().join("work").join(project).join("src");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("main.c"), project).unwrap();
+        }
+
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, &root_path, "source", false);
+        let archive = insert_root(&conn, "/archive", "archive", false);
+        for (project, hash) in [("proj-v1", "hash-v1"), ("proj-v2", "hash-v2")] {
+            let obj = insert_object(&conn, hash, false);
+            insert_source(
+                &conn,
+                root,
+                &format!("work/{project}/src/main.c"),
+                Some(obj),
+            );
+        }
+
+        let scopes = vec![
+            format!("{root_path}/work/proj-v1"),
+            format!("{root_path}/work/proj-v2"),
+        ];
+        let gen_plan = plan_generate(&mut conn, &default_params()).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let manifest_path = out.path().join("cluster.toml");
+        execute_generate(
+            &gen_plan,
+            &ExecuteGenerateParams {
+                lock_path: out.path().join("cluster.lock"),
+                manifest_path: manifest_path.clone(),
+                expanded_filters: vec![],
+                original_filters: vec![],
+                scope_prefixes: scopes,
+                archive_root_id: archive,
+                base_dir: String::new(),
+                allow: vec![],
+            },
+        )
+        .unwrap();
+
+        let config: ManifestConfig =
+            toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert_eq!(config.output.pattern, "{scope.rel_path}");
+        let pattern = parse_pattern(&config.output.pattern).unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
+
+        let sources: Vec<&LockEntry> = gen_plan.lock_entries.iter().collect();
+        let mut root_paths = HashMap::new();
+        root_paths.insert(root, root_path.clone());
+        root_paths.insert(archive, "/archive".to_string());
+        let vantage =
+            ScopeVantage::new(&config.meta.scope, root_paths.values().map(|p| p.as_str()));
+        let apply_plan = plan_apply(
+            &mut conn,
+            &ApplyPlanParams {
+                sources: &sources,
+                pattern: &pattern,
+                needed_keys: &needed_keys,
+                vantage: &vantage,
+                root_paths: &root_paths,
+                archive_root_id: archive,
+                base_dir_rel: "",
+                resume: false,
+                progress: None,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            apply_plan.violations.collisions.is_empty(),
+            "sibling scopes merged into one tree: {:?}",
+            apply_plan.violations.collisions
+        );
+        let mut dests: Vec<&str> = apply_plan
+            .transfers
+            .iter()
+            .map(|t| t.dest_rel_path.as_str())
+            .collect();
+        dests.sort();
+        assert_eq!(dests, vec!["proj-v1/src/main.c", "proj-v2/src/main.c"]);
     }
 
     // =========================================================================

@@ -11,8 +11,10 @@
 //! refresh. Reading and writing the files themselves is the operations
 //! layer's job.
 
+use std::fmt;
+
 use anyhow::{bail, Result};
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::core::domain::source::Source;
 
@@ -40,19 +42,86 @@ pub struct ManifestMeta {
     #[serde(default = "default_version")]
     pub version: u32,
     pub query: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
+    /// The paths the generation was scoped to, every one of them. Held as a
+    /// list because that is what it is: joining several into one field is
+    /// what made "the scope" mean three different things in three readers.
+    #[serde(
+        default,
+        deserialize_with = "de_scope",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub scope: Vec<String>,
     /// RFC3339 timestamp when manifest was generated/refreshed
     pub generated_at: String,
     /// SHA256 hash of the lock file (for integrity validation)
     pub lock_hash: String,
 }
 
+/// Read `meta.scope`.
+///
+/// A list, which is the only form Canon writes or accepts. A **version 1**
+/// manifest recorded its scopes joined into a single string with `", "`; that
+/// form is **refused, never reconstructed**. Splitting it back apart cannot be
+/// more than a guess — a directory name may itself contain the separator, and
+/// nothing in the string says which reading was meant — and the guess would
+/// decide where files are moved.
+///
+/// The way back is named in the refusal itself and nowhere else: a remedy
+/// spelled in two places goes stale in one of them.
+///
+/// The refusal is spelled here rather than left to serde because this is where
+/// the old form is recognisable. A bare type error would tell the reader that a
+/// string is not a sequence, which is true and useless.
+fn de_scope<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    struct ScopeVisitor;
+
+    impl<'de> de::Visitor<'de> for ScopeVisitor {
+        type Value = Vec<String>;
+
+        // Every wrong type that is not a string is answered by serde's own
+        // "invalid type: …, expected …" using this line, which is why the
+        // visitor is worth its length: an untagged enum answers all of them
+        // with one message naming a private type and no offending value.
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a list of scope paths")
+        }
+
+        fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+            Err(E::custom(
+                "meta.scope must be a list of paths. A string is the version 1 format, \
+                 which joined several scopes into one field; splitting them apart again \
+                 would be a guess about where files land, so it is refused rather than \
+                 read. Fix it with `canon cluster refresh --edit <manifest>`, which opens \
+                 the file before reading it, or write scope as a list.",
+            ))
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut paths = Vec::new();
+            while let Some(path) = seq.next_element::<String>()? {
+                paths.push(path);
+            }
+            Ok(paths)
+        }
+    }
+
+    deserializer.deserialize_any(ScopeVisitor)
+}
+
 fn default_version() -> u32 {
     1
 }
 
-const SUPPORTED_MANIFEST_VERSION: u32 = 1;
+/// The version a freshly written manifest carries.
+///
+/// 2 since `meta.scope` became a list. The bump does not make an older canon
+/// binary emit the friendly refusal on a v2 manifest — its parse runs before
+/// its version gate, so it fails on the type first — but it stops `version =
+/// 1` from meaning two different formats, which is what the *next* format
+/// change would otherwise inherit.
+pub const CURRENT_MANIFEST_VERSION: u32 = 2;
+
+const SUPPORTED_MANIFEST_VERSION: u32 = CURRENT_MANIFEST_VERSION;
 
 pub fn validate_manifest_version(version: u32) -> Result<()> {
     if version > SUPPORTED_MANIFEST_VERSION {
@@ -240,6 +309,122 @@ mod tests {
     }
 
     // =========================================================================
+    // The recorded scope — one representation, two on-disk forms
+    // =========================================================================
+
+    fn meta_err(scope_toml: &str) -> String {
+        let toml_str = format!(
+            r#"
+[meta]
+version = 1
+query = []
+{scope_toml}
+generated_at = "2026-02-15T12:00:00Z"
+lock_hash = "abc123"
+
+[output]
+pattern = "{{filename}}"
+archive_root_id = 1
+base_dir = ""
+"#
+        );
+        match toml::from_str::<ManifestConfig>(&toml_str) {
+            Ok(_) => panic!("a string scope must be refused"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// M1 — the version 1 joined form is refused, not reconstructed. Splitting
+    /// it decides where files are moved on the strength of a guess, and a
+    /// directory name may carry the separator itself.
+    #[test]
+    fn a_version_one_joined_scope_string_is_refused() {
+        let err = meta_err(r#"scope = "/vol/work/proj-v1, /vol/work/proj-v2""#);
+        assert!(err.contains("must be a list of paths"), "{err}");
+        assert!(err.contains("cluster refresh --edit"), "{err}");
+    }
+
+    /// M2 — and so is the single-scope form, which is indistinguishable from
+    /// the joined one without guessing. One rule, no special case.
+    #[test]
+    fn a_version_one_single_scope_string_is_refused_the_same_way() {
+        let err = meta_err(r#"scope = "/vol/work/proj-v1""#);
+        assert!(err.contains("must be a list of paths"), "{err}");
+    }
+
+    /// The refusal says what to do about it, rather than reporting that a
+    /// string is not a sequence — which is true and useless.
+    #[test]
+    fn the_refusal_names_the_remedy_rather_than_the_type() {
+        let err = meta_err(r#"scope = "/vol/work/proj-v1, v2/src""#);
+        assert!(!err.contains("invalid type"), "{err}");
+        assert!(err.contains("cluster refresh --edit"), "{err}");
+    }
+
+    /// M3 — what everything writes from now on: an array, round-tripping
+    /// unchanged, and written as an array rather than a string.
+    #[test]
+    fn a_scope_list_round_trips_as_an_array() {
+        let scope = vec![
+            "/vol/work/proj-v1".to_string(),
+            "/vol/work/proj-v2".to_string(),
+        ];
+        let config = ManifestConfig {
+            meta: ManifestMeta {
+                version: CURRENT_MANIFEST_VERSION,
+                query: vec![],
+                scope: scope.clone(),
+                generated_at: "2026-02-15T12:00:00Z".to_string(),
+                lock_hash: "abc123".to_string(),
+            },
+            options: ManifestOptions::default(),
+            output: ManifestOutput {
+                pattern: "{filename}".to_string(),
+                archive_root_id: 1,
+                base_dir: String::new(),
+            },
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        // An array, never a joined string — nothing writes the legacy form.
+        assert!(toml_str.contains("scope = ["), "{toml_str}");
+        assert!(!toml_str.contains(r#"scope = ""#), "{toml_str}");
+        let parsed: ManifestConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.meta.scope, scope);
+    }
+
+    /// M4 — an unscoped manifest omits the field entirely, as it always has.
+    #[test]
+    fn a_manifest_with_no_scope_omits_the_field() {
+        let config = ManifestConfig {
+            meta: ManifestMeta {
+                version: CURRENT_MANIFEST_VERSION,
+                query: vec![],
+                scope: vec![],
+                generated_at: "2026-02-15T12:00:00Z".to_string(),
+                lock_hash: "abc123".to_string(),
+            },
+            options: ManifestOptions::default(),
+            output: ManifestOutput {
+                pattern: "{filename}".to_string(),
+                archive_root_id: 1,
+                base_dir: String::new(),
+            },
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        assert!(!toml_str.contains("scope"), "{toml_str}");
+        let parsed: ManifestConfig = toml::from_str(&toml_str).unwrap();
+        assert!(parsed.meta.scope.is_empty());
+    }
+
+    /// M5 — the gate still refuses a manifest from a later Canon, now that
+    /// the current version is 2 and 2 itself must be accepted.
+    #[test]
+    fn a_future_manifest_version_is_still_refused() {
+        assert!(validate_manifest_version(CURRENT_MANIFEST_VERSION).is_ok());
+        assert!(validate_manifest_version(CURRENT_MANIFEST_VERSION + 1).is_err());
+    }
+
+    // =========================================================================
     // Manifest serde
     // =========================================================================
 
@@ -249,7 +434,7 @@ mod tests {
             meta: ManifestMeta {
                 version: 1,
                 query: vec!["source.ext=jpg".to_string()],
-                scope: Some("/photos".to_string()),
+                scope: vec!["/photos".to_string()],
                 generated_at: "2026-02-15T12:00:00Z".to_string(),
                 lock_hash: "abc123".to_string(),
             },
@@ -276,7 +461,7 @@ mod tests {
         let toml_str = r#"
 [meta]
 query = ["source.ext=jpg"]
-scope = "/photos"
+scope = ["/photos"]
 generated_at = "2026-02-15T12:00:00Z"
 lock_hash = "abc123"
 
@@ -294,7 +479,7 @@ base_dir = "photos"
         let toml_str = r#"
 [meta]
 query = ["source.ext=jpg"]
-scope = "/photos"
+scope = ["/photos"]
 generated_at = "2026-02-15T12:00:00Z"
 lock_hash = "abc123"
 
@@ -313,7 +498,7 @@ base_dir = "photos"
             meta: ManifestMeta {
                 version: 1,
                 query: vec!["source.ext=jpg".to_string()],
-                scope: Some("/photos".to_string()),
+                scope: vec!["/photos".to_string()],
                 generated_at: "2026-02-15T12:00:00Z".to_string(),
                 lock_hash: "abc123".to_string(),
             },

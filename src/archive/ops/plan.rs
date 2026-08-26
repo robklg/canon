@@ -24,7 +24,7 @@ use crate::core::domain::fact::FactEntry;
 use crate::core::domain::format::{first_chars, shell_quote};
 use crate::core::domain::path::path_strip_prefix;
 use crate::core::repo::{self, Connection};
-use crate::expr::Pattern;
+use crate::expr::{Pattern, ScopeVantage};
 
 use super::pattern::evaluate_pattern;
 
@@ -51,8 +51,9 @@ pub struct ApplyPlanParams<'a> {
     pub pattern: &'a Pattern,
     /// Fact keys needed by the pattern (from expr::extract_fact_keys).
     pub needed_keys: &'a [String],
-    /// Scope prefix from manifest config (meta.scope).
-    pub scope_prefix: Option<&'a str>,
+    /// Where a `{scope.rel_path}` measures from, derived once from the
+    /// manifest's recorded scope.
+    pub vantage: &'a ScopeVantage,
     /// Root ID → root path cache (from core::repo::root::fetch_all).
     pub root_paths: &'a HashMap<i64, String>,
     /// Destination archive root ID.
@@ -326,7 +327,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
             params.pattern,
             source,
             params.needed_keys,
-            params.scope_prefix,
+            params.vantage,
             params.root_paths,
             &all_facts,
         ) {
@@ -1022,6 +1023,15 @@ mod tests {
         }
     }
 
+    /// The vantage a test plans against when its pattern never names
+    /// `scope.rel_path`, which is every test in this module: a manifest with
+    /// no recorded scope. Shared rather than threaded through 36 call sites,
+    /// none of which has an opinion about the scope.
+    fn no_scope() -> &'static ScopeVantage {
+        static EMPTY: std::sync::OnceLock<ScopeVantage> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(|| ScopeVantage::new(&[], std::iter::empty()))
+    }
+
     fn default_params<'a>(
         sources: &'a [&'a LockEntry],
         pattern: &'a Pattern,
@@ -1033,7 +1043,7 @@ mod tests {
             sources,
             pattern,
             needed_keys,
-            scope_prefix: None,
+            vantage: no_scope(),
             root_paths,
             archive_root_id,
             base_dir_rel: "",

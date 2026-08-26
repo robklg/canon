@@ -18,7 +18,7 @@ use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
 use crate::core::repo::{self, Db};
-use crate::expr::{extract_fact_keys, parse_pattern, placement_shape, Pattern};
+use crate::expr::{extract_fact_keys, parse_pattern, placement_shape, Pattern, ScopeVantage};
 
 pub struct ApplyOptions {
     pub dry_run: bool,
@@ -127,16 +127,14 @@ pub fn run(
         .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
     let needed_keys = extract_fact_keys(&pattern);
 
-    // Passed to pattern evaluation as a single prefix, deliberately without
-    // splitting — unlike the decision scope further below, which splits the
-    // same field. A manifest covering more than one scope therefore evaluates
-    // patterns against a prefix that matches none of them, and the evaluator
-    // falls back to the full relative path rather than reporting it.
-    let scope_prefix = config.meta.scope.as_deref();
-
     // Cache all root paths (single query via repo layer)
     let roots = repo::root::fetch_all(conn)?;
     let root_paths: HashMap<i64, String> = roots.iter().map(|r| (r.id, r.path.clone())).collect();
+
+    // Where a `{scope.rel_path}` measures from, derived once for the run: the
+    // samples, the plan and the decision scope all read the same recorded
+    // list, and none of them re-derives what "the scope" means.
+    let vantage = ScopeVantage::new(&config.meta.scope, root_paths.values().map(|p| p.as_str()));
 
     // Look up archive root from cached roots, verify it's an archive
     let archive_root = roots
@@ -175,7 +173,7 @@ pub fn run(
             &filtered_sources,
             &pattern,
             &needed_keys,
-            scope_prefix,
+            &vantage,
             &root_paths,
             &base_dir,
         )
@@ -208,7 +206,7 @@ pub fn run(
             sources: &filtered_sources,
             pattern: &pattern,
             needed_keys: &needed_keys,
-            scope_prefix,
+            vantage: &vantage,
             root_paths: &root_paths,
             archive_root_id: config.output.archive_root_id,
             base_dir_rel: &config.output.base_dir,
@@ -552,15 +550,7 @@ pub fn run(
     };
     let decision = DecisionParams {
         command: DecisionCommand::Apply,
-        scope: config
-            .meta
-            .scope
-            .as_ref()
-            .map(|s| {
-                let prefixes: Vec<String> = s.split(", ").map(|p| p.to_string()).collect();
-                DecisionScope::decompose(&prefixes, &roots)
-            })
-            .unwrap_or_default(),
+        scope: DecisionScope::decompose(&config.meta.scope, &roots),
         command_line: command_line.to_string(),
         reason: effective_reason,
         record_enabled: ledger.recording != RecordingMode::Off && !options.dry_run,
@@ -675,7 +665,7 @@ fn compute_sample_destinations(
     sources: &[&LockEntry],
     pattern: &Pattern,
     needed_keys: &[String],
-    scope_prefix: Option<&str>,
+    vantage: &ScopeVantage,
     root_paths: &HashMap<i64, String>,
     base_dir: &Path,
 ) -> Vec<SampleDestination> {
@@ -713,7 +703,7 @@ fn compute_sample_destinations(
                 pattern,
                 source,
                 needed_keys,
-                scope_prefix,
+                vantage,
                 root_paths,
                 &all_facts,
             ) {

@@ -13,6 +13,19 @@ use super::transform::{parse_modifier, ModifierCall, PathAccessor};
 use crate::core::domain::fact::FactType;
 
 // ============================================================================
+// The pattern-only key
+// ============================================================================
+
+/// The one spelling of the pattern-only key `scope.rel_path`.
+///
+/// Not a `BuiltinKey`: it is not a fact and never appears in a filter. It is
+/// derived at pattern-evaluation time from the scope the manifest records,
+/// which a filter has no access to — so admitting it to the built-in
+/// vocabulary would widen what a `--where` clause accepts, for a key that
+/// could not mean anything there.
+pub const SCOPE_REL_PATH: &str = "scope.rel_path";
+
+// ============================================================================
 // Built-in Keys
 // ============================================================================
 

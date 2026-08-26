@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::core::repo::{self, Connection};
+use crate::expr::ScopeVantage;
 
 use super::manifest::{read_lock_entries, read_manifest_config};
 
@@ -140,7 +141,9 @@ pub fn compute_manifest_status(
     let pattern = parse_pattern(&config.output.pattern)
         .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
     let needed_keys = extract_fact_keys(&pattern);
-    let scope_prefix = config.meta.scope.as_deref();
+    // Derived once for the whole read: what "the scope" means when there is
+    // more than one is not a question each reader answers for itself.
+    let vantage = ScopeVantage::new(&config.meta.scope, root_paths.values().map(|p| p.as_str()));
 
     // Batch fetch facts for all lock entries if pattern uses content facts
     let source_ids: Vec<i64> = lock_entries.iter().map(|s| s.id).collect();
@@ -169,7 +172,7 @@ pub fn compute_manifest_status(
             &pattern,
             lock_entry,
             &needed_keys,
-            scope_prefix,
+            &vantage,
             &root_paths,
             &all_facts,
         ) {

@@ -70,9 +70,9 @@ The generated manifest includes a cluster summary, a notes section for your own 
 #
 
 [meta]
-version = 1
+version = 2
 query = ["source.ext IN ('jpg', 'png', 'heic')"]
-scope = "/path/to/photos"
+scope = ["/path/to/photos"]
 generated_at = "2026-02-28T12:00:00Z"
 lock_hash = "abc123..."
 
@@ -90,7 +90,7 @@ archive_root_id = 2
 
 - **Cluster Summary** is regenerated on each `cluster refresh`, showing current source counts, root breakdown, and archive coverage.
 - **Notes** section is preserved across refreshes — add your own comments here.
-- **`pattern`** starts at `{scope.rel_path}` when the generation was scoped to a single path, and at `{source.rel_path}` otherwise: files keep the folder structure they were found in. Edit it to organize them differently. An existing manifest keeps the pattern it recorded.
+- **`pattern`** starts at `{scope.rel_path}` when the generation was scoped to any path at all, and at `{source.rel_path}` when it was not: files keep the folder structure they were found in. Edit it to organize them differently. An existing manifest keeps the pattern it recorded.
 
   Writing the manifest inside the destination is fine, but a manifest whose own path is a directory the pattern needs blocks every file below it. Generate and refresh warn when that is the case, naming both paths; [`apply`](apply.md) refuses the run. This is easy to hit by naming a manifest after a folder whose name contains a dot: `-o`/`-O` append `.toml` only when the name has no extension, so `-O photos.2024` writes exactly that name.
 - **`version`** field tracks the manifest format version.
@@ -99,10 +99,10 @@ archive_root_id = 2
 **Common output patterns:**
 
 ```toml
-# Structure below the scoped path (default for a single-path generate)
+# Structure below the scoped path (default for a scoped generate)
 pattern = "{scope.rel_path}"
 
-# Structure below each source's root (default otherwise)
+# Structure below each source's root (default when unscoped)
 pattern = "{source.rel_path}"
 
 # Flat - all files in base_dir

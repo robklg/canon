@@ -4,15 +4,17 @@
 //! Patterns consist of literal text and placeholders like `{fact.key}`,
 //! `{source.rel_path[-1]}`, or `{content.DateTimeOriginal|year}`.
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 
-use super::key::{expand_alias, parse_key_and_accessor, BuiltinKey};
+use super::key::{expand_alias, parse_key_and_accessor, BuiltinKey, SCOPE_REL_PATH};
 use super::transform::{
     apply_accessor, apply_modifier, fact_value_to_string, parse_modifier, ModifierCall,
     PathAccessor,
 };
+use super::vantage::ScopeVantage;
 use crate::core::domain::fact::FactValue;
+use crate::core::domain::path::path_strip_prefix;
 
 // ============================================================================
 // Types
@@ -40,24 +42,26 @@ pub struct PatternExpr {
 }
 
 /// Context for pattern evaluation - provides fact values and source info
-pub struct EvalContext {
+pub struct EvalContext<'a> {
     /// Fact values by key (properly typed from database)
     facts: HashMap<String, FactValue>,
     /// Source root path (for path derivation)
     source_root: Option<String>,
     /// Source relative path (for path derivation)
     source_rel_path: Option<String>,
-    /// Scope prefix for scope.rel_path derivation
-    scope_prefix: Option<String>,
+    /// Where a `scope.rel_path` measures from, derived once per run. Borrowed
+    /// rather than owned: a context is built per source, and the vantage is
+    /// built once for all of them.
+    vantage: Option<&'a ScopeVantage>,
 }
 
-impl EvalContext {
+impl<'a> EvalContext<'a> {
     pub fn new() -> Self {
         EvalContext {
             facts: HashMap::new(),
             source_root: None,
             source_rel_path: None,
-            scope_prefix: None,
+            vantage: None,
         }
     }
 
@@ -76,13 +80,13 @@ impl EvalContext {
         self.source_rel_path = Some(rel_path);
     }
 
-    /// Set scope prefix for deriving scope.rel_path
-    pub fn set_scope_prefix(&mut self, prefix: Option<String>) {
-        self.scope_prefix = prefix;
+    /// Point the context at the run's derived scope vantage.
+    pub fn set_vantage(&mut self, vantage: &'a ScopeVantage) {
+        self.vantage = Some(vantage);
     }
 }
 
-impl Default for EvalContext {
+impl Default for EvalContext<'_> {
     fn default() -> Self {
         Self::new()
     }
@@ -256,7 +260,7 @@ fn expression_may_nest(expr: &PatternExpr) -> bool {
     }
     // The scope-relative path is derived at evaluation time and carries no
     // built-in key, but it is a path like any other.
-    if expr.key == "scope.rel_path" {
+    if expr.key == SCOPE_REL_PATH {
         return true;
     }
     BuiltinKey::from_str(&expr.key)
@@ -324,31 +328,35 @@ fn evaluate_expr(expr: &PatternExpr, ctx: &EvalContext) -> Result<String> {
 
 /// Get a fact value by key, handling derived facts
 fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
-    // Handle scope.rel_path specially (not a BuiltinKey)
-    if key == "scope.rel_path" {
-        // Derived: strip scope prefix from full path
-        match (&ctx.scope_prefix, &ctx.source_root, &ctx.source_rel_path) {
-            (Some(scope), Some(root), Some(rel_path)) => {
-                let full_path = if rel_path.is_empty() {
-                    root.clone()
-                } else {
-                    format!("{root}/{rel_path}")
-                };
-                // Strip scope prefix
-                let scope_rel = if full_path.starts_with(scope) {
-                    let stripped = &full_path[scope.len()..];
-                    stripped.trim_start_matches('/').to_string()
-                } else {
-                    // If scope doesn't match, return full rel_path
-                    rel_path.clone()
-                };
-                return Ok(FactValue::Path(scope_rel));
-            }
-            (None, _, _) => bail!(
-                "scope.rel_path not available (no scope was specified during manifest generation)"
-            ),
-            _ => bail!("scope.rel_path not available"),
-        }
+    // The scope-relative path is derived here rather than looked up: it is
+    // not a fact and carries no built-in key. Every arm that cannot answer
+    // refuses by name — a destination is the one decision a user cannot
+    // un-decide after a move, so the alternative to refusing is inventing one.
+    if key == SCOPE_REL_PATH {
+        let vantage = ctx.vantage.filter(|v| !v.is_empty()).ok_or_else(|| {
+            anyhow!("{SCOPE_REL_PATH} is not available: the manifest records no scope")
+        })?;
+        let (root, rel_path) = match (&ctx.source_root, &ctx.source_rel_path) {
+            (Some(root), Some(rel_path)) => (root, rel_path),
+            _ => bail!("{SCOPE_REL_PATH} is not available"),
+        };
+        let measured_from = vantage.for_root(root).ok_or_else(|| {
+            anyhow!(
+                "{SCOPE_REL_PATH} cannot be measured for a source in {root}: \
+                 the manifest's scope names no path in that root"
+            )
+        })?;
+        let full_path = if rel_path.is_empty() {
+            root.clone()
+        } else {
+            format!("{root}/{rel_path}")
+        };
+        // Containment through its owner, never a byte prefix: `/R/photos`
+        // must not swallow `/R/photos2/x.jpg` and strip it to `2/x.jpg`.
+        let scope_rel = path_strip_prefix(&full_path, measured_from).ok_or_else(|| {
+            anyhow!("{SCOPE_REL_PATH}: {full_path} is not under the scope vantage {measured_from}")
+        })?;
+        return Ok(FactValue::Path(scope_rel.to_string()));
     }
 
     // Handle built-in keys via enum
@@ -402,8 +410,11 @@ fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
     if ctx.source_root.is_some() && ctx.source_rel_path.is_some() {
         available.push("source.path");
     }
-    if ctx.scope_prefix.is_some() && ctx.source_root.is_some() && ctx.source_rel_path.is_some() {
-        available.push("scope.rel_path");
+    if ctx.vantage.is_some_and(|v| !v.is_empty())
+        && ctx.source_root.is_some()
+        && ctx.source_rel_path.is_some()
+    {
+        available.push(SCOPE_REL_PATH);
     }
     available.sort();
 
@@ -422,6 +433,11 @@ fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
 mod tests {
     use super::super::transform::Modifier;
     use super::*;
+
+    fn vantage(prefixes: &[&str], roots: &[&str]) -> ScopeVantage {
+        let owned: Vec<String> = prefixes.iter().map(|p| p.to_string()).collect();
+        ScopeVantage::new(&owned, roots.iter().copied())
+    }
 
     #[test]
     fn test_parse_simple_literal() {
@@ -558,12 +574,84 @@ mod tests {
     #[test]
     fn test_scope_rel_path() {
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
+        let vantage = vantage(&["/Photos/Home"], &["/Photos"]);
         let mut ctx = EvalContext::new();
         ctx.set_source_root("/Photos".to_string());
         ctx.set_source_rel_path("Home/2024/vacation/image.jpg".to_string());
-        ctx.set_scope_prefix(Some("/Photos/Home".to_string()));
+        ctx.set_vantage(&vantage);
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "2024/vacation/image.jpg");
+    }
+
+    /// P7 — the friction end to end: with sibling scopes each source measures
+    /// from their shared parent, so each scope's own name survives and the
+    /// ancestors above it do not come along.
+    #[test]
+    fn scope_rel_path_measures_from_the_vantage() {
+        let pattern = parse_pattern("{scope.rel_path}").unwrap();
+        let vantage = vantage(&["/vol/work/proj-v1", "/vol/work/proj-v2"], &["/vol"]);
+        for rel in ["work/proj-v1/src/main.c", "work/proj-v2/src/main.c"] {
+            let mut ctx = EvalContext::new();
+            ctx.set_source_root("/vol".to_string());
+            ctx.set_source_rel_path(rel.to_string());
+            ctx.set_vantage(&vantage);
+            let result = evaluate(&pattern, &ctx).unwrap();
+            // Measured from `/vol/work`, not from the root: the scope name
+            // survives, the ancestor above it does not.
+            assert_eq!(result, rel.trim_start_matches("work/"));
+        }
+    }
+
+    /// P8 — the path-law pin. A byte-prefix test would strip `/vol/photos2`
+    /// with `/vol/photos` and hand back `2/x.jpg`; containment through its
+    /// owner refuses instead. Asserting on the absence of the wrong answer
+    /// matters as much as the error: a bare `is_err()` would pass against a
+    /// different bug.
+    #[test]
+    fn a_sibling_named_like_the_scope_is_not_under_it() {
+        let pattern = parse_pattern("{scope.rel_path}").unwrap();
+        let vantage = vantage(&["/vol/photos"], &["/vol"]);
+        let mut ctx = EvalContext::new();
+        ctx.set_source_root("/vol".to_string());
+        ctx.set_source_rel_path("photos2/x.jpg".to_string());
+        ctx.set_vantage(&vantage);
+        let result = evaluate(&pattern, &ctx);
+        assert!(result.is_err(), "got {result:?}");
+        assert_ne!(result.ok(), Some("2/x.jpg".to_string()));
+    }
+
+    /// P9 — the silent fallback is gone. A source in a root the scope never
+    /// names is refused, and the message names the root.
+    #[test]
+    fn a_source_whose_root_carries_no_scope_is_refused_by_name() {
+        let pattern = parse_pattern("{scope.rel_path}").unwrap();
+        let vantage = vantage(&["/vol/work/proj-v1"], &["/vol", "/media/backup"]);
+        let mut ctx = EvalContext::new();
+        ctx.set_source_root("/media/backup".to_string());
+        ctx.set_source_rel_path("proj-v1/src/main.c".to_string());
+        ctx.set_vantage(&vantage);
+        let err = evaluate(&pattern, &ctx).unwrap_err().to_string();
+        assert!(err.contains("/media/backup"), "{err}");
+        assert!(err.contains("names no path in that root"), "{err}");
+        // The other half of the distinction: a per-root refusal must not also
+        // read as "this manifest records no scope". It records one.
+        assert!(!err.contains("records no scope"), "{err}");
+    }
+
+    /// P10 — a manifest recording no scope at all says so, and says something
+    /// different from P9: nowhere to measure from is not the same answer as
+    /// nowhere to measure from *here*.
+    #[test]
+    fn no_scope_at_all_still_says_so() {
+        let pattern = parse_pattern("{scope.rel_path}").unwrap();
+        let vantage = vantage(&[], &["/vol"]);
+        let mut ctx = EvalContext::new();
+        ctx.set_source_root("/vol".to_string());
+        ctx.set_source_rel_path("work/proj-v1/src/main.c".to_string());
+        ctx.set_vantage(&vantage);
+        let err = evaluate(&pattern, &ctx).unwrap_err().to_string();
+        assert!(err.contains("records no scope"), "{err}");
+        assert!(!err.contains("names no path in that root"), "{err}");
     }
 
     #[test]

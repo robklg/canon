@@ -12,16 +12,19 @@ use anyhow::Result;
 use crate::archive::domain::LockEntry;
 use crate::core::domain::fact::{FactEntry, FactValue};
 use crate::core::domain::path::path_strip_prefix;
-use crate::expr::{evaluate, EvalContext, Pattern};
+use crate::expr::{evaluate, EvalContext, Pattern, ScopeVantage};
 
 /// Build an EvalContext for a source using pre-fetched facts and cached root paths.
-fn build_eval_context(
+///
+/// The vantage is borrowed, never cloned: this runs once per source and the
+/// vantage is derived once per run.
+fn build_eval_context<'a>(
     source: &LockEntry,
     needed_keys: &[String],
-    scope_prefix: Option<&str>,
+    vantage: &'a ScopeVantage,
     root_paths: &HashMap<i64, String>,
     all_facts: &HashMap<i64, Vec<FactEntry>>,
-) -> Result<EvalContext> {
+) -> Result<EvalContext<'a>> {
     let mut ctx = EvalContext::new();
 
     let root_path = root_paths
@@ -38,7 +41,7 @@ fn build_eval_context(
 
     ctx.set_source_root(root_path.clone());
     ctx.set_source_rel_path(rel_path);
-    ctx.set_scope_prefix(scope_prefix.map(|s| s.to_string()));
+    ctx.set_vantage(vantage);
 
     if let Some(source_facts) = all_facts.get(&source.id) {
         for key in needed_keys {
@@ -68,10 +71,10 @@ pub fn evaluate_pattern(
     pattern: &Pattern,
     source: &LockEntry,
     needed_keys: &[String],
-    scope_prefix: Option<&str>,
+    vantage: &ScopeVantage,
     root_paths: &HashMap<i64, String>,
     all_facts: &HashMap<i64, Vec<FactEntry>>,
 ) -> Result<String> {
-    let ctx = build_eval_context(source, needed_keys, scope_prefix, root_paths, all_facts)?;
+    let ctx = build_eval_context(source, needed_keys, vantage, root_paths, all_facts)?;
     evaluate(pattern, &ctx)
 }
