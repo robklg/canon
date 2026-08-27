@@ -3,6 +3,7 @@
 
 pub(super) mod composition;
 pub(super) mod compute;
+pub(super) mod crossings;
 pub(super) mod place;
 pub(super) mod show;
 

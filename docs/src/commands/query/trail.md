@@ -2,10 +2,11 @@
 
 Read the decision trail. Canon records every effectful action ([decision provenance](../../concepts/decisions.md)); `trail` reads that record back as a timeline of what happened, with your notes interleaved.
 
-One command, two lenses:
+One command, three ways to ask:
 
 - **The scope lens** — standing in a folder: *what did I do here?* Decisions touching this place, as a timeline ending at now.
 - **The time lens** (`--today`, `--since`, `--on`) — *what did I do today?* The day's decisions as a story, with a rollup of what was deleted, archived, and excluded.
+- **The counterpart door** (`trail crossings`) — *what moved between here and there?* The relation between two places: what this one gave another, or took from it.
 
 ```bash
 # What happened here?
@@ -25,6 +26,12 @@ canon trail --on 2026-05-12
 
 # One decision in full
 canon trail show 61
+
+# Expand the rollups by place
+canon trail crossings
+
+# Everything one drive ever delivered here
+canon trail crossings --origin /Volumes/old-backup
 
 # Full paths, for copying
 canon trail -l
@@ -92,10 +99,10 @@ The same answer comes back whether you name the place or stand in it: a bare `ca
 Standing at a source location, an `apply` that drew content out of this scope shows up too, even though the apply's own selection scope may have been global or elsewhere. It renders in the *extraction aspect*, replacing the usual summary line:
 
 ```
-#42   2026-05-12 14:02  archived  2016/italy   → 47 files (3.9 GB) to /Archive/Media/2016/Italy (copied; originals remain) · "italy assembly"
+#42   2026-05-12 14:02  archived  2016/italy   → 47 files (3.9 GB) to /Archive/Media/2016/Italy (copied) · "italy assembly"
 ```
 
-The place cell is the drawn-from location, not the destination; the disposition tells you whether the originals remain (`copied`) or are gone from here (`moved`). A decision appears once per view, never as both a selection line and an extraction line.
+The place cell is the drawn-from location, not the destination; the disposition states the recorded act — `copied` or `moved`. It says what the apply did, not what is at the origin now: that place may be long since cleared, or on a drive Canon can no longer see. A decision appears once per view, never as both a selection line and an extraction line.
 
 The ledger records an apply per directory it drew from, so a view shows only what actually left *it*: an apply that drew from two sibling folders never surfaces at a third, and standing inside one of them you see that folder's share of the draw, not the apply-wide total.
 
@@ -112,10 +119,10 @@ Omitted when nothing has ever been drawn from here. Sizes are omitted, not guess
 Standing at a destination, the same apply shows up too: files it placed inside this scope are enough, regardless of where its source root sits. It renders in the *arrival aspect*:
 
 ```
-#42   2026-05-12 14:03  archived  .   ← 47 files (3.9 GB) from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain) · "italy assembly"
+#42   2026-05-12 14:03  archived  .   ← 47 files (3.9 GB) from /Volumes/old-laptop/photos/2016/italy (copied in) · "italy assembly"
 ```
 
-The place cell is the destination this time, view-relative (`.` for the viewed folder itself); the wording mirrors the outbound direction (`copied in; originals remain` / `moved in`). A source root the live index no longer knows renders with `(root removed)` appended, matching `trail show`'s `drew from:` lines.
+The place cell is the destination this time, view-relative (`.` for the viewed folder itself); the wording mirrors the outbound direction (`copied in` / `moved in`). A source root the live index no longer knows renders with `(root removed)` appended, matching `trail show`'s `drew from:` lines.
 
 When a decision's origin *and* destination both sit inside the view (content rearranged entirely within one scope), it renders once, not twice: the extraction-aspect line, with the destination shown view-relative instead of absolute. Both endpoints stay visible in that one line.
 
@@ -137,7 +144,16 @@ Arrived here: 340 files (8.2 GB) from 3 origins.
 Rearranged here: 47 files (3.9 GB).
 ```
 
-Crossings are stated first, then what stayed inside. Any combination of the three can appear: a location can draw content out, receive content in, rearrange content within itself, all of these, or none.
+Crossings are stated first, then what stayed inside, and a hint beneath names the command that expands them:
+
+```
+Archived from here: 1,251 files (22.1 GB) → 2 destinations.
+Arrived here: 340 files (8.2 GB) from 3 origins.
+Rearranged here: 47 files (3.9 GB).
+  canon trail crossings — expand these by place
+```
+
+Any combination of the three can appear: a location can draw content out, receive content in, rearrange content within itself, all of these, or none.
 
 `Rearranged here` carries no counterparty clause, unlike its two siblings: rearranged content stayed here, so there is no other place to name.
 
@@ -156,32 +172,32 @@ Below the rollups, a scoped scope-lens view ends with a present-tense statement 
 
 ```
 Standing here: 3 files (21 B)
-  from /Volumes/old-laptop/photos/2016/italy: 3 files (21 B) · #42 · 2026-05-12
+  arrived from /Volumes/old-laptop/photos/2016/italy: 3 files (21 B) · 1 decision · 2026-05-12
 ```
 
 "Arrived here" is an event total and never shrinks; "Standing here" is a state total and can be smaller. `Arrived here: 5 files` next to `Standing here: 3 files` means some of what arrived was later deleted or moved elsewhere; neither number is wrong.
 
-Origin lines come first, busiest first: a single-origin root that fed this location across one or more applies merges into one `from <root>` line (listing every contributing decision id and the date range, if more than one); an apply that drew from several roots in a single decision gets its own `via apply #N from M origins` line, since its content isn't merge-worthy with anything else. After origins come **standings**: what present content here was last touched by, one line per transition (`excluded: 28,412 files (19.2 GB)`), merged across every decision that produced it. A standing is a statement about this place now, so it carries no decision id; the decisions behind it are the timeline above. Then a `first indexed here` bucket for content this location saw first via a scan, and an `untracked (predates recording)` bucket for content whose stamp predates recording entirely.
+Origin lines come first, busiest first: a single-origin root that fed this location across one or more applies merges into one `arrived from <root>` line, carrying how many decisions are behind it and the date range they span (open them with [`trail crossings --origin <root>`](#the-counterpart-door-trail-crossings)); an apply that drew from several roots in a single decision gets its own `via apply #N from M origins` line, since its content isn't merge-worthy with anything else. After origins come **standings**: what present content here was last touched by, one line per transition (`excluded: 28,412 files (19.2 GB)`), merged across every decision that produced it. A standing is a statement about this place now, so it carries no decision id; the decisions behind it are the timeline above. Then a `first indexed here` bucket for content this location saw first via a scan, and an `arrival unrecorded` bucket for content carrying no stamp at all. That content *is* tracked — it is indexed, present, and counted in the header above; what is missing is the record of how it arrived, and the row cannot say why, so the line names the absence and stops there.
 
 Where the record has a **gap**, the line names the one decision it is about, after the standings: `archived (origin unknown) here (#88)` for an apply the extraction ledger cannot attribute, `transition unrecorded here (#404)` for a stamp whose decision row no longer exists. A gap must read as a gap, so it is never merged away.
 
-Long lists are capped with an explicit remainder line (`… and 2 more origins.`, `… and 3 more gaps.`), never a silent truncation.
+Long lists are capped with an explicit remainder line (`… and 2 more origins — canon trail crossings`, `… and 3 more gaps.`), never a silent truncation.
 
 An origin line names a place other than this one. Two cases follow from that, both mirroring the boundary rule above:
 
 ```
 Standing here: 500 files (12.9 GB)
-  from /Volumes/old-laptop: 300 files (7.1 GB) · #12, #18 · 2026-03-02 – 2026-05-01
-  from elsewhere in /archive: 47 files (3.9 GB) · #42 · 2026-05-12
+  arrived from /Volumes/old-laptop: 300 files (7.1 GB) · 2 decisions · 2026-03-02 – 2026-05-01
+  arrived from elsewhere in /archive: 47 files (3.9 GB) · 1 decision · 2026-05-12
   rearranged: 12 files (800.0 MB)
   first indexed here: 141 files (1.1 GB)
 ```
 
-`from elsewhere in <root>` means the content genuinely arrived (its origin sits outside the viewed scope) while the origin root *contains* where you're standing. Origin lines are anchored on the root, so a bare `from /archive` while standing in `/archive/2020` would name the place you are already in. The root is still named rather than left implicit, because a view can span several roots.
+`arrived from elsewhere in <root>` means the content genuinely arrived (its origin sits outside the viewed scope) while the origin root *contains* where you're standing. Origin lines are anchored on the root, so a bare `/archive` while standing in `/archive/2020` would name the place you are already in. The root is still named rather than left implicit, because a view can span several roots.
 
 `rearranged` means the content didn't arrive at all: every row of the applies behind it was drawn from inside this view, so there is no elsewhere to name. Unlike the rollups, the card classifies per *decision* rather than per row: a source's stamp records which decision last touched it, not which row of that decision, so for an apply spanning several origins the card cannot tell which surviving files came from which side. Any row from outside keeps the origin line, rather than claiming a rearrangement the index can't substantiate.
 
-Origin attribution is root-level throughout: `from /Volumes/old-laptop`, not the subfolder within it. The card merges applies across time, and the root is the stable unit; for the exact subfolder of any one decision, `canon trail show <id>` lists it under `drew from:`.
+Origin attribution is root-level throughout: `arrived from /Volumes/old-laptop`, not the subfolder within it. The card merges applies across time, and the root is the stable unit; for the exact subfolder of any one decision, `canon trail show <id>` lists it under `drew from:`.
 
 Exclusion doesn't remove standing: an excluded-but-present source still counts. Renaming a file later doesn't erase its origin either, since attribution follows the decision that stamped it, not the file's current name. The card only appears when it has something to say: a location whose content is entirely first-indexed-here or untracked renders no card at all. It never appears in global views, the time lens, or `--jsonl` output; it is a scoped, present-tense reading, and JSONL's `extractions` field already covers the machine-readable side of provenance.
 
@@ -227,6 +243,130 @@ $ canon trail -l
 ```
 
 Paths are absolute in this mode wherever you run it, scoped views included: relative rendering is a convenience for reading, and this mode exists to be copied from. `-l` changes only how an event renders, never which events appear, and has no effect under `--jsonl`.
+
+## The counterpart door: `trail crossings`
+
+`canon trail crossings` reads the relation between two places: what this one gave another, or took from it. It takes the paths the trail's own output prints.
+
+### The bare view
+
+```
+$ canon trail crossings
+
+Crossings: /archive
+
+Archived from here: 1,251 files (22.1 GB) → 2 destinations.
+  /archive/Media/2016
+      904 files (18.2 GB) · 3 decisions · 2026-07-11
+  /archive/Documents/scans
+      347 files (3.9 GB) · 1 decision · 2026-08-09
+
+Arrived here: 36,412 files (498.2 GB) from 10 origins.
+  /Volumes/old-backup/archived
+      (root retired — the book: /archive/books/2026-08-11-backup-archived)
+      8,398 files (201.4 GB) · 15 decisions · 2026-08-02 – 2026-08-09
+  … and 9 more origins.
+```
+
+The section headers are the rollup lines from `canon trail`, in the same order and the same form. The entries beneath itemize them by counterpart: the number of entries is the rollup's counterparty count, and their counts sum to its total.
+
+The two surfaces select by different evidence, so they can part. A source root removed and added again at the same path carries a new id: `canon trail`'s rollup, which matches on that id, falls silent, while `crossings`, which matches on the path each decision recorded, still answers. Where they both speak they agree; where they differ, the crossings answer is the one read from the record.
+
+Counterpart paths render whole, on their own line, never elided. A counterpart whose root the live index no longer knows is marked `(root removed)`; a retired one points at its book instead, in the wording `trail show`'s `drew from:` lines use.
+
+A section with nothing in it does not print. Standing at a source location, only the outbound section appears:
+
+```
+$ canon trail crossings
+
+Crossings: /Volumes/camera-card/2019
+
+Archived from here: 1,551 files (44.2 GB) → 1 destination.
+  /archive/Media/2019
+      1,551 files (44.2 GB) · 3 decisions · 2026-07-14 – 2026-08-01
+```
+
+### Naming a counterpart
+
+`--origin <path>` narrows to content drawn from at or under that place; `--destination <path>` to content placed at or under it. Both take a path at any depth, and both compose. Naming one drops that section to per-decision detail at row precision:
+
+```
+$ canon trail crossings --origin /Volumes/old-backup/archived
+
+Crossings: /archive
+
+Arrived here: 8,398 files (201.4 GB) from /Volumes/old-backup/archived
+  (root retired — the book: /archive/books/2026-08-11-backup-archived).
+
+  #48   2026-08-02   1,204 files (31.2 GB)   moved in
+        Photos/2016  → Media/2016
+        Photos/2017  → Media/2017
+        "italy trip + the 2017 backlog"
+  #50   2026-08-02     847 files (12.8 GB)   copied in
+        Photos/2018  → Media/2018
+  … and 13 more decisions.
+
+Standing here: 8,151 of the 8,398 files delivered.
+```
+
+Each end of a place line is measured from its own anchor: the named counterpart on one side, the viewed scope on the other. The counterpart path in the header stays whole.
+
+A flag can also narrow the section on the side you are standing rather than the side you asked about. Standing at a source location, `--origin <subfolder>` narrows what left, while what it left *for* is still unnamed, so that section keeps the counterpart listing and names the place it narrowed to instead of saying "here":
+
+```
+Archived from /Volumes/camera-card/2019/raw: 812 files (22.4 GB) → 1 destination.
+```
+
+The counts are then smaller than the same sentence in `canon trail`, and the header says why.
+
+The `Standing here` line appears when the view is scoped, `--destination` is not in play, and the [composition card](#the-composition-card-whats-standing-here) carries an origin line for exactly this root. It states two counts: how much that origin delivered, and how much of it stands here now. A named destination narrows the delivered count while the card still answers for the whole location, so the two would no longer be counts of the same content; the line is omitted rather than shown as a comparison that does not hold. The gap between them is not decomposed. Content can leave an archive location by deletion, by a later apply, or by a transition recorded in place, and these records cannot tell those apart.
+
+### What counts as a crossing
+
+A crossing is a movement across the boundary of the place in view. Content that moved *within* the view crossed nothing and appears in neither section. When that is all there is, the command says so:
+
+```
+Nothing crossed this boundary. 47 files (3.9 GB) were rearranged within it.
+```
+
+A named counterpart matches at or below the path given, never above it. Asking about `/archive/2016` does not surface a delivery whose recorded destination is `/archive`: a common prefix says nothing about a particular folder beneath it. Matching is on literal bytes, so `_` and `%` in a folder name mean themselves.
+
+Counterparts match on the paths recorded when each decision ran, so a removed root, or one removed and re-added, keeps its link.
+
+### `--global`
+
+`--global` borrows the counterpart named as its boundary:
+
+```
+$ canon trail crossings --global --origin /Volumes/old-backup/archived
+```
+
+reads everything that drive ever delivered, wherever it went. This is the same computation as standing at the drive. `--global` therefore requires `--origin` or `--destination`; on its own there is nothing to measure against, and the command errors.
+
+The same refusal applies without the flag. Running `canon trail crossings` from a directory no open root contains resolves to every root, which is the same boundless state, and it errors for the same reason: a view with no boundary cannot report a crossing, because every place is inside it. Two such directories answer instead of erroring — a [retired root's old path](#after-retirement-the-trail-stays-whole), which states its retirement, and a directory inside a suspended root, whose message names the suspension and the way back.
+
+When `--global` names both, the boundary is the deeper of the two where one contains the other, and the origin otherwise. Where the two paths do not nest, both choices select the same records and only the section header differs. Where one contains the other they select differently, and the deeper path is the one that reads the movement between them as a crossing rather than as a rearrangement inside the wider place.
+
+### Exits, caps and machine output
+
+A counterpart Canon has no record of is stated, exit non-zero, no `Error:` prefix, stdout clean, matching the [scope-lens miss](#places-with-no-history). A counterpart Canon knows across which nothing crossed is answered, exit 0.
+
+`--limit N` (default 20) caps each section independently, always with an explicit remainder; `--all` uncaps. Place listings inside one delivery cap at 5, the value `drew from:` uses, and `--all` uncaps those too — every remainder this command prints has an invocation that opens it.
+
+`--jsonl` emits the same decision events the timeline emits, over the decisions carrying a crossing in view. No field is added or dropped, and each decision carries its full row set, so a decision serializes identically wherever it was surfaced from.
+
+`crossings` is read-only and records no decision.
+
+| Flag | Meaning |
+|------|---------|
+| `--origin <path>` | Narrow to content drawn from at or under this path |
+| `--destination <path>` | Narrow to content placed at or under this path |
+| `--global` | All roots; requires `--origin` or `--destination` |
+| `--limit N` | At most N entries per section (default 20) |
+| `--all` | No cap |
+| `--jsonl` | Machine output (JSONL on stdout) |
+
+Counterparts are named by path. A root spec (`id:N`, `path:...`) is refused: it cannot name a location below a root, and a removed root's id is gone with the root.
 
 ## Inspecting one decision: `trail show`
 

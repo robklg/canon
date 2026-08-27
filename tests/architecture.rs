@@ -2345,7 +2345,9 @@ fn s() -> Connection {
             "trail",
             &[
                 "run",
+                "run_crossings",
                 "run_show",
+                "CrossingsArgs",
                 "TrailArgs",
                 "RowAspect",
                 "ScopeMatch",

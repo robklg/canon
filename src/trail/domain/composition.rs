@@ -37,6 +37,15 @@ pub enum OriginLine {
         root_path: String,
         /// Whether the origin root is still known to the live index.
         root_removed: bool,
+        /// Where a removed origin root's story lives now, when it was
+        /// retired: the bound book's display path. `None` for a live root or
+        /// for a plain `roots rm` (no bound story to point at).
+        ///
+        /// Read from the retirement decision's artifact reference — the card
+        /// makes **no stat call**, unlike `show`'s receipt pointers, which
+        /// redirect and therefore must observe. State the recorded path;
+        /// claim nothing about what stands at it.
+        retired_book: Option<String>,
         /// Whether the origin root *contains the viewed scope* — the content
         /// came from elsewhere within this same root, not in from outside.
         ///
@@ -259,11 +268,17 @@ fn contains_view(root_path: &str, prefixes: &[String]) -> bool {
 ///
 /// `prefixes` is the viewed scope, used only to tell a real origin from this
 /// place itself (see the rearrangement guard below).
+/// `retired_books` maps an origin root's snapshot path to the display path of
+/// the book its story was bound into — a DB read, so ops looks it up and
+/// passes it in, exactly as it already does for `live_root_paths`. A path
+/// absent from the map has no bound story: a live root, or one removed by
+/// plain `roots rm`.
 pub fn build_card(
     groups: &HashMap<Option<i64>, BucketCount>,
     decisions: &HashMap<i64, Decision>,
     extractions_by_decision: &HashMap<i64, Vec<DecisionExtraction>>,
     live_root_paths: &HashSet<String>,
+    retired_books: &HashMap<String, String>,
     prefixes: &[String],
 ) -> CompositionCard {
     let mut files = 0i64;
@@ -407,9 +422,19 @@ pub fn build_card(
         // Decided from the group key, so a root removed and re-added can't be
         // called removed on the strength of whichever stale row merged first.
         let root_removed = !live_root_paths.iter().any(|p| p == &root_path);
+        // Gated on removal for the same reason `show`'s `drew from:` gates
+        // it: a bound-but-unreleased retirement leaves its artifact
+        // reference recorded while the root stays fully indexed, and a live
+        // place must never read as bound history.
+        let retired_book = if root_removed {
+            retired_books.get(&root_path).cloned()
+        } else {
+            None
+        };
         origins.push(OriginLine::FromRoot {
             root_path,
             root_removed,
+            retired_book,
             from_within: acc.from_within,
             files: acc.files,
             bytes: acc.bytes,
@@ -543,6 +568,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/Volumes/sd", "/archive"]),
+            &HashMap::new(),
             &view(),
         );
         assert_eq!(card.origins.len(), 1);
@@ -571,12 +597,20 @@ mod tests {
         ]);
         let live = live(&["/vol/a"]);
 
-        let card = build_card(&groups, &decisions, &extractions, &live, &view());
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &live,
+            &HashMap::new(),
+            &view(),
+        );
         assert_eq!(card.origins.len(), 1);
         match &card.origins[0] {
             OriginLine::FromRoot {
                 root_path,
                 root_removed,
+                retired_book: _,
                 from_within,
                 files,
                 bytes,
@@ -608,7 +642,14 @@ mod tests {
         )]);
         let live = live(&["/vol/a", "/vol/b", "/vol/small", "/vol/big"]);
 
-        let card = build_card(&groups, &decisions, &extractions, &live, &view());
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &live,
+            &HashMap::new(),
+            &view(),
+        );
         assert_eq!(card.origins.len(), 1);
         match &card.origins[0] {
             OriginLine::MultiOrigin {
@@ -640,6 +681,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
             &view(),
         );
 
@@ -741,6 +783,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
+            &HashMap::new(),
             &view(),
         );
         assert!(card.origins.is_empty(), "a place is not its own origin");
@@ -775,6 +818,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
+            &HashMap::new(),
             &["/archive/2020".to_string()],
         );
         assert!(card.transitioned.is_empty());
@@ -800,6 +844,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
+            &HashMap::new(),
             &["/archive/2020".to_string()],
         );
         match &card.origins[0] {
@@ -828,6 +873,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
+            &HashMap::new(),
             &["/archive/2020".to_string()],
         );
         match &card.origins[0] {
@@ -876,6 +922,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a", "/vol/b", "/Volumes/sd", "/archive"]),
+            &HashMap::new(),
             &view(),
         );
         assert!(card.transitioned.is_empty(), "not a rearrangement");
@@ -911,6 +958,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a", "/vol/b", "/Volumes/sd", "/archive"]),
+            &HashMap::new(),
             &view(),
         );
         assert_eq!(card.files, 82);
@@ -951,6 +999,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
+            &HashMap::new(),
             &view(),
         );
         assert!(card.origins.is_empty());
@@ -970,6 +1019,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
             &view(),
         );
 
@@ -988,6 +1038,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
             &view(),
         );
 
@@ -1014,6 +1065,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
             &view(),
         );
 
@@ -1041,6 +1093,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
             &view(),
         );
 
@@ -1075,6 +1128,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
             &view(),
         );
 
@@ -1131,6 +1185,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive"]),
+            &HashMap::new(),
             &view(),
         );
 
@@ -1159,6 +1214,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
             &view(),
         );
 
@@ -1198,6 +1254,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a"]),
+            &HashMap::new(),
             &view(),
         );
 
@@ -1242,6 +1299,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
             &view(),
         );
 
@@ -1263,6 +1321,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
             &view(),
         );
 
@@ -1282,6 +1341,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
             &view(),
         );
 
@@ -1304,7 +1364,14 @@ mod tests {
         let extractions = HashMap::from([(1, vec![mk_extraction(1, 7, "/vol/a")])]);
         let live = live(&["/vol/a"]);
 
-        let card = build_card(&groups, &decisions, &extractions, &live, &view());
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &live,
+            &HashMap::new(),
+            &view(),
+        );
         assert_eq!(card.files, 100);
         assert_eq!(card.bytes, 10_000);
 
@@ -1344,6 +1411,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
             &view(),
         );
 
@@ -1371,6 +1439,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashMap::new(),
             &view(),
         );
 
@@ -1391,7 +1460,14 @@ mod tests {
         ]);
         let live = live(&["/vol/a", "/vol/b", "/vol/small", "/vol/big"]);
 
-        let card = build_card(&groups, &decisions, &extractions, &live, &view());
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &live,
+            &HashMap::new(),
+            &view(),
+        );
         assert_eq!(card.origins.len(), 2);
         assert_eq!(card.origins[0].files(), 50);
         assert_eq!(card.origins[1].files(), 5);
@@ -1404,7 +1480,14 @@ mod tests {
         let decisions = HashMap::from([(1, d)]);
         let extractions = HashMap::from([(1, vec![mk_extraction(1, 7, "/vol/gone")])]);
         // No live root at that path.
-        let card = build_card(&groups, &decisions, &extractions, &HashSet::new(), &view());
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &HashSet::new(),
+            &HashMap::new(),
+            &view(),
+        );
 
         match &card.origins[0] {
             OriginLine::FromRoot { root_removed, .. } => assert!(root_removed),
@@ -1426,6 +1509,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a"]), // live under some other id now
+            &HashMap::new(),
             &view(),
         );
 
@@ -1454,6 +1538,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a"]),
+            &HashMap::new(),
             &view(),
         );
 

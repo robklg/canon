@@ -210,4 +210,8 @@ Counting such a decision as both a departure and an arrival would double it, wit
 
 **The boundary moves when you move.** Standing at an archive root, a curation pass reads as a rearrangement; standing in the destination folder, the same pass reads as an arrival, because from there the origin genuinely is elsewhere. Each view answers its own question. What is guaranteed is that within any one view, the categories are disjoint: no file is counted twice.
 
+A movement that *does* cross the boundary is a **crossing**: a recorded movement across the boundary of the place in view, with an origin end and a destination end. It is the unit [`canon trail crossings`](../commands/query/trail.md#the-counterpart-door-trail-crossings) reads. A rearrangement is not one, because it crossed nothing.
+
+A crossing binds two places by what *moved* between them, when, and why. That is a different relation from the sweep's **counterpart**, which binds places by where matching content currently *is*: two folders can hold the same bytes with nothing ever having moved between them, and a crossing can be recorded between two places that share nothing today. The trail answers by record; the sweep and survey answer by content.
+
 The word *rearranged* states an observable fact about two paths and one boundary. It deliberately avoids `relocated`, which already means something narrower in Canon: whether an apply's originals moved or were copied (see `origin_disposition` above). An intra-archive apply can be either.

@@ -83,11 +83,35 @@ pub fn compute_composition(
     // the same location, and a location that exists today is visitable today.
     let live_root_paths: HashSet<String> = roots.iter().map(|r| r.path.clone()).collect();
 
+    // A removed origin root that was retired points at its book — the origin
+    // reads as bound history rather than a dead end, the same repair
+    // `trail show`'s `drew from:` lines already carry. `build_card` is pure,
+    // so the DB read happens here and the answer is passed in, exactly as
+    // `live_root_paths` is. One lookup per distinct removed origin root: the
+    // paths are deduped by the map before any of them is asked about, and
+    // the lookup's own liveness gate is what makes a bound-but-unreleased
+    // retirement fall through.
+    let mut retired_books: HashMap<String, String> = HashMap::new();
+    let mut origin_root_paths: Vec<&str> = extractions_by_decision
+        .values()
+        .flatten()
+        .map(|row| row.root_path.as_str())
+        .filter(|path| !live_root_paths.contains(*path))
+        .collect();
+    origin_root_paths.sort_unstable();
+    origin_root_paths.dedup();
+    for path in origin_root_paths {
+        if let Some(retired) = crate::retire::find_retirement_covering_path(conn, path)? {
+            retired_books.insert(path.to_string(), retired.book_display);
+        }
+    }
+
     let card = build_card(
         &groups,
         &decisions,
         &extractions_by_decision,
         &live_root_paths,
+        &retired_books,
         prefixes,
     );
     if !card.has_origin_story() {
@@ -376,5 +400,164 @@ mod tests {
             OriginLine::FromRoot { root_removed, .. } => assert!(root_removed),
             OriginLine::MultiOrigin { .. } => panic!("expected FromRoot"),
         }
+    }
+
+    /// Bind a `roots retire` decision for `root_path`, with its book placed
+    /// at `book_root`/`book_rel` — the shape `find_retirement_covering_path`
+    /// reads: a bound decision (receipt columns set) plus a scope row
+    /// carrying the retired root's write-time path snapshot.
+    fn bind_retirement(
+        conn: &Connection,
+        root_path: &str,
+        book_root: i64,
+        book_rel: &str,
+        created_at: i64,
+    ) -> i64 {
+        let id = insert_decision_at(conn, "roots_retire", created_at);
+        conn.execute(
+            "UPDATE decisions SET receipt_root_id = ?2, receipt_rel_path = ?3 WHERE id = ?1",
+            rusqlite::params![id, book_root, book_rel],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO decision_scopes (decision_id, root_id, root_path, rel_prefix)
+             VALUES (?1, 999, ?2, '')",
+            rusqlite::params![id, root_path],
+        )
+        .unwrap();
+        id
+    }
+
+    /// An apply from `/Volumes/gone` into `/archive`, with one surviving
+    /// source stamped by it — the origin-line shape every test below reads.
+    fn archive_with_one_removed_origin(conn: &Connection) -> i64 {
+        let archive_root = insert_test_root(conn, "/archive", "archive", false);
+        let apply = insert_decision_at(conn, "apply", 100);
+        repo::decision::replace_extractions(
+            conn,
+            &[crate::core::domain::extraction::DecisionExtraction {
+                decision_id: apply,
+                root_id: 999,
+                root_path: "/Volumes/gone".to_string(),
+                rel_prefix: "".to_string(),
+                files: 1,
+                bytes: Some(10),
+                destination_root_id: Some(archive_root),
+                destination_path: "/archive".to_string(),
+                disposition: None,
+            }],
+        )
+        .unwrap();
+        let s1 = insert_test_source(conn, archive_root, "x.jpg", 1, 1, 10, 0);
+        stamp(conn, s1, apply, true);
+        archive_root
+    }
+
+    fn origin_book(card: &crate::trail::domain::composition::CompositionCard) -> Option<String> {
+        match &card.origins[0] {
+            OriginLine::FromRoot { retired_book, .. } => retired_book.clone(),
+            OriginLine::MultiOrigin { .. } => panic!("expected FromRoot"),
+        }
+    }
+
+    /// The card's origin line points at the book, exactly as `drew from:`
+    /// does — the two doors onto the same origin must not disagree.
+    #[test]
+    fn a_retired_origin_root_carries_its_book() {
+        let conn = open_in_memory_for_test();
+        let archive_root = archive_with_one_removed_origin(&conn);
+        bind_retirement(&conn, "/Volumes/gone", archive_root, "books/gone", 200);
+
+        let card = compute_composition(&conn, &["/archive".to_string()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(origin_book(&card).as_deref(), Some("/archive/books/gone"));
+    }
+
+    /// A plain `roots rm` left no bound story; there is nothing to point at,
+    /// and the line keeps the removed-root marker instead.
+    #[test]
+    fn a_plainly_removed_origin_root_carries_no_book() {
+        let conn = open_in_memory_for_test();
+        archive_with_one_removed_origin(&conn);
+
+        let card = compute_composition(&conn, &["/archive".to_string()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(origin_book(&card), None);
+    }
+
+    /// The liveness gate, read through the card: a ceremony that bound its
+    /// book but never released the root leaves the root fully indexed, and a
+    /// live place must never read as bound history.
+    #[test]
+    fn a_bound_but_unreleased_retirement_leaves_the_root_live_and_unmarked() {
+        let conn = open_in_memory_for_test();
+        let archive_root = insert_test_root(&conn, "/archive", "archive", false);
+        // The origin root is still indexed — the release never happened.
+        let source_root = insert_test_root(&conn, "/Volumes/here", "source", false);
+        let apply = insert_decision_at(&conn, "apply", 100);
+        repo::decision::replace_extractions(
+            &conn,
+            &[crate::core::domain::extraction::DecisionExtraction {
+                decision_id: apply,
+                root_id: source_root,
+                root_path: "/Volumes/here".to_string(),
+                rel_prefix: "".to_string(),
+                files: 1,
+                bytes: Some(10),
+                destination_root_id: Some(archive_root),
+                destination_path: "/archive".to_string(),
+                disposition: None,
+            }],
+        )
+        .unwrap();
+        let s1 = insert_test_source(&conn, archive_root, "x.jpg", 1, 1, 10, 0);
+        stamp(&conn, s1, apply, true);
+        bind_retirement(&conn, "/Volumes/here", archive_root, "books/here", 200);
+
+        let card = compute_composition(&conn, &["/archive".to_string()])
+            .unwrap()
+            .unwrap();
+        match &card.origins[0] {
+            OriginLine::FromRoot {
+                root_removed,
+                retired_book,
+                ..
+            } => {
+                assert!(!root_removed);
+                assert_eq!(retired_book, &None);
+            }
+            OriginLine::MultiOrigin { .. } => panic!("expected FromRoot"),
+        }
+    }
+
+    /// The card states the **recorded** book path and observes nothing —
+    /// deliberately unlike `show`'s receipt pointers, which redirect and so
+    /// must stat. Here nothing exists on disk at the book's path, and the
+    /// line renders it all the same.
+    #[test]
+    fn the_card_states_a_book_path_it_never_observes() {
+        let conn = open_in_memory_for_test();
+        let archive_root = archive_with_one_removed_origin(&conn);
+        bind_retirement(
+            &conn,
+            "/Volumes/gone",
+            archive_root,
+            "books/nothing-is-here",
+            200,
+        );
+
+        let book = origin_book(
+            &compute_composition(&conn, &["/archive".to_string()])
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(book, "/archive/books/nothing-is-here");
+        assert!(
+            !std::path::Path::new(&book).exists(),
+            "the fixture must not accidentally exist on disk"
+        );
     }
 }

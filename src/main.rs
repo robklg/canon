@@ -596,6 +596,29 @@ enum TrailAction {
         /// Decision id (as shown in the timeline)
         id: i64,
     },
+    /// Expand what moved between here and another place
+    Crossings {
+        /// Directory paths to scope the view (resolved to realpath)
+        paths: Vec<PathBuf>,
+        /// Narrow to content drawn from at or under this path
+        #[arg(long, value_name = "PATH")]
+        origin: Option<String>,
+        /// Narrow to content placed at or under this path
+        #[arg(long, value_name = "PATH")]
+        destination: Option<String>,
+        /// Read across all roots — needs --origin or --destination
+        #[arg(long)]
+        global: bool,
+        /// Maximum entries per section (default: 20)
+        #[arg(long, conflicts_with = "all")]
+        limit: Option<usize>,
+        /// Show all entries (no cap)
+        #[arg(long)]
+        all: bool,
+        /// Emit the contributing decisions as JSONL (machine output)
+        #[arg(long)]
+        jsonl: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1555,6 +1578,35 @@ fn main() -> Result<()> {
             jsonl,
         } => match action {
             Some(TrailAction::Show { id }) => trail::run_show(&mut db, id)?,
+            Some(TrailAction::Crossings {
+                paths,
+                origin,
+                destination,
+                global,
+                limit,
+                all,
+                jsonl,
+            }) => {
+                // Same exit contract as the timeline: a place Canon has never
+                // known is a well-formed question answered, not an error.
+                if matches!(
+                    trail::run_crossings(
+                        &mut db,
+                        trail::CrossingsArgs {
+                            paths,
+                            origin,
+                            destination,
+                            global,
+                            limit,
+                            all,
+                            jsonl,
+                        },
+                    )?,
+                    trail::TrailExit::PlaceUnknown
+                ) {
+                    std::process::exit(1);
+                }
+            }
             None => {
                 // A place Canon has never known is a well-formed question
                 // answered, not an error: non-zero, no `Error:` prefix.
@@ -1671,5 +1723,57 @@ mod tests {
     fn trail_timeline_flags_still_parse_without_a_subcommand() {
         assert!(Cli::try_parse_from(["canon", "trail", "--global", "--jsonl"]).is_ok());
         assert!(Cli::try_parse_from(["canon", "trail", "show", "7"]).is_ok());
+    }
+
+    /// Inside a subcommand every flag carries a value, so the positional /
+    /// flag ambiguity that rules out `--destination` on the bare timeline
+    /// dissolves: `crossings --destination /vol/x` cannot be misread as
+    /// "expand destinations, scoped to /vol/x".
+    #[test]
+    fn crossings_is_a_subcommand_beside_show() {
+        assert!(Cli::try_parse_from(["canon", "trail", "crossings"]).is_ok());
+        assert!(Cli::try_parse_from(["canon", "trail", "crossings", "/archive"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "canon",
+            "trail",
+            "crossings",
+            "--origin",
+            "/vol/sd",
+            "--destination",
+            "/archive/Media"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from(["canon", "trail", "crossings", "--global"]).is_ok());
+    }
+
+    /// Neither counterpart flag has a bare form: a value is always required,
+    /// so the flag can never swallow the positional scope path beside it.
+    #[test]
+    fn the_counterpart_flags_always_require_a_value() {
+        for flag in ["--origin", "--destination"] {
+            assert!(
+                Cli::try_parse_from(["canon", "trail", "crossings", flag]).is_err(),
+                "{flag} must require a value"
+            );
+        }
+    }
+
+    /// The timeline flags belong to the timeline; `crossings` honors none of
+    /// them, so clap must refuse rather than accept and drop them.
+    #[test]
+    fn crossings_refuses_timeline_flags_it_cannot_honor() {
+        for flag in [
+            vec!["--since", "today"],
+            vec!["--today"],
+            vec!["--no-notes"],
+            vec!["-l"],
+        ] {
+            let mut argv = vec!["canon", "trail", "crossings"];
+            argv.extend(flag.iter());
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "expected {argv:?} to be refused"
+            );
+        }
     }
 }

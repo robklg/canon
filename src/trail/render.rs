@@ -17,6 +17,10 @@ use crate::trail::domain::timeline::{decision_act, DayRollup, FateLine, Timeline
 use crate::trail::ops::compute::{
     ArrivalRollup, ExtractionRollup, RearrangementRollup, DEFAULT_LIMIT,
 };
+use crate::trail::ops::crossings::{
+    CounterpartLine, CrossingBody, CrossingDelivery, CrossingPlace, CrossingSection,
+    CrossingsParams, CrossingsResult, NothingCrossed,
+};
 use crate::trail::ops::show::ShowExtraction;
 use crate::trail::{TrailResult, TrailView};
 
@@ -224,8 +228,15 @@ pub(super) fn print_human(
     if !rollup_lines.is_empty() || result.earlier_decisions > 0 || result.unscoped_decisions > 0 {
         println!();
     }
+    let taught = !rollup_lines.is_empty();
     for line in rollup_lines {
         println!("{line}");
+    }
+    // Each rollup line names other places and, until now, offered no way to
+    // ask about any of them. The hint is printed once beneath the block, not
+    // once per line, and never inside the door's own output.
+    if taught {
+        println!("{CROSSINGS_HINT}");
     }
     if result.earlier_decisions > 0 {
         let cap = limit.unwrap_or(DEFAULT_LIMIT);
@@ -250,6 +261,335 @@ pub(super) fn print_human(
         print_composition_card(card);
     }
 }
+
+/// The crossings door's human output: the rollup sentences, expanded.
+///
+/// Section headers are the rollup lines verbatim in form — the door *is*
+/// those lines made expandable, so no new noun is coined for it. An unnamed
+/// section keeps the counterparty clause and itemizes the counterparties; a
+/// named one replaces that clause with the counterpart itself and drops to
+/// the deliveries beneath it.
+///
+/// Counterpart paths render **full and unelided**, on their own line. The
+/// path is this door's key — it is what the reader copies from one invocation
+/// into the next — so a column-aligned form that would elide or wrap a long
+/// path breaks the reach chain at its first hop.
+pub(super) fn print_crossings(
+    result: &CrossingsResult,
+    resolved: &ResolvedScope,
+    params: &CrossingsParams,
+) {
+    let scope_part = if resolved.is_global() {
+        "all roots".to_string()
+    } else {
+        resolved.prefixes.join(", ")
+    };
+    println!("Crossings: {scope_part}");
+
+    for section in &result.sections {
+        println!();
+        for line in crossing_section_lines(section, resolved, params) {
+            println!("{line}");
+        }
+    }
+
+    if let Some(nothing) = &result.nothing_crossed {
+        println!();
+        println!("{}", nothing_crossed_line(nothing, resolved));
+    }
+
+    if let Some(reconciliation) = &result.reconciliation {
+        println!();
+        println!(
+            "Standing here: {} of the {} files delivered.",
+            format_count(reconciliation.standing),
+            format_count(reconciliation.delivered)
+        );
+    }
+}
+
+/// One section's lines, indentation included. Pure data — the same separation
+/// `drew_from_lines` and `composition_card_lines` keep, so the caps, the
+/// ordering and the wording are testable without capturing stdout.
+fn crossing_section_lines(
+    section: &CrossingSection,
+    resolved: &ResolvedScope,
+    params: &CrossingsParams,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let counts = files_with_size(section.files, section.bytes);
+    // Where this section stands. "Here" is the view — but the flag naming the
+    // section's *inside* end narrows the counts without narrowing the word,
+    // so wherever that flag is present the place is named instead. This holds
+    // whether or not the outside end was also named: with both flags the
+    // counts are narrowed at both ends, and saying "here" is exactly as
+    // unaccountable as it is with one.
+    let inside = inside_end(section.aspect, params);
+    match &section.named {
+        Some(counterpart) => {
+            let head = match section.aspect {
+                RowAspect::Arrival => format!(
+                    "Arrived {}: {counts} from {}",
+                    inside.map_or("here".to_string(), |path| format!("at {path}")),
+                    counterpart.path
+                ),
+                RowAspect::Extraction | RowAspect::Rearrangement | RowAspect::Outside => {
+                    format!(
+                        "Archived from {}: {counts} \u{2192} {}",
+                        inside.unwrap_or("here"),
+                        counterpart.path
+                    )
+                }
+            };
+            // The marker takes its own line rather than trailing the path:
+            // both are long, and the path must stay copy-pasteable to the end
+            // of the line it is on.
+            let marker = origin_marker(
+                counterpart.retired_book.as_deref(),
+                counterpart.root_removed,
+            );
+            if marker.is_empty() {
+                out.push(format!("{head}."));
+            } else {
+                out.push(head);
+                out.push(format!(
+                    "  ({}).",
+                    marker.trim().trim_start_matches('(').trim_end_matches(')')
+                ));
+            }
+        }
+        None => out.push(match section.aspect {
+            RowAspect::Arrival => format!(
+                "Arrived {}: {counts} from {}.",
+                inside.map_or("here".to_string(), |path| format!("at {path}")),
+                count_of(section.counterparty_count as i64, "origin")
+            ),
+            RowAspect::Extraction | RowAspect::Rearrangement | RowAspect::Outside => format!(
+                "Archived from {}: {counts} \u{2192} {}.",
+                inside.unwrap_or("here"),
+                count_of(section.counterparty_count as i64, "destination")
+            ),
+        }),
+    }
+
+    match &section.body {
+        CrossingBody::Counterparts { lines, more } => {
+            for line in lines {
+                out.extend(counterpart_lines(line));
+            }
+            if *more > 0 {
+                let noun = match section.aspect {
+                    RowAspect::Arrival => "origin",
+                    RowAspect::Extraction | RowAspect::Rearrangement | RowAspect::Outside => {
+                        "destination"
+                    }
+                };
+                out.push(format!(
+                    "  \u{2026} and {} more {}.",
+                    format_count(*more as i64),
+                    plural(*more as i64, noun)
+                ));
+            }
+        }
+        CrossingBody::Deliveries { lines, more } => {
+            for line in lines {
+                out.extend(delivery_lines(line, section, resolved, params));
+            }
+            if *more > 0 {
+                out.push(format!(
+                    "  \u{2026} and {} more {}.",
+                    format_count(*more as i64),
+                    plural(*more as i64, "decision")
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The place a section's **inside** end was narrowed to, if a flag named it.
+///
+/// The exact complement of `ops::crossings`' outside-end rule: a section's
+/// counterpart is its outside end (origin for an arrival, destination for an
+/// extraction), so the *other* flag is the one narrowing the side the reader
+/// is standing on. That flag shrinks the counts without shrinking the word
+/// "here", which is what leaves the same sentence at the same place carrying
+/// smaller numbers with nothing to account for them.
+fn inside_end(aspect: RowAspect, params: &CrossingsParams) -> Option<&str> {
+    match aspect {
+        RowAspect::Arrival => params.destination.as_deref(),
+        RowAspect::Extraction | RowAspect::Rearrangement | RowAspect::Outside => {
+            params.origin.as_deref()
+        }
+    }
+}
+
+/// One counterpart entry: the path on its own line, its marker beneath it
+/// when it has one, then the counts.
+///
+/// The marker and the counts are both continuations of the path above them,
+/// so they indent alike; a one-column difference between two lines that hang
+/// off the same path reads as structure that isn't there.
+fn counterpart_lines(line: &CounterpartLine) -> Vec<String> {
+    let mut out = vec![format!("  {}", line.counterpart.path)];
+    let marker = origin_marker(
+        line.counterpart.retired_book.as_deref(),
+        line.counterpart.root_removed,
+    );
+    if !marker.is_empty() {
+        out.push(format!("      {}", marker.trim()));
+    }
+    out.push(format!(
+        "      {} \u{00b7} {} \u{00b7} {}",
+        files_with_size(line.files, line.bytes),
+        count_of(line.decisions as i64, "decision"),
+        format_date_range(line.first_at, line.last_at)
+    ));
+    out
+}
+
+/// One delivery: the decision's header line, its places, then its reason.
+///
+/// Each end renders against **its own anchor** — the named counterpart for
+/// the named side, the view for the other — falling back to absolute where
+/// there is none. The counterpart path itself stays whole in the header; the
+/// per-row directories beneath it are interior structure, not keys.
+fn delivery_lines(
+    line: &CrossingDelivery,
+    section: &CrossingSection,
+    resolved: &ResolvedScope,
+    params: &CrossingsParams,
+) -> Vec<String> {
+    let disposition = match section.aspect {
+        RowAspect::Arrival => disposition_suffix(
+            line.disposition,
+            INBOUND_DISPOSITION.0,
+            INBOUND_DISPOSITION.1,
+        ),
+        RowAspect::Extraction | RowAspect::Rearrangement | RowAspect::Outside => {
+            disposition_suffix(
+                line.disposition,
+                OUTBOUND_DISPOSITION.0,
+                OUTBOUND_DISPOSITION.1,
+            )
+        }
+    };
+    // The parenthetical is the timeline's shape; here the word stands on its
+    // own at the end of a column line.
+    let disposition = disposition
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .to_string();
+
+    let mut out = vec![format!(
+        "  #{:<4} {}   {}{}",
+        line.decision_id,
+        format_date_only(line.at),
+        files_with_size(line.files, line.bytes),
+        if disposition.is_empty() {
+            String::new()
+        } else {
+            format!("   {disposition}")
+        }
+    )];
+
+    let anchor_for = |side_is_origin: bool| -> Option<&str> {
+        let named = if side_is_origin {
+            params.origin.as_deref()
+        } else {
+            params.destination.as_deref()
+        };
+        named.or_else(|| {
+            if resolved.prefixes.len() == 1 {
+                Some(resolved.prefixes[0].as_str())
+            } else {
+                None
+            }
+        })
+    };
+    let origin_anchor = anchor_for(true);
+    let destination_anchor = anchor_for(false);
+
+    let cap = place_cap(params);
+    let shown: Vec<&CrossingPlace> = line.places.iter().take(cap).collect();
+    let width = shown
+        .iter()
+        .map(|p| under(&p.origin, origin_anchor).chars().count())
+        .max()
+        .unwrap_or(0);
+    for place in &shown {
+        out.push(format!(
+            "        {:<width$}  \u{2192} {}",
+            under(&place.origin, origin_anchor),
+            under(&place.destination, destination_anchor)
+        ));
+    }
+    let more = line.places.len().saturating_sub(cap);
+    if more > 0 {
+        let noun = if more == 1 { "place" } else { "places" };
+        out.push(format!(
+            "        \u{2026} and {} more {noun}",
+            format_count(more)
+        ));
+    }
+    if let Some(reason) = &line.reason {
+        out.push(format!("        \"{reason}\""));
+    }
+    out
+}
+
+/// How many places one delivery lists before its remainder line.
+///
+/// A remainder has to have a door, and `--all` is the invocation that opens
+/// it: the flag uncaps this listing exactly as it uncaps the listing above,
+/// or the reader is told what is missing and given no way to reach it — the
+/// very shape this whole surface exists to answer, one level down.
+/// `--limit N` sizes the listing of entries and not this one; the places
+/// beneath a single delivery are that delivery's interior, so they keep
+/// their own constant.
+fn place_cap(params: &CrossingsParams) -> usize {
+    match params.limit {
+        Some(_) => DREW_FROM_DIR_CAP,
+        None => usize::MAX,
+    }
+}
+
+/// A location measured from its own anchor, or whole where there is none.
+/// The anchor's own path renders as `.`, matching the timeline's view-relative
+/// cell.
+fn under(path: &str, anchor: Option<&str>) -> String {
+    match anchor {
+        Some(anchor) if path == anchor => ".".to_string(),
+        Some(anchor) => crate::core::domain::path_strip_prefix(path, anchor)
+            .map(str::to_string)
+            .unwrap_or_else(|| path.to_string()),
+        None => path.to_string(),
+    }
+}
+
+/// What to say when nothing crossed.
+///
+/// A view whose every row stayed inside it has to name the rearrangement, or
+/// the silence reads as "nothing ever happened here" — the opposite of the
+/// truth about a heavily curated archive.
+fn nothing_crossed_line(nothing: &NothingCrossed, resolved: &ResolvedScope) -> String {
+    match nothing {
+        NothingCrossed::Rearranged { files, bytes } => format!(
+            "Nothing crossed this boundary. {} were rearranged within it.",
+            files_with_size(*files, *bytes)
+        ),
+        NothingCrossed::Nothing if resolved.is_global() => "No recorded crossing.".to_string(),
+        NothingCrossed::Nothing => "Nothing has crossed this boundary.".to_string(),
+    }
+}
+
+/// The line that teaches the door, printed once beneath the rollup block.
+///
+/// `crossings` appears on no output line of its own, so the surfaces that
+/// invite it name it at the moment of need — the same move the all-digits
+/// `trail show` hint makes. Once, not once per rollup.
+const CROSSINGS_HINT: &str = "  canon trail crossings — expand these by place";
 
 /// Maximum number of origin lines the composition card shows before an
 /// explicit remainder line — the origins section scales with a location's
@@ -276,14 +616,7 @@ const DREW_FROM_DIR_CAP: usize = 5;
 pub(super) fn drew_from_lines(extractions: &[ShowExtraction]) -> Vec<String> {
     let mut out = Vec::new();
     for group in extractions {
-        // The snapshot path stays primary; a root the index no longer knows
-        // must not read as a live, visitable location. A retired origin
-        // points at its book — bound history, not a dead end.
-        let marker = match (&group.retired_book, group.root_removed) {
-            (Some(book), _) => format!(" (root retired — the book: {book})"),
-            (None, true) => ROOT_REMOVED_MARKER.to_string(),
-            (None, false) => String::new(),
-        };
+        let marker = origin_marker(group.retired_book.as_deref(), group.root_removed);
         out.push(format!(
             "    {} — {}{marker}",
             group.location,
@@ -332,8 +665,10 @@ fn composition_card_lines(card: &CompositionCard) -> Vec<String> {
     }
     if card.origins.len() > CARD_ORIGIN_CAP {
         let more = card.origins.len() - CARD_ORIGIN_CAP;
+        // The remainder is where the reader most needs the door — the origins
+        // it names are the ones this line just declined to print.
         lines.push(format!(
-            "\u{2026} and {} more {}.",
+            "\u{2026} and {} more {} — canon trail crossings",
             format_count(more as i64),
             plural(more as i64, "origin")
         ));
@@ -369,8 +704,13 @@ fn composition_card_lines(card: &CompositionCard) -> Vec<String> {
         ));
     }
     if let Some(bucket) = &card.untracked {
+        // These sources *are* tracked — indexed, present, counted in the sum
+        // directly above. What is missing is the record of how they arrived,
+        // and the row cannot say why: predating recording is one cause among
+        // several indistinguishable ones, so the line names the absence and
+        // stops there. Self-explaining gaps, never a guessed cause.
         lines.push(format!(
-            "untracked (predates recording): {}",
+            "arrival unrecorded: {}",
             format_bucket(bucket.files, bucket.bytes)
         ));
     }
@@ -411,12 +751,27 @@ fn format_bucket(files: i64, bytes: i64) -> String {
     files_with_size(files, Some(bytes))
 }
 
+/// The disposition words, one spelling each, per direction: `(retained,
+/// relocated)`.
+///
+/// Registered vocabulary with a single carrier rather than four literals at
+/// four call sites. The trail states the **recorded act** and nothing about
+/// the origin's present state: an origin's files may be long gone, or sit on
+/// a drive Canon can no longer observe, and a line claiming otherwise is
+/// unverifiable exactly where it is read most (a retired root). An extraction
+/// is read from the origin, an arrival from the destination, and the *same*
+/// delivery must not acquire a third wording when a second surface renders
+/// it.
+const OUTBOUND_DISPOSITION: (&str, &str) = ("copied", "moved");
+/// The inbound half of [`OUTBOUND_DISPOSITION`] — see there.
+const INBOUND_DISPOSITION: (&str, &str) = ("copied in", "moved in");
+
 /// The disposition parenthetical, or nothing when the row can't say.
 ///
-/// The wording differs by direction (outbound `moved` vs inbound `moved in`)
-/// and is registered vocabulary, so each caller passes its own pair rather
-/// than the words being derived here — but the "append in parens, or omit
-/// entirely" mechanics are shared.
+/// The words differ by direction and come from [`OUTBOUND_DISPOSITION`] /
+/// [`INBOUND_DISPOSITION`], never a literal at the call site — but the
+/// "append in parens, or omit entirely" mechanics are shared, which is what
+/// this function owns.
 fn disposition_suffix(
     disposition: Option<OriginDisposition>,
     retained: &str,
@@ -430,20 +785,37 @@ fn disposition_suffix(
     }
 }
 
-/// One origin line: `from <root>` (single-origin, possibly several merged
-/// decisions) or `via apply #N from M origins` (one multi-origin decision) —
-/// the registered wording, never a free literal.
+/// One origin line: `arrived from <root>` (single-origin, possibly several
+/// merged decisions) or `via apply #N from M origins` (one multi-origin
+/// decision) — the registered wording, never a free literal.
 ///
-/// An origin root that *contains* the view reads `from elsewhere in <root>`:
-/// the content genuinely arrived (its origin sits outside the viewed scope),
-/// but a bare `from /archive` while standing in `/archive/2020` would read as
-/// naming the place you're already in. The root is still named rather than
+/// The card's lines all answer one question — *how did what stands here come
+/// to stand here* — so an origin reads as an action in the same grammar as
+/// its sibling labels (`excluded`, `rearranged`, `first indexed here`), not
+/// as a bare prepositional phrase. `MultiOrigin` is deliberately left alone:
+/// it names no root, and making it parallel would mean coining a wording for
+/// a line nothing asked about.
+///
+/// An origin root that *contains* the view reads `arrived from elsewhere in
+/// <root>`: the content genuinely arrived (its origin sits outside the viewed
+/// scope), but a bare `/archive` while standing in `/archive/2020` would read
+/// as naming the place you're already in. The root is still named rather than
 /// left implicit ("in this root"), because a view can span several roots.
+///
+/// The line carries a **count** of the decisions behind it, not their ids.
+/// The count is the density signal — how much of a relationship this place had
+/// with that one — while the ids were doorknobs: fifteen of them, and until
+/// `trail crossings` existed, the acts behind an origin line were reachable
+/// from nowhere the reader was standing. The transitioned section could always
+/// drop its ids on the argument that the acts behind it are the timeline's to
+/// hold, directly above; the origins section could not make that claim until
+/// there was a door. Now it can.
 fn format_origin_line(line: &OriginLine) -> String {
     match line {
         OriginLine::FromRoot {
             root_path,
             root_removed,
+            retired_book,
             from_within,
             files,
             bytes,
@@ -451,21 +823,16 @@ fn format_origin_line(line: &OriginLine) -> String {
             first_at,
             last_at,
         } => {
-            let marker = if *root_removed {
-                ROOT_REMOVED_MARKER
-            } else {
-                ""
-            };
+            let marker = origin_marker(retired_book.as_deref(), *root_removed);
             let source = if *from_within {
-                format!("from elsewhere in {root_path}{marker}")
+                format!("arrived from elsewhere in {root_path}{marker}")
             } else {
-                format!("from {root_path}{marker}")
+                format!("arrived from {root_path}{marker}")
             };
-            let ids: Vec<String> = decision_ids.iter().map(|id| format!("#{id}")).collect();
             format!(
                 "{source}: {} \u{00b7} {} \u{00b7} {}",
                 format_bucket(*files, *bytes),
-                ids.join(", "),
+                count_of(decision_ids.len() as i64, "decision"),
                 format_date_range(*first_at, *last_at)
             )
         }
@@ -847,21 +1214,29 @@ fn extraction_narration_with_destination(row: &DecisionExtraction, destination: 
     format!(
         "\u{2192} {} to {destination}{}",
         files_with_size(row.files, row.bytes),
-        disposition_suffix(row.disposition, "copied; originals remain", "moved")
+        disposition_suffix(
+            row.disposition,
+            OUTBOUND_DISPOSITION.0,
+            OUTBOUND_DISPOSITION.1
+        )
     )
 }
 
 /// The arrival aspect's narration: `← N files (size) from ORIGIN (wording)`.
-/// The mirror of `extraction_narration` for the inbound direction — "in"
-/// wording (`moved in` / `copied in; originals remain`) rather than the
-/// outbound's, and the origin carries the removed-root marker when its
-/// source root is no longer known to the live index.
+/// The mirror of `extraction_narration` for the inbound direction —
+/// [`INBOUND_DISPOSITION`] rather than the outbound's, and the origin carries
+/// the removed-root marker when its source root is no longer known to the
+/// live index.
 fn arrival_narration(row: &DecisionExtraction, roots: &HashMap<i64, Root>) -> String {
     format!(
         "\u{2190} {} from {}{}",
         files_with_size(row.files, row.bytes),
         origin_location(row, roots),
-        disposition_suffix(row.disposition, "copied in; originals remain", "moved in")
+        disposition_suffix(
+            row.disposition,
+            INBOUND_DISPOSITION.0,
+            INBOUND_DISPOSITION.1
+        )
     )
 }
 
@@ -869,6 +1244,29 @@ fn arrival_narration(row: &DecisionExtraction, roots: &HashMap<i64, Root>) -> St
 /// use the same text) — a root the live index no longer knows must not read
 /// as a visitable location.
 const ROOT_REMOVED_MARKER: &str = " (root removed)";
+
+/// What an origin location's own line says about the root behind it, one
+/// spelling for every surface that names an origin.
+///
+/// The snapshot path stays primary — a root the index no longer knows must
+/// not read as a live, visitable location — and a **retired** origin points
+/// at its book instead: bound history, not a dead end. Precedence is the
+/// book's: a retired root is also a removed one, and `(root removed)` there
+/// would answer a question the book already answers better. A live root
+/// carries neither.
+///
+/// Three surfaces render this and must render it identically: `trail show`'s
+/// `drew from:` groups, the composition card's origin lines, and
+/// `trail crossings`' counterparts. Before this had one carrier they had
+/// drifted — one door pointed at the book while its neighbour, naming the
+/// same root, said only `(root removed)`.
+fn origin_marker(retired_book: Option<&str>, root_removed: bool) -> String {
+    match (retired_book, root_removed) {
+        (Some(book), _) => format!(" (root retired \u{2014} the book: {book})"),
+        (None, true) => ROOT_REMOVED_MARKER.to_string(),
+        (None, false) => String::new(),
+    }
+}
 
 /// An arrival row's drawn-from location, with the removed-root marker
 /// appended when the origin's source root is gone from the live index.
@@ -1084,7 +1482,9 @@ fn format_time(ts: i64) -> String {
 mod tests {
     use super::*;
     use crate::core::domain::decision::Decision;
+    use crate::trail::domain::composition::BucketCount;
     use crate::trail::domain::timeline::TimelineEvent;
+    use crate::trail::ops::crossings::Counterpart;
 
     fn mk_extraction_row(
         bytes: Option<i64>,
@@ -1829,7 +2229,7 @@ mod tests {
         let row = mk_extraction_row(Some(3_900_000_000), Some(OriginDisposition::Retained));
         assert_eq!(
             extraction_narration(&row),
-            "\u{2192} 47 files (3.9 GB) to /Archive/Media/2016/Italy (copied; originals remain)"
+            "\u{2192} 47 files (3.9 GB) to /Archive/Media/2016/Italy (copied)"
         );
     }
 
@@ -1847,7 +2247,7 @@ mod tests {
         let row = mk_extraction_row(None, Some(OriginDisposition::Retained));
         assert_eq!(
             extraction_narration(&row),
-            "\u{2192} 47 files to /Archive/Media/2016/Italy (copied; originals remain)"
+            "\u{2192} 47 files to /Archive/Media/2016/Italy (copied)"
         );
     }
 
@@ -1867,7 +2267,7 @@ mod tests {
         row.files = 1;
         assert_eq!(
             extraction_narration(&row),
-            "\u{2192} 1 file (10 B) to /Archive/Media/2016/Italy (copied; originals remain)"
+            "\u{2192} 1 file (10 B) to /Archive/Media/2016/Italy (copied)"
         );
     }
 
@@ -1879,7 +2279,7 @@ mod tests {
         let row = mk_extraction_row(Some(1_000), Some(OriginDisposition::Retained));
         assert_eq!(
             extraction_narration_with_destination(&row, "."),
-            "\u{2192} 47 files (1.0 KB) to . (copied; originals remain)"
+            "\u{2192} 47 files (1.0 KB) to . (copied)"
         );
     }
 
@@ -1893,7 +2293,7 @@ mod tests {
         let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
         assert_eq!(
             arrival_narration(&row, &roots),
-            "\u{2190} 47 files (3.9 GB) from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain)"
+            "\u{2190} 47 files (3.9 GB) from /Volumes/old-laptop/photos/2016/italy (copied in)"
         );
     }
 
@@ -1913,7 +2313,7 @@ mod tests {
         let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
         assert_eq!(
             arrival_narration(&row, &roots),
-            "\u{2190} 47 files from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain)"
+            "\u{2190} 47 files from /Volumes/old-laptop/photos/2016/italy (copied in)"
         );
     }
 
@@ -1935,7 +2335,7 @@ mod tests {
         let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
         assert_eq!(
             arrival_narration(&row, &roots),
-            "\u{2190} 1 file (10 B) from /Volumes/old-laptop/photos/2016/italy (copied in; originals remain)"
+            "\u{2190} 1 file (10 B) from /Volumes/old-laptop/photos/2016/italy (copied in)"
         );
     }
 
@@ -1946,7 +2346,7 @@ mod tests {
         let roots: HashMap<i64, Root> = HashMap::new();
         assert_eq!(
             arrival_narration(&row, &roots),
-            "\u{2190} 47 files (10 B) from /Volumes/old-laptop/photos/2016/italy (root removed) (copied in; originals remain)"
+            "\u{2190} 47 files (10 B) from /Volumes/old-laptop/photos/2016/italy (root removed) (copied in)"
         );
     }
 
@@ -1966,6 +2366,554 @@ mod tests {
         assert_eq!(row.root_id, 1);
         let roots = HashMap::from([(77, mk_root(77, "/Volumes/old-laptop"))]);
         assert!(!arrival_narration(&row, &roots).contains(ROOT_REMOVED_MARKER));
+    }
+
+    // ------------------------------------------------------------------
+    // The disposition vocabulary
+    // ------------------------------------------------------------------
+
+    /// One spelling per disposition word, per direction — and neither
+    /// direction's pair leaks into the other. The consts are the only
+    /// source; a fifth literal at a call site would show up here.
+    #[test]
+    fn the_disposition_words_have_one_spelling_per_direction() {
+        let retained = mk_extraction_row(Some(10), Some(OriginDisposition::Retained));
+        let relocated = mk_extraction_row(Some(10), Some(OriginDisposition::Relocated));
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
+
+        assert!(extraction_narration(&retained).ends_with("(copied)"));
+        assert!(extraction_narration(&relocated).ends_with("(moved)"));
+        assert!(arrival_narration(&retained, &roots).ends_with("(copied in)"));
+        assert!(arrival_narration(&relocated, &roots).ends_with("(moved in)"));
+
+        // The inbound pair never reaches an outbound line, nor the reverse:
+        // "moved" is a prefix of "moved in", so the check is on the whole
+        // parenthetical, not on a substring of the word.
+        for line in [
+            extraction_narration(&retained),
+            extraction_narration(&relocated),
+        ] {
+            assert!(!line.contains(INBOUND_DISPOSITION.0));
+            assert!(!line.contains(INBOUND_DISPOSITION.1));
+        }
+        for line in [
+            arrival_narration(&retained, &roots),
+            arrival_narration(&relocated, &roots),
+        ] {
+            assert!(!line.ends_with(&format!("({})", OUTBOUND_DISPOSITION.0)));
+            assert!(!line.ends_with(&format!("({})", OUTBOUND_DISPOSITION.1)));
+        }
+    }
+
+    /// A row that cannot say how it was delivered says nothing — never a
+    /// guess, and distinguishable from every word the vocabulary holds.
+    #[test]
+    fn a_none_disposition_still_renders_nothing() {
+        let unknown = mk_extraction_row(Some(10), None);
+        let roots = HashMap::from([(1, mk_root(1, "/Volumes/old-laptop"))]);
+
+        assert_eq!(disposition_suffix(None, "copied", "moved"), "");
+        for line in [
+            extraction_narration(&unknown),
+            arrival_narration(&unknown, &roots),
+        ] {
+            // The line ends at the location; the only parenthetical left is
+            // the size, which `files_with_size` owns.
+            assert!(!line.ends_with(')'), "{line}");
+            for word in [
+                OUTBOUND_DISPOSITION.0,
+                OUTBOUND_DISPOSITION.1,
+                INBOUND_DISPOSITION.0,
+                INBOUND_DISPOSITION.1,
+            ] {
+                assert!(!line.contains(word), "{line} names {word}");
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Crossings sections
+    // ------------------------------------------------------------------
+
+    fn scope_of(prefixes: &[&str]) -> ResolvedScope {
+        ResolvedScope {
+            prefixes: prefixes.iter().map(|p| p.to_string()).collect(),
+            set_aside: Vec::new(),
+            from_cwd: false,
+            auto_include_archived: false,
+        }
+    }
+
+    fn crossings_params_of(origin: Option<&str>, destination: Option<&str>) -> CrossingsParams {
+        CrossingsParams {
+            prefixes: vec!["/archive".to_string()],
+            origin: origin.map(String::from),
+            destination: destination.map(String::from),
+            // An ordinary invocation, not `--all` — `None` is what the flag
+            // means, and a helper that spelled it by default would hand every
+            // test the uncapped view nobody asked for.
+            limit: Some(DEFAULT_LIMIT),
+            machine_output: false,
+        }
+    }
+
+    fn plain_counterpart(path: &str) -> Counterpart {
+        Counterpart {
+            path: path.to_string(),
+            root_removed: false,
+            retired_book: None,
+        }
+    }
+
+    fn counterpart_line(path: &str, files: i64, decisions: usize, at: i64) -> CounterpartLine {
+        CounterpartLine {
+            counterpart: plain_counterpart(path),
+            files,
+            bytes: Some(files * 100),
+            decisions,
+            first_at: at,
+            last_at: at,
+        }
+    }
+
+    fn bare_section(
+        aspect: RowAspect,
+        lines: Vec<CounterpartLine>,
+        more: usize,
+    ) -> CrossingSection {
+        CrossingSection {
+            aspect,
+            files: lines.iter().map(|l| l.files).sum(),
+            bytes: Some(lines.iter().map(|l| l.files * 100).sum()),
+            counterparty_count: lines.len() + more,
+            named: None,
+            body: CrossingBody::Counterparts { lines, more },
+        }
+    }
+
+    /// The door is those rollup lines made expandable, so its headers are
+    /// those sentences in form — no new noun is coined for the same fact.
+    #[test]
+    fn section_headers_are_the_rollup_sentences() {
+        let ts = local_ts_on("2026-07-11");
+        let arrivals = bare_section(
+            RowAspect::Arrival,
+            vec![counterpart_line("/vol/sd", 5, 1, ts)],
+            9,
+        );
+        let lines = crossing_section_lines(
+            &arrivals,
+            &scope_of(&["/archive"]),
+            &crossings_params_of(None, None),
+        );
+        assert_eq!(
+            lines[0],
+            format_arrival_rollup(&ArrivalRollup {
+                files: 5,
+                bytes: Some(500),
+                origins: 10,
+            })
+        );
+
+        let extractions = bare_section(
+            RowAspect::Extraction,
+            vec![counterpart_line("/archive/Media", 5, 1, ts)],
+            1,
+        );
+        let lines = crossing_section_lines(
+            &extractions,
+            &scope_of(&["/vol/sd"]),
+            &crossings_params_of(None, None),
+        );
+        assert_eq!(
+            lines[0],
+            format_extraction_rollup(&ExtractionRollup {
+                files: 5,
+                bytes: Some(500),
+                destinations: 2,
+            })
+        );
+    }
+
+    /// A section narrowed by the flag naming its *inside* end still prints an
+    /// unnamed header, and must not print the unnarrowed sentence with it:
+    /// the reader would meet the same words at the same place carrying
+    /// smaller numbers, with nothing to account for them.
+    #[test]
+    fn a_narrowed_section_header_names_what_narrowed_it() {
+        let ts = local_ts_on("2026-07-11");
+
+        // Outbound, narrowed by --origin: its outside end (the destination)
+        // is unnamed, so the header is the unnamed shape — but it says where.
+        let out = bare_section(
+            RowAspect::Extraction,
+            vec![counterpart_line("/archive/Media", 2, 1, ts)],
+            0,
+        );
+        let lines = crossing_section_lines(
+            &out,
+            &scope_of(&["/vol/sd"]),
+            &crossings_params_of(Some("/vol/sd/photos"), None),
+        );
+        assert_eq!(
+            lines[0],
+            "Archived from /vol/sd/photos: 2 files (200 B) \u{2192} 1 destination."
+        );
+
+        // Inbound, narrowed by --destination.
+        let inbound = bare_section(
+            RowAspect::Arrival,
+            vec![counterpart_line("/vol/sd", 2, 1, ts)],
+            0,
+        );
+        let lines = crossing_section_lines(
+            &inbound,
+            &scope_of(&["/archive"]),
+            &crossings_params_of(None, Some("/archive/Media")),
+        );
+        assert_eq!(
+            lines[0],
+            "Arrived at /archive/Media: 2 files (200 B) from 1 origin."
+        );
+
+        // Unnarrowed, the sentence is the rollup's own, unchanged.
+        let lines = crossing_section_lines(
+            &inbound,
+            &scope_of(&["/archive"]),
+            &crossings_params_of(None, None),
+        );
+        assert_eq!(lines[0], "Arrived here: 2 files (200 B) from 1 origin.");
+    }
+
+    /// **Both flags named.** The section's outside end is named, so it takes
+    /// the named header — and its inside end is narrowed too, so that header
+    /// must not say "here" either. Naming only the outside end would leave
+    /// "here" printed beside counts narrowed at both ends, which is the
+    /// unaccountable reading in its worst form: two narrowings, neither
+    /// visible.
+    #[test]
+    fn a_section_narrowed_at_both_ends_names_both_of_them() {
+        let named = |aspect, path: &str| CrossingSection {
+            aspect,
+            files: 2,
+            bytes: Some(200),
+            counterparty_count: 1,
+            named: Some(plain_counterpart(path)),
+            body: CrossingBody::Deliveries {
+                lines: Vec::new(),
+                more: 0,
+            },
+        };
+
+        let lines = crossing_section_lines(
+            &named(RowAspect::Arrival, "/vol/sd"),
+            &scope_of(&["/archive"]),
+            &crossings_params_of(Some("/vol/sd"), Some("/archive/Raw")),
+        );
+        assert_eq!(
+            lines[0],
+            "Arrived at /archive/Raw: 2 files (200 B) from /vol/sd."
+        );
+
+        let lines = crossing_section_lines(
+            &named(RowAspect::Extraction, "/archive/Raw"),
+            &scope_of(&["/vol/sd"]),
+            &crossings_params_of(Some("/vol/sd/2019"), Some("/archive/Raw")),
+        );
+        assert_eq!(
+            lines[0],
+            "Archived from /vol/sd/2019: 2 files (200 B) \u{2192} /archive/Raw."
+        );
+
+        // One flag only: the named header keeps "here", because nothing
+        // narrowed the side the reader is standing on.
+        let lines = crossing_section_lines(
+            &named(RowAspect::Arrival, "/vol/sd"),
+            &scope_of(&["/archive"]),
+            &crossings_params_of(Some("/vol/sd"), None),
+        );
+        assert_eq!(lines[0], "Arrived here: 2 files (200 B) from /vol/sd.");
+    }
+
+    /// The path is this door's key — it is what the reader copies from one
+    /// invocation into the next — so it renders whole. `cap_path` would break
+    /// the reach chain at its first hop.
+    #[test]
+    fn a_counterpart_path_renders_full_and_unelided() {
+        let long = "/Volumes/old-backup/archived/2016/photos/italy/second-week/raw-files";
+        assert!(long.chars().count() > SCOPE_CELL_MAX);
+        let ts = local_ts_on("2026-07-11");
+        let section = bare_section(
+            RowAspect::Arrival,
+            vec![counterpart_line(long, 5, 1, ts)],
+            0,
+        );
+        let lines = crossing_section_lines(
+            &section,
+            &scope_of(&["/archive"]),
+            &crossings_params_of(None, None),
+        );
+        assert!(lines.iter().any(|l| l.trim() == long), "{lines:?}");
+        assert!(!lines
+            .iter()
+            .any(|l| l.contains('\u{2026}') && l.contains("Volumes")));
+
+        // And in a named section's header.
+        let named = CrossingSection {
+            aspect: RowAspect::Arrival,
+            files: 5,
+            bytes: Some(500),
+            counterparty_count: 1,
+            named: Some(plain_counterpart(long)),
+            body: CrossingBody::Deliveries {
+                lines: Vec::new(),
+                more: 0,
+            },
+        };
+        let lines = crossing_section_lines(
+            &named,
+            &scope_of(&["/archive"]),
+            &crossings_params_of(Some(long), None),
+        );
+        assert!(lines[0].ends_with(&format!("from {long}.")), "{}", lines[0]);
+    }
+
+    #[test]
+    fn the_listing_caps_with_an_explicit_remainder() {
+        let ts = local_ts_on("2026-07-11");
+        let section = bare_section(
+            RowAspect::Arrival,
+            vec![counterpart_line("/vol/sd", 5, 1, ts)],
+            8,
+        );
+        let lines = crossing_section_lines(
+            &section,
+            &scope_of(&["/archive"]),
+            &crossings_params_of(None, None),
+        );
+        assert_eq!(lines.last().unwrap().trim(), "\u{2026} and 8 more origins.");
+
+        // Per delivery's places, too — the same cap and discipline the
+        // `drew from:` block applies to the identical shape.
+        let places: Vec<CrossingPlace> = (0..8)
+            .map(|i| CrossingPlace {
+                origin: format!("/vol/sd/dir{i}"),
+                destination: "/archive/Media".to_string(),
+            })
+            .collect();
+        let named = CrossingSection {
+            aspect: RowAspect::Arrival,
+            files: 8,
+            bytes: Some(80),
+            counterparty_count: 1,
+            named: Some(plain_counterpart("/vol/sd")),
+            body: CrossingBody::Deliveries {
+                lines: vec![CrossingDelivery {
+                    decision_id: 48,
+                    at: ts,
+                    files: 8,
+                    bytes: Some(80),
+                    disposition: Some(OriginDisposition::Relocated),
+                    reason: None,
+                    places,
+                }],
+                more: 0,
+            },
+        };
+        let lines = crossing_section_lines(
+            &named,
+            &scope_of(&["/archive"]),
+            &crossings_params_of(Some("/vol/sd"), None),
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.trim() == "\u{2026} and 3 more places"),
+            "{lines:?}"
+        );
+    }
+
+    /// `--all` uncaps the places beneath a delivery, exactly as it uncaps the
+    /// listing of entries above them.
+    ///
+    /// The remainder line names places the reader cannot otherwise reach, and
+    /// an unreachable remainder is the defect this whole surface exists to
+    /// answer one level up — so the cap and the flag that opens it are pinned
+    /// together, in one test, against the same data.
+    #[test]
+    fn all_uncaps_the_places_beneath_a_delivery() {
+        let ts = local_ts_on("2026-07-11");
+        let places: Vec<CrossingPlace> = (0..8)
+            .map(|i| CrossingPlace {
+                origin: format!("/vol/sd/dir{i}"),
+                destination: "/archive/Media".to_string(),
+            })
+            .collect();
+        let section = CrossingSection {
+            aspect: RowAspect::Arrival,
+            files: 8,
+            bytes: Some(80),
+            counterparty_count: 1,
+            named: Some(plain_counterpart("/vol/sd")),
+            body: CrossingBody::Deliveries {
+                lines: vec![CrossingDelivery {
+                    decision_id: 48,
+                    at: ts,
+                    files: 8,
+                    bytes: Some(80),
+                    disposition: Some(OriginDisposition::Relocated),
+                    reason: None,
+                    places,
+                }],
+                more: 0,
+            },
+        };
+        let scope = scope_of(&["/archive"]);
+
+        // The default invocation caps, and says so.
+        let capped = crossing_section_lines(
+            &section,
+            &scope,
+            &crossings_params_of(Some("/vol/sd"), None),
+        );
+        assert!(
+            capped.iter().any(|l| l.contains("more places")),
+            "{capped:?}"
+        );
+        assert_eq!(
+            capped.iter().filter(|l| l.contains(" \u{2192} ")).count(),
+            DREW_FROM_DIR_CAP,
+            "{capped:?}"
+        );
+
+        // `--all` is `limit: None`, and it must leave no remainder anywhere.
+        let uncapped = crossing_section_lines(
+            &section,
+            &scope,
+            &CrossingsParams {
+                limit: None,
+                ..crossings_params_of(Some("/vol/sd"), None)
+            },
+        );
+        assert!(
+            !uncapped.iter().any(|l| l.contains("more places")),
+            "{uncapped:?}"
+        );
+        assert_eq!(
+            uncapped.iter().filter(|l| l.contains(" \u{2192} ")).count(),
+            8,
+            "{uncapped:?}"
+        );
+    }
+
+    /// A counterpart entry's marker and its counts both hang off the path
+    /// above them, so they indent alike — a one-column difference reads as
+    /// structure that is not there.
+    #[test]
+    fn a_counterparts_continuation_lines_align_under_its_path() {
+        let ts = local_ts_on("2026-07-11");
+        let book = "/archive/books/2026-08-11-backup-archived";
+        let mut line = counterpart_line("/Volumes/gone", 5, 1, ts);
+        line.counterpart.root_removed = true;
+        line.counterpart.retired_book = Some(book.to_string());
+
+        let lines = counterpart_lines(&line);
+        assert_eq!(lines[0], "  /Volumes/gone");
+        assert!(lines[1].contains(book), "{lines:?}");
+
+        let indent = |l: &String| l.len() - l.trim_start().len();
+        assert_eq!(indent(&lines[1]), indent(&lines[2]), "{lines:?}");
+    }
+
+    /// A named section reads in the inbound voice; the counterpart's marker
+    /// is `drew_from_lines`' own, and the path stays whole on its own line.
+    #[test]
+    fn a_retired_counterpart_renders_the_book_pointer_in_drew_froms_wording() {
+        let book = "/archive/books/2026-08-11-backup-archived";
+        let section = CrossingSection {
+            aspect: RowAspect::Arrival,
+            files: 5,
+            bytes: Some(500),
+            counterparty_count: 1,
+            named: Some(Counterpart {
+                path: "/Volumes/gone".to_string(),
+                root_removed: true,
+                retired_book: Some(book.to_string()),
+            }),
+            body: CrossingBody::Deliveries {
+                lines: Vec::new(),
+                more: 0,
+            },
+        };
+        let lines = crossing_section_lines(
+            &section,
+            &scope_of(&["/archive"]),
+            &crossings_params_of(Some("/Volumes/gone"), None),
+        );
+        assert_eq!(lines[0], "Arrived here: 5 files (500 B) from /Volumes/gone");
+        assert_eq!(
+            lines[1].trim(),
+            format!("(root retired \u{2014} the book: {book}).")
+        );
+        assert!(!lines.iter().any(|l| l.contains("root removed")));
+    }
+
+    /// Each end renders against its own anchor — the named counterpart for
+    /// the named side, the view for the other.
+    #[test]
+    fn a_delivery_measures_each_end_from_its_own_anchor() {
+        let ts = local_ts_on("2026-08-02");
+        let section = CrossingSection {
+            aspect: RowAspect::Arrival,
+            files: 6,
+            bytes: Some(60),
+            counterparty_count: 1,
+            named: Some(plain_counterpart("/Volumes/gone")),
+            body: CrossingBody::Deliveries {
+                lines: vec![CrossingDelivery {
+                    decision_id: 48,
+                    at: ts,
+                    files: 6,
+                    bytes: Some(60),
+                    disposition: Some(OriginDisposition::Relocated),
+                    reason: Some("italy trip".to_string()),
+                    places: vec![CrossingPlace {
+                        origin: "/Volumes/gone/Photos/2016".to_string(),
+                        destination: "/archive/Media/2016".to_string(),
+                    }],
+                }],
+                more: 0,
+            },
+        };
+        let lines = crossing_section_lines(
+            &section,
+            &scope_of(&["/archive"]),
+            &crossings_params_of(Some("/Volumes/gone"), None),
+        );
+        assert!(lines[1].starts_with("  #48 "), "{}", lines[1]);
+        // Inbound voice, and the disposition word is the registered one.
+        assert!(lines[1].ends_with("moved in"), "{}", lines[1]);
+        assert_eq!(lines[2].trim(), "Photos/2016  \u{2192} Media/2016");
+        assert_eq!(lines[3].trim(), "\"italy trip\"");
+    }
+
+    /// A view that only rearranged must say so. "Nothing crossed" alone reads
+    /// as "nothing ever happened here", which is the opposite of the truth
+    /// about a heavily curated archive.
+    #[test]
+    fn nothing_crossed_names_the_rearrangement() {
+        let line = nothing_crossed_line(
+            &NothingCrossed::Rearranged {
+                files: 47,
+                bytes: Some(3_900_000_000),
+            },
+            &scope_of(&["/archive"]),
+        );
+        assert!(line.contains("47 files (3.9 GB)"), "{line}");
+        assert!(line.contains("rearranged"), "{line}");
+
+        let empty = nothing_crossed_line(&NothingCrossed::Nothing, &scope_of(&["/archive"]));
+        assert!(!empty.contains("rearranged"), "{empty}");
     }
 
     // ------------------------------------------------------------------
@@ -2176,12 +3124,42 @@ mod tests {
         OriginLine::FromRoot {
             root_path: root_path.to_string(),
             root_removed,
+            retired_book: None,
             from_within: false,
             files,
             bytes: files * 100,
             decision_ids,
             first_at,
             last_at,
+        }
+    }
+
+    /// [`mk_from_root`] for a removed origin root whose story was bound into
+    /// a book.
+    fn mk_retired_from_root(root_path: &str, book: &str, ts: i64) -> OriginLine {
+        match mk_from_root(root_path, true, 47, vec![12], ts, ts) {
+            OriginLine::FromRoot {
+                root_path,
+                root_removed,
+                from_within,
+                files,
+                bytes,
+                decision_ids,
+                first_at,
+                last_at,
+                ..
+            } => OriginLine::FromRoot {
+                root_path,
+                root_removed,
+                retired_book: Some(book.to_string()),
+                from_within,
+                files,
+                bytes,
+                decision_ids,
+                first_at,
+                last_at,
+            },
+            other => other,
         }
     }
 
@@ -2205,7 +3183,7 @@ mod tests {
         let line = mk_from_root("/Volumes/old-laptop", false, 47, vec![12], ts, ts);
         assert_eq!(
             format_origin_line(&line),
-            "from /Volumes/old-laptop: 47 files (4.7 KB) \u{b7} #12 \u{b7} 2024-01-05"
+            "arrived from /Volumes/old-laptop: 47 files (4.7 KB) \u{b7} 1 decision \u{b7} 2024-01-05"
         );
     }
 
@@ -2215,6 +3193,7 @@ mod tests {
         let line = OriginLine::FromRoot {
             root_path: "/archive".to_string(),
             root_removed: false,
+            retired_book: None,
             from_within: true,
             files: 47,
             bytes: 3_900_000_000,
@@ -2224,7 +3203,7 @@ mod tests {
         };
         assert_eq!(
             format_origin_line(&line),
-            "from elsewhere in /archive: 47 files (3.9 GB) \u{b7} #42 \u{b7} 2026-05-12"
+            "arrived from elsewhere in /archive: 47 files (3.9 GB) \u{b7} 1 decision \u{b7} 2026-05-12"
         );
     }
 
@@ -2236,6 +3215,7 @@ mod tests {
         let line = OriginLine::FromRoot {
             root_path: "/archive".to_string(),
             root_removed: true,
+            retired_book: None,
             from_within: true,
             files: 1,
             bytes: 100,
@@ -2244,25 +3224,185 @@ mod tests {
             last_at: ts,
         };
         let text = format_origin_line(&line);
-        assert!(text.starts_with("from elsewhere in /archive"), "{text}");
+        assert!(
+            text.starts_with("arrived from elsewhere in /archive"),
+            "{text}"
+        );
         assert!(text.contains(ROOT_REMOVED_MARKER), "{text}");
     }
 
     #[test]
-    fn format_origin_line_from_root_merged_decisions_show_date_range_and_all_ids() {
+    fn format_origin_line_from_root_merged_decisions_show_the_count_and_date_range() {
         let first = local_ts_on("2024-01-05");
         let last = local_ts_on("2024-02-04");
         let line = mk_from_root("/Volumes/old-laptop", false, 15, vec![1, 2], first, last);
         let text = format_origin_line(&line);
-        assert!(text.contains("#1, #2"));
-        assert!(text.contains("2024-01-05 \u{2013} 2024-02-04"));
+        assert!(text.contains("2 decisions"), "{text}");
+        assert!(text.contains("2024-01-05 \u{2013} 2024-02-04"), "{text}");
+    }
+
+    /// The doorknobs become a handle. The count stays — it is the density
+    /// signal, how much of a relationship this place had with that one — but
+    /// no id appears, because the acts behind the line now have a door.
+    #[test]
+    fn an_origin_line_carries_a_decision_count_not_a_list() {
+        let ts = local_ts_on("2024-01-05");
+        let many: Vec<i64> = (1..=15).collect();
+        let text = format_origin_line(&mk_from_root("/vol/sd", false, 8_151, many, ts, ts));
+        assert!(text.contains("15 decisions"), "{text}");
+        assert!(!text.contains('#'), "{text}");
+    }
+
+    #[test]
+    fn one_decision_reads_singular() {
+        let ts = local_ts_on("2024-01-05");
+        let text = format_origin_line(&mk_from_root("/vol/sd", false, 1, vec![7], ts, ts));
+        assert!(text.contains(" 1 decision "), "{text}");
+        assert!(!text.contains("1 decisions"), "{text}");
+    }
+
+    #[test]
+    fn the_date_range_is_retained() {
+        let first = local_ts_on("2026-08-02");
+        let last = local_ts_on("2026-08-09");
+        let text = format_origin_line(&mk_from_root("/vol/sd", false, 5, vec![1, 2], first, last));
+        assert!(text.ends_with("2026-08-02 \u{2013} 2026-08-09"), "{text}");
+    }
+
+    /// `MultiOrigin` names no root and already carries a single id; making it
+    /// parallel would mean coining a wording for a line nothing asked about.
+    #[test]
+    fn a_multi_origin_line_is_unchanged() {
+        let line = OriginLine::MultiOrigin {
+            decision_id: 42,
+            origin_count: 3,
+            files: 5,
+            bytes: 500,
+            at: local_ts_on("2026-05-12"),
+        };
+        assert_eq!(
+            format_origin_line(&line),
+            "via apply #42 from 3 origins: 5 files (500 B) \u{b7} 2026-05-12"
+        );
     }
 
     #[test]
     fn format_origin_line_from_root_marks_removed_root() {
         let ts = local_ts_on("2024-01-05");
         let line = mk_from_root("/Volumes/gone", true, 1, vec![1], ts, ts);
-        assert!(format_origin_line(&line).starts_with("from /Volumes/gone (root removed):"));
+        assert!(format_origin_line(&line).starts_with("arrived from /Volumes/gone (root removed):"));
+    }
+
+    /// The card's grammar, over both variants: an origin line answers *how
+    /// did this come to stand here* in the same voice as its sibling action
+    /// labels, rather than as a bare prepositional phrase.
+    #[test]
+    fn an_origin_line_reads_arrived_from() {
+        let ts = local_ts_on("2024-01-05");
+        assert!(
+            format_origin_line(&mk_from_root("/vol/sd", false, 1, vec![1], ts, ts))
+                .starts_with("arrived from /vol/sd:")
+        );
+
+        let within = match mk_from_root("/archive", false, 1, vec![1], ts, ts) {
+            OriginLine::FromRoot {
+                root_path,
+                root_removed,
+                retired_book,
+                files,
+                bytes,
+                decision_ids,
+                first_at,
+                last_at,
+                ..
+            } => OriginLine::FromRoot {
+                root_path,
+                root_removed,
+                retired_book,
+                from_within: true,
+                files,
+                bytes,
+                decision_ids,
+                first_at,
+                last_at,
+            },
+            other => other,
+        };
+        assert!(format_origin_line(&within).starts_with("arrived from elsewhere in /archive:"));
+    }
+
+    /// The marker is byte-identical to the one `drew_from_lines` renders for
+    /// the same book. One door pointing at the book while its neighbour,
+    /// naming the same root, says only `(root removed)` is the drift these
+    /// two surfaces are here to stay out of; a second spelling reintroduces
+    /// it silently.
+    #[test]
+    fn a_retired_origin_root_carries_the_book_pointer_in_drew_froms_wording() {
+        let ts = local_ts_on("2024-01-05");
+        let book = "/archive/books/2026-08-11-backup-archived";
+        let card_line = format_origin_line(&mk_retired_from_root("/Volumes/gone", book, ts));
+
+        let drew = drew_from_lines(&[ShowExtraction {
+            location: "/Volumes/gone".to_string(),
+            root_removed: true,
+            retired_book: Some(book.to_string()),
+            files: 1,
+            bytes: None,
+            directories: Vec::new(),
+        }]);
+
+        let marker = format!(" (root retired \u{2014} the book: {book})");
+        assert!(card_line.contains(&marker), "{card_line}");
+        assert!(drew[0].contains(&marker), "{}", drew[0]);
+        // The book wins outright: a retired root is also a removed one, and
+        // saying both would answer with the worse of the two.
+        assert!(!card_line.contains(ROOT_REMOVED_MARKER), "{card_line}");
+    }
+
+    #[test]
+    fn a_plainly_removed_origin_root_keeps_the_root_removed_marker() {
+        let ts = local_ts_on("2024-01-05");
+        let line = mk_from_root("/Volumes/gone", true, 1, vec![1], ts, ts);
+        let text = format_origin_line(&line);
+        assert!(text.contains(ROOT_REMOVED_MARKER), "{text}");
+        assert!(!text.contains("the book:"), "{text}");
+    }
+
+    #[test]
+    fn a_live_origin_root_carries_no_marker() {
+        let ts = local_ts_on("2024-01-05");
+        let text = format_origin_line(&mk_from_root("/vol/sd", false, 1, vec![1], ts, ts));
+        assert!(!text.contains(ROOT_REMOVED_MARKER), "{text}");
+        assert!(!text.contains("root retired"), "{text}");
+    }
+
+    /// The label names the absence and stops. The cause is unknowable from
+    /// the row — predating recording is one of several indistinguishable
+    /// reasons — and these sources are not untracked at all: they are
+    /// indexed, present, and counted in the header directly above.
+    #[test]
+    fn an_unrecorded_arrival_states_no_cause() {
+        let card = CompositionCard {
+            files: 3,
+            bytes: 300,
+            origins: Vec::new(),
+            transitioned: vec![TransitionedLine::Standing {
+                label: "excluded".to_string(),
+                files: 1,
+                bytes: 100,
+            }],
+            indexed_here: None,
+            untracked: Some(BucketCount {
+                files: 2,
+                bytes: 200,
+            }),
+        };
+        let lines = composition_card_lines(&card);
+        let last = lines.last().unwrap();
+        assert_eq!(last, "arrival unrecorded: 2 files (200 B)");
+        for cause in ["predates", "recording", "untracked"] {
+            assert!(!last.contains(cause), "{last} names {cause}");
+        }
     }
 
     #[test]
@@ -2346,10 +3486,10 @@ mod tests {
         );
         let lines = composition_card_lines(&card);
         assert_eq!(lines.len(), 4);
-        assert!(lines[0].starts_with("from /a"));
+        assert!(lines[0].starts_with("arrived from /a"));
         assert!(lines[1].starts_with("excluded:"));
         assert!(lines[2].starts_with("first indexed here"));
-        assert!(lines[3].starts_with("untracked (predates recording)"));
+        assert!(lines[3].starts_with("arrival unrecorded"));
     }
 
     #[test]
@@ -2361,7 +3501,101 @@ mod tests {
         let lines = composition_card_lines(&card);
         // 10 origin lines + one remainder line.
         assert_eq!(lines.len(), 11);
-        assert_eq!(lines[10], "\u{2026} and 2 more origins.");
+        assert_eq!(
+            lines[10],
+            "\u{2026} and 2 more origins — canon trail crossings"
+        );
+    }
+
+    /// The remainder is where the reader most needs the door: the origins it
+    /// names are exactly the ones the line just declined to print.
+    #[test]
+    fn the_card_origin_remainder_teaches_the_door() {
+        let origins: Vec<OriginLine> = (0..12)
+            .map(|i| mk_from_root(&format!("/vol{i}"), false, 1, vec![i], 0, 0))
+            .collect();
+        let remainder = composition_card_lines(&mk_card(origins, Vec::new(), None, None))
+            .last()
+            .unwrap()
+            .clone();
+        assert!(remainder.contains("canon trail crossings"), "{remainder}");
+
+        // A card whose origins all fit teaches nothing — there is no
+        // remainder line to teach from.
+        let few: Vec<OriginLine> = (0..2)
+            .map(|i| mk_from_root(&format!("/vol{i}"), false, 1, vec![i], 0, 0))
+            .collect();
+        for line in composition_card_lines(&mk_card(few, Vec::new(), None, None)) {
+            assert!(!line.contains("canon trail crossings"), "{line}");
+        }
+    }
+
+    /// One teaching line beneath the rollup block, not one per rollup — and
+    /// the hint names the command the block's own lines invite.
+    #[test]
+    fn the_rollup_block_teaches_the_door_once() {
+        assert!(CROSSINGS_HINT.contains("canon trail crossings"));
+        assert_eq!(CROSSINGS_HINT.matches("canon trail crossings").count(), 1);
+
+        // It is not part of any rollup sentence, so three rollups cannot
+        // print it three times.
+        for line in [
+            format_extraction_rollup(&ExtractionRollup {
+                files: 1,
+                bytes: None,
+                destinations: 1,
+            }),
+            format_arrival_rollup(&ArrivalRollup {
+                files: 1,
+                bytes: None,
+                origins: 1,
+            }),
+            format_rearrangement_rollup(&RearrangementRollup {
+                files: 1,
+                bytes: None,
+            }),
+        ] {
+            assert!(!line.contains("crossings"), "{line}");
+        }
+    }
+
+    /// The door does not teach its own name inside its own output.
+    #[test]
+    fn a_crossings_section_never_teaches_the_door() {
+        let ts = local_ts_on("2026-07-11");
+        let section = bare_section(
+            RowAspect::Arrival,
+            vec![counterpart_line("/vol/sd", 5, 1, ts)],
+            3,
+        );
+        for line in crossing_section_lines(
+            &section,
+            &scope_of(&["/archive"]),
+            &crossings_params_of(None, None),
+        ) {
+            assert!(!line.contains("canon trail crossings"), "{line}");
+        }
+    }
+
+    /// An empty section is omitted rather than printed empty — a section
+    /// exists only when `rollup_parts` found rows for it, so this is a
+    /// property of the computation, asserted at the surface that would show
+    /// the defect.
+    #[test]
+    fn a_section_with_nothing_in_it_does_not_print() {
+        let result = CrossingsResult {
+            sections: Vec::new(),
+            nothing_crossed: Some(NothingCrossed::Nothing),
+            reconciliation: None,
+            decisions: Vec::new(),
+            extractions_all: HashMap::new(),
+        };
+        assert!(result.sections.is_empty());
+        assert!(nothing_crossed_line(
+            result.nothing_crossed.as_ref().unwrap(),
+            &scope_of(&["/archive"])
+        )
+        .contains("Nothing"));
     }
 
     /// Gaps stay per-decision, so they are the one part of the transitioned

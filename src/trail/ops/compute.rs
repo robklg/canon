@@ -489,7 +489,12 @@ pub(super) fn classify_extraction_rows(
 /// same rule in each, and three copies of it would be three places to fix.
 /// They differ only in which end of the row is the counterparty — and the
 /// rearrangement rollup, whose counterparty is this place, discards it.
-fn rollup_parts<'a>(
+///
+/// `pub(super)`, not private: `ops::crossings` builds its section totals
+/// through this same function. The crossings door is the rollup lines made
+/// expandable, so its totals must *be* the rollup totals rather than agree
+/// with them — same rows, same keys, same summation, one spelling.
+pub(super) fn rollup_parts<'a>(
     rows: impl Iterator<Item = &'a DecisionExtraction>,
     counterparty: fn(&DecisionExtraction) -> &str,
 ) -> Option<(i64, Option<i64>, usize)> {
