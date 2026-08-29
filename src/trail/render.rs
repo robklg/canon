@@ -19,7 +19,7 @@ use crate::trail::ops::compute::{
 };
 use crate::trail::ops::crossings::{
     CounterpartLine, CrossingBody, CrossingDelivery, CrossingPlace, CrossingSection,
-    CrossingsParams, CrossingsResult, NothingCrossed,
+    CrossingsParams, CrossingsResult, NothingCrossed, Reconciliation,
 };
 use crate::trail::ops::show::ShowExtraction;
 use crate::trail::{TrailResult, TrailView};
@@ -207,36 +207,20 @@ pub(super) fn print_human(
     // content out, receive content in, rearrange content within itself, any
     // combination, or none. Crossings are stated first (what this place traded
     // with the rest of the universe), then what merely moved inside it.
-    let rollup_lines: Vec<String> = match &result.view {
-        TrailView::Recent(_) => [
-            result
-                .extraction_rollup
-                .as_ref()
-                .map(format_extraction_rollup),
-            result.arrival_rollup.as_ref().map(format_arrival_rollup),
-            result
-                .rearrangement_rollup
-                .as_ref()
-                .map(format_rearrangement_rollup),
-        ]
-        .into_iter()
-        .flatten()
-        .collect(),
+    let rollup_lines = match &result.view {
+        TrailView::Recent(_) => rollup_block_lines(
+            result.extraction_rollup.as_ref(),
+            result.arrival_rollup.as_ref(),
+            result.rearrangement_rollup.as_ref(),
+        ),
         TrailView::Days(_) => Vec::new(),
     };
 
     if !rollup_lines.is_empty() || result.earlier_decisions > 0 || result.unscoped_decisions > 0 {
         println!();
     }
-    let taught = !rollup_lines.is_empty();
-    for line in rollup_lines {
+    for line in &rollup_lines {
         println!("{line}");
-    }
-    // Each rollup line names other places and, until now, offered no way to
-    // ask about any of them. The hint is printed once beneath the block, not
-    // once per line, and never inside the door's own output.
-    if taught {
-        println!("{CROSSINGS_HINT}");
     }
     if result.earlier_decisions > 0 {
         let cap = limit.unwrap_or(DEFAULT_LIMIT);
@@ -260,6 +244,38 @@ pub(super) fn print_human(
     if let (TrailView::Recent(_), Some(card)) = (&result.view, card) {
         print_composition_card(card);
     }
+}
+
+/// The scope-lens rollup block, teaching line included. Pure data — the same
+/// separation `composition_card_lines` keeps, so the ordering is testable
+/// without capturing stdout, which is what the hint's placement needs.
+///
+/// The hint sits **between** the two crossing rollups and the rearrangement
+/// one. It teaches the door, the door itemizes crossings, and a rearrangement
+/// has no counterpart to itemize — so beneath the whole block, "these totals"
+/// would point last at the single total the door has nothing to say about.
+///
+/// A view whose only rollup is the rearrangement goes **untaught**: the door
+/// answers "nothing crossed" there, so the invitation would promise places it
+/// cannot list. That joins the global and time-lens views the door already
+/// leaves untaught — a recorded category, not a new one.
+fn rollup_block_lines(
+    extraction: Option<&ExtractionRollup>,
+    arrival: Option<&ArrivalRollup>,
+    rearrangement: Option<&RearrangementRollup>,
+) -> Vec<String> {
+    let mut lines: Vec<String> = [
+        extraction.map(format_extraction_rollup),
+        arrival.map(format_arrival_rollup),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !lines.is_empty() {
+        lines.push(CROSSINGS_HINT.to_string());
+    }
+    lines.extend(rearrangement.map(format_rearrangement_rollup));
+    lines
 }
 
 /// The crossings door's human output: the rollup sentences, expanded.
@@ -293,19 +309,151 @@ pub(super) fn print_crossings(
         }
     }
 
+    if let Some(hint) = drill_down_hint(result, params) {
+        println!();
+        println!("{hint}");
+    }
+
     if let Some(nothing) = &result.nothing_crossed {
         println!();
-        println!("{}", nothing_crossed_line(nothing, resolved));
+        println!("{}", nothing_crossed_line(nothing, resolved, params));
     }
 
     if let Some(reconciliation) = &result.reconciliation {
         println!();
-        println!(
-            "Standing here: {} of the {} files delivered.",
-            format_count(reconciliation.standing),
-            format_count(reconciliation.delivered)
-        );
+        println!("{}", reconciliation_line(reconciliation));
     }
+}
+
+/// The one deliberate register crossing, composed: two observations on each
+/// axis, and no cause on either.
+///
+/// The clauses are composed **independently**, and each states an "of the"
+/// construction only where its own two numbers arithmetically permit one.
+/// Containment fails in both directions — a decision stamp survives a
+/// scan-observed move into the view, so what stands here can exceed what this
+/// door records as delivered — which is why the standing-beyond-delivered
+/// branch drops the construction entirely rather than stating an arithmetic
+/// impossibility from the one line designed never to guess. The decisions
+/// clause never had one to drop: the trace failed for it first.
+///
+/// **Equal counts do not license a claim about the same files.** The identity
+/// reading — "all of what was delivered still stands" — is the strongest
+/// statement anything on this surface makes, and the containment trace forbids
+/// it in exactly the way it forbids "of the": deliver 229 here and one
+/// elsewhere, lose one of the 229, and let a scan observe the stray moving in
+/// with its stamp intact, and the counts match while the sets do not. So
+/// equality states the two counts plainly, in the same shape the
+/// standing-beyond-delivered case uses — which still spares the reader the
+/// subtraction that made `229 of the 229` read badly, without claiming what
+/// these rows cannot show. Suppressing the line stays rejected: an absent line
+/// cannot be told from "nothing was lost", nor from "there is no card at all".
+///
+/// The decisions clause carries **no pronoun**. Two of the three files-clause
+/// forms now end on the delivered count, so a "them" would sit next to the
+/// wrong number and say that N decisions stand behind the *delivered* files
+/// while announcing a different delivered figure in the same breath. Naming
+/// nothing and mirroring the files clause's own shape says it exactly once.
+fn reconciliation_line(r: &Reconciliation) -> String {
+    let files = match r.standing.cmp(&r.delivered) {
+        // The one form that *is* a proportion, and the only one whose two
+        // numbers license saying so. Unreachable at `delivered == 1`, since
+        // a card line carries at least one standing file.
+        std::cmp::Ordering::Less => format!(
+            "{} of the {} files delivered",
+            format_count(r.standing),
+            format_count(r.delivered)
+        ),
+        // Equal and greater share one spelling: two counts, side by side,
+        // claiming nothing about which files they are. Spelled out rather
+        // than left to a `_` arm — this is the one claim-bearing line on the
+        // surface, and a law match here states its cases.
+        std::cmp::Ordering::Equal | std::cmp::Ordering::Greater => format!(
+            "{} {} {}; {} {} delivered",
+            format_count(r.standing),
+            plural(r.standing, "file"),
+            stand_agrees(r.standing),
+            format_count(r.delivered),
+            was_agrees(r.delivered)
+        ),
+    };
+    let decisions = if r.standing_decisions == r.delivered_decisions {
+        String::new()
+    } else {
+        format!(
+            " \u{2014} {} {}; {} delivered",
+            count_of(r.standing_decisions as i64, "decision"),
+            stand_agrees(r.standing_decisions as i64),
+            format_count(r.delivered_decisions as i64)
+        )
+    };
+    format!("Standing here: {files}{decisions}.")
+}
+
+/// `stand` / `stands`, agreeing with its subject's count.
+fn stand_agrees(n: i64) -> &'static str {
+    if n == 1 {
+        "stands"
+    } else {
+        "stand"
+    }
+}
+
+/// `was` / `were`, agreeing with its subject's count.
+fn was_agrees(n: i64) -> &'static str {
+    if n == 1 {
+        "was"
+    } else {
+        "were"
+    }
+}
+
+/// Whether this view teaches its own drill-down, and with what.
+///
+/// **Once per view, never per entry** — an `Option` rather than a per-line
+/// decision, so a second invitation is unrepresentable rather than merely
+/// avoided.
+///
+/// The test is **per section, not per view**: a bare section's entries are
+/// handles whether or not a sibling section was named. Naming a counterpart
+/// opens one direction and leaves the other listing counterparts as usual, so
+/// a view can hold a named section and a bare one at once — standing in
+/// `/archive/2016` with `--destination /archive` is the shape — and the bare
+/// half still has entries nothing else announces. A view whose every section
+/// is named teaches nothing, which is the case the rule was written for: the
+/// reader has already stepped through the door. Machine output carries no
+/// hints at all — belt and braces, since `--jsonl` returns before this
+/// renderer is reached.
+///
+/// A view with no bare entries has no handle to teach: "nothing crossed"
+/// carries nothing to drill into.
+///
+/// The flag is **derived from the sections actually rendered**, so the hint
+/// can only ever name a flag the entries on screen feed. A one-directional
+/// view — the common case — names one flag; a view rendering both sections
+/// names both, which is the case the two-flag spelling was written for.
+fn drill_down_hint(result: &CrossingsResult, params: &CrossingsParams) -> Option<String> {
+    if params.machine_output {
+        return None;
+    }
+    let mut flags: Vec<&str> = result
+        .sections
+        .iter()
+        .filter(|section| {
+            section.named.is_none() && matches!(&section.body, CrossingBody::Counterparts { .. })
+        })
+        .map(|section| entry_flag(section.aspect))
+        .collect();
+    flags.dedup();
+    // Origin before destination where both render, the settled spelling.
+    flags.sort_by_key(|flag| *flag != "--origin");
+
+    let (first, rest) = flags.split_first()?;
+    let mut invocation = format!("`canon trail crossings {first} <path>`");
+    for flag in rest {
+        invocation.push_str(&format!(" or `{flag} <path>`"));
+    }
+    Some(format!("{invocation} {CROSSINGS_DRILL_DOWN_PAYOFF}"))
 }
 
 /// One section's lines, indentation included. Pure data — the same separation
@@ -424,28 +572,87 @@ fn inside_end(aspect: RowAspect, params: &CrossingsParams) -> Option<&str> {
     }
 }
 
-/// One counterpart entry: the path on its own line, its marker beneath it
-/// when it has one, then the counts.
+/// The head and continuation indents of a keyed entry, per surface.
 ///
-/// The marker and the counts are both continuations of the path above them,
-/// so they indent alike; a one-column difference between two lines that hang
-/// off the same path reads as structure that isn't there.
-fn counterpart_lines(line: &CounterpartLine) -> Vec<String> {
-    let mut out = vec![format!("  {}", line.counterpart.path)];
-    let marker = origin_marker(
-        line.counterpart.retired_book.as_deref(),
-        line.counterpart.root_removed,
-    );
+/// The card's lines are printed under [`CARD_LINE_PREFIX`], so its
+/// continuations land in the same column as the door's — the two surfaces
+/// carry identical facts and must carry them identically.
+const DOOR_INDENTS: (&str, &str) = ("  ", "      ");
+/// The card's half of [`DOOR_INDENTS`] — see there.
+const CARD_INDENTS: (&str, &str) = ("", "    ");
+
+/// One keyed entry: a path on its own line, its marker beneath it when it has
+/// one, then its counts.
+///
+/// The shape both surfaces that name a place compose through — the door's
+/// counterpart entries and the card's origin lines. It exists because the
+/// same three facts were being spelled two ways: the door over three lines,
+/// the card crammed onto one that ran past two hundred characters on a
+/// retired root. Three lines survive any path length; one line does not, so
+/// that is the shape both take.
+///
+/// The path is **whole and unelided** and ends its own line: it is the key
+/// the reader copies from one invocation into the next, so a column-aligned
+/// form that could elide it breaks the reach chain at its first hop.
+///
+/// The marker and the counts are both continuations of the head above them,
+/// so they **indent alike** — one column of difference between two lines
+/// hanging off the same path reads as structure that is not there. That is
+/// one parameter here rather than a rule kept twice.
+fn keyed_entry_lines(head: &str, marker: &str, counts: &str, indents: (&str, &str)) -> Vec<String> {
+    let (head_indent, continuation) = indents;
+    let mut out = vec![format!("{head_indent}{head}")];
     if !marker.is_empty() {
-        out.push(format!("      {}", marker.trim()));
+        out.push(format!("{continuation}{}", marker.trim()));
     }
-    out.push(format!(
-        "      {} \u{00b7} {} \u{00b7} {}",
-        files_with_size(line.files, line.bytes),
-        count_of(line.decisions as i64, "decision"),
-        format_date_range(line.first_at, line.last_at)
-    ));
+    out.push(format!("{continuation}{counts}"));
     out
+}
+
+/// One counterpart entry, in the shared keyed-entry shape.
+fn counterpart_lines(line: &CounterpartLine) -> Vec<String> {
+    let mut counts = format!(
+        "{} \u{00b7} {} \u{00b7} {}",
+        files_with_size(line.files, line.bytes),
+        decision_chip(&line.decision_ids),
+        format_date_range(line.first_at, line.last_at)
+    );
+    // A coarsened key must say how much it stands for, or it reads as the
+    // whole truth. One folder needs no saying — the path above *is* it.
+    if line.folders > 1 {
+        counts.push_str(&format!(
+            " \u{00b7} {}",
+            count_of(line.folders as i64, "folder")
+        ));
+    }
+    keyed_entry_lines(
+        &line.counterpart.path,
+        &origin_marker(
+            line.counterpart.retired_book.as_deref(),
+            line.counterpart.root_removed,
+        ),
+        &counts,
+        DOOR_INDENTS,
+    )
+}
+
+/// A count of decisions, or — where there is exactly one — the decision.
+///
+/// A list of one is not a list, so the count-over-list rule that banished id
+/// *lists* from these surfaces has nothing to say here: hiding the single id
+/// makes the reader open a second view to learn a number the line already
+/// holds, when a bare id is already a taught handle in this tool (`canon
+/// trail 57` hints at `trail show 57`). Three surfaces render it — the two
+/// bare-view directions and the card's origin lines — through this one
+/// spelling.
+///
+/// The ids come off the aggregation the count is computed from; nothing here
+/// looks a decision up.
+fn decision_chip(ids: &[i64]) -> String {
+    match ids {
+        [id] => format!("decision #{id}"),
+        _ => count_of(ids.len() as i64, "decision"),
+    }
 }
 
 /// One delivery: the decision's header line, its places, then its reason.
@@ -573,23 +780,150 @@ fn under(path: &str, anchor: Option<&str>) -> String {
 /// A view whose every row stayed inside it has to name the rearrangement, or
 /// the silence reads as "nothing ever happened here" — the opposite of the
 /// truth about a heavily curated archive.
-fn nothing_crossed_line(nothing: &NothingCrossed, resolved: &ResolvedScope) -> String {
+///
+/// And where a counterpart was **named**, this line names it back. Otherwise
+/// the answer never mentions what was asked about: a named counterpart lives
+/// on a `CrossingSection`, empty sections are omitted rather than printed
+/// empty, and the two together make the ask unreachable exactly when nothing
+/// matched it. The refusal path already names the paths it refuses — a
+/// self-explaining answer names what was asked — and this is the same
+/// principle at the site that fell between those two rules.
+///
+/// The observable shape: pointing `--origin` at a place Canon knows but that
+/// is no delivery's endpoint — a retired book's own directory sitting inside
+/// the archive, an indexed source folder never applied from — answered with a
+/// sentence naming nothing, while a path Canon has *never* heard of got a
+/// statement naming it. The near miss was less informative than the total one.
+fn nothing_crossed_line(
+    nothing: &NothingCrossed,
+    resolved: &ResolvedScope,
+    params: &CrossingsParams,
+) -> String {
+    // A **global** view has no "here" to measure between: it borrowed the
+    // named counterpart as its boundary, so that place *is* the subject
+    // rather than a second end. Both variants take that carve-out in every
+    // reachable case, or whichever misses it says "here" where there is none.
+    // The unnamed global cells are unreachable — the interface refuses a
+    // boundless ask — and are spelled anyway rather than folded away, so the
+    // two variants stay readable side by side.
+    let named = asked_about(params);
+    let global = resolved.is_global();
     match nothing {
-        NothingCrossed::Rearranged { files, bytes } => format!(
-            "Nothing crossed this boundary. {} were rearranged within it.",
-            files_with_size(*files, *bytes)
-        ),
-        NothingCrossed::Nothing if resolved.is_global() => "No recorded crossing.".to_string(),
-        NothingCrossed::Nothing => "Nothing has crossed this boundary.".to_string(),
+        NothingCrossed::Rearranged { files, bytes } => {
+            let counts = files_with_size(*files, *bytes);
+            match (&named, global) {
+                // Globally the boundary is borrowed from what was named, so
+                // "within it" reaches for the right place. Where *both*
+                // counterparts are named only one of them is promoted, so the
+                // pronoun has two antecedents — but a rearrangement requires
+                // both endpoints inside the boundary *and* past both filters,
+                // which puts the rows under both named paths, so the sentence
+                // is true whichever one the reader binds it to.
+                (Some(place), true) => {
+                    format!("No recorded crossing at {place}. {counts} were rearranged within it.")
+                }
+                // Scoped, the rearrangement happened within the **view**, not
+                // within the named counterpart — so the boundary is named
+                // rather than left to a pronoun that would now reach for the
+                // place mentioned just before it.
+                (Some(place), false) => format!(
+                    "Nothing crossed between here and {place}. \
+                     {counts} were rearranged within this boundary."
+                ),
+                (None, _) => {
+                    format!("Nothing crossed this boundary. {counts} were rearranged within it.")
+                }
+            }
+        }
+        NothingCrossed::Nothing => match (&named, global) {
+            (Some(place), true) => format!("No recorded crossing at {place}."),
+            (Some(place), false) => format!("Nothing has crossed between here and {place}."),
+            (None, true) => "No recorded crossing.".to_string(),
+            (None, false) => "Nothing has crossed this boundary.".to_string(),
+        },
     }
 }
 
-/// The line that teaches the door, printed once beneath the rollup block.
+/// The place (or places) a flag named, for a line that has no section to
+/// carry them. `None` when the ask named none, which is the bare view.
+fn asked_about(params: &CrossingsParams) -> Option<String> {
+    match (params.origin.as_deref(), params.destination.as_deref()) {
+        // Both flags on one place is one place, not the same path twice.
+        (Some(origin), Some(destination)) if origin == destination => Some(origin.to_string()),
+        (Some(origin), Some(destination)) => Some(format!("{origin} or {destination}")),
+        (Some(place), None) | (None, Some(place)) => Some(place.to_string()),
+        (None, None) => None,
+    }
+}
+
+/// The line that teaches the door, printed once beneath the **two crossing
+/// rollups** — above `Rearranged here`, which the door does not itemize.
 ///
 /// `crossings` appears on no output line of its own, so the surfaces that
 /// invite it name it at the moment of need — the same move the all-digits
 /// `trail show` hint makes. Once, not once per rollup.
-const CROSSINGS_HINT: &str = "  canon trail crossings — expand these by place";
+///
+/// It states **what running it yields**, not the gesture. "Expand these by
+/// place" named a motion with no visible referent — "these" pointed at a
+/// single rollup line, and a reader had to run the command to decode its own
+/// invitation. The rollup totals itemized per counterpart place is what comes
+/// back, so that is what the line says.
+const CROSSINGS_HINT: &str = "  `canon trail crossings` to list the places behind these totals";
+
+/// The card's own teacher, printed beneath its origins block.
+///
+/// The card's origin lines **are** door handles — the rendered path is
+/// exactly the argument `--origin` takes — and until now the only thing that
+/// said so was the origins *remainder*, which fires only on a capped card. A
+/// card showing all its origins taught nothing, precisely where the handles
+/// are. The payoff is named, not the flag: nothing in a flag's name says what
+/// is behind it, so the line says it.
+/// Its payoff carries the same referent the drill-down's does, for the same
+/// reason: the card's origin lines already name their decision where there is
+/// one, so promising "the decisions" would offer what is on screen. What
+/// naming an origin adds is the folders.
+const CARD_ORIGIN_HINT: &str =
+    "`canon trail crossings --origin <path>` to list the folders behind an origin";
+
+/// What naming an entry adds that the bare listing does not already show —
+/// the drill-down hint's promise, held as **one word with a checked
+/// referent** rather than as free prose.
+///
+/// A hint is a claim about a *different* rendering, and a claim held only as
+/// prose goes stale silently. Two ways it can: the promised thing moves onto
+/// the listing, so the invitation offers what is already on screen; or the
+/// promise is reworded past what naming an entry actually delivers. Neither
+/// breaks anything a reader of this file would notice.
+///
+/// So the promise names a rendering feature, and
+/// `the_drill_down_hint_promises_only_what_naming_an_entry_adds` pins the
+/// feature from both sides — present where an entry is named, absent from the
+/// bare entry, and named in this const. Move the folder pairs onto the bare
+/// listing and the pin fails; reword the promise away from what is delivered
+/// and it fails too. That does not make English self-verifying, and it is not
+/// meant to: it gives the sentence a referent a test can hold.
+const CROSSINGS_DRILL_DOWN_PAYOFF: &str = "to list the folders behind an entry";
+
+/// Which flag opens a section's entries.
+///
+/// The exact complement of the operations layer's outside-end rule: a
+/// section's counterpart is its outside end, so an **extraction** section
+/// lists destinations and `--destination` opens them, while an **arrival**
+/// section lists origins and `--origin` does. Derived from the rendered
+/// sections rather than written into the hint, because a hint naming the flag
+/// that does *not* match what is on screen invites the reader to substitute a
+/// listed path into a dead end — and since a counterpart that matches nothing
+/// now answers "nothing has crossed between here and <path>", it is a
+/// *silent* dead end. Exhaustive, so a new aspect is a compile error rather
+/// than a hint that quietly points the wrong way.
+fn entry_flag(aspect: RowAspect) -> &'static str {
+    match aspect {
+        RowAspect::Extraction => "--destination",
+        RowAspect::Arrival => "--origin",
+        // Unreachable: a section is only ever one of the two crossings.
+        RowAspect::Rearrangement | RowAspect::Outside => "--destination",
+    }
+}
 
 /// Maximum number of origin lines the composition card shows before an
 /// explicit remainder line — the origins section scales with a location's
@@ -645,11 +979,20 @@ pub(super) fn drew_from_lines(extractions: &[ShowExtraction]) -> Vec<String> {
     out
 }
 
+/// The indent every card body line is printed under.
+///
+/// Named rather than spelled inline because it is half of an alignment claim:
+/// the card's continuations land in the door's column only once this prefix is
+/// applied, so the test that pins that claim has to measure through the same
+/// value the printer uses. Spelled twice, the two could part with nothing
+/// failing.
+const CARD_LINE_PREFIX: &str = "  ";
+
 fn print_composition_card(card: &CompositionCard) {
     println!();
     println!("Standing here: {}", format_bucket(card.files, card.bytes));
     for line in composition_card_lines(card) {
-        println!("  {line}");
+        println!("{CARD_LINE_PREFIX}{line}");
     }
 }
 
@@ -660,18 +1003,50 @@ fn print_composition_card(card: &CompositionCard) {
 /// testable without capturing stdout.
 fn composition_card_lines(card: &CompositionCard) -> Vec<String> {
     let mut lines = Vec::new();
+    // The cap counts **origins, not physical lines**: an origin now emits
+    // several, and capping the emitted lines would truncate one entry
+    // mid-shape.
     for line in card.origins.iter().take(CARD_ORIGIN_CAP) {
-        lines.push(format_origin_line(line));
+        lines.extend(format_origin_line(line));
     }
+    // Whether an origin line puts a path on screen that `--origin` can take.
+    //
+    // `MultiOrigin` names no root — it reads `via apply #N from M origins` —
+    // so a card whose origins are all multi-origin has no handle to teach,
+    // and the invitation would name a `<path>` the reader cannot find
+    // anywhere above it. Same rule the rollup hint's placement rests on: a
+    // hint must not attach to a line it cannot deliver on.
+    fn names_a_path(line: &OriginLine) -> bool {
+        matches!(line, OriginLine::FromRoot { .. })
+    }
+
+    // Decided once, for both emission sites: the invitation names a `<path>`,
+    // so it prints only where the card put one on screen. Evaluated over the
+    // **shown** origins rather than all of them — the reader can only
+    // substitute what they can see, and the remainder line is precisely the
+    // one whose own origins were declined.
+    let teach_the_door = card.origins.iter().take(CARD_ORIGIN_CAP).any(names_a_path);
+    let hint = if teach_the_door {
+        format!(" \u{2014} {CARD_ORIGIN_HINT}")
+    } else {
+        String::new()
+    };
+
+    // The origins block teaches its own door — **one invitation, never two**.
+    // A capped card's remainder absorbs the teacher rather than stacking a
+    // second line beneath it; one branch decides, so stacking is
+    // unrepresentable rather than merely avoided.
     if card.origins.len() > CARD_ORIGIN_CAP {
         let more = card.origins.len() - CARD_ORIGIN_CAP;
         // The remainder is where the reader most needs the door — the origins
         // it names are the ones this line just declined to print.
         lines.push(format!(
-            "\u{2026} and {} more {} — canon trail crossings",
+            "\u{2026} and {} more {}{hint}",
             format_count(more as i64),
             plural(more as i64, "origin")
         ));
+    } else if teach_the_door {
+        lines.push(CARD_ORIGIN_HINT.to_string());
     }
     // Standings are unbounded — merging keys them on the label, so their
     // count is bounded by the transition vocabulary, not by the history.
@@ -809,8 +1184,19 @@ fn disposition_suffix(
 /// from nowhere the reader was standing. The transitioned section could always
 /// drop its ids on the argument that the acts behind it are the timeline's to
 /// hold, directly above; the origins section could not make that claim until
-/// there was a door. Now it can.
-fn format_origin_line(line: &OriginLine) -> String {
+/// there was a door. Now it can. A count of **one** names its decision
+/// ([`decision_chip`]) — a list of one is not a list, and hiding the single id
+/// sends the reader through a door to learn a number the line already holds.
+///
+/// The line takes the **door's shape** ([`keyed_entry_lines`]) and returns
+/// several lines: path, then the marker where there is one, then the counts.
+/// It carried identical facts to a counterpart entry while spelling them
+/// differently, and on a retired root the one-line form ran past two hundred
+/// characters — ten times over on a real card. **Uniform**: a short line takes
+/// the shape too, because a
+/// card whose line shape varies with content length scans worse than one that
+/// does not.
+fn format_origin_line(line: &OriginLine) -> Vec<String> {
     match line {
         OriginLine::FromRoot {
             root_path,
@@ -823,19 +1209,26 @@ fn format_origin_line(line: &OriginLine) -> String {
             first_at,
             last_at,
         } => {
-            let marker = origin_marker(retired_book.as_deref(), *root_removed);
-            let source = if *from_within {
-                format!("arrived from elsewhere in {root_path}{marker}")
+            let head = if *from_within {
+                format!("arrived from elsewhere in {root_path}")
             } else {
-                format!("arrived from {root_path}{marker}")
+                format!("arrived from {root_path}")
             };
-            format!(
-                "{source}: {} \u{00b7} {} \u{00b7} {}",
-                format_bucket(*files, *bytes),
-                count_of(decision_ids.len() as i64, "decision"),
-                format_date_range(*first_at, *last_at)
+            keyed_entry_lines(
+                &head,
+                &origin_marker(retired_book.as_deref(), *root_removed),
+                &format!(
+                    "{} \u{00b7} {} \u{00b7} {}",
+                    format_bucket(*files, *bytes),
+                    decision_chip(decision_ids),
+                    format_date_range(*first_at, *last_at)
+                ),
+                CARD_INDENTS,
             )
         }
+        // One line: it names no root, so there is no path to protect from
+        // wrapping and no marker to hang beneath one. It already leads with
+        // its decision id.
         OriginLine::MultiOrigin {
             decision_id,
             origin_count,
@@ -843,12 +1236,12 @@ fn format_origin_line(line: &OriginLine) -> String {
             bytes,
             at,
         } => {
-            format!(
+            vec![format!(
                 "via apply #{decision_id} from {} origins: {} \u{00b7} {}",
                 format_count(*origin_count),
                 format_bucket(*files, *bytes),
                 format_date_only(*at)
-            )
+            )]
         }
     }
 }
@@ -2465,15 +2858,24 @@ mod tests {
         }
     }
 
+    /// `decisions` is a count, spelled here as consecutive ids so a fixture
+    /// asking for one decision gets a nameable one — the singleton chip
+    /// renders the id, so a builder handing out none could not exercise it.
     fn counterpart_line(path: &str, files: i64, decisions: usize, at: i64) -> CounterpartLine {
         CounterpartLine {
             counterpart: plain_counterpart(path),
             files,
             bytes: Some(files * 100),
-            decisions,
+            decision_ids: (1..=decisions as i64).collect(),
+            folders: 1,
             first_at: at,
             last_at: at,
         }
+    }
+
+    fn covering(mut line: CounterpartLine, folders: usize) -> CounterpartLine {
+        line.folders = folders;
+        line
     }
 
     fn bare_section(
@@ -2486,6 +2888,12 @@ mod tests {
             files: lines.iter().map(|l| l.files).sum(),
             bytes: Some(lines.iter().map(|l| l.files * 100).sum()),
             counterparty_count: lines.len() + more,
+            decision_count: {
+                let mut ids: Vec<i64> = lines.iter().flat_map(|l| l.decision_ids.clone()).collect();
+                ids.sort_unstable();
+                ids.dedup();
+                ids.len()
+            },
             named: None,
             body: CrossingBody::Counterparts { lines, more },
         }
@@ -2598,6 +3006,7 @@ mod tests {
             files: 2,
             bytes: Some(200),
             counterparty_count: 1,
+            decision_count: 1,
             named: Some(plain_counterpart(path)),
             body: CrossingBody::Deliveries {
                 lines: Vec::new(),
@@ -2664,6 +3073,7 @@ mod tests {
             files: 5,
             bytes: Some(500),
             counterparty_count: 1,
+            decision_count: 1,
             named: Some(plain_counterpart(long)),
             body: CrossingBody::Deliveries {
                 lines: Vec::new(),
@@ -2706,6 +3116,7 @@ mod tests {
             files: 8,
             bytes: Some(80),
             counterparty_count: 1,
+            decision_count: 1,
             named: Some(plain_counterpart("/vol/sd")),
             body: CrossingBody::Deliveries {
                 lines: vec![CrossingDelivery {
@@ -2754,6 +3165,7 @@ mod tests {
             files: 8,
             bytes: Some(80),
             counterparty_count: 1,
+            decision_count: 1,
             named: Some(plain_counterpart("/vol/sd")),
             body: CrossingBody::Deliveries {
                 lines: vec![CrossingDelivery {
@@ -2825,6 +3237,207 @@ mod tests {
         assert_eq!(indent(&lines[1]), indent(&lines[2]), "{lines:?}");
     }
 
+    /// The coarsening must be visible where it happened and silent where it
+    /// did not: a grouped entry says how many finer places it stands for, and
+    /// a leaf entry says nothing, because the path above it *is* the place.
+    #[test]
+    fn a_coverage_count_renders_only_past_one_folder() {
+        let ts = local_ts_on("2026-07-11");
+
+        let grouped = counterpart_lines(&covering(
+            counterpart_line("/archive/Media/2016/03", 262, 2, ts),
+            44,
+        ));
+        assert!(
+            grouped.last().unwrap().contains("44 folders"),
+            "{grouped:?}"
+        );
+
+        let leaf = counterpart_lines(&counterpart_line("/archive/Media/2016/03/08", 262, 2, ts));
+        assert!(
+            !leaf.last().unwrap().contains("folder"),
+            "a leaf entry states no coverage: {leaf:?}"
+        );
+
+        // And the singular is never reached by the count itself, since one
+        // folder is exactly the case that renders nothing.
+        let one = counterpart_lines(&covering(counterpart_line("/archive/Docs", 3, 1, ts), 1));
+        assert!(!one.last().unwrap().contains("folder"), "{one:?}");
+    }
+
+    /// A count of exactly one names the decision; two or more stay a count.
+    /// One spelling, and this is the door's site of it.
+    #[test]
+    fn a_singleton_decision_count_names_its_id_at_an_entry() {
+        let ts = local_ts_on("2026-07-11");
+
+        assert_eq!(decision_chip(&[57]), "decision #57");
+        assert_eq!(decision_chip(&[57, 58]), "2 decisions");
+
+        let mut line = counterpart_line("/archive/Docs", 3, 1, ts);
+        line.decision_ids = vec![57];
+        let rendered = counterpart_lines(&line);
+        assert!(
+            rendered.last().unwrap().contains("decision #57"),
+            "{rendered:?}"
+        );
+        // The singleton's date is one date, never a degenerate range.
+        assert!(
+            !rendered.last().unwrap().contains('\u{2013}'),
+            "{rendered:?}"
+        );
+
+        let plural = counterpart_lines(&counterpart_line("/archive/Media", 9, 3, ts));
+        assert!(plural.last().unwrap().contains("3 decisions"), "{plural:?}");
+        assert!(!plural.last().unwrap().contains('#'), "{plural:?}");
+    }
+
+    // ------------------------------------------------------------------
+    // The reconciliation line
+    // ------------------------------------------------------------------
+
+    fn reconciliation(
+        standing: i64,
+        delivered: i64,
+        standing_decisions: usize,
+        delivered_decisions: usize,
+    ) -> Reconciliation {
+        Reconciliation {
+            standing,
+            delivered,
+            standing_decisions,
+            delivered_decisions,
+        }
+    }
+
+    /// The five shapes the line takes, composed from two independent clauses.
+    #[test]
+    fn the_reconciliation_line_composes_five_shapes() {
+        assert_eq!(
+            reconciliation_line(&reconciliation(229, 229, 3, 3)),
+            "Standing here: 229 files stand; 229 were delivered."
+        );
+        assert_eq!(
+            reconciliation_line(&reconciliation(8_151, 8_199, 15, 15)),
+            "Standing here: 8,151 of the 8,199 files delivered."
+        );
+        assert_eq!(
+            reconciliation_line(&reconciliation(8_151, 8_199, 15, 17)),
+            "Standing here: 8,151 of the 8,199 files delivered \u{2014} 15 decisions stand; \
+             17 delivered."
+        );
+        assert_eq!(
+            reconciliation_line(&reconciliation(229, 229, 3, 4)),
+            "Standing here: 229 files stand; 229 were delivered \u{2014} 3 decisions stand; \
+             4 delivered."
+        );
+        assert_eq!(
+            reconciliation_line(&reconciliation(8_300, 8_199, 15, 15)),
+            "Standing here: 8,300 files stand; 8,199 were delivered."
+        );
+    }
+
+    /// **Equal counts are not a claim about the same files.** Deliver 229
+    /// here and one elsewhere, lose one of the 229, and let a scan observe
+    /// the stray moving in with its stamp intact: the counts match and the
+    /// sets do not. So the equality branch states two counts and never
+    /// asserts identity between them — the same doctrine that keeps "of the"
+    /// off the standing-beyond-delivered branch, at the branch it had not
+    /// reached.
+    #[test]
+    fn equal_counts_never_claim_the_same_files() {
+        let line = reconciliation_line(&reconciliation(229, 229, 3, 3));
+        assert!(!line.contains("all "), "{line}");
+        assert!(!line.contains("still stand"), "{line}");
+        assert!(!line.contains("of the"), "{line}");
+        assert_eq!(line, "Standing here: 229 files stand; 229 were delivered.");
+    }
+
+    /// **Red-smoke**: containment fails in both directions — a decision stamp
+    /// survives a scan-observed move into the view — so where standing
+    /// exceeds delivered the line must drop the "of the" construction rather
+    /// than state an arithmetic impossibility from the one line designed
+    /// never to guess.
+    #[test]
+    fn standing_beyond_delivered_drops_the_of_the_construction() {
+        let line = reconciliation_line(&reconciliation(8_300, 8_199, 17, 15));
+        assert!(!line.contains("of the"), "{line}");
+        assert!(line.contains("8,300 files"), "{line}");
+        assert!(line.contains("8,199 were delivered"), "{line}");
+        // The decisions clause never had one to drop, so it reads the same
+        // whichever way that axis runs.
+        assert!(line.contains("17 decisions stand; 15 delivered"), "{line}");
+    }
+
+    /// Equality still spares the reader the subtraction that made
+    /// `229 of the 229` read badly — the two counts sit side by side and
+    /// match on sight.
+    #[test]
+    fn equality_reads_without_arithmetic() {
+        let line = reconciliation_line(&reconciliation(229, 229, 3, 3));
+        assert!(
+            line.contains("229 files stand; 229 were delivered"),
+            "{line}"
+        );
+        assert!(!line.contains("229 of the 229"), "{line}");
+    }
+
+    /// Suppressing on equality stays rejected: an absent line cannot be told
+    /// from "nothing was lost", nor from "there is no card at all".
+    #[test]
+    fn the_line_is_present_on_equality() {
+        assert!(!reconciliation_line(&reconciliation(229, 229, 3, 3)).is_empty());
+        // Down to the degenerate single file, which still reads as a sentence.
+        assert_eq!(
+            reconciliation_line(&reconciliation(1, 1, 1, 1)),
+            "Standing here: 1 file stands; 1 was delivered."
+        );
+    }
+
+    /// Number agreement at every boundary the line has — noun **and** verb.
+    /// A count and a verb that disagree beside it ("1 were delivered") undo
+    /// the care the rest of the sentence takes, and the singular is reachable
+    /// on both clauses.
+    #[test]
+    fn the_reconciliation_clauses_agree_in_number() {
+        let decisions = reconciliation_line(&reconciliation(1, 1, 1, 2));
+        assert!(
+            decisions.contains("1 decision stands; 2 delivered"),
+            "{decisions}"
+        );
+
+        // The case that was wrong: a single delivered file beside a plural
+        // standing count.
+        let plain = reconciliation_line(&reconciliation(2, 1, 1, 1));
+        assert_eq!(plain, "Standing here: 2 files stand; 1 was delivered.");
+        assert!(!plain.contains("1 were"), "{plain}");
+
+        // The singular on the standing side, which the shared arm reaches
+        // only at 1-and-1: standing >= delivered is what enters this arm, so
+        // a singular standing count forces a singular delivered one and the
+        // cross-verb case above is the only place the two can differ.
+        assert_eq!(
+            reconciliation_line(&reconciliation(1, 1, 1, 1)),
+            "Standing here: 1 file stands; 1 was delivered."
+        );
+    }
+
+    /// The decisions clause carries no pronoun, because two of the three
+    /// files-clause forms end on the **delivered** count — a "them" there
+    /// would say these decisions stand behind the delivered files while
+    /// naming a different delivered figure in the same breath.
+    #[test]
+    fn the_decisions_clause_names_no_pronoun() {
+        for line in [
+            reconciliation_line(&reconciliation(229, 229, 3, 4)),
+            reconciliation_line(&reconciliation(8_300, 8_199, 17, 15)),
+            reconciliation_line(&reconciliation(8_151, 8_199, 15, 17)),
+        ] {
+            assert!(!line.contains("them"), "{line}");
+            assert!(line.contains("decisions stand;"), "{line}");
+        }
+    }
+
     /// A named section reads in the inbound voice; the counterpart's marker
     /// is `drew_from_lines`' own, and the path stays whole on its own line.
     #[test]
@@ -2835,6 +3448,7 @@ mod tests {
             files: 5,
             bytes: Some(500),
             counterparty_count: 1,
+            decision_count: 1,
             named: Some(Counterpart {
                 path: "/Volumes/gone".to_string(),
                 root_removed: true,
@@ -2868,6 +3482,7 @@ mod tests {
             files: 6,
             bytes: Some(60),
             counterparty_count: 1,
+            decision_count: 1,
             named: Some(plain_counterpart("/Volumes/gone")),
             body: CrossingBody::Deliveries {
                 lines: vec![CrossingDelivery {
@@ -2902,18 +3517,136 @@ mod tests {
     /// about a heavily curated archive.
     #[test]
     fn nothing_crossed_names_the_rearrangement() {
+        let bare = crossings_params_of(None, None);
         let line = nothing_crossed_line(
             &NothingCrossed::Rearranged {
                 files: 47,
                 bytes: Some(3_900_000_000),
             },
             &scope_of(&["/archive"]),
+            &bare,
         );
-        assert!(line.contains("47 files (3.9 GB)"), "{line}");
-        assert!(line.contains("rearranged"), "{line}");
+        assert_eq!(
+            line,
+            "Nothing crossed this boundary. 47 files (3.9 GB) were rearranged within it."
+        );
 
-        let empty = nothing_crossed_line(&NothingCrossed::Nothing, &scope_of(&["/archive"]));
-        assert!(!empty.contains("rearranged"), "{empty}");
+        let empty = nothing_crossed_line(&NothingCrossed::Nothing, &scope_of(&["/archive"]), &bare);
+        assert_eq!(empty, "Nothing has crossed this boundary.");
+    }
+
+    /// A named counterpart lives on a `CrossingSection`, and empty sections
+    /// are omitted — so with nothing matched, the place the reader asked
+    /// about had no way to reach the output at all. The answer named nothing,
+    /// while a path Canon has *never* heard of gets a statement naming it: the
+    /// near miss was less informative than the total one.
+    ///
+    /// Live shape: `--origin` pointed at a retired book's own directory, which
+    /// sits inside the archive root and is known (its files are indexed) but
+    /// is no delivery's endpoint.
+    #[test]
+    fn a_no_crossing_answer_names_the_counterpart_it_was_asked_about() {
+        let book = "/archive/retired/archived-2026-08-08";
+        let scoped = scope_of(&["/archive"]);
+
+        let line = nothing_crossed_line(
+            &NothingCrossed::Nothing,
+            &scoped,
+            &crossings_params_of(Some(book), None),
+        );
+        assert_eq!(
+            line,
+            format!("Nothing has crossed between here and {book}.")
+        );
+
+        // A named destination reads the same way — the ask is what is named,
+        // not which flag named it.
+        let destination = nothing_crossed_line(
+            &NothingCrossed::Nothing,
+            &scoped,
+            &crossings_params_of(None, Some(book)),
+        );
+        assert_eq!(destination, line);
+
+        // The rearrangement voice names it too, or the fix would recreate the
+        // same silence one variant over.
+        let rearranged = nothing_crossed_line(
+            &NothingCrossed::Rearranged {
+                files: 9,
+                bytes: Some(900),
+            },
+            &scoped,
+            &crossings_params_of(Some(book), None),
+        );
+        assert_eq!(
+            rearranged,
+            format!(
+                "Nothing crossed between here and {book}. \
+                 9 files (900 B) were rearranged within this boundary."
+            )
+        );
+
+        // Two different counterparts are both named; the same path twice is
+        // one place, not a repetition.
+        let both = nothing_crossed_line(
+            &NothingCrossed::Nothing,
+            &scoped,
+            &crossings_params_of(Some("/vol/sd"), Some(book)),
+        );
+        assert_eq!(
+            both,
+            format!("Nothing has crossed between here and /vol/sd or {book}.")
+        );
+        assert_eq!(
+            asked_about(&crossings_params_of(Some(book), Some(book))),
+            Some(book.to_string())
+        );
+
+        // A global view has no "here" — it borrowed the named counterpart as
+        // its boundary, so that place is the subject rather than a second end.
+        let mut global_params = crossings_params_of(Some(book), None);
+        global_params.prefixes = Vec::new();
+        let global = nothing_crossed_line(&NothingCrossed::Nothing, &scope_of(&[]), &global_params);
+        assert_eq!(global, format!("No recorded crossing at {book}."));
+
+        // The fourth cell of the 2x2: global *and* rearranged. The carve-out
+        // belongs to both variants, or whichever misses it says "here" where
+        // a borrowed boundary has none.
+        let global_rearranged = nothing_crossed_line(
+            &NothingCrossed::Rearranged {
+                files: 47,
+                bytes: Some(4_700),
+            },
+            &scope_of(&[]),
+            &global_params,
+        );
+        assert!(!global_rearranged.contains("here"), "{global_rearranged}");
+        assert_eq!(
+            global_rearranged,
+            format!("No recorded crossing at {book}. 47 files (4.7 KB) were rearranged within it.")
+        );
+    }
+
+    /// "within it" must not reach for the place named just before it. The
+    /// rearranged set is measured against the **view's** boundary, not the
+    /// named counterpart's, so a scoped view names the boundary rather than
+    /// leaving a pronoun to bind to the nearer noun.
+    #[test]
+    fn a_named_rearrangement_says_which_boundary_it_was_within() {
+        let line = nothing_crossed_line(
+            &NothingCrossed::Rearranged {
+                files: 9,
+                bytes: Some(900),
+            },
+            &scope_of(&["/archive"]),
+            &crossings_params_of(Some("/archive/A"), None),
+        );
+        assert_eq!(
+            line,
+            "Nothing crossed between here and /archive/A. \
+             9 files (900 B) were rearranged within this boundary."
+        );
+        assert!(!line.contains("within it"), "{line}");
     }
 
     // ------------------------------------------------------------------
@@ -2949,7 +3682,7 @@ mod tests {
             origins: 2_400,
         })
         .contains("2,400 origins"));
-        assert!(format_origin_line(&OriginLine::MultiOrigin {
+        assert!(origin_text(&OriginLine::MultiOrigin {
             decision_id: 1,
             origin_count: 1_050,
             files: 5,
@@ -3163,6 +3896,12 @@ mod tests {
         }
     }
 
+    /// An origin entry's lines joined, for the assertions that are about its
+    /// *content* rather than its shape. The shape has its own pins below.
+    fn origin_text(line: &OriginLine) -> String {
+        format_origin_line(line).join("\n")
+    }
+
     /// A timestamp that maps back to `date_str` under the local timezone
     /// used by `format_date_only` — noon avoids DST-transition edge cases.
     /// Timezone-independent by construction: the date is chosen first, the
@@ -3177,13 +3916,20 @@ mod tests {
             .timestamp()
     }
 
+    /// The card's origin entry in the door's shape: the path ends its own
+    /// line, the counts hang beneath it. Uniform — this is a short live-root
+    /// line and it takes the shape too, because a card whose lines change
+    /// shape with their length scans worse than one that does not.
     #[test]
-    fn format_origin_line_from_root_single_decision_single_date() {
+    fn the_cards_origin_lines_take_the_doors_shape() {
         let ts = local_ts_on("2024-01-05");
         let line = mk_from_root("/Volumes/old-laptop", false, 47, vec![12], ts, ts);
         assert_eq!(
             format_origin_line(&line),
-            "arrived from /Volumes/old-laptop: 47 files (4.7 KB) \u{b7} 1 decision \u{b7} 2024-01-05"
+            vec![
+                "arrived from /Volumes/old-laptop".to_string(),
+                "    47 files (4.7 KB) \u{b7} decision #12 \u{b7} 2024-01-05".to_string(),
+            ]
         );
     }
 
@@ -3203,7 +3949,61 @@ mod tests {
         };
         assert_eq!(
             format_origin_line(&line),
-            "arrived from elsewhere in /archive: 47 files (3.9 GB) \u{b7} 1 decision \u{b7} 2026-05-12"
+            vec![
+                "arrived from elsewhere in /archive".to_string(),
+                "    47 files (3.9 GB) \u{b7} decision #42 \u{b7} 2026-05-12".to_string(),
+            ]
+        );
+    }
+
+    /// The alignment rule at its second site: the marker and the counts both
+    /// hang off the path above them, so they indent alike — on the card
+    /// exactly as on the door, since the card's lines are printed under
+    /// `CARD_LINE_PREFIX` and land in the same column.
+    #[test]
+    fn the_card_and_door_continuations_align_alike() {
+        let ts = local_ts_on("2026-07-11");
+        let book = "/archive/books/2026-08-11-backup-archived";
+
+        let card = format_origin_line(&mk_retired_from_root("/Volumes/gone", book, ts));
+        assert_eq!(card.len(), 3, "path, marker, counts: {card:?}");
+        let indent = |l: &String| l.len() - l.trim_start().len();
+        assert_eq!(indent(&card[1]), indent(&card[2]), "{card:?}");
+
+        let mut entry = counterpart_line("/Volumes/gone", 5, 1, ts);
+        entry.counterpart.root_removed = true;
+        entry.counterpart.retired_book = Some(book.to_string());
+        let door = counterpart_lines(&entry);
+
+        // Measured **through the prefix the printer actually applies**, not a
+        // hand-written stand-in for it: the claim is about the column on
+        // screen, so a change to that prefix has to break this.
+        let printed = |line: &String| format!("{CARD_LINE_PREFIX}{line}");
+        assert_eq!(
+            indent(&printed(&card[1])),
+            indent(&door[1]),
+            "{card:?} {door:?}"
+        );
+        assert_eq!(indent(&printed(&card[0])), indent(&door[0]));
+    }
+
+    /// The cap counts origins, not the lines they emit: an entry is never
+    /// truncated mid-shape.
+    #[test]
+    fn card_origin_cap_counts_origins_not_lines() {
+        let ts = local_ts_on("2026-07-11");
+        let origins: Vec<OriginLine> = (0..12)
+            .map(|i| mk_from_root(&format!("/vol{i}"), false, 1, vec![i], ts, ts))
+            .collect();
+        let lines = composition_card_lines(&mk_card(origins, Vec::new(), None, None));
+        // Ten origins at two lines each, then one remainder line.
+        assert_eq!(lines.len(), 21, "{lines:?}");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.starts_with("arrived from"))
+                .count(),
+            10
         );
     }
 
@@ -3223,12 +4023,9 @@ mod tests {
             first_at: ts,
             last_at: ts,
         };
-        let text = format_origin_line(&line);
-        assert!(
-            text.starts_with("arrived from elsewhere in /archive"),
-            "{text}"
-        );
-        assert!(text.contains(ROOT_REMOVED_MARKER), "{text}");
+        let lines = format_origin_line(&line);
+        assert_eq!(lines[0], "arrived from elsewhere in /archive");
+        assert_eq!(lines[1], format!("    {}", ROOT_REMOVED_MARKER.trim()));
     }
 
     #[test]
@@ -3236,7 +4033,7 @@ mod tests {
         let first = local_ts_on("2024-01-05");
         let last = local_ts_on("2024-02-04");
         let line = mk_from_root("/Volumes/old-laptop", false, 15, vec![1, 2], first, last);
-        let text = format_origin_line(&line);
+        let text = origin_text(&line);
         assert!(text.contains("2 decisions"), "{text}");
         assert!(text.contains("2024-01-05 \u{2013} 2024-02-04"), "{text}");
     }
@@ -3248,24 +4045,27 @@ mod tests {
     fn an_origin_line_carries_a_decision_count_not_a_list() {
         let ts = local_ts_on("2024-01-05");
         let many: Vec<i64> = (1..=15).collect();
-        let text = format_origin_line(&mk_from_root("/vol/sd", false, 8_151, many, ts, ts));
+        let text = origin_text(&mk_from_root("/vol/sd", false, 8_151, many, ts, ts));
         assert!(text.contains("15 decisions"), "{text}");
         assert!(!text.contains('#'), "{text}");
     }
 
+    /// A **list of one is not a list**, so the count-over-list rule above has
+    /// nothing to say here: the card's third site of the singleton chip names
+    /// the decision, which is the id `trail show` takes.
     #[test]
-    fn one_decision_reads_singular() {
+    fn one_decision_names_its_id_on_the_card() {
         let ts = local_ts_on("2024-01-05");
-        let text = format_origin_line(&mk_from_root("/vol/sd", false, 1, vec![7], ts, ts));
-        assert!(text.contains(" 1 decision "), "{text}");
-        assert!(!text.contains("1 decisions"), "{text}");
+        let text = origin_text(&mk_from_root("/vol/sd", false, 1, vec![7], ts, ts));
+        assert!(text.contains("decision #7"), "{text}");
+        assert!(!text.contains("1 decision "), "{text}");
     }
 
     #[test]
     fn the_date_range_is_retained() {
         let first = local_ts_on("2026-08-02");
         let last = local_ts_on("2026-08-09");
-        let text = format_origin_line(&mk_from_root("/vol/sd", false, 5, vec![1, 2], first, last));
+        let text = origin_text(&mk_from_root("/vol/sd", false, 5, vec![1, 2], first, last));
         assert!(text.ends_with("2026-08-02 \u{2013} 2026-08-09"), "{text}");
     }
 
@@ -3282,15 +4082,31 @@ mod tests {
         };
         assert_eq!(
             format_origin_line(&line),
-            "via apply #42 from 3 origins: 5 files (500 B) \u{b7} 2026-05-12"
+            vec!["via apply #42 from 3 origins: 5 files (500 B) \u{b7} 2026-05-12".to_string()]
         );
+    }
+
+    /// `MultiOrigin` stays **one line** through the shape change: it names no
+    /// root, so there is no path to protect and no marker to hang beneath one.
+    #[test]
+    fn multi_origin_stays_one_line() {
+        let line = OriginLine::MultiOrigin {
+            decision_id: 42,
+            origin_count: 3,
+            files: 5,
+            bytes: 500,
+            at: local_ts_on("2026-05-12"),
+        };
+        assert_eq!(format_origin_line(&line).len(), 1);
     }
 
     #[test]
     fn format_origin_line_from_root_marks_removed_root() {
         let ts = local_ts_on("2024-01-05");
         let line = mk_from_root("/Volumes/gone", true, 1, vec![1], ts, ts);
-        assert!(format_origin_line(&line).starts_with("arrived from /Volumes/gone (root removed):"));
+        let lines = format_origin_line(&line);
+        assert_eq!(lines[0], "arrived from /Volumes/gone");
+        assert_eq!(lines[1], format!("    {}", ROOT_REMOVED_MARKER.trim()));
     }
 
     /// The card's grammar, over both variants: an origin line answers *how
@@ -3299,9 +4115,9 @@ mod tests {
     #[test]
     fn an_origin_line_reads_arrived_from() {
         let ts = local_ts_on("2024-01-05");
-        assert!(
-            format_origin_line(&mk_from_root("/vol/sd", false, 1, vec![1], ts, ts))
-                .starts_with("arrived from /vol/sd:")
+        assert_eq!(
+            format_origin_line(&mk_from_root("/vol/sd", false, 1, vec![1], ts, ts))[0],
+            "arrived from /vol/sd"
         );
 
         let within = match mk_from_root("/archive", false, 1, vec![1], ts, ts) {
@@ -3328,7 +4144,10 @@ mod tests {
             },
             other => other,
         };
-        assert!(format_origin_line(&within).starts_with("arrived from elsewhere in /archive:"));
+        assert_eq!(
+            format_origin_line(&within)[0],
+            "arrived from elsewhere in /archive"
+        );
     }
 
     /// The marker is byte-identical to the one `drew_from_lines` renders for
@@ -3352,28 +4171,42 @@ mod tests {
         }]);
 
         let marker = format!(" (root retired \u{2014} the book: {book})");
-        assert!(card_line.contains(&marker), "{card_line}");
+        // The card hangs the marker on its own line, so the leading space is
+        // layout rather than text; the marker itself is the same string,
+        // because both surfaces reach it through `origin_marker`.
+        assert_eq!(
+            card_line[1],
+            format!("    {}", marker.trim()),
+            "{card_line:?}"
+        );
         assert!(drew[0].contains(&marker), "{}", drew[0]);
         // The book wins outright: a retired root is also a removed one, and
         // saying both would answer with the worse of the two.
-        assert!(!card_line.contains(ROOT_REMOVED_MARKER), "{card_line}");
+        assert!(
+            !origin_text(&mk_retired_from_root("/Volumes/gone", book, ts))
+                .contains(ROOT_REMOVED_MARKER.trim()),
+            "{card_line:?}"
+        );
     }
 
     #[test]
     fn a_plainly_removed_origin_root_keeps_the_root_removed_marker() {
         let ts = local_ts_on("2024-01-05");
         let line = mk_from_root("/Volumes/gone", true, 1, vec![1], ts, ts);
-        let text = format_origin_line(&line);
-        assert!(text.contains(ROOT_REMOVED_MARKER), "{text}");
+        let text = origin_text(&line);
+        assert!(text.contains(ROOT_REMOVED_MARKER.trim()), "{text}");
         assert!(!text.contains("the book:"), "{text}");
     }
 
     #[test]
     fn a_live_origin_root_carries_no_marker() {
         let ts = local_ts_on("2024-01-05");
-        let text = format_origin_line(&mk_from_root("/vol/sd", false, 1, vec![1], ts, ts));
-        assert!(!text.contains(ROOT_REMOVED_MARKER), "{text}");
+        let line = mk_from_root("/vol/sd", false, 1, vec![1], ts, ts);
+        let text = origin_text(&line);
+        assert!(!text.contains(ROOT_REMOVED_MARKER.trim()), "{text}");
         assert!(!text.contains("root retired"), "{text}");
+        // A live root has no marker line at all: path, then counts.
+        assert_eq!(format_origin_line(&line).len(), 2);
     }
 
     /// The label names the absence and stops. The cause is unknowable from
@@ -3415,7 +4248,7 @@ mod tests {
             at: local_ts_on("2024-01-05"),
         };
         assert_eq!(
-            format_origin_line(&line),
+            origin_text(&line),
             "via apply #42 from 3 origins: 12 files (1.2 KB) \u{b7} 2024-01-05"
         );
     }
@@ -3485,11 +4318,15 @@ mod tests {
             }),
         );
         let lines = composition_card_lines(&card);
-        assert_eq!(lines.len(), 4);
+        // The one origin takes two lines (path, counts) and the origins block
+        // teaches its door; the siblings are one line each and unchanged.
+        assert_eq!(lines.len(), 6);
         assert!(lines[0].starts_with("arrived from /a"));
-        assert!(lines[1].starts_with("excluded:"));
-        assert!(lines[2].starts_with("first indexed here"));
-        assert!(lines[3].starts_with("arrival unrecorded"));
+        assert!(lines[1].trim_start().starts_with("5 files"));
+        assert_eq!(lines[2], CARD_ORIGIN_HINT);
+        assert!(lines[3].starts_with("excluded:"));
+        assert!(lines[4].starts_with("first indexed here"));
+        assert!(lines[5].starts_with("arrival unrecorded"));
     }
 
     #[test]
@@ -3499,34 +4336,533 @@ mod tests {
             .collect();
         let card = mk_card(origins, Vec::new(), None, None);
         let lines = composition_card_lines(&card);
-        // 10 origin lines + one remainder line.
-        assert_eq!(lines.len(), 11);
-        assert_eq!(
-            lines[10],
-            "\u{2026} and 2 more origins — canon trail crossings"
+        // 10 origins at two lines each + one remainder line.
+        assert_eq!(lines.len(), 21);
+        assert!(
+            lines[20].starts_with("\u{2026} and 2 more origins"),
+            "{}",
+            lines[20]
         );
     }
 
-    /// The remainder is where the reader most needs the door: the origins it
-    /// names are exactly the ones the line just declined to print.
+    /// **One invitation, never two.** A capped card's remainder absorbs the
+    /// teacher; an uncapped card still teaches, because that is exactly where
+    /// the handles are and where nothing used to say so.
     #[test]
-    fn the_card_origin_remainder_teaches_the_door() {
+    fn a_capped_card_renders_one_invitation_not_two() {
         let origins: Vec<OriginLine> = (0..12)
             .map(|i| mk_from_root(&format!("/vol{i}"), false, 1, vec![i], 0, 0))
             .collect();
-        let remainder = composition_card_lines(&mk_card(origins, Vec::new(), None, None))
-            .last()
-            .unwrap()
-            .clone();
-        assert!(remainder.contains("canon trail crossings"), "{remainder}");
+        let capped = composition_card_lines(&mk_card(origins, Vec::new(), None, None));
+        assert_eq!(
+            capped
+                .iter()
+                .filter(|l| l.contains("canon trail crossings"))
+                .count(),
+            1,
+            "{capped:?}"
+        );
+        let remainder = capped.last().unwrap();
+        assert!(
+            remainder.starts_with("\u{2026} and 2 more origins"),
+            "{remainder}"
+        );
+        assert!(remainder.ends_with(CARD_ORIGIN_HINT), "{remainder}");
+    }
 
-        // A card whose origins all fit teaches nothing — there is no
-        // remainder line to teach from.
+    /// The card's origin lines are door handles, and the remainder line fires
+    /// only on a capped card — so without this a card showing all its origins
+    /// teaches nothing, exactly where the handles are.
+    #[test]
+    fn an_uncapped_card_still_teaches_its_origin_door() {
         let few: Vec<OriginLine> = (0..2)
             .map(|i| mk_from_root(&format!("/vol{i}"), false, 1, vec![i], 0, 0))
             .collect();
-        for line in composition_card_lines(&mk_card(few, Vec::new(), None, None)) {
+        let lines = composition_card_lines(&mk_card(few, Vec::new(), None, None));
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.contains("canon trail crossings"))
+                .count(),
+            1,
+            "{lines:?}"
+        );
+        // It names the payoff, not the gesture: nothing in a flag's name says what
+        // is behind it, so the line says it.
+        assert!(CARD_ORIGIN_HINT.contains("to list the folders behind an origin"));
+
+        // A card with no origins has no handles, so it teaches nothing.
+        let originless = composition_card_lines(&mk_card(
+            Vec::new(),
+            vec![TransitionedLine::Standing {
+                label: "excluded".to_string(),
+                files: 1,
+                bytes: 100,
+            }],
+            None,
+            None,
+        ));
+        for line in &originless {
             assert!(!line.contains("canon trail crossings"), "{line}");
+        }
+    }
+
+    /// `MultiOrigin` names no root, so a card carrying only multi-origin
+    /// lines puts no path on screen for `--origin` to take. The invitation
+    /// must not print there — the rule the rollup hint's placement rests on,
+    /// at the site that would otherwise break it.
+    #[test]
+    fn a_card_whose_origins_name_no_path_does_not_teach_the_origin_door() {
+        let card = mk_card(
+            vec![OriginLine::MultiOrigin {
+                decision_id: 42,
+                origin_count: 3,
+                files: 5,
+                bytes: 500,
+                at: local_ts_on("2026-05-12"),
+            }],
+            Vec::new(),
+            None,
+            None,
+        );
+        let lines = composition_card_lines(&card);
+        assert!(!lines.iter().any(|l| l.contains("<path>")), "{lines:?}");
+        for line in &lines {
+            assert!(!line.contains("canon trail crossings"), "{line}");
+        }
+
+        // **The capped card**, which is the branch the rule condemns most
+        // directly: the only origins the remainder line is about are the ones
+        // it just declined to print, so a `<path>` there is the least
+        // substitutable of all. Eleven multi-origin lines fill the window and
+        // the remainder must stay bare.
+        let capped = mk_card(
+            (0..(CARD_ORIGIN_CAP + 1) as i64)
+                .map(|i| OriginLine::MultiOrigin {
+                    decision_id: i,
+                    origin_count: 3,
+                    files: 5,
+                    bytes: 500,
+                    at: local_ts_on("2026-05-12"),
+                })
+                .collect(),
+            Vec::new(),
+            None,
+            None,
+        );
+        let capped = composition_card_lines(&capped);
+        assert!(
+            capped
+                .last()
+                .unwrap()
+                .starts_with("\u{2026} and 1 more origin"),
+            "{:?}",
+            capped.last()
+        );
+        for line in &capped {
+            assert!(!line.contains("<path>"), "{line}");
+            assert!(!line.contains("canon trail crossings"), "{line}");
+        }
+
+        // And the gate reads the **shown** origins, not all of them: a
+        // `FromRoot` beyond the cap puts no path on screen, so it cannot make
+        // the invitation substitutable. Only a window-blind gate teaches here.
+        let mut beyond: Vec<OriginLine> = (0..CARD_ORIGIN_CAP as i64)
+            .map(|i| OriginLine::MultiOrigin {
+                decision_id: i,
+                origin_count: 3,
+                files: 5,
+                bytes: 500,
+                at: local_ts_on("2026-05-12"),
+            })
+            .collect();
+        beyond.push(mk_from_root("/vol/sd", false, 1, vec![99], 0, 0));
+        for line in composition_card_lines(&mk_card(beyond, Vec::new(), None, None)) {
+            assert!(
+                !line.contains("canon trail crossings"),
+                "the only path is beyond the cap: {line}"
+            );
+        }
+
+        // One `FromRoot` beside it is enough — there is now a path to take.
+        let mixed = mk_card(
+            vec![
+                OriginLine::MultiOrigin {
+                    decision_id: 42,
+                    origin_count: 3,
+                    files: 5,
+                    bytes: 500,
+                    at: local_ts_on("2026-05-12"),
+                },
+                mk_from_root("/vol/sd", false, 1, vec![7], 0, 0),
+            ],
+            Vec::new(),
+            None,
+            None,
+        );
+        assert_eq!(
+            composition_card_lines(&mixed)
+                .iter()
+                .filter(|l| l.contains("canon trail crossings"))
+                .count(),
+            1
+        );
+    }
+
+    /// The rollup block with any combination of its three lines present.
+    fn rollup_block(extraction: bool, arrival: bool, rearrangement: bool) -> Vec<String> {
+        rollup_block_lines(
+            extraction.then_some(&ExtractionRollup {
+                files: 5,
+                bytes: Some(500),
+                destinations: 2,
+            }),
+            arrival.then_some(&ArrivalRollup {
+                files: 3,
+                bytes: Some(300),
+                origins: 1,
+            }),
+            rearrangement.then_some(&RearrangementRollup {
+                files: 2,
+                bytes: Some(200),
+            }),
+        )
+    }
+
+    /// **Red-smoke against today's ordering.** The hint sits beneath the two
+    /// *crossing* rollups and above `Rearranged here`: it teaches the door,
+    /// the door itemizes crossings, and the rearrangement rollup is the one
+    /// line it never expands. Printed beneath the whole block — where it was
+    /// — "these totals" points last at the total the door has nothing to say
+    /// about.
+    ///
+    /// Asserted on the printed order, since the defect is positional and a
+    /// const alone cannot show it.
+    #[test]
+    fn the_hint_sits_above_the_rearrangement_rollup() {
+        let block = rollup_block(true, true, true);
+        let hint = block.iter().position(|l| l == CROSSINGS_HINT).unwrap();
+        let rearranged = block
+            .iter()
+            .position(|l| l.starts_with("Rearranged here"))
+            .unwrap();
+        assert!(hint < rearranged, "{block:?}");
+        assert!(
+            block[hint - 1].starts_with("Arrived here"),
+            "the hint hangs off the crossing rollups: {block:?}"
+        );
+    }
+
+    /// A view whose only rollup is the rearrangement goes untaught: the door
+    /// answers "nothing crossed" there and itemizes nothing, so the
+    /// invitation would promise places it cannot list. That joins the global
+    /// and time-lens views the door already leaves untaught.
+    #[test]
+    fn a_rearrangement_only_view_is_not_taught_the_door() {
+        let block = rollup_block(false, false, true);
+        assert_eq!(block.len(), 1, "{block:?}");
+        assert!(!block[0].contains("canon trail crossings"), "{block:?}");
+    }
+
+    fn crossings_result(sections: Vec<CrossingSection>) -> CrossingsResult {
+        CrossingsResult {
+            sections,
+            nothing_crossed: None,
+            reconciliation: None,
+            decisions: Vec::new(),
+            extractions_all: HashMap::new(),
+        }
+    }
+
+    /// The bare view's entries are handles — the rendered path is exactly the
+    /// argument the flags take — and nothing announced it. Taught once for
+    /// the whole view, never once per entry.
+    #[test]
+    fn the_bare_view_teaches_its_drill_down_once() {
+        let ts = local_ts_on("2026-07-11");
+        let result = crossings_result(vec![
+            bare_section(
+                RowAspect::Extraction,
+                vec![
+                    counterpart_line("/archive/Media/2016/03", 262, 2, ts),
+                    counterpart_line("/archive/Docs", 3, 1, ts),
+                ],
+                0,
+            ),
+            bare_section(
+                RowAspect::Arrival,
+                vec![counterpart_line("/Volumes/sd", 5, 1, ts)],
+                0,
+            ),
+        ]);
+        // Two sections, three entries, one invitation — and because both
+        // directions rendered, it names both flags.
+        assert_eq!(
+            drill_down_hint(&result, &crossings_params_of(None, None)),
+            Some(format!(
+                "`canon trail crossings --origin <path>` or `--destination <path>` \
+                 {CROSSINGS_DRILL_DOWN_PAYOFF}"
+            ))
+        );
+    }
+
+    /// **The hint can only name a flag the entries on screen feed.** It is
+    /// derived from the rendered sections, not written down: an extraction
+    /// section lists destinations, so `--destination` opens them; an arrival
+    /// section lists origins, so `--origin` does.
+    ///
+    /// The defect this removes: a source-side view lists destinations while
+    /// the hint led with `--origin`, so substituting a listed path into it
+    /// narrowed the *other* end, matched nothing, and answered "nothing has
+    /// crossed between here and <that path>" — a dead end that reads as a
+    /// finding.
+    #[test]
+    fn the_drill_down_hint_names_the_flag_its_entries_feed() {
+        let ts = local_ts_on("2026-07-11");
+        let bare = crossings_params_of(None, None);
+        let entry = |path: &str| counterpart_line(path, 5, 1, ts);
+
+        let outbound = crossings_result(vec![bare_section(
+            RowAspect::Extraction,
+            vec![entry("/archive/Media/2016/03")],
+            0,
+        )]);
+        let hint = drill_down_hint(&outbound, &bare).unwrap();
+        assert!(hint.contains("--destination <path>"), "{hint}");
+        assert!(!hint.contains("--origin"), "{hint}");
+
+        let inbound = crossings_result(vec![bare_section(
+            RowAspect::Arrival,
+            vec![entry("/Volumes/sd")],
+            0,
+        )]);
+        let hint = drill_down_hint(&inbound, &bare).unwrap();
+        assert!(hint.contains("--origin <path>"), "{hint}");
+        assert!(!hint.contains("--destination"), "{hint}");
+    }
+
+    /// **The hint's promise is pinned from both sides**, because a claim
+    /// about a different rendering, held only as prose, goes stale silently.
+    ///
+    /// Two assertions, each catching a different drift:
+    /// * the promised feature is **absent** from a bare entry — move it onto
+    ///   the listing and this fails, rather than leaving the hint offering
+    ///   what is already on screen;
+    /// * it is **present** where an entry is named, and the promise names it
+    ///   — reword away from what is delivered and this fails.
+    #[test]
+    fn the_drill_down_hint_promises_only_what_naming_an_entry_adds() {
+        let ts = local_ts_on("2026-07-11");
+        // Deliberately **not** keyed on an indent: the drift this half exists
+        // to catch would most naturally arrive at the entry's *own*
+        // continuation indent, which is what `keyed_entry_lines` already
+        // hands out. Keying on eight spaces would make the assertion true by
+        // the indent width alone and blind to the shape it names.
+        let pairs = |lines: &[String]| lines.iter().filter(|l| l.contains('\u{2192}')).count();
+
+        // A bare entry: a path, its counts, and a folder *count* — never the
+        // folders themselves. The whole shape is a head, an optional marker and a
+        // counts line, so a listing of any kind, at any indent, shows up as
+        // one line more than that.
+        let bare_entry = counterpart_lines(&covering(
+            counterpart_line("/archive/Media/2016/03", 262, 2, ts),
+            9,
+        ));
+        assert_eq!(
+            bare_entry.len(),
+            2,
+            "a bare entry is exactly a head and a counts line; anything \
+             enumerating places adds one, at whatever indent: {bare_entry:?}"
+        );
+        assert_eq!(
+            pairs(&bare_entry),
+            0,
+            "the bare listing already shows what the hint promises: {bare_entry:?}"
+        );
+
+        // The marked shape too, so the exact count above cannot be satisfied
+        // by a drift that happens to replace the marker line.
+        let mut marked = covering(counterpart_line("/Volumes/gone", 5, 1, ts), 4);
+        marked.counterpart.root_removed = true;
+        let marked = counterpart_lines(&marked);
+        assert_eq!(marked.len(), 3, "head, marker, counts: {marked:?}");
+        assert_eq!(pairs(&marked), 0, "{marked:?}");
+
+        // The same content with the entry named: the folders, listed.
+        let named = CrossingSection {
+            aspect: RowAspect::Extraction,
+            files: 262,
+            bytes: Some(26_200),
+            counterparty_count: 1,
+            decision_count: 1,
+            named: Some(plain_counterpart("/archive/Media/2016/03")),
+            body: CrossingBody::Deliveries {
+                lines: Vec::new(),
+                more: 0,
+            },
+        };
+        let delivery = CrossingDelivery {
+            decision_id: 23,
+            at: ts,
+            files: 262,
+            bytes: Some(26_200),
+            disposition: None,
+            reason: None,
+            places: vec![
+                CrossingPlace {
+                    origin: "/vol/sd/03/01".to_string(),
+                    destination: "/archive/Media/2016/03/01".to_string(),
+                },
+                CrossingPlace {
+                    origin: "/vol/sd/03/02".to_string(),
+                    destination: "/archive/Media/2016/03/02".to_string(),
+                },
+            ],
+        };
+        let named_entry = delivery_lines(
+            &delivery,
+            &named,
+            &scope_of(&["/vol/sd"]),
+            &crossings_params_of(None, Some("/archive/Media/2016/03")),
+        );
+        assert_eq!(pairs(&named_entry), 2, "{named_entry:?}");
+
+        // And both promises name that feature, so neither can drift apart
+        // from it silently. The card's hint is the drill-down's twin — its
+        // origin lines name their decision too, so it makes the same promise
+        // about the same thing and takes the same pin.
+        for promise in [CROSSINGS_DRILL_DOWN_PAYOFF, CARD_ORIGIN_HINT] {
+            assert!(promise.contains("folders"), "{promise}");
+            assert!(
+                !promise.contains("decisions"),
+                "the entries already name their decision: {promise}"
+            );
+        }
+
+        // The card's own rendering, held to the same claim its hint makes —
+        // the string check above is only half a pin, and covering one site's
+        // structure while asserting about two is the shape this whole test
+        // exists to refuse.
+        let card_origin =
+            format_origin_line(&mk_from_root("/vol/sd", false, 262, vec![12], ts, ts));
+        assert_eq!(
+            card_origin.len(),
+            2,
+            "a card origin is a head and a counts line; a folder listing would \
+             add one: {card_origin:?}"
+        );
+        assert_eq!(pairs(&card_origin), 0, "{card_origin:?}");
+    }
+
+    /// A named view has already stepped through the door this line describes.
+    #[test]
+    fn a_named_view_does_not_teach_the_drill_down() {
+        let ts = local_ts_on("2026-07-11");
+        let named = CrossingSection {
+            aspect: RowAspect::Arrival,
+            files: 5,
+            bytes: Some(500),
+            counterparty_count: 1,
+            decision_count: 1,
+            named: Some(plain_counterpart("/Volumes/sd")),
+            body: CrossingBody::Deliveries {
+                lines: vec![CrossingDelivery {
+                    decision_id: 7,
+                    at: ts,
+                    files: 5,
+                    bytes: Some(500),
+                    disposition: None,
+                    reason: None,
+                    places: Vec::new(),
+                }],
+                more: 0,
+            },
+        };
+        assert_eq!(
+            drill_down_hint(
+                &crossings_result(vec![named]),
+                &crossings_params_of(Some("/Volumes/sd"), None)
+            ),
+            None
+        );
+
+        // And a view with nothing to drill into teaches nothing either.
+        assert_eq!(
+            drill_down_hint(
+                &crossings_result(Vec::new()),
+                &crossings_params_of(None, None)
+            ),
+            None
+        );
+    }
+
+    /// A named counterpart opens one direction and leaves the other listing
+    /// counterparts, so a view can hold a named section and a bare one at
+    /// once. The bare half's entries are still handles nothing else
+    /// announces, so it is still taught — the test is per section, and only a
+    /// view whose every section is named goes untaught.
+    #[test]
+    fn a_view_with_one_named_and_one_bare_section_still_teaches_the_bare_one() {
+        let ts = local_ts_on("2026-07-11");
+        let named = CrossingSection {
+            aspect: RowAspect::Extraction,
+            files: 5,
+            bytes: Some(500),
+            counterparty_count: 1,
+            decision_count: 1,
+            named: Some(plain_counterpart("/archive")),
+            body: CrossingBody::Deliveries {
+                lines: Vec::new(),
+                more: 0,
+            },
+        };
+        let bare = bare_section(
+            RowAspect::Arrival,
+            vec![counterpart_line("/Volumes/sd", 5, 1, ts)],
+            0,
+        );
+        let hint = drill_down_hint(
+            &crossings_result(vec![named, bare]),
+            &crossings_params_of(None, Some("/archive")),
+        )
+        .expect("the bare arrival section still has entries to open");
+        // The bare section is the arrival one, so it teaches `--origin` and
+        // never the flag that already named its sibling.
+        assert!(hint.contains("--origin <path>"), "{hint}");
+        assert!(!hint.contains("--destination"), "{hint}");
+    }
+
+    #[test]
+    fn jsonl_carries_no_hints() {
+        let ts = local_ts_on("2026-07-11");
+        let result = crossings_result(vec![bare_section(
+            RowAspect::Extraction,
+            vec![counterpart_line("/archive/Docs", 3, 1, ts)],
+            0,
+        )]);
+        let mut machine = crossings_params_of(None, None);
+        machine.machine_output = true;
+        assert_eq!(drill_down_hint(&result, &machine), None);
+    }
+
+    /// Every invitation this surface prints says **what running it yields**,
+    /// never only the gesture — a backquoted literal command, then `to <plain
+    /// verb> <payoff>`.
+    #[test]
+    fn every_invitation_names_its_payoff() {
+        let ts = local_ts_on("2026-07-11");
+        let drill_down = drill_down_hint(
+            &crossings_result(vec![bare_section(
+                RowAspect::Extraction,
+                vec![counterpart_line("/archive/Docs", 3, 1, ts)],
+                0,
+            )]),
+            &crossings_params_of(None, None),
+        )
+        .unwrap();
+        for hint in [CROSSINGS_HINT, CARD_ORIGIN_HINT, &drill_down] {
+            assert!(hint.contains("`canon trail crossings"), "{hint}");
+            assert!(hint.contains(" to list "), "{hint}");
         }
     }
 
@@ -3536,6 +4872,13 @@ mod tests {
     fn the_rollup_block_teaches_the_door_once() {
         assert!(CROSSINGS_HINT.contains("canon trail crossings"));
         assert_eq!(CROSSINGS_HINT.matches("canon trail crossings").count(), 1);
+        assert_eq!(
+            rollup_block(true, true, true)
+                .iter()
+                .filter(|l| *l == CROSSINGS_HINT)
+                .count(),
+            1
+        );
 
         // It is not part of any rollup sentence, so three rollups cannot
         // print it three times.
@@ -3593,7 +4936,8 @@ mod tests {
         assert!(result.sections.is_empty());
         assert!(nothing_crossed_line(
             result.nothing_crossed.as_ref().unwrap(),
-            &scope_of(&["/archive"])
+            &scope_of(&["/archive"]),
+            &crossings_params_of(None, None)
         )
         .contains("Nothing"));
     }
@@ -3643,7 +4987,9 @@ mod tests {
             .collect();
         let card = mk_card(origins, Vec::new(), None, None);
         let lines = composition_card_lines(&card);
-        assert_eq!(lines.len(), 3);
+        // Three origins at two lines each, then the hint — and nothing left
+        // over to name.
+        assert_eq!(lines.len(), 7);
         assert!(!lines.iter().any(|l| l.contains("more")));
     }
 

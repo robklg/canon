@@ -159,6 +159,236 @@ fn the_bare_view_itemizes_exactly_what_the_rollups_count() {
     assert_eq!(out_section.counterparty_count, out_rollup.destinations);
 }
 
+/// The same property where the outbound side actually coarsens — the case
+/// that would break if the rollup and the door ever derived the grain
+/// separately instead of sharing one derivation.
+///
+/// The failure this pins is not arithmetic drift but a reading one: a rollup
+/// saying `→ 19 destinations` standing one line above a door listing three of
+/// them, with the teaching hint between them inviting the comparison.
+#[test]
+fn the_grouped_outbound_view_itemizes_exactly_what_the_rollup_counts() {
+    let conn = open_in_memory_for_test();
+    a_drive_delivering_into_generated_folders(&conn);
+
+    let trail = compute_trail(&conn, &params(vec!["/Volumes/sd".to_string()])).unwrap();
+    let result = reported(&conn, &crossings_params(vec!["/Volumes/sd"]));
+    let outbound = section(&result, RowAspect::Extraction);
+    let rollup = trail.extraction_rollup.as_ref().unwrap();
+
+    assert_eq!(rollup.destinations, 3, "the rollup counts grouped places");
+    assert_eq!(outbound.counterparty_count, rollup.destinations);
+    assert_eq!(outbound.files, rollup.files);
+    assert_eq!(outbound.bytes, rollup.bytes);
+
+    let entries = counterpart_entries(&result, RowAspect::Extraction);
+    assert_eq!(entries.len(), rollup.destinations);
+    // Partition: the entries sum to the section total, and the folders they
+    // state sum to the ledger leaves underneath.
+    assert_eq!(entries.iter().map(|l| l.files).sum::<i64>(), rollup.files);
+    assert_eq!(entries.iter().map(|l| l.folders).sum::<usize>(), 19);
+}
+
+/// One drive delivering into a pattern-generated archive: twelve day folders
+/// under one month, six under another, and one folder a person named. At
+/// ledger precision that is nineteen destinations, none of them a place
+/// anyone would name.
+fn a_drive_delivering_into_generated_folders(conn: &Connection) -> (i64, Vec<i64>) {
+    let sd = insert_test_root(conn, "/Volumes/sd", "source", false);
+    insert_test_root(conn, "/archive", "archive", false);
+
+    let mut destinations: Vec<String> = (1..=12)
+        .map(|d| format!("/archive/Media/2016/03/{d:02}"))
+        .collect();
+    destinations.extend((1..=6).map(|d| format!("/archive/Media/2016/04/{d:02}")));
+    destinations.push("/archive/Media/2016/a-named-folder".to_string());
+
+    // Two applies, so a grouped entry can carry a plural decision count and
+    // the lone named folder can carry a singleton one.
+    let first = insert_decision_at(conn, "apply", 100);
+    let second = insert_decision_at(conn, "apply", 200);
+    let rows: Vec<DecisionExtraction> = destinations
+        .iter()
+        .enumerate()
+        .map(|(i, destination)| {
+            let decision = if destination.contains("a-named-folder") || i % 2 == 0 {
+                first
+            } else {
+                second
+            };
+            extraction_row(
+                decision,
+                sd,
+                "/Volumes/sd",
+                &format!("dir{i:02}"),
+                (i as i64) + 1,
+                Some(((i as i64) + 1) * 10),
+                destination,
+            )
+        })
+        .collect();
+    write_rows(conn, &rows);
+    (sd, vec![first, second])
+}
+
+fn counterpart_paths(result: &CrossingsResult, aspect: RowAspect) -> Vec<String> {
+    match &section(result, aspect).body {
+        CrossingBody::Counterparts { lines, .. } => {
+            lines.iter().map(|l| l.counterpart.path.clone()).collect()
+        }
+        CrossingBody::Deliveries { .. } => panic!("expected counterparts"),
+    }
+}
+
+fn counterpart_entries(
+    result: &CrossingsResult,
+    aspect: RowAspect,
+) -> &[crate::trail::ops::crossings::CounterpartLine] {
+    match &section(result, aspect).body {
+        CrossingBody::Counterparts { lines, .. } => lines,
+        CrossingBody::Deliveries { .. } => panic!("expected counterparts"),
+    }
+}
+
+/// The outbound listing names months and the folder a person named — never
+/// the nineteen generated day folders underneath them.
+#[test]
+fn the_outbound_view_groups_generated_folders_into_places_a_person_would_name() {
+    let conn = open_in_memory_for_test();
+    a_drive_delivering_into_generated_folders(&conn);
+
+    let result = reported(&conn, &crossings_params(vec!["/Volumes/sd"]));
+    let mut paths = counterpart_paths(&result, RowAspect::Extraction);
+    paths.sort();
+    assert_eq!(
+        paths,
+        vec![
+            "/archive/Media/2016/03",
+            "/archive/Media/2016/04",
+            "/archive/Media/2016/a-named-folder",
+        ]
+    );
+
+    // The coarsening is visible: a grouped entry says how many finer places
+    // it stands for, and a leaf entry says nothing because it is one.
+    let mut covered: Vec<(String, usize)> = counterpart_entries(&result, RowAspect::Extraction)
+        .iter()
+        .map(|l| (l.counterpart.path.clone(), l.folders))
+        .collect();
+    covered.sort();
+    assert_eq!(
+        covered,
+        vec![
+            ("/archive/Media/2016/03".to_string(), 12),
+            ("/archive/Media/2016/04".to_string(), 6),
+            ("/archive/Media/2016/a-named-folder".to_string(), 1),
+        ]
+    );
+}
+
+/// The reach the coarsening must not cost: naming a grouped entry drops into
+/// it at the ledger's own grain, with the decisions behind it.
+#[test]
+fn a_destination_flag_narrows_into_a_grouped_entry() {
+    let conn = open_in_memory_for_test();
+    a_drive_delivering_into_generated_folders(&conn);
+
+    let mut p = crossings_params(vec!["/Volumes/sd"]);
+    p.destination = Some("/archive/Media/2016/03".to_string());
+    let result = reported(&conn, &p);
+    let narrowed = section(&result, RowAspect::Extraction);
+    assert!(narrowed.named.is_some(), "the entry was named, so it opens");
+
+    match &narrowed.body {
+        CrossingBody::Deliveries { lines, .. } => {
+            let places: Vec<&str> = lines
+                .iter()
+                .flat_map(|l| l.places.iter().map(|p| p.destination.as_str()))
+                .collect();
+            assert_eq!(places.len(), 12, "all twelve leaves are reachable");
+            assert!(places.contains(&"/archive/Media/2016/03/07"));
+        }
+        CrossingBody::Counterparts { .. } => panic!("a named destination lists deliveries"),
+    }
+}
+
+/// The boundary-borrowing rule's own pin, extended past the row set to the
+/// display grain: standing at the drive and naming it from nowhere are one
+/// computation, so they must not group two ways.
+#[test]
+fn global_origin_groups_identically_to_standing_at_the_drive() {
+    let conn = open_in_memory_for_test();
+    a_drive_delivering_into_generated_folders(&conn);
+
+    let standing = reported(&conn, &crossings_params(vec!["/Volumes/sd"]));
+    let mut global = crossings_params(vec![]);
+    global.origin = Some("/Volumes/sd".to_string());
+    let borrowed = reported(&conn, &global);
+
+    assert_eq!(
+        counterpart_paths(&standing, RowAspect::Extraction),
+        counterpart_paths(&borrowed, RowAspect::Extraction)
+    );
+    assert_eq!(
+        section(&standing, RowAspect::Extraction).counterparty_count,
+        section(&borrowed, RowAspect::Extraction).counterparty_count
+    );
+}
+
+/// The cap sizes the listing of **entries**, which after grouping are the
+/// places — so a remainder now names a quantity the reader can act on.
+#[test]
+fn the_cap_applies_to_grouped_entries() {
+    let conn = open_in_memory_for_test();
+    a_drive_delivering_into_generated_folders(&conn);
+
+    let mut p = crossings_params(vec!["/Volumes/sd"]);
+    p.limit = Some(2);
+    let result = reported(&conn, &p);
+    match &section(&result, RowAspect::Extraction).body {
+        CrossingBody::Counterparts { lines, more } => {
+            assert_eq!(lines.len(), 2);
+            // Two of three grouped entries, not two of nineteen leaves.
+            assert_eq!(*more, 1);
+        }
+        CrossingBody::Deliveries { .. } => panic!("expected counterparts"),
+    }
+}
+
+/// A fully-determined answer is a handle, not a statistic: the entry drawn by
+/// one decision carries that decision's real id, and it is the id `trail
+/// show` takes.
+#[test]
+fn a_singleton_decision_count_names_its_id() {
+    let conn = open_in_memory_for_test();
+    let (_, applies) = a_drive_delivering_into_generated_folders(&conn);
+
+    let result = reported(&conn, &crossings_params(vec!["/Volumes/sd"]));
+    let named_folder = counterpart_entries(&result, RowAspect::Extraction)
+        .iter()
+        .find(|l| l.counterpart.path.ends_with("a-named-folder"))
+        .expect("the named folder is its own entry");
+    assert_eq!(named_folder.decision_ids, vec![applies[0]]);
+    // The date of a single decision is one date, never a degenerate range.
+    assert_eq!(named_folder.first_at, named_folder.last_at);
+}
+
+#[test]
+fn a_plural_count_stays_anonymous() {
+    let conn = open_in_memory_for_test();
+    let (_, applies) = a_drive_delivering_into_generated_folders(&conn);
+
+    let result = reported(&conn, &crossings_params(vec!["/Volumes/sd"]));
+    let month = counterpart_entries(&result, RowAspect::Extraction)
+        .iter()
+        .find(|l| l.counterpart.path.ends_with("/03"))
+        .expect("the month is a grouped entry");
+    let mut ids = month.decision_ids.clone();
+    ids.sort_unstable();
+    assert_eq!(ids, applies, "both applies fed this month");
+    assert!(month.first_at < month.last_at, "a real span, not one date");
+}
+
 /// A rearrangement is in neither crossing section — and at an archive root
 /// that is the section the intra-archive apply lands in.
 #[test]
@@ -573,6 +803,162 @@ fn the_reconciliation_line_is_absent_when_a_destination_narrows_the_delivery() {
     assert!(
         narrowed.reconciliation.is_none(),
         "a narrowed delivery must not be compared against an unnarrowed standing"
+    );
+}
+
+/// One drive, two applies into the archive, only one of which stamped a
+/// source that still stands — so the card's decision count and the door's
+/// genuinely differ, which is the shape the decisions clause exists for.
+fn an_origin_whose_two_counts_both_diverge(conn: &Connection) -> (i64, i64) {
+    let sd = insert_test_root(conn, "/Volumes/sd", "source", false);
+    let archive = insert_test_root(conn, "/archive", "archive", false);
+    let first = insert_decision_at(conn, "apply", 100);
+    let second = insert_decision_at(conn, "apply", 200);
+    write_rows(
+        conn,
+        &[
+            extraction_row(first, sd, "/Volumes/sd", "photos", 2, Some(20), "/archive"),
+            extraction_row(second, sd, "/Volumes/sd", "photos", 3, Some(30), "/archive"),
+        ],
+    );
+    // One survivor, stamped by the first apply only: the second delivered
+    // and nothing it delivered still stands.
+    let kept = insert_test_source(conn, archive, "x.jpg", 1, 1, 10, 0);
+    conn.execute(
+        "UPDATE sources SET decision_id = ?, present = 1 WHERE id = ?",
+        rusqlite::params![first, kept],
+    )
+    .unwrap();
+    (first, second)
+}
+
+/// **The decisions clause acquires no gate of its own.** Both numbers are
+/// read off the same card line at the same match, so every condition that
+/// silences the file clause silences this one — asserted by walking the six
+/// conditions rather than by argument.
+///
+/// Each case is preceded by a **positive control**: the ungated run must
+/// produce a line carrying both axes, or the case proves nothing about the
+/// gate it names. A fixture that never reaches `reconcile` at all yields an
+/// absent line for a reason of its own, and a gate test resting on that
+/// passes through an entirely different branch than the one it is named for.
+#[test]
+fn the_decisions_clause_inherits_every_file_clause_gate() {
+    let conn = open_in_memory_for_test();
+    an_origin_whose_two_counts_both_diverge(&conn);
+
+    let ungated = || {
+        let mut p = crossings_params(vec!["/archive"]);
+        p.origin = Some("/Volumes/sd".to_string());
+        p
+    };
+
+    // Positive control: the computation is reached and both axes diverge, so
+    // every `is_none()` below is the gate firing rather than a fixture that
+    // never had a line to suppress.
+    let line = reported(&conn, &ungated()).reconciliation.unwrap();
+    assert_eq!((line.standing, line.delivered), (1, 5));
+    assert_eq!(
+        (line.standing_decisions, line.delivered_decisions),
+        (1, 2),
+        "the fixture must diverge on the decisions axis too"
+    );
+
+    // 1. Machine output — a present-tense number has no place in a stream
+    //    whose contract is view-independent.
+    let mut machine = ungated();
+    machine.machine_output = true;
+    assert!(reported(&conn, &machine).reconciliation.is_none());
+
+    // 2. A global view: the card answers for no place in particular.
+    //
+    //    Held in two places, and this case cannot tell them apart —
+    //    red-smoking `reconcile`'s own disjunct leaves every test passing,
+    //    because `compute_composition` refuses a global scope first and there
+    //    is no card to read either count off. Asserted as the pair it is,
+    //    rather than claiming a branch this fixture never reaches.
+    let mut global = ungated();
+    global.prefixes = Vec::new();
+    assert!(reported(&conn, &global).reconciliation.is_none());
+    assert!(
+        crate::trail::ops::composition::compute_composition(&conn, &[])
+            .unwrap()
+            .is_none(),
+        "the card's own global refusal is the outer half of this gate"
+    );
+
+    // 3. A named destination narrows the delivered count and narrows nothing
+    //    about the card.
+    let mut narrowed = ungated();
+    narrowed.destination = Some("/archive".to_string());
+    assert!(reported(&conn, &narrowed).reconciliation.is_none());
+
+    // 4. No origin named: nothing to attribute the card's line to.
+    let mut unnamed = ungated();
+    unnamed.origin = None;
+    assert!(reported(&conn, &unnamed).reconciliation.is_none());
+
+    // 5. A sub-root origin: the card attributes at root level by design, so
+    //    there is no card number at this grain to compare against.
+    let mut deeper = ungated();
+    deeper.origin = Some("/Volumes/sd/photos".to_string());
+    let sub_root = reported(&conn, &deeper);
+    assert_eq!(
+        section(&sub_root, RowAspect::Arrival).files,
+        5,
+        "the section must exist, or the gate under test was never reached"
+    );
+    assert!(sub_root.reconciliation.is_none());
+
+    // 6. No arrival section at all: an origin Canon knows, that delivered
+    //    nothing here. There is no delivered count to set anything beside.
+    let other = insert_test_root(&conn, "/Volumes/other-drive", "source", false);
+    insert_test_source(&conn, other, "y.jpg", 1, 3, 10, 0);
+    let mut silent = ungated();
+    silent.origin = Some("/Volumes/other-drive".to_string());
+    let quiet = reported(&conn, &silent);
+    assert!(
+        !quiet
+            .sections
+            .iter()
+            .any(|s| s.aspect == RowAspect::Arrival),
+        "the fixture must genuinely have no arrival section"
+    );
+    assert!(quiet.reconciliation.is_none());
+}
+
+/// The card's decision count is the card's own, at the exact match site —
+/// never a second count of the same thing, on either axis.
+#[test]
+fn both_reconciliation_axes_come_from_the_card_not_a_re_derivation() {
+    let conn = open_in_memory_for_test();
+    let (first, _) = an_origin_whose_two_counts_both_diverge(&conn);
+
+    let mut p = crossings_params(vec!["/archive"]);
+    p.origin = Some("/Volumes/sd".to_string());
+    let line = reported(&conn, &p).reconciliation.unwrap();
+
+    let card =
+        crate::trail::ops::composition::compute_composition(&conn, &["/archive".to_string()])
+            .unwrap()
+            .unwrap();
+    match &card.origins[0] {
+        crate::trail::domain::composition::OriginLine::FromRoot {
+            files,
+            decision_ids,
+            ..
+        } => {
+            assert_eq!(line.standing, *files);
+            assert_eq!(line.standing_decisions, decision_ids.len());
+            assert_eq!(decision_ids, &vec![first]);
+        }
+        crate::trail::domain::composition::OriginLine::MultiOrigin { .. } => panic!("FromRoot"),
+    }
+
+    // And the delivered half is the door's own section count, not a third.
+    assert_eq!(
+        line.delivered_decisions,
+        section(&reported(&conn, &p), RowAspect::Arrival).decision_count
     );
 }
 

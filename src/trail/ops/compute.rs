@@ -13,6 +13,7 @@ use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::root::{find_containing_root, Root};
 use crate::core::repo::{self, Connection};
 use crate::notes::{fetch_all, fetch_by_roots};
+use crate::trail::domain::grouping::group_destinations;
 use crate::trail::domain::placement::{
     placement_in_view, row_aspect, scopes_touch, RowAspect, ScopeMatch,
 };
@@ -49,6 +50,9 @@ pub struct ExtractionRollup {
     pub files: i64,
     /// `None` if any contributing row lacks a size — never a partial sum.
     pub bytes: Option<i64>,
+    /// Destinations at the **derived grain**, not at the ledger's leaf: the
+    /// count the counterpart door itemizes, through the same
+    /// `domain::grouping` derivation over the same rows.
     pub destinations: usize,
 }
 
@@ -235,7 +239,8 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
             // Whole-history rollups: every touching row, never capped by the
             // decision-window limit. Scope-lens only — never a time-lens view.
             let rollups = if range.is_none() {
-                build_rollups(&placements)
+                let floors: Vec<&str> = roots.iter().map(|r| r.path.as_str()).collect();
+                build_rollups(&placements, &floors)
             } else {
                 Rollups::default()
             };
@@ -517,15 +522,24 @@ pub(super) fn rollup_parts<'a>(
 }
 
 /// "Archived from here": content that left, by where it went.
+///
+/// The counterparty count `rollup_parts` computes is **discarded**: it counts
+/// ledger leaves, and this line's number is the one the door itemizes, which
+/// is the derived destination grain. Sharing that derivation — not merely
+/// matching its result — is what keeps a rollup saying `→ 3 destinations`
+/// from standing above a door listing forty-seven of them, one line apart,
+/// with the teaching hint between them inviting the comparison.
 fn build_extraction_rollup<'a>(
     rows: impl Iterator<Item = &'a DecisionExtraction>,
+    floors: &[&str],
 ) -> Option<ExtractionRollup> {
-    rollup_parts(rows, |r| &r.destination_path).map(|(files, bytes, destinations)| {
-        ExtractionRollup {
-            files,
-            bytes,
-            destinations,
-        }
+    let rows: Vec<&DecisionExtraction> = rows.collect();
+    let (files, bytes, _) = rollup_parts(rows.iter().copied(), |r| &r.destination_path)?;
+    let leaves: Vec<&str> = rows.iter().map(|r| r.destination_path.as_str()).collect();
+    Some(ExtractionRollup {
+        files,
+        bytes,
+        destinations: group_destinations(&leaves, floors).len(),
     })
 }
 
@@ -567,7 +581,14 @@ struct Rollups {
 /// rollup at once. The sets are disjoint, so no row is counted twice — which
 /// is the whole point, since a rearrangement used to be claimed by both
 /// crossing rollups and read as double the activity.
-fn build_rollups(placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>) -> Rollups {
+///
+/// `floors` are the live root paths the outbound grouping stays below; they
+/// are threaded from the roots this query already loaded rather than fetched,
+/// so the derivation itself stays I/O-free.
+fn build_rollups(
+    placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>,
+    floors: &[&str],
+) -> Rollups {
     let (mut left, mut entered, mut stayed) = (Vec::new(), Vec::new(), Vec::new());
     for (row, aspect) in placements.values().flatten() {
         match aspect {
@@ -580,7 +601,7 @@ fn build_rollups(placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>
     }
 
     Rollups {
-        extraction: build_extraction_rollup(left.into_iter()),
+        extraction: build_extraction_rollup(left.into_iter(), floors),
         arrival: build_arrival_rollup(entered.into_iter()),
         rearrangement: build_rearrangement_rollup(stayed.into_iter()),
     }

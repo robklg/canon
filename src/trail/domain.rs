@@ -3,6 +3,7 @@
 
 pub(super) mod composition;
 pub(super) mod crossings;
+pub(super) mod grouping;
 pub(super) mod place;
 pub(super) mod placement;
 pub(super) mod timeline;

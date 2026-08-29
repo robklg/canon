@@ -27,6 +27,7 @@ use crate::trail::domain::composition::OriginLine;
 use crate::trail::domain::crossings::{
     counterpart_of, crossing_verdict, CrossingFilter, CrossingVerdict,
 };
+use crate::trail::domain::grouping::group_destinations;
 use crate::trail::domain::placement::{placement_in_view, RowAspect};
 use crate::trail::ops::compute::rollup_parts;
 use crate::trail::ops::place::{place_knowledge, PlaceKnowledge};
@@ -80,7 +81,16 @@ pub struct CrossingSection {
     pub files: i64,
     /// `None` if any contributing row lacks a size — never a partial sum.
     pub bytes: Option<i64>,
+    /// Counterparties at the **display grain** — the number of entries
+    /// printed beneath this header, which outbound is the derived grouping
+    /// and inbound is the origin root count.
     pub counterparty_count: usize,
+    /// Distinct decisions behind this section's rows.
+    ///
+    /// The door's own count of the number the composition card also carries,
+    /// which is what the reconciliation line sets beside the card's. Computed
+    /// here, over the section's rows, rather than re-derived at the line.
+    pub decision_count: usize,
     /// Set when this section's outside end was named by a flag.
     pub named: Option<Counterpart>,
     pub body: CrossingBody,
@@ -115,7 +125,22 @@ pub struct CounterpartLine {
     pub counterpart: Counterpart,
     pub files: i64,
     pub bytes: Option<i64>,
-    pub decisions: usize,
+    /// Every decision behind this entry, sorted and deduped.
+    ///
+    /// The **ids**, not their count: a count of exactly one renders as the id
+    /// itself, which is a handle the reader can hand straight to `trail show`
+    /// rather than a statistic they must open a second view to resolve. The
+    /// ids ride the aggregation the count was already computed from — the
+    /// dedup below runs for the date span regardless — so no renderer ever
+    /// looks one up per line.
+    pub decision_ids: Vec<i64>,
+    /// How many ledger-leaf places this entry stands for.
+    ///
+    /// `1` where the entry *is* a leaf, which is every inbound entry (origins
+    /// key at the root path) and every outbound entry the grouping left at
+    /// ledger grain. Past one, the count is stated: a coarsened key that did
+    /// not say how much it covered would read as the whole truth.
+    pub folders: usize,
     pub first_at: i64,
     pub last_at: i64,
 }
@@ -164,16 +189,35 @@ pub enum NothingCrossed {
     Nothing,
 }
 
-/// Two observations about one origin, side by side: how much it delivered
-/// (the ledger's count) and how much of that still stands here (the card's).
+/// Two observations about one origin, side by side, on each of two axes: how
+/// much it delivered (the ledger's count) and how much of that still stands
+/// here (the card's) — in files, and in the decisions behind them.
 ///
-/// The gap is **never decomposed**. Its causes — deleted since, moved on
-/// again, or later re-transitioned in place — are indistinguishable from
-/// these rows, so naming any subset of them would state a cause Canon cannot
-/// know.
+/// The gap is **never decomposed** on either axis. Its causes — deleted
+/// since, moved on again, or later re-transitioned in place — are
+/// indistinguishable from these rows, so naming any subset of them would
+/// state a cause Canon cannot know.
+///
+/// The decisions axis exists because the line that was built to stop one
+/// number reading as a bug acquired a second number beside it: an origin line
+/// promising fifteen decisions, opened, shows a door header reading
+/// seventeen. Neither count can be made to agree with the other without lying
+/// about its own register — the card counts decisions that stamped surviving
+/// sources, the door counts decisions holding extraction rows.
+///
+/// **Containment does not hold in either direction.** A decision stamp
+/// survives a scan-observed move *into* the view, so the card's counts can
+/// exceed the door's on both axes; the traced consequence is that no clause
+/// composed from these numbers may assert one set is a subset of the other
+/// where the arithmetic does not permit it.
 pub struct Reconciliation {
     pub standing: i64,
     pub delivered: i64,
+    /// Decisions behind what stands here — the card's `FromRoot` line's own
+    /// id count, at the exact match site, never re-derived.
+    pub standing_decisions: usize,
+    /// Decisions behind what was delivered — the arrival section's count.
+    pub delivered_decisions: usize,
 }
 
 pub fn compute_crossings(conn: &Connection, params: &CrossingsParams) -> Result<Crossings> {
@@ -330,11 +374,14 @@ fn build_section(
     // The same builder the whole-history rollups use, over the same rows and
     // the same counterparty key: the section header is the rollup line, so it
     // must be the rollup's arithmetic rather than a second copy of it.
-    let Some((files, bytes, counterparty_count)) =
-        rollup_parts(rows.iter().copied(), counterparty_fn(aspect))
+    let Some((files, bytes, _)) = rollup_parts(rows.iter().copied(), counterparty_fn(aspect))
     else {
         return Ok(None);
     };
+    // ...and the counterparty *count* is the display grain, not the leaf
+    // count `rollup_parts` returns, for the same reason the rollup line
+    // discards it: the header counts the entries printed beneath it.
+    let keys = display_keys(&rows, aspect, roots);
 
     let named = match named_for(aspect, params) {
         Some(path) => Some(counterpart_at(path, roots, conn)?),
@@ -342,17 +389,65 @@ fn build_section(
     };
     let body = match &named {
         Some(_) => build_deliveries(&rows, decisions, params.limit),
-        None => build_counterparts(&rows, decisions, aspect, params.limit, roots, conn)?,
+        None => build_counterparts(&rows, &keys, decisions, aspect, params.limit, roots, conn)?,
     };
 
     Ok(Some(CrossingSection {
         aspect,
         files,
         bytes,
-        counterparty_count,
+        counterparty_count: keys.len(),
+        decision_count: distinct_decisions(&rows).len(),
         named,
         body,
     }))
+}
+
+/// The distinct decisions behind a set of rows, sorted.
+fn distinct_decisions(rows: &[&DecisionExtraction]) -> Vec<i64> {
+    let mut ids: Vec<i64> = rows.iter().map(|row| row.decision_id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// The display keys this section's entries stand at, each with the ledger
+/// leaves it covers.
+///
+/// **Outbound the key is derived** (`trail::domain::grouping`): the ledger
+/// records a destination directory, and a manifest pattern can make that a
+/// folder per day, so the leaf is not a place a person would name. **Inbound
+/// it is the leaf** — the counterparty is already the origin *root* path,
+/// which is the grain the card attributes at and the one that reads well.
+///
+/// One function serves the section header's count and its entries, so the
+/// header can never disagree with the lines beneath it; the rollup line above
+/// the door reaches the same derivation over its own rows.
+fn display_keys(
+    rows: &[&DecisionExtraction],
+    aspect: RowAspect,
+    roots: &[Root],
+) -> Vec<(String, Vec<String>)> {
+    let counterparty = counterparty_fn(aspect);
+    let leaves: Vec<&str> = rows.iter().map(|row| counterparty(row)).collect();
+    match aspect {
+        RowAspect::Extraction => {
+            let floors: Vec<&str> = roots.iter().map(|r| r.path.as_str()).collect();
+            group_destinations(&leaves, &floors)
+                .into_iter()
+                .map(|group| (group.key, group.leaves))
+                .collect()
+        }
+        RowAspect::Arrival | RowAspect::Rearrangement | RowAspect::Outside => {
+            let mut distinct: Vec<String> = leaves.iter().map(|leaf| leaf.to_string()).collect();
+            distinct.sort();
+            distinct.dedup();
+            distinct
+                .into_iter()
+                .map(|leaf| (leaf.clone(), vec![leaf]))
+                .collect()
+        }
+    }
 }
 
 /// Which end of a row this aspect counts as its counterparty — the rollups'
@@ -388,9 +483,15 @@ fn counterpart_at(path: &str, roots: &[Root], conn: &Connection) -> Result<Count
     })
 }
 
-/// The bare listing: one entry per counterpart, the rollup line itemized.
+/// The bare listing: one entry per display key, the rollup line itemized.
+///
+/// Rows are bucketed by **which key covers their counterparty**, not by the
+/// counterparty string itself. The grouping partitions the leaves, so every
+/// row lands in exactly one entry and the sum over entries is the section
+/// total — arithmetic rather than discipline.
 fn build_counterparts(
     rows: &[&DecisionExtraction],
+    keys: &[(String, Vec<String>)],
     decisions: &HashMap<i64, Decision>,
     aspect: RowAspect,
     limit: Option<usize>,
@@ -398,21 +499,28 @@ fn build_counterparts(
     conn: &Connection,
 ) -> Result<CrossingBody> {
     let key = counterparty_fn(aspect);
-    let mut groups: Vec<(&str, Vec<&DecisionExtraction>)> = Vec::new();
-    for row in rows {
-        match groups.iter_mut().find(|(k, _)| *k == key(row)) {
-            Some((_, members)) => members.push(row),
-            None => groups.push((key(row), vec![row])),
+    let mut owner: HashMap<&str, usize> = HashMap::new();
+    for (index, (_, leaves)) in keys.iter().enumerate() {
+        for leaf in leaves {
+            owner.insert(leaf.as_str(), index);
         }
+    }
+    let mut members: Vec<Vec<&DecisionExtraction>> = vec![Vec::new(); keys.len()];
+    for row in rows {
+        // The leaves were derived from these same rows, so a miss is a broken
+        // partition, not a row this view does not own — and dropping it
+        // silently would leave the entries summing to less than the header.
+        let index = *owner
+            .get(key(row))
+            .expect("every row's counterparty is one of the grouped leaves");
+        members[index].push(row);
     }
 
     let mut lines: Vec<CounterpartLine> = Vec::new();
-    for (path, members) in groups {
+    for ((path, leaves), members) in keys.iter().zip(members) {
         let (files, bytes, _) =
             rollup_parts(members.iter().copied(), key).expect("a group is never empty");
-        let mut ids: Vec<i64> = members.iter().map(|r| r.decision_id).collect();
-        ids.sort_unstable();
-        ids.dedup();
+        let ids = distinct_decisions(&members);
         let stamps: Vec<i64> = ids
             .iter()
             .filter_map(|id| decisions.get(id).map(|d| d.created_at))
@@ -421,7 +529,8 @@ fn build_counterparts(
             counterpart: counterpart_at(path, roots, conn)?,
             files,
             bytes,
-            decisions: ids.len(),
+            decision_ids: ids,
+            folders: leaves.len(),
             first_at: stamps.iter().copied().min().unwrap_or_default(),
             last_at: stamps.iter().copied().max().unwrap_or_default(),
         });
@@ -528,25 +637,32 @@ fn reconcile(
     let Some(origin) = params.origin.as_ref() else {
         return Ok(None);
     };
-    let Some(delivered) = sections
-        .iter()
-        .find(|s| s.aspect == RowAspect::Arrival)
-        .map(|s| s.files)
-    else {
+    let Some(arrivals) = sections.iter().find(|s| s.aspect == RowAspect::Arrival) else {
         return Ok(None);
     };
     let Some(card) = crate::trail::ops::composition::compute_composition(conn, &params.prefixes)?
     else {
         return Ok(None);
     };
+    // Both numbers come off the *same* card line, at the same match, so the
+    // decisions axis acquires no gate of its own — it inherits every one of
+    // the file axis's, which is the whole reason it is read here rather than
+    // counted a second time somewhere else.
     let standing = card.origins.iter().find_map(|line| match line {
         OriginLine::FromRoot {
-            root_path, files, ..
-        } if root_path == origin => Some(*files),
+            root_path,
+            files,
+            decision_ids,
+            ..
+        } if root_path == origin => Some((*files, decision_ids.len())),
         OriginLine::FromRoot { .. } | OriginLine::MultiOrigin { .. } => None,
     });
-    Ok(standing.map(|standing| Reconciliation {
-        standing,
-        delivered,
-    }))
+    Ok(
+        standing.map(|(standing, standing_decisions)| Reconciliation {
+            standing,
+            delivered: arrivals.files,
+            standing_decisions,
+            delivered_decisions: arrivals.decision_count,
+        }),
+    )
 }
