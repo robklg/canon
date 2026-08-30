@@ -484,10 +484,26 @@ fn available<'k>(ctx: &'k EvalContext<'_>) -> Vec<&'k str> {
 mod tests {
     use super::super::transform::Modifier;
     use super::*;
+    use crate::core::domain::root::Root;
+    use crate::core::domain::scope::ScopeResolution;
 
+    /// The vantage a manifest recording `prefixes` yields against `roots`,
+    /// built through the one resolution exactly as a run builds it.
     fn vantage(prefixes: &[&str], roots: &[&str]) -> ScopeVantage {
         let owned: Vec<String> = prefixes.iter().map(|p| p.to_string()).collect();
-        ScopeVantage::new(&owned, roots.iter().copied())
+        let roots: Vec<Root> = roots
+            .iter()
+            .enumerate()
+            .map(|(i, path)| Root {
+                id: i as i64 + 1,
+                path: path.to_string(),
+                role: "source".to_string(),
+                comment: None,
+                last_scanned_at: None,
+                suspended: false,
+            })
+            .collect();
+        ScopeVantage::new(&ScopeResolution::resolve(&owned, &roots))
     }
 
     /// A source at `root` + `rel`, with the remaining attributes fixed. The

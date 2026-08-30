@@ -984,6 +984,7 @@ mod tests {
         insert_source_with_metadata, setup_test_db,
     };
 
+    use crate::core::domain::scope::ScopeResolution;
     use crate::expr::{extract_fact_keys, parse_pattern};
 
     fn make_lock_entry(
@@ -1014,7 +1015,7 @@ mod tests {
     /// none of which has an opinion about the scope.
     fn no_scope() -> &'static ScopeVantage {
         static EMPTY: std::sync::OnceLock<ScopeVantage> = std::sync::OnceLock::new();
-        EMPTY.get_or_init(|| ScopeVantage::new(&[], std::iter::empty()))
+        EMPTY.get_or_init(|| ScopeVantage::new(&ScopeResolution::resolve(&[], &[])))
     }
 
     fn default_params<'a>(

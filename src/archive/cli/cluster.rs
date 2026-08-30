@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::archive::domain::{parse_manifest_allow, validate_manifest_version, ManifestConfig};
@@ -11,7 +12,7 @@ use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
-use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::scope::{DecisionScope, ScopeResolution};
 use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::core::ops::scope::{classify_all, resolve_archive_path};
 use crate::core::repo::{self, Connection, Db};
@@ -272,9 +273,20 @@ fn refresh_with_editor(
         );
     }
 
-    // Taken as recorded — no split, nothing to reconstruct. Owned because
-    // the config itself is handed on to the refresh below.
-    let scope_prefixes = config.meta.scope.clone();
+    // The roots are fetched here rather than beside the placement warning
+    // below, because the recorded scope has to be resolved against them before
+    // anything reads it: the re-query, the write-back and the decision record
+    // all take that one answer.
+    let refresh_roots = repo::root::fetch_all(conn)?;
+
+    // Taken as recorded, then resolved — no split, nothing to reconstruct.
+    let scope = ScopeResolution::resolve(&config.meta.scope, &refresh_roots);
+
+    // Stated here, on the honesty policy's own position for an effectful
+    // command: before any plan display and before any confirmation, so a
+    // --yes or --dry-run run states it by position. A refresh narrows a lock
+    // rather than deciding a destination, so it says so and keeps going.
+    write_unrooted_scope(&mut std::io::stderr().lock(), scope.unrooted());
 
     // Parse filters from config
     let parsed_filters: Vec<Filter> = config
@@ -284,8 +296,10 @@ fn refresh_with_editor(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Plan
-    let scopes = classify_all(&scope_prefixes);
+    // Plan. A rooted prefix is re-queried in the byte-form the index stores,
+    // so a manifest naming its scope in another normalization matches the
+    // sources it names.
+    let scopes = classify_all(scope.recorded());
     let plan_params = ClusterGenerateParams {
         scopes,
         filters: parsed_filters,
@@ -312,7 +326,6 @@ fn refresh_with_editor(
     // prefix) → edit adds one → refresh, so the rewrite is usually the moment
     // it becomes knowable. A manifest naming a root that is gone gets no
     // warning rather than an error: the refresh itself is still legitimate.
-    let refresh_roots = repo::root::fetch_all(conn)?;
     let placement_root = refresh_roots
         .iter()
         .find(|r| r.id == config.output.archive_root_id)
@@ -323,6 +336,12 @@ fn refresh_with_editor(
         lock_path: lock_path.clone(),
         manifest_path: config_path.to_path_buf(),
         old_manifest_content: old_content,
+        // What goes back into meta.scope: a rooted prefix healed to the
+        // byte-form the index stores, so a refresh converges on what
+        // generation records for the same input; an unrooted one verbatim,
+        // because there is nothing to heal it to and rewriting it would be
+        // inventing a place.
+        scope: scope.recorded().to_vec(),
         config,
     };
 
@@ -345,7 +364,7 @@ fn refresh_with_editor(
 
     let decision = DecisionParams {
         command: DecisionCommand::ClusterRefresh,
-        scope: DecisionScope::decompose(&scope_prefixes, &refresh_roots),
+        scope: scope.scopes().to_vec(),
         command_line: command_line.to_string(),
         reason: None,
         record_enabled: ledger.recording != RecordingMode::Off,
@@ -490,6 +509,56 @@ fn display_plan_warnings(plan: &ClusterGeneratePlan, options: &GenerateOptions) 
     }
 }
 
+/// The step that moves this manifest forward, or nothing when there is none.
+///
+/// **Whether** there is a step does not depend on the recorded scope: it is
+/// files still to transfer, and nothing lost or wrong. That gate is outermost
+/// on purpose. A manifest with nothing pending has no next step to take, and
+/// one with content missing has just been told to check the volume before
+/// refreshing — advising a refresh in either state clears the lock and gains
+/// nothing, and in the second it contradicts the line above it.
+///
+/// **Which** step it is does depend on the scope: a recorded prefix naming no
+/// known root makes `apply` refuse — plain and `--resume` alike — so naming it
+/// would point at the one command that cannot run. The step is the manifest.
+fn write_next_step(
+    handle: &mut impl Write,
+    status: &status_ops::ManifestStatus,
+    manifest_path: &Path,
+) {
+    if status.pending == 0 || !status.all_accounted_for() {
+        return;
+    }
+    let _ = writeln!(handle);
+    if !status.unrooted_scope.is_empty() {
+        let _ = writeln!(handle, "{}", super::edit_then_refresh(manifest_path));
+    } else if status.at_destination > 0 {
+        let _ = writeln!(
+            handle,
+            "To complete: canon apply --resume {}",
+            manifest_path.display()
+        );
+    } else {
+        let _ = writeln!(handle, "To apply: canon apply {}", manifest_path.display());
+    }
+}
+
+/// The one spelling of an unrooted scope prefix, shared by the two commands
+/// that read a recorded scope and report rather than refuse.
+///
+/// A prefix the manifest records that names no known root is named, with what
+/// follows from it — never dropped. Dropping one silently narrows whatever the
+/// reader does next, which is the class this closes; the twin of the scope
+/// boundary's own `no sources known at <p> — skipped`, at the manifest door.
+fn write_unrooted_scope(handle: &mut impl Write, unrooted: &[String]) {
+    for path in unrooted {
+        let _ = writeln!(
+            handle,
+            "no known root at {path} — kept in the manifest, no destination measures from it"
+        );
+    }
+}
+
 fn allow_values_to_strings(options: &GenerateOptions) -> Vec<String> {
     let mut v = Vec::new();
     if options.allow_archived {
@@ -516,6 +585,9 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
         eprintln!("Warning: lock file hash mismatch — manifest may be out of sync.");
     }
     println!("Lock: {} entries", format_count(status.lock_entry_count));
+    // Stated on stdout, this command's own scope channel — a report's scope
+    // belongs beside its header, not on a side channel.
+    write_unrooted_scope(&mut std::io::stdout().lock(), &status.unrooted_scope);
     println!();
 
     // Per-entry table: concerning entries (or all if verbose)
@@ -646,18 +718,7 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
         }
     }
 
-    // Next-step hint
-    if status.pending > 0 && status.all_accounted_for() {
-        println!();
-        if status.at_destination > 0 {
-            println!(
-                "To complete: canon apply --resume {}",
-                manifest_path.display()
-            );
-        } else {
-            println!("To apply: canon apply {}", manifest_path.display());
-        }
-    }
+    write_next_step(&mut std::io::stdout().lock(), &status, manifest_path);
 
     Ok(())
 }
@@ -717,6 +778,241 @@ mod tests {
             &LedgerConfig::default(),
             true,
         )
+    }
+
+    /// The manifest text a refresh reads, with `meta.scope` written in. The
+    /// generated shape carries no scope key when there is none, so this is the
+    /// same document `manifest_text` produces with the field a user would have
+    /// added by hand.
+    fn manifest_text_scoped(query: &str, scope: &[String]) -> String {
+        let quoted: Vec<String> = scope.iter().map(|p| format!("{p:?}")).collect();
+        manifest_text(query).replace(
+            "generated_at = ",
+            &format!("scope = [{}]\ngenerated_at = ", quoted.join(", ")),
+        )
+    }
+
+    /// A `ManifestStatus` carrying `pending` entries still to transfer and
+    /// `at_destination` already there, plus whatever scope prefixes failed to
+    /// resolve — and `source_lost` entries when a case needs the accounting
+    /// claim to be false.
+    ///
+    /// The entry list is built to match the counts rather than left empty:
+    /// in production every count is derived from `entries`, so a fixture whose
+    /// two halves disagree is a state that cannot occur, and it would go on
+    /// passing silently the day this writer starts reading entries.
+    fn status_with(
+        pending: usize,
+        at_destination: usize,
+        source_lost: usize,
+        unrooted: &[&str],
+    ) -> status_ops::ManifestStatus {
+        let entry = |i: usize, status: status_ops::EntryStatus| status_ops::StatusEntry {
+            source_path: format!("/photos/f{i}.jpg"),
+            source_filename: format!("f{i}.jpg"),
+            source_exists: !matches!(status, status_ops::EntryStatus::SourceLost),
+            dest_path: format!("/archive/f{i}.jpg"),
+            db_registered: matches!(status, status_ops::EntryStatus::AtDestination),
+            status,
+        };
+        let entries: Vec<status_ops::StatusEntry> =
+            std::iter::repeat_n(status_ops::EntryStatus::Pending, pending)
+                .chain(std::iter::repeat_n(
+                    status_ops::EntryStatus::AtDestination,
+                    at_destination,
+                ))
+                .chain(std::iter::repeat_n(
+                    status_ops::EntryStatus::SourceLost,
+                    source_lost,
+                ))
+                .enumerate()
+                .map(|(i, st)| entry(i, st))
+                .collect();
+
+        status_ops::ManifestStatus {
+            manifest_path: "m.toml".to_string(),
+            dest_display: "/archive".to_string(),
+            pattern: "{filename}".to_string(),
+            lock_entry_count: entries.len(),
+            lock_hash_valid: true,
+            entries,
+            at_destination,
+            pending,
+            source_lost,
+            size_mismatch: 0,
+            source_still_present: 0,
+            unrooted_scope: unrooted.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn next_step(status: &status_ops::ManifestStatus) -> String {
+        let mut out = Vec::new();
+        write_next_step(&mut out, status, Path::new("m.toml"));
+        String::from_utf8(out).unwrap()
+    }
+
+    /// F2 — a report that has just said the scope does not resolve must not
+    /// then name the one command that cannot run. `apply` refuses on exactly
+    /// this manifest, plain and `--resume` alike, so the step is the manifest.
+    ///
+    /// The counts are deliberately the ones that *do* earn an apply hint,
+    /// because that is the whole finding: the accounting claim is about source
+    /// files and stays true, so it cannot be what decides whether applying is
+    /// possible.
+    #[test]
+    fn an_unresolvable_scope_never_points_at_apply() {
+        assert_eq!(
+            next_step(&status_with(2, 0, 0, &["/canon-test/no-such-root"])),
+            "\nEdit meta.scope, then `canon cluster refresh m.toml` to rewrite the lock.\n"
+        );
+        // The same, where the run would otherwise be told to resume.
+        assert_eq!(
+            next_step(&status_with(1, 1, 0, &["/canon-test/no-such-root"])),
+            "\nEdit meta.scope, then `canon cluster refresh m.toml` to rewrite the lock.\n"
+        );
+    }
+
+    /// The other side of the same branch: a manifest whose scope resolves
+    /// still gets the hint it always got, in both its arms.
+    #[test]
+    fn a_resolvable_scope_still_points_at_apply() {
+        assert_eq!(
+            next_step(&status_with(2, 0, 0, &[])),
+            "\nTo apply: canon apply m.toml\n"
+        );
+        assert_eq!(
+            next_step(&status_with(1, 1, 0, &[])),
+            "\nTo complete: canon apply --resume m.toml\n"
+        );
+    }
+
+    /// **Whether** there is a next step is in no case the scope's business.
+    /// A manifest with nothing pending has no step to take, and one with
+    /// content missing has just been told to check the volume before
+    /// refreshing — so an unresolvable scope must not conjure advice where
+    /// there is none, least of all advice that clears the lock.
+    ///
+    /// The six states that must stay silent, each reachable: the scope is the
+    /// easy thing to key this decision on, and keying it there is wrong in
+    /// every one of them.
+    #[test]
+    fn an_unresolvable_scope_conjures_no_step_where_there_was_none() {
+        let bad = ["/canon-test/no-such-root"];
+        for status in [
+            status_with(0, 2, 0, &bad), // all applied; nothing to do
+            status_with(0, 0, 0, &bad), // an empty lock
+            status_with(0, 0, 2, &bad), // sources lost, no hand-editing needed
+            status_with(2, 0, 1, &bad), // pending, but content is missing
+            status_with(2, 1, 1, &bad), // the same, part-applied
+            status_with(0, 1, 1, &bad), // part-applied and part-lost
+        ] {
+            assert_eq!(
+                next_step(&status),
+                "",
+                "pending={} at_destination={} source_lost={}",
+                status.pending,
+                status.at_destination,
+                status.source_lost
+            );
+        }
+    }
+
+    /// C4 — a refresh is not the place to refuse: it narrows a lock, and it is
+    /// the way back from apply's refusal, so a manifest naming a place under no
+    /// known root must still be refreshable. It says so and keeps going —
+    /// manifest rewritten, lock rewritten.
+    #[test]
+    fn a_refresh_states_an_unrooted_scope_and_keeps_going() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest_path, lock_path) = setup(dir.path());
+        fs::write(
+            &manifest_path,
+            manifest_text_scoped(
+                "source.ext=jpg",
+                &[
+                    "/photos".to_string(),
+                    "/canon-test/no-such-root".to_string(),
+                ],
+            ),
+        )
+        .unwrap();
+
+        run_refresh(&mut db, &manifest_path, None).unwrap();
+
+        let lock = fs::read_to_string(&lock_path).unwrap();
+        assert!(
+            lock.contains("a.jpg"),
+            "the lock was still rewritten: {lock}"
+        );
+        let manifest = fs::read_to_string(&manifest_path).unwrap();
+        assert!(
+            manifest.contains("/canon-test/no-such-root"),
+            "the prefix is preserved rather than dropped: {manifest}"
+        );
+
+        // The statement's own spelling, pinned where it is composed: a run
+        // writes it to stderr, which an in-process test cannot read back.
+        // Only the wording is pinned here — that the line carries the path it
+        // was handed is a property of `writeln!`, not of this code.
+        let mut said = Vec::new();
+        write_unrooted_scope(&mut said, &["/canon-test/no-such-root".to_string()]);
+        let said = String::from_utf8(said).unwrap();
+        assert_eq!(
+            said,
+            "no known root at /canon-test/no-such-root — kept in the manifest, \
+             no destination measures from it\n"
+        );
+    }
+
+    /// C5 — the healing half, and the reason nothing in the system used to fix
+    /// a mismatched prefix on its own: a refresh preserved whatever the file
+    /// held, indefinitely. A rooted prefix is now written back in the byte-form
+    /// the index stores — converging on what generation records for the same
+    /// input — and an unrooted one verbatim, because there is nothing to heal
+    /// it to and rewriting it would be inventing a place.
+    #[test]
+    fn a_refresh_writes_the_resolved_form_back() {
+        // A root whose stored form is decomposed, named in a manifest the
+        // precomposed way. The two must differ or this proves nothing.
+        const DECOMPOSED: &str = "/photos/cafe\u{301}";
+        const PRECOMPOSED: &str = "/photos/caf\u{e9}";
+        assert_ne!(DECOMPOSED, PRECOMPOSED);
+
+        let dir = tempfile::tempdir().unwrap();
+        let conn = setup_test_db();
+        let root = insert_root(&conn, DECOMPOSED, "source", false);
+        let jpg = insert_object(&conn, "hash-jpg", false);
+        insert_source(&conn, root, "trip/a.jpg", Some(jpg));
+
+        let manifest_path = dir.path().join("cluster.toml");
+        fs::write(
+            &manifest_path,
+            manifest_text_scoped(
+                "source.ext=jpg",
+                &[
+                    format!("{PRECOMPOSED}/trip"),
+                    "/canon-test/no-such-root".to_string(),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let mut db = Db::from_connection(conn);
+        run_refresh(&mut db, &manifest_path, None).unwrap();
+
+        let manifest = fs::read_to_string(&manifest_path).unwrap();
+        assert!(
+            manifest.contains(&format!("{DECOMPOSED}/trip")),
+            "the rooted prefix must come back in the stored form: {manifest:?}"
+        );
+        assert!(
+            !manifest.contains(&format!("{PRECOMPOSED}/trip")),
+            "the typed form must not survive the rewrite: {manifest:?}"
+        );
+        assert!(
+            manifest.contains("/canon-test/no-such-root"),
+            "an unrooted prefix has nothing to heal to and stays verbatim: {manifest:?}"
+        );
     }
 
     #[test]

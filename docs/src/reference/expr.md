@@ -27,6 +27,8 @@ Patterns need the key's full name. `--where` and `canon facts --key` let you lea
 
 `{scope.rel_path}` is not a fact: it is the source's path below the *vantage* — the deepest directory containing every scope the manifest records that lies in that source's own root. With one scope the vantage is that scope. With several, it is the directory they share, so each scope's own name survives in the result. Scopes in different roots each get their own vantage. [`cluster generate`](../commands/archive/cluster.md) records the paths it was scoped to; where the manifest records no scope, or none in a source's root, the pattern is refused rather than guessed.
 
+The recorded paths are resolved against the known roots once per run, matching each path against the normalization forms of its root's stored path. A path whose root portion is typed in the other Unicode normalization resolves and measures normally; below the root, forms must match what the index stores. A path that names no known root is never dropped: [`apply`](../commands/archive/apply.md) refuses the run and names it, and [`cluster refresh`](../commands/archive/cluster.md) states it and keeps it.
+
 ## Modifiers
 
 Transform values using the `|` syntax. See [Facts](facts.md#modifiers) for the complete list.

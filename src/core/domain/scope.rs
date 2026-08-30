@@ -4,6 +4,7 @@
 //! "what kind of match do we want?" separated from the SQL implementation
 //! of "how do we express this in a query?".
 
+use super::path::normalization_candidates;
 use super::root::{find_containing_root, Root};
 
 /// Domain concept: what kind of scope match do we want?
@@ -99,6 +100,123 @@ impl DecisionScope {
     }
 }
 
+/// A recorded scope resolved against the known roots — once, for the whole run.
+///
+/// A manifest's scope is user-editable text, so it arrives in whatever form
+/// and whatever state the user left it: a path retyped in another
+/// normalization, a folder since moved, a root since removed. That is one
+/// question with one answer, and it used to be answered separately by every
+/// reader — the vantage matched roots its own way, the recorder matched them
+/// another, and each lost a prefix in its own silence.
+///
+/// Form-tolerant on the way in: each prefix is matched through its
+/// normalization candidates, so a root stored in the disk's form is reachable
+/// from a prefix typed in the other one — the same bend path resolution
+/// performs at the argument door, not a second rule.
+///
+/// Two things the argument door does that this does not, both deliberate and
+/// both limits rather than features. It does not lexically clean the prefix
+/// (`resolve_path` calls `clean_path` first), so a hand-written `..` is
+/// matched literally. And it has no second-stage retry over the below-root
+/// remainder: candidates are of the **whole** prefix, and the first that finds
+/// a root wins, so the form that matched the root is the form the whole prefix
+/// is recorded in, remainder included.
+///
+/// The consequence worth knowing: where a root's own path matches as typed —
+/// an ASCII root always does — no candidate but as-given is ever tried, and
+/// each prefix keeps whatever form its remainder was typed in. Two prefixes
+/// under such a root can then disagree below it, and where they do the
+/// vantage's common prefix climbs above the differing component and files land
+/// a level out. Pre-existing, out of this type's reach, and routed.
+///
+/// Honest on the way out: a prefix matching no root is carried, never dropped.
+/// Dropping one silently narrows whatever the reader does next — the vantage
+/// measures from somewhere deeper, the recorder writes a scoped act down as a
+/// global one — and a narrowing nobody stated is the class this closes. What
+/// to do about a carried prefix is the consumer's own answer; this type
+/// classifies and never decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeResolution {
+    /// Sorted and deduplicated: the recorder's projection, so repeated runs
+    /// record identically.
+    resolved: Vec<DecisionScope>,
+    /// In the manifest's own order, first occurrence only — this is read back
+    /// to a user against their own file.
+    unrooted: Vec<String>,
+    /// Every recorded prefix in the manifest's own order: resolved ones in the
+    /// byte-form the index stores, unresolved ones verbatim. What a rewrite
+    /// writes back.
+    recorded: Vec<String>,
+}
+
+impl ScopeResolution {
+    /// Resolve a recorded scope against the known roots.
+    ///
+    /// Infallible by design: it classifies, it never fails. Every failure mode
+    /// is a caller's disposition — a resolution that could itself error would
+    /// hand callers a fourth thing to answer inconsistently, which is the
+    /// defect wearing a fix.
+    ///
+    /// Suspension is not consulted. A parked root is still a known root, so a
+    /// manifest naming one resolves exactly as it did before the door closed.
+    pub fn resolve(prefixes: &[String], roots: &[Root]) -> Self {
+        let mut resolved: Vec<DecisionScope> = Vec::new();
+        let mut unrooted: Vec<String> = Vec::new();
+        let mut recorded: Vec<String> = Vec::with_capacity(prefixes.len());
+
+        for prefix in prefixes {
+            let hit = normalization_candidates(prefix).into_iter().find_map(|c| {
+                find_containing_root(&c, roots).map(|(root_id, root_path, _role, rel)| {
+                    DecisionScope::new(root_id, root_path, rel)
+                })
+            });
+            match hit {
+                Some(scope) => {
+                    recorded.push(scope.display_path());
+                    resolved.push(scope);
+                }
+                None => {
+                    recorded.push(prefix.clone());
+                    if !unrooted.contains(prefix) {
+                        unrooted.push(prefix.clone());
+                    }
+                }
+            }
+        }
+
+        resolved.sort();
+        resolved.dedup();
+
+        ScopeResolution {
+            resolved,
+            unrooted,
+            recorded,
+        }
+    }
+
+    /// The rooted prefixes as typed scopes — what the recorder stores.
+    pub fn scopes(&self) -> &[DecisionScope] {
+        &self.resolved
+    }
+
+    /// The prefixes that match no known root, in the manifest's own order.
+    pub fn unrooted(&self) -> &[String] {
+        &self.unrooted
+    }
+
+    /// Every recorded prefix, resolved ones healed to the stored byte-form and
+    /// unresolved ones verbatim — what a rewrite writes back.
+    pub fn recorded(&self) -> &[String] {
+        &self.recorded
+    }
+
+    /// Whether the manifest recorded any scope at all — a different question
+    /// from whether any of it resolved.
+    pub fn is_empty(&self) -> bool {
+        self.recorded.is_empty()
+    }
+}
+
 /// Recover a scope row's root path from its decision's display paths.
 ///
 /// A `decision_scopes` row written before root-path snapshots existed only has
@@ -126,6 +244,181 @@ pub fn recover_root_path(candidates: &[String], rel_prefix: &str) -> Option<Stri
     match matches.as_slice() {
         [only] => Some(only.clone()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod scope_resolution_tests {
+    use super::*;
+
+    fn root(id: i64, path: &str) -> Root {
+        Root {
+            id,
+            path: path.to_string(),
+            role: "source".to_string(),
+            comment: None,
+            last_scanned_at: None,
+            suspended: false,
+        }
+    }
+
+    fn suspended_root(id: i64, path: &str) -> Root {
+        Root {
+            suspended: true,
+            ..root(id, path)
+        }
+    }
+
+    fn owned(prefixes: &[&str]) -> Vec<String> {
+        prefixes.iter().map(|p| p.to_string()).collect()
+    }
+
+    /// A root path whose last component carries a combining accent, stored in
+    /// the decomposed form a disk hands back. Written from code points rather
+    /// than as a literal so the two forms cannot be confused by an editor
+    /// that normalizes what it saves.
+    const ROOT_NFD: &str = "/vol/work/cafe\u{301}";
+    /// The same place typed the other way — one precomposed code point.
+    const ROOT_NFC: &str = "/vol/work/caf\u{e9}";
+
+    /// A1 — the form half. A prefix typed in the other normalization resolves,
+    /// and the prefix that comes back is byte-identical to the root's stored
+    /// bytes: the argument bends, the index is never rewritten.
+    #[test]
+    fn a_prefix_typed_in_another_normalization_resolves_to_the_stored_form() {
+        let roots = vec![root(1, ROOT_NFD)];
+        let resolution = ScopeResolution::resolve(&owned(&[&format!("{ROOT_NFC}/2016")]), &roots);
+
+        assert!(
+            resolution.unrooted().is_empty(),
+            "the prefix names a known root: {:?}",
+            resolution.unrooted()
+        );
+        assert_eq!(
+            resolution.recorded(),
+            [format!("{ROOT_NFD}/2016")],
+            "the kept prefix must carry the stored root's bytes"
+        );
+        assert_eq!(
+            resolution.scopes(),
+            [DecisionScope::new(
+                1,
+                ROOT_NFD.to_string(),
+                "2016".to_string()
+            )]
+        );
+    }
+
+    /// A2 — the unrooted half, at the funnel. The prefix is carried out where
+    /// a caller can see it, never quietly discarded.
+    #[test]
+    fn a_prefix_under_no_root_is_carried_never_dropped() {
+        let roots = vec![root(1, "/vol/work")];
+        let resolution = ScopeResolution::resolve(&owned(&["/vol/gone/proj-v2"]), &roots);
+
+        assert_eq!(resolution.unrooted(), ["/vol/gone/proj-v2"]);
+        assert!(resolution.scopes().is_empty());
+        assert!(!resolution.is_empty(), "a scope was recorded");
+    }
+
+    /// A3 — the compound pin, and the configuration the friction is made of:
+    /// two prefixes the user wrote as siblings, one of which no longer names a
+    /// known root. Neither hides the other — the survivor does not stand in
+    /// for the whole recorded scope, and the casualty does not suppress the
+    /// survivor.
+    #[test]
+    fn a_carried_prefix_does_not_displace_its_rooted_siblings() {
+        let roots = vec![root(1, "/vol/work")];
+        let resolution = ScopeResolution::resolve(
+            &owned(&["/vol/work/proj-v1", "/vol/work-archive/proj-v2"]),
+            &roots,
+        );
+
+        assert_eq!(
+            resolution.scopes(),
+            [DecisionScope::new(
+                1,
+                "/vol/work".to_string(),
+                "proj-v1".to_string()
+            )]
+        );
+        assert_eq!(resolution.unrooted(), ["/vol/work-archive/proj-v2"]);
+    }
+
+    /// A4 — the three-projection identity: nothing recorded goes missing, and
+    /// every recorded prefix is accounted for by exactly one of the two
+    /// answers.
+    #[test]
+    fn every_recorded_prefix_survives_the_resolution() {
+        let roots = vec![root(1, "/vol/work"), root(2, "/media/backup")];
+        let prefixes = owned(&[
+            "/vol/work/proj-v1",
+            "/vol/gone/proj-v2",
+            "/media/backup",
+            "/elsewhere",
+        ]);
+        let resolution = ScopeResolution::resolve(&prefixes, &roots);
+
+        assert_eq!(resolution.recorded().len(), prefixes.len());
+
+        let mut accounted: Vec<String> = resolution
+            .scopes()
+            .iter()
+            .map(DecisionScope::display_path)
+            .chain(resolution.unrooted().iter().cloned())
+            .collect();
+        accounted.sort();
+        let mut recorded = resolution.recorded().to_vec();
+        recorded.sort();
+        recorded.dedup();
+        assert_eq!(accounted, recorded);
+    }
+
+    /// A5 — a parked drive never makes a manifest refuse. Suspension closes a
+    /// door on attention; it does not unmake the root a recorded prefix names.
+    #[test]
+    fn a_prefix_on_a_suspended_root_stays_rooted() {
+        let roots = vec![suspended_root(1, "/vol/work")];
+        let resolution = ScopeResolution::resolve(&owned(&["/vol/work/proj-v1"]), &roots);
+
+        assert!(resolution.unrooted().is_empty());
+        assert_eq!(
+            resolution.scopes(),
+            [DecisionScope::new(
+                1,
+                "/vol/work".to_string(),
+                "proj-v1".to_string()
+            )]
+        );
+    }
+
+    /// A6 — the recorder's projection is sorted and deduplicated, so the same
+    /// recorded scope written in a different order, or written twice, records
+    /// identically. `decompose`'s existing contract, kept.
+    #[test]
+    fn repeated_resolution_records_identically() {
+        let roots = vec![root(1, "/vol/work"), root(2, "/media/backup")];
+        let one = ScopeResolution::resolve(
+            &owned(&["/media/backup/b", "/vol/work/a", "/vol/work/a"]),
+            &roots,
+        );
+        let other = ScopeResolution::resolve(&owned(&["/vol/work/a", "/media/backup/b"]), &roots);
+
+        assert_eq!(one.scopes(), other.scopes());
+        assert_eq!(one.scopes().len(), 2, "the repeat collapsed");
+    }
+
+    /// A7 — an unrooted prefix is read back to a user against their own file,
+    /// so it keeps the order that file wrote it in.
+    #[test]
+    fn an_unrooted_prefix_keeps_the_manifest_order() {
+        let roots = vec![root(1, "/vol/work")];
+        let resolution = ScopeResolution::resolve(
+            &owned(&["/zeta/last", "/vol/work/kept", "/alpha/first"]),
+            &roots,
+        );
+
+        assert_eq!(resolution.unrooted(), ["/zeta/last", "/alpha/first"]);
     }
 }
 

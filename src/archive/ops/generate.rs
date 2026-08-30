@@ -272,6 +272,12 @@ pub struct ExecuteRefreshParams {
     pub lock_path: PathBuf,
     pub manifest_path: PathBuf,
     pub old_manifest_content: String,
+    /// What to write back into `meta.scope` — the caller's resolution of what
+    /// the manifest recorded, not the recorded text itself. Separate from
+    /// `config` because the config carries what was *read*, and a refresh
+    /// writes the document out healed: a rooted prefix in the byte-form the
+    /// index stores, an unrooted one verbatim.
+    pub scope: Vec<String>,
     pub config: ManifestConfig,
 }
 
@@ -390,7 +396,7 @@ pub fn execute_refresh(
             // one thing the version field exists to stop.
             version: CURRENT_MANIFEST_VERSION,
             query: params.config.meta.query.clone(),
-            scope: params.config.meta.scope.clone(),
+            scope: params.scope.clone(),
             generated_at: current_timestamp(),
             lock_hash,
         },
@@ -1445,6 +1451,7 @@ mod tests {
     #[test]
     fn the_default_pattern_keeps_a_nested_tree_apart_at_apply_time() {
         use crate::archive::ops::plan::{plan_apply, ApplyPlanParams};
+        use crate::core::domain::scope::ScopeResolution;
         use crate::expr::{extract_fact_keys, parse_pattern, ScopeVantage};
 
         let tree = tempfile::tempdir().unwrap();
@@ -1493,9 +1500,12 @@ mod tests {
         root_paths.insert(root, root_path.clone());
         root_paths.insert(archive, "/archive".to_string());
         // The vantage apply would derive: read off the manifest's own
-        // recorded scope, not rebuilt from the literal above.
-        let vantage =
-            ScopeVantage::new(&config.meta.scope, root_paths.values().map(|p| p.as_str()));
+        // recorded scope, resolved against the real roots exactly as apply
+        // resolves it — not rebuilt from the literal above.
+        let vantage = ScopeVantage::new(&ScopeResolution::resolve(
+            &config.meta.scope,
+            &crate::core::repo::root::fetch_all(&conn).unwrap(),
+        ));
         let apply_plan = plan_apply(
             &mut conn,
             &ApplyPlanParams {
@@ -1538,6 +1548,7 @@ mod tests {
     #[test]
     fn sibling_scopes_keep_their_own_names_at_the_destination() {
         use crate::archive::ops::plan::{plan_apply, ApplyPlanParams};
+        use crate::core::domain::scope::ScopeResolution;
         use crate::expr::{extract_fact_keys, parse_pattern, ScopeVantage};
 
         let tree = tempfile::tempdir().unwrap();
@@ -1593,8 +1604,10 @@ mod tests {
         let mut root_paths = HashMap::new();
         root_paths.insert(root, root_path.clone());
         root_paths.insert(archive, "/archive".to_string());
-        let vantage =
-            ScopeVantage::new(&config.meta.scope, root_paths.values().map(|p| p.as_str()));
+        let vantage = ScopeVantage::new(&ScopeResolution::resolve(
+            &config.meta.scope,
+            &crate::core::repo::root::fetch_all(&conn).unwrap(),
+        ));
         let apply_plan = plan_apply(
             &mut conn,
             &ApplyPlanParams {
@@ -1663,6 +1676,7 @@ base_dir = \"output\"\n";
             lock_path: dir.path().join("cluster.lock"),
             manifest_path: dir.path().join("cluster.toml"),
             old_manifest_content: old_content.to_string(),
+            scope: config.meta.scope.clone(),
             config,
         };
 
@@ -1687,6 +1701,7 @@ base_dir = \"output\"\n";
             lock_path: lock_path.clone(),
             manifest_path: manifest_path.clone(),
             old_manifest_content: String::new(),
+            scope: refresh_config().meta.scope.clone(),
             config: refresh_config(),
         };
 
@@ -1722,6 +1737,7 @@ base_dir = \"output\"\n";
             lock_path: dir.path().join("cluster.lock"),
             manifest_path: manifest_path.clone(),
             old_manifest_content: old_content.to_string(),
+            scope: refresh_config().meta.scope.clone(),
             config: refresh_config(),
         };
 
@@ -1752,6 +1768,7 @@ base_dir = \"output\"\n";
             lock_path: dir.path().join("cluster.lock"),
             manifest_path: manifest_path.clone(),
             old_manifest_content: String::new(),
+            scope: refresh_config().meta.scope.clone(),
             config: refresh_config(),
         };
 
@@ -1864,6 +1881,7 @@ base_dir = \"output\"\n";
             lock_path: dir.path().join("cluster.lock"),
             manifest_path: manifest_path.clone(),
             old_manifest_content: content,
+            scope: vec![],
             config: toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap(),
         };
         execute_refresh(&empty_plan(), &refresh_params).unwrap();

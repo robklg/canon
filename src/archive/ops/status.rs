@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::core::domain::scope::ScopeResolution;
 use crate::core::repo::{self, Connection};
 use crate::expr::{prefetch_pattern_facts, ScopeVantage};
 
@@ -84,6 +85,10 @@ pub struct ManifestStatus {
     pub size_mismatch: usize,
     /// Count of entries at dest where source file still exists.
     pub source_still_present: usize,
+    /// Scope prefixes the manifest records that resolve to no known root.
+    /// Carried rather than acted on: a report reports. The interface states
+    /// them; nothing here narrows a count on their account.
+    pub unrooted_scope: Vec<String>,
 }
 
 impl ManifestStatus {
@@ -141,9 +146,12 @@ pub fn compute_manifest_status(
     let pattern = parse_pattern(&config.output.pattern)
         .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
     let needed_keys = extract_fact_keys(&pattern);
-    // Derived once for the whole read: what "the scope" means when there is
-    // more than one is not a question each reader answers for itself.
-    let vantage = ScopeVantage::new(&config.meta.scope, root_paths.values().map(|p| p.as_str()));
+    // Derived once for the whole read, from the manifest's scope resolved
+    // against the known roots: what "the scope" means when there is more than
+    // one is not a question each reader answers for itself, and neither is
+    // which root owns each prefix.
+    let scope = ScopeResolution::resolve(&config.meta.scope, &roots);
+    let vantage = ScopeVantage::new(&scope);
 
     // Batch fetch facts for all lock entries if pattern uses content facts
     let source_ids: Vec<i64> = lock_entries.iter().map(|s| s.id).collect();
@@ -258,6 +266,7 @@ pub fn compute_manifest_status(
         source_lost,
         size_mismatch,
         source_still_present,
+        unrooted_scope: scope.unrooted().to_vec(),
     })
 }
 
@@ -324,6 +333,61 @@ mod tests {
         execute_generate(&plan, &params).unwrap();
 
         (conn, dir, manifest_path, archive_dir)
+    }
+
+    /// D1 — a recorded prefix under no known root leaves the computation as
+    /// data. Status is a report, so it neither refuses nor narrows: the
+    /// prefix is carried out for the interface to state, and the accounting
+    /// claim — which is about source files — is untouched by it.
+    #[test]
+    fn an_unrooted_scope_is_carried_out_of_the_computation() {
+        let (mut conn, dir, manifest, _archive) = status_fixture(&["settled.jpg"]);
+        std::fs::write(dir.path().join("archive").join("settled.jpg"), b"aaaa").unwrap();
+
+        // A manifest that records two places, one of which no root answers
+        // for. The other names the source root itself, so the resolution has
+        // something to keep as well as something to carry.
+        let root: String = conn
+            .query_row("SELECT path FROM roots WHERE role = 'source'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        rewrite_manifest_scope(&manifest, &[root, "/canon-test/no-such-root".to_string()]);
+
+        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+
+        assert_eq!(status.unrooted_scope, ["/canon-test/no-such-root"]);
+        assert!(
+            status.all_accounted_for(),
+            "the accounting claim is about source files and must not move"
+        );
+        assert_eq!(status.at_destination, 1);
+    }
+
+    /// Write `meta.scope` into a manifest, the way a user editing the file
+    /// does. The lock is untouched, so the pair still agrees. An empty scope
+    /// is not serialized at all, so the key is inserted above `generated_at`
+    /// when it is absent and its whole `[ ... ]` span replaced when it is
+    /// present — the serializer writes arrays across several lines.
+    fn rewrite_manifest_scope(manifest: &Path, prefixes: &[String]) {
+        let text = std::fs::read_to_string(manifest).unwrap();
+        let quoted: Vec<String> = prefixes.iter().map(|p| format!("{p:?}")).collect();
+        let line = format!("scope = [{}]", quoted.join(", "));
+        let rewritten = match text.find("\nscope = [") {
+            Some(at) => {
+                let start = at + 1;
+                let end = start + text[start..].find(']').expect("unterminated scope array") + 1;
+                format!("{}{line}{}", &text[..start], &text[end..])
+            }
+            None => {
+                let at = text
+                    .find("\ngenerated_at = ")
+                    .expect("no [meta] table to write a scope into")
+                    + 1;
+                format!("{}{line}\n{}", &text[..at], &text[at..])
+            }
+        };
+        std::fs::write(manifest, rewritten).unwrap();
     }
 
     #[test]

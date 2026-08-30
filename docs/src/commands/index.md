@@ -42,8 +42,9 @@ question rather than one more place to look: both sides of `compare`, the
 scope and `--prefer` paths of `exclude duplicates`, and `survey --other`.
 These error as a single path does.
 
-Paths match the index whichever Unicode normalization form you type. Canon
-stores the form the disk gave it and matches your argument against that.
+Paths you pass on the command line match the index whichever Unicode
+normalization form you type. Canon stores the form the disk gave it and matches
+your argument against that.
 
 **Filters**: Select sources using `--where` with boolean expressions:
 

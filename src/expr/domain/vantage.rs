@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 
-use crate::core::domain::path::{common_path_prefix, path_is_under};
+use crate::core::domain::path::common_path_prefix;
+use crate::core::domain::scope::ScopeResolution;
 
 /// The place a `{scope.rel_path}` measures from, one per root.
 ///
@@ -31,35 +32,34 @@ pub struct ScopeVantage {
 impl ScopeVantage {
     /// Derive the vantage for each root the recorded scope names.
     ///
-    /// A prefix under no known root contributes to nothing: it can only come
-    /// from a hand-edited manifest, and inventing a vantage for it is the
-    /// class of guess this type exists to stop.
-    pub fn new<'a>(prefixes: &[String], root_paths: impl IntoIterator<Item = &'a str>) -> Self {
-        let roots: Vec<&str> = root_paths.into_iter().collect();
-        let mut grouped: HashMap<&str, Vec<&str>> = HashMap::new();
-
-        for prefix in prefixes {
-            // Roots never nest, so at most one can contain a prefix. Taking
-            // the longest match anyway keeps the answer independent of the
-            // order roots arrive in — a destination must not depend on a
-            // hash map's iteration order.
-            let owner = roots
-                .iter()
-                .filter(|root| path_is_under(prefix, root))
-                .max_by_key(|root| root.len());
-            if let Some(root) = owner {
-                grouped.entry(root).or_default().push(prefix.as_str());
-            }
+    /// Takes an already-attributed scope. Which root owns a prefix is the path
+    /// law's question and is answered once, in `core`, before this is called —
+    /// so a prefix that named no root cannot reach here to be silently skipped,
+    /// and passing raw manifest text is a compile error rather than a guess.
+    /// What is left is this type's own law and nothing else: the deepest
+    /// directory containing every scope that lies in one root.
+    pub fn new(scope: &ScopeResolution) -> Self {
+        let mut grouped: HashMap<&str, Vec<String>> = HashMap::new();
+        for s in scope.scopes() {
+            grouped
+                .entry(s.root_path.as_str())
+                .or_default()
+                .push(s.display_path());
         }
 
         let by_root = grouped
             .into_iter()
-            .map(|(root, scopes)| (root.to_string(), common_path_prefix(scopes.into_iter())))
+            .map(|(root, paths)| {
+                (
+                    root.to_string(),
+                    common_path_prefix(paths.iter().map(String::as_str)),
+                )
+            })
             .collect();
 
         ScopeVantage {
             by_root,
-            recorded: !prefixes.is_empty(),
+            recorded: !scope.is_empty(),
         }
     }
 
@@ -79,10 +79,26 @@ impl ScopeVantage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::root::Root;
 
+    /// The vantage a manifest recording `prefixes` yields against `roots` —
+    /// built the way production builds it, through the one resolution, so the
+    /// fixture cannot drift from what a run actually hands this type.
     fn v(prefixes: &[&str], roots: &[&str]) -> ScopeVantage {
         let owned: Vec<String> = prefixes.iter().map(|p| p.to_string()).collect();
-        ScopeVantage::new(&owned, roots.iter().copied())
+        let roots: Vec<Root> = roots
+            .iter()
+            .enumerate()
+            .map(|(i, path)| Root {
+                id: i as i64 + 1,
+                path: path.to_string(),
+                role: "source".to_string(),
+                comment: None,
+                last_scanned_at: None,
+                suspended: false,
+            })
+            .collect();
+        ScopeVantage::new(&ScopeResolution::resolve(&owned, &roots))
     }
 
     /// V1 — the no-regression guard at the law's own level: with one scope the

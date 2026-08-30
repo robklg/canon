@@ -141,7 +141,16 @@ On refresh:
 - The **Cluster Summary** is regenerated with current counts
 - The **Notes** section is preserved verbatim
 - The same root breakdown and archive coverage summary is printed to stdout
+- **`meta.scope` is rewritten with each path in the form that matched its root**, which is what `cluster generate` records for the same paths. Where the root's own path matched as typed, the rest of the path is written back unchanged.
 
 `--edit` opens the manifest in `$VISUAL`/`$EDITOR` before the re-query, so an edited query is the query that runs. The manifest is edited in place. If the editor exits with a failure status, or the saved manifest does not parse, the refresh stops: neither the manifest nor the lock file is written, and the file holds exactly what was saved. Nothing is parsed before the editor opens, so a manifest that no longer parses can be repaired this way.
+
+A path in `meta.scope` that names no known root is stated and kept. Refresh narrows a lock rather than deciding where files go, so it continues; the path is written back exactly as it stands, because there is nothing to resolve it to:
+
+```
+no known root at /Volumes/old-laptop/photos/2016 — kept in the manifest, no destination measures from it
+```
+
+[`apply`](apply.md) refuses on the same manifest. Edit `meta.scope`, then refresh again.
 
 When the query matches nothing, the lock file is removed and `lock_hash` is emptied. The manifest is rewritten in full, with the Cluster Summary stating the zero match and the Notes section preserved as on any other refresh.

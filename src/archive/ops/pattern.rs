@@ -96,6 +96,7 @@ pub fn evaluate_pattern(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::scope::ScopeResolution;
     use crate::expr::parse_pattern;
 
     /// The fixture the documented examples are written against: one source at
@@ -126,7 +127,7 @@ mod tests {
 
     fn expand(pattern: &str) -> Result<String> {
         let parsed = parse_pattern(pattern).unwrap();
-        let vantage = ScopeVantage::new(&[], std::iter::empty());
+        let vantage = ScopeVantage::new(&ScopeResolution::resolve(&[], &[]));
         evaluate_pattern(
             &parsed,
             &entry(),
@@ -208,7 +209,7 @@ mod tests {
         entry.id = source;
         entry.root_id = root;
         let roots = HashMap::from([(root, "/photos".to_string())]);
-        let vantage = ScopeVantage::new(&[], std::iter::empty());
+        let vantage = ScopeVantage::new(&ScopeResolution::resolve(&[], &[]));
 
         let dest = evaluate_pattern(&pattern, &entry, &vantage, &roots, &facts).unwrap();
         assert_eq!(dest, "2024/IMG_001.jpg");

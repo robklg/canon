@@ -14,7 +14,7 @@ use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
-use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::scope::ScopeResolution;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
 use crate::core::repo::{self, Db};
@@ -134,10 +134,58 @@ pub fn run(
     let roots = repo::root::fetch_all(conn)?;
     let root_paths: HashMap<i64, String> = roots.iter().map(|r| (r.id, r.path.clone())).collect();
 
-    // Where a `{scope.rel_path}` measures from, derived once for the run: the
-    // samples, the plan and the decision scope all read the same recorded
-    // list, and none of them re-derives what "the scope" means.
-    let vantage = ScopeVantage::new(&config.meta.scope, root_paths.values().map(|p| p.as_str()));
+    // The manifest's scope, resolved against the known roots once for the run.
+    // A manifest's scope is text the user may have edited, so which root owns
+    // each prefix is a real question with one answer — and the samples, the
+    // plan and the decision record all read that one answer rather than each
+    // matching roots its own way.
+    let scope = ScopeResolution::resolve(&config.meta.scope, &roots);
+
+    // Where a `{scope.rel_path}` measures from, derived once for the run from
+    // the resolution above: none of the readers re-derives what "the scope"
+    // means, and none of them decides which root a prefix belongs to.
+    let vantage = ScopeVantage::new(&scope);
+
+    // A recorded prefix that names no known root stops the run here — before
+    // the plan, and long before the decision row exists, so a refusal leaves
+    // nothing behind to explain.
+    //
+    // Refusal rather than a statement, and unconditional rather than gated on
+    // whether the pattern reads the scope: both halves of the damage are
+    // silent. Destinations are measured from the recorded scope, so a lost
+    // prefix leaves the surviving siblings measuring from somewhere deeper and
+    // files land flattened at exit 0; and the decision record would claim a
+    // scoped act as a global one whatever the pattern says. Neither is
+    // recoverable afterwards, and the alternative to refusing is inventing an
+    // answer to a question the manifest no longer answers.
+    //
+    // Placement is relied on, not designed on: if this check ever moves below
+    // `DecisionRecorder::start`, `DecisionRecorder::refuse` is what settles the
+    // row it would leave.
+    //
+    // The whole message is the refusal, on the pattern the lock-hash mismatch
+    // above already uses: both say this manifest cannot be applied as it
+    // stands and name the way back, and both are worth one message rather than
+    // a display half and a terse half.
+    if !scope.unrooted().is_empty() {
+        bail!(
+            "The manifest's scope names {} under no known root:\n\
+             {}\n\
+             Destinations are measured from the recorded scope, so nothing was moved.\n\
+             {}",
+            match scope.unrooted().len() {
+                1 => "1 path".to_string(),
+                n => format!("{} paths", format_count(n)),
+            },
+            scope
+                .unrooted()
+                .iter()
+                .map(|p| format!("  {p}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            super::edit_then_refresh(&config_path)
+        );
+    }
 
     // Look up archive root from cached roots, verify it's an archive
     let archive_root = roots
@@ -553,7 +601,7 @@ pub fn run(
     };
     let decision = DecisionParams {
         command: DecisionCommand::Apply,
-        scope: DecisionScope::decompose(&config.meta.scope, &roots),
+        scope: scope.scopes().to_vec(),
         command_line: command_line.to_string(),
         reason: effective_reason,
         record_enabled: ledger.recording != RecordingMode::Off && !options.dry_run,
@@ -1064,5 +1112,296 @@ mod tests {
             PathBuf::from("/Volumes/Archive/photos")
         );
         assert!(destination.fans_out);
+    }
+
+    // ------------------------------------------------------------------
+    // The recorded scope, against the real command
+    // ------------------------------------------------------------------
+
+    use crate::archive::ops::generate::{
+        execute_generate, plan_generate, ClusterGenerateParams, ExecuteGenerateParams,
+    };
+    use crate::core::domain::scope::ScopeMatch;
+    use crate::core::testing::{insert_object, insert_root, setup_test_db};
+    use std::os::unix::fs::MetadataExt;
+
+    /// A source tree, an archive root, and a manifest + lock written by the
+    /// real generator, ready for `run` to be called on.
+    ///
+    /// Built rather than typed out because a manifest is a pair: the lock
+    /// file's hash is named in the config, and apply refuses the pair when
+    /// they disagree. Letting generation write both means every case here
+    /// reads a document Canon actually produces. Only `meta.scope` is
+    /// dictated — that is the field a user edits by hand, and it is what all
+    /// three cases are about.
+    struct Fixture {
+        db: Db,
+        manifest: PathBuf,
+        source_root: PathBuf,
+        archive_root: PathBuf,
+        _tree: tempfile::TempDir,
+        _archive: tempfile::TempDir,
+        _out: tempfile::TempDir,
+    }
+
+    impl Fixture {
+        fn decision_count(&mut self) -> i64 {
+            self.db
+                .conn_mut()
+                .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
+                .unwrap()
+        }
+
+        /// Every file under the archive root, root-relative and sorted: the
+        /// destination surface a run produced. The ledger directory is left
+        /// out — it is provenance, not where the content went.
+        fn placed(&self) -> Vec<String> {
+            fn walk(dir: &Path, base: &Path, out: &mut Vec<String>) {
+                let mut entries: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap()).collect();
+                entries.sort_by_key(|e| e.path());
+                for entry in entries {
+                    let path = entry.path();
+                    if path.file_name().and_then(|n| n.to_str()) == Some(".canon-ledger") {
+                        continue;
+                    }
+                    if path.is_dir() {
+                        walk(&path, base, out);
+                    } else {
+                        out.push(
+                            path.strip_prefix(base)
+                                .unwrap()
+                                .to_string_lossy()
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            walk(&self.archive_root, &self.archive_root, &mut out);
+            out.sort();
+            out
+        }
+    }
+
+    /// `root_dir_name` is the source root's own last component, so a case can
+    /// give it a name with two normalizations. `selected` names the
+    /// directories generation queries over — what lands in the lock.
+    /// `recorded` is handed the stored root and returns what goes into
+    /// `meta.scope`, which is where the divergence under test is introduced;
+    /// it takes the root because only the filesystem can say which byte-form
+    /// that root will be stored in.
+    fn fixture(
+        root_dir_name: &str,
+        selected: &[&str],
+        recorded: impl Fn(&str) -> Vec<String>,
+    ) -> Fixture {
+        let tree = tempfile::tempdir().unwrap();
+        let archive = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+
+        // The stored root is whatever the filesystem hands back for the
+        // directory just created, never the string typed here: on a
+        // filesystem that normalizes names those differ, and the stored form
+        // is the one every comparison downstream has to meet.
+        let created = tree.path().join(root_dir_name);
+        fs::create_dir_all(&created).unwrap();
+        let source_root = fs::canonicalize(&created).unwrap();
+        let archive_root = fs::canonicalize(archive.path()).unwrap();
+
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, &source_root.to_string_lossy(), "source", false);
+        let archive_id = insert_root(&conn, &archive_root.to_string_lossy(), "archive", false);
+
+        for (i, rel) in ["proj-v1/a.jpg", "proj-v2/b.jpg"].iter().enumerate() {
+            let file = source_root.join(rel);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, format!("content-{i}")).unwrap();
+            let meta = fs::metadata(&file).unwrap();
+            let object = insert_object(&conn, &format!("hash-{i}"), false);
+            // Size, mtime and partial hash are the file's own: apply
+            // re-observes all three against disk before it transfers anything,
+            // so placeholder values would make every case here fail as stale
+            // rather than on what it is about.
+            let partial = crate::core::ops::fs::compute_partial_hash(&file, meta.len()).unwrap();
+            conn.execute(
+                "INSERT INTO sources (root_id, rel_path, object_id, size, mtime, partial_hash, \
+                 scanned_at, last_seen_at, device, inode, excluded) \
+                 VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0)",
+                rusqlite::params![
+                    root_id,
+                    rel,
+                    object,
+                    meta.len() as i64,
+                    meta.mtime(),
+                    partial
+                ],
+            )
+            .unwrap();
+        }
+
+        let scopes: Vec<ScopeMatch> = selected
+            .iter()
+            .map(|s| ScopeMatch::UnderDirectory(source_root.join(s).to_string_lossy().to_string()))
+            .collect();
+        let plan = plan_generate(
+            &mut conn,
+            &ClusterGenerateParams {
+                scopes,
+                filters: vec![],
+                allow_archived: false,
+                allow_duplicates: false,
+            },
+        )
+        .unwrap();
+        assert!(!plan.lock_entries.is_empty(), "the fixture locked nothing");
+
+        let manifest = out.path().join("cluster.toml");
+        execute_generate(
+            &plan,
+            &ExecuteGenerateParams {
+                lock_path: out.path().join("cluster.lock"),
+                manifest_path: manifest.clone(),
+                expanded_filters: vec![],
+                original_filters: vec![],
+                scope_prefixes: recorded(&source_root.to_string_lossy()),
+                archive_root_id: archive_id,
+                base_dir: String::new(),
+                allow: vec![],
+            },
+        )
+        .unwrap();
+
+        Fixture {
+            db: Db::from_connection(conn),
+            manifest,
+            source_root,
+            archive_root,
+            _tree: tree,
+            _archive: archive,
+            _out: out,
+        }
+    }
+
+    fn apply(fixture: &mut Fixture) -> Result<()> {
+        let options = ApplyOptions {
+            dry_run: false,
+            verbose: false,
+            allow_cross_archive_duplicates: false,
+            allow_duplicates: false,
+            roots: vec![],
+            transfer_mode: TransferMode::Copy,
+            yes: true,
+            resume: false,
+        };
+        let manifest = fixture.manifest.clone();
+        run(
+            &mut fixture.db,
+            &manifest,
+            &options,
+            "canon apply",
+            &LedgerConfig::default(),
+            false,
+            None,
+        )
+    }
+
+    /// C1 — the unforgivable half, closed where it is unforgivable.
+    ///
+    /// The shape is the friction's own: two sibling scopes recorded, one
+    /// naming no known root, and every locked source under the sibling that
+    /// survives. Nothing downstream objects — the survivors all lie under the
+    /// vantage the survivor alone yields — so with the check removed this run
+    /// completes at exit 0, places `a.jpg` at the archive top where
+    /// `proj-v1/a.jpg` belongs, and writes a decision row claiming a scope it
+    /// never resolved. It must instead stop before it plans.
+    #[test]
+    fn an_unrooted_scope_refuses_before_anything_moves() {
+        let mut f = fixture("tree", &["proj-v1"], |root| {
+            vec![
+                format!("{root}/proj-v1"),
+                "/canon-test/no-such-root/proj-v2".to_string(),
+            ]
+        });
+
+        let message = format!("{:#}", apply(&mut f).unwrap_err());
+        assert!(
+            message.contains("/canon-test/no-such-root/proj-v2"),
+            "the refusal must name the prefix it could not root: {message}"
+        );
+        assert!(f.placed().is_empty(), "nothing may move: {:?}", f.placed());
+        assert_eq!(
+            f.decision_count(),
+            0,
+            "a run refused before planning leaves no decision row"
+        );
+    }
+
+    /// C2 — the refusal is read back against the user's own file, so it names
+    /// every prefix that failed rather than stopping at the first.
+    #[test]
+    fn the_refusal_names_every_unrooted_prefix() {
+        let mut f = fixture("tree", &["proj-v1"], |root| {
+            vec![
+                "/canon-test/gone-one".to_string(),
+                format!("{root}/proj-v1"),
+                "/canon-test/gone-two".to_string(),
+            ]
+        });
+
+        let message = format!("{:#}", apply(&mut f).unwrap_err());
+        assert!(message.contains("/canon-test/gone-one"), "{message}");
+        assert!(message.contains("/canon-test/gone-two"), "{message}");
+    }
+
+    /// C3 — the form half's positive side, checked as an equality between two
+    /// derived surfaces rather than against a literal destination: a manifest
+    /// naming its scope in one normalization must place exactly where one
+    /// naming the same places in the stored form places. Both runs classify
+    /// the same rows, so any difference between them is the mismatch itself.
+    #[test]
+    fn a_form_mismatched_scope_places_where_the_generated_one_would() {
+        // A component with two spellings. They must actually differ, or the
+        // case is vacuous and would pass against the defect it names.
+        const DECOMPOSED: &str = "cafe\u{301}";
+        const PRECOMPOSED: &str = "caf\u{e9}";
+        assert_ne!(DECOMPOSED, PRECOMPOSED);
+
+        // `shift` is what a user retyping the path produces: the same place,
+        // spelled in the other normalization.
+        let shift = |s: &str| -> String {
+            if s.contains(DECOMPOSED) {
+                s.replace(DECOMPOSED, PRECOMPOSED)
+            } else {
+                s.replace(PRECOMPOSED, DECOMPOSED)
+            }
+        };
+        let stored = |root: &str| -> Vec<String> {
+            vec![format!("{root}/proj-v1"), format!("{root}/proj-v2")]
+        };
+
+        let mut baseline = fixture(DECOMPOSED, &["proj-v1", "proj-v2"], stored);
+        let mut mismatched = fixture(DECOMPOSED, &["proj-v1", "proj-v2"], |root| {
+            stored(root).iter().map(|s| shift(s)).collect()
+        });
+        let root = baseline.source_root.to_string_lossy().to_string();
+        assert_ne!(
+            shift(&root),
+            root,
+            "the stored root carries neither spelling — the fixture proves nothing"
+        );
+
+        apply(&mut baseline).unwrap();
+        apply(&mut mismatched).unwrap();
+
+        assert_eq!(
+            mismatched.placed(),
+            baseline.placed(),
+            "a scope typed in the other normalization must place where the stored form places"
+        );
+        assert!(
+            baseline.placed().iter().any(|p| p.contains('/')),
+            "each scope's own name must survive, or this proves nothing: {:?}",
+            baseline.placed()
+        );
     }
 }
