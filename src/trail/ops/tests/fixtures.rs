@@ -56,6 +56,24 @@ pub(super) fn insert_zero_transfer_decision(
     conn.last_insert_rowid()
 }
 
+/// A decision that refused: a pre-flight check said no and the run bailed
+/// before touching content. It reaches its last act, so it carries a terminal
+/// status — and no counts at all, because it attempted nothing.
+pub(super) fn insert_refused_decision(
+    conn: &Connection,
+    command: &str,
+    created_at: i64,
+    command_line: &str,
+) -> i64 {
+    conn.execute(
+        "INSERT INTO decisions (command, command_line, status, canon_version, created_at)
+         VALUES (?1, ?2, 'refused', 'test', ?3)",
+        rusqlite::params![command, command_line, created_at],
+    )
+    .unwrap();
+    conn.last_insert_rowid()
+}
+
 pub(super) fn insert_note_at(conn: &Connection, root_id: i64, rel_path: &str, created_at: i64) {
     conn.execute(
         "INSERT INTO notes (root_id, rel_path, text, created_at) VALUES (?1, ?2, 'thought', ?3)",

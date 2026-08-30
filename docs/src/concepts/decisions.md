@@ -29,7 +29,7 @@ Each decision captures:
 - **Scope** — paths the command operated on
 - **Command line** — the full command as typed
 - **Reason** — optional user annotation (via `--reason`)
-- **Status** — `started`, `completed`, `partial`, or `interrupted`
+- **Status** — `started`, `completed`, `partial`, `interrupted`, or `refused`
 - **Counts** — attempted, completed, failed, skipped
 - **Summary** — the completion message you saw
 - **Canon version** — which version produced the record
@@ -42,7 +42,9 @@ Recording happens in two phases:
 1. **Start**: A "started" record is written after you confirm (or just before execution for commands without confirmation)
 2. **Complete**: The record is updated with the outcome after execution finishes
 
-If Canon is interrupted (Ctrl+C, crash, power loss), the "started" record survives as a durable trace that the operation was attempted.
+A run that refuses — a pre-flight check said no, so nothing was touched — records `refused`. One cut short after work began records `interrupted` or `partial`.
+
+If Canon is interrupted (Ctrl+C, crash, power loss), the "started" record survives as a durable trace that the operation was attempted. A row left `started` means the second phase was never reached: the run was killed, or it failed early enough that no outcome was ever written.
 
 ## Records vs. Receipts
 
@@ -121,7 +123,7 @@ recording = "Full"   # Full | Records | Off
 layout = "Central"   # Central | Alongside
 ```
 
-A decision's recorded receipt location is settled at the decision's last act, so a finished row names a file that exists. The location is reserved when the run starts, before the receipt is written; if the receipt never appears — nothing transitioned, the write failed, or the run refused before moving anything — the reservation is withdrawn rather than left pointing at nothing, and [`trail show`](../commands/query/trail.md) states why. The counts carry the reason: a receipt records per-item transitions, so a run with none has nothing to receipt. A run killed outright never reaches its last act; its row stays `started`, which is the state to look for when recovering from a crash.
+A decision's recorded receipt location is settled at the decision's last act, so a finished row names a file that exists. The location is reserved when the run starts, before the receipt is written; if the receipt never appears — nothing transitioned, the write failed, or the run refused before moving anything — the reservation is withdrawn rather than left pointing at nothing, and [`trail show`](../commands/query/trail.md) states why. The counts carry the reason: a receipt records per-item transitions, so a run with none has nothing to receipt. A run that refused says so in its own status, so its missing receipt is explained by the row rather than left generic. A run that never reached its last act leaves its row `started`, which is the state to look for when recovering from a crash.
 
 If no archive root is configured, exclusion decisions are still recorded, but no receipt can be written; Canon warns you so the gap is visible rather than silent. Deletion receipts have no such dependency: they live on the source root, which always exists, so deletions from a root that was never archived are still recorded in full.
 

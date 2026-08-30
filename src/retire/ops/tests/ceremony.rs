@@ -126,6 +126,10 @@ fn bind_places_a_verified_book_and_records_the_pointer() {
 
     // The decision is still open (release hasn't run) but the pointer is
     // already recorded — abort-after-bind stays findable.
+    //
+    // `started` is correct here and must not be "fixed" by a later sweep of
+    // this class: the ceremony has not reached its last act. Mid-run is
+    // precisely the state the word is reserved for.
     let decision_id = ceremony.recorder.decision_id().unwrap();
     let decision = repo::decision::fetch_by_id(&conn, decision_id)
         .unwrap()
@@ -372,6 +376,21 @@ fn full_ceremony_releases_the_root_and_completes_the_decision() {
     assert_eq!(decision.summary.as_deref(), Some(summary.as_str()));
 }
 
+/// **Retirement's projection of the status conjugation**, examined: the ceremony
+/// registers its row only after the first confirmation, and each of its *named*
+/// exits — this one, `interrupt`, and `release`'s two arms — settles that row at
+/// its last act. The conjugation is owned by `core/ops/decision.rs`; the
+/// ceremony supplies the word, because which outcome a declined release
+/// deserves is the caller's knowledge. The `partial` assertion below is that
+/// projection's pin.
+///
+/// **Conforming on its named exits only**, and the qualifier is load-bearing:
+/// `release` reaches four propagating `?` before either arm — opening the
+/// immediate transaction, the world-moved probe, the removal, the commit — and
+/// any of them leaves the row `started`. `BEGIN IMMEDIATE` returning busy under
+/// a second canon process is the realistic one. The window is open, and it is
+/// sharpest here: the book is already bound and the user has already confirmed
+/// removal.
 #[test]
 fn abandon_after_bind_leaves_root_and_book_standing() {
     let (conn, _src, _arch, root_id) = every_fate_fixture();

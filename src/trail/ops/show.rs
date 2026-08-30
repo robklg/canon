@@ -15,7 +15,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::core::domain::decision::{Decision, DecisionCommand};
+use crate::core::domain::decision::{Decision, DecisionCommand, DecisionStatus};
 use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::fate::{decision_family, DecisionFamily};
 use crate::core::domain::root::Root;
@@ -204,10 +204,10 @@ pub fn compute_show(conn: &Connection, id: i64, cwd: Option<&str>) -> Result<Opt
 
     let receipt_absence = if receipts.is_empty() {
         // The opt-out is recorded in the command line itself. A run that
-        // transferred nothing is readable from the row's own counts: the
-        // receipt gate is the per-item transition, and the row records none.
-        // Beyond those two the row can't say whether recording mode or
-        // placement suppressed it.
+        // refused says so in its own status, and one that transferred nothing
+        // is readable from the row's counts: the receipt gate is the per-item
+        // transition, and the row records none. Beyond those three the row
+        // can't say whether recording mode or placement suppressed it.
         //
         // The counts alone are not enough to say it. Commands that never write
         // a receipt at all can also land at zero completed — an import whose
@@ -218,8 +218,15 @@ pub fn compute_show(conn: &Connection, id: i64, cwd: Option<&str>) -> Result<Opt
             matches!(decision_family(&decision.command), DecisionFamily::Archive)
                 && decision.count_completed == Some(0)
                 && decision.count_attempted.is_some_and(|n| n > 0);
+        // Order is a claim, not an accident. An explicit opt-out is the better
+        // explanation even for a run that refused — the receipt was never going
+        // to be written whatever the run did. The nothing-transferred arm is
+        // unreachable for a refusal by construction: it needs a non-zero
+        // attempted count, and a refusal records none.
         Some(if decision.command_line.contains("--no-receipt") {
             "no receipt (--no-receipt)".to_string()
+        } else if decision.status == DecisionStatus::Refused.as_str() {
+            "no receipt (the run refused)".to_string()
         } else if nothing_transferred {
             "no receipt (nothing transferred)".to_string()
         } else {

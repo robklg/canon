@@ -60,6 +60,11 @@ pub enum DecisionStatus {
     Completed,
     Partial,
     Interrupted,
+    /// The run declined to do anything: a pre-flight check said no and it
+    /// bailed before touching content. Distinct from `Interrupted`, which
+    /// means a run was cut short after starting, and from `Started`, which
+    /// means the run never reached a last act at all.
+    Refused,
 }
 
 impl DecisionStatus {
@@ -69,6 +74,7 @@ impl DecisionStatus {
             Self::Completed => "completed",
             Self::Partial => "partial",
             Self::Interrupted => "interrupted",
+            Self::Refused => "refused",
         }
     }
 }
@@ -164,5 +170,6 @@ mod tests {
         assert_eq!(DecisionStatus::Completed.as_str(), "completed");
         assert_eq!(DecisionStatus::Partial.as_str(), "partial");
         assert_eq!(DecisionStatus::Interrupted.as_str(), "interrupted");
+        assert_eq!(DecisionStatus::Refused.as_str(), "refused");
     }
 }

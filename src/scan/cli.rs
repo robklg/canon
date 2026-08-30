@@ -770,6 +770,13 @@ mod tests {
     /// back. An error after `start()` must close its own row: a `started` row
     /// left behind reads as a scan killed mid-walk, which is a different and
     /// more alarming claim than the error that actually happened.
+    ///
+    /// **Scan's projection of the status conjugation**, examined and declared
+    /// conforming: the row's `started` is a claim registered before the run
+    /// finished, and this arm settles it at the run's last act. The conjugation
+    /// is owned by `core/ops/decision.rs`; scan supplies the word, because
+    /// which outcome an error deserves is the caller's knowledge. This test is
+    /// that projection's pin — it fails if the arm stops settling.
     #[test]
     fn a_scan_that_errors_after_start_completes_its_decision_as_interrupted() {
         let conn = repo::open_in_memory_for_test();

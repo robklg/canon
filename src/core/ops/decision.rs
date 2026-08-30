@@ -90,6 +90,20 @@ pub struct DecisionCounts {
     pub skipped: Option<i64>,
 }
 
+impl DecisionCounts {
+    /// No counts at all — the shape of an outcome that attempted nothing.
+    /// Every column stays SQL `NULL`, so the row cannot be read as having
+    /// tried and failed at zero items.
+    pub fn none() -> Self {
+        DecisionCounts {
+            attempted: None,
+            completed: None,
+            failed: None,
+            skipped: None,
+        }
+    }
+}
+
 /// What a decision row's receipt columns currently claim.
 ///
 /// The columns are written prospectively at `start()`, before the artifact they
@@ -112,6 +126,25 @@ enum ReceiptClaim {
     /// The columns were pointed at a durable artifact that is not a receipt —
     /// the retirement book. Not the recorder's to retract.
     Artifact,
+}
+
+/// What a decision row's status column currently claims.
+///
+/// `insert_started` writes `started` before anything happens — a prospective
+/// claim about a run that has not finished. The recorder registered it, so the
+/// recorder is what settles it at the decision's last act.
+#[derive(Debug, PartialEq, Eq)]
+enum StatusClaim {
+    /// No row exists — recording disabled, or the INSERT failed.
+    Unclaimed,
+    /// The row says `started`; nothing has settled it.
+    Registered,
+    /// A terminal status was written. It never walks back: a later failure
+    /// leaves this alone rather than re-claiming the row says `started`,
+    /// which would point crash recovery at a run that finished. Unlike the
+    /// receipt side's `Finalized`, a second settlement is harmless here — a
+    /// plain UPDATE, not a rename that would break on its own success.
+    Settled,
 }
 
 /// Records a decision. Created before execution, completed after.
@@ -137,6 +170,9 @@ pub struct DecisionRecorder {
     /// What the row's receipt columns currently claim, so an unwritten claim
     /// can be retracted rather than left pointing at nothing.
     claim: ReceiptClaim,
+    /// What the row's status column currently claims, so a row registered as
+    /// `started` cannot be left saying so by a run that did reach a last act.
+    status_claim: StatusClaim,
     warnings: Vec<String>,
 }
 
@@ -198,6 +234,7 @@ impl DecisionRecorder {
                 receipt_abs_path: None,
                 scope_display: Vec::new(),
                 claim: ReceiptClaim::Unclaimed,
+                status_claim: StatusClaim::Unclaimed,
                 warnings: Vec::new(),
             };
         }
@@ -223,6 +260,7 @@ impl DecisionRecorder {
                     receipt_abs_path: None,
                     scope_display: Vec::new(),
                     claim: ReceiptClaim::Unclaimed,
+                    status_claim: StatusClaim::Unclaimed,
                     warnings: vec![format!("Warning: failed to record decision: {e}")],
                 };
             }
@@ -257,6 +295,9 @@ impl DecisionRecorder {
             receipt_abs_path,
             scope_display,
             claim,
+            // The INSERT wrote `started`: the row now makes a claim about a run
+            // that has not finished, and this is what owes the settlement.
+            status_claim: StatusClaim::Registered,
             warnings,
         }
     }
@@ -286,9 +327,35 @@ impl DecisionRecorder {
             counts.skipped,
             Some(summary),
         ) {
+            // The claim stays registered: the row really is still `started`,
+            // and the warning is the record of why. Recording settlement here
+            // would be the falsehood the tracking exists to prevent.
             self.warnings
                 .push(format!("Warning: failed to update decision record: {e}"));
+            return;
         }
+        self.status_claim = StatusClaim::Settled;
+    }
+
+    /// The decision's last act for a run that declined to do anything.
+    ///
+    /// A refusal attempted nothing, so the counts stay empty and the receipt
+    /// registered at `start()` is retracted — the row must not go on citing a
+    /// file that will never be written. Distinct from `interrupted`, which
+    /// means a run was cut short after starting, and from a row left
+    /// `started`, which means the run never reached a last act at all.
+    ///
+    /// Deliberately thin over `complete`: what it buys is the vocabulary point,
+    /// not new mechanism. No caller spells `Refused` plus four `None`s itself,
+    /// and settling the status and the receipt is one act rather than two calls
+    /// a caller could half-make.
+    pub fn refuse(&mut self, conn: &Connection, summary: &str) {
+        self.complete(
+            conn,
+            DecisionStatus::Refused,
+            DecisionCounts::none(),
+            summary,
+        );
     }
 
     /// Write `receipt` to the `.incomplete` file (no DB, no finalize). A write
@@ -365,9 +432,9 @@ impl DecisionRecorder {
     /// never appeared.
     ///
     /// This is the last act of a decision on every shape that can register a
-    /// claim — `complete()`, the commit-then-write shape that settles on its own
-    /// after its transaction, and the paths that abandon a run before it moves
-    /// anything. A path registered at `start()` that was never written is
+    /// claim — `complete()` and its terminals, `refuse()` among them, plus the
+    /// commit-then-write shape that settles on its own after its transaction. A
+    /// path registered at `start()` that was never written is
     /// retracted here: the row would otherwise cite a receipt that does not
     /// exist, and every reader of the trail treats those columns as the index
     /// over what is on disk. Nothing was written, so there is nothing to
@@ -1205,6 +1272,170 @@ mod tests {
             "unexpected warnings: {:?}",
             recorder.warnings
         );
+    }
+
+    // =========================================================================
+    // The status conjugation
+    //
+    // `insert_started` writes `started` before anything happens, so the row
+    // makes a claim about a run that has not finished. The recorder registered
+    // that claim, so the recorder settles it at the decision's last act —
+    // confirmed (`completed`), corrected (`partial`/`interrupted`) or retracted
+    // (`refused`). A row that keeps `started` is a run that never reached a
+    // last act at all, which is the recovery signal the provenance model reads.
+    // =========================================================================
+
+    /// Force every later write against `decisions` to fail, so a settlement
+    /// that did not happen cannot be recorded as one.
+    fn break_the_decisions_table(conn: &Connection) {
+        conn.execute("DROP TABLE decisions", []).unwrap();
+    }
+
+    /// The ordinary path: a run that reaches its last act settles the claim it
+    /// registered.
+    #[test]
+    fn a_completed_run_settles_its_status_claim() {
+        let conn = setup_test_db();
+        let params = make_params(DecisionCommand::Scan, true);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+        assert_eq!(recorder.status_claim, StatusClaim::Registered);
+
+        recorder.complete(
+            &conn,
+            DecisionStatus::Completed,
+            DecisionCounts::none(),
+            "done",
+        );
+
+        assert_eq!(recorder.status_claim, StatusClaim::Settled);
+    }
+
+    /// A settlement the database refused did not happen. The row really is
+    /// still `started`, and the warning the recorder already pushes is the
+    /// record of why — so the claim stays registered rather than recording a
+    /// settlement that is not on the row.
+    #[test]
+    fn a_failed_status_update_leaves_the_claim_registered() {
+        let conn = setup_test_db();
+        let params = make_params(DecisionCommand::Scan, true);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+        break_the_decisions_table(&conn);
+
+        recorder.complete(
+            &conn,
+            DecisionStatus::Completed,
+            DecisionCounts::none(),
+            "done",
+        );
+
+        assert_eq!(recorder.status_claim, StatusClaim::Registered);
+        assert!(
+            recorder
+                .warnings
+                .iter()
+                .any(|w| w.contains("failed to update decision record")),
+            "the failure must still be reported: {:?}",
+            recorder.warnings
+        );
+    }
+
+    /// Settled is terminal, for the same reason `Finalized` is on the receipt
+    /// side: a later failure must not walk a settled row back to a claim that
+    /// its status is still `started`, which would point recovery at a run that
+    /// finished.
+    #[test]
+    fn settling_a_settled_status_again_leaves_it_alone() {
+        let conn = setup_test_db();
+        let params = make_params(DecisionCommand::Scan, true);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+        recorder.complete(
+            &conn,
+            DecisionStatus::Completed,
+            DecisionCounts::none(),
+            "done",
+        );
+        assert_eq!(recorder.status_claim, StatusClaim::Settled);
+
+        break_the_decisions_table(&conn);
+        recorder.complete(
+            &conn,
+            DecisionStatus::Interrupted,
+            DecisionCounts::none(),
+            "second thoughts",
+        );
+
+        assert_eq!(recorder.status_claim, StatusClaim::Settled);
+    }
+
+    /// No row, no claim. A recorder that never registered anything has nothing
+    /// to settle, and `refuse` — the terminal a refusing caller reaches for
+    /// without knowing whether recording is on — must be a silent no-op rather
+    /// than a write against a decision that does not exist.
+    #[test]
+    fn a_disabled_recorder_claims_no_status() {
+        let conn = setup_test_db();
+        let params = make_params(DecisionCommand::Apply, false);
+        let mut recorder = DecisionRecorder::start(&conn, &params, None);
+        assert_eq!(recorder.status_claim, StatusClaim::Unclaimed);
+
+        recorder.refuse(&conn, "Refused: 1 sources are not readable");
+
+        assert_eq!(recorder.status_claim, StatusClaim::Unclaimed);
+        assert_eq!(count_decisions(&conn), 0);
+        assert!(
+            recorder.take_warnings().is_empty(),
+            "a disabled recorder has nothing to warn about"
+        );
+    }
+
+    /// Exhaustive over the status vocabulary, with no `_` arm: a variant added
+    /// later cannot slip in without an answer to "which act writes this, and
+    /// does writing it settle the row?". `Started` is the one non-terminal, and
+    /// it is here to be classified as such rather than omitted.
+    #[test]
+    fn every_terminal_status_is_reachable_by_name() {
+        for status in [
+            DecisionStatus::Started,
+            DecisionStatus::Completed,
+            DecisionStatus::Partial,
+            DecisionStatus::Interrupted,
+            DecisionStatus::Refused,
+        ] {
+            let conn = setup_test_db();
+            let params = make_params(DecisionCommand::Apply, true);
+            let mut recorder = DecisionRecorder::start(&conn, &params, None);
+            assert_eq!(recorder.status_claim, StatusClaim::Registered);
+
+            match status {
+                // Not a terminal: it is what `start()` registers, and the only
+                // row that keeps it is one whose run never reached a last act.
+                DecisionStatus::Started => {
+                    let row = repo::decision::fetch_by_id(&conn, recorder.decision_id().unwrap())
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(row.status, DecisionStatus::Started.as_str());
+                    assert_eq!(recorder.status_claim, StatusClaim::Registered);
+                    continue;
+                }
+                // The outcomes the caller names, because which word an outcome
+                // deserves is caller knowledge — it is what knows its results.
+                DecisionStatus::Completed
+                | DecisionStatus::Partial
+                | DecisionStatus::Interrupted => {
+                    recorder.complete(&conn, status, DecisionCounts::none(), "an outcome")
+                }
+                // The one outcome carrying no caller-specific information, so
+                // the recorder owns its whole shape: empty counts, receipt
+                // claim retracted.
+                DecisionStatus::Refused => recorder.refuse(&conn, "Refused: a pre-flight said no"),
+            }
+
+            let row = repo::decision::fetch_by_id(&conn, recorder.decision_id().unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.status, status.as_str());
+            assert_eq!(recorder.status_claim, StatusClaim::Settled);
+        }
     }
 
     /// The smallest thing that serializes to a receipt body.

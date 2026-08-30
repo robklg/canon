@@ -5,7 +5,8 @@ use crate::core::repo::Connection;
 use crate::trail::ops::show::{compute_show, PointerRelocation, ScopeRelation};
 
 use super::fixtures::{
-    extraction_row, insert_decision_at, insert_decision_full, insert_zero_transfer_decision,
+    extraction_row, insert_decision_at, insert_decision_full, insert_refused_decision,
+    insert_zero_transfer_decision,
 };
 
 #[test]
@@ -351,6 +352,40 @@ fn trail_show_says_nothing_transferred_for_a_receiptless_zero_transfer_decision(
     assert_eq!(
         show.receipt_absence.as_deref(),
         Some("no receipt (nothing transferred)")
+    );
+}
+
+/// A refused run's row can explain its own missing receipt: the status says a
+/// pre-flight check said no, so the reader is not left with the generic arm —
+/// which reads as "something suppressed the receipt and the row can't say
+/// what". The user's question here is "did that run do anything?", and the
+/// answer is on the row.
+#[test]
+fn a_refused_run_explains_its_missing_receipt() {
+    let conn = open_in_memory_for_test();
+    let refused = insert_refused_decision(&conn, "apply", 500, "canon apply test.toml");
+
+    let show = compute_show(&conn, refused, None).unwrap().unwrap();
+    assert_eq!(
+        show.receipt_absence.as_deref(),
+        Some("no receipt (the run refused)")
+    );
+}
+
+/// The arm ordering is a claim, not an accident. A run invoked with
+/// `--no-receipt` was never going to write a receipt whatever it then did, so
+/// the opt-out is the better explanation — and it stays the better one when
+/// the run also refused.
+#[test]
+fn an_explicit_opt_out_still_wins_over_a_refusal() {
+    let conn = open_in_memory_for_test();
+    let refused =
+        insert_refused_decision(&conn, "apply", 600, "canon apply test.toml --no-receipt");
+
+    let show = compute_show(&conn, refused, None).unwrap().unwrap();
+    assert_eq!(
+        show.receipt_absence.as_deref(),
+        Some("no receipt (--no-receipt)")
     );
 }
 

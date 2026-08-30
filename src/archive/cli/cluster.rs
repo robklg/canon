@@ -361,8 +361,9 @@ fn refresh_with_editor(
     let result = generate_ops::execute_refresh(&plan, &exec_params)?;
 
     // Only an empty plan leaves no outcome, and that path returned above; a
-    // missing one here means the lock was never written, which the started
-    // row stays open to say.
+    // missing one here means the lock was never written, and this `?` leaves
+    // the decision row unsettled — one of the sites where an error between
+    // start() and completion still exits without naming an outcome.
     let r = result
         .outcome
         .context("refresh wrote no lock file for a non-empty plan")?;

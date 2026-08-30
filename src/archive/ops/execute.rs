@@ -190,18 +190,6 @@ fn setup_interrupt_flag() -> Result<Arc<AtomicBool>> {
     Ok(flag)
 }
 
-/// Settle the receipt claim of a run that is about to refuse.
-///
-/// Apply registers its receipt path when the recorder starts, but its
-/// pre-transfer checks can still refuse the whole run. The decision row stays
-/// `started` — nothing finished, and that is the truth — but it must not go on
-/// citing a receipt that will never be written.
-fn settle_abandoned_claim(conn: &Connection, recorder: Option<&mut DecisionRecorder>) {
-    if let Some(recorder) = recorder {
-        recorder.settle_receipt_claim(conn);
-    }
-}
-
 pub fn execute_apply(
     conn: &Connection,
     plan: &ApplyPlan,
@@ -257,10 +245,16 @@ pub fn execute_apply(
     }
     progress.on_validation_finish();
     if !unreadable.is_empty() {
-        // The run refuses before anything moves, so the receipt registered at
-        // start() will never be written. Settle the claim before leaving:
-        // abandoning it would leave the row citing a file that never appears.
-        settle_abandoned_claim(conn, recorder.as_mut());
+        // The run refuses before anything moves. This is the decision's last
+        // act, so the row settles here: `refused` names what happened, the
+        // counts stay empty, and the receipt registered at start() — a file
+        // that will never appear — is retracted in the same act.
+        if let Some(recorder) = recorder.as_mut() {
+            recorder.refuse(
+                conn,
+                &format!("Refused: {} sources are not readable", unreadable.len()),
+            );
+        }
         bail!(
             "{} sources are not readable: {}",
             unreadable.len(),
@@ -281,7 +275,17 @@ pub fn execute_apply(
     if !transfers_to_execute.is_empty() {
         let stale = validate_transfers_disk(&transfers_to_execute, progress);
         if !stale.is_empty() {
-            settle_abandoned_claim(conn, recorder.as_mut());
+            // The other pre-transfer refusal, settled the same way — the two
+            // must never diverge, which is what pins them separately.
+            if let Some(recorder) = recorder.as_mut() {
+                recorder.refuse(
+                    conn,
+                    &format!(
+                        "Refused: {} sources have changed since the manifest was generated",
+                        stale.len()
+                    ),
+                );
+            }
             let mut message = format!(
                 "{} sources have changed since manifest was generated:",
                 stale.len()
@@ -2844,10 +2848,9 @@ mod tests {
     }
 
     /// Apply registers its receipt path before its pre-transfer checks run, and
-    /// those checks can refuse the whole run. The row stays `started` — nothing
-    /// finished, which is true — but it must not go on citing a receipt that
-    /// will never be written. The staleness refusal is the routine way a user
-    /// meets this: its own message tells them to rescan and refresh.
+    /// those checks can refuse the whole run. The row must not go on citing a
+    /// receipt that will never be written. The staleness refusal is the routine
+    /// way a user meets this: its own message tells them to rescan and refresh.
     #[test]
     fn an_abandoned_apply_claims_no_receipt() {
         use std::io::Write;
@@ -2905,7 +2908,11 @@ mod tests {
             .expect("decision row");
         assert_eq!(row.receipt_root_id, None, "claim must not outlive the run");
         assert_eq!(row.receipt_rel_path, None, "claim must not outlive the run");
-        assert_eq!(row.status, "started");
+        // The refusal *is* the decision's last act, so both of the row's
+        // prospective claims settle in it. `started` is reserved for a run that
+        // never reached a last act at all — a kill, a crash, a power cut — and
+        // a deliberate no must not read as one of those.
+        assert_eq!(row.status, "refused");
     }
 
     /// The other refusal, which no test reached before: a source that cannot be
@@ -2962,6 +2969,179 @@ mod tests {
             .expect("decision row");
         assert_eq!(row.receipt_root_id, None, "claim must not outlive the run");
         assert_eq!(row.receipt_rel_path, None, "claim must not outlive the run");
+    }
+
+    // =========================================================================
+    // The status conjugation: a run that refuses settles its own row
+    // =========================================================================
+
+    /// Stage the staleness refusal — a plan whose one source changed under it,
+    /// driven to the refusal — and hand back the world it left behind. The
+    /// temp dirs are returned because dropping them deletes the ledger the
+    /// non-vacuity witness reads.
+    fn refused_by_staleness() -> (Connection, tempfile::TempDir, tempfile::TempDir) {
+        use std::io::Write;
+        let conn = setup_test_db();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+        let src_dir = tempfile::tempdir().unwrap();
+        insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+
+        let (plan, _, _) = single_transfer_plan(src_dir.path(), "photo.jpg", "photo.jpg", b"data");
+        std::fs::File::create(src_dir.path().join("photo.jpg"))
+            .unwrap()
+            .write_all(b"different data entirely")
+            .unwrap();
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: Some(ReceiptPlacement::Targeted {
+                archive_root_id: archive_root,
+                archive_root_path: archive_dir.path().display().to_string(),
+                base_dir_rel: String::new(),
+            }),
+        };
+        let decision = make_decision_params(true);
+        let outcome = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision));
+        let err = match outcome {
+            Err(e) => e,
+            Ok(_) => panic!("a stale source must refuse the run"),
+        };
+        assert!(err.to_string().contains("have changed"), "{err}");
+
+        // Non-vacuity: registering the receipt claim is what creates the ledger
+        // directory, so its presence witnesses that a decision row was opened
+        // and had something to settle.
+        assert!(
+            archive_dir.path().join(".canon-ledger").exists(),
+            "the run must have opened a decision for these tests to mean anything"
+        );
+        (conn, archive_dir, src_dir)
+    }
+
+    /// `started` is a claim registered before the run finishes, and the
+    /// provenance model reads a surviving `started` row as a run that never
+    /// reached a last act — a kill, a crash, a power cut. A refusal *is* a last
+    /// act: the run was told no and stopped. Leaving the row `started` puts a
+    /// deliberate no in the same bucket as a power cut and sends the user
+    /// looking for damage that was never done.
+    #[test]
+    fn a_refused_apply_is_never_left_started() {
+        let (conn, _archive_dir, _src_dir) = refused_by_staleness();
+
+        let row = repo::decision::fetch_by_id(&conn, latest_decision_id(&conn))
+            .unwrap()
+            .expect("decision row");
+        assert_eq!(row.status, "refused");
+        assert_eq!(
+            row.summary.as_deref(),
+            Some("Refused: 1 sources have changed since the manifest was generated"),
+            "the durable record says which refusal this was"
+        );
+    }
+
+    /// The other pre-transfer refusal, on its own pin. Apply has two, and a fix
+    /// applied to whichever one is easy to stage leaves the other free to rot —
+    /// which is exactly the shape the receipt half of this law was already
+    /// caught in.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_source_refusal_is_never_left_started() {
+        let conn = setup_test_db();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+        let src_dir = tempfile::tempdir().unwrap();
+        insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+
+        let (plan, _, _) = single_transfer_plan(src_dir.path(), "photo.jpg", "photo.jpg", b"data");
+        // A symlink pointing at itself: opening it fails with a loop error,
+        // which is neither "not found" nor a permission problem — the arm that
+        // chmod cannot reach when the tests run as root.
+        let path = src_dir.path().join("photo.jpg");
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&path, &path).unwrap();
+
+        let params = ApplyExecuteParams {
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: Some(ReceiptPlacement::Targeted {
+                archive_root_id: archive_root,
+                archive_root_path: archive_dir.path().display().to_string(),
+                base_dir_rel: String::new(),
+            }),
+        };
+        let decision = make_decision_params(true);
+        let outcome = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision));
+        let err = match outcome {
+            Err(e) => e,
+            Ok(_) => panic!("an unreadable source must refuse the run"),
+        };
+        assert!(err.to_string().contains("not readable"), "{err}");
+
+        assert!(archive_dir.path().join(".canon-ledger").exists());
+        let row = repo::decision::fetch_by_id(&conn, latest_decision_id(&conn))
+            .unwrap()
+            .expect("decision row");
+        assert_eq!(row.status, "refused");
+        assert_eq!(
+            row.summary.as_deref(),
+            Some("Refused: 1 sources are not readable"),
+        );
+    }
+
+    /// A refusal attempted nothing, and the row must not imply otherwise. Zero
+    /// attempted is a different claim from no attempt: `trail show` reads the
+    /// counts to explain a missing receipt, and a run that tried one file and
+    /// completed none is a failure, not a refusal.
+    #[test]
+    fn a_refusal_records_no_counts() {
+        let (conn, _archive_dir, _src_dir) = refused_by_staleness();
+
+        let row = repo::decision::fetch_by_id(&conn, latest_decision_id(&conn))
+            .unwrap()
+            .expect("decision row");
+        assert_eq!(row.count_attempted, None);
+        assert_eq!(row.count_completed, None);
+        assert_eq!(row.count_failed, None);
+        assert_eq!(row.count_skipped, None);
+    }
+
+    /// The two prospective claims settle together in the one act. Composing the
+    /// refusal over `complete` is what makes half-settling unreachable rather
+    /// than merely unintended: settling one and not the other leaves the row
+    /// either citing a receipt that will never exist, or claiming a run that
+    /// never ended.
+    #[test]
+    fn a_refusal_also_retracts_the_receipt_claim() {
+        let (conn, _archive_dir, _src_dir) = refused_by_staleness();
+
+        let row = repo::decision::fetch_by_id(&conn, latest_decision_id(&conn))
+            .unwrap()
+            .expect("decision row");
+        assert_eq!(row.status, "refused");
+        assert_eq!(row.receipt_root_id, None);
+        assert_eq!(row.receipt_rel_path, None);
     }
 
     /// The positive half of the same law: a receipt that was written stays
