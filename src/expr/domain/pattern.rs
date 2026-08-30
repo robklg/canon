@@ -7,13 +7,14 @@
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 
-use super::key::{expand_alias, parse_key_and_accessor, BuiltinKey, SCOPE_REL_PATH};
+use super::key::{expand_alias, parse_key_and_accessor, BuiltinKey, OBJECT_HASH, SCOPE_REL_PATH};
 use super::transform::{
     apply_accessor, apply_modifier, fact_value_to_string, parse_modifier, ModifierCall,
     PathAccessor,
 };
+use super::value::{get_builtin_value, SourceAttributes};
 use super::vantage::ScopeVantage;
-use crate::core::domain::fact::FactValue;
+use crate::core::domain::fact::{FactEntry, FactValue};
 use crate::core::domain::path::path_strip_prefix;
 
 // ============================================================================
@@ -41,14 +42,77 @@ pub struct PatternExpr {
     pub modifiers: Vec<ModifierCall>,
 }
 
+/// The facts fetched for a run of pattern evaluation, keyed by source.
+///
+/// The invariant, and the reason this is a noun rather than a `HashMap`: **no
+/// key in here is one the evaluation context supplies itself.** The prefetch
+/// that builds it drops those before asking the database, so a stored fact
+/// cannot reach evaluation wearing a computed key's name — which is what
+/// would silently move where files land.
+///
+/// Before this type existed the guarantee was a copy of one `if` at four
+/// sites, each carrying a comment saying all four had to agree and nothing
+/// holding them to it. Wrapping the map is what turns "they agree" from a
+/// thing to check into a thing that cannot be otherwise: the only way to fill
+/// one in production is the prefetch that enforces it.
+pub struct PatternFacts(HashMap<i64, Vec<FactEntry>>);
+
+impl PatternFacts {
+    /// Wrap a map the prefetch has already filtered. Facility-private: the
+    /// invariant belongs to the prefetch, and this is how it hands its result
+    /// over.
+    pub(in crate::expr) fn new(facts: HashMap<i64, Vec<FactEntry>>) -> Self {
+        PatternFacts(facts)
+    }
+
+    /// The stored facts fetched for one source, or nothing if it had none.
+    pub fn for_source(&self, id: i64) -> &[FactEntry] {
+        self.0.get(&id).map_or(&[], Vec::as_slice)
+    }
+
+    /// The one named escape: a test that wants a specific map, including the
+    /// hostile ones that plant a context-supplied key deliberately.
+    /// `cfg(test)` is what makes the invariant build-refused rather than
+    /// convention-held — production has no route to this constructor at all.
+    #[cfg(test)]
+    pub fn from_entries(facts: HashMap<i64, Vec<FactEntry>>) -> Self {
+        PatternFacts(facts)
+    }
+}
+
+/// Whether the pattern evaluation context answers this key itself.
+///
+/// **The context-supplied law**: a key this returns true for is never read
+/// from the facts table. Spelled once, here, and unreachable from outside the
+/// facility on purpose — exporting it would mean three callers each having to
+/// remember to call it, which is the failure mode being repaired rather than
+/// a repair of it. What consumers get instead is `prefetch_pattern_facts`,
+/// which applies it for them.
+///
+/// Two halves, and only one of them is derived. The built-in half reads
+/// `is_computed`, which reads the resolver — a hand-written list would get
+/// `content.hash.sha256` wrong, since it is a built-in *and* a genuinely
+/// stored fact. The other two are named literally because neither is a
+/// `BuiltinKey`: `scope.rel_path` is derived from the manifest's scope at
+/// evaluation time, and `object.hash` comes off the lock entry. That half is
+/// pinned rather than derived, and the pins say so.
+pub(in crate::expr) fn is_context_supplied(key: &str) -> bool {
+    key == SCOPE_REL_PATH
+        || key == OBJECT_HASH
+        || BuiltinKey::from_str(key).is_some_and(|k| k.is_computed())
+}
+
 /// Context for pattern evaluation - provides fact values and source info
 pub struct EvalContext<'a> {
-    /// Fact values by key (properly typed from database)
+    /// Fact values by key, stored rather than computed. Under the
+    /// context-supplied law nothing in here is a key this context answers
+    /// itself, so a lookup falling through to this map cannot shadow a
+    /// built-in.
     facts: HashMap<String, FactValue>,
-    /// Source root path (for path derivation)
-    source_root: Option<String>,
-    /// Source relative path (for path derivation)
-    source_rel_path: Option<String>,
+    /// What the source itself answers, which is every computed built-in. The
+    /// shaping half reaches the same resolver the asking half does; before it
+    /// did, it held two path strings and could derive three keys from them.
+    source: Option<SourceAttributes>,
     /// Where a `scope.rel_path` measures from, derived once per run. Borrowed
     /// rather than owned: a context is built per source, and the vantage is
     /// built once for all of them.
@@ -59,8 +123,7 @@ impl<'a> EvalContext<'a> {
     pub fn new() -> Self {
         EvalContext {
             facts: HashMap::new(),
-            source_root: None,
-            source_rel_path: None,
+            source: None,
             vantage: None,
         }
     }
@@ -70,14 +133,12 @@ impl<'a> EvalContext<'a> {
         self.facts.insert(key.to_string(), value);
     }
 
-    /// Set source root path (for deriving source.root, source.path)
-    pub fn set_source_root(&mut self, root: String) {
-        self.source_root = Some(root);
-    }
-
-    /// Set source relative path (for deriving source.rel_path, filename, etc.)
-    pub fn set_source_rel_path(&mut self, rel_path: String) {
-        self.source_rel_path = Some(rel_path);
+    /// Point the context at the source it is evaluating for.
+    ///
+    /// One setter rather than one per attribute: the attributes arrive
+    /// together and half a source is not a state any caller means to be in.
+    pub fn set_source(&mut self, attrs: SourceAttributes) {
+        self.source = Some(attrs);
     }
 
     /// Point the context at the run's derived scope vantage.
@@ -326,7 +387,16 @@ fn evaluate_expr(expr: &PatternExpr, ctx: &EvalContext) -> Result<String> {
     Ok(fact_value_to_string(&result))
 }
 
-/// Get a fact value by key, handling derived facts
+/// Get a fact value by key.
+///
+/// Three sources of an answer, in this order: the pattern-only
+/// `scope.rel_path`, which is derived here; the built-in vocabulary, which the
+/// source answers through the one resolver both halves of the language share;
+/// and the facts the caller prefetched. The order is what makes the law hold
+/// from this side — but it is not what the law rests on. The prefetch never
+/// asks for a key this function answers, so the facts map cannot hold one
+/// (`PatternFacts`), and the precedence here is a second lock on a door that
+/// is already shut.
 fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
     // The scope-relative path is derived here rather than looked up: it is
     // not a fact and carries no built-in key. Every arm that cannot answer
@@ -336,21 +406,17 @@ fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
         let vantage = ctx.vantage.filter(|v| !v.is_empty()).ok_or_else(|| {
             anyhow!("{SCOPE_REL_PATH} is not available: the manifest records no scope")
         })?;
-        let (root, rel_path) = match (&ctx.source_root, &ctx.source_rel_path) {
-            (Some(root), Some(rel_path)) => (root, rel_path),
-            _ => bail!("{SCOPE_REL_PATH} is not available"),
+        let Some(source) = ctx.source.as_ref() else {
+            bail!("{SCOPE_REL_PATH} is not available");
         };
+        let root = &source.root_path;
         let measured_from = vantage.for_root(root).ok_or_else(|| {
             anyhow!(
                 "{SCOPE_REL_PATH} cannot be measured for a source in {root}: \
                  the manifest's scope names no path in that root"
             )
         })?;
-        let full_path = if rel_path.is_empty() {
-            root.clone()
-        } else {
-            format!("{root}/{rel_path}")
-        };
+        let full_path = source.path();
         // Containment through its owner, never a byte prefix: `/R/photos`
         // must not swallow `/R/photos2/x.jpg` and strip it to `2/x.jpg`.
         let scope_rel = path_strip_prefix(&full_path, measured_from).ok_or_else(|| {
@@ -359,70 +425,55 @@ fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
         return Ok(FactValue::Path(scope_rel.to_string()));
     }
 
-    // Handle built-in keys via enum
+    // Every built-in the source itself answers goes to the resolver the
+    // asking half already uses. Three of these arms used to be written out
+    // here by hand, which is why the other six were missing.
     if let Some(builtin) = BuiltinKey::from_str(key) {
-        match builtin {
-            BuiltinKey::SourceRelPath => {
-                if let Some(ref rel_path) = ctx.source_rel_path {
-                    return Ok(FactValue::Path(rel_path.clone()));
-                }
-                bail!("source.rel_path not available");
-            }
-            BuiltinKey::SourceRoot => {
-                if let Some(ref root) = ctx.source_root {
-                    return Ok(FactValue::Path(root.clone()));
-                }
-                bail!("source.root not available");
-            }
-            BuiltinKey::SourcePath => {
-                // Derived: root + "/" + rel_path
-                match (&ctx.source_root, &ctx.source_rel_path) {
-                    (Some(root), Some(rel_path)) => {
-                        let full = if rel_path.is_empty() {
-                            root.clone()
-                        } else {
-                            format!("{root}/{rel_path}")
-                        };
-                        return Ok(FactValue::Path(full));
-                    }
-                    _ => bail!("source.path not available (requires root and rel_path)"),
-                }
-            }
-            // Other builtin keys are looked up in facts or not available in patterns
-            _ => {}
+        if builtin.is_computed() {
+            let source = ctx
+                .source
+                .as_ref()
+                .ok_or_else(|| anyhow!("{key} is not available: no source in context"))?;
+            return get_builtin_value(source, builtin)
+                .ok_or_else(|| anyhow!("{key} is not available"));
         }
     }
 
-    // Look up in facts
     if let Some(value) = ctx.facts.get(key) {
         return Ok(value.clone());
     }
 
-    // Build list of available facts for error message
-    let mut available: Vec<&str> = ctx.facts.keys().map(|s| s.as_str()).collect();
-    // Add derived facts that are available
-    if ctx.source_rel_path.is_some() {
-        available.push("source.rel_path");
-    }
-    if ctx.source_root.is_some() {
-        available.push("source.root");
-    }
-    if ctx.source_root.is_some() && ctx.source_rel_path.is_some() {
-        available.push("source.path");
-    }
-    if ctx.vantage.is_some_and(|v| !v.is_empty())
-        && ctx.source_root.is_some()
-        && ctx.source_rel_path.is_some()
-    {
-        available.push(SCOPE_REL_PATH);
-    }
-    available.sort();
-
     bail!(
-        "Unknown fact '{}'. Available facts: {}",
-        key,
-        available.join(", ")
+        "Unknown fact '{key}'. Available facts: {}",
+        available(ctx).join(", ")
     );
+}
+
+/// What this context can answer, for the error message that says a key was not
+/// among them.
+///
+/// Derived from the same conjugation the resolution above reads, never listed.
+/// A hand-written list here would be a fourth spelling of the set — living
+/// inside the very message whose job is to describe it accurately — and the
+/// hole this story repairs was found precisely because this message happened
+/// to be honest about the three keys it knew.
+fn available<'k>(ctx: &'k EvalContext<'_>) -> Vec<&'k str> {
+    use strum::IntoEnumIterator;
+
+    let mut names: Vec<&str> = ctx.facts.keys().map(String::as_str).collect();
+    if ctx.source.is_some() {
+        for key in BuiltinKey::iter().filter(BuiltinKey::is_computed) {
+            let name: &'static str = key.into();
+            names.push(name);
+        }
+        // A vantage with no source has nothing to measure, so listing the key
+        // would name something this context still could not answer.
+        if ctx.vantage.is_some_and(|v| !v.is_empty()) {
+            names.push(SCOPE_REL_PATH);
+        }
+    }
+    names.sort();
+    names
 }
 
 // ============================================================================
@@ -437,6 +488,28 @@ mod tests {
     fn vantage(prefixes: &[&str], roots: &[&str]) -> ScopeVantage {
         let owned: Vec<String> = prefixes.iter().map(|p| p.to_string()).collect();
         ScopeVantage::new(&owned, roots.iter().copied())
+    }
+
+    /// A source at `root` + `rel`, with the remaining attributes fixed. The
+    /// mtime is 2024-06-15 12:00:00 UTC — the same instant `value.rs`'s
+    /// display pin already asserts renders as `2024-06-15`.
+    fn source(root: &str, rel: &str) -> SourceAttributes {
+        SourceAttributes {
+            id: 42,
+            root_id: 1,
+            root_path: root.to_string(),
+            rel_path: rel.to_string(),
+            size: 1024000,
+            mtime: 1718452800,
+            device: 16777220,
+            inode: 12345678,
+        }
+    }
+
+    /// The common case: a source under a root nothing else in the test cares
+    /// about.
+    fn at(rel: &str) -> SourceAttributes {
+        source("/root", rel)
     }
 
     #[test]
@@ -510,7 +583,7 @@ mod tests {
     fn test_evaluate_simple() {
         let pattern = parse_pattern("{filename}").unwrap();
         let mut ctx = EvalContext::new();
-        ctx.set_source_rel_path("photos/2024/image.jpg".to_string());
+        ctx.set_source(at("photos/2024/image.jpg"));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "image.jpg");
     }
@@ -519,7 +592,7 @@ mod tests {
     fn test_evaluate_path_index() {
         let pattern = parse_pattern("{source.rel_path[-2]}").unwrap();
         let mut ctx = EvalContext::new();
-        ctx.set_source_rel_path("photos/2024/vacation/image.jpg".to_string());
+        ctx.set_source(at("photos/2024/vacation/image.jpg"));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "vacation");
     }
@@ -528,7 +601,7 @@ mod tests {
     fn test_evaluate_path_slice() {
         let pattern = parse_pattern("{source.rel_path[0:2]}").unwrap();
         let mut ctx = EvalContext::new();
-        ctx.set_source_rel_path("photos/2024/vacation/image.jpg".to_string());
+        ctx.set_source(at("photos/2024/vacation/image.jpg"));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "photos/2024");
     }
@@ -537,8 +610,13 @@ mod tests {
     fn test_evaluate_time_modifier() {
         let pattern = parse_pattern("{source.mtime|year}").unwrap();
         let mut ctx = EvalContext::new();
-        // 2024-06-15 12:00:00 UTC
-        ctx.set_fact("source.mtime", FactValue::Time(1718452800));
+        // The mtime comes from the source, not from a planted fact. It used
+        // to come from a fact here, which is why this test passed while the
+        // production path — where nothing plants one — could not expand this
+        // pattern at all.
+        let mut source = at("photos/image.jpg");
+        source.mtime = 1718452800; // 2024-06-15 12:00:00 UTC
+        ctx.set_source(source);
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "2024");
     }
@@ -547,7 +625,7 @@ mod tests {
     fn test_evaluate_stem_modifier() {
         let pattern = parse_pattern("{stem}").unwrap();
         let mut ctx = EvalContext::new();
-        ctx.set_source_rel_path("photos/image.jpg".to_string());
+        ctx.set_source(at("photos/image.jpg"));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "image");
     }
@@ -556,7 +634,7 @@ mod tests {
     fn test_evaluate_ext_modifier() {
         let pattern = parse_pattern("{ext}").unwrap();
         let mut ctx = EvalContext::new();
-        ctx.set_source_rel_path("photos/image.jpg".to_string());
+        ctx.set_source(at("photos/image.jpg"));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "jpg");
     }
@@ -565,7 +643,7 @@ mod tests {
     fn test_out_of_bounds_error() {
         let pattern = parse_pattern("{source.rel_path[10]}").unwrap();
         let mut ctx = EvalContext::new();
-        ctx.set_source_rel_path("photos/image.jpg".to_string());
+        ctx.set_source(at("photos/image.jpg"));
         let result = evaluate(&pattern, &ctx);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("out of bounds"));
@@ -576,8 +654,7 @@ mod tests {
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
         let vantage = vantage(&["/Photos/Home"], &["/Photos"]);
         let mut ctx = EvalContext::new();
-        ctx.set_source_root("/Photos".to_string());
-        ctx.set_source_rel_path("Home/2024/vacation/image.jpg".to_string());
+        ctx.set_source(source("/Photos", "Home/2024/vacation/image.jpg"));
         ctx.set_vantage(&vantage);
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "2024/vacation/image.jpg");
@@ -592,8 +669,7 @@ mod tests {
         let vantage = vantage(&["/vol/work/proj-v1", "/vol/work/proj-v2"], &["/vol"]);
         for rel in ["work/proj-v1/src/main.c", "work/proj-v2/src/main.c"] {
             let mut ctx = EvalContext::new();
-            ctx.set_source_root("/vol".to_string());
-            ctx.set_source_rel_path(rel.to_string());
+            ctx.set_source(source("/vol", rel));
             ctx.set_vantage(&vantage);
             let result = evaluate(&pattern, &ctx).unwrap();
             // Measured from `/vol/work`, not from the root: the scope name
@@ -612,8 +688,7 @@ mod tests {
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
         let vantage = vantage(&["/vol/photos"], &["/vol"]);
         let mut ctx = EvalContext::new();
-        ctx.set_source_root("/vol".to_string());
-        ctx.set_source_rel_path("photos2/x.jpg".to_string());
+        ctx.set_source(source("/vol", "photos2/x.jpg"));
         ctx.set_vantage(&vantage);
         let result = evaluate(&pattern, &ctx);
         assert!(result.is_err(), "got {result:?}");
@@ -627,8 +702,7 @@ mod tests {
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
         let vantage = vantage(&["/vol/work/proj-v1"], &["/vol", "/media/backup"]);
         let mut ctx = EvalContext::new();
-        ctx.set_source_root("/media/backup".to_string());
-        ctx.set_source_rel_path("proj-v1/src/main.c".to_string());
+        ctx.set_source(source("/media/backup", "proj-v1/src/main.c"));
         ctx.set_vantage(&vantage);
         let err = evaluate(&pattern, &ctx).unwrap_err().to_string();
         assert!(err.contains("/media/backup"), "{err}");
@@ -646,12 +720,54 @@ mod tests {
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
         let vantage = vantage(&[], &["/vol"]);
         let mut ctx = EvalContext::new();
-        ctx.set_source_root("/vol".to_string());
-        ctx.set_source_rel_path("work/proj-v1/src/main.c".to_string());
+        ctx.set_source(source("/vol", "work/proj-v1/src/main.c"));
         ctx.set_vantage(&vantage);
         let err = evaluate(&pattern, &ctx).unwrap_err().to_string();
         assert!(err.contains("records no scope"), "{err}");
         assert!(!err.contains("names no path in that root"), "{err}");
+    }
+
+    /// The message that says a key was not found must describe the set the
+    /// lookup actually consulted. It is derived from the same conjugation the
+    /// lookup reads, so it cannot drift from it — and this asserts on the
+    /// keys a hand-written list would have left out, not on the three it
+    /// used to name.
+    #[test]
+    fn an_unknown_key_lists_the_computed_builtins_as_available() {
+        let pattern = parse_pattern("{content.NotHere}").unwrap();
+        let mut ctx = EvalContext::new();
+        ctx.set_source(at("photos/image.jpg"));
+        ctx.set_fact("content.Make", FactValue::Text("Canon".to_string()));
+
+        let err = evaluate(&pattern, &ctx).unwrap_err().to_string();
+        for expected in [
+            "source.ext",
+            "source.mtime",
+            "source.size",
+            "source.id",
+            "source.device",
+            "source.inode",
+            "source.path",
+            "source.root",
+            "source.rel_path",
+            "content.Make",
+        ] {
+            assert!(err.contains(expected), "'{expected}' missing from: {err}");
+        }
+        // Keys the source cannot answer are not claimed as available.
+        assert!(!err.contains("hash_short"), "{err}");
+    }
+
+    /// A source at its own root's top has no filename and so no extension.
+    /// The resolver answers with an empty string rather than refusing —
+    /// consistent with the asking half, where `resolve_source_ext_no_extension`
+    /// pins the same behaviour.
+    #[test]
+    fn a_source_at_its_root_yields_an_empty_extension() {
+        let pattern = parse_pattern("photos/{source.ext}").unwrap();
+        let mut ctx = EvalContext::new();
+        ctx.set_source(at(""));
+        assert_eq!(evaluate(&pattern, &ctx).unwrap(), "photos");
     }
 
     #[test]
@@ -681,8 +797,7 @@ mod tests {
             parse_pattern("{source.rel_path[0]}/{source.mtime|year}/{stem}_{hash_short}.{ext}")
                 .unwrap();
         let mut ctx = EvalContext::new();
-        ctx.set_source_rel_path("vacation/photos/IMG_001.jpg".to_string());
-        ctx.set_fact("source.mtime", FactValue::Time(1718452800));
+        ctx.set_source(at("vacation/photos/IMG_001.jpg"));
         ctx.set_fact(
             "object.hash",
             FactValue::Text("abcdef1234567890".to_string()),
@@ -774,7 +889,7 @@ mod tests {
         // Raw concatenation: "/5.avi" -> Normalized: "5.avi"
         let pattern = parse_pattern("{source.rel_path[:-1]}/{filename}").unwrap();
         let mut ctx = EvalContext::new();
-        ctx.set_source_rel_path("5.avi".to_string());
+        ctx.set_source(at("5.avi"));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "5.avi");
     }
@@ -787,7 +902,7 @@ mod tests {
         // Result: "subdir/file.jpg" — unchanged by normalization
         let pattern = parse_pattern("{source.rel_path[:-1]}/{filename}").unwrap();
         let mut ctx = EvalContext::new();
-        ctx.set_source_rel_path("subdir/file.jpg".to_string());
+        ctx.set_source(at("subdir/file.jpg"));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "subdir/file.jpg");
     }

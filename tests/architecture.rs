@@ -272,11 +272,6 @@ const TIER3: &[Tier3Entry] = &[
         severity: Severity::Read,
     },
     Tier3Entry {
-        file: "archive/cli/apply.rs",
-        reference: "core::repo::fact::batch_fetch_key_for_sources",
-        severity: Severity::Read,
-    },
-    Tier3Entry {
         file: "archive/cli/cluster.rs",
         reference: "core::repo::root::fetch_all",
         severity: Severity::Read,
@@ -1341,6 +1336,92 @@ fn the_facility_leaves_sql_to_its_repo_but_for_one_pinned_exception() {
     );
 }
 
+/// The context-supplied set is spelled inside the expression facility and
+/// nowhere else.
+///
+/// One line used to decide which facts reach pattern evaluation, and it was
+/// written out four times — three fetch sites plus the set site — each
+/// carrying a comment saying all four had to agree and nothing holding them
+/// to it. Its own words for the consequence: *a stored fact shadows a
+/// built-in and destinations move.* Three of those sites now call one
+/// function and the fourth is gone, so what remains possible is a **fifth**
+/// site appearing somewhere new. This is the pin against that.
+///
+/// **The exemptions are not oversights, and unifying them would be a false
+/// equality.** Three sites outside the facility match the same bytes and each
+/// serves a different verb:
+///
+/// - `facts/domain.rs` — *reserving an import namespace*: it refuses
+///   `source.*` on the way **in**. Same bytes, opposite direction.
+/// - `facts/ops/maintain.rs` — *protecting facts from deletion*: a different
+///   set (`source.*` **and** `policy.*`) answering a different question.
+/// - `worklist/ops.rs` — *routing an entity lookup*: source table vs object
+///   table. A dispatch switch, not a claim about what supplies a key.
+///
+/// Convergent spelling without convergent meaning. A matcher that flagged
+/// these would be asserting the very equality the design rejects, so they are
+/// listed by name with their verbs, and the count is exact: a second spelling
+/// added inside an exempt file fails this too.
+///
+/// The scan covers test code as well as production. A test spelling the set
+/// out is still a spelling of it, and admitting one would need the same
+/// deliberate act as admitting a production one.
+#[test]
+fn the_context_supplied_set_is_spelled_only_inside_expr() {
+    // The two prefix tests the old skiplist was built from. `object.hash` is
+    // deliberately absent: it is an exact-match on an ordinary string and
+    // matching it would flag every unrelated mention of the key.
+    const SPELLINGS: &[&str] = &["starts_with(\"source.\")", "starts_with(\"scope.\")"];
+
+    /// Each exemption, with the verb it serves and how many times it spells
+    /// one of the above.
+    const EXEMPT: &[(&str, usize)] = &[
+        // reserving an import namespace
+        ("src/facts/domain.rs", 1),
+        // protecting facts from deletion
+        ("src/facts/ops/maintain.rs", 1),
+        // routing an entity lookup
+        ("src/worklist/ops.rs", 1),
+    ];
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let src_root = Path::new(&manifest_dir).join("src");
+
+    let mut found: Vec<(String, usize)> = Vec::new();
+    for path in collect_rs_files(&src_root) {
+        let rel = path
+            .strip_prefix(&manifest_dir)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        // The facility is where the set is allowed to be spelled.
+        if rel.starts_with("src/expr/") || rel == "src/expr.rs" {
+            continue;
+        }
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+        let count: usize = SPELLINGS.iter().map(|s| text.matches(s).count()).sum();
+        if count > 0 {
+            found.push((rel, count));
+        }
+    }
+    found.sort();
+
+    let expected: Vec<(String, usize)> =
+        EXEMPT.iter().map(|(f, n)| ((*f).to_string(), *n)).collect();
+
+    assert_eq!(
+        found, expected,
+        "\n  The context-supplied set is spelled outside `src/expr/`.\n  \
+         Found: {found:?}\n  Exempt: {expected:?}\n  \
+         A new site means a fifth spelling of the rule that decides which facts reach \
+         pattern evaluation — route it through `expr::prefetch_pattern_facts` instead, \
+         which applies the rule for its callers.\n  \
+         If an exemption is genuinely gone, delete its row here in the same commit; if a new \
+         one is genuinely a different verb, add it with that verb named."
+    );
+}
+
 // ============================================================================
 // Self-tests (August's spec)
 // ============================================================================
@@ -2288,14 +2369,18 @@ fn s() -> Connection {
                 "Pattern",
                 "EvalContext",
                 "ScopeVantage",
+                "prefetch_pattern_facts",
+                "PatternFacts",
                 "resolve_fact_value",
                 "get_builtin_value",
                 "fact_value_to_display",
+                "SourceAttributes",
                 "ParsedFactKey",
                 "BuiltinKey",
                 "BuiltinKeyCategory",
                 "BuiltinKeyVisibility",
                 "SCOPE_REL_PATH",
+                "OBJECT_HASH",
                 "Modifier",
                 "ModifierCategory",
                 "apply_accessor",

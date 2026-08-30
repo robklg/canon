@@ -22,7 +22,7 @@ use crate::core::domain::{FactEntry, FactType, FactValue};
 use crate::core::repo::{self, Connection};
 use crate::expr::Filter;
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
-use crate::expr::{BuiltinKey, SCOPE_REL_PATH};
+use crate::expr::{BuiltinKey, OBJECT_HASH, SCOPE_REL_PATH};
 
 use super::manifest::{write_and_sync, write_lock_file};
 
@@ -779,7 +779,7 @@ fn generate_fact_help(
     }
     help.push_str(&format!(
         "#   {:18} {:6} - {}\n",
-        "object.hash", "text", "Content hash (if hashed)"
+        OBJECT_HASH, "text", "Content hash (if hashed)"
     ));
     if has_scope {
         help.push_str(&format!(

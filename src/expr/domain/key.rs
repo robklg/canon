@@ -25,6 +25,23 @@ use crate::core::domain::fact::FactType;
 /// could not mean anything there.
 pub const SCOPE_REL_PATH: &str = "scope.rel_path";
 
+/// The spelling of the pattern-only key `object.hash`, for every site that
+/// writes the key itself.
+///
+/// Not a `BuiltinKey` either, and for a different reason than
+/// `scope.rel_path`: it names content identity, which no source column
+/// answers. A pattern gets it from the lock entry the manifest recorded; a
+/// filter asks `content.hash.sha256` instead. It has a name here because
+/// several places wrote the literal before this const existed.
+///
+/// One literal survives, below: `HashShort`'s expansion is `"object.hash|short"`,
+/// a composed *expression* rather than a naming of the key, and a
+/// `&'static str` return cannot be built from a const and a suffix. Stated
+/// rather than left for a reader to notice — a const claiming to be the only
+/// spelling while one sits eighty lines under it is the overstatement this
+/// facility exists to avoid.
+pub const OBJECT_HASH: &str = "object.hash";
+
 // ============================================================================
 // Built-in Keys
 // ============================================================================
@@ -111,10 +128,47 @@ impl BuiltinKey {
             BuiltinKey::Filename => Some("source.rel_path[-1]"),
             BuiltinKey::Stem => Some("source.rel_path[-1]|stem"),
             BuiltinKey::Ext => Some("source.rel_path[-1]|ext"),
-            BuiltinKey::Hash => Some("object.hash"),
+            BuiltinKey::Hash => Some(OBJECT_HASH),
             BuiltinKey::HashShort => Some("object.hash|short"),
             BuiltinKey::Id => Some("source.id"),
             _ => None,
+        }
+    }
+
+    /// Whether the source itself answers this key, or the facts table does.
+    ///
+    /// This is the conjugation the context-supplied law reads: a key the
+    /// evaluation context answers is never fetched from the facts table, so a
+    /// stored fact cannot reach evaluation wearing a built-in's name and move
+    /// where files land.
+    ///
+    /// Exhaustive on purpose — no `_` arm. A new built-in must say which side
+    /// it falls on or the build refuses it, because the alternative is a new
+    /// key defaulting into a classification nobody chose. The classification
+    /// is not free to drift from the resolver either:
+    /// `a_key_is_computed_exactly_when_the_resolver_answers_it` asserts this
+    /// function agrees with `get_builtin_value` across the whole enum.
+    pub fn is_computed(&self) -> bool {
+        match self {
+            BuiltinKey::SourceExt
+            | BuiltinKey::SourceSize
+            | BuiltinKey::SourceMtime
+            | BuiltinKey::SourcePath
+            | BuiltinKey::SourceRoot
+            | BuiltinKey::SourceRelPath
+            | BuiltinKey::SourceId
+            | BuiltinKey::SourceDevice
+            | BuiltinKey::SourceInode
+            | BuiltinKey::Filename
+            | BuiltinKey::Stem
+            | BuiltinKey::Ext
+            | BuiltinKey::Id
+            | BuiltinKey::Size
+            | BuiltinKey::Mtime
+            | BuiltinKey::RootId => true,
+
+            // Need an object lookup, not derivable from the source alone.
+            BuiltinKey::Hash | BuiltinKey::HashShort | BuiltinKey::ContentHashSha256 => false,
         }
     }
 

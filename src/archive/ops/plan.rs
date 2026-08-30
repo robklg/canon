@@ -20,11 +20,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::archive::domain::LockEntry;
-use crate::core::domain::fact::FactEntry;
 use crate::core::domain::format::{first_chars, shell_quote};
 use crate::core::domain::path::path_strip_prefix;
 use crate::core::repo::{self, Connection};
-use crate::expr::{Pattern, ScopeVantage};
+use crate::expr::{prefetch_pattern_facts, Pattern, ScopeVantage};
 
 use super::pattern::evaluate_pattern;
 
@@ -303,20 +302,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     // --- Batch fetch facts for pattern evaluation ---
 
     let source_ids: Vec<i64> = params.sources.iter().map(|s| s.id).collect();
-    let mut all_facts: HashMap<i64, Vec<FactEntry>> = HashMap::new();
-    for key in params.needed_keys {
-        // Must list the same namespaces as the evaluation context builder
-        // above — see the note there.
-        if key.starts_with("source.") || key.starts_with("scope.") || key == "object.hash" {
-            continue;
-        }
-        let key_facts = repo::fact::batch_fetch_key_for_sources(conn, &source_ids, key)?;
-        for (source_id, entry_opt) in key_facts {
-            if let Some(entry) = entry_opt {
-                all_facts.entry(source_id).or_default().push(entry);
-            }
-        }
-    }
+    let facts = prefetch_pattern_facts(conn, &source_ids, params.needed_keys)?;
 
     // --- Expand patterns and build transfers ---
 
@@ -326,10 +312,9 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
         match evaluate_pattern(
             params.pattern,
             source,
-            params.needed_keys,
             params.vantage,
             params.root_paths,
-            &all_facts,
+            &facts,
         ) {
             Ok(dest_rel) => {
                 let archive_rel_path = compute_archive_rel_path(params.base_dir_rel, &dest_rel);

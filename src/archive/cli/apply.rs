@@ -18,7 +18,10 @@ use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
 use crate::core::repo::{self, Db};
-use crate::expr::{extract_fact_keys, parse_pattern, placement_shape, Pattern, ScopeVantage};
+use crate::expr::{
+    extract_fact_keys, parse_pattern, placement_shape, prefetch_pattern_facts, Pattern,
+    ScopeVantage,
+};
 
 pub struct ApplyOptions {
     pub dry_run: bool,
@@ -674,39 +677,19 @@ fn compute_sample_destinations(
         return vec![];
     }
 
-    // Fetch facts for sample sources only (same per-key pattern as plan_apply)
+    // Fetch facts for sample sources only. The samples are decoration on a
+    // confirmation prompt, not the act, so a database error drops them rather
+    // than failing the command — the same graceful degradation as before,
+    // moved out to the one call that can now fail.
     let sample_ids: Vec<i64> = sample_sources.iter().map(|s| s.id).collect();
-    let mut all_facts: HashMap<i64, Vec<crate::core::domain::fact::FactEntry>> = HashMap::new();
-    for key in needed_keys {
-        // Must list the same namespaces as the fetch and evaluation sites in
-        // the apply operation — a namespace listed in one place and not the
-        // others changes which facts reach pattern evaluation.
-        if key.starts_with("source.") || key.starts_with("scope.") || key == "object.hash" {
-            continue;
-        }
-        match repo::fact::batch_fetch_key_for_sources(conn, &sample_ids, key) {
-            Ok(key_facts) => {
-                for (source_id, entry_opt) in key_facts {
-                    if let Some(entry) = entry_opt {
-                        all_facts.entry(source_id).or_default().push(entry);
-                    }
-                }
-            }
-            Err(_) => return vec![], // Graceful degradation: skip samples on DB error
-        }
-    }
+    let Ok(facts) = prefetch_pattern_facts(conn, &sample_ids, needed_keys) else {
+        return vec![];
+    };
 
     sample_sources
         .iter()
         .map(|source| {
-            match pattern::evaluate_pattern(
-                pattern,
-                source,
-                needed_keys,
-                vantage,
-                root_paths,
-                &all_facts,
-            ) {
+            match pattern::evaluate_pattern(pattern, source, vantage, root_paths, &facts) {
                 Ok(dest_rel) => {
                     let full_path = base_dir.join(&dest_rel);
                     SampleDestination {

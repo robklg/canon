@@ -32,6 +32,62 @@ use crate::core::domain::fact::FactEntry;
 use crate::core::domain::fact::FactValue;
 use crate::core::domain::source::Source;
 
+/// Everything the built-in vocabulary can be computed from — the complete set,
+/// so a built-in either resolves from these or is a stored fact.
+///
+/// Named as its own input because the resolver serves both halves of the
+/// language and the two halves hold different things. The asking half has a
+/// whole `Source` in hand; the shaping half has a manifest's lock entry and a
+/// root/rel split it computes itself, and never a `Source` at all. That
+/// difference is why the shaping half went unwired to this resolver for as
+/// long as it did — a plumbing accident, not a decision — and naming the input
+/// is what closes it.
+///
+/// The strings are owned rather than borrowed. Borrowing is free from a
+/// `Source`, but the pattern half builds its relative path locally and hands
+/// the context onward, so a borrow would dangle; the escapes are a private
+/// owned mirror (two types for one concept) or an eight-argument call. Two
+/// `String` clones per source, which is what the pattern half already spends
+/// on its root path.
+#[derive(Debug, Clone)]
+pub struct SourceAttributes {
+    pub id: i64,
+    pub root_id: i64,
+    pub root_path: String,
+    pub rel_path: String,
+    pub size: i64,
+    pub mtime: i64,
+    pub device: i64,
+    pub inode: i64,
+}
+
+impl SourceAttributes {
+    /// The absolute path, composed the one way Canon composes it: a source at
+    /// its own root's top is the root.
+    pub(super) fn path(&self) -> String {
+        if self.rel_path.is_empty() {
+            self.root_path.clone()
+        } else {
+            format!("{}/{}", self.root_path, self.rel_path)
+        }
+    }
+}
+
+impl From<&Source> for SourceAttributes {
+    fn from(source: &Source) -> Self {
+        SourceAttributes {
+            id: source.id,
+            root_id: source.root_id,
+            root_path: source.root_path.clone(),
+            rel_path: source.rel_path.clone(),
+            size: source.size,
+            mtime: source.mtime,
+            device: source.device,
+            inode: source.inode,
+        }
+    }
+}
+
 /// Resolve a fact value for a source.
 ///
 /// Returns the resolved value as a display string, or None if the fact
@@ -53,7 +109,7 @@ pub fn resolve_fact_value(
 ) -> Result<Option<String>> {
     // 1. Get raw value (built-in or stored)
     let raw_value = if let Some(builtin) = BuiltinKey::from_str(&key.base_key) {
-        get_builtin_value(source, builtin)
+        get_builtin_value(&SourceAttributes::from(source), builtin)
     } else {
         stored_facts.get(&key.base_key).map(|e| e.value.clone())
     };
@@ -76,11 +132,15 @@ pub fn resolve_fact_value(
     }
 }
 
-/// Extract a built-in fact value from source fields.
+/// Extract a built-in fact value from a source's own attributes.
 ///
-/// Built-in facts are derived from Source columns without database lookup.
-/// Returns None for hash-based facts which require object lookup.
-pub fn get_builtin_value(source: &Source, builtin: BuiltinKey) -> Option<FactValue> {
+/// Built-in facts are derived from source columns without database lookup.
+/// Returns None for hash-based facts which require object lookup — and that
+/// `None` is load-bearing beyond this function: it is what
+/// `BuiltinKey::is_computed` is derived against, so which keys the pattern
+/// context answers for itself is read off these arms rather than listed
+/// anywhere.
+pub fn get_builtin_value(source: &SourceAttributes, builtin: BuiltinKey) -> Option<FactValue> {
     match builtin {
         BuiltinKey::SourceExt | BuiltinKey::Ext => {
             let ext = std::path::Path::new(&source.rel_path)
@@ -165,6 +225,57 @@ pub fn fact_value_to_display(value: &FactValue) -> String {
 mod tests {
     use super::*;
     use crate::core::domain::fact::FactValue;
+
+    /// A probe with every attribute populated, so a resolver arm that
+    /// answers at all answers for this one. The equality below is only as
+    /// strong as that: an arm returning `None` here is genuinely an arm the
+    /// source cannot answer, not one this fixture happened to starve.
+    fn probe() -> SourceAttributes {
+        SourceAttributes {
+            id: 42,
+            root_id: 1,
+            root_path: "/photos".to_string(),
+            rel_path: "2024/vacation/IMG_001.jpg".to_string(),
+            size: 1024000,
+            mtime: 1718452800,
+            device: 16777220,
+            inode: 12345678,
+        }
+    }
+
+    /// The derived-surface equality: `is_computed` is not a second opinion
+    /// about the resolver, it is a reading of it. A hand-written list gets
+    /// this wrong — `content.hash.sha256` is a built-in *and* a genuinely
+    /// stored fact, and `hash`/`hash_short` are the resolver's other `None`
+    /// arms — so the classification is asserted against the resolver itself
+    /// rather than against a list someone maintained.
+    ///
+    /// **Its limit, which is half the point.** The equality holds over
+    /// `BuiltinKey` and says nothing wider. `scope.rel_path` and
+    /// `object.hash` are context-supplied and are *not* `BuiltinKey`s; they
+    /// are the hand-written half of `is_context_supplied` and are pinned
+    /// there, separately. Widening this assertion to cover them would assert
+    /// an equality that does not hold and is exactly the false-equality
+    /// generator the limit rule exists to prevent.
+    #[test]
+    fn a_key_is_computed_exactly_when_the_resolver_answers_it() {
+        use strum::IntoEnumIterator;
+
+        for key in BuiltinKey::iter() {
+            let name: &'static str = key.into();
+            assert_eq!(
+                key.is_computed(),
+                get_builtin_value(&probe(), key).is_some(),
+                "'{name}' is classified is_computed()={} but the resolver {} it",
+                key.is_computed(),
+                if get_builtin_value(&probe(), key).is_some() {
+                    "answers"
+                } else {
+                    "does not answer"
+                }
+            );
+        }
+    }
 
     /// Helper to create a Source with minimal required fields for testing.
     fn make_source() -> Source {

@@ -13,7 +13,7 @@ use crate::core::domain::fact::{FactType, FactValue};
 use crate::core::repo::{self, Connection};
 use crate::expr::{
     apply_accessor, apply_modifier, fact_value_to_display, get_builtin_value, resolve_fact_value,
-    BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey,
+    BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey, SourceAttributes,
 };
 use crate::facts::repo as facts_repo;
 
@@ -304,10 +304,12 @@ fn compute_builtin_distribution(
         } else {
             // Use default grouping for the no-transform case
             match BuiltinKey::from_str(&key.base_key) {
-                Some(builtin) => match get_builtin_value(source, builtin) {
-                    Some(raw) => default_grouping(&key.base_key, raw),
-                    None => continue,
-                },
+                Some(builtin) => {
+                    match get_builtin_value(&SourceAttributes::from(source), builtin) {
+                        Some(raw) => default_grouping(&key.base_key, raw),
+                        None => continue,
+                    }
+                }
                 None => continue,
             }
         };

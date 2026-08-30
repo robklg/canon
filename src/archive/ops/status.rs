@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::core::repo::{self, Connection};
-use crate::expr::ScopeVantage;
+use crate::expr::{prefetch_pattern_facts, ScopeVantage};
 
 use super::manifest::{read_lock_entries, read_manifest_config};
 
@@ -147,35 +147,14 @@ pub fn compute_manifest_status(
 
     // Batch fetch facts for all lock entries if pattern uses content facts
     let source_ids: Vec<i64> = lock_entries.iter().map(|s| s.id).collect();
-    let mut all_facts: HashMap<i64, Vec<crate::core::domain::fact::FactEntry>> = HashMap::new();
-    for key in &needed_keys {
-        // Must list the same namespaces as the fetch and evaluation sites in
-        // the apply operation — a namespace listed in one place and not the
-        // others changes which facts reach pattern evaluation.
-        if key.starts_with("source.") || key.starts_with("scope.") || key == "object.hash" {
-            continue;
-        }
-        let key_facts = repo::fact::batch_fetch_key_for_sources(conn, &source_ids, key)?;
-        for (source_id, entry_opt) in key_facts {
-            if let Some(entry) = entry_opt {
-                all_facts.entry(source_id).or_default().push(entry);
-            }
-        }
-    }
+    let facts = prefetch_pattern_facts(conn, &source_ids, &needed_keys)?;
 
     // 6. Evaluate patterns to get dest paths, then check filesystem + DB
     let mut entries = Vec::with_capacity(lock_entry_count);
     let mut dest_rel_paths: Vec<String> = Vec::with_capacity(lock_entry_count);
 
     for lock_entry in &lock_entries {
-        let dest_rel = match evaluate_pattern(
-            &pattern,
-            lock_entry,
-            &needed_keys,
-            &vantage,
-            &root_paths,
-            &all_facts,
-        ) {
+        let dest_rel = match evaluate_pattern(&pattern, lock_entry, &vantage, &root_paths, &facts) {
             Ok(rel) => rel,
             Err(e) => {
                 // If pattern expansion fails, we can't determine dest path.

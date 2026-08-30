@@ -43,13 +43,26 @@ pub use domain::pattern::{
 };
 pub use domain::vantage::ScopeVantage;
 
-// Resolving a key to a value, and rendering one for display.
-pub use domain::value::{fact_value_to_display, get_builtin_value, resolve_fact_value};
+// The facts a pattern needs, read out of the database with the
+// context-supplied law already applied. The law itself stays inside: a
+// predicate three callers must remember to call is the failure mode being
+// repaired, so what leaves the facility is the fetch, not the rule.
+pub use domain::pattern::PatternFacts;
+pub use ops::pattern::prefetch_pattern_facts;
+
+// Resolving a key to a value, and rendering one for display — together with
+// the attributes a built-in is computed from, which both halves of the
+// language hand the resolver.
+pub use domain::value::{
+    fact_value_to_display, get_builtin_value, resolve_fact_value, SourceAttributes,
+};
 
 // The key vocabulary: what a key may name, and what a written one parsed to —
-// plus the one spelling of the pattern-only key, which a manifest writes down.
+// plus the two spellings of the pattern-only keys, which a manifest writes
+// down.
 pub use domain::key::{
-    BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey, SCOPE_REL_PATH,
+    BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey, OBJECT_HASH,
+    SCOPE_REL_PATH,
 };
 
 // The transforms a value can be put through.

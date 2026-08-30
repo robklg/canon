@@ -11,4 +11,5 @@
 
 pub(super) mod alias;
 pub(super) mod filter;
+pub(super) mod pattern;
 pub(super) mod selection;
