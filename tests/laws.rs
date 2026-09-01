@@ -601,6 +601,14 @@ const LAWS: &[Law] = &[
         record: "2026-08-05",
     },
     Law {
+        name: "path",
+        owner: "core/domain/path.rs",
+        verifier: "the_containment_probe_is_spelled_only_inside_the_path_law",
+        reach: Reach::Canon,
+        authority: Authority::Distilled,
+        record: "2026-08-20",
+    },
+    Law {
         name: "physical-identity",
         owner: "scan/domain.rs",
         verifier: "the_law_reads_content_evidence_never_device_or_inode",
@@ -735,7 +743,6 @@ const UNQUALIFIED: &[(&str, &str)] = &[
     ("named", "sentence about laws"),
     ("never-literal", "verifier not found"),
     ("own", "prose variant"),
-    ("path", "verifier not found"),
     ("purity", "prose variant"),
     ("round-trip", "prose variant"),
     ("separation", "prose variant"),

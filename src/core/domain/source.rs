@@ -24,6 +24,7 @@
 //!     .filter(|s| !s.is_excluded())
 //! ```
 
+use super::path::path_is_under;
 use super::scope::ScopeMatch;
 
 /// Input data for inserting a new source (destination) record.
@@ -138,12 +139,17 @@ impl Source {
     /// Returns true if:
     /// - No scopes are provided (empty slice means "match all")
     /// - The source's path exactly matches an ExactFile scope
-    /// - The source's path is under an UnderDirectory scope
+    /// - The source's path is at or under an UnderDirectory scope
     ///
-    /// ## Edge Case: Similar Prefixes
+    /// ## The directory boundary is not decided here
     ///
-    /// `/a/bc` is NOT under `/a/b`. We check for a path separator after
-    /// the directory prefix to avoid false matches on similar prefixes.
+    /// `/a/bc` is not under `/a/b`, and this asks
+    /// [`path_is_under`](super::path::path_is_under) for that answer rather
+    /// than working it out again. Containment has one owner; a second
+    /// spelling of it here would be correct on the day it was written and
+    /// would drift the day the owner was repaired. This site used to carry
+    /// one — a byte prefix plus a probe at the prefix's length — and the two
+    /// had already diverged on a directory named with a trailing slash.
     pub fn matches_scope(&self, scopes: &[ScopeMatch]) -> bool {
         if scopes.is_empty() {
             return true;
@@ -152,14 +158,7 @@ impl Source {
         let full_path = self.path();
         scopes.iter().any(|scope| match scope {
             ScopeMatch::ExactFile(path) => full_path == *path,
-            ScopeMatch::UnderDirectory(dir) => {
-                // Match if:
-                // 1. Path equals the directory exactly (the dir itself is a file)
-                // 2. Path starts with dir AND has a '/' immediately after
-                full_path == *dir
-                    || (full_path.starts_with(dir)
-                        && full_path.as_bytes().get(dir.len()) == Some(&b'/'))
-            }
+            ScopeMatch::UnderDirectory(dir) => path_is_under(&full_path, dir),
         })
     }
 
@@ -311,6 +310,82 @@ mod tests {
         let s = make_source("/home/user", "photos-backup/file.jpg");
         let scopes = vec![ScopeMatch::UnderDirectory("/home/user/photos".to_string())];
         assert!(!s.matches_scope(&scopes));
+    }
+
+    /// The directory arm of `matches_scope` **is** the path law, not a second
+    /// spelling that happens to agree with it.
+    ///
+    /// Each row is written as the law's own answer, taken from
+    /// `path_is_under`, and then asserted of `matches_scope` — so a future
+    /// repair to the owner moves both sides together, which is the whole
+    /// point of there being one owner. The trailing-slash row is the one the
+    /// old hand-spelled probe got wrong: it took a byte prefix and probed the
+    /// character at the prefix's length, so a directory written `/a/b/`
+    /// matched nothing at all — not the directory, and not one descendant,
+    /// because the byte sitting at that offset is the descendant's first
+    /// character rather than a separator. The same directory written `/a/b`
+    /// matched descendants fine. Two spellings of one directory, two answers.
+    #[test]
+    fn matches_scope_under_a_directory_is_the_path_law() {
+        // (root, rel_path, directory scope)
+        const CASES: &[(&str, &str, &str)] = &[
+            ("/a", "b/c", "/a/b"),
+            ("/a", "bc", "/a/b"),
+            ("/a", "b", "/a/b"),
+            ("/a", "b", "/a/b/"),
+            ("/a", "b/c", "/a/b/"),
+            ("/home/user", "photos-backup/file.jpg", "/home/user/photos"),
+        ];
+
+        for (root, rel, dir) in CASES {
+            let s = make_source(root, rel);
+            let law = path_is_under(&s.path(), dir);
+            let scopes = vec![ScopeMatch::UnderDirectory((*dir).to_string())];
+            assert_eq!(
+                s.matches_scope(&scopes),
+                law,
+                "matches_scope disagrees with the path law for path {} under {dir}: \
+                 the law says {law}. Containment has one owner, so this arm must ask it \
+                 rather than decide for itself.",
+                s.path()
+            );
+        }
+    }
+
+    /// The one truth value this predicate's repair actually flips, asserted
+    /// **absolutely** rather than by agreement with the law.
+    ///
+    /// The agreement pin above says "this arm is the law", which is the
+    /// chartered claim — but it derives its expectation from the owner, so a
+    /// later change to the owner moves both sides together and this
+    /// behaviour could revert with the suite green. These are the rows a
+    /// reader would have to look up otherwise, and the reachable one:
+    /// `cluster refresh` carries a manifest scope naming a directory under no
+    /// known root **verbatim**, trailing slash and all, so `/vol/` and `/`
+    /// are both things a user can put in a file and Canon will act on.
+    #[test]
+    fn a_directory_spelled_with_a_trailing_slash_selects_its_subtree() {
+        let s = make_source("/vol", "work/x");
+
+        // The directory itself, and its subtree, under both spellings.
+        for dir in ["/vol", "/vol/"] {
+            let scopes = vec![ScopeMatch::UnderDirectory(dir.to_string())];
+            assert!(
+                s.matches_scope(&scopes),
+                "/vol/work/x must be under {dir} — two spellings of one directory \
+                 must not give two answers"
+            );
+        }
+
+        // The root directory selects everything, which is what a manifest
+        // scope of "/" asks for.
+        let root_scope = vec![ScopeMatch::UnderDirectory("/".to_string())];
+        assert!(s.matches_scope(&root_scope));
+
+        // And the boundary still holds: a trailing slash widens nothing else.
+        let sibling = make_source("/vol", "workshop/x");
+        let scopes = vec![ScopeMatch::UnderDirectory("/vol/work/".to_string())];
+        assert!(!sibling.matches_scope(&scopes));
     }
 
     #[test]

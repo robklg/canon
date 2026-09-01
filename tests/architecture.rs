@@ -1422,6 +1422,130 @@ fn the_context_supplied_set_is_spelled_only_inside_expr() {
     );
 }
 
+/// Where a positional probe may be spelled: the law's own owner, and this
+/// file, which declares the spellings and plants them in its self-tests.
+///
+/// `path.rs` spells none today. It is named prospectively: if the owner ever
+/// needs a probe, that is where one belongs.
+const PROBE_HOMES: &[&str] = &["src/core/domain/path.rs", "tests/architecture.rs"];
+
+/// The fingerprint: taking a byte or character prefix and then reading the
+/// single element sitting at the prefix's length to see whether it is a
+/// separator.
+const PROBE_SPELLINGS: &[&str] = &[
+    "as_bytes().get(",
+    "as_bytes()[",
+    "bytes().nth(",
+    "chars().nth(",
+];
+
+/// Each exemption, with the verb it serves and how many times it spells a
+/// probe.
+const PROBE_EXEMPT: &[(&str, usize)] = &[
+    // reading fixed-offset fields out of a timestamp — not a path
+    ("src/facts/ops/import.rs", 2),
+];
+
+/// How many probe spellings a file's text contains.
+fn positional_probes(text: &str) -> usize {
+    PROBE_SPELLINGS
+        .iter()
+        .map(|s| text.matches(s).count())
+        .sum()
+}
+
+/// Containment is decided in one place, and a hand-rolled boundary test
+/// somewhere else fails the build.
+///
+/// `core::domain::path::path_is_under` asks `Path::starts_with`, which is
+/// component-aware by construction. Re-deriving that rule looks different:
+/// take a byte prefix, then read the one element sitting at the prefix's
+/// length and check it against a separator. That positional read is the
+/// fingerprint of a second spelling of a rule that already has one — and a
+/// second spelling drifts silently. It is correct on the day it is written
+/// and diverges the day the owner is repaired.
+///
+/// This is not tidiness. The path law's failure mode is that files land
+/// somewhere the user did not ask for, at exit 0, with the record claiming
+/// otherwise. A law whose only defense is that everyone remembers to call
+/// the right function has no defense.
+///
+/// **What this does not catch, stated rather than left to be discovered.**
+/// The aperture is one *idiom*, not the whole class of second spellings, and
+/// it is deliberately narrow — a wide one would be dishonest rather than
+/// merely noisy, because `Path::starts_with` and `str::starts_with` are
+/// indistinguishable to a text scan. Four things go unseen:
+///
+/// - **A bare `starts_with` alone** as a containment claim, with no
+///   positional read after it. That is a *wrong* containment test rather
+///   than a second spelling of the right one, and behaviour tests catch it.
+///   Widening to every path-ish prefix test was weighed and declined: around
+///   twenty-six sites, nearly all either already correct or test assertions
+///   sharing one verb, so the exemption block would assert the very equality
+///   this design rejects.
+/// - **The same idiom split across two statements.** The match is on the
+///   adjacency of receiver and accessor, so binding the receiver to a local
+///   first and reading the local at the prefix's length scores zero. A
+///   two-line refactor of the exact defect walks through.
+/// - **The slice form** — taking the remainder from the prefix's length and
+///   asking whether *it* begins with a separator. Same rule, no positional
+///   read.
+/// - **The separator-concatenation family** — appending a separator to a
+///   prefix and stripping that, which is `path_strip_prefix` re-derived.
+///   `notes::domain::relative_to_scope` does this in production today; it
+///   agrees with the owner, so it is duplication rather than a live defect,
+///   and it is recorded rather than silent.
+///
+/// **The scan covers `tests/` as well as `src/`.** A test hand-rolling the
+/// boundary is still a second spelling of it, and admitting one should need
+/// the same deliberate act as admitting a production one. The one blind spot
+/// inside that coverage is this file, exempt wholesale so the self-tests can
+/// plant probes — an unbounded exemption, and the reason the self-tests
+/// carry the weight of the matcher's correctness rather than a count does.
+#[test]
+fn the_containment_probe_is_spelled_only_inside_the_path_law() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let base = Path::new(&manifest_dir);
+
+    let mut found: Vec<(String, usize)> = Vec::new();
+    for dir in ["src", "tests"] {
+        for path in collect_rs_files(&base.join(dir)) {
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if PROBE_HOMES.contains(&rel.as_str()) {
+                continue;
+            }
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+            let count = positional_probes(&text);
+            if count > 0 {
+                found.push((rel, count));
+            }
+        }
+    }
+    found.sort();
+
+    let expected: Vec<(String, usize)> = PROBE_EXEMPT
+        .iter()
+        .map(|(f, n)| ((*f).to_string(), *n))
+        .collect();
+
+    assert_eq!(
+        found, expected,
+        "\n  A positional containment probe is spelled outside the path law.\n  \
+         Found: {found:?}\n  Exempt: {expected:?}\n  \
+         Containment has one owner: ask `core::domain::path::path_is_under` (or, inside a \
+         query, the registered `core::repo::db::path_at_or_under_sql` / \
+         `path_strictly_under_sql`) instead of working the boundary out again.\n  \
+         If a new site genuinely reads a fixed offset out of something that is not a path, \
+         add it here with that verb named and its exact count; if an exemption is genuinely \
+         gone, delete its row in the same commit."
+    );
+}
+
 // ============================================================================
 // Self-tests (August's spec)
 // ============================================================================
@@ -1429,6 +1553,79 @@ fn the_context_supplied_set_is_spelled_only_inside_expr() {
 #[cfg(test)]
 mod self_tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // The containment-probe matcher.
+    //
+    // These plant probes deliberately. This file is one of `PROBE_HOMES`
+    // for exactly that reason: a matcher that cannot be exercised against
+    // the defect it names is the class specimen, not a defense.
+    // ------------------------------------------------------------------
+
+    /// Red smoke against the defect the guard names: the hand-rolled
+    /// boundary test, in the shape it actually took in the tree.
+    #[test]
+    fn a_planted_positional_probe_is_seen() {
+        let text = "fn under(p: &str, d: &str) -> bool {\n    \
+                    p == d || (p.starts_with(d) && p.as_bytes().get(d.len()) == Some(&b'/'))\n}\n";
+        assert_eq!(positional_probes(text), 1);
+    }
+
+    /// The guard must not fire on the correct spelling. A guard that flags
+    /// right answers is how a guard becomes something people write around.
+    #[test]
+    fn a_component_wise_containment_test_is_not_seen() {
+        let text = "pub fn path_is_under(path: &str, prefix: &str) -> bool {\n    \
+                    Path::new(path).starts_with(prefix)\n}\n";
+        assert_eq!(positional_probes(text), 0);
+    }
+
+    /// Lines copied from the tree, **written independently of
+    /// `PROBE_SPELLINGS`** — which is the whole point of them.
+    ///
+    /// An earlier version of the test below generated its haystack from the
+    /// constant, so every entry matched itself and a typo in the constant
+    /// passed while disarming the guard. That is the defect this file exists
+    /// to refuse, committed inside the instrument that refuses it. The corpus
+    /// breaks the circle: a mistyped spelling matches nothing here.
+    const PROBE_CORPUS: &[&str] = &[
+        // src/core/domain/source.rs, as it stood before the repair
+        "full_path.starts_with(dir) && full_path.as_bytes().get(dir.len()) == Some(&b'/')",
+        // the same idiom reached by indexing rather than by `get`
+        "prefix_len < s.len() && s.as_bytes()[prefix_len] == b'/'",
+        // src/facts/ops/import.rs — a fixed offset into a timestamp
+        "s.len() >= 19 && s.chars().nth(4) == Some(':')",
+        // the byte-iterator form
+        "p.bytes().nth(d.len()) == Some(b'/')",
+    ];
+
+    /// A typo in `PROBE_SPELLINGS` is a matcher that cannot fire, and a
+    /// matcher that cannot fire is the class specimen rather than a defense.
+    ///
+    /// Two directions, and the corpus is what makes either of them mean
+    /// something: every spelling must be found in a line written without
+    /// reference to it, and every one of those lines must be seen by the
+    /// matcher as a whole.
+    #[test]
+    fn every_probe_spelling_is_seen() {
+        for spelling in PROBE_SPELLINGS {
+            let hits = PROBE_CORPUS.iter().filter(|l| l.contains(spelling)).count();
+            assert_eq!(
+                hits, 1,
+                "the spelling {spelling:?} matches no line in the corpus — it is mistyped, \
+                 or the corpus lost the line it was copied from. Either way the guard is \
+                 disarmed for that spelling."
+            );
+        }
+
+        for line in PROBE_CORPUS {
+            assert_eq!(
+                positional_probes(line),
+                1,
+                "the matcher does not see this probe: {line:?}"
+            );
+        }
+    }
 
     #[test]
     fn strip_doc_comment_code_example_no_stdio_violation() {
