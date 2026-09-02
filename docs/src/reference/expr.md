@@ -25,9 +25,20 @@ Any fact key can be used in a pattern:
 
 Patterns need the key's full name. `--where` and `canon facts --key` let you leave the `content.` prefix off, but a pattern does not: `{Make}` fails with `Unknown fact 'Make'`, so write `{content.Make}`.
 
-`{scope.rel_path}` is not a fact: it is the source's path below the *vantage* — the deepest directory containing every scope the manifest records that lies in that source's own root. With one scope the vantage is that scope. With several, it is the directory they share, so each scope's own name survives in the result. Scopes in different roots each get their own vantage. [`cluster generate`](../commands/archive/cluster.md) records the paths it was scoped to; where the manifest records no scope, or none in a source's root, the pattern is refused rather than guessed.
+`{scope.rel_path}` is not a fact: it is the source's path below the *vantage*: the deepest directory containing every scope the manifest records **that Canon could resolve** and that lies in that source's own root. A recorded path Canon could not resolve is stated and left out of the measurement (see below). With one scope the vantage is that scope. With several, it is the directory they share, so each scope's own name survives in the result. Scopes in different roots each get their own vantage.
 
-The recorded paths are resolved against the known roots once per run, matching each path against the normalization forms of its root's stored path. A path whose root portion is typed in the other Unicode normalization resolves and measures normally; below the root, forms must match what the index stores. A path that names no known root is never dropped: [`apply`](../commands/archive/apply.md) refuses the run and names it, and [`cluster refresh`](../commands/archive/cluster.md) states it and keeps it.
+The value is measured when the selection is made, by [`cluster generate`](../commands/archive/cluster.md) and `cluster refresh`, and recorded in the lock file beside the source it belongs to. [`apply`](../commands/archive/apply.md) reads what was recorded. Editing `meta.scope` therefore takes effect on the next refresh; editing the pattern takes effect on the next apply.
+
+The recorded paths are resolved against the known roots once per run, tolerantly of Unicode normalization in both halves: the root is matched against the normalization forms of its stored path, and the part below the root against the forms the index holds sources under. A path retyped in the other form resolves and measures normally, and a refresh repairs it in the manifest text.
+
+A path Canon cannot resolve, under no known root or with no known sources under it in any form, is never dropped and never silently obeyed. [`cluster refresh`](../commands/archive/cluster.md) names it, keeps it in the file, and leaves it out of the measurement, so the paths that did resolve measure from themselves.
+
+`{scope.rel_path}` is unanswerable in two cases, and they take different answers:
+
+- **The manifest records no scope** — with `--global`, or with filters and no path. There is nothing to measure from, and no refresh will give the manifest a scope. Scope the manifest, or use `{source.rel_path}`.
+- **The lock file was written before Canon recorded the measurement.** Apply refuses it outright and names `cluster refresh` as the way back.
+
+There is no fallback destination in either case.
 
 ## Modifiers
 

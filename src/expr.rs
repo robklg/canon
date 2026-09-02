@@ -36,10 +36,10 @@ pub use ops::alias::expand_filter_strings;
 
 // The shaping half: a pattern, parsed, inspected for the keys it needs, read
 // for the placement it commits to, and evaluated against a source — together
-// with the place a scope-relative path measures from, derived once per run by
-// the caller and handed to every evaluation.
+// with the scope-relative path the run that selected the source settled for
+// it, and, where there is none, the run's own reason there is none.
 pub use domain::pattern::{
-    evaluate, extract_fact_keys, parse_pattern, placement_shape, EvalContext, Pattern,
+    evaluate, extract_fact_keys, parse_pattern, placement_shape, EvalContext, Pattern, Unmeasured,
 };
 pub use domain::vantage::ScopeVantage;
 

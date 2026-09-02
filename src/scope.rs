@@ -27,7 +27,7 @@ pub fn print_report_scope(handle: &mut impl Write, label: &str, scope: &Resolved
             let _ = writeln!(handle, "  {p}");
         }
     }
-    write_set_asides(handle, scope);
+    write_set_asides(handle, &scope.set_aside);
 }
 
 /// Print scope header for list/data commands (stderr handle).
@@ -42,7 +42,7 @@ pub fn print_list_scope(handle: &mut impl Write, scope: &ResolvedScope) {
             let _ = writeln!(handle, "scope: {}", scope.prefixes.join(", "));
         }
     }
-    write_set_asides(handle, scope);
+    write_set_asides(handle, &scope.set_aside);
 }
 
 /// State what the scope boundary set aside, ahead of any ceremony display —
@@ -52,20 +52,26 @@ pub fn print_list_scope(handle: &mut impl Write, scope: &ResolvedScope) {
 pub fn print_scope_set_asides(scope: &ResolvedScope) {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    write_set_asides(&mut handle, scope);
+    write_set_asides(&mut handle, &scope.set_aside);
 }
 
 /// State what the scope boundary set aside on stderr, for display paths
 /// that carry no scope line of their own — a compact or machine-shaped
 /// stdout stays exactly what it is, and the skip is still said.
 pub fn eprint_scope_set_asides(scope: &ResolvedScope) {
-    write_set_asides(&mut std::io::stderr().lock(), scope);
+    write_set_asides(&mut std::io::stderr().lock(), &scope.set_aside);
 }
 
 /// The one spelling of a set-aside line. A path Canon knows no sources for
 /// is named and marked skipped — never dropped, never counted as run.
-fn write_set_asides(handle: &mut impl Write, scope: &ResolvedScope) {
-    for path in &scope.set_aside {
+///
+/// Takes the paths rather than a [`ResolvedScope`] because the same statement
+/// is owed at two doors: the argument door, where a scope comes back as a
+/// `ResolvedScope`, and the manifest door, where `cluster refresh` holds a
+/// `ScopeResolution` instead. One situation, one sentence — the partition it
+/// came out of is not the sentence's business.
+pub fn write_set_asides(handle: &mut impl Write, set_aside: &[String]) {
+    for path in set_aside {
         let _ = writeln!(handle, "no sources known at {path} — skipped");
     }
 }

@@ -13,16 +13,18 @@ use crate::archive::domain::LockEntry;
 use crate::core::domain::fact::FactValue;
 use crate::core::domain::path::path_strip_prefix;
 use crate::expr::{
-    evaluate, EvalContext, Pattern, PatternFacts, ScopeVantage, SourceAttributes, OBJECT_HASH,
+    evaluate, EvalContext, Pattern, PatternFacts, SourceAttributes, Unmeasured, OBJECT_HASH,
 };
 
 /// Build an EvalContext for a source using pre-fetched facts and cached root paths.
 ///
-/// The vantage is borrowed, never cloned: this runs once per source and the
-/// vantage is derived once per run.
+/// The scope-relative path comes off the lock entry, borrowed rather than
+/// copied: it was settled when the selection was, and nothing here re-derives
+/// it. That is what lets this run identically at plan time, at status time and
+/// in the confirmation samples — three readers, one measurement, taken once.
 fn build_eval_context<'a>(
-    source: &LockEntry,
-    vantage: &'a ScopeVantage,
+    source: &'a LockEntry,
+    unmeasured: Unmeasured,
     root_paths: &HashMap<i64, String>,
     facts: &PatternFacts,
 ) -> Result<EvalContext<'a>> {
@@ -64,7 +66,7 @@ fn build_eval_context<'a>(
         device: source.device,
         inode: source.inode,
     });
-    ctx.set_vantage(vantage);
+    ctx.set_scope_rel(source.scope_rel_path.as_deref(), unmeasured);
 
     // No filter here, and none is owed: `PatternFacts` cannot hold a key the
     // context supplies, because the prefetch that built it never asked for
@@ -82,21 +84,26 @@ fn build_eval_context<'a>(
 }
 
 /// Evaluate a pattern for a source, returning the destination relative path.
+///
+/// `unmeasured` is the lock's own answer to *why* an entry might carry no
+/// scope-relative path (`LockFile::unmeasured_reason`) — a per-run value,
+/// handed in the same way the root cache and the prefetched facts are, because
+/// an entry cannot answer it and a refusal that guesses prescribes a remedy
+/// that may not work.
 pub fn evaluate_pattern(
     pattern: &Pattern,
     source: &LockEntry,
-    vantage: &ScopeVantage,
+    unmeasured: Unmeasured,
     root_paths: &HashMap<i64, String>,
     facts: &PatternFacts,
 ) -> Result<String> {
-    let ctx = build_eval_context(source, vantage, root_paths, facts)?;
+    let ctx = build_eval_context(source, unmeasured, root_paths, facts)?;
     evaluate(pattern, &ctx)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::domain::scope::ScopeResolution;
     use crate::expr::parse_pattern;
 
     /// The fixture the documented examples are written against: one source at
@@ -118,6 +125,7 @@ mod tests {
             object_id: Some(1),
             hash_type: Some("sha256".to_string()),
             hash_value: Some("abcdef1234567890".to_string()),
+            scope_rel_path: None,
         }
     }
 
@@ -127,11 +135,10 @@ mod tests {
 
     fn expand(pattern: &str) -> Result<String> {
         let parsed = parse_pattern(pattern).unwrap();
-        let vantage = ScopeVantage::new(&ScopeResolution::resolve(&[], &[]));
         evaluate_pattern(
             &parsed,
             &entry(),
-            &vantage,
+            Unmeasured::NoScopeRecorded,
             &roots(),
             &PatternFacts::from_entries(HashMap::new()),
         )
@@ -209,9 +216,15 @@ mod tests {
         entry.id = source;
         entry.root_id = root;
         let roots = HashMap::from([(root, "/photos".to_string())]);
-        let vantage = ScopeVantage::new(&ScopeResolution::resolve(&[], &[]));
 
-        let dest = evaluate_pattern(&pattern, &entry, &vantage, &roots, &facts).unwrap();
+        let dest = evaluate_pattern(
+            &pattern,
+            &entry,
+            Unmeasured::NoScopeRecorded,
+            &roots,
+            &facts,
+        )
+        .unwrap();
         assert_eq!(dest, "2024/IMG_001.jpg");
         assert_ne!(dest, "2019/IMG_001.jpg", "the stored fact decided the year");
     }

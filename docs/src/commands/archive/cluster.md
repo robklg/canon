@@ -28,7 +28,7 @@ canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive --show-a
 canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive --force
 ```
 
-The command generates two files: a manifest (`.toml`) that you edit, and a lock file (`.lock`) containing the source list.
+The command generates two files: a manifest (`.toml`) that you edit, and a lock file (`.lock`) holding what the run settled: the resolved scope, and one line per source recording its state and where it goes. The lock is not edited by hand: [`apply`](apply.md) reads it as written.
 
 **Typical workflow:**
 
@@ -141,16 +141,27 @@ On refresh:
 - The **Cluster Summary** is regenerated with current counts
 - The **Notes** section is preserved verbatim
 - The same root breakdown and archive coverage summary is printed to stdout
-- **`meta.scope` is rewritten with each path in the form that matched its root**, which is what `cluster generate` records for the same paths. Where the root's own path matched as typed, the rest of the path is written back unchanged.
+- **`meta.scope` is rewritten in the byte-form the index stores**, which is what `cluster generate` records for the same paths — root and the part below it alike. A path retyped in the other Unicode normalization is repaired in the file by the refresh.
+- **The lock file records where each file goes.** Refresh settles that from the scope it just resolved; [`apply`](apply.md) reads it and does not re-read `meta.scope`. Editing `meta.scope` therefore takes effect on the next refresh, like the filters beside it.
 
 `--edit` opens the manifest in `$VISUAL`/`$EDITOR` before the re-query, so an edited query is the query that runs. The manifest is edited in place. If the editor exits with a failure status, or the saved manifest does not parse, the refresh stops: neither the manifest nor the lock file is written, and the file holds exactly what was saved. Nothing is parsed before the editor opens, so a manifest that no longer parses can be repaired this way.
 
-A path in `meta.scope` that names no known root is stated and kept. Refresh narrows a lock rather than deciding where files go, so it continues; the path is written back exactly as it stands, because there is nothing to resolve it to:
+A path in `meta.scope` that Canon cannot resolve is stated and kept. Refresh narrows a lock rather than deciding where files go, so it continues; the path is written back exactly as it stands, and it contributes nothing, neither to **which files are gathered** nor to **where they land**. Both halves matter: a manifest naming a since-removed drive alongside a live path now locks fewer entries than it did, because the unresolvable path selects nothing. Two kinds, with two lines:
 
 ```
 no known root at /Volumes/old-laptop/photos/2016 — kept in the manifest, no destination measures from it
+no sources known at /Volumes/Photos/2016 — skipped
 ```
 
-[`apply`](apply.md) refuses on the same manifest. Edit `meta.scope`, then refresh again.
+The first names a place under no known root; the second a place Canon knows no sources for. The remaining paths measure from themselves, so what lands where reflects the paths that resolved. A path that stops resolving changes where its siblings land, and names are lost rather than gained.
+
+The two lines are not interchangeable, and the difference shows when nothing else in the scope resolves:
+
+- **Every path skipped for want of sources** stops the refresh. It names every skipped path and leaves the manifest and the lock unchanged.
+- **Every path under no known root** continues, because a refresh is the way back from a manifest naming a root that is gone. Nothing is selected — a path Canon cannot resolve selects nothing, never everything — so the lock file is removed and `lock_hash` is emptied, the same as any refresh whose query matches nothing. Edit `meta.scope` first if you want the lock kept.
+
+A path that *is* rewritten comes back in the byte-form the index stores as far as Canon could confirm it: for a skipped path that means its root's form, with the part below the root left as written.
+
+[`apply`](apply.md) does not read `meta.scope`, so it neither refuses on these nor repeats them. `cluster status` states them alongside its counts.
 
 When the query matches nothing, the lock file is removed and `lock_hash` is emptied. The manifest is rewritten in full, with the Cluster Summary stating the zero match and the Notes section preserved as on any other refresh.

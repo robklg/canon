@@ -13,16 +13,18 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::archive::domain::{
-    extract_notes_raw, LockEntry, ManifestConfig, ManifestMeta, ManifestOptions, ManifestOutput,
-    CURRENT_MANIFEST_VERSION,
+    extract_notes_raw, LockEntry, LockHeader, LockScope, ManifestConfig, ManifestMeta,
+    ManifestOptions, ManifestOutput, CURRENT_LOCK_VERSION, CURRENT_MANIFEST_VERSION,
 };
 use crate::core::domain::include::IncludeSet;
-use crate::core::domain::scope::ScopeMatch;
+use crate::core::domain::path::path_strip_prefix;
+use crate::core::domain::root::Root;
+use crate::core::domain::scope::{ScopeMatch, ScopeResolution};
 use crate::core::domain::{FactEntry, FactType, FactValue};
 use crate::core::repo::{self, Connection};
 use crate::expr::Filter;
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
-use crate::expr::{BuiltinKey, OBJECT_HASH, SCOPE_REL_PATH};
+use crate::expr::{BuiltinKey, ScopeVantage, OBJECT_HASH, SCOPE_REL_PATH};
 
 use super::manifest::{write_and_sync, write_lock_file};
 
@@ -213,6 +215,84 @@ pub fn plan_generate(
     })
 }
 
+impl ClusterGeneratePlan {
+    /// The plan a run that selects nothing produces.
+    ///
+    /// Not the same as a query that matched nothing, though the outcome is
+    /// identical and deliberately so: this is a run whose recorded scope
+    /// resolved to no confirmed place at all, so there is nowhere to select
+    /// *from*. It must never reach the planner, because an empty scope list
+    /// means global there, and a manifest naming a place Canon cannot find
+    /// must not become a whole-universe archive.
+    pub fn empty() -> Self {
+        ClusterGeneratePlan {
+            lock_entries: vec![],
+            archived: vec![],
+            full_coverage_facts: vec![],
+            mixed_type_warnings: vec![],
+            root_breakdown: vec![],
+            not_archived_count: 0,
+            excluded_count: 0,
+            unhashed_count: 0,
+        }
+    }
+}
+
+// ============================================================================
+// The measurement
+// ============================================================================
+
+/// Settle where each entry goes, at the moment the selection is settled.
+///
+/// One function, called by both writers — generation and refresh — which is
+/// the whole point: two similar loops is the drift this class of defect comes
+/// from, and the two files a user compares must be byte-identical for the same
+/// inputs.
+///
+/// One [`ScopeVantage`] for the run, then one `path_strip_prefix` per entry.
+/// Both are borrowed rules, not re-derived ones: what "the scope" means when
+/// there is more than one belongs to the vantage, and containment belongs to
+/// the path law.
+///
+/// After a fresh generate or refresh every value is `Some` **wherever the run
+/// confirmed a scope at all** — entries are selected from the very register
+/// this measures from (`ScopeResolution::selection`), so every entry's root
+/// has a vantage and every entry lies under it. A run that confirmed nothing
+/// measures nothing, correctly: there is nowhere to measure from. So `None`
+/// on a fresh lock means the header's scope is empty, and `None` on a lock
+/// with no header at all means the lock predates the field — which is the
+/// whole of what `LockFile::unmeasured_reason` has to tell apart.
+pub(super) fn measure_entries(entries: &mut [LockEntry], scope: &ScopeResolution, roots: &[Root]) {
+    let vantage = ScopeVantage::new(scope);
+    let root_paths: HashMap<i64, &str> = roots.iter().map(|r| (r.id, r.path.as_str())).collect();
+
+    for entry in entries {
+        entry.scope_rel_path = root_paths
+            .get(&entry.root_id)
+            .and_then(|root_path| vantage.for_root(root_path))
+            .and_then(|measured_from| path_strip_prefix(&entry.path, measured_from))
+            .map(str::to_string);
+    }
+}
+
+/// The header a run writes: what it settled, as against what the manifest
+/// declares. Confirmed scopes only — a set-aside or unrooted line contributes
+/// nothing to a destination and must contribute nothing to the record either.
+fn lock_header(scope: &ScopeResolution) -> LockHeader {
+    LockHeader {
+        lock_version: CURRENT_LOCK_VERSION,
+        scope: scope
+            .scopes()
+            .iter()
+            .map(|s| LockScope {
+                root_id: s.root_id,
+                root_path: s.root_path.clone(),
+                rel_prefix: s.rel_prefix.clone(),
+            })
+            .collect(),
+    }
+}
+
 // ============================================================================
 // Execute types
 // ============================================================================
@@ -223,7 +303,14 @@ pub struct ExecuteGenerateParams {
     pub manifest_path: PathBuf,
     pub expanded_filters: Vec<String>,
     pub original_filters: Vec<String>,
-    pub scope_prefixes: Vec<String>,
+    /// The run's scope, already resolved against the known roots — what goes
+    /// into `meta.scope`, what the measurement is taken from, and what the
+    /// lock header records. One value, because it is one answer: two fields
+    /// meaning "the scope" is how the readers drifted apart before.
+    pub scope: ScopeResolution,
+    /// The known roots, for turning an entry's `root_id` into the path the
+    /// vantage is keyed on.
+    pub roots: Vec<Root>,
     pub archive_root_id: i64,
     pub base_dir: String,
     pub allow: Vec<String>,
@@ -272,12 +359,16 @@ pub struct ExecuteRefreshParams {
     pub lock_path: PathBuf,
     pub manifest_path: PathBuf,
     pub old_manifest_content: String,
-    /// What to write back into `meta.scope` — the caller's resolution of what
-    /// the manifest recorded, not the recorded text itself. Separate from
+    /// The manifest's own scope, resolved: what goes back into `meta.scope`,
+    /// what the measurement is taken from, and what the lock header records.
+    /// The caller's resolution of what the manifest recorded, not the recorded
+    /// text itself. Separate from
     /// `config` because the config carries what was *read*, and a refresh
     /// writes the document out healed: a rooted prefix in the byte-form the
     /// index stores, an unrooted one verbatim.
-    pub scope: Vec<String>,
+    pub scope: ScopeResolution,
+    /// The known roots — see [`ExecuteGenerateParams::roots`].
+    pub roots: Vec<Root>,
     pub config: ManifestConfig,
 }
 
@@ -298,9 +389,12 @@ pub struct ExecuteRefreshResult {
 /// that refusal — is the caller's job, and only for this entry point: a
 /// refresh is meant to rewrite in place.
 pub fn execute_generate(
-    plan: &ClusterGeneratePlan,
+    plan: &mut ClusterGeneratePlan,
     params: &ExecuteGenerateParams,
 ) -> Result<ExecuteGenerateResult> {
+    // Settled before anything is written, so no writer can forget it.
+    measure_entries(&mut plan.lock_entries, &params.scope, &params.roots);
+
     // Create destination directory if needed (after plan confirmed sources exist)
     if let Some(parent) = params.manifest_path.parent() {
         fs::create_dir_all(parent)
@@ -313,7 +407,11 @@ pub fn execute_generate(
     // a hash of bytes that were never on disk, and every later apply refuses
     // the pair. Both files are synced, so the durable manifest cannot name a
     // lock that did not survive alongside it.
-    write_lock_file(&params.lock_path, &plan.lock_entries)?;
+    write_lock_file(
+        &params.lock_path,
+        &lock_header(&params.scope),
+        &plan.lock_entries,
+    )?;
 
     // Compute lock file hash
     let lock_hash = crate::core::ops::fs::compute_full_hash(&params.lock_path)?;
@@ -322,7 +420,7 @@ pub fn execute_generate(
         meta: ManifestMeta {
             version: CURRENT_MANIFEST_VERSION,
             query: params.expanded_filters.clone(),
-            scope: params.scope_prefixes.clone(),
+            scope: params.scope.recorded().to_vec(),
             generated_at: current_timestamp(),
             lock_hash,
         },
@@ -330,7 +428,7 @@ pub fn execute_generate(
             allow: params.allow.clone(),
         },
         output: ManifestOutput {
-            pattern: default_pattern(&params.scope_prefixes).to_string(),
+            pattern: default_pattern(params.scope.recorded()).to_string(),
             archive_root_id: params.archive_root_id,
             base_dir: params.base_dir.clone(),
         },
@@ -368,9 +466,12 @@ pub fn execute_generate(
 /// user can read and edit; it must not hand back a bare TOML body with the
 /// user's Notes gone.
 pub fn execute_refresh(
-    plan: &ClusterGeneratePlan,
+    plan: &mut ClusterGeneratePlan,
     params: &ExecuteRefreshParams,
 ) -> Result<ExecuteRefreshResult> {
+    // The same act as generation's, through the same function.
+    measure_entries(&mut plan.lock_entries, &params.scope, &params.roots);
+
     let matched_nothing = plan.lock_entries.is_empty();
 
     // A lock file states what a query matched. With no matches there is
@@ -384,7 +485,11 @@ pub fn execute_refresh(
     } else {
         // Order matters exactly as it does for generation: write the lock,
         // then hash what landed on disk, then name that hash in the manifest.
-        write_lock_file(&params.lock_path, &plan.lock_entries)?;
+        write_lock_file(
+            &params.lock_path,
+            &lock_header(&params.scope),
+            &plan.lock_entries,
+        )?;
         crate::core::ops::fs::compute_full_hash(&params.lock_path)?
     };
 
@@ -396,7 +501,7 @@ pub fn execute_refresh(
             // one thing the version field exists to stop.
             version: CURRENT_MANIFEST_VERSION,
             query: params.config.meta.query.clone(),
-            scope: params.scope.clone(),
+            scope: params.scope.recorded().to_vec(),
             generated_at: current_timestamp(),
             lock_hash,
         },
@@ -452,8 +557,8 @@ const EMPTY_NOTES: &str = "\n#\n";
 ///
 /// It is a default, not a rule: the pattern is the line of the manifest the
 /// user is most invited to edit, and `{filename}` remains one edit away.
-fn default_pattern(scope_prefixes: &[String]) -> &'static str {
-    if scope_prefixes.is_empty() {
+fn default_pattern(recorded_scope: &[String]) -> &'static str {
+    if recorded_scope.is_empty() {
         "{source.rel_path}"
     } else {
         "{scope.rel_path}"
@@ -872,6 +977,7 @@ mod tests {
         insert_fact, insert_object, insert_root, insert_source, insert_source_excluded,
         setup_test_db,
     };
+    use crate::expr::Unmeasured;
 
     fn default_params() -> ClusterGenerateParams {
         ClusterGenerateParams {
@@ -885,16 +991,7 @@ mod tests {
     /// A plan that matched nothing — the refresh arm this story routes through
     /// the shared assembly.
     fn empty_plan() -> ClusterGeneratePlan {
-        ClusterGeneratePlan {
-            lock_entries: vec![],
-            archived: vec![],
-            full_coverage_facts: vec![],
-            mixed_type_warnings: vec![],
-            root_breakdown: vec![],
-            not_archived_count: 0,
-            excluded_count: 0,
-            unhashed_count: 0,
-        }
+        ClusterGeneratePlan::empty()
     }
 
     fn refresh_config() -> ManifestConfig {
@@ -1221,6 +1318,7 @@ mod tests {
         // Build minimal lock entries to match source_count
         let lock_entries: Vec<LockEntry> = (0..source_count)
             .map(|i| LockEntry {
+                scope_rel_path: None,
                 id: i as i64,
                 root_id: 1,
                 path: format!("file{i}.jpg"),
@@ -1321,13 +1419,15 @@ mod tests {
             manifest_path: manifest_path.clone(),
             expanded_filters: vec![],
             original_filters: vec![],
-            scope_prefixes: vec!["/photos".to_string()],
+            scope: scope_of(&conn, &["/photos".to_string()]),
+            roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
             archive_root_id: 1,
             base_dir: "output".to_string(),
             allow: vec![],
         };
 
-        let result = execute_generate(&plan, &params).unwrap();
+        let mut plan = plan;
+        let result = execute_generate(&mut plan, &params).unwrap();
         assert_eq!(result.source_count, 1);
 
         // Verify files exist
@@ -1341,6 +1441,188 @@ mod tests {
         assert!(manifest.contains("[meta]"));
         assert!(manifest.contains("[output]"));
         assert!(manifest.contains("pattern = \"{scope.rel_path}\""));
+    }
+
+    /// The scope a generate test hands `execute_generate`, resolved through
+    /// the very function `cluster generate` resolves through — so a fixture
+    /// cannot drift from what a run actually hands these functions.
+    fn scope_of(conn: &Connection, prefixes: &[String]) -> ScopeResolution {
+        crate::core::ops::scope::resolve_recorded_scope(
+            conn,
+            prefixes,
+            &crate::core::repo::root::fetch_all(conn).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// The same, without a database: every prefix confirmed on its root match
+    /// alone. For the measurement cases, which are about `ScopeVantage` and
+    /// `path_strip_prefix` and have no index to consult.
+    fn attributed(prefixes: &[&str], roots: &[Root]) -> ScopeResolution {
+        use crate::core::domain::scope::{attribute_prefix, PrefixOutcome};
+        ScopeResolution::from_outcomes(
+            prefixes
+                .iter()
+                .map(|p| match attribute_prefix(p, roots) {
+                    Some(scope) => PrefixOutcome::Confirmed(scope),
+                    None => PrefixOutcome::Unrooted(p.to_string()),
+                })
+                .collect(),
+        )
+    }
+
+    // =========================================================================
+    // The measurement — what the lock settles that nothing can recover later
+    // =========================================================================
+
+    /// The test that proves the field earns its place.
+    ///
+    /// The vantage is *where the user pointed*, which may be shallower than
+    /// where the files are. With one scope at `/R/proj` and every file under
+    /// `/R/proj/src`, the measurement is `src/main.c` — and the common prefix
+    /// of the lock's own contents is `/R/proj/src`, which would hand back
+    /// `main.c` and lose the `src/` level. The information is genuinely absent
+    /// from the entries, which is why it has to be recorded when the selection
+    /// is made rather than derived afterwards.
+    #[test]
+    fn the_measurement_cannot_be_recovered_from_the_entries() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/R", "source", false);
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+
+        let mut entries: Vec<LockEntry> = ["proj/src/main.c", "proj/src/util.c"]
+            .iter()
+            .map(|rel| lock_entry_at(root, &format!("/R/{rel}")))
+            .collect();
+
+        measure_entries(&mut entries, &attributed(&["/R/proj"], &roots), &roots);
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.scope_rel_path.clone().unwrap())
+                .collect::<Vec<_>>(),
+            ["src/main.c", "src/util.c"],
+            "the level the user pointed above must survive"
+        );
+
+        // And the counter-derivation, spelled out: the deepest directory
+        // containing every entry is one level lower, so anything reading the
+        // entries would answer differently.
+        assert_eq!(
+            crate::core::domain::path::common_path_prefix(entries.iter().map(|e| e.path.as_str())),
+            "/R/proj/src",
+        );
+    }
+
+    /// Sibling scopes: each entry's measurement keeps its own scope's name, so
+    /// two siblings cannot collide at the destination. The vantage's rule,
+    /// seen through the lock it is now written into.
+    #[test]
+    fn sibling_scopes_keep_their_own_names_in_the_measurement() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/R", "source", false);
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+
+        let mut entries: Vec<LockEntry> = ["work/proj-v1/main.c", "work/proj-v2/main.c"]
+            .iter()
+            .map(|rel| lock_entry_at(root, &format!("/R/{rel}")))
+            .collect();
+
+        measure_entries(
+            &mut entries,
+            &attributed(&["/R/work/proj-v1", "/R/work/proj-v2"], &roots),
+            &roots,
+        );
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.scope_rel_path.clone().unwrap())
+                .collect::<Vec<_>>(),
+            ["proj-v1/main.c", "proj-v2/main.c"],
+        );
+    }
+
+    /// A lock entry standing at `path` under `root_id`, with the rest of the
+    /// snapshot fixed — these cases are about the measurement and nothing
+    /// else.
+    fn lock_entry_at(root_id: i64, path: &str) -> LockEntry {
+        LockEntry {
+            id: 1,
+            root_id,
+            path: path.to_string(),
+            device: 0,
+            inode: 0,
+            size: 1,
+            mtime: 0,
+            partial_hash: String::new(),
+            object_id: None,
+            hash_type: None,
+            hash_value: None,
+            scope_rel_path: None,
+        }
+    }
+
+    /// The requester's "exactly the same code" ruling, pinned rather than
+    /// trusted: generation and refresh must write **byte-identical** locks
+    /// from the same inputs. Two similar loops is the drift this whole class
+    /// of defect comes from, so what is asserted is the file, not a field.
+    #[test]
+    fn generate_and_refresh_write_the_same_lock() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "hash1", false);
+        insert_source(&conn, root, "trip/day1/photo.jpg", Some(obj));
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+        let scope = || attributed(&["/photos/trip"], &roots);
+
+        let dir = tempfile::tempdir().unwrap();
+        let gen_lock = dir.path().join("gen.lock");
+        let mut plan = plan_generate(&mut conn, &default_params()).unwrap();
+        execute_generate(
+            &mut plan,
+            &ExecuteGenerateParams {
+                lock_path: gen_lock.clone(),
+                manifest_path: dir.path().join("gen.toml"),
+                expanded_filters: vec![],
+                original_filters: vec![],
+                scope: scope(),
+                roots: roots.clone(),
+                archive_root_id: 1,
+                base_dir: String::new(),
+                allow: vec![],
+            },
+        )
+        .unwrap();
+
+        let refresh_lock = dir.path().join("refresh.lock");
+        let mut plan = plan_generate(&mut conn, &default_params()).unwrap();
+        execute_refresh(
+            &mut plan,
+            &ExecuteRefreshParams {
+                lock_path: refresh_lock.clone(),
+                manifest_path: dir.path().join("refresh.toml"),
+                old_manifest_content: String::new(),
+                scope: scope(),
+                roots: roots.clone(),
+                config: refresh_config(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&gen_lock).unwrap(),
+            std::fs::read_to_string(&refresh_lock).unwrap(),
+            "generate and refresh must settle a manifest identically"
+        );
+        // And it is not vacuously equal to an unmeasured lock.
+        assert!(
+            std::fs::read_to_string(&gen_lock)
+                .unwrap()
+                .contains("\"scope_rel_path\":\"day1/photo.jpg\""),
+            "the lock carries the measurement"
+        );
     }
 
     #[test]
@@ -1358,13 +1640,15 @@ mod tests {
             manifest_path: dir.path().join("cluster.toml"),
             expanded_filters: vec!["source.ext=jpg".to_string()],
             original_filters: vec!["@image".to_string()],
-            scope_prefixes: vec!["/photos".to_string()],
+            scope: scope_of(&conn, &["/photos".to_string()]),
+            roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
             archive_root_id: 1,
             base_dir: "output".to_string(),
             allow: vec![],
         };
 
-        execute_generate(&plan, &params).unwrap();
+        let mut plan = plan;
+        execute_generate(&mut plan, &params).unwrap();
 
         let manifest = std::fs::read_to_string(dir.path().join("cluster.toml")).unwrap();
         assert!(manifest.contains("# Original: @image"));
@@ -1382,7 +1666,7 @@ mod tests {
         let obj = insert_object(&conn, "hash1", false);
         insert_source(&conn, root, "trip/day1/photo.jpg", Some(obj));
 
-        let plan = plan_generate(&mut conn, &default_params()).unwrap();
+        let mut plan = plan_generate(&mut conn, &default_params()).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let manifest_path = dir.path().join("cluster.toml");
         let params = ExecuteGenerateParams {
@@ -1390,12 +1674,13 @@ mod tests {
             manifest_path: manifest_path.clone(),
             expanded_filters: vec![],
             original_filters: vec![],
-            scope_prefixes,
+            scope: scope_of(&conn, &scope_prefixes),
+            roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
             archive_root_id: 1,
             base_dir: "output".to_string(),
             allow: vec![],
         };
-        execute_generate(&plan, &params).unwrap();
+        execute_generate(&mut plan, &params).unwrap();
 
         let manifest = std::fs::read_to_string(&manifest_path).unwrap();
         let config: ManifestConfig = toml::from_str(&manifest).unwrap();
@@ -1451,8 +1736,7 @@ mod tests {
     #[test]
     fn the_default_pattern_keeps_a_nested_tree_apart_at_apply_time() {
         use crate::archive::ops::plan::{plan_apply, ApplyPlanParams};
-        use crate::core::domain::scope::ScopeResolution;
-        use crate::expr::{extract_fact_keys, parse_pattern, ScopeVantage};
+        use crate::expr::{extract_fact_keys, parse_pattern};
 
         let tree = tempfile::tempdir().unwrap();
         let root_path = tree.path().to_str().unwrap().to_string();
@@ -1472,18 +1756,19 @@ mod tests {
 
         // Generate, then read the pattern back off the manifest — what apply
         // plans with is what generation wrote, not a literal repeated here.
-        let gen_plan = plan_generate(&mut conn, &default_params()).unwrap();
+        let mut gen_plan = plan_generate(&mut conn, &default_params()).unwrap();
         let out = tempfile::tempdir().unwrap();
         let manifest_path = out.path().join("cluster.toml");
         let scope = format!("{root_path}/trip");
         execute_generate(
-            &gen_plan,
+            &mut gen_plan,
             &ExecuteGenerateParams {
                 lock_path: out.path().join("cluster.lock"),
                 manifest_path: manifest_path.clone(),
                 expanded_filters: vec![],
                 original_filters: vec![],
-                scope_prefixes: vec![scope.clone()],
+                scope: scope_of(&conn, std::slice::from_ref(&scope)),
+                roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
                 archive_root_id: archive,
                 base_dir: String::new(),
                 allow: vec![],
@@ -1499,20 +1784,15 @@ mod tests {
         let mut root_paths = HashMap::new();
         root_paths.insert(root, root_path.clone());
         root_paths.insert(archive, "/archive".to_string());
-        // The vantage apply would derive: read off the manifest's own
-        // recorded scope, resolved against the real roots exactly as apply
-        // resolves it — not rebuilt from the literal above.
-        let vantage = ScopeVantage::new(&ScopeResolution::resolve(
-            &config.meta.scope,
-            &crate::core::repo::root::fetch_all(&conn).unwrap(),
-        ));
         let apply_plan = plan_apply(
             &mut conn,
             &ApplyPlanParams {
                 sources: &sources,
                 pattern: &pattern,
                 needed_keys: &needed_keys,
-                vantage: &vantage,
+                // These two cases plan against a lock generation just wrote,
+                // so every entry is measured and this arm is never taken.
+                unmeasured: Unmeasured::NoScopeRecorded,
                 root_paths: &root_paths,
                 archive_root_id: archive,
                 base_dir_rel: "",
@@ -1548,8 +1828,7 @@ mod tests {
     #[test]
     fn sibling_scopes_keep_their_own_names_at_the_destination() {
         use crate::archive::ops::plan::{plan_apply, ApplyPlanParams};
-        use crate::core::domain::scope::ScopeResolution;
-        use crate::expr::{extract_fact_keys, parse_pattern, ScopeVantage};
+        use crate::expr::{extract_fact_keys, parse_pattern};
 
         let tree = tempfile::tempdir().unwrap();
         let root_path = tree.path().to_str().unwrap().to_string();
@@ -1576,17 +1855,18 @@ mod tests {
             format!("{root_path}/work/proj-v1"),
             format!("{root_path}/work/proj-v2"),
         ];
-        let gen_plan = plan_generate(&mut conn, &default_params()).unwrap();
+        let mut gen_plan = plan_generate(&mut conn, &default_params()).unwrap();
         let out = tempfile::tempdir().unwrap();
         let manifest_path = out.path().join("cluster.toml");
         execute_generate(
-            &gen_plan,
+            &mut gen_plan,
             &ExecuteGenerateParams {
                 lock_path: out.path().join("cluster.lock"),
                 manifest_path: manifest_path.clone(),
                 expanded_filters: vec![],
                 original_filters: vec![],
-                scope_prefixes: scopes,
+                scope: scope_of(&conn, &scopes),
+                roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
                 archive_root_id: archive,
                 base_dir: String::new(),
                 allow: vec![],
@@ -1604,17 +1884,15 @@ mod tests {
         let mut root_paths = HashMap::new();
         root_paths.insert(root, root_path.clone());
         root_paths.insert(archive, "/archive".to_string());
-        let vantage = ScopeVantage::new(&ScopeResolution::resolve(
-            &config.meta.scope,
-            &crate::core::repo::root::fetch_all(&conn).unwrap(),
-        ));
         let apply_plan = plan_apply(
             &mut conn,
             &ApplyPlanParams {
                 sources: &sources,
                 pattern: &pattern,
                 needed_keys: &needed_keys,
-                vantage: &vantage,
+                // These two cases plan against a lock generation just wrote,
+                // so every entry is measured and this arm is never taken.
+                unmeasured: Unmeasured::NoScopeRecorded,
                 root_paths: &root_paths,
                 archive_root_id: archive,
                 base_dir_rel: "",
@@ -1676,11 +1954,13 @@ base_dir = \"output\"\n";
             lock_path: dir.path().join("cluster.lock"),
             manifest_path: dir.path().join("cluster.toml"),
             old_manifest_content: old_content.to_string(),
-            scope: config.meta.scope.clone(),
+            scope: ScopeResolution::from_outcomes(vec![]),
+            roots: vec![],
             config,
         };
 
-        let result = execute_refresh(&plan, &params).unwrap();
+        let mut plan = plan;
+        let result = execute_refresh(&mut plan, &params).unwrap();
         assert!(result.outcome.is_some());
 
         let manifest = std::fs::read_to_string(dir.path().join("cluster.toml")).unwrap();
@@ -1701,11 +1981,12 @@ base_dir = \"output\"\n";
             lock_path: lock_path.clone(),
             manifest_path: manifest_path.clone(),
             old_manifest_content: String::new(),
-            scope: refresh_config().meta.scope.clone(),
+            scope: ScopeResolution::from_outcomes(vec![]),
+            roots: vec![],
             config: refresh_config(),
         };
 
-        let result = execute_refresh(&empty_plan(), &params).unwrap();
+        let result = execute_refresh(&mut empty_plan(), &params).unwrap();
         assert!(result.outcome.is_none());
         assert!(!lock_path.exists());
         assert!(manifest_path.exists());
@@ -1737,11 +2018,12 @@ base_dir = \"output\"\n";
             lock_path: dir.path().join("cluster.lock"),
             manifest_path: manifest_path.clone(),
             old_manifest_content: old_content.to_string(),
-            scope: refresh_config().meta.scope.clone(),
+            scope: ScopeResolution::from_outcomes(vec![]),
+            roots: vec![],
             config: refresh_config(),
         };
 
-        let result = execute_refresh(&empty_plan(), &params).unwrap();
+        let result = execute_refresh(&mut empty_plan(), &params).unwrap();
         assert!(result.outcome.is_none());
 
         // A query that now matches nothing is not a reason to lose the words
@@ -1768,11 +2050,12 @@ base_dir = \"output\"\n";
             lock_path: dir.path().join("cluster.lock"),
             manifest_path: manifest_path.clone(),
             old_manifest_content: String::new(),
-            scope: refresh_config().meta.scope.clone(),
+            scope: ScopeResolution::from_outcomes(vec![]),
+            roots: vec![],
             config: refresh_config(),
         };
 
-        execute_refresh(&empty_plan(), &params).unwrap();
+        execute_refresh(&mut empty_plan(), &params).unwrap();
 
         let manifest = std::fs::read_to_string(&manifest_path).unwrap();
         assert!(manifest.starts_with("# Canon manifest"), "got: {manifest}");
@@ -1853,12 +2136,14 @@ base_dir = \"output\"\n";
             manifest_path: manifest_path.clone(),
             expanded_filters: vec![],
             original_filters: vec![],
-            scope_prefixes: vec![],
+            scope: scope_of(&conn, &[]),
+            roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
             archive_root_id: 1,
             base_dir: String::new(),
             allow: vec![],
         };
-        execute_generate(&plan, &params).unwrap();
+        let mut plan = plan;
+        execute_generate(&mut plan, &params).unwrap();
 
         // The writer's section order and the parser's idea of where a section
         // ends are a single contract, and the tests on either side of it use
@@ -1881,10 +2166,11 @@ base_dir = \"output\"\n";
             lock_path: dir.path().join("cluster.lock"),
             manifest_path: manifest_path.clone(),
             old_manifest_content: content,
-            scope: vec![],
+            scope: ScopeResolution::from_outcomes(vec![]),
+            roots: vec![],
             config: toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap(),
         };
-        execute_refresh(&empty_plan(), &refresh_params).unwrap();
+        execute_refresh(&mut empty_plan(), &refresh_params).unwrap();
 
         let refreshed = std::fs::read_to_string(&manifest_path).unwrap();
         let raw =

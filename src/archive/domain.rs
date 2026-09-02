@@ -141,6 +141,55 @@ pub struct ManifestOutput {
 // Lock file
 // ============================================================================
 
+/// The version a freshly written lock file carries.
+///
+/// 2 since the lock gained a header and a per-entry measurement. There is no
+/// version 1 constant, because a version 1 lock has no header to read one
+/// out of: its absence *is* the detection.
+pub const CURRENT_LOCK_VERSION: u32 = 2;
+
+/// The lock file's first line: what the run settled, as opposed to what it
+/// selected.
+///
+/// A manifest's `meta.scope` is editable text and stays that way; this is the
+/// resolved answer taken at the moment the selection was made, so `apply`
+/// records paths that exist without re-reading anything a user could have
+/// changed since. The existing `lock_hash` covers the whole file, so the
+/// header is tamper-evident at no extra cost.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LockHeader {
+    /// Required, and required is the point: an older lock's first line has no
+    /// such field, so it fails to parse as a header and is recognised as old.
+    ///
+    /// **A discriminator, not a gate** — deliberately, and unlike
+    /// [`validate_manifest_version`] beside it. Nothing reads the number back,
+    /// so a lock from a later Canon is read as this one. That follows the
+    /// ephemerality ruling this format change was made under: a lock is a
+    /// temporary artifact rebuilt by `cluster refresh`, so no compatibility
+    /// path is owed in either direction. Whoever adds a forward gate is
+    /// reversing that ruling, not filling an omission.
+    pub lock_version: u32,
+    /// The resolved scope, for `apply`'s decision record. Confirmed prefixes
+    /// only — a line the index could not confirm never reaches here, so the
+    /// record cannot claim a place Canon has no sources for.
+    pub scope: Vec<LockScope>,
+}
+
+/// One resolved scope, as the lock records it.
+///
+/// Deliberately **not** a serialized [`DecisionScope`]. That type's whole
+/// point is that constructing one requires a matching root, so a rootless
+/// string is unrepresentable; deserializing into it would put arbitrary file
+/// text through the back door and weaken a guarantee bought at some cost.
+/// Apply converts through `DecisionScope::new`, leaving the domain type with
+/// one constructor.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LockScope {
+    pub root_id: i64,
+    pub root_path: String,
+    pub rel_prefix: String,
+}
+
 /// JSONL lock entry (one per line in .lock file)
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LockEntry {
@@ -161,10 +210,31 @@ pub struct LockEntry {
     pub hash_value: Option<String>,
     // Note: `facts` field was removed. Apply looks up facts at runtime from DB.
     // Old lock files with `facts` field are still readable (serde ignores unknown fields).
+    /// Where this file goes, measured when the selection was settled.
+    ///
+    /// The opposite case to `facts`, and the reason the note above is worth
+    /// reading beside this field: an attribute that can be looked up fresh
+    /// left the lock, and this **cannot** be. What `{scope.rel_path}` means is
+    /// a property of the *selection* — the shape the user was looking at,
+    /// which may be shallower than where the files are — and it is not
+    /// recoverable from the entries' own paths afterwards.
+    ///
+    /// `None` has two meanings, and only the lock as a whole can tell them
+    /// apart: a lock with **no header** predates this field, and a lock whose
+    /// header records **no scope** had nowhere to measure from. A run that
+    /// confirmed a scope always fills this for every entry, because entries
+    /// are selected from the same register the measurement is taken from.
+    /// See `archive::ops::manifest::LockFile::unmeasured_reason`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_rel_path: Option<String>,
 }
 
 impl LockEntry {
     /// Build a LockEntry from a Source and object hash info.
+    ///
+    /// The measurement is not set here: it is a property of the run's whole
+    /// scope, not of one source, so it is filled afterwards for the entry set
+    /// as a whole (`archive::ops::generate::measure_entries`).
     pub fn from_source(
         source: &Source,
         hash_type: Option<String>,
@@ -182,6 +252,7 @@ impl LockEntry {
             object_id: source.object_id,
             hash_type,
             hash_value,
+            scope_rel_path: None,
         }
     }
 }

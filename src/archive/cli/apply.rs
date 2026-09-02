@@ -1,26 +1,24 @@
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::archive::domain::{
     extract_notes, parse_manifest_allow, validate_manifest_version, LockEntry, ManifestConfig,
 };
 use crate::archive::ops::execute::{self, TransferMode};
-use crate::archive::ops::{pattern, plan};
+use crate::archive::ops::{manifest, pattern, plan};
 use crate::ceremony;
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
-use crate::core::domain::scope::ScopeResolution;
+use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
 use crate::core::repo::{self, Db};
 use crate::expr::{
-    extract_fact_keys, parse_pattern, placement_shape, prefetch_pattern_facts, Pattern,
-    ScopeVantage,
+    extract_fact_keys, parse_pattern, placement_shape, prefetch_pattern_facts, Pattern, Unmeasured,
 };
 
 pub struct ApplyOptions {
@@ -97,19 +95,12 @@ pub fn run(
         );
     }
 
-    // Read JSONL lock file
-    let lock_file = File::open(&lock_path)
-        .with_context(|| format!("Failed to open lock file: {}", lock_path.display()))?;
-    let sources: Vec<LockEntry> = BufReader::new(lock_file)
-        .lines()
-        .enumerate()
-        .map(|(i, line)| {
-            let line =
-                line.with_context(|| format!("Failed to read line {} of lock file", i + 1))?;
-            serde_json::from_str(&line)
-                .with_context(|| format!("Failed to parse line {} of lock file", i + 1))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    // Read the JSONL lock file: the header it settled, and its entries.
+    let lock = manifest::read_lock_file(&lock_path)?;
+    // Why an entry might carry no measurement — asked of the file, which can
+    // tell the two causes apart, rather than left to a refusal to guess.
+    let unmeasured = lock.unmeasured_reason();
+    let sources = lock.entries;
 
     // Validate lock file hash matches config
     let actual_hash = crate::core::ops::fs::compute_full_hash(&lock_path)?;
@@ -134,30 +125,18 @@ pub fn run(
     let roots = repo::root::fetch_all(conn)?;
     let root_paths: HashMap<i64, String> = roots.iter().map(|r| (r.id, r.path.clone())).collect();
 
-    // The manifest's scope, resolved against the known roots once for the run.
-    // A manifest's scope is text the user may have edited, so which root owns
-    // each prefix is a real question with one answer — and the samples, the
-    // plan and the decision record all read that one answer rather than each
-    // matching roots its own way.
-    let scope = ScopeResolution::resolve(&config.meta.scope, &roots);
-
-    // Where a `{scope.rel_path}` measures from, derived once for the run from
-    // the resolution above: none of the readers re-derives what "the scope"
-    // means, and none of them decides which root a prefix belongs to.
-    let vantage = ScopeVantage::new(&scope);
-
-    // A recorded prefix that names no known root stops the run here — before
-    // the plan, and long before the decision row exists, so a refusal leaves
-    // nothing behind to explain.
+    // The scope this run acts under, taken from the lock rather than resolved
+    // from `meta.scope`. Apply selects nothing and now measures nothing: the
+    // lock settled both when the selection was made, and the header is what
+    // the decision record names — so a scope line edited after the refresh
+    // cannot move a file or falsify a record.
     //
-    // Refusal rather than a statement, and unconditional rather than gated on
-    // whether the pattern reads the scope: both halves of the damage are
-    // silent. Destinations are measured from the recorded scope, so a lost
-    // prefix leaves the surviving siblings measuring from somewhere deeper and
-    // files land flattened at exit 0; and the decision record would claim a
-    // scoped act as a global one whatever the pattern says. Neither is
-    // recoverable afterwards, and the alternative to refusing is inventing an
-    // answer to a question the manifest no longer answers.
+    // A lock with no header is refused here, before the plan and long before
+    // the decision row exists, so a refusal leaves nothing behind to explain.
+    // Unconditional, not gated on whether the pattern reads the scope: the
+    // record's claim is at stake on every apply whatever the pattern says, and
+    // a run that recorded a scoped act as a global one would be exactly the
+    // silence this whole mechanism exists to close.
     //
     // Placement is relied on, not designed on: if this check ever moves below
     // `DecisionRecorder::start`, `DecisionRecorder::refuse` is what settles the
@@ -165,27 +144,26 @@ pub fn run(
     //
     // The whole message is the refusal, on the pattern the lock-hash mismatch
     // above already uses: both say this manifest cannot be applied as it
-    // stands and name the way back, and both are worth one message rather than
-    // a display half and a terse half.
-    if !scope.unrooted().is_empty() {
+    // stands and name the way back.
+    let Some(header) = lock.header else {
         bail!(
-            "The manifest's scope names {} under no known root:\n\
-             {}\n\
-             Destinations are measured from the recorded scope, so nothing was moved.\n\
-             {}",
-            match scope.unrooted().len() {
-                1 => "1 path".to_string(),
-                n => format!("{} paths", format_count(n)),
-            },
-            scope
-                .unrooted()
-                .iter()
-                .map(|p| format!("  {p}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            super::edit_then_refresh(&config_path)
+            "This lock file was written before Canon recorded where each file goes.\n\
+             Nothing was moved. Rebuild it: canon cluster refresh {}",
+            config_path.display()
         );
-    }
+    };
+    // Nothing checks that the header's scopes actually contain the entries,
+    // and nothing needs to *while* the writers keep selecting from the same
+    // register they measure from (`ScopeResolution::selection`). They do, and
+    // `a_line_that_measures_nothing_selects_nothing` is what holds it: select
+    // from the recorded list instead and a refresh produces a lock whose two
+    // halves genuinely disagree. A check here would only add a second place to
+    // notice that; the `lock_hash` above already refuses a hand-edited lock.
+    let decision_scope: Vec<DecisionScope> = header
+        .scope
+        .into_iter()
+        .map(|s| DecisionScope::new(s.root_id, s.root_path, s.rel_prefix))
+        .collect();
 
     // Look up archive root from cached roots, verify it's an archive
     let archive_root = roots
@@ -224,7 +202,7 @@ pub fn run(
             &filtered_sources,
             &pattern,
             &needed_keys,
-            &vantage,
+            unmeasured,
             &root_paths,
             &base_dir,
         )
@@ -257,7 +235,7 @@ pub fn run(
             sources: &filtered_sources,
             pattern: &pattern,
             needed_keys: &needed_keys,
-            vantage: &vantage,
+            unmeasured,
             root_paths: &root_paths,
             archive_root_id: config.output.archive_root_id,
             base_dir_rel: &config.output.base_dir,
@@ -336,8 +314,12 @@ pub fn run(
         if v.expansion_failures.len() > 10 {
             eprintln!("  ... and {} more", v.expansion_failures.len() - 10);
         }
-        eprintln!("\nPattern requires facts that are missing for these sources.");
-        eprintln!("Use 'canon facts' to check fact coverage, or adjust the pattern.");
+        // No cause is asserted: a pattern fails to expand for a missing fact,
+        // and equally for a scope the manifest does not record, and the lines
+        // above already carry each source's own reason. Naming one cause here
+        // sends half the readers to a command that cannot help them.
+        eprintln!("\nAdjust the pattern in your manifest, or supply what it names.");
+        eprintln!("Use 'canon facts' to check coverage for a pattern that names facts.");
         bail!("Aborting due to pattern expansion failures");
     }
 
@@ -601,7 +583,7 @@ pub fn run(
     };
     let decision = DecisionParams {
         command: DecisionCommand::Apply,
-        scope: scope.scopes().to_vec(),
+        scope: decision_scope,
         command_line: command_line.to_string(),
         reason: effective_reason,
         record_enabled: ledger.recording != RecordingMode::Off && !options.dry_run,
@@ -716,7 +698,7 @@ fn compute_sample_destinations(
     sources: &[&LockEntry],
     pattern: &Pattern,
     needed_keys: &[String],
-    vantage: &ScopeVantage,
+    unmeasured: Unmeasured,
     root_paths: &HashMap<i64, String>,
     base_dir: &Path,
 ) -> Vec<SampleDestination> {
@@ -737,7 +719,7 @@ fn compute_sample_destinations(
     sample_sources
         .iter()
         .map(|source| {
-            match pattern::evaluate_pattern(pattern, source, vantage, root_paths, &facts) {
+            match pattern::evaluate_pattern(pattern, source, unmeasured, root_paths, &facts) {
                 Ok(dest_rel) => {
                     let full_path = base_dir.join(&dest_rel);
                     SampleDestination {
@@ -1145,6 +1127,126 @@ mod tests {
     }
 
     impl Fixture {
+        /// What the run's decision row recorded as its scope, as
+        /// `(root_path, rel_prefix)` pairs — the durable half of every claim
+        /// in this module.
+        fn recorded_scope(&mut self) -> Vec<(String, String)> {
+            self.db
+                .conn_mut()
+                .prepare(
+                    "SELECT root_path, rel_prefix FROM decision_scopes ORDER BY root_path, rel_prefix",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        }
+
+        /// Where this fixture's one selected source lands: the manifest is
+        /// scoped to `proj-v1` and the default pattern is `{scope.rel_path}`,
+        /// so a single scope is its own vantage and `proj-v1/day1/a.jpg`
+        /// measures to `day1/a.jpg`. Distinct from the filename and from the
+        /// root-relative path, which is what makes the cases below able to
+        /// fail. Named once because three of them compare against it, and what
+        /// each is about is that something did *not* move it.
+        fn expected_placement(&self) -> Vec<String> {
+            vec!["day1/a.jpg".to_string()]
+        }
+
+        /// Rewrite `output.pattern` in the manifest, the way a user would.
+        /// The lock is untouched, so its hash still matches.
+        fn set_pattern(&self, pattern: &str) {
+            let text = fs::read_to_string(&self.manifest).unwrap();
+            let rewritten: String = text
+                .lines()
+                .map(|line| {
+                    if line.starts_with("pattern = ") {
+                        format!("pattern = \"{pattern}\"\n")
+                    } else {
+                        format!("{line}\n")
+                    }
+                })
+                .collect();
+            fs::write(&self.manifest, rewritten).unwrap();
+        }
+
+        /// Turn the lock back into one written before headers existed, and
+        /// re-point the manifest at its new hash — otherwise the run would
+        /// stop on the hash mismatch instead of on the missing header.
+        fn strip_lock_header(&self) {
+            let lock_path = self.manifest.with_extension("lock");
+            let content = fs::read_to_string(&lock_path).unwrap();
+            let without: String = content
+                .lines()
+                .skip(1)
+                .map(|l| {
+                    // An old lock also carried no per-entry measurement.
+                    let mut v: serde_json::Value = serde_json::from_str(l).unwrap();
+                    v.as_object_mut().unwrap().remove("scope_rel_path");
+                    format!("{v}\n")
+                })
+                .collect();
+            fs::write(&lock_path, without).unwrap();
+
+            let hash = crate::core::ops::fs::compute_full_hash(&lock_path).unwrap();
+            let text = fs::read_to_string(&self.manifest).unwrap();
+            let rewritten: String = text
+                .lines()
+                .map(|line| {
+                    if line.starts_with("lock_hash = ") {
+                        format!("lock_hash = \"{hash}\"\n")
+                    } else {
+                        format!("{line}\n")
+                    }
+                })
+                .collect();
+            fs::write(&self.manifest, rewritten).unwrap();
+        }
+
+        /// What `plan_apply` reported as pattern-expansion failures, with
+        /// each source's own reason — the same strings apply prints to
+        /// stderr, read where they are data rather than output.
+        fn expansion_failures(&mut self) -> Vec<(String, String)> {
+            use crate::archive::ops::plan::{plan_apply, ApplyPlanParams};
+            use crate::expr::{extract_fact_keys, parse_pattern};
+
+            let text = fs::read_to_string(&self.manifest).unwrap();
+            let config: crate::archive::domain::ManifestConfig = toml::from_str(&text).unwrap();
+            let lock = manifest::read_lock_file(&self.manifest.with_extension("lock")).unwrap();
+            let pattern = parse_pattern(&config.output.pattern).unwrap();
+            let needed_keys = extract_fact_keys(&pattern);
+            let unmeasured = lock.unmeasured_reason();
+            let entries: Vec<&LockEntry> = lock.entries.iter().collect();
+
+            let conn = self.db.conn_mut();
+            let root_paths: HashMap<i64, String> = repo::root::fetch_all(conn)
+                .unwrap()
+                .iter()
+                .map(|r| (r.id, r.path.clone()))
+                .collect();
+            let plan = plan_apply(
+                conn,
+                &ApplyPlanParams {
+                    sources: &entries,
+                    pattern: &pattern,
+                    needed_keys: &needed_keys,
+                    unmeasured,
+                    root_paths: &root_paths,
+                    archive_root_id: config.output.archive_root_id,
+                    base_dir_rel: &config.output.base_dir,
+                    resume: false,
+                    progress: None,
+                },
+            )
+            .unwrap();
+            assert!(
+                !plan.violations.expansion_failures.is_empty(),
+                "the fixture must actually fail to expand, or this proves nothing"
+            );
+            plan.violations.expansion_failures.clone()
+        }
+
         fn decision_count(&mut self) -> i64 {
             self.db
                 .conn_mut()
@@ -1195,6 +1297,19 @@ mod tests {
         selected: &[&str],
         recorded: impl Fn(&str) -> Vec<String>,
     ) -> Fixture {
+        fixture_under("", root_dir_name, selected, recorded)
+    }
+
+    /// The same, with the two projects sitting under `under` inside the root —
+    /// which is what lets a case put the divergence *below* an ASCII root —
+    /// the shape an ASCII volume or home path with accented folders under it
+    /// always has.
+    fn fixture_under(
+        under: &str,
+        root_dir_name: &str,
+        selected: &[&str],
+        recorded: impl Fn(&str) -> Vec<String>,
+    ) -> Fixture {
         let tree = tempfile::tempdir().unwrap();
         let archive = tempfile::tempdir().unwrap();
         let out = tempfile::tempdir().unwrap();
@@ -1212,7 +1327,22 @@ mod tests {
         let root_id = insert_root(&conn, &source_root.to_string_lossy(), "source", false);
         let archive_id = insert_root(&conn, &archive_root.to_string_lossy(), "archive", false);
 
-        for (i, rel) in ["proj-v1/a.jpg", "proj-v2/b.jpg"].iter().enumerate() {
+        // Nested one level below the scope on purpose. The measurement for a
+        // manifest scoped to `proj-v1` is then `day1/a.jpg`, which is neither
+        // the filename nor the root-relative path — so a reader that quietly
+        // substituted either would be visible here rather than coincidentally
+        // right.
+        let rels: Vec<String> = ["proj-v1/day1/a.jpg", "proj-v2/day1/b.jpg"]
+            .iter()
+            .map(|r| {
+                if under.is_empty() {
+                    r.to_string()
+                } else {
+                    format!("{under}/{r}")
+                }
+            })
+            .collect();
+        for (i, rel) in rels.iter().enumerate() {
             let file = source_root.join(rel);
             fs::create_dir_all(file.parent().unwrap()).unwrap();
             fs::write(&file, format!("content-{i}")).unwrap();
@@ -1256,14 +1386,26 @@ mod tests {
         assert!(!plan.lock_entries.is_empty(), "the fixture locked nothing");
 
         let manifest = out.path().join("cluster.toml");
+        // Through the same resolution `cluster generate` uses, so the lock the
+        // fixture writes is the lock the real command writes — measurement,
+        // header and healed `meta.scope` alike.
+        let all_roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+        let scope = crate::core::ops::scope::resolve_recorded_scope(
+            &conn,
+            &recorded(&source_root.to_string_lossy()),
+            &all_roots,
+        )
+        .unwrap();
+        let mut plan = plan;
         execute_generate(
-            &plan,
+            &mut plan,
             &ExecuteGenerateParams {
                 lock_path: out.path().join("cluster.lock"),
                 manifest_path: manifest.clone(),
                 expanded_filters: vec![],
                 original_filters: vec![],
-                scope_prefixes: recorded(&source_root.to_string_lossy()),
+                scope,
+                roots: all_roots,
                 archive_root_id: archive_id,
                 base_dir: String::new(),
                 allow: vec![],
@@ -1305,17 +1447,31 @@ mod tests {
         )
     }
 
-    /// C1 — the unforgivable half, closed where it is unforgivable.
+    /// C1 — the unforgivable half, now closed by construction rather than by
+    /// a gate.
     ///
     /// The shape is the friction's own: two sibling scopes recorded, one
     /// naming no known root, and every locked source under the sibling that
-    /// survives. Nothing downstream objects — the survivors all lie under the
-    /// vantage the survivor alone yields — so with the check removed this run
-    /// completes at exit 0, places `a.jpg` at the archive top where
-    /// `proj-v1/a.jpg` belongs, and writes a decision row claiming a scope it
-    /// never resolved. It must instead stop before it plans.
+    /// survives. Both halves of the old damage were silent. Placement: the
+    /// vantage the survivor alone yields is *deeper*, so every source is still
+    /// under it and nothing refuses — `a.jpg` landed at the archive top where
+    /// `proj-v1/a.jpg` belongs, at exit 0. And the record: a scoped act
+    /// written down as a global one.
+    ///
+    /// Neither can happen now, and apply is not what stops it. The unrooted
+    /// prefix never enters the lock: the measurement was taken from the
+    /// confirmed scope alone and the header carries only that, so apply reads
+    /// a settled answer and has nothing to get wrong. Apply's own unrooted
+    /// refusal is gone with the reading that needed it.
+    ///
+    /// What the confirmed scope alone yields is `a.jpg` — a single scope is
+    /// its own vantage — and that is the honest answer rather than a
+    /// consolation: the line naming a place Canon has never heard of cannot
+    /// contribute a vantage, so it does not drag one. The user hears about it
+    /// at the refresh that wrote the lock, which is where the manifest text
+    /// is still the live question.
     #[test]
-    fn an_unrooted_scope_refuses_before_anything_moves() {
+    fn an_unrooted_scope_moves_neither_the_files_nor_the_record() {
         let mut f = fixture("tree", &["proj-v1"], |root| {
             vec![
                 format!("{root}/proj-v1"),
@@ -1323,23 +1479,29 @@ mod tests {
             ]
         });
 
-        let message = format!("{:#}", apply(&mut f).unwrap_err());
-        assert!(
-            message.contains("/canon-test/no-such-root/proj-v2"),
-            "the refusal must name the prefix it could not root: {message}"
-        );
-        assert!(f.placed().is_empty(), "nothing may move: {:?}", f.placed());
+        apply(&mut f).unwrap();
+
         assert_eq!(
-            f.decision_count(),
-            0,
-            "a run refused before planning leaves no decision row"
+            f.placed(),
+            f.expected_placement(),
+            "the confirmed scope measures from itself"
+        );
+        assert_eq!(
+            f.recorded_scope(),
+            [(
+                f.source_root.to_string_lossy().to_string(),
+                "proj-v1".to_string()
+            )],
+            "the record names the confirmed scope, and only it"
         );
     }
 
-    /// C2 — the refusal is read back against the user's own file, so it names
-    /// every prefix that failed rather than stopping at the first.
+    /// C2 — the same, with the unrooted lines on both sides of the confirmed
+    /// one and two of them, because the register they used to be read out of
+    /// was order-sensitive and read back against a user's own file. None of
+    /// them may reach the record, whatever order they were written in.
     #[test]
-    fn the_refusal_names_every_unrooted_prefix() {
+    fn no_unrooted_prefix_reaches_the_record_whatever_its_position() {
         let mut f = fixture("tree", &["proj-v1"], |root| {
             vec![
                 "/canon-test/gone-one".to_string(),
@@ -1348,9 +1510,204 @@ mod tests {
             ]
         });
 
+        apply(&mut f).unwrap();
+
+        assert_eq!(f.placed(), f.expected_placement());
+        assert_eq!(
+            f.recorded_scope(),
+            [(
+                f.source_root.to_string_lossy().to_string(),
+                "proj-v1".to_string()
+            )]
+        );
+    }
+
+    /// C3b — the below-root form mismatch, at the destination.
+    ///
+    /// An **ASCII root** with an accented folder under it, and a manifest
+    /// naming two siblings below that folder in two normalizations — the
+    /// ordinary Mac shape, and the one the whole-prefix bend cannot reach: the
+    /// root matches as typed, so nothing was ever bent and each line kept
+    /// whatever form it was written in. The two lines then diverged at the
+    /// accented component, the vantage climbed **above** it, and every file
+    /// landed a directory level out, at exit 0, with a decision row naming a
+    /// path no folder on disk has.
+    ///
+    /// A climbing vantage is *more* permissive, so nothing downstream objected:
+    /// this is not a case the existing refusals could ever have caught.
+    ///
+    /// Asserted as an equality between two derived surfaces rather than
+    /// against a literal, so the case cannot pass by agreeing with a wrong
+    /// answer — and the second assertion is what makes it non-vacuous: with
+    /// the accented level dragged in, `placed()` would carry it.
+    #[test]
+    fn a_below_root_form_mismatch_places_where_the_stored_form_places() {
+        const DECOMPOSED: &str = "cafe\u{301}";
+        const PRECOMPOSED: &str = "caf\u{e9}";
+        assert_ne!(DECOMPOSED, PRECOMPOSED);
+
+        let stored = |root: &str| -> Vec<String> {
+            vec![
+                format!("{root}/{DECOMPOSED}/proj-v1"),
+                format!("{root}/{DECOMPOSED}/proj-v2"),
+            ]
+        };
+        // What a user retyping one of the two lines produces: the same place,
+        // in the other normalization, beside a sibling still in the stored one.
+        let mixed = |root: &str| -> Vec<String> {
+            vec![
+                format!("{root}/{PRECOMPOSED}/proj-v1"),
+                format!("{root}/{DECOMPOSED}/proj-v2"),
+            ]
+        };
+
+        let selected = [
+            &format!("{DECOMPOSED}/proj-v1")[..],
+            &format!("{DECOMPOSED}/proj-v2")[..],
+        ];
+        let mut baseline = fixture_under(DECOMPOSED, "tree", &selected, stored);
+        let mut mismatched = fixture_under(DECOMPOSED, "tree", &selected, mixed);
+
+        apply(&mut baseline).unwrap();
+        apply(&mut mismatched).unwrap();
+
+        assert_eq!(
+            mismatched.placed(),
+            baseline.placed(),
+            "a line retyped below an ASCII root must place where the stored form places"
+        );
+        assert_eq!(
+            baseline.placed(),
+            ["proj-v1/day1/a.jpg", "proj-v2/day1/b.jpg"],
+            "the sibling scopes' own names survive and the accented level above them does not"
+        );
+        assert!(
+            !mismatched
+                .placed()
+                .iter()
+                .any(|p| p.contains(DECOMPOSED) || p.contains(PRECOMPOSED)),
+            "the level the vantage used to climb above must not reach the archive: {:?}",
+            mismatched.placed()
+        );
+    }
+
+    /// C4 — the old-lock refusal, and it is **unconditional**.
+    ///
+    /// A lock with no header carries no settled scope, so an apply that went
+    /// ahead would write `decisions.scope` empty — a global row for a scoped
+    /// act, with no `decision_scopes` rows behind it. That is a silent
+    /// provenance gap whatever the pattern says, which is why the pattern is
+    /// not consulted: the second half of this test uses `{filename}`, which
+    /// needs no measurement at all, and is refused just the same.
+    #[test]
+    fn a_lock_with_no_header_is_refused_whatever_the_pattern() {
+        for pattern in ["{scope.rel_path}", "{filename}"] {
+            let mut f = fixture("tree", &["proj-v1"], |root| vec![format!("{root}/proj-v1")]);
+            f.set_pattern(pattern);
+            f.strip_lock_header();
+
+            let message = format!("{:#}", apply(&mut f).unwrap_err());
+            assert!(
+                message.contains("cluster refresh"),
+                "the refusal must name the way back, for {pattern}: {message}"
+            );
+            assert!(
+                f.placed().is_empty(),
+                "nothing may move for {pattern}: {:?}",
+                f.placed()
+            );
+            assert_eq!(
+                f.decision_count(),
+                0,
+                "a run refused before planning leaves no decision row"
+            );
+        }
+    }
+
+    /// C4b — an absent measurement has **two** causes and they take different
+    /// answers. A manifest that records no scope measures nothing — correctly,
+    /// there is nothing to measure from — so its entries carry no
+    /// `scope_rel_path` in a perfectly current lock. Refusing that with the
+    /// old-lock message would assert a cause Canon cannot know and prescribe a
+    /// refresh that rebuilds the same lock, leaving the user in a loop.
+    ///
+    /// Reached by two ordinary actions: generating unscoped (`--global`, or
+    /// filters alone) and then editing the pattern, or emptying `meta.scope`
+    /// and refreshing — which is exactly what the new rule tells a user to do.
+    #[test]
+    fn an_unscoped_manifest_says_so_rather_than_blaming_the_lock() {
+        let mut f = fixture("tree", &["proj-v1"], |_| vec![]);
+        f.set_pattern("{scope.rel_path}");
+
+        // The wrapper apply exits with is the same either way, and the cause
+        // it prints goes to stderr — so asserting on the error alone cannot
+        // tell fixed from unfixed. The cause is read back through
+        // `plan_apply`'s own violations, where it is data.
         let message = format!("{:#}", apply(&mut f).unwrap_err());
-        assert!(message.contains("/canon-test/gone-one"), "{message}");
-        assert!(message.contains("/canon-test/gone-two"), "{message}");
+        assert!(
+            message.contains("pattern expansion"),
+            "the run must refuse on the expansion, not on the lock's age: {message}"
+        );
+        assert!(f.placed().is_empty(), "nothing may move: {:?}", f.placed());
+
+        for (_, reason) in f.expansion_failures() {
+            assert!(
+                reason.contains("records no scope"),
+                "the cause must be the manifest, not the lock's age: {reason}"
+            );
+            assert!(
+                !reason.contains("cluster refresh"),
+                "a refresh cannot give an unscoped manifest a scope: {reason}"
+            );
+        }
+    }
+
+    /// C5 — the incoherence the whole story exists to close, from the user's
+    /// side. Editing `meta.scope` after the lock was written used to change
+    /// **where files land** while leaving **which files** alone — half an
+    /// edit landing, silently. Now neither half lands until a refresh, and the
+    /// record says what the lock settled rather than what the text says.
+    #[test]
+    fn editing_the_scope_after_the_lock_changes_neither_placement_nor_record() {
+        let mut edited = fixture("tree", &["proj-v1"], |root| vec![format!("{root}/proj-v1")]);
+        let untouched = fixture("tree", &["proj-v1"], |root| vec![format!("{root}/proj-v1")]);
+
+        // A user hand-edits the scope up one level. The lock is untouched, so
+        // its hash still matches and apply proceeds.
+        let root = edited.source_root.to_string_lossy().to_string();
+        let text = fs::read_to_string(&edited.manifest).unwrap();
+        fs::write(
+            &edited.manifest,
+            text.replace(&format!("{root}/proj-v1"), &root),
+        )
+        .unwrap();
+
+        apply(&mut edited).unwrap();
+
+        assert_eq!(
+            edited.placed(),
+            untouched.expected_placement(),
+            "an edited meta.scope must not move a destination"
+        );
+        assert_eq!(
+            edited.recorded_scope(),
+            [(root, "proj-v1".to_string())],
+            "an edited meta.scope must not change what the record claims"
+        );
+    }
+
+    /// C6 — the workflow that must not break in closing C5. `output.pattern`
+    /// is the line of a manifest a user edits most, and it is a property of
+    /// how they want things *named* rather than of the selection, so it stays
+    /// read at apply time and takes effect without a refresh.
+    #[test]
+    fn editing_the_pattern_after_the_lock_still_takes_effect() {
+        let mut f = fixture("tree", &["proj-v1"], |root| vec![format!("{root}/proj-v1")]);
+        f.set_pattern("keep/{filename}");
+
+        apply(&mut f).unwrap();
+
+        assert_eq!(f.placed(), ["keep/a.jpg"]);
     }
 
     /// C3 — the form half's positive side, checked as an equality between two

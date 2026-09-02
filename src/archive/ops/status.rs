@@ -10,11 +10,18 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::core::domain::scope::ScopeResolution;
+use crate::core::ops::scope::resolve_recorded_scope;
 use crate::core::repo::{self, Connection};
-use crate::expr::{prefetch_pattern_facts, ScopeVantage};
+use crate::expr::prefetch_pattern_facts;
 
-use super::manifest::{read_lock_entries, read_manifest_config};
+use super::manifest::{read_lock_file, read_manifest_config};
+
+/// What a destination path reads when the pattern could not be expanded for
+/// that entry. Spoken here because the interface recovers the same fact by
+/// matching on it: two spellings would let the count and the listing beneath
+/// it drift apart silently, the count staying right while the listing
+/// quietly empties.
+pub const EXPANSION_FAILED: &str = "<pattern expansion failed";
 
 /// What one lock entry's two endpoints add up to — derived once, here, and
 /// read by the counts and by every line the interface prints. A header that
@@ -89,6 +96,37 @@ pub struct ManifestStatus {
     /// Carried rather than acted on: a report reports. The interface states
     /// them; nothing here narrows a count on their account.
     pub unrooted_scope: Vec<String>,
+    /// Scope prefixes that name a known root but no byte-form of which the
+    /// index knows sources under. The other half of "this line contributes
+    /// nothing", and a different answer from the one above — a place Canon
+    /// cannot confirm, rather than one it has never heard of. Reported for the
+    /// same reason and on the same terms.
+    pub set_aside_scope: Vec<String>,
+    /// Whether the lock file predates the recorded measurement, and so is
+    /// refused by `apply` outright, whatever the pattern says.
+    pub lock_predates_measurement: bool,
+    /// Whether the pattern failed to expand for any entry, and so would fail
+    /// for the whole run: `apply` collects expansion failures and aborts on
+    /// them before it transfers anything.
+    ///
+    /// Together with the flag above this is the whole answer to *can `apply`
+    /// run at all* — which is the question a report must ask before naming it,
+    /// and which the lock's own age does not answer on its own.
+    pub pattern_unexpandable: bool,
+    /// What the pattern said when it could not expand, in the order the
+    /// entries were read and deduplicated: usually one reason for every
+    /// entry, since a pattern fails the same way for all of them.
+    ///
+    /// Carried because a report that declines to name a next step owes the
+    /// user the reason it declined — the per-entry table shows a fixed "not at
+    /// dest" and never this, so without it the run would report nothing at all
+    /// about a manifest that cannot be applied.
+    pub expansion_failures: Vec<String>,
+    /// How many entries failed, which is not the length of the list above —
+    /// that deduplicates by message, and a pattern usually fails the same way
+    /// for every source. Carried rather than recovered by the interface,
+    /// which would otherwise have to match a display string to count.
+    pub expansion_failure_count: usize,
 }
 
 impl ManifestStatus {
@@ -112,7 +150,10 @@ pub fn compute_manifest_status(
     // 1. Read manifest and lock
     let config = read_manifest_config(manifest_path)?;
     let lock_path = manifest_path.with_extension("lock");
-    let lock_entries = read_lock_entries(&lock_path)?;
+    let lock = read_lock_file(&lock_path)?;
+    let lock_predates_measurement = lock.header.is_none();
+    let unmeasured = lock.unmeasured_reason();
+    let lock_entries = lock.entries;
     let lock_entry_count = lock_entries.len();
 
     // 2. Validate lock hash (non-fatal)
@@ -146,27 +187,40 @@ pub fn compute_manifest_status(
     let pattern = parse_pattern(&config.output.pattern)
         .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
     let needed_keys = extract_fact_keys(&pattern);
-    // Derived once for the whole read, from the manifest's scope resolved
-    // against the known roots: what "the scope" means when there is more than
-    // one is not a question each reader answers for itself, and neither is
-    // which root owns each prefix.
-    let scope = ScopeResolution::resolve(&config.meta.scope, &roots);
-    let vantage = ScopeVantage::new(&scope);
+    // The manifest's own scope, through the same resolution `cluster generate`
+    // and `cluster refresh` use. Status takes no measurement from it — that
+    // comes off each lock entry, settled when the selection was — but this is
+    // the diagnostic that tells a user what state their manifest is in, and a
+    // scope line contributing nothing is part of that state.
+    let scope = resolve_recorded_scope(conn, &config.meta.scope, &roots)?;
 
     // Batch fetch facts for all lock entries if pattern uses content facts
     let source_ids: Vec<i64> = lock_entries.iter().map(|s| s.id).collect();
     let facts = prefetch_pattern_facts(conn, &source_ids, &needed_keys)?;
 
     // 6. Evaluate patterns to get dest paths, then check filesystem + DB
+    let mut pattern_unexpandable = false;
+    let mut expansion_failures: Vec<String> = Vec::new();
+    let mut expansion_failure_count = 0usize;
     let mut entries = Vec::with_capacity(lock_entry_count);
     let mut dest_rel_paths: Vec<String> = Vec::with_capacity(lock_entry_count);
 
     for lock_entry in &lock_entries {
-        let dest_rel = match evaluate_pattern(&pattern, lock_entry, &vantage, &root_paths, &facts) {
+        let dest_rel = match evaluate_pattern(&pattern, lock_entry, unmeasured, &root_paths, &facts)
+        {
             Ok(rel) => rel,
             Err(e) => {
                 // If pattern expansion fails, we can't determine dest path.
-                // Use a placeholder and mark as not-at-dest.
+                // Use a placeholder and mark as not-at-dest. It is also the
+                // whole run's answer: apply aborts on expansion failures
+                // before it transfers anything, so a report that has seen one
+                // must not go on to name apply.
+                pattern_unexpandable = true;
+                expansion_failure_count += 1;
+                let reason = e.to_string();
+                if !expansion_failures.contains(&reason) {
+                    expansion_failures.push(reason);
+                }
                 let filename = Path::new(&lock_entry.path)
                     .file_name()
                     .map(|f| f.to_string_lossy().to_string())
@@ -176,7 +230,7 @@ pub fn compute_manifest_status(
                     source_path: lock_entry.path.clone(),
                     source_filename: filename,
                     source_exists,
-                    dest_path: format!("<pattern expansion failed: {}>", e),
+                    dest_path: format!("{EXPANSION_FAILED}: {e}>"),
                     db_registered: false,
                     status: classify_entry(source_exists, false, false),
                 });
@@ -267,6 +321,11 @@ pub fn compute_manifest_status(
         size_mismatch,
         source_still_present,
         unrooted_scope: scope.unrooted().to_vec(),
+        set_aside_scope: scope.set_aside().to_vec(),
+        lock_predates_measurement,
+        pattern_unexpandable,
+        expansion_failures,
+        expansion_failure_count,
     })
 }
 
@@ -318,21 +377,72 @@ mod tests {
             insert_source_with_size(&conn, src_root, name, Some(obj), 4);
         }
 
-        let plan = plan_generate(&mut conn, &default_params()).unwrap();
+        let mut plan = plan_generate(&mut conn, &default_params()).unwrap();
         let manifest_path = dir.path().join("cluster.toml");
         let params = ExecuteGenerateParams {
             lock_path: dir.path().join("cluster.lock"),
             manifest_path: manifest_path.clone(),
             expanded_filters: vec![],
             original_filters: vec![],
-            scope_prefixes: vec![],
+            scope: crate::core::domain::scope::ScopeResolution::from_outcomes(vec![]),
+            roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
             archive_root_id: archive_root,
             base_dir: String::new(),
             allow: vec![],
         };
-        execute_generate(&plan, &params).unwrap();
+        execute_generate(&mut plan, &params).unwrap();
 
         (conn, dir, manifest_path, archive_dir)
+    }
+
+    /// An absent measurement has two causes and a report must not blame the
+    /// wrong one. A manifest recording no scope measures nothing — correctly,
+    /// there is nothing to measure from — in a perfectly **current** lock. So
+    /// the message must name the manifest, not the lock's age, and must not
+    /// prescribe a refresh that would rebuild the identical lock.
+    ///
+    /// The `apply` side of this is `an_unscoped_manifest_says_so_rather_than_blaming_the_lock`;
+    /// it refuses and moves nothing, but prints the cause on stderr. Here the
+    /// same string is data.
+    #[test]
+    fn an_unscoped_manifest_blames_the_manifest_not_the_lock() {
+        let (mut conn, _dir, manifest, _archive) = status_fixture(&["a.jpg"]);
+        rewrite_manifest_pattern(&manifest, "{scope.rel_path}");
+
+        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+
+        assert!(
+            !status.lock_predates_measurement,
+            "the lock is a current one; its age explains nothing here"
+        );
+        assert!(
+            status.pattern_unexpandable,
+            "the run cannot expand, which is what a next-step hint must ask"
+        );
+        let dest = &status.entries[0].dest_path;
+        assert!(dest.contains("records no scope"), "{dest}");
+        assert!(
+            !dest.contains("cluster refresh"),
+            "a refresh cannot give an unscoped manifest a scope: {dest}"
+        );
+    }
+
+    /// Write `output.pattern` into a manifest, the way a user editing the file
+    /// does. The lock is untouched, so the pair still agrees — which is the
+    /// point: this is an edit that takes effect without a refresh.
+    fn rewrite_manifest_pattern(manifest: &Path, pattern: &str) {
+        let text = std::fs::read_to_string(manifest).unwrap();
+        let rewritten: String = text
+            .lines()
+            .map(|line| {
+                if line.starts_with("pattern = ") {
+                    format!("pattern = \"{pattern}\"\n")
+                } else {
+                    format!("{line}\n")
+                }
+            })
+            .collect();
+        std::fs::write(manifest, rewritten).unwrap();
     }
 
     /// D1 — a recorded prefix under no known root leaves the computation as
@@ -497,10 +607,14 @@ mod tests {
         assert!(fresh.lock_hash_valid);
 
         // Change the lock without touching the manifest's recorded hash. The
-        // entries stay parseable so the read still reaches the comparison.
+        // entries stay parseable so the read still reaches the comparison —
+        // which means duplicating the *entries*, not the whole file: a second
+        // header line partway down is a malformed lock, and the read would
+        // then fail on that instead of reaching the hash comparison.
         let lock = dir.path().join("cluster.lock");
         let content = std::fs::read_to_string(&lock).unwrap();
-        std::fs::write(&lock, format!("{content}{content}")).unwrap();
+        let entries: String = content.lines().skip(1).map(|l| format!("{l}\n")).collect();
+        std::fs::write(&lock, format!("{content}{entries}")).unwrap();
 
         let tampered = compute_manifest_status(&mut conn, &manifest).unwrap();
         assert!(!tampered.lock_hash_valid);

@@ -12,9 +12,11 @@ use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
-use crate::core::domain::scope::{DecisionScope, ScopeResolution};
+use crate::core::domain::scope::ScopeResolution;
 use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
-use crate::core::ops::scope::{classify_all, resolve_archive_path};
+use crate::core::ops::scope::{
+    classify_all, no_sources_known, resolve_archive_path, resolve_recorded_scope,
+};
 use crate::core::repo::{self, Connection, Db};
 use crate::expr::Filter;
 
@@ -66,15 +68,43 @@ pub fn generate(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Plan
-    let scopes = classify_all(scope_prefixes);
-    let params = ClusterGenerateParams {
-        scopes,
-        filters: parsed_filters,
-        allow_archived: options.allow_archived,
-        allow_duplicates: options.allow_duplicates,
+    // The scope this run settles on, through the very code a manifest's own
+    // scope goes through — the requester's "exactly the same code" ruling.
+    // Asking again is what makes generate and refresh incapable of disagreeing;
+    // it is not a formality over prefixes already known to confirm, as the
+    // paragraph below says.
+    let generate_scope = resolve_recorded_scope(conn, scope_prefixes, &all_roots)?;
+
+    // A prefix reaching here can still be sourceless, and assuming otherwise
+    // is a panic in the commonest invocation there is. `resolve_scope` gates
+    // *explicit* paths through the source-existence policy, but its **CWD**
+    // branch does not: it resolves the current directory and hands it over
+    // unasked, because CWD defaulting is a context switch rather than an
+    // assertion about content. So `canon cluster generate --where …` run from
+    // a folder created since the last scan arrives here with one prefix the
+    // index knows nothing under.
+    //
+    // Stated, then treated exactly as a refresh treats it — same registers,
+    // same answer — which is the "exactly the same code" ruling applied to the
+    // arm that is easiest to believe cannot happen.
+    crate::scope::write_set_asides(&mut std::io::stdout().lock(), generate_scope.set_aside());
+
+    // Plan. Selection reads the same healed register the measurement is taken
+    // from — never the raw argument list beside it — and a scope that
+    // confirmed nothing selects nothing rather than everything. See the
+    // refresh below, which does the identical thing for the identical reason.
+    let mut plan = match generate_scope.selection() {
+        Some(prefixes) => {
+            let params = ClusterGenerateParams {
+                scopes: classify_all(&prefixes),
+                filters: parsed_filters,
+                allow_archived: options.allow_archived,
+                allow_duplicates: options.allow_duplicates,
+            };
+            generate_ops::plan_generate(conn, &params)?
+        }
+        None => ClusterGeneratePlan::empty(),
     };
-    let plan = generate_ops::plan_generate(conn, &params)?;
 
     // Display warnings
     display_plan_warnings(&plan, options);
@@ -91,7 +121,8 @@ pub fn generate(
         manifest_path: output_path.to_path_buf(),
         expanded_filters: expanded_filters.to_vec(),
         original_filters: original_filters.to_vec(),
-        scope_prefixes: scope_prefixes.to_vec(),
+        scope: generate_scope.clone(),
+        roots: all_roots.clone(),
         archive_root_id,
         base_dir,
         allow: allow_values_to_strings(options),
@@ -99,7 +130,11 @@ pub fn generate(
 
     let decision = DecisionParams {
         command: DecisionCommand::ClusterGenerate,
-        scope: DecisionScope::decompose(scope_prefixes, &all_roots),
+        // The same register the header, the measurement and the selection read.
+        // `DecisionScope::decompose` would answer the same for these prefixes
+        // today and match roots byte-exactly rather than form-tolerantly, which
+        // is a fourth spelling of one question.
+        scope: generate_scope.scopes().to_vec(),
         command_line: command_line.to_string(),
         reason: None,
         record_enabled: ledger.recording != RecordingMode::Off,
@@ -112,7 +147,7 @@ pub fn generate(
     // the artifact the run leaves behind.
     let mut recorder = DecisionRecorder::start(conn, &decision, None);
 
-    let result = generate_ops::execute_generate(&plan, &exec_params)?;
+    let result = generate_ops::execute_generate(&mut plan, &exec_params)?;
 
     let gen_summary = format!(
         "Generated manifest: {} ({} sources in {})",
@@ -280,13 +315,36 @@ fn refresh_with_editor(
     let refresh_roots = repo::root::fetch_all(conn)?;
 
     // Taken as recorded, then resolved — no split, nothing to reconstruct.
-    let scope = ScopeResolution::resolve(&config.meta.scope, &refresh_roots);
+    // Through the ops-layer resolution, so a scope line reaching Canon in a
+    // manifest is healed by the same lookup as one typed on the command line
+    // and partitioned by the same policy.
+    let scope = resolve_recorded_scope(conn, &config.meta.scope, &refresh_roots)?;
 
-    // Stated here, on the honesty policy's own position for an effectful
-    // command: before any plan display and before any confirmation, so a
-    // --yes or --dry-run run states it by position. A refresh narrows a lock
-    // rather than deciding a destination, so it says so and keeps going.
-    write_unrooted_scope(&mut std::io::stderr().lock(), scope.unrooted());
+    // Both statements go out on the honesty policy's own position for an
+    // effectful command: before any plan display and before any confirmation.
+    // On **stdout**, which is that policy's channel for an effectful command
+    // (`scope::print_scope_set_asides`) and the channel `cluster generate` and
+    // `cluster status` already use for the same sentences — the skip and the
+    // outcome it qualifies belong on one stream. What is said, and in which
+    // order, is `scope_statements`' decision; this only prints it.
+    let refusing = refresh_must_refuse(&scope);
+    {
+        use std::io::Write as _;
+        let _ = std::io::stdout()
+            .lock()
+            .write_all(&scope_statements(&scope, refusing));
+    }
+
+    if refusing {
+        bail!(
+            "{}\n\
+             Refresh aborted — {} and its lock file are unchanged.\n\
+             {}",
+            no_sources_known(scope.set_aside()),
+            config_path.display(),
+            super::edit_then_refresh(config_path)
+        );
+    }
 
     // Parse filters from config
     let parsed_filters: Vec<Filter> = config
@@ -296,17 +354,28 @@ fn refresh_with_editor(
         .map(|f| Filter::parse(f))
         .collect::<Result<Vec<_>>>()?;
 
-    // Plan. A rooted prefix is re-queried in the byte-form the index stores,
-    // so a manifest naming its scope in another normalization matches the
-    // sources it names.
-    let scopes = classify_all(scope.recorded());
-    let plan_params = ClusterGenerateParams {
-        scopes,
-        filters: parsed_filters,
-        allow_archived,
-        allow_duplicates,
+    // Plan, from the **confirmed** register — the one the measurement and the
+    // lock header are built from. A rooted prefix is re-queried in the
+    // byte-form the index stores, so a manifest naming its scope in another
+    // normalization matches the sources it names; and a line that measures
+    // nothing selects nothing, so the run cannot gather content it has just
+    // told the user it has no destination for.
+    //
+    // A scope that resolved to nothing selects nothing rather than everything:
+    // an empty scope list means global to the planner, and a manifest naming a
+    // place Canon cannot find must not become a whole-universe archive.
+    let mut plan = match scope.selection() {
+        Some(prefixes) => {
+            let plan_params = ClusterGenerateParams {
+                scopes: classify_all(&prefixes),
+                filters: parsed_filters,
+                allow_archived,
+                allow_duplicates,
+            };
+            generate_ops::plan_generate(conn, &plan_params)?
+        }
+        None => ClusterGeneratePlan::empty(),
     };
-    let plan = generate_ops::plan_generate(conn, &plan_params)?;
 
     // Display warnings
     let display_options = GenerateOptions {
@@ -341,7 +410,8 @@ fn refresh_with_editor(
         // generation records for the same input; an unrooted one verbatim,
         // because there is nothing to heal it to and rewriting it would be
         // inventing a place.
-        scope: scope.recorded().to_vec(),
+        scope: scope.clone(),
+        roots: refresh_roots,
         config,
     };
 
@@ -351,7 +421,7 @@ fn refresh_with_editor(
     // telling the truth about its query; but no source was touched, and a 0/0
     // row in the trail would claim an act where there was none.
     if plan.lock_entries.is_empty() {
-        generate_ops::execute_refresh(&plan, &exec_params)?;
+        generate_ops::execute_refresh(&mut plan, &exec_params)?;
         println!("No sources matched the query");
         // The manifest only: this arm removed the lock file, and a warning
         // about a file standing in the way would be naming one that no longer
@@ -377,7 +447,7 @@ fn refresh_with_editor(
     // the artifact the run leaves behind.
     let mut recorder = DecisionRecorder::start(conn, &decision, None);
 
-    let result = generate_ops::execute_refresh(&plan, &exec_params)?;
+    let result = generate_ops::execute_refresh(&mut plan, &exec_params)?;
 
     // Only an empty plan leaves no outcome, and that path returned above; a
     // missing one here means the lock was never written, and this `?` leaves
@@ -518,9 +588,30 @@ fn display_plan_warnings(plan: &ClusterGeneratePlan, options: &GenerateOptions) 
 /// refreshing — advising a refresh in either state clears the lock and gains
 /// nothing, and in the second it contradicts the line above it.
 ///
-/// **Which** step it is does depend on the scope: a recorded prefix naming no
-/// known root makes `apply` refuse — plain and `--resume` alike — so naming it
-/// would point at the one command that cannot run. The step is the manifest.
+/// **Which** step it is depends on one thing only: whether `apply` can run at
+/// all. A report must never name the one command that cannot — and naming a
+/// remedy that will not work is the same fault wearing a different word. Two
+/// states answer it, and they take different answers:
+///
+/// - a lock written **before the measurement was recorded in it**, which
+///   `apply` refuses outright whatever the pattern says. A refresh rebuilds
+///   the lock and the run proceeds, so that is the step.
+/// - a **pattern that does not expand**, which `apply` collects and aborts on
+///   before it transfers anything. Here there is **no step**: what a pattern
+///   needs — a fact nothing supplies, a scope the manifest does not record —
+///   is not something any one command gives it, and naming a refresh would be
+///   the same fault in a different word. Silence is the honest answer, the
+///   same one a manifest with content missing gets — and it is only honest
+///   because the report says what failed a few lines above, in its own block.
+///   Do not make this branch silent without that block: the per-entry table
+///   shows a fixed status word and never the reason.
+///
+/// A scope line that resolves to nothing is deliberately **not** such a state.
+/// It once was, because `apply` used to refuse an unrooted prefix; now the
+/// measurement and the recorded scope are both settled in the lock without it,
+/// so applying is exactly the right next step — and sending the user to a
+/// refresh that would preserve the line verbatim only loops them. The line is
+/// still stated above; it is not a blocker.
 fn write_next_step(
     handle: &mut impl Write,
     status: &status_ops::ManifestStatus,
@@ -529,9 +620,16 @@ fn write_next_step(
     if status.pending == 0 || !status.all_accounted_for() {
         return;
     }
+    if status.pattern_unexpandable && !status.lock_predates_measurement {
+        return;
+    }
     let _ = writeln!(handle);
-    if !status.unrooted_scope.is_empty() {
-        let _ = writeln!(handle, "{}", super::edit_then_refresh(manifest_path));
+    if status.lock_predates_measurement {
+        let _ = writeln!(
+            handle,
+            "To rebuild the lock: canon cluster refresh {}",
+            manifest_path.display()
+        );
     } else if status.at_destination > 0 {
         let _ = writeln!(
             handle,
@@ -541,6 +639,36 @@ fn write_next_step(
     } else {
         let _ = writeln!(handle, "To apply: canon apply {}", manifest_path.display());
     }
+}
+
+/// What a refresh says about its recorded scope, in order.
+///
+/// Composed rather than printed so the **ordering** is a value a test can
+/// read. It is a real decision, not a formatting detail: the unrooted lines
+/// are stated whether or not the run is about to refuse, because the refusal
+/// names only the set-asides and gating them on it would leave a prefix under
+/// no known root unsaid in exactly the run that had least to work with. The
+/// set-asides are stated only when the run continues, because the refusal
+/// names every one of them itself.
+fn scope_statements(scope: &ScopeResolution, refusing: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_unrooted_scope(&mut out, scope.unrooted());
+    if !refusing {
+        crate::scope::write_set_asides(&mut out, scope.set_aside());
+    }
+    out
+}
+
+/// Whether a refresh must refuse: the source-existence policy's terminal rule
+/// at the manifest door — a scope that kept nothing must never look like a
+/// narrowing.
+///
+/// An all-unrooted scope is deliberately not this case. It kept nothing
+/// either, but a refresh is the way back from a manifest naming a root that is
+/// gone, and it selects nothing rather than everything, so continuing costs
+/// the user only the lock their own manifest no longer describes.
+fn refresh_must_refuse(scope: &ScopeResolution) -> bool {
+    scope.scopes().is_empty() && !scope.set_aside().is_empty()
 }
 
 /// The one spelling of an unrooted scope prefix, shared by the two commands
@@ -587,7 +715,11 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
     println!("Lock: {} entries", format_count(status.lock_entry_count));
     // Stated on stdout, this command's own scope channel — a report's scope
     // belongs beside its header, not on a side channel.
-    write_unrooted_scope(&mut std::io::stdout().lock(), &status.unrooted_scope);
+    {
+        let mut out = std::io::stdout().lock();
+        write_unrooted_scope(&mut out, &status.unrooted_scope);
+        crate::scope::write_set_asides(&mut out, &status.set_aside_scope);
+    }
     println!();
 
     // Per-entry table: concerning entries (or all if verbose)
@@ -657,6 +789,38 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
                 "  (showing {} concerning entries; use --verbose for all)",
                 concerning.len()
             );
+        }
+        println!();
+    }
+
+    // A manifest whose pattern will not expand cannot be applied, and the
+    // per-entry table above does not carry the reason — it shows a fixed
+    // status word. Said here, once per distinct reason rather than once per
+    // source, because a pattern fails the same way for every entry and N
+    // copies of one sentence is not a report.
+    if !status.expansion_failures.is_empty() {
+        println!(
+            "{} of {} entries have no destination:",
+            format_count(status.expansion_failure_count),
+            format_count(status.lock_entry_count),
+        );
+        for reason in &status.expansion_failures {
+            println!("  {reason}");
+        }
+        // Which ones, not only how many: the per-entry table below shows a
+        // fixed status word, so without this the report names a count and
+        // never a file. Capped like every other listing here.
+        const SHOWN: usize = 5;
+        let failed: Vec<&status_ops::StatusEntry> = status
+            .entries
+            .iter()
+            .filter(|e| e.dest_path.starts_with(status_ops::EXPANSION_FAILED))
+            .collect();
+        for entry in failed.iter().take(SHOWN) {
+            println!("  {}", entry.source_path);
+        }
+        if failed.len() > SHOWN {
+            println!("  ... and {} more", format_count(failed.len() - SHOWN));
         }
         println!();
     }
@@ -784,8 +948,13 @@ mod tests {
     /// generated shape carries no scope key when there is none, so this is the
     /// same document `manifest_text` produces with the field a user would have
     /// added by hand.
+    ///
+    /// Quoted as TOML rather than through Rust's `Debug`, which escapes a
+    /// combining accent to `\u{301}` — a six-character sequence TOML rejects,
+    /// and one no editor would ever produce. The paths here carry no quote or
+    /// backslash, so plain quoting is the faithful spelling.
     fn manifest_text_scoped(query: &str, scope: &[String]) -> String {
-        let quoted: Vec<String> = scope.iter().map(|p| format!("{p:?}")).collect();
+        let quoted: Vec<String> = scope.iter().map(|p| format!("\"{p}\"")).collect();
         manifest_text(query).replace(
             "generated_at = ",
             &format!("scope = [{}]\ngenerated_at = ", quoted.join(", ")),
@@ -805,7 +974,7 @@ mod tests {
         pending: usize,
         at_destination: usize,
         source_lost: usize,
-        unrooted: &[&str],
+        cannot_apply: bool,
     ) -> status_ops::ManifestStatus {
         let entry = |i: usize, status: status_ops::EntryStatus| status_ops::StatusEntry {
             source_path: format!("/photos/f{i}.jpg"),
@@ -841,7 +1010,12 @@ mod tests {
             source_lost,
             size_mismatch: 0,
             source_still_present: 0,
-            unrooted_scope: unrooted.iter().map(|s| s.to_string()).collect(),
+            unrooted_scope: Vec::new(),
+            set_aside_scope: Vec::new(),
+            lock_predates_measurement: cannot_apply,
+            pattern_unexpandable: false,
+            expansion_failures: Vec::new(),
+            expansion_failure_count: 0,
         }
     }
 
@@ -851,60 +1025,104 @@ mod tests {
         String::from_utf8(out).unwrap()
     }
 
-    /// F2 — a report that has just said the scope does not resolve must not
-    /// then name the one command that cannot run. `apply` refuses on exactly
-    /// this manifest, plain and `--resume` alike, so the step is the manifest.
+    /// F2 — a report must not name the one command that cannot run. The state
+    /// that blocks `apply` moved with this story: it is no longer an
+    /// unresolvable scope line but a lock written before the measurement was
+    /// recorded in it, which `apply` refuses plain and `--resume` alike. The
+    /// finding is unchanged; only the blocking state is.
     ///
     /// The counts are deliberately the ones that *do* earn an apply hint,
     /// because that is the whole finding: the accounting claim is about source
     /// files and stays true, so it cannot be what decides whether applying is
     /// possible.
     #[test]
-    fn an_unresolvable_scope_never_points_at_apply() {
+    fn a_lock_apply_would_refuse_never_points_at_apply() {
         assert_eq!(
-            next_step(&status_with(2, 0, 0, &["/canon-test/no-such-root"])),
-            "\nEdit meta.scope, then `canon cluster refresh m.toml` to rewrite the lock.\n"
+            next_step(&status_with(2, 0, 0, true)),
+            "\nTo rebuild the lock: canon cluster refresh m.toml\n"
         );
         // The same, where the run would otherwise be told to resume.
         assert_eq!(
-            next_step(&status_with(1, 1, 0, &["/canon-test/no-such-root"])),
-            "\nEdit meta.scope, then `canon cluster refresh m.toml` to rewrite the lock.\n"
+            next_step(&status_with(1, 1, 0, true)),
+            "\nTo rebuild the lock: canon cluster refresh m.toml\n"
         );
     }
 
-    /// The other side of the same branch: a manifest whose scope resolves
-    /// still gets the hint it always got, in both its arms.
+    /// The other side of the same branch: a lock `apply` can actually run
+    /// against still gets the hint it always got, in both its arms.
     #[test]
-    fn a_resolvable_scope_still_points_at_apply() {
+    fn a_lock_apply_can_run_still_points_at_apply() {
         assert_eq!(
-            next_step(&status_with(2, 0, 0, &[])),
+            next_step(&status_with(2, 0, 0, false)),
             "\nTo apply: canon apply m.toml\n"
         );
         assert_eq!(
-            next_step(&status_with(1, 1, 0, &[])),
+            next_step(&status_with(1, 1, 0, false)),
             "\nTo complete: canon apply --resume m.toml\n"
         );
     }
 
-    /// **Whether** there is a next step is in no case the scope's business.
+    /// F2c — an unscoped manifest whose pattern was edited to name
+    /// `{scope.rel_path}` cannot expand, so `apply` aborts on it — and the
+    /// lock is a current one, so the lock's own age does not see this. A
+    /// report that named the apply here would be naming a command that cannot
+    /// run, which is the standing finding this branch exists for.
+    ///
+    /// And there is no *other* command to name in its place: a refresh does
+    /// not give a pattern the fact or the scope it is missing, so offering one
+    /// would be the same fault in a different word. The rows above already say
+    /// what failed for each source.
+    #[test]
+    fn a_pattern_that_cannot_expand_offers_no_step_at_all() {
+        for (pending, at_destination) in [(2, 0), (1, 1)] {
+            let mut status = status_with(pending, at_destination, 0, false);
+            status.pattern_unexpandable = true;
+            assert_eq!(next_step(&status), "", "pending={pending}");
+        }
+
+        // But a lock that predates the measurement still gets its rebuild,
+        // even though its entries also fail to expand — there the refresh is
+        // exactly the fix.
+        let mut status = status_with(2, 0, 0, true);
+        status.pattern_unexpandable = true;
+        assert_eq!(
+            next_step(&status),
+            "\nTo rebuild the lock: canon cluster refresh m.toml\n"
+        );
+    }
+
+    /// F2b — and the state that no longer blocks must no longer divert. A
+    /// scope line resolving to nothing leaves the lock correct: it was
+    /// measured and recorded without that line, so applying is exactly right,
+    /// and sending the user to a refresh that preserves the line verbatim
+    /// would only loop them. The line is stated above the hint, not instead
+    /// of it.
+    #[test]
+    fn a_scope_line_that_resolves_to_nothing_still_points_at_apply() {
+        let mut status = status_with(2, 0, 0, false);
+        status.unrooted_scope = vec!["/canon-test/no-such-root".to_string()];
+        status.set_aside_scope = vec!["/photos/nothing-here".to_string()];
+        assert_eq!(next_step(&status), "\nTo apply: canon apply m.toml\n");
+    }
+
+    /// **Whether** there is a next step is in no case the lock's business.
     /// A manifest with nothing pending has no step to take, and one with
     /// content missing has just been told to check the volume before
-    /// refreshing — so an unresolvable scope must not conjure advice where
-    /// there is none, least of all advice that clears the lock.
+    /// refreshing — so a lock `apply` would refuse must not conjure advice
+    /// where there is none, least of all advice that clears the lock.
     ///
-    /// The six states that must stay silent, each reachable: the scope is the
-    /// easy thing to key this decision on, and keying it there is wrong in
-    /// every one of them.
+    /// The six states that must stay silent, each reachable: the blocking
+    /// state is the easy thing to key this decision on, and keying it there is
+    /// wrong in every one of them.
     #[test]
-    fn an_unresolvable_scope_conjures_no_step_where_there_was_none() {
-        let bad = ["/canon-test/no-such-root"];
+    fn a_lock_apply_would_refuse_conjures_no_step_where_there_was_none() {
         for status in [
-            status_with(0, 2, 0, &bad), // all applied; nothing to do
-            status_with(0, 0, 0, &bad), // an empty lock
-            status_with(0, 0, 2, &bad), // sources lost, no hand-editing needed
-            status_with(2, 0, 1, &bad), // pending, but content is missing
-            status_with(2, 1, 1, &bad), // the same, part-applied
-            status_with(0, 1, 1, &bad), // part-applied and part-lost
+            status_with(0, 2, 0, true), // all applied; nothing to do
+            status_with(0, 0, 0, true), // an empty lock
+            status_with(0, 0, 2, true), // sources lost, no rebuild needed
+            status_with(2, 0, 1, true), // pending, but content is missing
+            status_with(2, 1, 1, true), // the same, part-applied
+            status_with(0, 1, 1, true), // part-applied and part-lost
         ] {
             assert_eq!(
                 next_step(&status),
@@ -1013,6 +1231,388 @@ mod tests {
             manifest.contains("/canon-test/no-such-root"),
             "an unrooted prefix has nothing to heal to and stays verbatim: {manifest:?}"
         );
+    }
+
+    /// C6 — the defect's own shape, end to end at the refresh: an **ASCII**
+    /// root with an accented folder under it, and a manifest naming two
+    /// siblings below that folder in two normalizations. Root attribution
+    /// alone cannot see this — the root matches as typed, so nothing is ever
+    /// bent — and the below-root retry is what heals both lines onto the
+    /// stored spelling.
+    ///
+    /// Both consequences are pinned: the lock keeps **both** sources (before,
+    /// the mismatched line matched nothing and the lock silently narrowed),
+    /// and the manifest text comes back healed, so the file repairs itself.
+    #[test]
+    fn a_refresh_heals_a_below_root_form_mismatch() {
+        const NFD: &str = "cafe\u{301}";
+        const NFC: &str = "caf\u{e9}";
+        assert_ne!(NFD, NFC);
+
+        let dir = tempfile::tempdir().unwrap();
+        let conn = setup_test_db();
+        // An ASCII root: the exposure this closes, and the shape a Mac home
+        // path or volume always has.
+        let root = insert_root(&conn, "/photos", "source", false);
+        let a = insert_object(&conn, "hash-a", false);
+        let b = insert_object(&conn, "hash-b", false);
+        insert_source(&conn, root, &format!("{NFD}/sub1/a.jpg"), Some(a));
+        insert_source(&conn, root, &format!("{NFD}/sub2/b.jpg"), Some(b));
+
+        let manifest_path = dir.path().join("cluster.toml");
+        fs::write(
+            &manifest_path,
+            manifest_text_scoped(
+                "source.ext=jpg",
+                &[format!("/photos/{NFC}/sub1"), format!("/photos/{NFD}/sub2")],
+            ),
+        )
+        .unwrap();
+
+        let mut db = Db::from_connection(conn);
+        run_refresh(&mut db, &manifest_path, None).unwrap();
+
+        let lock = fs::read_to_string(dir.path().join("cluster.lock")).unwrap();
+        assert!(
+            lock.contains("a.jpg"),
+            "the retyped line still selects: {lock}"
+        );
+        assert!(lock.contains("b.jpg"), "its sibling still selects: {lock}");
+
+        let manifest = fs::read_to_string(&manifest_path).unwrap();
+        assert!(
+            manifest.contains(&format!("/photos/{NFD}/sub1")),
+            "the retyped line must be written back healed: {manifest:?}"
+        );
+        assert!(
+            !manifest.contains(&format!("/photos/{NFC}/sub1")),
+            "the typed form must not survive the rewrite: {manifest:?}"
+        );
+    }
+
+    /// C7 — the source-existence policy at the second door. A recorded prefix
+    /// the index knows nothing under is set aside and stated; the sibling that
+    /// *is* known proceeds, and the set-aside line is still in the file
+    /// afterwards, because a refresh must not narrow the user's own manifest
+    /// on their behalf.
+    ///
+    /// The load-bearing assertion is the **decision record**: a set-aside line
+    /// never becomes a recorded scope — the manifest door's twin of
+    /// `a_set_aside_never_becomes_a_decision_scope` at the argument door. The
+    /// lock and the file are the visible halves; this is the durable one.
+    #[test]
+    fn a_refresh_sets_a_sourceless_scope_line_aside_and_keeps_going() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest_path, lock_path) = setup(dir.path());
+        fs::write(
+            &manifest_path,
+            manifest_text_scoped(
+                "source.ext=jpg",
+                &["/photos".to_string(), "/photos/nothing-here".to_string()],
+            ),
+        )
+        .unwrap();
+
+        run_refresh(&mut db, &manifest_path, None).unwrap();
+
+        let recorded: Vec<String> = db
+            .conn_mut()
+            .prepare("SELECT rel_prefix FROM decision_scopes ORDER BY rel_prefix")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            recorded,
+            [""],
+            "only the confirmed line becomes a recorded scope"
+        );
+
+        let lock = fs::read_to_string(&lock_path).unwrap();
+        assert!(lock.contains("a.jpg"), "the known line still ran: {lock}");
+        let manifest = fs::read_to_string(&manifest_path).unwrap();
+        assert!(
+            manifest.contains("/photos/nothing-here"),
+            "the set-aside line stays in the user's file: {manifest:?}"
+        );
+
+        // The statement's own spelling, pinned where it is composed — the one
+        // the scope boundary already uses, reached rather than re-spelled.
+        // The channel is stdout, the same one `cluster generate` and
+        // `cluster status` state it on; an in-process test cannot read either
+        // stream back, so only the wording is pinned here.
+        let mut said = Vec::new();
+        crate::scope::write_set_asides(&mut said, &["/photos/nothing-here".to_string()]);
+        assert_eq!(
+            String::from_utf8(said).unwrap(),
+            "no sources known at /photos/nothing-here — skipped\n"
+        );
+    }
+
+    /// C6a — a scope prefix the index knows nothing under reaches
+    /// `cluster generate`, and must be stated and set aside rather than
+    /// assumed away.
+    ///
+    /// It arrives by the commonest route there is: `resolve_scope`'s **CWD**
+    /// branch resolves the current directory and hands it over **without**
+    /// the source-existence gate, because CWD defaulting is a context switch
+    /// rather than an assertion about content. So `canon cluster generate
+    /// --where …` run from a folder created since the last scan arrives here
+    /// with exactly this. Assuming otherwise cost a panic in that invocation.
+    ///
+    /// This calls `generate` with the prefix directly, which is the same state
+    /// that branch produces — and worth saying plainly: **no test in this
+    /// module goes through `resolve_scope`**, so the argument door's own
+    /// behaviour is not what is pinned here. What is pinned is that this
+    /// command survives what that door can hand it.
+    #[test]
+    fn a_sourceless_scope_prefix_is_set_aside_rather_than_assumed_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let jpg = insert_object(&conn, "hash-jpg", false);
+        insert_source(&conn, root, "known/a.jpg", Some(jpg));
+        insert_root(&conn, "/archive", "archive", false);
+        let mut db = Db::from_connection(conn);
+
+        let out = dir.path().join("cluster.toml");
+        generate(
+            &mut db,
+            // Under a known root, and the index knows nothing beneath it.
+            &["/photos/new-folder".to_string()],
+            &[],
+            &[],
+            Path::new("/archive"),
+            &out,
+            &GenerateOptions {
+                force: false,
+                allow_archived: false,
+                allow_duplicates: false,
+                show_archived: false,
+                no_edit: true,
+            },
+            "canon cluster generate",
+            &LedgerConfig::default(),
+            true,
+        )
+        .expect("a sourceless scope is a nothing-matched run, never a panic");
+
+        assert!(
+            !out.exists(),
+            "nothing matched, so no manifest is written: {out:?}"
+        );
+
+        // And the skip is said, in the one spelling the scope boundary uses.
+        let mut said = Vec::new();
+        crate::scope::write_set_asides(&mut said, &["/photos/new-folder".to_string()]);
+        assert_eq!(
+            String::from_utf8(said).unwrap(),
+            "no sources known at /photos/new-folder — skipped\n"
+        );
+    }
+
+    /// C6b — selection and measurement read the same register, or they
+    /// disagree about the same run.
+    ///
+    /// An unrooted prefix can be an **ancestor** of a known root:
+    /// `path_is_under` matches it where `find_containing_root` does not. Select
+    /// from the recorded list and such a line gathers sources no vantage can
+    /// measure — a lock whose header is not empty and whose entries are not all
+    /// measured, which is a state every reader downstream is entitled to assume
+    /// away. The run would then refuse those files at apply, one by one, for a
+    /// line it had already told the user measures nothing.
+    #[test]
+    fn a_line_that_measures_nothing_selects_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = setup_test_db();
+        // The root sits *below* the prefix the manifest also names, which is
+        // what makes the unrooted line select rather than merely fail.
+        let root = insert_root(&conn, "/vol/work", "source", false);
+        let a = insert_object(&conn, "hash-a", false);
+        let b = insert_object(&conn, "hash-b", false);
+        insert_source(&conn, root, "proj/a.jpg", Some(a));
+        insert_source(&conn, root, "other/b.jpg", Some(b));
+
+        let manifest_path = dir.path().join("cluster.toml");
+        fs::write(
+            &manifest_path,
+            manifest_text_scoped(
+                "source.ext=jpg",
+                &["/vol/work/proj".to_string(), "/vol".to_string()],
+            ),
+        )
+        .unwrap();
+
+        let mut db = Db::from_connection(conn);
+        run_refresh(&mut db, &manifest_path, None).unwrap();
+
+        let lock = fs::read_to_string(dir.path().join("cluster.lock")).unwrap();
+        assert!(
+            lock.contains("proj/a.jpg"),
+            "the confirmed line selects: {lock}"
+        );
+        assert!(
+            !lock.contains("other/b.jpg"),
+            "the unrooted ancestor must select nothing: {lock}"
+        );
+        // The claim every reader rests on: no entry is left unmeasured beneath
+        // a header that records a scope.
+        for line in lock.lines().skip(1) {
+            assert!(
+                line.contains("\"scope_rel_path\""),
+                "a header with a scope leaves no unmeasured entry: {line}"
+            );
+        }
+        // And the line is still in the user's own file.
+        let manifest = fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.contains("\"/vol\""), "{manifest:?}");
+    }
+
+    /// C6c — and a scope that confirmed **nothing** selects nothing rather
+    /// than everything. An empty scope list means *global* to the planner, so
+    /// the register that carries "no confirmed place" must not be spelled the
+    /// same way as "no scope was ever recorded" — a manifest naming a drive
+    /// that is not plugged in would otherwise archive the whole universe.
+    #[test]
+    fn a_scope_that_confirmed_nothing_selects_nothing_rather_than_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest_path, lock_path) = setup(dir.path());
+        fs::write(
+            &manifest_path,
+            manifest_text_scoped("source.ext=jpg", &["/canon-test/gone".to_string()]),
+        )
+        .unwrap();
+
+        run_refresh(&mut db, &manifest_path, None).unwrap();
+
+        assert!(
+            !lock_path.exists(),
+            "the query matched nothing, so the lock goes — never a global sweep"
+        );
+    }
+
+    /// C8 — the policy's terminal rule at the second door: a scope that kept
+    /// nothing must never look like a narrowing, so a refresh whose every
+    /// rooted line was set aside refuses, naming every one of them, with
+    /// neither file touched.
+    #[test]
+    fn a_refresh_whose_scope_kept_nothing_refuses_naming_every_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest_path, lock_path) = setup(dir.path());
+        let before = manifest_text_scoped(
+            "source.ext=jpg",
+            &[
+                "/photos/nothing-here".to_string(),
+                "/photos/nor-here".to_string(),
+            ],
+        );
+        fs::write(&manifest_path, &before).unwrap();
+
+        let err = run_refresh(&mut db, &manifest_path, None)
+            .unwrap_err()
+            .to_string();
+        // The refusal names every skipped path itself. That it is not *also*
+        // stated a line above is a property of ordering, not of this string —
+        // the per-line statement goes to stdout and never into the error — so
+        // what is pinned here is the refusal's own content, and the ordering
+        // is pinned by `an_unrooted_line_is_stated_even_when_the_refresh_refuses`
+        // below, which is the case the ordering can actually get wrong.
+        assert!(err.contains("/photos/nothing-here"), "{err}");
+        assert!(
+            err.contains("/photos/nor-here"),
+            "every line is named: {err}"
+        );
+        assert!(err.contains("unchanged"), "{err}");
+
+        assert_eq!(
+            fs::read_to_string(&manifest_path).unwrap(),
+            before,
+            "the manifest is untouched"
+        );
+        assert!(!lock_path.exists(), "no lock was written");
+    }
+
+    /// C8b — an unrooted line is a fact about the manifest, and the run that
+    /// had least to work with must not be the one that goes unsaid.
+    ///
+    /// The terminal refusal names only the **set-asides**, so gating the
+    /// statements on the run continuing would leave a manifest holding both an
+    /// unrooted line and a sourceless one refusing while never mentioning the
+    /// unrooted one at all — silence at exactly the boundary the honesty
+    /// policy exists for.
+    ///
+    /// Asserted over `scope_statements`' own output rather than over the
+    /// stream: `println!` cannot be captured in-process, so a test reading the
+    /// error string would be asserting something it cannot see. The ordering
+    /// is the decision, so the ordering is the value.
+    #[test]
+    fn an_unrooted_line_is_stated_even_when_the_refresh_refuses() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root, "a.jpg", None);
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+        let scope = resolve_recorded_scope(
+            &conn,
+            &[
+                "/canon-test/no-such-root".to_string(),
+                "/photos/nothing-here".to_string(),
+            ],
+            &roots,
+        )
+        .unwrap();
+
+        assert!(
+            refresh_must_refuse(&scope),
+            "the fixture must reach the refusing branch, or this proves nothing"
+        );
+        let said = String::from_utf8(scope_statements(&scope, true)).unwrap();
+        assert_eq!(
+            said,
+            "no known root at /canon-test/no-such-root — kept in the manifest, \
+             no destination measures from it\n",
+            "the unrooted line is stated; the set-aside is left to the refusal"
+        );
+
+        // And when the run continues, both are said.
+        let scope = resolve_recorded_scope(
+            &conn,
+            &[
+                "/canon-test/no-such-root".to_string(),
+                "/photos/nothing-here".to_string(),
+                "/photos".to_string(),
+            ],
+            &roots,
+        )
+        .unwrap();
+        assert!(!refresh_must_refuse(&scope));
+        let said = String::from_utf8(scope_statements(&scope, false)).unwrap();
+        assert!(
+            said.contains("no known root at /canon-test/no-such-root"),
+            "{said}"
+        );
+        assert!(
+            said.contains("no sources known at /photos/nothing-here — skipped"),
+            "{said}"
+        );
+    }
+
+    /// C9 — and the case that is *not* the terminal rule: a scope naming only
+    /// places under no known root keeps nothing either, and still proceeds.
+    /// The two are different answers — one is a place Canon cannot confirm,
+    /// the other a place Canon has never heard of — and a refresh is the way
+    /// back from the second, so refusing it would strand the user.
+    #[test]
+    fn an_all_unrooted_scope_is_not_the_terminal_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest_path, _lock_path) = setup(dir.path());
+        fs::write(
+            &manifest_path,
+            manifest_text_scoped("source.ext=jpg", &["/canon-test/no-such-root".to_string()]),
+        )
+        .unwrap();
+
+        run_refresh(&mut db, &manifest_path, None).expect("a refresh must stay reachable");
     }
 
     #[test]

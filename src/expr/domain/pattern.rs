@@ -13,9 +13,7 @@ use super::transform::{
     PathAccessor,
 };
 use super::value::{get_builtin_value, SourceAttributes};
-use super::vantage::ScopeVantage;
 use crate::core::domain::fact::{FactEntry, FactValue};
-use crate::core::domain::path::path_strip_prefix;
 
 // ============================================================================
 // Types
@@ -102,6 +100,23 @@ pub(in crate::expr) fn is_context_supplied(key: &str) -> bool {
         || BuiltinKey::from_str(key).is_some_and(|k| k.is_computed())
 }
 
+/// Why a source carries no scope-relative measurement.
+///
+/// An absent measurement has two possible causes and they take different
+/// answers, so an evaluation that cannot tell them apart must assert neither.
+/// It is a property of the **lock as a whole**, not of the entry, which is why
+/// the caller supplies it rather than the entry carrying it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unmeasured {
+    /// The manifest records no scope, so there was nothing to measure from.
+    /// Not a failure of anything: `{scope.rel_path}` has no meaning for this
+    /// run, and no amount of refreshing will give it one.
+    NoScopeRecorded,
+    /// The lock was written before the measurement was recorded in it. A
+    /// refresh rebuilds it and the key resolves.
+    LockPredatesMeasurement,
+}
+
 /// Context for pattern evaluation - provides fact values and source info
 pub struct EvalContext<'a> {
     /// Fact values by key, stored rather than computed. Under the
@@ -113,10 +128,16 @@ pub struct EvalContext<'a> {
     /// shaping half reaches the same resolver the asking half does; before it
     /// did, it held two path strings and could derive three keys from them.
     source: Option<SourceAttributes>,
-    /// Where a `scope.rel_path` measures from, derived once per run. Borrowed
-    /// rather than owned: a context is built per source, and the vantage is
-    /// built once for all of them.
-    vantage: Option<&'a ScopeVantage>,
+    /// This source's scope-relative path, as the run that selected it settled
+    /// it. Borrowed from the caller's own record rather than derived here: the
+    /// measurement is a property of the *selection*, and by the time a pattern
+    /// is expanded the selection is long settled.
+    scope_rel: Option<&'a str>,
+    /// Why [`scope_rel`](Self::scope_rel) is absent, when it is. Carried
+    /// beside it rather than inferred from it, because the two causes are
+    /// indistinguishable from the entry alone and a refusal that guesses
+    /// between them prescribes a remedy that may not work.
+    unmeasured: Unmeasured,
 }
 
 impl<'a> EvalContext<'a> {
@@ -124,7 +145,10 @@ impl<'a> EvalContext<'a> {
         EvalContext {
             facts: HashMap::new(),
             source: None,
-            vantage: None,
+            scope_rel: None,
+            // A bare context has no lock behind it and no scope in front of
+            // it, which is exactly this reading.
+            unmeasured: Unmeasured::NoScopeRecorded,
         }
     }
 
@@ -141,9 +165,14 @@ impl<'a> EvalContext<'a> {
         self.source = Some(attrs);
     }
 
-    /// Point the context at the run's derived scope vantage.
-    pub fn set_vantage(&mut self, vantage: &'a ScopeVantage) {
-        self.vantage = Some(vantage);
+    /// Give the context this source's settled scope-relative path, and — for
+    /// the case where there is none — the run's own reason there is none.
+    ///
+    /// One setter for both because they are one fact in two parts: half of it
+    /// is a state no caller means to be in.
+    pub fn set_scope_rel(&mut self, scope_rel: Option<&'a str>, unmeasured: Unmeasured) {
+        self.scope_rel = scope_rel;
+        self.unmeasured = unmeasured;
     }
 }
 
@@ -390,7 +419,7 @@ fn evaluate_expr(expr: &PatternExpr, ctx: &EvalContext) -> Result<String> {
 /// Get a fact value by key.
 ///
 /// Three sources of an answer, in this order: the pattern-only
-/// `scope.rel_path`, which is derived here; the built-in vocabulary, which the
+/// `scope.rel_path`, which the context carries; the built-in vocabulary, which the
 /// source answers through the one resolver both halves of the language share;
 /// and the facts the caller prefetched. The order is what makes the law hold
 /// from this side — but it is not what the law rests on. The prefetch never
@@ -398,29 +427,30 @@ fn evaluate_expr(expr: &PatternExpr, ctx: &EvalContext) -> Result<String> {
 /// (`PatternFacts`), and the precedence here is a second lock on a door that
 /// is already shut.
 fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
-    // The scope-relative path is derived here rather than looked up: it is
-    // not a fact and carries no built-in key. Every arm that cannot answer
-    // refuses by name — a destination is the one decision a user cannot
-    // un-decide after a move, so the alternative to refusing is inventing one.
+    // The scope-relative path is answered from the context rather than looked
+    // up: it is not a fact and carries no built-in key. It is also not
+    // *derived* here any more — it was measured when the selection was
+    // settled, and this reads what was settled.
+    //
+    // That collapses the two refusals a *resolution* used to fail with, which
+    // cannot happen at evaluation time any more. It does not collapse the
+    // third: "the manifest records no scope" was never a resolution failure —
+    // it is a property of the manifest, it survives the move to write time
+    // unchanged, and it takes a different answer, because no refresh can give
+    // an unscoped manifest a scope. A destination is the one decision a user
+    // cannot un-decide after a move, so the alternative to refusing is
+    // inventing one — and a refusal naming a remedy that cannot work is one
+    // step short of that.
     if key == SCOPE_REL_PATH {
-        let vantage = ctx.vantage.filter(|v| !v.is_empty()).ok_or_else(|| {
-            anyhow!("{SCOPE_REL_PATH} is not available: the manifest records no scope")
-        })?;
-        let Some(source) = ctx.source.as_ref() else {
-            bail!("{SCOPE_REL_PATH} is not available");
-        };
-        let root = &source.root_path;
-        let measured_from = vantage.for_root(root).ok_or_else(|| {
-            anyhow!(
-                "{SCOPE_REL_PATH} cannot be measured for a source in {root}: \
-                 the manifest's scope names no path in that root"
-            )
-        })?;
-        let full_path = source.path();
-        // Containment through its owner, never a byte prefix: `/R/photos`
-        // must not swallow `/R/photos2/x.jpg` and strip it to `2/x.jpg`.
-        let scope_rel = path_strip_prefix(&full_path, measured_from).ok_or_else(|| {
-            anyhow!("{SCOPE_REL_PATH}: {full_path} is not under the scope vantage {measured_from}")
+        let scope_rel = ctx.scope_rel.ok_or_else(|| match ctx.unmeasured {
+            Unmeasured::NoScopeRecorded => {
+                anyhow!("{SCOPE_REL_PATH} is not available: the manifest records no scope")
+            }
+            Unmeasured::LockPredatesMeasurement => anyhow!(
+                "{SCOPE_REL_PATH} is not available: this lock file was written before \
+                 the scope-relative path was recorded in it. Run `canon cluster refresh` \
+                 to rebuild the lock."
+            ),
         })?;
         return Ok(FactValue::Path(scope_rel.to_string()));
     }
@@ -466,9 +496,7 @@ fn available<'k>(ctx: &'k EvalContext<'_>) -> Vec<&'k str> {
             let name: &'static str = key.into();
             names.push(name);
         }
-        // A vantage with no source has nothing to measure, so listing the key
-        // would name something this context still could not answer.
-        if ctx.vantage.is_some_and(|v| !v.is_empty()) {
+        if ctx.scope_rel.is_some() {
             names.push(SCOPE_REL_PATH);
         }
     }
@@ -484,26 +512,12 @@ fn available<'k>(ctx: &'k EvalContext<'_>) -> Vec<&'k str> {
 mod tests {
     use super::super::transform::Modifier;
     use super::*;
-    use crate::core::domain::root::Root;
-    use crate::core::domain::scope::ScopeResolution;
 
-    /// The vantage a manifest recording `prefixes` yields against `roots`,
-    /// built through the one resolution exactly as a run builds it.
-    fn vantage(prefixes: &[&str], roots: &[&str]) -> ScopeVantage {
-        let owned: Vec<String> = prefixes.iter().map(|p| p.to_string()).collect();
-        let roots: Vec<Root> = roots
-            .iter()
-            .enumerate()
-            .map(|(i, path)| Root {
-                id: i as i64 + 1,
-                path: path.to_string(),
-                role: "source".to_string(),
-                comment: None,
-                last_scanned_at: None,
-                suspended: false,
-            })
-            .collect();
-        ScopeVantage::new(&ScopeResolution::resolve(&owned, &roots))
+    /// A source's settled scope-relative path, as the run that selected it
+    /// measured it and wrote it into the lock. Evaluation reads this; it does
+    /// not compute it, which is what the five tests below now say.
+    fn measured(scope_rel: &str) -> Option<&str> {
+        Some(scope_rel)
     }
 
     /// A source at `root` + `rel`, with the remaining attributes fixed. The
@@ -668,79 +682,113 @@ mod tests {
     #[test]
     fn test_scope_rel_path() {
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
-        let vantage = vantage(&["/Photos/Home"], &["/Photos"]);
         let mut ctx = EvalContext::new();
         ctx.set_source(source("/Photos", "Home/2024/vacation/image.jpg"));
-        ctx.set_vantage(&vantage);
+        ctx.set_scope_rel(
+            measured("2024/vacation/image.jpg"),
+            Unmeasured::NoScopeRecorded,
+        );
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "2024/vacation/image.jpg");
     }
 
-    /// P7 — the friction end to end: with sibling scopes each source measures
-    /// from their shared parent, so each scope's own name survives and the
-    /// ancestors above it do not come along.
+    /// P7 — the claim these five tests used to make, restated where it now
+    /// lives. Sibling scopes still measure from their shared parent, so each
+    /// scope's own name survives and the ancestors above it do not come
+    /// along — but that is settled when the selection is, and evaluation
+    /// reads the settled value rather than re-deriving it from a scope that
+    /// may have been edited since.
+    ///
+    /// The rule itself is `ScopeVantage`'s and is pinned there; what this pins
+    /// is that expansion is a **lookup**, so the two cannot disagree.
     #[test]
-    fn scope_rel_path_measures_from_the_vantage() {
+    fn scope_rel_path_is_the_measurement_the_lock_recorded() {
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
-        let vantage = vantage(&["/vol/work/proj-v1", "/vol/work/proj-v2"], &["/vol"]);
         for rel in ["work/proj-v1/src/main.c", "work/proj-v2/src/main.c"] {
+            // What `measure_entries` writes for a manifest naming
+            // `/vol/work/proj-v1` and `/vol/work/proj-v2`: measured from
+            // `/vol/work`, so the scope name survives and the ancestor above
+            // it does not.
+            let recorded = rel.trim_start_matches("work/");
             let mut ctx = EvalContext::new();
             ctx.set_source(source("/vol", rel));
-            ctx.set_vantage(&vantage);
-            let result = evaluate(&pattern, &ctx).unwrap();
-            // Measured from `/vol/work`, not from the root: the scope name
-            // survives, the ancestor above it does not.
-            assert_eq!(result, rel.trim_start_matches("work/"));
+            ctx.set_scope_rel(measured(recorded), Unmeasured::NoScopeRecorded);
+            assert_eq!(evaluate(&pattern, &ctx).unwrap(), recorded);
         }
     }
 
-    /// P8 — the path-law pin. A byte-prefix test would strip `/vol/photos2`
-    /// with `/vol/photos` and hand back `2/x.jpg`; containment through its
-    /// owner refuses instead. Asserting on the absence of the wrong answer
-    /// matters as much as the error: a bare `is_err()` would pass against a
-    /// different bug.
+    /// P8 — the path-law pin, moved with the strip it guards. A byte-prefix
+    /// test would strip `/vol/photos2` with `/vol/photos` and hand back
+    /// `2/x.jpg`; containment through its owner refuses instead. The strip now
+    /// happens at write time, so this asserts the refusal reaches the lock —
+    /// a source the vantage does not contain is recorded with **no**
+    /// measurement, and expansion then refuses rather than inventing one.
     #[test]
     fn a_sibling_named_like_the_scope_is_not_under_it() {
+        use crate::core::domain::path::path_strip_prefix;
+        assert_eq!(path_strip_prefix("/vol/photos2/x.jpg", "/vol/photos"), None);
+
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
-        let vantage = vantage(&["/vol/photos"], &["/vol"]);
         let mut ctx = EvalContext::new();
         ctx.set_source(source("/vol", "photos2/x.jpg"));
-        ctx.set_vantage(&vantage);
+        ctx.set_scope_rel(None, Unmeasured::LockPredatesMeasurement);
         let result = evaluate(&pattern, &ctx);
         assert!(result.is_err(), "got {result:?}");
         assert_ne!(result.ok(), Some("2/x.jpg".to_string()));
     }
 
-    /// P9 — the silent fallback is gone. A source in a root the scope never
-    /// names is refused, and the message names the root.
+    /// P9 — the two refusals a *resolution* used to fail with are gone,
+    /// because resolution no longer happens here; the two that remain are the
+    /// two an absent measurement can actually mean, and each says its own
+    /// thing.
+    ///
+    /// The distinction is load-bearing rather than cosmetic: only one of them
+    /// has a remedy. A lock that predates the measurement is rebuilt by a
+    /// refresh; a manifest that records no scope has nothing to measure from,
+    /// and telling that user to refresh sends them round a loop.
     #[test]
-    fn a_source_whose_root_carries_no_scope_is_refused_by_name() {
+    fn an_unmeasured_entry_is_refused_by_the_reason_it_is_unmeasured() {
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
-        let vantage = vantage(&["/vol/work/proj-v1"], &["/vol", "/media/backup"]);
-        let mut ctx = EvalContext::new();
-        ctx.set_source(source("/media/backup", "proj-v1/src/main.c"));
-        ctx.set_vantage(&vantage);
-        let err = evaluate(&pattern, &ctx).unwrap_err().to_string();
-        assert!(err.contains("/media/backup"), "{err}");
-        assert!(err.contains("names no path in that root"), "{err}");
-        // The other half of the distinction: a per-root refusal must not also
-        // read as "this manifest records no scope". It records one.
+
+        let mut old_lock = EvalContext::new();
+        old_lock.set_source(source("/media/backup", "proj-v1/src/main.c"));
+        old_lock.set_scope_rel(None, Unmeasured::LockPredatesMeasurement);
+        let err = evaluate(&pattern, &old_lock).unwrap_err().to_string();
+        assert!(err.contains("cluster refresh"), "{err}");
         assert!(!err.contains("records no scope"), "{err}");
+
+        let mut unscoped = EvalContext::new();
+        unscoped.set_source(source("/media/backup", "proj-v1/src/main.c"));
+        unscoped.set_scope_rel(None, Unmeasured::NoScopeRecorded);
+        let err = evaluate(&pattern, &unscoped).unwrap_err().to_string();
+        assert!(err.contains("records no scope"), "{err}");
+        assert!(
+            !err.contains("cluster refresh"),
+            "a refresh cannot give an unscoped manifest a scope: {err}"
+        );
+
+        // And neither of the old resolution-time refusals may reappear:
+        // neither can be true any more.
+        for ctx in [&old_lock, &unscoped] {
+            let err = evaluate(&pattern, ctx).unwrap_err().to_string();
+            assert!(!err.contains("names no path in that root"), "{err}");
+        }
     }
 
-    /// P10 — a manifest recording no scope at all says so, and says something
-    /// different from P9: nowhere to measure from is not the same answer as
-    /// nowhere to measure from *here*.
+    /// P10 — and there is no fallback behind the refusal. A destination is the
+    /// one decision a user cannot un-decide after a move, so an entry with no
+    /// measurement must never quietly become the source's root-relative path,
+    /// its filename, or the empty string.
     #[test]
-    fn no_scope_at_all_still_says_so() {
+    fn an_unmeasured_entry_never_falls_back_to_a_destination() {
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
-        let vantage = vantage(&[], &["/vol"]);
         let mut ctx = EvalContext::new();
         ctx.set_source(source("/vol", "work/proj-v1/src/main.c"));
-        ctx.set_vantage(&vantage);
-        let err = evaluate(&pattern, &ctx).unwrap_err().to_string();
-        assert!(err.contains("records no scope"), "{err}");
-        assert!(!err.contains("names no path in that root"), "{err}");
+        ctx.set_scope_rel(None, Unmeasured::NoScopeRecorded);
+        assert!(evaluate(&pattern, &ctx).is_err());
+
+        // And the key is not offered as available when it cannot be answered.
+        assert!(!available(&ctx).contains(&SCOPE_REL_PATH));
     }
 
     /// The message that says a key was not found must describe the set the

@@ -77,29 +77,47 @@ Destination current contents (/Volumes/Archive/sorted):
   2024/
 ```
 
-**A recorded scope that no longer resolves:**
+**A lock file written before Canon recorded where each file goes:**
 
-Destinations are measured from the scope the manifest records (see
-[`{scope.rel_path}`](../../reference/expr.md)). That scope is text, and it can stop
-naming a known root: a path retyped by hand, a folder moved, a root removed. Apply
-refuses before it plans, names every path it could not resolve, and transfers nothing:
+Apply carries out a lock file. Where each file lands is settled in that lock when the
+manifest is generated or refreshed, not read from `meta.scope` at apply time. A lock
+written by an earlier version of Canon does not carry that, so apply refuses before it
+plans and transfers nothing:
 
 ```
-Error: The manifest's scope names 1 path under no known root:
-  /Volumes/old-laptop/photos/2016
-Destinations are measured from the recorded scope, so nothing was moved.
-Edit meta.scope, then `canon cluster refresh manifest.toml` to rewrite the lock.
+Error: This lock file was written before Canon recorded where each file goes.
+Nothing was moved. Rebuild it: canon cluster refresh manifest.toml
 ```
 
-The refusal does not depend on whether the pattern reads `{scope.rel_path}`: the
-decision record names the scope either way. No decision row is written.
+The refusal does not depend on whether the pattern reads `{scope.rel_path}`: the decision
+record names the scope either way. No decision row is written. Run
+[`cluster refresh`](cluster.md) and apply again.
 
-Edit `meta.scope` to name places that resolve, then refresh.
+**Editing the manifest after the lock was written:**
 
-Resolution is tolerant of Unicode normalization: a scope whose root is typed in the other
-form resolves and needs no edit, and the whole path is then read in the form that matched
-that root. Where a root's own path matches as typed, the rest of each scope path is taken
-as written, so two scope paths in one manifest should agree with each other below the root.
+- Editing `output.pattern` takes effect on the next apply.
+- Editing `meta.scope` takes effect on the next [`cluster refresh`](cluster.md), like the
+  filters beside it. Apply reads the scope from the lock, so an edited `meta.scope` changes
+  neither where files land nor what the decision record names until the lock is rebuilt.
+
+A scope path that no longer names a known root, or that names a place Canon has no sources
+for, is stated by `cluster generate` and `cluster refresh` when they build the lock, and
+does not reach apply. See [`cluster`](cluster.md).
+
+**A pattern that cannot expand:**
+
+`{scope.rel_path}` has no value for a manifest that records no scope: one generated with
+`--global`, or with filters and no path. Apply reports the failure per source and transfers
+nothing:
+
+```
+Error: 2 sources failed pattern expansion:
+  /Volumes/Photos/2016/IMG_0001.jpg: scope.rel_path is not available: the manifest records no scope
+```
+
+A refresh does not help here: the manifest has no scope to rebuild from. Scope the manifest,
+or use `{source.rel_path}`. `cluster status` names no next step in this state, for the same
+reason.
 
 **Progress before anything moves:**
 
@@ -160,8 +178,8 @@ Use `--root` to apply only a subset of sources from the manifest. Useful for sta
 - `--root id:N` - Filter by root ID (shown in manifest as `root_id`)
 - `--root path:/path` - Filter by root path (must match exactly)
 
-**Pre-flight checks** (mandatory). These run once the manifest's recorded scope has
-resolved: a scope naming a path under no known root refuses before any of them.
+**Pre-flight checks** (mandatory). These run once the lock file has been read: a lock
+written before Canon recorded where each file goes refuses before any of them.
 
 1. **Blocked destination directories** - If a file stands where a destination directory has to go, apply refuses the whole run before transferring anything, naming the file and the destinations it blocks. This check also runs with `--resume`: a file in the way is not evidence of an earlier run's progress. Move or rename the file, or edit the pattern.
 

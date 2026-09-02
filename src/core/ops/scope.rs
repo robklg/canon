@@ -21,7 +21,7 @@ use super::fs::canonicalize_maybe_missing;
 use crate::core::domain;
 use crate::core::domain::path::{clean_path, path_strip_prefix, validate_paths_in_roots};
 use crate::core::domain::root::{find_containing_root, Root, RootSpec};
-use crate::core::domain::scope::ScopeMatch;
+use crate::core::domain::scope::{DecisionScope, PrefixOutcome, ScopeMatch, ScopeResolution};
 use crate::core::repo::{self, Connection};
 
 /// Classify a canonicalized path as file or directory scope.
@@ -429,20 +429,48 @@ pub fn resolve_history_scope(explicit_paths: &[PathBuf], roots: &[Root]) -> Opti
     })
 }
 
-/// The index's answer to "which byte-form of this path does Canon know?" —
-/// the form-tolerance rule at the source-existence gate.
+/// The index's answer to "which byte-form of this below-root remainder does
+/// Canon know?" — the form-tolerance rule's database-asking half, spoken once.
 ///
 /// The path's root has already been matched (root containment is
-/// form-tolerant in its own right); only the relative remainder is retried
-/// here, so a root and the content beneath it may each have been stored in
-/// whichever form their disk handed over. Returns the path rebuilt from the
-/// candidate the index knows sources under — the stored bytes, which is what
-/// every downstream comparison (Rust prefix matching, the SQL boundary
-/// spellings) must see. `None` means no form of this path has sources: it is
+/// form-tolerant in its own right, at both doors); only the relative remainder
+/// is retried here, so a root and the content beneath it may each have been
+/// stored in whichever form their disk handed over. Returns the candidate the
+/// index knows sources under — the stored bytes, which is what every
+/// downstream comparison (Rust prefix matching, the SQL boundary spellings)
+/// must see. `None` means no form of this remainder has sources: it is
 /// genuinely sourceless, and only then does policy see it.
 ///
-/// Root-level paths (empty remainder) are always known — a root is valid
-/// whether or not anything has been scanned into it yet.
+/// Root-level remainders (empty) are always known — a root is valid whether or
+/// not anything has been scanned into it yet.
+///
+/// **The as-given-first ordering is load-bearing and must not be tidied.** On
+/// a normalization-*sensitive* filesystem two spellings can be two genuinely
+/// different directories, and trying the path as written before any bend is
+/// what makes each of them resolve to itself.
+///
+/// Both doors ask through this: the argument door via
+/// [`stored_form_with_sources`], the manifest door via
+/// [`resolve_recorded_scope`]. Two spellings of one question is how the two
+/// doors drifted apart in the first place.
+fn stored_form_of_rel(conn: &Connection, root_id: i64, rel: &str) -> Result<Option<String>> {
+    if rel.is_empty() {
+        return Ok(Some(String::new()));
+    }
+    for candidate in domain::path::normalization_candidates(rel) {
+        if repo::source::sources_exist_at_scope(conn, root_id, &candidate)? {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+/// The index's answer to "which byte-form of this path does Canon know?" at
+/// the **argument** door: find the root, ask [`stored_form_of_rel`], rejoin.
+///
+/// `None` means no form of this path has sources; a path under no known root
+/// comes back as given, because root membership is validated separately and
+/// this gate has nothing to say about it.
 fn stored_form_with_sources(
     conn: &Connection,
     path: &str,
@@ -451,24 +479,72 @@ fn stored_form_with_sources(
     let Some((root_id, root_path, _role, rel_path)) =
         domain::root::find_containing_root(path, roots)
     else {
-        // Not under any known root: root membership is validated separately
-        // and this gate has nothing to say about it.
         return Ok(Some(path.to_string()));
     };
     if rel_path.is_empty() {
         return Ok(Some(path.to_string()));
     }
-    for candidate in domain::path::normalization_candidates(&rel_path) {
-        if repo::source::sources_exist_at_scope(conn, root_id, &candidate)? {
-            return Ok(Some(
-                Path::new(&root_path)
-                    .join(&candidate)
-                    .to_string_lossy()
-                    .into_owned(),
-            ));
-        }
+    Ok(
+        stored_form_of_rel(conn, root_id, &rel_path)?.map(|candidate| {
+            Path::new(&root_path)
+                .join(&candidate)
+                .to_string_lossy()
+                .into_owned()
+        }),
+    )
+}
+
+/// Resolve a **recorded** (manifest) scope: attribute each prefix to a root,
+/// then heal its remainder to the byte-form the index stores, then partition
+/// by the source-existence policy.
+///
+/// The form-tolerance rule's fourth integration point, and the second stage no
+/// pure resolution can run: healing needs an answer only the index has, and
+/// `ScopeResolution` has no `Connection`. That is why this is the type's only
+/// source of outcomes in production.
+///
+/// **The order is not interchangeable.** Root attribution comes first, over
+/// whole-prefix candidates, because a prefix whose *root* portion is written
+/// in the other form must match its root before its remainder can be asked
+/// about at all. Only then is the remainder retried.
+///
+/// **Classification still cannot fail.** The `Result` carries *infrastructure*
+/// failure — a SQL error — and nothing else; every failure mode of the scope
+/// itself remains a caller's disposition, exactly as the pure resolution
+/// promises. A prefix the index cannot confirm comes back set aside, not as an
+/// error.
+pub fn resolve_recorded_scope(
+    conn: &Connection,
+    prefixes: &[String],
+    roots: &[Root],
+) -> Result<ScopeResolution> {
+    let mut outcomes = Vec::with_capacity(prefixes.len());
+    for prefix in prefixes {
+        outcomes.push(match domain::scope::attribute_prefix(prefix, roots) {
+            Some(scope) => match stored_form_of_rel(conn, scope.root_id, &scope.rel_prefix)? {
+                Some(rel) => PrefixOutcome::Confirmed(DecisionScope::new(
+                    scope.root_id,
+                    scope.root_path,
+                    rel,
+                )),
+                None => PrefixOutcome::SetAside(scope),
+            },
+            None => PrefixOutcome::Unrooted(prefix.clone()),
+        });
     }
-    Ok(None)
+    Ok(ScopeResolution::from_outcomes(outcomes))
+}
+
+/// The one spelling of the refusal a scope that kept nothing gets, at either
+/// door.
+///
+/// One sentence, because it is one rule: a scope that kept nothing must never
+/// look like a narrowing, so it is refused naming every path it could not
+/// keep. The argument door raises it from [`apply_source_existence_policy`];
+/// the manifest door raises it from `cluster refresh`, which is where that
+/// door's dispositions live and which adds its own way back beneath it.
+pub fn no_sources_known(paths: &[String]) -> String {
+    format!("no sources known at {}", paths.join(", "))
 }
 
 /// How a scope's asked-for paths came out of the source-existence gate.
@@ -510,12 +586,12 @@ fn apply_source_existence_policy(
     for path in paths {
         match stored_form_with_sources(conn, &path, roots)? {
             Some(stored) => kept.push(stored),
-            None if single => bail!("no sources known at {path}"),
+            None if single => bail!("{}", no_sources_known(&[path])),
             None => set_aside.push(path),
         }
     }
     if kept.is_empty() {
-        bail!("no sources known at {}", set_aside.join(", "));
+        bail!("{}", no_sources_known(&set_aside));
     }
     Ok(ScopePartition { kept, set_aside })
 }
@@ -915,6 +991,258 @@ mod tests {
         let (_, _, _, rel) = domain::root::find_containing_root(kept, &roots).unwrap();
         assert_eq!(rel.as_bytes(), NFD_DIR.as_bytes());
         assert!(repo::source::sources_exist_at_scope(&conn, root_id, &rel).unwrap());
+    }
+
+    // ========================================================================
+    // The manifest door — resolve_recorded_scope
+    //
+    // The same rule as the argument door above, at the door a manifest's
+    // `meta.scope` comes through. Every test here builds a real database,
+    // because the whole question is what the index knows.
+    // ========================================================================
+
+    /// The anchor, from the requester's ruling that generate, refresh and
+    /// apply use exactly the same code: the same paths must produce the same
+    /// recorded scope whether they were typed as arguments (through
+    /// `resolve_scope`) or written into a manifest by hand (through
+    /// `resolve_recorded_scope`). This is the test that fails the day the two
+    /// doors drift apart again.
+    #[test]
+    fn the_two_doors_agree_on_the_same_paths() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, &format!("{NFD_DIR}/a.jpg"), None);
+        insert_source(&conn, root_id, "2011/b.jpg", None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        // Typed with the accent in the other form, as a user would retype it.
+        let typed = [format!("/photos/{NFC_DIR}"), "/photos/2011".to_string()];
+
+        let by_argument = resolve_scope(
+            &conn,
+            &typed.iter().map(PathBuf::from).collect::<Vec<_>>(),
+            false,
+            &roots,
+        )
+        .unwrap();
+        let by_manifest = resolve_recorded_scope(&conn, &typed, &roots).unwrap();
+
+        assert_eq!(
+            by_manifest.recorded(),
+            by_argument.prefixes,
+            "the manifest door must record what the argument door keeps"
+        );
+        assert_eq!(
+            by_manifest
+                .scopes()
+                .iter()
+                .map(DecisionScope::display_path)
+                .collect::<Vec<_>>(),
+            DecisionScope::decompose(&by_argument.prefixes, &roots)
+                .iter()
+                .map(DecisionScope::display_path)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// The defect's own shape at the unit: an accented prefix typed in the
+    /// other normalization, **below an ASCII root**, resolves to the form the
+    /// index stores. Attribution alone never sees this — the root matches as
+    /// typed, so no candidate but as-given is tried on the whole prefix — and
+    /// the second stage is what closes it.
+    #[test]
+    fn a_recorded_prefix_below_an_ascii_root_heals_to_the_stored_form() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, &format!("{NFD_DIR}/sub1/a.jpg"), None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let resolution =
+            resolve_recorded_scope(&conn, &[format!("/photos/{NFC_DIR}/sub1")], &roots).unwrap();
+
+        assert_eq!(
+            resolution.scopes(),
+            [DecisionScope::new(
+                root_id,
+                "/photos".to_string(),
+                format!("{NFD_DIR}/sub1")
+            )],
+            "the confirmed scope must carry the index's bytes"
+        );
+        assert_eq!(resolution.recorded(), [format!("/photos/{NFD_DIR}/sub1")]);
+        assert!(resolution.set_aside().is_empty());
+        assert!(resolution.unrooted().is_empty());
+    }
+
+    /// The two spellings of one visible name, both really present under one
+    /// root — the normalization-*sensitive* filesystem's case. As-given wins,
+    /// so each prefix resolves to itself and neither is bent onto the other.
+    /// This is what the candidate ordering buys and what tidying it would
+    /// destroy.
+    #[test]
+    fn as_given_wins_when_the_index_knows_it() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, &format!("{NFD_DIR}/a.jpg"), None);
+        insert_source(&conn, root_id, &format!("{NFC_DIR}/b.jpg"), None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        for dir in [NFD_DIR, NFC_DIR] {
+            let resolution =
+                resolve_recorded_scope(&conn, &[format!("/photos/{dir}")], &roots).unwrap();
+            assert_eq!(
+                resolution.scopes()[0].rel_prefix.as_bytes(),
+                dir.as_bytes(),
+                "{dir} must resolve to itself"
+            );
+        }
+    }
+
+    /// A rooted prefix the index knows nothing under is set aside — neither
+    /// silently obeyed nor dropped.
+    #[test]
+    fn a_sourceless_recorded_prefix_is_set_aside() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "2011/a.jpg", None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let resolution = resolve_recorded_scope(
+            &conn,
+            &["/photos/2011".to_string(), "/photos/2012".to_string()],
+            &roots,
+        )
+        .unwrap();
+
+        assert_eq!(resolution.set_aside(), ["/photos/2012"]);
+        assert!(resolution.unrooted().is_empty());
+    }
+
+    /// The behavioural core of the fix: a set-aside line is absent from
+    /// `scopes()`, so it never reaches the vantage, the lock header or the
+    /// decision record. What that buys downstream — the surviving line
+    /// measuring from itself rather than from a common prefix dragged above
+    /// it — is the vantage's own claim and is pinned in
+    /// `expr::domain::vantage` (V8), because a core test may not name a
+    /// subsystem.
+    #[test]
+    fn a_set_aside_line_never_reaches_the_measurement() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "2011/a.jpg", None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let resolution = resolve_recorded_scope(
+            &conn,
+            &["/photos/2011".to_string(), "/photos/2012".to_string()],
+            &roots,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolution.scopes(),
+            [DecisionScope::new(
+                root_id,
+                "/photos".to_string(),
+                "2011".to_string()
+            )]
+        );
+        assert!(
+            !resolution.scopes().iter().any(|s| s.rel_prefix == "2012"),
+            "the set-aside prefix must not be a scope"
+        );
+    }
+
+    /// The write-back does not destroy the user's own line: a set-aside prefix
+    /// is still in `recorded()`, and a refresh writes it back rather than
+    /// silently narrowing the manifest.
+    #[test]
+    fn a_set_aside_line_survives_in_the_write_back() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "2011/a.jpg", None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let resolution = resolve_recorded_scope(
+            &conn,
+            &["/photos/2011".to_string(), "/photos/2012".to_string()],
+            &roots,
+        )
+        .unwrap();
+
+        assert_eq!(resolution.recorded(), ["/photos/2011", "/photos/2012"]);
+    }
+
+    /// A root's own top is always confirmed, whatever has been scanned into
+    /// it — the honesty policy's root-level rule, at the second door.
+    #[test]
+    fn a_root_level_recorded_prefix_is_always_confirmed() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let resolution = resolve_recorded_scope(&conn, &["/photos".to_string()], &roots).unwrap();
+
+        assert_eq!(
+            resolution.scopes(),
+            [DecisionScope::new(
+                root_id,
+                "/photos".to_string(),
+                String::new()
+            )]
+        );
+        assert!(resolution.set_aside().is_empty());
+    }
+
+    /// The roster law, unchanged by the second stage: a prefix under no known
+    /// root is carried as unrooted, never dropped and never set aside — the
+    /// two are different answers and the reader says different things about
+    /// them.
+    #[test]
+    fn a_recorded_prefix_under_no_root_is_still_carried() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "2011/a.jpg", None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let resolution = resolve_recorded_scope(
+            &conn,
+            &["/gone/proj".to_string(), "/photos/2011".to_string()],
+            &roots,
+        )
+        .unwrap();
+
+        assert_eq!(resolution.unrooted(), ["/gone/proj"]);
+        assert!(resolution.set_aside().is_empty());
+        assert_eq!(resolution.recorded(), ["/gone/proj", "/photos/2011"]);
+    }
+
+    /// Parity for the extraction: the argument door's behaviour is unchanged
+    /// by `stored_form_of_rel` being pulled out from under it. Root-level
+    /// paths, healed remainders, sourceless paths and paths under no known
+    /// root all answer exactly as they did.
+    #[test]
+    fn the_argument_door_still_answers_as_it_did() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, &format!("{NFD_DIR}/a.jpg"), None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        for (path, expected) in [
+            ("/photos", Some("/photos".to_string())),
+            (
+                &format!("/photos/{NFC_DIR}"),
+                Some(format!("/photos/{NFD_DIR}")),
+            ),
+            ("/photos/2012", None),
+            ("/elsewhere/x", Some("/elsewhere/x".to_string())),
+        ] {
+            assert_eq!(
+                stored_form_with_sources(&conn, path, &roots).unwrap(),
+                expected,
+                "for {path}"
+            );
+        }
     }
 
     #[test]

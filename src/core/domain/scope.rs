@@ -100,6 +100,48 @@ impl DecisionScope {
     }
 }
 
+/// Attribute one recorded prefix to a known root, form-tolerantly.
+///
+/// The composition path resolution performs at the argument door —
+/// [`normalization_candidates`] over [`find_containing_root`] — so a root
+/// stored in the disk's form is reachable from a prefix typed in the other
+/// one. Candidates are of the **whole** prefix and the first that finds a root
+/// wins, which is what makes the form that matched the root the form the
+/// prefix carries from here on.
+///
+/// It does not lexically clean the prefix (`resolve_path` calls `clean_path`
+/// first), so a hand-written `..` is matched literally. That is a limit, not a
+/// feature.
+///
+/// This answers *which root*, and only that. What byte-form of the remainder
+/// the index knows is a question only the index can answer, and it is asked
+/// afterwards, one layer up (`core::ops::scope::resolve_recorded_scope`).
+pub fn attribute_prefix(prefix: &str, roots: &[Root]) -> Option<DecisionScope> {
+    normalization_candidates(prefix).into_iter().find_map(|c| {
+        find_containing_root(&c, roots)
+            .map(|(root_id, root_path, _role, rel)| DecisionScope::new(root_id, root_path, rel))
+    })
+}
+
+/// What became of one recorded prefix, in the manifest's own order.
+///
+/// The three answers a recorded prefix can get, and the only input
+/// [`ScopeResolution::from_outcomes`] takes — so every register the type
+/// exposes is derived from one list rather than accumulated in parallel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrefixOutcome {
+    /// Rooted, and the index knows sources under it. The scope carries the
+    /// stored byte-form throughout: the root's from attribution, the
+    /// remainder's from whoever confirmed it.
+    Confirmed(DecisionScope),
+    /// Rooted, but no byte-form of it has any sources. Nothing to measure from
+    /// and nothing to select, so it is stated and set aside — never obeyed
+    /// silently, never dropped.
+    SetAside(DecisionScope),
+    /// Matches no known root at all, verbatim as the manifest wrote it.
+    Unrooted(String),
+}
+
 /// A recorded scope resolved against the known roots — once, for the whole run.
 ///
 /// A manifest's scope is user-editable text, so it arrives in whatever form
@@ -109,32 +151,23 @@ impl DecisionScope {
 /// reader — the vantage matched roots its own way, the recorder matched them
 /// another, and each lost a prefix in its own silence.
 ///
-/// Form-tolerant on the way in: each prefix is matched through its
-/// normalization candidates, so a root stored in the disk's form is reachable
-/// from a prefix typed in the other one — the same bend path resolution
-/// performs at the argument door, not a second rule.
+/// Form-tolerant on the way in, in **two stages**, and both are the same
+/// form-tolerance rule reaching a second half of one path rather than two
+/// rules. Stage one is [`attribute_prefix`], which bends the whole prefix
+/// against the known roots. Stage two bends the below-root remainder against
+/// the index and needs a database to do it, so it lives one layer up in
+/// `core::ops::scope::resolve_recorded_scope`, which is what fills the
+/// `Confirmed`/`SetAside` split. Nothing in production assembles a resolution
+/// without it: attribution alone answers *which root*, which is not enough to
+/// confirm a prefix.
 ///
-/// Two things the argument door does that this does not, both deliberate and
-/// both limits rather than features. It does not lexically clean the prefix
-/// (`resolve_path` calls `clean_path` first), so a hand-written `..` is
-/// matched literally. And it has no second-stage retry over the below-root
-/// remainder: candidates are of the **whole** prefix, and the first that finds
-/// a root wins, so the form that matched the root is the form the whole prefix
-/// is recorded in, remainder included.
-///
-/// The consequence worth knowing: where a root's own path matches as typed —
-/// an ASCII root always does — no candidate but as-given is ever tried, and
-/// each prefix keeps whatever form its remainder was typed in. Two prefixes
-/// under such a root can then disagree below it, and where they do the
-/// vantage's common prefix climbs above the differing component and files land
-/// a level out. Pre-existing, out of this type's reach, and routed.
-///
-/// Honest on the way out: a prefix matching no root is carried, never dropped.
-/// Dropping one silently narrows whatever the reader does next — the vantage
-/// measures from somewhere deeper, the recorder writes a scoped act down as a
-/// global one — and a narrowing nobody stated is the class this closes. What
-/// to do about a carried prefix is the consumer's own answer; this type
-/// classifies and never decides.
+/// Honest on the way out: a prefix matching no root is carried, never dropped,
+/// and neither is one the index cannot confirm. Dropping either silently
+/// narrows whatever the reader does next — the vantage measures from somewhere
+/// deeper, the recorder writes a scoped act down as a global one — and a
+/// narrowing nobody stated is the class this closes. What to do about a
+/// carried prefix is the consumer's own answer; this type classifies and never
+/// decides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopeResolution {
     /// Sorted and deduplicated: the recorder's projection, so repeated runs
@@ -142,44 +175,52 @@ pub struct ScopeResolution {
     resolved: Vec<DecisionScope>,
     /// In the manifest's own order, first occurrence only — this is read back
     /// to a user against their own file.
+    set_aside: Vec<String>,
+    /// In the manifest's own order, first occurrence only — likewise read back
+    /// to a user against their own file.
     unrooted: Vec<String>,
-    /// Every recorded prefix in the manifest's own order: resolved ones in the
-    /// byte-form the index stores, unresolved ones verbatim. What a rewrite
-    /// writes back.
+    /// Every recorded prefix in the manifest's own order: healed as far as it
+    /// could be, verbatim past that. What a rewrite writes back.
     recorded: Vec<String>,
 }
 
 impl ScopeResolution {
-    /// Resolve a recorded scope against the known roots.
+    /// Assemble the registers from the per-prefix outcomes, in the manifest's
+    /// own order.
     ///
-    /// Infallible by design: it classifies, it never fails. Every failure mode
-    /// is a caller's disposition — a resolution that could itself error would
-    /// hand callers a fourth thing to answer inconsistently, which is the
-    /// defect wearing a fix.
-    ///
-    /// Suspension is not consulted. A parked root is still a known root, so a
-    /// manifest naming one resolves exactly as it did before the door closed.
-    pub fn resolve(prefixes: &[String], roots: &[Root]) -> Self {
+    /// The one assembly site, and the only constructor: what each register
+    /// means is decided here rather than agreed on by two loops. The ops-layer
+    /// resolution supplies the outcomes; a test that wants the attribution
+    /// half alone composes [`attribute_prefix`] into this the same way.
+    pub fn from_outcomes(outcomes: Vec<PrefixOutcome>) -> Self {
         let mut resolved: Vec<DecisionScope> = Vec::new();
+        let mut set_aside: Vec<String> = Vec::new();
         let mut unrooted: Vec<String> = Vec::new();
-        let mut recorded: Vec<String> = Vec::with_capacity(prefixes.len());
+        let mut recorded: Vec<String> = Vec::with_capacity(outcomes.len());
 
-        for prefix in prefixes {
-            let hit = normalization_candidates(prefix).into_iter().find_map(|c| {
-                find_containing_root(&c, roots).map(|(root_id, root_path, _role, rel)| {
-                    DecisionScope::new(root_id, root_path, rel)
-                })
-            });
-            match hit {
-                Some(scope) => {
+        for outcome in outcomes {
+            match outcome {
+                PrefixOutcome::Confirmed(scope) => {
                     recorded.push(scope.display_path());
                     resolved.push(scope);
                 }
-                None => {
-                    recorded.push(prefix.clone());
-                    if !unrooted.contains(prefix) {
+                PrefixOutcome::SetAside(scope) => {
+                    // The root portion matched, so writing back its stored
+                    // bytes is healing rather than inventing — it is the same
+                    // display path this prefix got before the second stage
+                    // existed. Only the remainder is unconfirmed, and nothing
+                    // rewrites that.
+                    let display = scope.display_path();
+                    recorded.push(display.clone());
+                    if !set_aside.contains(&display) {
+                        set_aside.push(display);
+                    }
+                }
+                PrefixOutcome::Unrooted(prefix) => {
+                    if !unrooted.contains(&prefix) {
                         unrooted.push(prefix.clone());
                     }
+                    recorded.push(prefix);
                 }
             }
         }
@@ -189,14 +230,26 @@ impl ScopeResolution {
 
         ScopeResolution {
             resolved,
+            set_aside,
             unrooted,
             recorded,
         }
     }
 
-    /// The rooted prefixes as typed scopes — what the recorder stores.
+    /// The confirmed prefixes as typed scopes — what the recorder stores, what
+    /// the vantage measures from, and what the lock header carries.
+    ///
+    /// A set-aside prefix is **absent** from here, and that absence is the
+    /// behavioural point: a line naming a place Canon cannot confirm stops
+    /// dragging the measurement, so the surviving lines place correctly.
     pub fn scopes(&self) -> &[DecisionScope] {
         &self.resolved
+    }
+
+    /// The rooted prefixes the index knows no sources under, in the manifest's
+    /// own order.
+    pub fn set_aside(&self) -> &[String] {
+        &self.set_aside
     }
 
     /// The prefixes that match no known root, in the manifest's own order.
@@ -204,16 +257,43 @@ impl ScopeResolution {
         &self.unrooted
     }
 
-    /// Every recorded prefix, resolved ones healed to the stored byte-form and
-    /// unresolved ones verbatim — what a rewrite writes back.
+    /// Every recorded prefix, healed as far as it could be and verbatim past
+    /// that — what a rewrite writes back.
+    ///
+    /// **Never what a run selects from.** A prefix in here that is not in
+    /// [`scopes`](Self::scopes) contributes nothing to the measurement, and
+    /// selecting content it names would gather files the run has told the user
+    /// it cannot place. Selection and measurement read the same register or
+    /// they disagree; see [`selection`](Self::selection).
     pub fn recorded(&self) -> &[String] {
         &self.recorded
     }
 
-    /// Whether the manifest recorded any scope at all — a different question
-    /// from whether any of it resolved.
-    pub fn is_empty(&self) -> bool {
-        self.recorded.is_empty()
+    /// The paths a run selects content from: the confirmed scopes, as absolute
+    /// display paths.
+    ///
+    /// The same register the vantage and the lock header are built from, which
+    /// is the whole point. A set-aside prefix names nothing the index knows,
+    /// and an unrooted one may still be an *ancestor* of a known root —
+    /// `path_is_under` matches it where `find_containing_root` does not — so
+    /// selecting from the recorded list gathers sources no vantage can measure
+    /// and the run refuses them at apply, one by one, for a line it already
+    /// said measures nothing.
+    ///
+    /// `None` where the manifest recorded a scope and none of it confirmed:
+    /// the selection is **empty**, and the distinction matters because an
+    /// empty *scope list* means global. A scope that resolved to nothing must
+    /// select nothing, never everything.
+    pub fn selection(&self) -> Option<Vec<String>> {
+        if self.resolved.is_empty() && !self.recorded.is_empty() {
+            return None;
+        }
+        Some(
+            self.resolved
+                .iter()
+                .map(DecisionScope::display_path)
+                .collect(),
+        )
     }
 }
 
@@ -273,6 +353,26 @@ mod scope_resolution_tests {
         prefixes.iter().map(|p| p.to_string()).collect()
     }
 
+    /// The attribution half alone: every prefix that finds a root, confirmed
+    /// on its root match and nothing else.
+    ///
+    /// Production never assembles a resolution this way — confirming a prefix
+    /// takes an answer only the index has, so `core::ops::scope` always runs
+    /// both stages. This is spelled here rather than kept as a production
+    /// function so the tree carries no constructor no command uses; what it
+    /// pins is the pure half's own claims, which are this module's.
+    fn attributed(prefixes: &[String], roots: &[Root]) -> ScopeResolution {
+        ScopeResolution::from_outcomes(
+            prefixes
+                .iter()
+                .map(|p| match attribute_prefix(p, roots) {
+                    Some(scope) => PrefixOutcome::Confirmed(scope),
+                    None => PrefixOutcome::Unrooted(p.clone()),
+                })
+                .collect(),
+        )
+    }
+
     /// A root path whose last component carries a combining accent, stored in
     /// the decomposed form a disk hands back. Written from code points rather
     /// than as a literal so the two forms cannot be confused by an editor
@@ -287,7 +387,7 @@ mod scope_resolution_tests {
     #[test]
     fn a_prefix_typed_in_another_normalization_resolves_to_the_stored_form() {
         let roots = vec![root(1, ROOT_NFD)];
-        let resolution = ScopeResolution::resolve(&owned(&[&format!("{ROOT_NFC}/2016")]), &roots);
+        let resolution = attributed(&owned(&[&format!("{ROOT_NFC}/2016")]), &roots);
 
         assert!(
             resolution.unrooted().is_empty(),
@@ -314,11 +414,15 @@ mod scope_resolution_tests {
     #[test]
     fn a_prefix_under_no_root_is_carried_never_dropped() {
         let roots = vec![root(1, "/vol/work")];
-        let resolution = ScopeResolution::resolve(&owned(&["/vol/gone/proj-v2"]), &roots);
+        let resolution = attributed(&owned(&["/vol/gone/proj-v2"]), &roots);
 
         assert_eq!(resolution.unrooted(), ["/vol/gone/proj-v2"]);
         assert!(resolution.scopes().is_empty());
-        assert!(!resolution.is_empty(), "a scope was recorded");
+        assert_eq!(
+            resolution.recorded(),
+            ["/vol/gone/proj-v2"],
+            "a scope was recorded"
+        );
     }
 
     /// A3 — the compound pin, and the configuration the friction is made of:
@@ -329,7 +433,7 @@ mod scope_resolution_tests {
     #[test]
     fn a_carried_prefix_does_not_displace_its_rooted_siblings() {
         let roots = vec![root(1, "/vol/work")];
-        let resolution = ScopeResolution::resolve(
+        let resolution = attributed(
             &owned(&["/vol/work/proj-v1", "/vol/work-archive/proj-v2"]),
             &roots,
         );
@@ -357,7 +461,7 @@ mod scope_resolution_tests {
             "/media/backup",
             "/elsewhere",
         ]);
-        let resolution = ScopeResolution::resolve(&prefixes, &roots);
+        let resolution = attributed(&prefixes, &roots);
 
         assert_eq!(resolution.recorded().len(), prefixes.len());
 
@@ -379,7 +483,7 @@ mod scope_resolution_tests {
     #[test]
     fn a_prefix_on_a_suspended_root_stays_rooted() {
         let roots = vec![suspended_root(1, "/vol/work")];
-        let resolution = ScopeResolution::resolve(&owned(&["/vol/work/proj-v1"]), &roots);
+        let resolution = attributed(&owned(&["/vol/work/proj-v1"]), &roots);
 
         assert!(resolution.unrooted().is_empty());
         assert_eq!(
@@ -398,14 +502,66 @@ mod scope_resolution_tests {
     #[test]
     fn repeated_resolution_records_identically() {
         let roots = vec![root(1, "/vol/work"), root(2, "/media/backup")];
-        let one = ScopeResolution::resolve(
+        let one = attributed(
             &owned(&["/media/backup/b", "/vol/work/a", "/vol/work/a"]),
             &roots,
         );
-        let other = ScopeResolution::resolve(&owned(&["/vol/work/a", "/media/backup/b"]), &roots);
+        let other = attributed(&owned(&["/vol/work/a", "/media/backup/b"]), &roots);
 
         assert_eq!(one.scopes(), other.scopes());
         assert_eq!(one.scopes().len(), 2, "the repeat collapsed");
+    }
+
+    /// A8 — the selection register, in all three of its states.
+    ///
+    /// The middle one is the whole reason this returns an `Option`: a run that
+    /// recorded no scope is **global**, and a run whose recorded scope
+    /// confirmed nothing must select **nothing**. Both are "empty" to a
+    /// careless reader, and downstream an empty scope list means global — so a
+    /// manifest naming a drive that is not plugged in would archive the whole
+    /// universe if the two collapsed into one value.
+    #[test]
+    fn the_selection_register_tells_global_apart_from_confirmed_nothing() {
+        let roots = vec![root(1, "/vol/work")];
+
+        // Nothing recorded: global, and an empty list is the right shape.
+        assert_eq!(attributed(&owned(&[]), &roots).selection(), Some(vec![]));
+
+        // Recorded, and confirmed: the confirmed scopes as absolute paths.
+        assert_eq!(
+            attributed(&owned(&["/vol/work/proj-v1"]), &roots).selection(),
+            Some(vec!["/vol/work/proj-v1".to_string()])
+        );
+
+        // Recorded, and nothing confirmed: no selection at all, which is a
+        // different answer from an empty one.
+        assert_eq!(attributed(&owned(&["/vol/gone"]), &roots).selection(), None);
+    }
+
+    /// A9 — the selection is the confirmed register and nothing else, so a
+    /// line that contributes nothing to the measurement contributes nothing to
+    /// what the run gathers either.
+    ///
+    /// The case that matters is an unrooted prefix which is an **ancestor** of
+    /// a known root: `path_is_under` matches it where `find_containing_root`
+    /// does not, so selecting through the recorded list would gather sources
+    /// no vantage can measure.
+    #[test]
+    fn the_selection_never_carries_a_line_that_measures_nothing() {
+        let roots = vec![root(1, "/vol/work")];
+        let resolution = attributed(&owned(&["/vol/work/proj-v1", "/vol"]), &roots);
+
+        assert_eq!(resolution.unrooted(), ["/vol"]);
+        assert_eq!(
+            resolution.recorded(),
+            ["/vol/work/proj-v1", "/vol"],
+            "the user's own line is still written back"
+        );
+        assert_eq!(
+            resolution.selection(),
+            Some(vec!["/vol/work/proj-v1".to_string()]),
+            "the ancestor must not reach the selection"
+        );
     }
 
     /// A7 — an unrooted prefix is read back to a user against their own file,
@@ -413,7 +569,7 @@ mod scope_resolution_tests {
     #[test]
     fn an_unrooted_prefix_keeps_the_manifest_order() {
         let roots = vec![root(1, "/vol/work")];
-        let resolution = ScopeResolution::resolve(
+        let resolution = attributed(
             &owned(&["/zeta/last", "/vol/work/kept", "/alpha/first"]),
             &roots,
         );

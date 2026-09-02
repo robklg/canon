@@ -2565,6 +2565,7 @@ fn s() -> Connection {
                 "evaluate",
                 "Pattern",
                 "EvalContext",
+                "Unmeasured",
                 "ScopeVantage",
                 "prefetch_pattern_facts",
                 "PatternFacts",

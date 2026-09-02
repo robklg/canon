@@ -23,10 +23,6 @@ use crate::core::domain::scope::ScopeResolution;
 pub struct ScopeVantage {
     /// Root path → the vantage for sources in that root.
     by_root: HashMap<String, String>,
-    /// Whether any scope was recorded at all. Not the same question as
-    /// whether `by_root` is populated: a scope naming no known root records
-    /// a scope and yields no vantage, and the two get different messages.
-    recorded: bool,
 }
 
 impl ScopeVantage {
@@ -57,10 +53,7 @@ impl ScopeVantage {
             })
             .collect();
 
-        ScopeVantage {
-            by_root,
-            recorded: !scope.is_empty(),
-        }
+        ScopeVantage { by_root }
     }
 
     /// The vantage for a source in this root, or `None` when the recorded
@@ -68,18 +61,13 @@ impl ScopeVantage {
     pub fn for_root(&self, root_path: &str) -> Option<&str> {
         self.by_root.get(root_path).map(|v| v.as_str())
     }
-
-    /// Whether the manifest recorded any scope at all — which distinguishes
-    /// "no scope" from "no scope *here*".
-    pub fn is_empty(&self) -> bool {
-        !self.recorded
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::domain::root::Root;
+    use crate::core::domain::scope::{attribute_prefix, PrefixOutcome};
 
     /// The vantage a manifest recording `prefixes` yields against `roots` —
     /// built the way production builds it, through the one resolution, so the
@@ -98,7 +86,15 @@ mod tests {
                 suspended: false,
             })
             .collect();
-        ScopeVantage::new(&ScopeResolution::resolve(&owned, &roots))
+        ScopeVantage::new(&ScopeResolution::from_outcomes(
+            owned
+                .iter()
+                .map(|p| match attribute_prefix(p, &roots) {
+                    Some(scope) => PrefixOutcome::Confirmed(scope),
+                    None => PrefixOutcome::Unrooted(p.clone()),
+                })
+                .collect(),
+        ))
     }
 
     /// V1 — the no-regression guard at the law's own level: with one scope the
@@ -107,7 +103,6 @@ mod tests {
     fn a_single_scope_is_its_own_vantage() {
         let vantage = v(&["/vol/work/proj-v1"], &["/vol/work"]);
         assert_eq!(vantage.for_root("/vol/work"), Some("/vol/work/proj-v1"));
-        assert!(!vantage.is_empty());
     }
 
     /// V2 — the friction's own shape: naming siblings measures from their
@@ -156,8 +151,6 @@ mod tests {
     fn a_root_the_scope_never_names_has_no_vantage() {
         let vantage = v(&["/vol/work/proj-v1"], &["/vol/work", "/media/backup"]);
         assert_eq!(vantage.for_root("/media/backup"), None);
-        // A scope *was* recorded, which is a different answer from none.
-        assert!(!vantage.is_empty());
     }
 
     /// The vantage side's twin of the byte-prefix pin at evaluation, and the
@@ -176,10 +169,46 @@ mod tests {
         assert_eq!(vantage.for_root("/vol/work"), Some("/vol/work"));
     }
 
+    /// V8 — the behavioural half of the manifest door's fourth partition, and
+    /// the shape the below-root form mismatch used to take: a recorded prefix
+    /// the index cannot confirm contributes nothing to the measurement, so the
+    /// sibling that *is* confirmed measures from itself rather than from a
+    /// common prefix dragged above the two of them.
+    ///
+    /// Built through `from_outcomes` rather than through a database: which
+    /// prefixes were confirmed is `core::ops::scope`'s answer, and what this
+    /// type does with the answer is the only thing under test here.
     #[test]
-    fn no_scope_at_all_is_empty() {
+    fn a_set_aside_scope_contributes_no_vantage() {
+        use crate::core::domain::scope::{DecisionScope, PrefixOutcome};
+
+        let confirmed = DecisionScope::new(1, "/vol/work".to_string(), "proj-v1".to_string());
+        let set_aside = DecisionScope::new(1, "/vol/work".to_string(), "proj-v2".to_string());
+
+        let both = ScopeVantage::new(&ScopeResolution::from_outcomes(vec![
+            PrefixOutcome::Confirmed(confirmed.clone()),
+            PrefixOutcome::Confirmed(set_aside.clone()),
+        ]));
+        assert_eq!(
+            both.for_root("/vol/work"),
+            Some("/vol/work"),
+            "two confirmed siblings measure from their shared parent"
+        );
+
+        let one_aside = ScopeVantage::new(&ScopeResolution::from_outcomes(vec![
+            PrefixOutcome::Confirmed(confirmed),
+            PrefixOutcome::SetAside(set_aside),
+        ]));
+        assert_eq!(
+            one_aside.for_root("/vol/work"),
+            Some("/vol/work/proj-v1"),
+            "a set-aside sibling must not drag the vantage above the survivor"
+        );
+    }
+
+    #[test]
+    fn no_scope_at_all_yields_no_vantage() {
         let vantage = v(&[], &["/vol/work"]);
-        assert!(vantage.is_empty());
         assert_eq!(vantage.for_root("/vol/work"), None);
     }
 }

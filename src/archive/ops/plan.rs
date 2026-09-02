@@ -23,7 +23,7 @@ use crate::archive::domain::LockEntry;
 use crate::core::domain::format::{first_chars, shell_quote};
 use crate::core::domain::path::path_strip_prefix;
 use crate::core::repo::{self, Connection};
-use crate::expr::{prefetch_pattern_facts, Pattern, ScopeVantage};
+use crate::expr::{prefetch_pattern_facts, Pattern, Unmeasured};
 
 use super::pattern::evaluate_pattern;
 
@@ -50,9 +50,10 @@ pub struct ApplyPlanParams<'a> {
     pub pattern: &'a Pattern,
     /// Fact keys needed by the pattern (from expr::extract_fact_keys).
     pub needed_keys: &'a [String],
-    /// Where a `{scope.rel_path}` measures from, derived once from the
-    /// manifest's recorded scope.
-    pub vantage: &'a ScopeVantage,
+    /// The lock's own answer to why an entry might carry no scope-relative
+    /// path (`ops::manifest::LockFile::unmeasured_reason`). Per run, like the
+    /// pattern beside it.
+    pub unmeasured: Unmeasured,
     /// Root ID → root path cache (from core::repo::root::fetch_all).
     pub root_paths: &'a HashMap<i64, String>,
     /// Destination archive root ID.
@@ -312,7 +313,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
         match evaluate_pattern(
             params.pattern,
             source,
-            params.vantage,
+            params.unmeasured,
             params.root_paths,
             &facts,
         ) {
@@ -984,7 +985,6 @@ mod tests {
         insert_source_with_metadata, setup_test_db,
     };
 
-    use crate::core::domain::scope::ScopeResolution;
     use crate::expr::{extract_fact_keys, parse_pattern};
 
     fn make_lock_entry(
@@ -998,6 +998,7 @@ mod tests {
             id,
             root_id,
             path: path.to_string(),
+            scope_rel_path: None,
             device: 0,
             inode: 0,
             size: 1000,
@@ -1007,15 +1008,6 @@ mod tests {
             hash_type: hash.map(|_| "sha256".to_string()),
             hash_value: hash.map(|h| h.to_string()),
         }
-    }
-
-    /// The vantage a test plans against when its pattern never names
-    /// `scope.rel_path`, which is every test in this module: a manifest with
-    /// no recorded scope. Shared rather than threaded through 36 call sites,
-    /// none of which has an opinion about the scope.
-    fn no_scope() -> &'static ScopeVantage {
-        static EMPTY: std::sync::OnceLock<ScopeVantage> = std::sync::OnceLock::new();
-        EMPTY.get_or_init(|| ScopeVantage::new(&ScopeResolution::resolve(&[], &[])))
     }
 
     fn default_params<'a>(
@@ -1029,7 +1021,9 @@ mod tests {
             sources,
             pattern,
             needed_keys,
-            vantage: no_scope(),
+            // Every test in this module drives a manifest with no recorded
+            // scope, so this is the reading that is true of all of them.
+            unmeasured: Unmeasured::NoScopeRecorded,
             root_paths,
             archive_root_id,
             base_dir_rel: "",

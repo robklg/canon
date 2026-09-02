@@ -627,7 +627,12 @@ const LAWS: &[Law] = &[
     Law {
         name: "recorded-scope resolution",
         owner: "core/domain/scope.rs",
-        verifier: "a_prefix_under_no_root_is_carried_never_dropped",
+        // The live verifier: `core/ops/scope.rs`'s test over the resolution
+        // every command actually runs. The pure battery beside the owner
+        // (A1-A7) pins the attribution half, which no command reaches on its
+        // own — a law's registered guarantee must be attached to a path that
+        // runs.
+        verifier: "a_recorded_prefix_under_no_root_is_still_carried",
         reach: Reach::Unit("core"),
         authority: Authority::Recognised,
         record: "2026-08-30",
