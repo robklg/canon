@@ -156,6 +156,11 @@ Before removing, Canon re-checks that **the world hasn't moved** since the revie
 another process scanned, applied, or excluded on this root in the meantime, the
 release stops (root intact, book standing) and asks to be re-run.
 
+If the release fails outright — a busy database, a write error — the standing is the
+same and the record says so: the book is bound, the root stays indexed, and the
+retirement shows in the trail as `partial` with the reason, not as a run that never
+finished.
+
 The closing summary states the guarantee:
 
 ```

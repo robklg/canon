@@ -377,20 +377,21 @@ fn full_ceremony_releases_the_root_and_completes_the_decision() {
 }
 
 /// **Retirement's projection of the status conjugation**, examined: the ceremony
-/// registers its row only after the first confirmation, and each of its *named*
-/// exits — this one, `interrupt`, and `release`'s two arms — settles that row at
-/// its last act. The conjugation is owned by `core/ops/decision.rs`; the
-/// ceremony supplies the word, because which outcome a declined release
-/// deserves is the caller's knowledge. The `partial` assertion below is that
-/// projection's pin.
+/// registers its row only after the first confirmation, and every returning exit
+/// settles that row at its last act — `interrupt` for a bind that produced no
+/// book, and after one stands, this one, `abandon_on_prompt_failure` and
+/// `release`'s three arms. The conjugation is owned by
+/// `core/ops/decision.rs`; the ceremony supplies the word, because which outcome
+/// a declined release deserves is the caller's knowledge. The `partial`
+/// assertion below is that projection's pin.
 ///
-/// **Conforming on its named exits only**, and the qualifier is load-bearing:
-/// `release` reaches four propagating `?` before either arm — opening the
-/// immediate transaction, the world-moved probe, the removal, the commit — and
-/// any of them leaves the row `started`. `BEGIN IMMEDIATE` returning busy under
-/// a second canon process is the realistic one. The window is open, and it is
-/// sharpest here: the book is already bound and the user has already confirmed
-/// removal.
+/// **The coverage claim is structural, not a list**: `release`'s four internal
+/// `?` — opening the immediate transaction, the world-moved probe, the removal,
+/// the commit — all leave through the wrapper's single `Err` arm, so a `?` added
+/// inside the body settles without anyone remembering to name it. The two
+/// directly drivable ones are pinned by
+/// `a_release_that_cannot_begin_is_never_left_started` and
+/// `a_release_whose_removal_fails_settles_after_the_rollback`.
 #[test]
 fn abandon_after_bind_leaves_root_and_book_standing() {
     let (conn, _src, _arch, root_id) = every_fate_fixture();
@@ -510,4 +511,187 @@ fn interrupt_records_a_findable_interrupted_decision() {
         .unwrap()
         .iter()
         .any(|r| r.id == root_id));
+}
+
+// The release window: every exit after the bind settles the row
+
+/// Drive a release that is expected to fail, and hand back the error.
+/// `ReleaseOutcome` carries no `Debug`, so `unwrap_err` is unavailable — and
+/// an unexpected *success* here deserves its own message rather than a
+/// formatting bound on a production type.
+fn release_must_fail(ceremony: &mut RetireCeremony, conn: &Connection) -> anyhow::Error {
+    match ceremony.release(conn) {
+        Ok(_) => panic!("the release was expected to fail"),
+        Err(e) => e,
+    }
+}
+
+/// The book stands and the root is still indexed — the standing every
+/// non-releasing exit leaves behind, asserted the same way for each of them.
+fn root_and_book_still_stand(conn: &Connection, root_id: i64, book: &std::path::Path) {
+    assert!(repo::root::fetch_all(conn)
+        .unwrap()
+        .iter()
+        .any(|r| r.id == root_id));
+    verify_book(book).unwrap();
+}
+
+/// Site 1 — `BEGIN IMMEDIATE` fails, before anything at all is written.
+///
+/// **The substitution is stated, not hidden.** In production the cause is a
+/// second canon process holding the write lock; this test substitutes a
+/// transaction already open on the same connection, which fires the same `?`
+/// deterministically and in-process — no second connection, no 30-second busy
+/// timeout. Same site, same exit, different cause: this is *not* a contention
+/// test, and must not be read as one.
+#[test]
+fn a_release_that_cannot_begin_is_never_left_started() {
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+    let bound = ceremony.bind(&conn, test_telling()).unwrap();
+
+    conn.execute_batch("BEGIN").unwrap();
+    let err = release_must_fail(&mut ceremony, &conn);
+    // Close the ambient transaction so the settling UPDATE it swallowed is
+    // durable. (The assertions below read on this same connection, which would
+    // see the write either way — committing is hygiene, not a precondition.)
+    conn.execute_batch("COMMIT").unwrap();
+
+    let decision = retire_decision_row(&conn, &ceremony);
+    assert_eq!(decision.status, "partial");
+    let summary = decision.summary.expect("a settled row carries its summary");
+    assert!(summary.contains("release failed"), "{summary}");
+    assert!(summary.contains(&format!("{err:#}")), "{summary}");
+    root_and_book_still_stand(&conn, root_id, &bound.dir);
+}
+
+/// Site 3 — the removal fails *inside* the transaction, so the settlement has
+/// to outlive the rollback. `remove_root_data` deletes notes first and the
+/// world-moved probe never reads that table, so dropping it lands the failure
+/// past the probe and inside the transaction: that placement is what makes
+/// this the rollback case rather than site 1 again.
+#[test]
+fn a_release_whose_removal_fails_settles_after_the_rollback() {
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+    let bound = ceremony.bind(&conn, test_telling()).unwrap();
+
+    conn.execute_batch("DROP TABLE notes").unwrap();
+    let err = release_must_fail(&mut ceremony, &conn);
+
+    // Written on the connection after the transaction was dropped — a
+    // settlement written inside it would have rolled back with the removal.
+    let decision = retire_decision_row(&conn, &ceremony);
+    assert_eq!(decision.status, "partial");
+    let summary = decision.summary.expect("a settled row carries its summary");
+    assert!(summary.contains("release failed"), "{summary}");
+    assert!(summary.contains(&format!("{err:#}")), "{summary}");
+    // The removal itself rolled back: the root is whole, not half-deleted.
+    root_and_book_still_stand(&conn, root_id, &bound.dir);
+}
+
+/// The composer is the sentence's one home: every exit that leaves the book
+/// bound and the root indexed speaks one standing, and differs from its
+/// siblings only in the parenthetical that names what happened.
+#[test]
+fn every_unreleased_exit_speaks_one_standing() {
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+
+    let summary_of = |conn: &Connection, ceremony: &RetireCeremony| -> String {
+        retire_decision_row(conn, ceremony)
+            .summary
+            .expect("a settled row carries its summary")
+    };
+
+    // The declined confirmation.
+    let mut declined = begin_with(&conn, root_id, RecordingMode::Full);
+    declined.bind(&conn, test_telling()).unwrap();
+    let declined_summary = declined.abandon(&conn).summary;
+
+    // The confirmation prompt that could not be read.
+    let mut prompted = begin_with(&conn, root_id, RecordingMode::Full);
+    prompted.bind(&conn, test_telling()).unwrap();
+    prompted.abandon_on_prompt_failure(&conn, "the terminal is not readable");
+    let prompted_summary = summary_of(&conn, &prompted);
+
+    // A release that failed outright (site 1, same substitution as above).
+    let mut failed = begin_with(&conn, root_id, RecordingMode::Full);
+    failed.bind(&conn, test_telling()).unwrap();
+    conn.execute_batch("BEGIN").unwrap();
+    release_must_fail(&mut failed, &conn);
+    conn.execute_batch("COMMIT").unwrap();
+    let failed_summary = summary_of(&conn, &failed);
+
+    // The world moved — last, because it perturbs the world the other
+    // ceremonies' reviews snapshotted.
+    let mut moved = begin_with(&conn, root_id, RecordingMode::Full);
+    moved.bind(&conn, test_telling()).unwrap();
+    insert_source(&conn, root_id, "new/arrival.jpg", None, true, false, None);
+    let outcome = moved.release(&conn).unwrap();
+    assert!(matches!(outcome, ReleaseOutcome::WorldMoved { .. }));
+    let moved_summary = summary_of(&conn, &moved);
+
+    let prefix = format!(
+        "The book is bound at {}; the root remains in the index (",
+        declined.plan.final_dir.display()
+    );
+    let arms = [
+        ("declined", &declined_summary, "release declined"),
+        (
+            "prompt failed",
+            &prompted_summary,
+            "the release prompt failed: the terminal is not readable",
+        ),
+        ("release failed", &failed_summary, "release failed: "),
+        (
+            "world moved",
+            &moved_summary,
+            "the world moved before release: ",
+        ),
+    ];
+
+    let mut parentheticals = Vec::new();
+    for (name, summary, expected) in arms {
+        let rest = summary
+            .strip_prefix(&prefix)
+            .unwrap_or_else(|| panic!("{name}: not the shared sentence: {summary}"));
+        let reason = rest
+            .strip_suffix(')')
+            .unwrap_or_else(|| panic!("{name}: unterminated parenthetical: {summary}"));
+        assert!(
+            reason.starts_with(expected),
+            "{name}: the register must name what happened: {reason}"
+        );
+        parentheticals.push(reason.to_string());
+    }
+
+    // Four exits, four distinct reasons — one sentence.
+    let mut distinct = parentheticals.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), parentheticals.len(), "{parentheticals:?}");
+}
+
+/// A failed release released nothing, and the row must not imply otherwise:
+/// `completed` stays SQL NULL rather than counting the sources the ceremony
+/// was about to remove.
+#[test]
+fn a_failed_release_claims_no_sources_released() {
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+    ceremony.bind(&conn, test_telling()).unwrap();
+    let rows_before = crate::retire::repo::count_all_by_root(&conn, root_id).unwrap();
+
+    conn.execute_batch("DROP TABLE notes").unwrap();
+    release_must_fail(&mut ceremony, &conn);
+
+    let decision = retire_decision_row(&conn, &ceremony);
+    assert_eq!(decision.count_attempted, Some(rows_before));
+    assert!(
+        decision.count_completed.is_none(),
+        "a failed release released nothing: {:?}",
+        decision.count_completed
+    );
+    assert!(decision.count_failed.is_none());
+    assert!(decision.count_skipped.is_none());
 }

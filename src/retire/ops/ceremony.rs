@@ -323,31 +323,49 @@ impl RetireCeremony {
         })
     }
 
-    /// The release movement: one `BEGIN IMMEDIATE` transaction holding the
-    /// world-moved re-check, the removal, and the decision's completion — the
-    /// re-check's reads must be authoritative against concurrent writers, and
-    /// the transaction is short.
+    /// The release movement, and the ceremony's single exit after the bind.
+    ///
+    /// Every error `perform_release` can raise leaves the same standing — book
+    /// bound, root still in the index, nothing destroyed — so every one of them
+    /// settles here, by construction: a `?` cannot leave the body without
+    /// passing through this arm. Without it the row would keep saying
+    /// `started`, which is reserved for a run that never reached a last act at
+    /// all, over the one ceremony in Canon that destroys index state.
+    ///
+    /// **The reaching is structural; the sentence is positional.** That every
+    /// `?` arrives here holds for any body. That the sentence it records is
+    /// *true* holds only while every `?` sits before `tx.commit()` — see the
+    /// note there, which is the half a later edit can break.
     pub fn release(&mut self, conn: &Connection) -> Result<ReleaseOutcome> {
+        match self.perform_release(conn) {
+            Ok(outcome) => Ok(outcome),
+            Err(e) => {
+                // The transaction is gone by the time we are here — dropped on
+                // the way out — so anything it wrote is rolled back, including
+                // a completion written just before a failed commit. Settling on
+                // the connection is what makes the row's terminal outlive that
+                // rollback.
+                self.record_unreleased(conn, &format!("release failed: {e:#}"));
+                Err(e)
+            }
+        }
+    }
+
+    /// The release movement's body: one `BEGIN IMMEDIATE` transaction holding
+    /// the world-moved re-check, the removal, and the decision's completion —
+    /// the re-check's reads must be authoritative against concurrent writers,
+    /// and the transaction is short.
+    ///
+    /// Private, and reached only through `release`: the settlement its errors
+    /// need lives there, and a second caller would bypass it.
+    fn perform_release(&mut self, conn: &Connection) -> Result<ReleaseOutcome> {
         let book_display = self.plan.final_dir.display().to_string();
         let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
 
         if let Some(detail) = self.world_moved(&tx)? {
             // Nothing was written — dropping the transaction rolls back.
             drop(tx);
-            let summary = format!(
-                "The book is bound at {book_display}; the world moved before release ({detail}) — the root remains in the index"
-            );
-            self.recorder.complete_db(
-                conn,
-                DecisionStatus::Partial,
-                DecisionCounts {
-                    attempted: Some(self.snapshot_source_count),
-                    completed: None,
-                    failed: None,
-                    skipped: None,
-                },
-                &summary,
-            );
+            self.record_unreleased(conn, &format!("the world moved before release: {detail}"));
             return Ok(ReleaseOutcome::WorldMoved {
                 detail,
                 warnings: self.recorder.take_warnings(),
@@ -371,6 +389,12 @@ impl RetireCeremony {
             },
             &summary,
         );
+        // The last statement that may fail. Nothing below may `?`: past this
+        // line the root is gone, and the wrapper would settle the row saying
+        // "the root remains in the index" over a root that does not — a false
+        // statement in the durable record, at the one command that destroys
+        // index state. A step that has to fail after the commit needs its own
+        // sentence, not this one.
         tx.commit()?;
 
         Ok(ReleaseOutcome::Released {
@@ -409,14 +433,30 @@ impl RetireCeremony {
         Ok(None)
     }
 
-    /// The declined second confirmation: the book stands, the root stays.
-    /// The decision completes `partial` — a findable state the rm guard and
-    /// a re-run both read (the re-run converges by replacing the book).
-    pub fn abandon(&mut self, conn: &Connection) -> AbandonResult {
-        let summary = format!(
-            "The book is bound at {}; the root remains in the index (release declined)",
+    /// The one sentence for the standing every non-releasing exit leaves
+    /// behind: the book is bound, the root is still in the index, nothing was
+    /// destroyed. The parenthetical is the only thing that differs between the
+    /// exits that reach it — a declined confirmation, a moved world, a prompt
+    /// that failed, and a release that failed.
+    ///
+    /// The parentheticals are calibrated against each other, and that is this
+    /// composer's job rather than each arm's: the register must match what
+    /// actually happened. A decline is the user's own choice, a moved world is
+    /// a safety check firing, and a failure is a fault — which is why the
+    /// failure arms say `failed` rather than something blander.
+    fn unreleased_summary(&self, reason: &str) -> String {
+        format!(
+            "The book is bound at {}; the root remains in the index ({reason})",
             self.plan.final_dir.display()
-        );
+        )
+    }
+
+    /// Record the bound-not-released standing. `partial` is the ceremony's
+    /// positional word: the bind produced a book, so some of the ceremony did
+    /// happen — unlike `interrupt`, which speaks for a bind that produced none.
+    /// Returns the composed summary, which is also what the interface prints.
+    fn record_unreleased(&mut self, conn: &Connection, reason: &str) -> String {
+        let summary = self.unreleased_summary(reason);
         self.recorder.complete_db(
             conn,
             DecisionStatus::Partial,
@@ -428,10 +468,41 @@ impl RetireCeremony {
             },
             &summary,
         );
+        summary
+    }
+
+    /// The declined second confirmation: the book stands, the root stays.
+    /// The decision completes `partial` — a findable state the rm guard and
+    /// a re-run both read (the re-run converges by replacing the book).
+    pub fn abandon(&mut self, conn: &Connection) -> AbandonResult {
+        let summary = self.record_unreleased(conn, "release declined");
         AbandonResult {
             summary,
             warnings: self.recorder.take_warnings(),
         }
+    }
+
+    /// The second confirmation's prompt itself failed, so the user was never
+    /// asked. The ceremony stands exactly where a decline leaves it, and the
+    /// row must say so rather than read as a kill — but the register names
+    /// what actually happened: the prompt failed, not the release, which was
+    /// never reached. Returns drained warnings, in `interrupt`'s shape (record,
+    /// drain, hand back); the error itself is the caller's to propagate.
+    ///
+    /// Named for `abandon`, not for `interrupt`, because it records what
+    /// `abandon` records: the word here is positional — `partial`, the book
+    /// standing and the root indexed — and `interrupt` is the other word.
+    pub fn abandon_on_prompt_failure(&mut self, conn: &Connection, error: &str) -> Vec<String> {
+        self.record_unreleased(conn, &format!("the release prompt failed: {error}"));
+        self.recorder.take_warnings()
+    }
+
+    /// Drain the recorder's warnings for an error path that has no result
+    /// struct to carry them — `release`'s failure arm settles the row and then
+    /// propagates, so the interface drains here or the settlement's own
+    /// warnings are lost.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        self.recorder.take_warnings()
     }
 
     /// Record a failed bind as `interrupted` — fix-forward: the failure is

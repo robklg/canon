@@ -267,7 +267,19 @@ pub fn retire(
     if !yes {
         println!("Remove the root from the index? Aborting keeps both the root and the book.");
     }
-    if !ceremony::confirm(yes)? {
+    let proceed = match ceremony::confirm(yes) {
+        Ok(proceed) => proceed,
+        Err(e) => {
+            // The prompt itself failed, so the user was never asked. The
+            // ceremony stands exactly where a decline leaves it, and the row
+            // must say so rather than read as a kill.
+            for warning in ceremony_state.abandon_on_prompt_failure(conn, &format!("{e:#}")) {
+                eprintln!("{warning}");
+            }
+            return Err(e);
+        }
+    };
+    if !proceed {
         let abandoned = ceremony_state.abandon(conn);
         println!("{}", abandoned.summary);
         for warning in &abandoned.warnings {
@@ -276,7 +288,19 @@ pub fn retire(
         return Ok(());
     }
 
-    match ceremony_state.release(conn)? {
+    let outcome = match ceremony_state.release(conn) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            // `release` settled the row before returning; these are that
+            // settlement's own warnings, which the error path would otherwise
+            // drop.
+            for warning in ceremony_state.take_warnings() {
+                eprintln!("{warning}");
+            }
+            return Err(e);
+        }
+    };
+    match outcome {
         super::ops::ReleaseOutcome::Released {
             summary, warnings, ..
         } => {
