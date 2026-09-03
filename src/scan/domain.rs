@@ -266,12 +266,15 @@ pub enum OldPathCheck {
     /// what was observed, not its former self.
     Present,
 
-    /// The candidate's path is empty and its root answered — the file that was
-    /// there is gone from there. This is the one state a move can be claimed
-    /// from, and only with corroboration on top.
+    /// The candidate's path is empty and its root answered on the device the
+    /// row was observed on — the file that was there is gone from there.
+    /// Absence is only absence when the storage that held it is the storage
+    /// that answered. This is the one state a move can be claimed from, and
+    /// only with corroboration on top.
     Vacated,
 
-    /// The check could not be made: the root is unreachable, or the stat failed
+    /// The check could not be made: the root is unreachable, the root answered
+    /// on a different device than the row was observed on, or the stat failed
     /// for a reason that is not absence. Ignorance, not evidence — never
     /// claimed, always counted.
     Unverifiable,

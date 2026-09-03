@@ -50,7 +50,13 @@ ID   ROLE       FILES  LAST SCAN         PATH
 
 ## Suspending Roots
 
-Suspended roots are hidden from listings, excluded from `scan --all`, and their sources are excluded from all queries (`ls`, `facts`, `coverage`, `worklist`, etc.). Suspended roots still prevent overlapping (you cannot add a new root at a suspended root's path). Use `--suspended` to list only suspended roots.
+Suspending a root sets it aside without changing anything in it. Its content stays indexed and keeps the standing it had, and `canon roots unsuspend` brings it back.
+
+A suspended root is hidden from `canon roots` (use `--suspended` to list only suspended roots) and skipped by `scan --all`; scanning a path inside one is refused, naming the way back. Its sources are left out of what the query commands report on: [`ls`](../query/ls.md), [`facts`](../query/facts.md), [`compare`](../query/compare.md), [`survey`](../query/survey.md), [`coverage`](../archive/coverage.md) and [`worklist`](../enrich/worklist.md). [`sweep`](../query/sweep.md) keeps its places off the board and states the pause in a footer.
+
+Two things a suspended root goes on doing. Its copies still count as evidence about content elsewhere, so content that also sits in a suspended archive root still reads as archived, both under `--where archived?` and in [`coverage`](../archive/coverage.md). And what Canon already recorded still reads: [`trail`](../query/trail.md), [`roots story`](story.md), [`note`](../manage/note.md) and bound books are unaffected.
+
+Suspended roots still prevent overlapping (you cannot add a new root at a suspended root's path).
 
 ## Removing Roots
 
