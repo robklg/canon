@@ -3,7 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::archive::domain::{parse_manifest_allow, validate_manifest_version, ManifestConfig};
+use crate::archive::domain::{parse_manifest_allow, parse_manifest_config, ManifestConfig};
 use crate::archive::ops::generate::{
     ClusterGenerateParams, ClusterGeneratePlan, ExecuteGenerateParams, ExecuteRefreshParams,
 };
@@ -226,9 +226,7 @@ fn read_manifest_text(config_path: &Path) -> Result<String> {
 /// One spelling, so the content a `--edit` refresh re-queries from passes the
 /// same gates the plain refresh applies.
 fn parse_manifest(content: &str, config_path: &Path) -> Result<(ManifestConfig, bool, bool)> {
-    let config: ManifestConfig = toml::from_str(content)
-        .with_context(|| format!("Failed to parse config: {}", config_path.display()))?;
-    validate_manifest_version(config.meta.version)?;
+    let config = parse_manifest_config(content, config_path)?;
     let (allow_archived, allow_duplicates) = parse_manifest_allow(&config.options.allow)?;
     Ok((config, allow_archived, allow_duplicates))
 }
@@ -1652,7 +1650,7 @@ mod tests {
         };
         let err = run_refresh(&mut db, &manifest_path, Some(&edit)).unwrap_err();
         assert!(
-            format!("{err:#}").contains("Failed to parse config"),
+            format!("{err:#}").contains("Failed to parse manifest config"),
             "{err:#}"
         );
 

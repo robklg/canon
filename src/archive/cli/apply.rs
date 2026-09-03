@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::archive::domain::{
-    extract_notes, parse_manifest_allow, validate_manifest_version, LockEntry, ManifestConfig,
+    extract_notes, parse_manifest_allow, parse_manifest_config, LockEntry,
 };
 use crate::archive::ops::execute::{self, TransferMode};
 use crate::archive::ops::{manifest, pattern, plan};
@@ -68,14 +68,13 @@ pub fn run(
             )
         };
 
-    // Read TOML config
+    // Read the TOML config. The text is kept because the notes at the bottom
+    // of it are read again further down; the parse itself goes through the
+    // domain's one door, which gates the version before it asks for the
+    // body's shape.
     let config_content = fs::read_to_string(&config_path)
         .with_context(|| format!("Failed to read manifest config: {}", config_path.display()))?;
-    let config: ManifestConfig = toml::from_str(&config_content)
-        .with_context(|| format!("Failed to parse manifest config: {}", config_path.display()))?;
-
-    // Validate manifest version
-    validate_manifest_version(config.meta.version)?;
+    let config = parse_manifest_config(&config_content, &config_path)?;
 
     // Merge manifest [options] with CLI options.
     //

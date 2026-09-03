@@ -5,9 +5,10 @@
 //! sources as they stood, each with the scope-relative path it was measured
 //! to. Generating writes the pair; the status read and apply consume it. The
 //! accessors sit together because the two files are one on-disk format — a
-//! change to either is almost always a change to both. Apply still reads the
-//! *manifest* inline rather than through `read_manifest_config`, which is a
-//! known wart, not a second format; the lock it reads through here.
+//! change to either is almost always a change to both. Apply reads the
+//! *manifest* text itself, because it reads the notes at the bottom of it a
+//! second time, but it parses through the same domain door this does; the lock
+//! it reads through here.
 
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -15,7 +16,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-use crate::archive::domain::{validate_manifest_version, LockEntry, LockHeader, ManifestConfig};
+use crate::archive::domain::{parse_manifest_config, LockEntry, LockHeader, ManifestConfig};
 use crate::expr::Unmeasured;
 
 /// Write content to a file and fsync to ensure it's flushed to disk.
@@ -62,6 +63,9 @@ pub(super) fn write_lock_file(
 }
 
 /// Read and parse a manifest TOML config file.
+///
+/// The gate-before-shape ordering belongs to the domain parser this calls; all
+/// that is added here is the file read.
 pub fn read_manifest_config(manifest_path: &Path) -> Result<ManifestConfig> {
     let config_content = fs::read_to_string(manifest_path).with_context(|| {
         format!(
@@ -69,14 +73,7 @@ pub fn read_manifest_config(manifest_path: &Path) -> Result<ManifestConfig> {
             manifest_path.display()
         )
     })?;
-    let config: ManifestConfig = toml::from_str(&config_content).with_context(|| {
-        format!(
-            "Failed to parse manifest config: {}",
-            manifest_path.display()
-        )
-    })?;
-    validate_manifest_version(config.meta.version)?;
-    Ok(config)
+    parse_manifest_config(&config_content, manifest_path)
 }
 
 /// A lock file as read back: the header it declares, and its entries.

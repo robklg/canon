@@ -12,8 +12,9 @@
 //! layer's job.
 
 use std::fmt;
+use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::core::domain::source::Source;
@@ -114,11 +115,12 @@ fn default_version() -> u32 {
 
 /// The version a freshly written manifest carries.
 ///
-/// 2 since `meta.scope` became a list. The bump does not make an older canon
-/// binary emit the friendly refusal on a v2 manifest — its parse runs before
-/// its version gate, so it fails on the type first — but it stops `version =
-/// 1` from meaning two different formats, which is what the *next* format
-/// change would otherwise inherit.
+/// 2 since `meta.scope` became a list. The bump does not make an *already
+/// shipped* canon binary emit the friendly refusal on a v2 manifest — those
+/// parse before they gate, so they fail on the type first — but it stops
+/// `version = 1` from meaning two different formats, which is what the next
+/// format change would otherwise inherit. From this version on the ordering is
+/// the other way round: see [`parse_manifest_config`].
 pub const CURRENT_MANIFEST_VERSION: u32 = 2;
 
 const SUPPORTED_MANIFEST_VERSION: u32 = CURRENT_MANIFEST_VERSION;
@@ -128,6 +130,49 @@ pub fn validate_manifest_version(version: u32) -> Result<()> {
         bail!("Manifest version {version} is not supported by this version of Canon. Please update Canon.");
     }
     Ok(())
+}
+
+/// Parse a manifest body: **the version gate first, the body's shape second.**
+///
+/// The order is the whole of it. A manifest written by a later Canon is
+/// exactly the file whose shape this binary may not know, so deserializing
+/// first spends the error on a serde type mismatch and the friendly "update
+/// Canon" refusal becomes unreachable in the one case it exists for. The
+/// number is therefore read off a `toml::Value`, which needs no knowledge of
+/// the body at all, and gated before `ManifestConfig` is ever asked for.
+///
+/// Every production read of a manifest passes through here, which is what
+/// keeps the ordering a fact about the tree rather than a habit three callers
+/// happen to share: `ops/manifest.rs` adds the file read for `cluster status`,
+/// `cli/apply.rs` adds its own read because it needs the text a second time
+/// for the notes, and `cli/cluster.rs` adds the `[options] allow` vocabulary
+/// for generate and refresh. None of them deserializes a `ManifestConfig`
+/// itself.
+pub fn parse_manifest_config(content: &str, config_path: &Path) -> Result<ManifestConfig> {
+    if let Some(version) = probe_manifest_version(content) {
+        validate_manifest_version(version)?;
+    }
+    toml::from_str(content)
+        .with_context(|| format!("Failed to parse manifest config: {}", config_path.display()))
+}
+
+/// Read `meta.version` while knowing nothing else about the body.
+///
+/// `None` means the question could not be asked — not TOML at all, no
+/// `meta.version`, or a number no version could be — never that the manifest
+/// is current. Those all fall through to the full parse, so serde still speaks
+/// for every malformed file that is not a version problem, and an absent
+/// version is left to `default_version`: an old manifest is not a future one.
+///
+/// A value past `u32` saturates rather than falling through. It is a future
+/// version under any reading, and the refusal is the useful answer.
+fn probe_manifest_version(content: &str) -> Option<u32> {
+    let value: toml::Value = toml::from_str(content).ok()?;
+    let version = value.get("meta")?.get("version")?.as_integer()?;
+    if version < 0 {
+        return None;
+    }
+    Some(u32::try_from(version).unwrap_or(u32::MAX))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -493,6 +538,83 @@ base_dir = ""
     fn a_future_manifest_version_is_still_refused() {
         assert!(validate_manifest_version(CURRENT_MANIFEST_VERSION).is_ok());
         assert!(validate_manifest_version(CURRENT_MANIFEST_VERSION + 1).is_err());
+    }
+
+    /// A manifest from a later Canon whose **body shape** this binary cannot
+    /// deserialize still gets the version refusal.
+    ///
+    /// This is the case the gate exists for and the only one it used to miss:
+    /// a format change is what a version bump announces, so the file that most
+    /// needs "update Canon" is the file serde cannot parse. The second
+    /// assertion is what makes the first mean anything — it holds the body
+    /// genuinely undeserializable, so the refusal can only have come from
+    /// asking the version first.
+    #[test]
+    fn a_future_manifest_is_refused_by_version_before_its_shape() {
+        let toml_str = r#"
+[meta]
+version = 99
+query = []
+scope = { paths = ["/photos"] }
+generated_at = "2026-02-15T12:00:00Z"
+lock_hash = "abc123"
+
+[output]
+pattern = "{filename}"
+archive_root_id = 1
+base_dir = ""
+"#;
+        assert!(
+            toml::from_str::<ManifestConfig>(toml_str).is_err(),
+            "the fixture must be a body this binary cannot deserialize, \
+             or the test proves nothing about ordering"
+        );
+
+        let err = parse_manifest_config(toml_str, Path::new("/m.toml"))
+            .err()
+            .expect("a future manifest must be refused")
+            .to_string();
+        assert!(err.contains("99"), "{err}");
+        assert!(err.contains("Please update Canon"), "{err}");
+    }
+
+    /// A body that is malformed for any reason *other* than its version still
+    /// gets serde's own message: the probe is a gate, never a filter.
+    #[test]
+    fn a_malformed_current_manifest_still_gets_the_parse_error() {
+        let toml_str = r#"
+[meta]
+version = 1
+query = []
+generated_at = "2026-02-15T12:00:00Z"
+lock_hash = "abc123"
+"#;
+        let err = parse_manifest_config(toml_str, Path::new("/m.toml"))
+            .err()
+            .expect("a future manifest must be refused")
+            .to_string();
+        assert!(err.contains("Failed to parse manifest config"), "{err}");
+        assert!(!err.contains("update Canon"), "{err}");
+    }
+
+    /// A manifest with no `meta.version` is an *old* one, not a future one:
+    /// the probe leaves it to `default_version` rather than refusing it.
+    #[test]
+    fn a_manifest_without_a_version_is_not_refused() {
+        let toml_str = r#"
+[meta]
+query = []
+scope = ["/photos"]
+generated_at = "2026-02-15T12:00:00Z"
+lock_hash = "abc123"
+
+[output]
+pattern = "{filename}"
+archive_root_id = 1
+base_dir = ""
+"#;
+        let config = parse_manifest_config(toml_str, Path::new("/m.toml")).unwrap();
+        assert_eq!(config.meta.version, 1);
     }
 
     // =========================================================================
