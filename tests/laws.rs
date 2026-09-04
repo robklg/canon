@@ -742,7 +742,6 @@ const UNQUALIFIED: &[(&str, &str)] = &[
     ("bidirectional", "owner not found"),
     ("cross-cutting", "kind of law"),
     ("index", "prose variant"),
-    ("last interface-layer", "law site"),
     ("lens separation", "verifier not found"),
     ("limit", "kind of law"),
     ("named", "sentence about laws"),
@@ -869,28 +868,23 @@ fn unit_names(root: &Path) -> BTreeSet<String> {
     units
 }
 
-/// The prose corpus this register reads, and how much of it was there.
+/// The prose corpus this register reads.
 ///
-/// CLAUDE.md is git-ignored at every depth, so a checkout of the tracked tree
-/// alone has **none** of it. That is not a broken corpus, it is a corpus that
-/// is not present — and the difference matters here in a way it does not for
-/// the citation guard next door: that guard only ever *adds* violations, so
-/// absence makes it silently pass, while this one asserts a set equality that
-/// absence would turn into "every entry is stale". A checkout with no corpus
-/// must not fail a check about prose it does not have.
-struct Corpus {
-    citations: Vec<Citation>,
-    files_read: usize,
-}
-
-fn read_corpus(root: &Path) -> Corpus {
+/// The corpus is always present: these files are tracked, and every `src/`
+/// subdirectory owes one. Absence is therefore a failure and not a state to
+/// tolerate — and the tolerance mattered here more than next door, because
+/// this check asserts a set equality that an empty corpus would turn into
+/// "every entry is stale".
+fn read_corpus(root: &Path) -> Vec<Citation> {
     let mut citations = Vec::new();
-    let mut files_read = 0;
     for path in common::claude_md_paths(root) {
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue; // git-ignored file, absent in this checkout.
-        };
-        files_read += 1;
+        let text = fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "failed to read {} — every src/ subdirectory owes a CLAUDE.md: {}",
+                path.display(),
+                e,
+            )
+        });
         let display = path
             .strip_prefix(root)
             .unwrap_or(&path)
@@ -898,23 +892,16 @@ fn read_corpus(root: &Path) -> Corpus {
             .to_string();
         citations.extend(law_citations(&display, &text));
     }
-    Corpus {
-        citations,
-        files_read,
-    }
+    citations
 }
 
 // ---------------------------------------------------------------------------
 // The checks over the real tree.
 // ---------------------------------------------------------------------------
 
-/// What direction A concluded. `NoCorpus` is a real answer, not a skip: the
-/// prose this check reads is git-ignored at every depth, so a checkout of the
-/// tracked tree alone has none of it, and a set equality against nothing would
-/// report every entry as stale. A check with no input says so.
+/// What direction A concluded.
 #[derive(Debug, PartialEq, Eq)]
 enum DirectionA {
-    NoCorpus,
     Resolved,
     Unresolved {
         unlisted: Vec<String>,
@@ -922,11 +909,8 @@ enum DirectionA {
     },
 }
 
-fn direction_a(corpus: &Corpus, laws: &[Law], listed: &[(&str, &str)]) -> DirectionA {
-    if corpus.files_read == 0 {
-        return DirectionA::NoCorpus;
-    }
-    let unregistered = unregistered_keys(&corpus.citations, laws);
+fn direction_a(citations: &[Citation], laws: &[Law], listed: &[(&str, &str)]) -> DirectionA {
+    let unregistered = unregistered_keys(citations, laws);
     let found: BTreeSet<&str> = unregistered.keys().map(String::as_str).collect();
     let listed: BTreeSet<&str> = listed.iter().map(|(k, _)| *k).collect();
 
@@ -950,12 +934,6 @@ fn direction_a(corpus: &Corpus, laws: &[Law], listed: &[(&str, &str)]) -> Direct
 fn the_unqualified_list_is_exactly_what_the_tree_produces() {
     let root = common::repo_root();
     let (new_names, stale) = match direction_a(&read_corpus(&root), LAWS, UNQUALIFIED) {
-        // Not a silent pass: a checkout with no prose is a different state
-        // from a checkout whose prose agrees, and the reader is told which.
-        DirectionA::NoCorpus => {
-            eprintln!("no CLAUDE.md present in this checkout — direction A has no corpus to check");
-            return;
-        }
         DirectionA::Resolved => return,
         DirectionA::Unresolved { unlisted, stale } => (unlisted, stale),
     };
@@ -1151,35 +1129,29 @@ mod register_self_tests {
         );
     }
 
-    fn corpus(files_read: usize, keys: &[&str]) -> Corpus {
-        Corpus {
-            citations: keys
-                .iter()
-                .map(|k| Citation {
-                    key: (*k).to_string(),
-                    file: "CLAUDE.md".to_string(),
-                    line: 1,
-                })
-                .collect(),
-            files_read,
-        }
+    fn corpus(keys: &[&str]) -> Vec<Citation> {
+        keys.iter()
+            .map(|k| Citation {
+                key: (*k).to_string(),
+                file: "CLAUDE.md".to_string(),
+                line: 1,
+            })
+            .collect()
     }
 
     #[test]
-    fn an_absent_corpus_is_an_answer_not_a_stale_list() {
-        // A checkout of the tracked tree has no CLAUDE.md at all. Reporting
-        // every entry as stale would be a claim about prose that is not here.
-        let verdict = direction_a(&corpus(0, &[]), &[sound_row()], &[("ghost", "law site")]);
-        assert_eq!(verdict, DirectionA::NoCorpus);
-        // The same empty citation set *with* prose present is a real staleness.
-        let verdict = direction_a(&corpus(18, &[]), &[sound_row()], &[("ghost", "law site")]);
+    fn prose_that_names_no_law_makes_every_entry_stale() {
+        // The corpus is always present, so an empty citation set is never
+        // "nothing to check" — it is prose that has stopped spelling the
+        // names the list still carries.
+        let verdict = direction_a(&corpus(&[]), &[sound_row()], &[("ghost", "law site")]);
         assert!(matches!(verdict, DirectionA::Unresolved { .. }));
     }
 
     #[test]
     fn direction_a_names_both_ways_the_list_can_be_wrong() {
         let verdict = direction_a(
-            &corpus(18, &["widget-alignment"]),
+            &corpus(&["widget-alignment"]),
             &[sound_row()],
             &[("ghost", "law site")],
         );
@@ -1190,7 +1162,7 @@ mod register_self_tests {
         assert!(stale[0].contains("ghost"), "{stale:?}");
         // A registered name is silenced by its row, not by the list.
         assert_eq!(
-            direction_a(&corpus(18, &["two-claims placement"]), &[sound_row()], &[]),
+            direction_a(&corpus(&["two-claims placement"]), &[sound_row()], &[]),
             DirectionA::Resolved,
         );
     }

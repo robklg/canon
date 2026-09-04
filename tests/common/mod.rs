@@ -320,8 +320,12 @@ fn collect_rs_files_inner(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Every CLAUDE.md the guards read: the root file, then one per `src/`
-/// subdirectory. The files are git-ignored, so a caller skips an absent one
-/// rather than failing on it.
+/// subdirectory. These files are tracked, and every `src/` subdirectory owes
+/// one — a directory that documents nothing is a subsystem no reader can find
+/// their way into — so a caller reads each of these and fails on an absent
+/// one. Which register files must exist is asserted in one place, the ceiling
+/// guard's both-directions match; the callers here only need to not paper over
+/// an absence when they meet it.
 pub fn claude_md_paths(root: &Path) -> Vec<PathBuf> {
     let mut candidates = vec![root.join("CLAUDE.md")];
     if let Ok(entries) = fs::read_dir(root.join("src")) {

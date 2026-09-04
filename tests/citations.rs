@@ -16,8 +16,8 @@
 //!   `Type::method` tail.
 //! - **Inventory bullets** — a `Modules:` line in a CLAUDE.md enumerates
 //!   module names; each must exist in the directory the bullet describes.
-//!   CLAUDE.md files are git-ignored, so an absent file is skipped, never
-//!   failed.
+//!   These files are tracked and every `src/` subdirectory owes one, so an
+//!   absent file is a failure rather than something to skip past.
 //!
 //! Deliberately out of scope: prose that asserts a *state* without naming a
 //! path ("no old-tree file reaches..."). That form is not mechanically
@@ -228,9 +228,13 @@ fn check_inventory_line(
 }
 
 fn check_claude_md(root: &Path, path: &Path) -> Vec<String> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return Vec::new(); // git-ignored file, absent in this checkout — skip.
-    };
+    let text = fs::read_to_string(path).unwrap_or_else(|e| {
+        panic!(
+            "failed to read {} — every src/ subdirectory owes a CLAUDE.md: {}",
+            path.display(),
+            e,
+        )
+    });
     let display = path
         .strip_prefix(root)
         .unwrap_or(path)
