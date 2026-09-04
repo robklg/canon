@@ -69,7 +69,8 @@ pub fn generate(
         .collect::<Result<Vec<_>>>()?;
 
     // The scope this run settles on, through the very code a manifest's own
-    // scope goes through — the requester's "exactly the same code" ruling.
+    // scope goes through: generate, refresh and apply resolve scope through
+    // exactly the same code.
     // Asking again is what makes generate and refresh incapable of disagreeing;
     // it is not a formality over prefixes already known to confirm, as the
     // paragraph below says.
@@ -85,8 +86,8 @@ pub fn generate(
     // index knows nothing under.
     //
     // Stated, then treated exactly as a refresh treats it — same registers,
-    // same answer — which is the "exactly the same code" ruling applied to the
-    // arm that is easiest to believe cannot happen.
+    // same answer — which is the same-code rule reaching the arm that is
+    // easiest to believe cannot happen.
     crate::scope::write_set_asides(&mut std::io::stdout().lock(), generate_scope.set_aside());
 
     // Plan. Selection reads the same healed register the measurement is taken

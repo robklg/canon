@@ -342,8 +342,9 @@ mod tests {
         // whose evidence sits behind that door must still leave the board.
         //
         // The residual half is the reason this test is here and must not be
-        // simplified away: it is the one place the inclusion half of the
-        // ruling becomes checkable, and unifying the sweep's inclusion policy
+        // simplified away: it is the one place the inclusion half of
+        // "computed always, ranked never" becomes checkable, and unifying the
+        // sweep's inclusion policy
         // with the query surfaces' active-only convention would break it
         // silently everywhere else.
         let conn = setup_test_db();

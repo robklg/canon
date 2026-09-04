@@ -150,9 +150,8 @@ fn merge_slices(atoms: Vec<ActAtom<'_>>) -> Vec<ActAtom<'_>> {
 /// Acts land where they touched — per-(decision, directory) slices from
 /// extraction origins and stamped dirs, never scope claims — so a decision
 /// spanning places renders as slices (partial counts, same id) and
-/// `no decision here` is true wherever it renders (the place-grain ruling of
-/// the 2026-08-03 tuning spec, superseding the earlier decision-grain
-/// anchoring).
+/// `no decision here` is true wherever it renders. Acts anchor at place grain,
+/// never at decision grain.
 ///
 /// The walk is the sweep's emission discipline transplanted — emit at the
 /// widest boundary where the line stays honest, descend only while the story

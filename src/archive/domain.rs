@@ -208,11 +208,10 @@ pub struct LockHeader {
     ///
     /// **A discriminator, not a gate** — deliberately, and unlike
     /// [`validate_manifest_version`] beside it. Nothing reads the number back,
-    /// so a lock from a later Canon is read as this one. That follows the
-    /// ephemerality ruling this format change was made under: a lock is a
-    /// temporary artifact rebuilt by `cluster refresh`, so no compatibility
+    /// so a lock from a later Canon is read as this one. A lock is ephemeral —
+    /// a temporary artifact rebuilt by `cluster refresh` — so no compatibility
     /// path is owed in either direction. Whoever adds a forward gate is
-    /// reversing that ruling, not filling an omission.
+    /// reversing that, not filling an omission.
     pub lock_version: u32,
     /// The resolved scope, for `apply`'s decision record. Confirmed prefixes
     /// only — a line the index could not confirm never reaches here, so the

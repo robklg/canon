@@ -1564,8 +1564,8 @@ mod tests {
         }
     }
 
-    /// The requester's "exactly the same code" ruling, pinned rather than
-    /// trusted: generation and refresh must write **byte-identical** locks
+    /// The same-code rule, pinned rather than trusted: generation and refresh
+    /// resolve scope through one pipeline and must write **byte-identical** locks
     /// from the same inputs. Two similar loops is the drift this whole class
     /// of defect comes from, so what is asserted is the file, not a field.
     #[test]

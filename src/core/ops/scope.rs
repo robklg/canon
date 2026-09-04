@@ -1001,8 +1001,8 @@ mod tests {
     // because the whole question is what the index knows.
     // ========================================================================
 
-    /// The anchor, from the requester's ruling that generate, refresh and
-    /// apply use exactly the same code: the same paths must produce the same
+    /// The anchor: generate, refresh and apply use exactly the same code, so
+    /// the same paths must produce the same
     /// recorded scope whether they were typed as arguments (through
     /// `resolve_scope`) or written into a manifest by hand (through
     /// `resolve_recorded_scope`). This is the test that fails the day the two
