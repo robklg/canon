@@ -15,18 +15,18 @@ subsystem stands on, and its identity is a small set of verbs: it **names** the 
 rebuildably and proves it**, **lends the hands** that touch disk, **conjugates** every verb
 through one grammar, and **defends its own laws**.
 
-**The bidirectional law.** Core never tells — no narration, no voice; its outputs are facts
+**The bidirectional rule.** Core never tells — no narration, no voice; its outputs are facts
 and typed results, and the voice belongs to the tellers. And tellers never warrant — a
 subsystem that re-derives a claim core already makes has made a second claim, and two
 mechanics for one claim are a safety defect waiting to disagree with themselves. Every
 boundary question here resolves against this law first.
 
 **The warrant-limit pairing.** Every warrant ships with the law of what it does *not* say; a
-warrant without its limit law is a false-claim generator. Wherever the spine states a claim
+warrant without its limit is a false-claim generator. Wherever the spine states a claim
 mechanic, the mechanic's limit is stated and enforced beside it — the pairing, not the
 positive half alone, is what gets reviewed when either changes.
 
-| Warrant | Positive mechanic | Limit law, and where it is enforced |
+| Warrant | Positive mechanic | Limit, and where it is enforced |
 |---|---|---|
 | **Identity** | the hash; one content, one object — `ops::fs::compute_partial_hash`/`compute_full_hash`, `domain::object` | **contentless** — identity claims about empty content are vacuous. `domain::source::is_contentless` is the one place `size == 0` is written; the SQL projections in `repo::object` carry it into every archived-ness query |
 | **Standing** | the two-register resolution account — `domain::resolution::{classify_present, classify_absent, build_account}` | **the asymmetric verdict** — unresolved is provable, ready never is. Coverage is a containment fact: precise about content, silent about shape and worth |
@@ -42,7 +42,7 @@ that read them (`is_excluded`, `is_contentless`, `matches_scope`, `find_containi
 Every subsystem speaks these; nothing here knows about any subsystem. Beside them the pure
 shape the nouns need to be handled at all — `domain::{path, scope, format, include, config}`:
 path manipulation and offline resolution, `ScopeMatch` and `DecisionScope`, display
-formatting, the visibility set, ledger-config parsing. Same purity law throughout: no I/O, so
+formatting, the visibility set, ledger-config parsing. Same purity rule throughout: no I/O, so
 path matching and scope resolution are testable with known inputs.
 
 These are here because the Feature-First Structure ADR names them as the spine, not because
@@ -73,11 +73,11 @@ two consumers were counted. The membership criteria below apply to everything el
   `fate_transition`/`Posture`/`fate_posture`. The one what/posture derivation, keyed on
   `(family, aspect)`. Shared between the trail rollup (which has the presence axis) and
   receipt writing (which supplies the aspect by receipt kind); neither owns it. The posture
-  half is the *happening* warrant's limit law, which is why it sits with the transition
+  half is the *happening* warrant's limit, which is why it sits with the transition
   vocabulary rather than in the recorder.
 - **`domain::extraction`** — `OriginDisposition`/`DecisionExtraction`/`ExtractionItem`/
   `build_extraction_rows`. Shared between apply's forward recording and `ledger reindex`'s
-  backfill. The round-trip law — a backfilled row structurally indistinguishable from a
+  backfill. The extraction round-trip law — a backfilled row structurally indistinguishable from a
   forward-recorded one — holds because both call the same aggregation function, not because
   two implementations agree.
 
@@ -175,7 +175,7 @@ in unsettled.
   pre-vocabulary receipts lack) live here deliberately and must never migrate into
   `ops::receipt`, which stays writer-only.
 
-  Its apply-driving tests do **not** live here: they prove the round-trip law by running a
+  Its apply-driving tests do **not** live here: they prove the extraction round-trip law by running a
   real apply, so they name archive's transfer types, and a core test may not name a subsystem
   any more than core code may. They live in `archive/ops/receipt.rs`. If a future core test
   wants a subsystem, the answer is the same one: it is not a core test.
@@ -193,7 +193,7 @@ only apply asks, and sit with it in `archive/ops/plan.rs`.
 
 ### It reads the world for the tellers — `ops::root_story`, `domain::folder_tree`
 
-Substrate that stops before any voice — the bidirectional law's sharpest edge, since
+Substrate that stops before any voice — the bidirectional rule's sharpest edge, since
 everything here exists to be narrated by someone else.
 
 - **`ops::root_story`** — `RootStory`, `fetch_root_story`. The one structural fetch of a
@@ -229,11 +229,14 @@ directory over ungated, because defaulting to CWD is a context switch rather tha
 about content. A consumer that reads "came from `resolve_scope`" as "met the gate" is wrong on
 that arm, which is the commonest one there is.
 
-The **form-tolerance rule**: the gate retries a path's below-root remainder through its
+The **form-tolerance law**: the gate retries a path's below-root remainder through its
 normalization candidates and hands back the byte-form the index stores, so every downstream
 comparison — Rust prefix matching and the SQL boundary spellings alike — sees stored bytes.
-That retry is spoken once, in `stored_form_of_rel`, and reached from both doors: the argument
-door's gate and the manifest door's `resolve_recorded_scope`.
+One law, two halves: the **owner** is `domain::path::normalization_candidates`, the root half,
+database-free and first at every door; the retry is its **registered projection**, spoken once
+in `stored_form_of_rel` and reached from both — the argument door's gate and the manifest
+door's `resolve_recorded_scope`. Canon-wide: wherever a path arrives as text and is matched
+byte-exact, this is the law it owes.
 
 `ops::scope` also owns `cwd_for`/`needs_cwd`: the current directory's absence is only fatal
 when a relative path needs one, so an absolute-path invocation survives a CWD deleted out from
@@ -251,7 +254,7 @@ prefix in their own silence: the vantage measures from somewhere deeper and file
 flattened at exit 0, while the recorder writes a scoped act down as a global one.
 
 It reuses rather than re-spells, and it does so **in two stages** — the same form-tolerance
-rule reaching both halves of a path, not two rules. Stage one is `attribute_prefix`
+law reaching both halves of a path, not two rules. Stage one is `attribute_prefix`
 (`domain::path::normalization_candidates` composed with `domain::root::find_containing_root`),
 which is pure and answers *which root*. Stage two asks which byte-form of the below-root
 remainder the index knows sources under, which only a database can answer, so it lives one
@@ -448,5 +451,5 @@ Three questions, in order:
    Sole-consumer code stays with its consumer, and comes here when a second one appears — with
    the trace in hand, not the expectation.
 
-And if it states a claim: **what is its limit law, and where is that enforced?** A warrant
+And if it states a claim: **what is its limit, and where is that enforced?** A warrant
 arriving without one is not ready to arrive.

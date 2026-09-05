@@ -20,7 +20,11 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   counterpart standing, hub and sibling-parent grouping, the reciprocal collapse, the closed-door
   partition). Never rank inside the engine, never classify in the interface — that is what leaves a
   future lens a second function over the same `StructuralSweep` rather than a rewrite. Code
-  vocabulary: "structural computation" and "lens derivation".
+  vocabulary: "structural computation" and "lens derivation". The half a spelling check can
+  settle is the **direction of the edge**, and that is what carries the law: the engine's files
+  name no identifier containing `lens`, pinned by `the_structural_engine_never_names_the_lens`.
+  Ranking computed in the wrong place still ranks correctly, so no behavioural test would see
+  the edge reverse.
 - **The engine's two suspension-aware lines are not an exception and must not become one**: the
   live-preferred counterpart choice decides which place a finding *cites as evidence*, and
   `Coverage.suspended_locations` *counts* locations — neither orders anything, which is the property
@@ -46,7 +50,7 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   ≥ `emit_floor_files`). Suspended roots stay in — **never removed from computation**.
 - **`SweepParams` are named calibratable constants** (lifting tolerance, candidate/concentration
   thresholds, ubiquity cap, emit floors); recalibration changes constants, never code paths.
-  **`LensParams` are the lens's own**, kept apart from them so the separation law reads in the
+  **`LensParams` are the lens's own**, kept apart from them so the lens separation law reads in the
   types: `root_entry_bucket` (default 1 — fewer than ten unresolved sources remain),
   `nearness_render_bucket` (2), `sibling_run_min` (2), `sibling_parent_coverage` (0.60).
 - **The interface classifies nothing**: every ranking and grouping decision arrives in the typed
@@ -124,7 +128,7 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   content is resolution rather than overlap and a contentless source resolves with its place, so
   counting either would measure numerator and denominator over two populations. **A lens input,
   never an engine output**: per-folder subtree sums returned from the structural computation would
-  put a ranking input inside a computation the separation law calls lens-free
+  put a ranking input inside a computation the lens separation law calls lens-free
   (`the_coverage_denominator_counts_only_comparison_participating_rows`). Neither it nor
   `RootNearness` issues a second query.
 - **Members state their own counterpart standing**, for the reason the root entry already

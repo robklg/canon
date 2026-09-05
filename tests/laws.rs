@@ -577,6 +577,20 @@ const LAWS: &[Law] = &[
         record: "2026-07-04",
     },
     Law {
+        name: "form-tolerance",
+        // One law with two halves, one owner and one registered projection.
+        // The root half — `normalization_candidates` over root containment —
+        // needs no database and runs first at both doors; the remainder half
+        // is `core::ops::scope::stored_form_of_rel`, spoken once and reached
+        // by both. The verifier is the one that pins what is worth
+        // protecting: that the two doors run both halves in the same order.
+        owner: "core/domain/path.rs",
+        verifier: "the_two_doors_agree_on_the_same_paths",
+        reach: Reach::Canon,
+        authority: Authority::Searched,
+        record: "2026-09-03",
+    },
+    Law {
         name: "four-layer",
         owner: "tests/architecture.rs",
         verifier: "architecture_rules_hold",
@@ -591,6 +605,22 @@ const LAWS: &[Law] = &[
         reach: Reach::Unit("sweep"),
         authority: Authority::Recognised,
         record: "2026-08-15",
+    },
+    Law {
+        name: "lens separation",
+        owner: "sweep/domain/structural.rs",
+        verifier: "the_structural_engine_never_names_the_lens",
+        reach: Reach::Unit("sweep"),
+        authority: Authority::Recognised,
+        record: "2026-09-03",
+    },
+    Law {
+        name: "never-literal",
+        owner: "retire/domain/book.rs",
+        verifier: "the_book_never_spells_a_fate_word_as_a_literal",
+        reach: Reach::Unit("retire"),
+        authority: Authority::Recognised,
+        record: "2026-09-03",
     },
     Law {
         name: "one-fetch",
@@ -734,27 +764,17 @@ const LAWS: &[Law] = &[
 /// - `verifier not found` — an owner exists, and no test names the claim. A
 ///   two-thirds carrier: the most interesting thing this list holds.
 ///
-/// **One reason per key, and a key can have more than one referent.** Three
-/// keys here (`round-trip`, `limit`, `separation`) are read from sites that
-/// mean different laws, and the reason names the dominant one. Splitting them
-/// is rewording work on the prose, not something this list can express.
-const UNQUALIFIED: &[(&str, &str)] = &[
-    ("bidirectional", "owner not found"),
-    ("cross-cutting", "kind of law"),
-    ("index", "prose variant"),
-    ("lens separation", "verifier not found"),
-    ("limit", "kind of law"),
-    ("named", "sentence about laws"),
-    ("never-literal", "verifier not found"),
-    ("own", "prose variant"),
-    ("purity", "prose variant"),
-    ("round-trip", "prose variant"),
-    ("separation", "prose variant"),
-    ("suite-wide", "prose variant"),
-    ("test-enforced", "kind of law"),
-    ("two-claims", "prose variant"),
-    ("v2", "owner not found"),
-];
+/// **One reason per key, and a key can have more than one referent.** A key
+/// read from sites that mean different laws takes the reason of the dominant
+/// one; splitting it is rewording work on the prose, not something this list
+/// can express.
+///
+/// **Empty is the wanted state, and it is the state today**: every law name
+/// the prose spells resolves to a row. Nothing about that is permanent — the
+/// next name written before its carrier exists lands here — and nothing about
+/// it is load-bearing either, because direction A fails the same way whether
+/// the list has one entry or none.
+const UNQUALIFIED: &[(&str, &str)] = &[];
 
 // ---------------------------------------------------------------------------
 // The two directions, as pure checks over supplied evidence.

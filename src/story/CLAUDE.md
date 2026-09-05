@@ -127,8 +127,8 @@ invented wording — the inventory resolves it per file.
 
 **The interface classifies nothing**: rendering is `story_lines`, pure and unit-tested —
 containment indentation, the two wordings, counted omissions that never drop the standing close.
-Handoffs go through `trail_handoff` under the sweep's round-trip law; the readiness review points
+Handoffs go through `trail_handoff` under the sweep's handoff round-trip law; the readiness review points
 at the story on both verdict paths (`story_pointer`, in retire). **Handoffs must answer, not just
-parse**: the round-trip law covers parseability, the trail's history-scope fallback (see the trail
+parse**: the handoff round-trip law covers parseability, the trail's history-scope fallback (see the trail
 conventions) covers answerability — a story handoff points at emptied places by design (the
 best-resolved places are the emptiest), so the trail must never 404 them.

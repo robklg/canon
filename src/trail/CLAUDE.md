@@ -93,7 +93,7 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   door state "nothing crossed" at exit 0 about content that had crossed. Owner:
   `domain::crossings::{CrossingFilter::boundary, crossing_verdict}`; guard
   `a_global_view_borrows_the_named_counterpart_as_its_boundary`.
-- **Membership is `placement_in_view` on both ends, never `scopes_touch`** — the two-claims law, at
+- **Membership is `placement_in_view` on both ends, never `scopes_touch`** — the two-claims placement law, at
   the boundary test (via `classify_row`) and at both narrowing filters alike. A counterpart named at
   a deep path is exactly the ancestor shape that manufactures arrivals at sibling folders. Matching
   is on write-time snapshot paths, so a removed — or removed-and-re-added — counterpart root keeps
@@ -329,9 +329,9 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   fate lines through it, and receipt `[meta]` stamps `transition` through it via `ReceiptKind`.
   `fate_posture` is its orthogonal `performed`/`observed` half (Observed iff a scan-observed
   deletion), stamped as receipt `posture`. Never emit a transition or posture word as a literal —
-  derive it. The receipt↔trail agreement is a compile/test-enforced law, the integrity test walking
+  derive it. The receipt↔trail agreement is enforced by the compiler and by test, the integrity test walking
   every `ReceiptKind`.
-- **Two matching modes, two named predicates — the two-claims law** (`domain/placement.rs`): a
+- **Two matching modes, two named predicates — the two-claims placement law** (`domain/placement.rs`): a
   **declared scope** (`decision_scopes` rows, note paths — "I acted on this subtree") matches
   **bidirectionally** via `scopes_touch`; an **observed placement** (an extraction row's
   origin/destination locations — "my files lie under here") matches **descendant-or-equal only** via
@@ -512,7 +512,7 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   collapses back to the root anyway. Sub-root precision lives in `trail show <id>`'s `drew from:`
   and in receipts. Do not "fix" this into finer granularity without a design pass.
 - **Sum invariant**: `files`/`bytes` on the card equal the sum across every bucket (origins +
-  transitioned + indexed_here + untracked) — a test-enforced law, not just convention. Holds with a
+  transitioned + indexed_here + untracked) — test-enforced, not just convention. Holds with a
   rearranged bucket present.
 - **State, not events**: "Arrived here" (the arrival rollup) is an event total that never shrinks;
   "Standing here" (the card) is a state total that can honestly be smaller once some of what arrived

@@ -64,6 +64,25 @@ impl DecisionScope {
     /// root is dropped — exactly as the recorder dropped it before (e.g. a
     /// `scan --add` root that does not exist yet). Results are sorted and
     /// deduplicated so repeated runs record identically.
+    ///
+    /// **The drop is a licence, not a default, and it is silent.** A scope that
+    /// loses its last prefix here records as a *global* decision, so a caller
+    /// handing this function unvalidated text writes a scoped act down as an
+    /// unscoped one — twice observed, which is why the licence is now narrow.
+    /// Two things redeem it, and a new caller owes one of them:
+    ///
+    /// - **Root-validated prefixes.** What `core::ops::scope::resolve_scope`
+    ///   returns has already been matched to a root, form-tolerantly, with
+    ///   anything it could not match carried as a set-aside. Nothing arriving
+    ///   from there is droppable, so the licence is never exercised.
+    /// - **Reconciliation at completion.** The caller records its scopes a
+    ///   second time through `record_scopes`, so a prefix under a root that did
+    ///   not exist at `start()` lands then rather than never. `scan --add` is
+    ///   the case, and the only one.
+    ///
+    /// Which caller holds which is pinned, both directions, by the call-site
+    /// census in `tests/architecture.rs`: a new call fails the build until it
+    /// names its redeemer.
     pub fn decompose(prefixes: &[String], roots: &[Root]) -> Vec<DecisionScope> {
         let mut scopes: Vec<DecisionScope> = prefixes
             .iter()

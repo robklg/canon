@@ -64,7 +64,7 @@ machine stream was asked for (`-0` with a machine-rendering detail view) the wor
 **stderr**, leaving stdout empty and the exit code carrying the refusal.
 
 **Role is read regardless of suspension** — a suspended archive root gets the same statement any
-archive root gets. Suspension's own law governs what a closed door permits, and this seam does
+archive root gets. What a closed door permits is suspension's own question, and this seam does
 not consult it. `resolve_scope`'s explicit-path arm re-derives `auto_include_archived` through
 the same `partition_prefixes_by_role`, one derivation across the two; its CWD-defaulting arm
 reads role from `resolve_root_path` instead, a deliberately different lookup that consults only

@@ -81,8 +81,8 @@ takes `&[DirectoryLocation]` — `core::domain::scope`'s measured-from register 
 manifest text nor a resolved *item* path can be folded, and both are compile errors rather than
 guesses. Which root owns a prefix is the path law's question, answered once in
 `core::domain::scope`/`core::ops::scope`; whether a scope names a directory or one item is the
-index's, answered once at the manifest door. What is left here is this type's own law and
-nothing else. It also sees only the resolution's **confirmed** scopes: a line the index could
+index's, answered once at the manifest door. What is left here is this type's own question
+and nothing else. It also sees only the resolution's **confirmed** scopes: a line the index could
 not confirm reaches it as nothing at all, so it cannot drag a common prefix above the sibling
 that did confirm.
 

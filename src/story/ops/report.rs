@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn report_over_is_compute_story_minus_the_fetch() {
-        // The lens-split law: the ceremony composes the bound telling over
+        // The one-fetch law: the ceremony composes the bound telling over
         // its own already-fetched story; the result must be exactly what
         // the live command computes. Compared through the rendering so any
         // divergence is visible in the terms a reader would meet.

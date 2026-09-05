@@ -1547,6 +1547,571 @@ fn the_containment_probe_is_spelled_only_inside_the_path_law() {
 }
 
 // ============================================================================
+// Two censuses over the production tree
+// ============================================================================
+
+/// One file's production text: every line outside a `#[cfg(test)]` module.
+///
+/// The test modules are **blanked, not deleted**, so a line's number stays its
+/// number and a census can say where it read something. Modules nest — a repo
+/// stratum with `source`/`root`/`fact` submodules carries a test module inside
+/// each — so the walk recurses rather than cutting at the first attribute the
+/// way the SQL scan above can afford to within one stratum.
+///
+/// Externalised test files — a stratum's own `tests/` directory, per the
+/// fixture-sharing criterion — carry no `#[cfg(test)]` at all and are excluded
+/// by path instead, at each census's walk.
+fn production_text(file_label: &str, raw: &str) -> String {
+    let file = syn::parse_file(raw).unwrap_or_else(|e| panic!("failed to parse {file_label}: {e}"));
+    let mut ranges = Vec::new();
+    test_mod_line_ranges(&file.items, &mut ranges);
+    raw.lines()
+        .enumerate()
+        .map(|(idx, line)| {
+            let line_no = idx + 1;
+            if ranges
+                .iter()
+                .any(|(from, to)| line_no >= *from && line_no <= *to)
+            {
+                ""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The line ranges every `#[cfg(test)]` module occupies, at any depth.
+fn test_mod_line_ranges(items: &[syn::Item], out: &mut Vec<(usize, usize)>) {
+    for item in items {
+        let syn::Item::Mod(item_mod) = item else {
+            continue;
+        };
+        if item_mod.attrs.iter().any(is_cfg_test) {
+            let span = item.span();
+            out.push((span.start().line, span.end().line));
+            continue;
+        }
+        if let Some((_, inner)) = &item_mod.content {
+            test_mod_line_ranges(inner, out);
+        }
+    }
+}
+
+/// A `#[cfg(test)]` attribute, however the predicate inside it is spelled.
+fn is_cfg_test(attr: &Attribute) -> bool {
+    match &attr.meta {
+        Meta::List(list) => list.path.is_ident("cfg") && list.tokens.to_string().contains("test"),
+        _ => false,
+    }
+}
+
+/// True for a file that is test scaffolding by placement: a `tests/` directory
+/// inside a stratum, where the fixture-sharing criterion externalises a corpus
+/// several files share. The directory name is the whole signal, so a
+/// production module may not be called `tests`.
+fn is_externalised_test_file(rel: &str) -> bool {
+    let mut components: Vec<&str> = rel.split('/').collect();
+    components.pop();
+    components.contains(&"tests")
+}
+
+// ----------------------------------------------------------------------------
+// The `decompose` call-site census
+// ----------------------------------------------------------------------------
+
+/// Why one production caller of `DecisionScope::decompose` may hold the
+/// funnel's drop licence.
+///
+/// `decompose` drops a prefix lying under no known root, and the drop is
+/// silent. On a claim-bearing path that silence is how a scoped act comes to
+/// be recorded as a global one — twice observed, which is why the licence is
+/// no longer general. Every caller redeems it one of exactly two ways, and a
+/// new caller passing text owes one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecomposeRedeemer {
+    /// The prefixes came from `core::ops::scope::resolve_scope`, which has
+    /// already matched each one to a root — form-tolerantly — and carried
+    /// what it could not as a set-aside. Nothing reaching `decompose` from
+    /// there is droppable, so the licence is unexercised.
+    RootValidated,
+    /// The caller records its scopes a second time at completion, through
+    /// `record_scopes`, so a prefix under a root that did not exist at
+    /// `start()` — a `scan --add` root — lands then rather than never. The
+    /// drop happens and is reconciled.
+    ReconciledAtCompletion,
+}
+
+impl DecomposeRedeemer {
+    fn as_str(self) -> &'static str {
+        match self {
+            DecomposeRedeemer::RootValidated => "root-validated prefixes (the drop is unreachable)",
+            DecomposeRedeemer::ReconciledAtCompletion => {
+                "reconciled at completion by `record_scopes`"
+            }
+        }
+    }
+}
+
+/// The census: every production call site of the funnel, with the count of
+/// calls in each file, and the redeemer that answers for them.
+///
+/// The count is part of the row on purpose. Without it a second call added to
+/// a file that already has a row would inherit that row's reason silently —
+/// and a reason is about a specific thing a specific caller passes, not about
+/// a file. With it, every new call site fails the build until someone states
+/// which redeemer it holds.
+const DECOMPOSE_CALLERS: &[(&str, usize, DecomposeRedeemer)] = &[
+    ("exclude/cli.rs", 1, DecomposeRedeemer::RootValidated),
+    ("facts/cli.rs", 1, DecomposeRedeemer::RootValidated),
+    ("scan/cli.rs", 1, DecomposeRedeemer::ReconciledAtCompletion),
+];
+
+/// Every production call of the funnel, by file. Matching `::decompose(`
+/// catches both the `DecisionScope::` spelling every caller uses and the
+/// `Self::` one the owner could reach for, while leaving the definition —
+/// `pub fn decompose(` — unmatched.
+fn decompose_call_sites(src_root: &Path) -> Vec<(String, usize)> {
+    let mut found = Vec::new();
+    for path in collect_rs_files(src_root) {
+        let rel = path
+            .strip_prefix(src_root)
+            .expect("file under src")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_externalised_test_file(&rel) {
+            continue;
+        }
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+        let calls = production_text(&rel, &text).matches("::decompose(").count();
+        if calls > 0 {
+            found.push((rel, calls));
+        }
+    }
+    found
+}
+
+/// Both directions over supplied evidence: a call site the census does not
+/// carry, a row the tree no longer produces, a count that has moved.
+fn decompose_census_violations(
+    found: &[(String, usize)],
+    rows: &[(&str, usize, DecomposeRedeemer)],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (file, calls) in found {
+        match rows.iter().find(|(f, _, _)| f == file) {
+            None => violations.push(format!(
+                "{file} calls the funnel {calls}× and holds no row — add one naming \
+                 the redeemer that answers for the drop",
+            )),
+            Some((_, pinned, redeemer)) if pinned != calls => violations.push(format!(
+                "{file} calls the funnel {calls}× and its row pins {pinned} — the new \
+                 call needs its own redeemer, not `{}`",
+                redeemer.as_str(),
+            )),
+            Some(_) => {}
+        }
+    }
+    for (file, _, _) in rows {
+        if !found.iter().any(|(f, _)| f == file) {
+            violations.push(format!(
+                "the census carries `{file}`, which no longer calls the funnel — \
+                 delete the row with the call",
+            ));
+        }
+    }
+    violations
+}
+
+#[test]
+fn every_decompose_caller_names_its_redeemer() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let src_root = Path::new(&manifest_dir).join("src");
+    let violations =
+        decompose_census_violations(&decompose_call_sites(&src_root), DECOMPOSE_CALLERS);
+    assert!(
+        violations.is_empty(),
+        "\n  `DecisionScope::decompose` drops a prefix under no known root, silently. \
+         Every production caller states why that is safe for what it passes:\n{}\n",
+        violations
+            .iter()
+            .map(|v| format!("  {v}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+}
+
+// ----------------------------------------------------------------------------
+// The reachability-claim census
+// ----------------------------------------------------------------------------
+
+/// One file's standing reachability claims: `.expect(` and `.unwrap()` in the
+/// production region of a `cli` or `ops` stratum file.
+///
+/// Each is a claim that a case cannot happen, made at discipline grade on a
+/// path that runs. One of them shipped a panic on `cluster generate`'s
+/// commonest invocation, from an `expect` asserting a gate the comment eight
+/// lines above it refuted — which is what this baseline is here to stop
+/// growing while the standing ones are sorted.
+///
+/// **The row carries counts and no class.** Sorting each site — unrepresentable
+/// via a `match`, or a genuine invariant the type holds and keeps with its
+/// reason — is a judgment per site, and a class column filled in here would be
+/// this scan making those judgments by seeding itself. So a number here is a
+/// debt, not a permission: it may fall in any commit, and it may rise only in
+/// one that says why.
+struct ReachabilityClaims {
+    file: &'static str,
+    expects: usize,
+    unwraps: usize,
+}
+
+/// The baseline, seeded against the real tree. Matched both directions: a
+/// count that grows fails (new drift refused), and a count that falls fails
+/// until the row is lowered in the same commit (a repair cannot land quietly).
+const REACHABILITY_CLAIMS: &[ReachabilityClaims] = &[
+    ReachabilityClaims {
+        file: "archive/ops/execute.rs",
+        expects: 2,
+        unwraps: 0,
+    },
+    ReachabilityClaims {
+        file: "compare/ops.rs",
+        expects: 1,
+        unwraps: 0,
+    },
+    ReachabilityClaims {
+        file: "core/ops/decision.rs",
+        expects: 1,
+        unwraps: 0,
+    },
+    ReachabilityClaims {
+        file: "exclude/cli.rs",
+        expects: 1,
+        unwraps: 0,
+    },
+    ReachabilityClaims {
+        file: "expr/ops/filter.rs",
+        expects: 0,
+        unwraps: 3,
+    },
+    ReachabilityClaims {
+        file: "facts/ops/import.rs",
+        expects: 1,
+        unwraps: 0,
+    },
+    ReachabilityClaims {
+        file: "retire/ops/verify.rs",
+        expects: 3,
+        unwraps: 0,
+    },
+    ReachabilityClaims {
+        file: "roots/cli.rs",
+        expects: 0,
+        unwraps: 2,
+    },
+    ReachabilityClaims {
+        file: "scan/cli.rs",
+        expects: 1,
+        unwraps: 0,
+    },
+    ReachabilityClaims {
+        file: "scan/ops/receipt.rs",
+        expects: 1,
+        unwraps: 0,
+    },
+    ReachabilityClaims {
+        file: "scan/ops/types.rs",
+        expects: 1,
+        unwraps: 0,
+    },
+    ReachabilityClaims {
+        file: "survey/ops/compute.rs",
+        expects: 0,
+        unwraps: 8,
+    },
+    ReachabilityClaims {
+        file: "survey/ops/orchestrate.rs",
+        expects: 0,
+        unwraps: 2,
+    },
+    ReachabilityClaims {
+        file: "trail/render.rs",
+        expects: 1,
+        unwraps: 0,
+    },
+    ReachabilityClaims {
+        file: "trail/ops/compute.rs",
+        expects: 0,
+        unwraps: 2,
+    },
+    ReachabilityClaims {
+        file: "trail/ops/crossings.rs",
+        expects: 3,
+        unwraps: 0,
+    },
+    ReachabilityClaims {
+        file: "worklist/ops.rs",
+        expects: 0,
+        unwraps: 1,
+    },
+];
+
+/// Count the claims standing in every `cli`/`ops` file's production region.
+/// Files with none are absent from the result, which is what makes a row for
+/// one of them stale rather than merely zero.
+fn reachability_claim_counts(src_root: &Path) -> Vec<(String, usize, usize)> {
+    let mut counts = Vec::new();
+    for path in collect_rs_files(src_root) {
+        let rel = path
+            .strip_prefix(src_root)
+            .expect("file under src")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_externalised_test_file(&rel) {
+            continue;
+        }
+        // The two strata whose code runs against a user, read whole. `cli` is
+        // a stratum name, not a filename: the layer model puts `render.rs`,
+        // `jsonl.rs` and the crate-root flat files in the same interface layer
+        // as `cli.rs`, so a line drawn inside it would be a blind spot rather
+        // than a boundary. Domain and repo stay out — a claim there is pure,
+        // and its blast radius is a unit test.
+        if !matches!(classify_layer(&rel), Layer::Ops | Layer::Interface) {
+            continue;
+        }
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+        let production = production_text(&rel, &text);
+        let expects = production.matches(".expect(").count();
+        let unwraps = production.matches(".unwrap()").count();
+        if expects + unwraps > 0 {
+            counts.push((rel, expects, unwraps));
+        }
+    }
+    counts
+}
+
+/// Both directions over supplied evidence.
+fn reachability_census_violations(
+    found: &[(String, usize, usize)],
+    rows: &[ReachabilityClaims],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (file, expects, unwraps) in found {
+        match rows.iter().find(|r| r.file == file) {
+            None => violations.push(format!(
+                "{file} makes {expects} `expect` and {unwraps} `unwrap` claims and has \
+                 no row — a new claim is drift until someone looks at it",
+            )),
+            Some(row) if row.expects != *expects || row.unwraps != *unwraps => {
+                violations.push(format!(
+                    "{file} makes {expects}/{unwraps} (expect/unwrap) claims, its row \
+                     pins {}/{} — raise the row with the reason, or lower it with the repair",
+                    row.expects, row.unwraps,
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    for row in rows {
+        if !found.iter().any(|(f, _, _)| f == row.file) {
+            violations.push(format!(
+                "the baseline carries `{}`, which now makes no claims at all — delete \
+                 the row with the repair",
+                row.file,
+            ));
+        }
+    }
+    violations
+}
+
+#[test]
+fn the_reachability_claims_in_cli_and_ops_are_the_ones_on_the_baseline() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let src_root = Path::new(&manifest_dir).join("src");
+    let violations =
+        reachability_census_violations(&reachability_claim_counts(&src_root), REACHABILITY_CLAIMS);
+    assert!(
+        violations.is_empty(),
+        "\n  An `expect` or an `unwrap` on a path that runs is a reachability claim \
+         at discipline grade. The standing ones are counted here so they can be \
+         sorted, and so no new one arrives unseen:\n{}\n",
+        violations
+            .iter()
+            .map(|v| format!("  {v}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Two law verifiers that only a spelling check can make
+// ----------------------------------------------------------------------------
+
+/// Every identifier in a token stream, at any nesting depth.
+///
+/// Lexing rather than reading text is what makes this see code and nothing
+/// else: comments are gone, and a word inside a string literal stays a
+/// literal. A doc comment survives as a `#[doc = "…"]` attribute, whose text
+/// is likewise a literal.
+fn identifiers_in(stream: TokenStream, out: &mut Vec<(String, proc_macro2::Span)>) {
+    for tree in stream {
+        match tree {
+            TokenTree::Ident(ident) => out.push((ident.to_string(), ident.span())),
+            TokenTree::Group(group) => identifiers_in(group.stream(), out),
+            _ => {}
+        }
+    }
+}
+
+/// The lens separation law: the sweep's structural engine produces lens-free
+/// findings, and the lens is a separate derivation over them.
+///
+/// The half a spelling check can settle is the **direction of the edge**: the
+/// lens names the engine, and the engine never names the lens. That is what
+/// leaves a future lens a second function over the same `StructuralSweep`
+/// rather than a rewrite — and a single `use super::lens` inside the engine
+/// would undo it while every behavioural test stayed green, because ranking
+/// computed in the wrong place still ranks correctly.
+///
+/// Identifiers only, so the prose in the engine's own files may go on
+/// explaining what the lens does with what it is handed. A name is refused on
+/// containing `lens` in any case, which covers the module, `LensParams`, and
+/// anything later derived from either.
+#[test]
+fn the_structural_engine_never_names_the_lens() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let engine = Path::new(&manifest_dir).join("src/sweep/domain/structural");
+    let mut files = collect_rs_files(&engine);
+    files.push(Path::new(&manifest_dir).join("src/sweep/domain/structural.rs"));
+    assert!(
+        files.len() > 1,
+        "the engine's files moved — this guard is now watching nothing"
+    );
+
+    let mut violations = Vec::new();
+    for path in &files {
+        let text = fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+        let stream: TokenStream = text
+            .parse()
+            .unwrap_or_else(|e| panic!("failed to lex {}: {}", path.display(), e));
+        let mut idents = Vec::new();
+        identifiers_in(stream, &mut idents);
+        for (ident, span) in idents {
+            if ident.to_ascii_lowercase().contains("lens") {
+                violations.push(format!(
+                    "{}:{}: names `{ident}` — the engine must not know the lens exists",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    span.start().line,
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "\n  The lens separation law is one-way: the lens reads the engine's findings, \
+         the engine knows nothing of the lens.\n{}\n",
+        violations
+            .iter()
+            .map(|v| format!("  {v}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+}
+
+/// The fate vocabulary's words, read out of the file that owns them.
+///
+/// Read rather than spelled, because a guard against literals that carries the
+/// literals it refuses would be the defect wearing the defence's clothes — and
+/// would go quiet the day a word is added. The arm shape is
+/// `Self::Variant => "word",` and nothing else in the vocabulary's file writes
+/// a string on the right of a match arm.
+fn fate_vocabulary_words(src_root: &Path) -> Vec<String> {
+    let owner = src_root.join("core/domain/fate.rs");
+    let text = fs::read_to_string(&owner)
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", owner.display(), e));
+    let mut words = Vec::new();
+    for (_, after) in text
+        .match_indices("=> \"")
+        .map(|(i, _)| (i, &text[i + 4..]))
+    {
+        if let Some(end) = after.find('"') {
+            words.push(after[..end].to_string());
+        }
+    }
+    words.sort();
+    words.dedup();
+    assert!(
+        words.len() >= 4,
+        "the fate vocabulary reads as {words:?} — the arm shape changed and this \
+         guard is now refusing almost nothing"
+    );
+    words
+}
+
+/// The never-literal law: a transition or posture word is derived, never
+/// written down.
+///
+/// The book is where it bites hardest — a retired root's story is read forever
+/// and cannot be rewritten — and it is the reason the law's correct scope is
+/// *transitions*: the standings beside them (`covered`, `present`,
+/// `missing_unexplained`, `contentless`) are present-tense facts with no
+/// derivation to come from, so they are named constants in one place instead.
+///
+/// Only a spelling check settles this. A test comparing a derived word to the
+/// vocabulary's own answer passes just as happily when the word was typed in,
+/// because a literal that is currently correct is indistinguishable from a
+/// derivation at run time — which is exactly the defect: it stops being correct
+/// the day the vocabulary moves, silently, in a document nobody may rewrite.
+///
+/// Comments are not exempt, deliberately: prose spells these words in
+/// backticks throughout, so a **quoted** one is a spelling of the wire word and
+/// carries the same drift.
+#[test]
+fn the_book_never_spells_a_fate_word_as_a_literal() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let src_root = Path::new(&manifest_dir).join("src");
+    let words = fate_vocabulary_words(&src_root);
+
+    let mut violations = Vec::new();
+    for path in collect_rs_files(&src_root.join("retire")) {
+        let rel = path
+            .strip_prefix(&src_root)
+            .expect("file under src")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_externalised_test_file(&rel) {
+            continue;
+        }
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+        let production = production_text(&rel, &text);
+        for (line_no, line) in production.lines().enumerate() {
+            for word in &words {
+                if line.contains(&format!("\"{word}\"")) {
+                    violations.push(format!("{rel}:{}: spells `\"{word}\"`", line_no + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "\n  A fate word written down is a fate word that stops agreeing with the \
+         vocabulary the day the vocabulary moves — in a book that is never \
+         rewritten. Derive it through `fate_transition`:\n{}\n",
+        violations
+            .iter()
+            .map(|v| format!("  {v}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+}
+
+// ============================================================================
 // Self-tests (August's spec)
 // ============================================================================
 
@@ -2523,6 +3088,130 @@ fn s() -> Connection {
             classify_home("retire/mod.rs"),
             Home::Subsystem("retire".to_string())
         );
+    }
+
+    // ========================================================================
+    // The two censuses — red smoke over synthetic evidence
+    // ========================================================================
+
+    #[test]
+    fn the_production_text_blanks_every_test_module_at_any_depth() {
+        // A test module at the top level, and one nested inside a production
+        // module — the repo-stratum shape, where the first is not the only one.
+        let text = "\
+fn f() { g().unwrap() }
+#[cfg(test)]
+mod t {
+    fn a() { h().unwrap() }
+}
+mod source {
+    fn s() { i().unwrap() }
+    #[cfg(test)]
+    mod tests {
+        fn b() { j().unwrap() }
+    }
+}
+";
+        let production = production_text("synthetic.rs", text);
+        assert_eq!(
+            production.matches(".unwrap()").count(),
+            2,
+            "the two production calls survive and the two test ones do not: {production}",
+        );
+        assert!(production.contains("fn f()") && production.contains("fn s()"));
+        assert!(!production.contains("fn a()") && !production.contains("fn b()"));
+        // Blanked, not deleted: a line keeps its number.
+        assert_eq!(production.lines().count(), text.lines().count());
+    }
+
+    #[test]
+    fn a_cfg_attribute_that_is_not_about_test_leaves_its_module_alone() {
+        let text = "#[cfg(unix)]\nmod u {\n    fn f() { g().unwrap() }\n}\n";
+        assert!(production_text("synthetic.rs", text).contains(".unwrap()"));
+    }
+
+    #[test]
+    fn an_externalised_test_file_is_known_by_its_directory() {
+        assert!(is_externalised_test_file("trail/ops/tests/compute.rs"));
+        assert!(is_externalised_test_file("retire/ops/tests/fixtures.rs"));
+        // The name only counts as a directory: a file called `tests.rs` is
+        // production code as far as placement can tell.
+        assert!(!is_externalised_test_file("trail/ops/tests.rs"));
+        assert!(!is_externalised_test_file("trail/ops/compute.rs"));
+    }
+
+    #[test]
+    fn the_decompose_census_refuses_a_new_caller_and_a_stale_row() {
+        let rows = &[("exclude/cli.rs", 1, DecomposeRedeemer::RootValidated)];
+
+        // Whole: the tree produces exactly what the census carries.
+        assert!(decompose_census_violations(&[("exclude/cli.rs".into(), 1)], rows).is_empty());
+
+        // A caller nobody vouched for.
+        let v = decompose_census_violations(
+            &[("exclude/cli.rs".into(), 1), ("survey/cli.rs".into(), 1)],
+            rows,
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(
+            v[0].contains("survey/cli.rs") && v[0].contains("holds no row"),
+            "{v:?}"
+        );
+
+        // A second call in a file that already had one: the existing reason
+        // answers for the first call, never for a call it has not seen.
+        let v = decompose_census_violations(&[("exclude/cli.rs".into(), 2)], rows);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].contains("pins 1"), "{v:?}");
+
+        // The other direction: the caller is gone and the row outlived it.
+        let v = decompose_census_violations(&[], rows);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].contains("no longer calls the funnel"), "{v:?}");
+    }
+
+    #[test]
+    fn the_reachability_census_refuses_growth_and_a_silent_repair() {
+        let rows = &[ReachabilityClaims {
+            file: "survey/ops/compute.rs",
+            expects: 0,
+            unwraps: 8,
+        }];
+
+        assert!(
+            reachability_census_violations(&[("survey/ops/compute.rs".into(), 0, 8)], rows)
+                .is_empty()
+        );
+
+        // One more claim than the baseline carries.
+        let v = reachability_census_violations(&[("survey/ops/compute.rs".into(), 0, 9)], rows);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].contains("pins 0/8"), "{v:?}");
+
+        // One fewer: a repair that did not lower its row is as invisible as
+        // drift, so it fails the same way.
+        let v = reachability_census_violations(&[("survey/ops/compute.rs".into(), 0, 7)], rows);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].contains("pins 0/8"), "{v:?}");
+
+        // A file that had none and now makes one.
+        let v = reachability_census_violations(
+            &[
+                ("survey/ops/compute.rs".into(), 0, 8),
+                ("ls/ops.rs".into(), 1, 0),
+            ],
+            rows,
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(
+            v[0].contains("ls/ops.rs") && v[0].contains("no row"),
+            "{v:?}"
+        );
+
+        // And the repair that empties a file entirely.
+        let v = reachability_census_violations(&[], rows);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].contains("no claims at all"), "{v:?}");
     }
 
     // ========================================================================

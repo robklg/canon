@@ -66,7 +66,12 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   `classify_present`/`classify_absent`) so the inventory and the account cannot drift — the
   agreement law (fates fold to the account's buckets) is a test. Terminal fate words derive
   through `fate_transition()`; *covered*/*present*/*missing_unexplained* are **standings, not
-  transitions** — named `STANDING_*` constants, the never-literal law's correct scope.
+  transitions** — named `STANDING_*` constants, the never-literal law's correct scope. The law
+  is carried by `the_book_never_spells_a_fate_word_as_a_literal`, which reads the vocabulary out
+  of its owner and refuses those words as quoted literals anywhere in this subsystem's
+  production code: a literal that is currently correct reads identically to a derivation at run
+  time, so only a spelling check sees it. It does **not** reach the standings beside them, which
+  have no derivation to come from.
   `ArchivedFromHere` carries `Option<OriginDisposition>` (pre-vocabulary receipts omit
   moved/copied rather than guess; reader-facing words via `disposition_word`).
   `BookEntry::verification()` is a method from hash presence, so an unhashed entry can
@@ -86,7 +91,7 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
 - **`verify_book` is production code, not a test helper** — the release movement's hinge: it
   parses `meta.toml` back, stream-recounts the inventory per fate (the writer's own word
   derivations), requires every claimed artifact, and cross-checks the gathered-ledger file count.
-  The **round-trip law** — compile → verify → counts equal the DB-derived account — is
+  The **round-trip check** — compile → verify → counts equal the DB-derived account — is
   test-enforced, scale-tested past the SQL chunking boundary.
 - **The book format is a public contract** (`docs/src/reference/book-format.md`, `version = 1` in
   `meta.toml`): fields may be added within a version, meanings never change; verification refuses
@@ -100,7 +105,7 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   alone; absent outside a ceremony or under `Off`, omitted never guessed) and indents multi-line
   summaries and reasons; notes render via `note_display_path` (root-relative, `(root)`, never a
   view-relative `.`); **zero-byte sources are contentless** (fate word `contentless`; they carry no
-  location lists, which the archived-ness SQL enforces — the suite-wide law); inventory lines carry
+  location lists, which the archived-ness SQL enforces — the contentless law, suite-wide); inventory lines carry
   **`decision`**, the fate-determining decision (`archived` → the apply via
   `ApplyOrigin.decision_id`, else the stamp; omitted when absent, never guessed).
 
@@ -182,7 +187,7 @@ compile and the ceremony, is the book's `story.md`. The place-walk composition i
 `story/ops/render.rs` and is reached here through the reference voicing (`Voicing`, `story_lines`,
 `reference_place_lines`).
 
-- **The frame states pastness once** (diction, not frame — the v2 law: ceremony in the structure,
+- **The frame states pastness once** (diction, not frame — the v2 rule: ceremony in the structure,
   sentences plain): beginning → foreword placeholder → entries guide (fate words defined at first
   use, `restored`/"returned to consideration" included; the `#N` → `timeline.md` →
   `inventory.jsonl` trace chain; the traceability claim as its own paragraph) → full map → tally

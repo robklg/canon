@@ -275,6 +275,174 @@ fn bullet_directory(line: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// The identifier rider: a backticked name in a register that names nothing.
+// ---------------------------------------------------------------------------
+
+/// One backticked identifier read from a register file, and where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IdentifierCitation {
+    name: String,
+    file: String,
+    line: usize,
+}
+
+/// Prospective names: an identifier a register spells before the code that
+/// answers to it exists. Exact-match, and matched both directions — an entry
+/// whose name has since landed fails until it is deleted, so this cannot
+/// become a place stale citations go to be forgotten.
+///
+/// Empty is the wanted state, and it is the state today.
+const PROSPECTIVE_NAMES: &[(&str, &str)] = &[];
+
+/// The backticked identifiers a register file spells: spans whose whole
+/// content is a bare `snake_case` name of **three or more** segments.
+///
+/// Three, because that is where the shape stops being ordinary English written
+/// in code's clothes. A two-segment name (`rel_path`, `root_id`, `dry_run`) is
+/// a field, a column or a flag, and a register spells those constantly without
+/// claiming any particular item exists. Three segments is the shape of the
+/// thing that goes stale invisibly: a test name, a long function name — the
+/// pin citations prose makes and nothing checks.
+///
+/// Three classes stay silent by construction rather than by exception, and
+/// each is a fixture below. **CLI flags** (`--dry-run`) are not bare
+/// identifiers — the dashes end the match. **Column names**
+/// (`previous_decision_id`) are spelled in the SQL that reads them, so they
+/// resolve like any other name. **Prospective names** are the exception, and
+/// they are listed above with their reason.
+///
+/// Fenced blocks are skipped whole: a fence holds example text — a config
+/// file, a shell transcript — and a name inside one is an illustration, not a
+/// claim about this tree. The fence marker is read at the start of a line, so
+/// an inline triple-backtick in prose (there is none) would not toggle it.
+fn identifier_citations(display_path: &str, text: &str) -> Vec<IdentifierCitation> {
+    let mut out = Vec::new();
+    let mut fenced = false;
+    for (idx, line) in text.lines().enumerate() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        for span in line.split('`').skip(1).step_by(2) {
+            if is_multi_segment_snake_case(span) {
+                out.push(IdentifierCitation {
+                    name: span.to_string(),
+                    file: display_path.to_string(),
+                    line: idx + 1,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// A bare lowercase identifier of three or more `_`-joined segments, each
+/// non-empty. Anything else — a path, a flag, a call with parentheses, a type
+/// name, a two-segment field — is not this shape.
+fn is_multi_segment_snake_case(span: &str) -> bool {
+    let segments: Vec<&str> = span.split('_').collect();
+    segments.len() >= 3
+        && segments.iter().all(|s| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
+}
+
+/// Every identifier token spelled anywhere under `src/` or `tests/` — maximal
+/// runs of identifier characters, comments and string literals included. A
+/// register may legitimately cite a name that appears only in a comment, and
+/// the question here is whether the name exists in the tree at all, not
+/// whether it is a declaration.
+fn identifier_tokens(root: &Path) -> std::collections::HashSet<String> {
+    let mut tokens = std::collections::HashSet::new();
+    for dir in ["src", "tests"] {
+        for file in collect_rs_files(&root.join(dir)) {
+            let text = fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("failed to read {}: {}", file.display(), e));
+            let mut current = String::new();
+            for c in text.chars() {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    current.push(c);
+                } else if !current.is_empty() {
+                    tokens.insert(std::mem::take(&mut current));
+                }
+            }
+            if !current.is_empty() {
+                tokens.insert(current);
+            }
+        }
+    }
+    tokens
+}
+
+/// Both directions over supplied evidence: a citation naming nothing and not
+/// listed, and a listed name the tree has since grown.
+fn identifier_rider_violations(
+    citations: &[IdentifierCitation],
+    tokens: &std::collections::HashSet<String>,
+    prospective: &[(&str, &str)],
+) -> Vec<String> {
+    let listed: Vec<&str> = prospective.iter().map(|(n, _)| *n).collect();
+    let mut violations = Vec::new();
+    for cite in citations {
+        if tokens.contains(&cite.name) || listed.contains(&cite.name.as_str()) {
+            continue;
+        }
+        violations.push(format!(
+            "{}:{}: `{}` names nothing under src/ or tests/",
+            cite.file, cite.line, cite.name,
+        ));
+    }
+    for (name, _) in prospective {
+        if tokens.contains(*name) {
+            violations.push(format!(
+                "`{name}` is listed as prospective and now exists — delete the entry",
+            ));
+        }
+    }
+    violations
+}
+
+#[test]
+fn identifiers_cited_in_the_registers_resolve() {
+    let root = repo_root();
+    let tokens = identifier_tokens(&root);
+    let mut citations = Vec::new();
+    for path in claude_md_paths(&root) {
+        let text = fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "failed to read {} — every src/ subdirectory owes a CLAUDE.md: {}",
+                path.display(),
+                e,
+            )
+        });
+        let display = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
+        citations.extend(identifier_citations(&display, &text));
+    }
+    let violations = identifier_rider_violations(&citations, &tokens, PROSPECTIVE_NAMES);
+    assert!(
+        violations.is_empty(),
+        "\n  A register names an identifier the tree does not have. A pin cited in \
+         prose goes stale invisibly — the rename that broke it is never in the \
+         same diff — so the citation is repaired here, or listed as prospective \
+         with its reason:\n{}\n",
+        violations
+            .iter()
+            .map(|v| format!("  {v}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The checks over the real tree.
 // ---------------------------------------------------------------------------
 
@@ -530,5 +698,116 @@ mod self_tests {
             Some("repo".to_string()),
         );
         assert_eq!(bullet_directory("plain prose with Modules: `x`"), None);
+    }
+    // ----------------------------------------------------------------
+    // The identifier rider.
+    // ----------------------------------------------------------------
+
+    fn tokens(names: &[&str]) -> std::collections::HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn names(text: &str) -> Vec<String> {
+        identifier_citations("CLAUDE.md", text)
+            .into_iter()
+            .map(|c| c.name)
+            .collect()
+    }
+
+    #[test]
+    fn reads_a_backticked_identifier_with_its_place() {
+        assert_eq!(
+            identifier_citations(
+                "src/trail/CLAUDE.md",
+                "intro\nheld by `a_group_is_never_empty`\n"
+            ),
+            vec![IdentifierCitation {
+                name: "a_group_is_never_empty".to_string(),
+                file: "src/trail/CLAUDE.md".to_string(),
+                line: 2,
+            }],
+        );
+    }
+
+    #[test]
+    fn the_three_english_classes_stay_silent() {
+        // A CLI flag is not a bare identifier — the dashes end the match.
+        assert!(names("pass `--dry-run` or `--no-receipt`\n").is_empty());
+        // A two-segment name is a field, a column or a flag, and a register
+        // spells those without claiming any item exists.
+        assert!(names("the `rel_path` column and the `root_id` beside it\n").is_empty());
+        // Neither is anything carrying punctuation: a path, a call, a type.
+        assert!(names("see `core/domain/path.rs`, `resolve_path()`, `ScopeMatch`\n").is_empty());
+        assert!(names("`core::ops::scope::stored_form_of_rel`\n").is_empty());
+        // A column name of three segments *is* read — and resolves, because
+        // the SQL that reads it spells it too. That is the class staying
+        // silent by resolving, not by being skipped.
+        assert_eq!(names("`previous_decision_id`\n"), ["previous_decision_id"]);
+        assert!(identifier_rider_violations(
+            &identifier_citations("CLAUDE.md", "`previous_decision_id`\n"),
+            &tokens(&["previous_decision_id"]),
+            &[],
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn a_fenced_block_names_nothing() {
+        // Example text — a config file, a shell transcript — is an
+        // illustration, not a claim about this tree.
+        assert!(names("```toml\nrecording = \"Full\"\n`a_name_in_a_fence`\n```\n").is_empty());
+        // And the fence closes: prose after it is read again.
+        assert_eq!(
+            names("```\nx\n```\nheld by `a_group_is_never_empty`\n"),
+            ["a_group_is_never_empty"],
+        );
+    }
+
+    #[test]
+    fn flags_a_planted_name_the_tree_does_not_have() {
+        let cites = identifier_citations(
+            "src/expr/CLAUDE.md",
+            "pinned by `a_source_key_the_context_does_not_supply_is_fetched`\n",
+        );
+        let v = identifier_rider_violations(&cites, &tokens(&["something_else_entirely"]), &[]);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].contains("src/expr/CLAUDE.md:1"), "{v:?}");
+        assert!(v[0].contains("names nothing"), "{v:?}");
+
+        // Listing it as prospective silences it, and only it.
+        assert!(identifier_rider_violations(
+            &cites,
+            &tokens(&[]),
+            &[(
+                "a_source_key_the_context_does_not_supply_is_fetched",
+                "the pin this names is not written yet",
+            )],
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn a_prospective_name_that_has_landed_fails_until_its_entry_goes() {
+        // The other direction: the list cannot become a place stale citations
+        // go to be forgotten.
+        let v = identifier_rider_violations(
+            &[],
+            &tokens(&["a_name_that_has_since_landed"]),
+            &[("a_name_that_has_since_landed", "written any day now")],
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].contains("now exists"), "{v:?}");
+    }
+
+    #[test]
+    fn a_name_is_matched_whole_never_as_a_stem() {
+        // `foo_bar_baz` is not answered for by `foo_bar_baz_qux`: a citation
+        // that resolves to a longer name resolves to a different thing.
+        let cites = identifier_citations("CLAUDE.md", "`a_stem_of_something`\n");
+        assert_eq!(
+            identifier_rider_violations(&cites, &tokens(&["a_stem_of_something_longer"]), &[])
+                .len(),
+            1,
+        );
     }
 }
