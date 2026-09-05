@@ -9,7 +9,11 @@
 //! 1. **Simple SQL**: Queries do data access only, no business logic in WHERE clauses
 //! 2. **Batch fetching**: Avoid N+1 queries by fetching in chunks of BATCH_SIZE
 //! 3. **Returns domain types**: Functions return `Source` structs, not raw rows
-//! 4. **present=1 baked in**: Only fetches present (non-deleted) sources
+//! 4. **Present-only by default**: a fetch returns present sources unless its
+//!    name says otherwise. The absent fetch reads tombstones, the scanned-at
+//!    minimum reads the root's whole history, and the two existence predicates
+//!    are history-inclusive and say so in their own docs. Pinned by
+//!    `every_source_fetch_is_present_only_unless_named_for_absence`.
 //!
 //! ## Usage
 //!
@@ -1274,6 +1278,100 @@ mod tests {
 
         // Root with no sources
         assert!(!sources_exist_at_scope(&conn, root_id, "").unwrap());
+    }
+
+    // =========================================================================
+    // The census behind design principle 4
+    // =========================================================================
+
+    /// **Principle 4, pinned over the file's own SQL.**
+    ///
+    /// The header says a fetch returns present sources unless its name says
+    /// otherwise. That is a claim about every `SELECT {SOURCE_COLUMNS}` in this
+    /// file, and a claim about a whole file is worth exactly as much as the
+    /// census behind it — the sentence it replaced had none, said *only*, and
+    /// was false in four places, and a reader trusting it as exact is a real
+    /// specimen rather than a hypothetical.
+    ///
+    /// Scoped to **function bodies**, not lines, so a `SELECT` split across
+    /// lines cannot slip past; comments are stripped first so a doc mention of
+    /// `SOURCE_COLUMNS` is not read as a query. A fetch may read tombstones
+    /// only if its name says so — `absent` in the name is the licence, and
+    /// `present = 0` is what it must then carry, so a filterless select fails
+    /// whatever it is called.
+    #[test]
+    fn every_source_fetch_is_present_only_unless_named_for_absence() {
+        let src = include_str!("source.rs");
+
+        // Strip line comments so prose naming SOURCE_COLUMNS is not a query.
+        let code: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Split into function bodies, keyed by name.
+        let mut fetches: Vec<(String, String)> = Vec::new();
+        let mut current: Option<(String, String)> = None;
+        for line in code.lines() {
+            if let Some(rest) = line.split("fn ").nth(1) {
+                if line.trim_start().starts_with("fn ")
+                    || line.trim_start().starts_with("pub fn ")
+                    || line.trim_start().starts_with("pub(crate) fn ")
+                {
+                    if let Some(done) = current.take() {
+                        fetches.push(done);
+                    }
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    current = Some((name, String::new()));
+                }
+            }
+            if let Some((_, body)) = current.as_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        if let Some(done) = current.take() {
+            fetches.push(done);
+        }
+
+        // Only the ones that actually build a source fetch.
+        let fetches: Vec<(String, String)> = fetches
+            .into_iter()
+            .filter(|(_, body)| body.contains("SOURCE_COLUMNS"))
+            .collect();
+
+        assert!(
+            fetches.len() >= 6,
+            "the census found {} source fetches — it has stopped seeing this \
+             file's queries, which is the way this pin fails silently",
+            fetches.len()
+        );
+
+        let mut absent_named = 0;
+        for (name, body) in &fetches {
+            if name.contains("absent") {
+                absent_named += 1;
+                assert!(
+                    body.contains("present = 0"),
+                    "{name} is named for absence but does not read tombstones"
+                );
+            } else {
+                assert!(
+                    body.contains("present = 1"),
+                    "{name} fetches sources with no presence filter, and its \
+                     name does not say it reads history"
+                );
+            }
+        }
+        assert_eq!(
+            absent_named, 1,
+            "exactly one fetch is named for absence today; a second is fine, \
+             but it should arrive with this number"
+        );
     }
 
     // =========================================================================
