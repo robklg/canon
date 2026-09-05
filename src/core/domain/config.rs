@@ -37,6 +37,13 @@ impl Default for LedgerConfig {
 ///
 /// Returns defaults for any invalid or missing fields, with a warning message
 /// per invalid field. Unknown keys and sections are silently ignored.
+///
+/// Mode and layout names are read case-insensitively, against one documented
+/// spelling each (`"Full"`, `"Central"`). One spelling because two would be
+/// two things to keep true; case-insensitive because the fallback is not
+/// neutral — an unread value falls through to the default, and the default
+/// *records*, so a `recording = "Off"` Canon failed to recognise would record
+/// everything the user asked it not to.
 pub fn parse_ledger_config(content: &str) -> (LedgerConfig, Vec<String>) {
     let mut config = LedgerConfig::default();
     let mut warnings = Vec::new();
@@ -57,15 +64,17 @@ pub fn parse_ledger_config(content: &str) -> (LedgerConfig, Vec<String>) {
 
     if let Some(recording) = ledger.get("recording") {
         match recording.as_str() {
-            Some("full") => config.recording = RecordingMode::Full,
-            Some("records") => config.recording = RecordingMode::Records,
-            Some("off") => config.recording = RecordingMode::Off,
+            Some(s) if s.eq_ignore_ascii_case("full") => config.recording = RecordingMode::Full,
+            Some(s) if s.eq_ignore_ascii_case("records") => {
+                config.recording = RecordingMode::Records
+            }
+            Some(s) if s.eq_ignore_ascii_case("off") => config.recording = RecordingMode::Off,
             Some(other) => warnings.push(format!(
-                "Warning: unknown recording mode {:?} in config.toml, using \"full\"",
+                "Warning: unknown recording mode {:?} in config.toml, using \"Full\"",
                 other
             )),
             None => warnings.push(
-                "Warning: invalid recording value in config.toml (expected string), using \"full\""
+                "Warning: invalid recording value in config.toml (expected string), using \"Full\""
                     .to_string(),
             ),
         }
@@ -73,14 +82,16 @@ pub fn parse_ledger_config(content: &str) -> (LedgerConfig, Vec<String>) {
 
     if let Some(layout) = ledger.get("layout") {
         match layout.as_str() {
-            Some("central") => config.layout = ReceiptLayout::Central,
-            Some("alongside") => config.layout = ReceiptLayout::Alongside,
+            Some(s) if s.eq_ignore_ascii_case("central") => config.layout = ReceiptLayout::Central,
+            Some(s) if s.eq_ignore_ascii_case("alongside") => {
+                config.layout = ReceiptLayout::Alongside
+            }
             Some(other) => warnings.push(format!(
-                "Warning: unknown layout {:?} in config.toml, using \"central\"",
+                "Warning: unknown layout {:?} in config.toml, using \"Central\"",
                 other
             )),
             None => warnings.push(
-                "Warning: invalid layout value in config.toml (expected string), using \"central\""
+                "Warning: invalid layout value in config.toml (expected string), using \"Central\""
                     .to_string(),
             ),
         }
@@ -224,5 +235,65 @@ bar = "baz"
         let (config, warnings) = parse_ledger_config(content);
         assert_eq!(config.recording, RecordingMode::Full);
         assert!(warnings.is_empty());
+    }
+
+    // ========================================================================
+    // Reading a name whatever its case
+    // ========================================================================
+
+    /// Every documented recording spelling lands on the mode it names. The
+    /// register writes them capitalised; the parser read only lowercase, so a
+    /// line copied from the documentation fell through to the default — and
+    /// the default records, which is the opposite of what `"Off"` asked for.
+    #[test]
+    fn a_recording_mode_is_read_by_name_whatever_its_case() {
+        for (written, expected) in [
+            ("Full", RecordingMode::Full),
+            ("FULL", RecordingMode::Full),
+            ("full", RecordingMode::Full),
+            ("Records", RecordingMode::Records),
+            ("RECORDS", RecordingMode::Records),
+            ("records", RecordingMode::Records),
+            ("Off", RecordingMode::Off),
+            ("OFF", RecordingMode::Off),
+            ("off", RecordingMode::Off),
+        ] {
+            let (config, warnings) =
+                parse_ledger_config(&format!("[ledger]\nrecording = \"{written}\""));
+            assert_eq!(config.recording, expected, "recording = {written:?}");
+            assert!(warnings.is_empty(), "recording = {written:?}: {warnings:?}");
+        }
+    }
+
+    /// The sibling field, the same defect: `layout` is documented capitalised
+    /// too, and a layout misread lands receipts somewhere other than where the
+    /// config asked for them.
+    #[test]
+    fn a_layout_is_read_by_name_whatever_its_case() {
+        for (written, expected) in [
+            ("Central", ReceiptLayout::Central),
+            ("CENTRAL", ReceiptLayout::Central),
+            ("central", ReceiptLayout::Central),
+            ("Alongside", ReceiptLayout::Alongside),
+            ("ALONGSIDE", ReceiptLayout::Alongside),
+            ("alongside", ReceiptLayout::Alongside),
+        ] {
+            let (config, warnings) =
+                parse_ledger_config(&format!("[ledger]\nlayout = \"{written}\""));
+            assert_eq!(config.layout, expected, "layout = {written:?}");
+            assert!(warnings.is_empty(), "layout = {written:?}: {warnings:?}");
+        }
+    }
+
+    /// A warning names the fallback in the spelling the register documents —
+    /// a message is a surface, and one teaching a spelling the docs do not
+    /// carry is how a second spelling gets into circulation.
+    #[test]
+    fn a_fallback_is_named_in_the_documented_spelling() {
+        let (_, warnings) =
+            parse_ledger_config("[ledger]\nrecording = \"nope\"\nlayout = \"flat\"");
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("\"Full\""), "{warnings:?}");
+        assert!(warnings[1].contains("\"Central\""), "{warnings:?}");
     }
 }
