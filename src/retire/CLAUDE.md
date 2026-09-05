@@ -48,9 +48,15 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   Bytes are all-or-omitted.
 - **A review records no decision** (read-only; recording gates on effectful actions).
   Ceremony-entry policy lives in ops (`validate_retire_target`): an archive-role target is
-  refused, and no archive root is a hard error — the book would have no shelf, and the bookless
-  removal stays `roots rm`. A suspended or unreachable root retires on faith: surfaced, never
-  refused.
+  refused, and no shelf to bind to is a hard error — the book would have nowhere to stand. The
+  refusal states **which** absence it met (`LedgerRootOutcome`): with no archive root registered
+  the bookless removal stays `roots rm`; with every archive root **suspended** the shelf and its
+  books stand where they stood, so the way back is `canon roots unsuspend` and only that, and the
+  destructive door is not offered
+  (`validate_names_a_parked_archive_fleet_and_offers_only_unsuspend`). `plan_bind` speaks the
+  same two causes as the backstop for a root parked between gate and bind, and the parked
+  sentence is spelled once for both doors (`ops::parked_shelf_refusal`). The *target* is the
+  other way round: suspended or unreachable, it retires on faith — surfaced, never refused.
 
 ## The book
 

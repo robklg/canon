@@ -6,6 +6,7 @@ use crate::ceremony;
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::format::{format_date, format_size, format_time_ago};
 use crate::core::domain::format_count;
+use crate::core::ops::receipt::LedgerRootOutcome;
 use crate::core::ops::scope::parse_root_spec_any;
 use crate::core::repo::{self, Db};
 use crate::retire::domain::Readiness;
@@ -23,7 +24,7 @@ pub fn retired(db: &Db, config: &LedgerConfig) -> Result<()> {
     // The shelf can be observed (books are the primary lines) or not (the
     // index still answers, hedged) — the header states which reading this is.
     let shelf_observed = match (&listing.shelf, listing.shelf_reachable) {
-        (None, _) => {
+        (LedgerRootOutcome::NoArchiveRoot, _) => {
             if listing.lines.is_empty() {
                 println!(
                     "No archive root is registered — there is no shelf, and the index records no retirements."
@@ -33,7 +34,25 @@ pub fn retired(db: &Db, config: &LedgerConfig) -> Result<()> {
             println!("No archive root is registered — there is no shelf. The index records:");
             false
         }
-        (Some(shelf), false) => {
+        // The books are on the shelf; the shelf is behind a closed door. Say
+        // that, and name the door — never "there is no shelf", which is a
+        // different world and sends the reader looking for a different fix.
+        (LedgerRootOutcome::AllArchiveRootsSuspended { roots }, _) => {
+            let parked = roots.join(", ");
+            let way_back = listing.shelf.unsuspend_hint().unwrap_or_default();
+            if listing.lines.is_empty() {
+                println!(
+                    "Every archive root is suspended ({parked}) — the shelf is out of view, and the index records no retirements. To open one: {way_back}"
+                );
+                return Ok(());
+            }
+            println!(
+                "Every archive root is suspended ({parked}) — the shelf is out of view. Listing from the index; to open one: {way_back}"
+            );
+            false
+        }
+        (LedgerRootOutcome::Found { .. }, false) => {
+            let shelf = listing.shelf_path().unwrap_or_default();
             if listing.lines.is_empty() {
                 println!(
                     "The shelf at {shelf} is not reachable right now, and the index records no retirements."
@@ -43,7 +62,8 @@ pub fn retired(db: &Db, config: &LedgerConfig) -> Result<()> {
             println!("The shelf at {shelf} is not reachable right now — listing from the index:");
             false
         }
-        (Some(shelf), true) => {
+        (LedgerRootOutcome::Found { .. }, true) => {
+            let shelf = listing.shelf_path().unwrap_or_default();
             if listing.lines.is_empty() {
                 println!("The shelf is empty — no roots retired yet. ({shelf})");
                 return Ok(());

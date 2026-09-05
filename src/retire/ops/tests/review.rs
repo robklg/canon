@@ -156,6 +156,27 @@ fn validate_requires_an_archive_root_to_exist() {
     assert!(err.to_string().contains("canon roots rm"));
 }
 
+/// The parked arm names the cause it actually has, and offers the door that
+/// undoes the pause — never `canon roots rm`, which destroys the index the
+/// user only parked.
+#[test]
+fn validate_names_a_parked_archive_fleet_and_offers_only_unsuspend() {
+    let conn = open_in_memory_for_test();
+    let root_id = insert_test_root(&conn, "/source", "source", false);
+    insert_test_root(&conn, "/archive", "archive", true);
+    let roots = repo::root::fetch_all(&conn).unwrap();
+    let err = validate_retire_target(&roots, root_id, &ledger_config())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("every archive root is suspended (/archive)"),
+        "{err}"
+    );
+    assert!(err.contains("canon roots unsuspend path:/archive"), "{err}");
+    assert!(!err.contains("no archive root is registered"), "{err}");
+    assert!(!err.contains("canon roots rm"), "{err}");
+}
+
 #[test]
 fn validate_passes_a_source_root_with_an_archive_registered() {
     let conn = open_in_memory_for_test();

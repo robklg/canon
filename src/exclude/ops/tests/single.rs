@@ -7,6 +7,7 @@ use crate::exclude::ops::single::{
     check_set_source_by_path, execute_clear_object, execute_set_object, fetch_object_sources,
     list_excluded_objects, ObjectClearCheck, ObjectExclusionCheck, SourceExclusionCheck,
 };
+use crate::exclude::ops::types::ReceiptDestination;
 
 // =========================================================================
 // check_set_source_by_id() tests
@@ -462,7 +463,7 @@ fn test_execute_set_object_excludes_and_returns_summary() {
         "abcdef1234567890",
         "sha256:abcdef1234567890",
         &sources,
-        None,
+        &ReceiptDestination::none(),
         None,
     )
     .unwrap();
@@ -487,7 +488,7 @@ fn test_execute_set_object_summary_includes_hash_prefix() {
         "deadbeef12345678",
         "sha256:deadbeef12345678",
         &[],
-        None,
+        &ReceiptDestination::none(),
         None,
     )
     .unwrap();
@@ -509,7 +510,7 @@ fn test_execute_clear_object_clears_and_returns_summary() {
         obj_id,
         "abcdef1234567890",
         "sha256:abcdef1234567890",
-        None,
+        &ReceiptDestination::none(),
         None,
     )
     .unwrap();

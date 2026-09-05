@@ -14,6 +14,7 @@ use crate::core::domain::config::LedgerConfig;
 use crate::core::domain::decision::{Decision, DecisionCommand};
 use crate::core::domain::resolution::{build_account, ResolutionAccount};
 use crate::core::domain::Root;
+use crate::core::ops::receipt::LedgerRootOutcome;
 use crate::core::ops::root_story::{fetch_root_story, RootStory};
 use crate::core::repo;
 use crate::retire::domain::{derive_readiness, Readiness};
@@ -67,10 +68,16 @@ pub fn validate_retire_target(roots: &[Root], root_id: i64, config: &LedgerConfi
             root.path
         );
     }
-    if crate::core::ops::receipt::resolve_ledger_root(roots, config).is_none() {
-        bail!("Retirement needs an archive root to hold the record — no archive root is registered. To remove the root without binding its story: canon roots rm");
+    let outcome = crate::core::ops::receipt::resolve_ledger_root(roots, config);
+    match &outcome {
+        LedgerRootOutcome::Found { .. } => Ok(()),
+        LedgerRootOutcome::NoArchiveRoot => bail!(
+            "Retirement needs an archive root to hold the record — no archive root is registered. To remove the root without binding its story: canon roots rm"
+        ),
+        LedgerRootOutcome::AllArchiveRootsSuspended { roots } => {
+            bail!("{}", super::parked_shelf_refusal(&outcome, roots))
+        }
     }
-    Ok(())
 }
 
 /// A bound retirement covering a path — the retired-scope statement's data.

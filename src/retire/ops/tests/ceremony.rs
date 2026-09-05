@@ -2,6 +2,7 @@ use rusqlite::Connection;
 
 use crate::core::domain::config::RecordingMode;
 use crate::core::domain::decision::Decision;
+use crate::core::ops::receipt::LedgerRootOutcome;
 use crate::core::ops::root_story::fetch_root_story;
 use crate::core::repo;
 use crate::core::repo::db::open_in_memory_for_test;
@@ -108,6 +109,34 @@ fn plan_bind_refuses_an_unidentifiable_directory() {
     assert!(err.to_string().contains("refusing to replace"), "{err:#}");
 }
 
+/// The backstop for the world moving between the entry gate and the bind: a
+/// `roots suspend` in another process. It speaks the parked cause, not the
+/// absent one.
+#[test]
+fn plan_bind_names_a_parked_archive_fleet() {
+    let (conn, _src, arch, root_id) = every_fate_fixture();
+    let mut story = fetch_root_story(&conn, root_id).unwrap();
+    for r in story.roots.iter_mut() {
+        if r.is_archive() {
+            r.suspended = true;
+        }
+    }
+
+    let err = plan_bind(&story, &ledger_config(), CEREMONY_NOW)
+        .unwrap_err()
+        .to_string();
+    let parked = arch.path().to_string_lossy().to_string();
+    assert!(
+        err.contains(&format!("every archive root is suspended ({parked})")),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!("canon roots unsuspend path:{parked}")),
+        "{err}"
+    );
+    assert!(!err.contains("no archive root is registered"), "{err}");
+}
+
 #[test]
 fn bind_places_a_verified_book_and_records_the_pointer() {
     let (conn, _src, arch, root_id) = every_fate_fixture();
@@ -140,11 +169,15 @@ fn bind_places_a_verified_book_and_records_the_pointer() {
         decision.receipt_rel_path.as_deref(),
         Some(format!("{SHELF_DIR}/{name}").as_str())
     );
-    let (arch_id, _) = crate::core::ops::receipt::resolve_ledger_root(
+    let LedgerRootOutcome::Found {
+        root_id: arch_id, ..
+    } = crate::core::ops::receipt::resolve_ledger_root(
         &fetch_root_story(&conn, root_id).unwrap().roots,
         &ledger_config(),
     )
-    .unwrap();
+    else {
+        panic!("expected an archive root");
+    };
     assert_eq!(decision.receipt_root_id, Some(arch_id));
 
     // The book names the decision that bound it — the index reference is

@@ -175,7 +175,10 @@ fn shelf_listing_falls_back_to_rows_when_the_shelf_is_unreachable() {
 
     let listing = listing_with_archive(&conn, "/no/such/archive");
     assert!(!listing.shelf_reachable);
-    assert_eq!(listing.shelf.as_deref(), Some("/no/such/archive/retired"));
+    assert_eq!(
+        listing.shelf_path().as_deref(),
+        Some("/no/such/archive/retired")
+    );
     assert_eq!(listing.lines.len(), 1);
     assert!(matches!(listing.lines[0], ShelfLine::RecordedOnly { .. }));
 }
@@ -189,4 +192,44 @@ fn shelf_listing_empty_shelf_is_empty_and_reachable() {
     let listing = listing_with_archive(&conn, archive.path().to_str().unwrap());
     assert!(listing.shelf_reachable);
     assert!(listing.lines.is_empty());
+}
+
+/// The books stand on the shelf; the shelf's root is parked. The listing
+/// carries which absence this is, so the header can say "out of view"
+/// instead of "there is no shelf" — a different world, with a different fix.
+#[test]
+fn a_parked_archive_fleet_leaves_the_shelf_out_of_view_not_absent() {
+    let conn = open_in_memory_for_test();
+    let archive = tempfile::tempdir().unwrap();
+    let shelf = archive.path().join(SHELF_DIR);
+    place_book(&shelf, "gone-2026-08-02", "/gone", 3980);
+    let archive_path = archive.path().to_string_lossy().to_string();
+    insert_test_root(&conn, &archive_path, "archive", true);
+
+    let listing = compute_shelf_listing(&conn, &LedgerConfig::default()).unwrap();
+
+    assert_eq!(
+        listing.shelf,
+        crate::core::ops::receipt::LedgerRootOutcome::AllArchiveRootsSuspended {
+            roots: vec![archive_path.clone()],
+        }
+    );
+    assert_eq!(listing.shelf_path(), None);
+    assert!(!listing.shelf_reachable);
+}
+
+/// The other absence, unchanged: no archive root was ever registered, so
+/// there really is no shelf.
+#[test]
+fn no_archive_root_leaves_the_shelf_absent() {
+    let conn = open_in_memory_for_test();
+    insert_test_root(&conn, "/source", "source", false);
+
+    let listing = compute_shelf_listing(&conn, &LedgerConfig::default()).unwrap();
+
+    assert_eq!(
+        listing.shelf,
+        crate::core::ops::receipt::LedgerRootOutcome::NoArchiveRoot
+    );
+    assert_eq!(listing.shelf_path(), None);
 }

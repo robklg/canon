@@ -9,7 +9,33 @@ use std::collections::HashMap;
 use crate::core::domain::object::Object;
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
+use crate::core::ops::receipt::ReceiptPlacement;
 use crate::expr::Filter;
+
+/// Where an exclusion's receipt lands — or why it lands nowhere.
+///
+/// One value rather than two arguments, because the pair is one fact and an
+/// incoherent pair is meaningless: a placement and a reason are never both
+/// present, and when a receipt was owed and could not be placed, the reason is
+/// never absent. `resolve_placement` in the cli stratum is the only constructor.
+pub struct ReceiptDestination {
+    pub placement: Option<ReceiptPlacement>,
+    /// The reason no receipt could be placed — carried into the recorded
+    /// summary so the row explains its own empty receipt columns. `None` when
+    /// a receipt was placed, or was never owed.
+    pub gap: Option<String>,
+}
+
+impl ReceiptDestination {
+    /// No receipt, no gap: the shape a test that records nothing passes.
+    #[cfg(test)]
+    pub fn none() -> Self {
+        Self {
+            placement: None,
+            gap: None,
+        }
+    }
+}
 
 /// Receipt-capable per-source detail carried through exclusion plans.
 ///

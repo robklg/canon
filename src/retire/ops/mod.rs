@@ -33,6 +33,26 @@ fn iso_date(ts: i64) -> String {
 /// deliberately not under `.canon-ledger/` — the books are for human eyes.
 pub const SHELF_DIR: &str = "retired";
 
+/// The refusal both retirement doors give when every archive root is parked:
+/// the entry gate (`validate_retire_target`) and the bind's backstop
+/// (`plan_bind`) meet one fact and must say one thing about it. Spelled here
+/// once, because the requester reads this sentence and a second copy is a
+/// second sentence the day either is repaired.
+///
+/// Nothing is missing — the shelf and its books stand where they stood — so
+/// the way back is `canon roots unsuspend` and only that; the destructive door
+/// belongs to the other absence, where there is genuinely no shelf to bind to.
+fn parked_shelf_refusal(
+    outcome: &crate::core::ops::receipt::LedgerRootOutcome,
+    parked: &[String],
+) -> String {
+    format!(
+        "Retirement needs an archive root to hold the record — every archive root is suspended ({}). To open one: {}",
+        parked.join(", "),
+        outcome.unsuspend_hint().unwrap_or_default()
+    )
+}
+
 mod ceremony;
 mod compile;
 pub(super) mod frame;

@@ -7,7 +7,7 @@ use crate::exclude::ops::execute::{
 };
 use crate::exclude::ops::types::{
     DuplicateGroupData, ExcludeClearPlan, ExcludeDuplicatesPlan, ExcludeSetObjectsPlan,
-    ExcludeSetPlan, ObjectPlanEntry,
+    ExcludeSetPlan, ObjectPlanEntry, ReceiptDestination,
 };
 
 use super::fixtures::item;
@@ -29,7 +29,7 @@ fn test_execute_set_marks_excluded() {
         not_archived_count: 2,
     };
 
-    execute_set(&mut conn, &plan, None, None).unwrap();
+    execute_set(&mut conn, &plan, &ReceiptDestination::none(), None).unwrap();
 
     assert!(is_source_excluded(&conn, id1));
     assert!(is_source_excluded(&conn, id2));
@@ -47,7 +47,7 @@ fn test_execute_clear_clears_excluded() {
         root_count: 1,
     };
 
-    execute_clear(&mut conn, &plan, None, None).unwrap();
+    execute_clear(&mut conn, &plan, &ReceiptDestination::none(), None).unwrap();
 
     assert!(!is_source_excluded(&conn, id1));
     assert!(!is_source_excluded(&conn, id2));
@@ -65,7 +65,7 @@ fn test_execute_set_returns_count() {
         not_archived_count: 1,
     };
 
-    let result = execute_set(&mut conn, &plan, None, None).unwrap();
+    let result = execute_set(&mut conn, &plan, &ReceiptDestination::none(), None).unwrap();
     assert_eq!(result.count, 1);
 }
 
@@ -81,12 +81,12 @@ fn test_execute_clear_returns_count() {
         root_count: 1,
     };
 
-    let result = execute_clear(&mut conn, &plan, None, None).unwrap();
+    let result = execute_clear(&mut conn, &plan, &ReceiptDestination::none(), None).unwrap();
     assert_eq!(result.count, 2);
 }
 
 // =========================================================================
-// execute_duplicates() tests
+// execute_duplicates(, None) tests
 // =========================================================================
 
 #[test]
@@ -111,7 +111,7 @@ fn test_execute_duplicates_marks_excluded() {
         skipped_multiple: 0,
     };
 
-    execute_duplicates(&mut conn, &plan, None, None).unwrap();
+    execute_duplicates(&mut conn, &plan, &ReceiptDestination::none(), None).unwrap();
 
     assert!(is_source_excluded(&conn, id1));
     assert!(is_source_excluded(&conn, id2));
@@ -138,12 +138,12 @@ fn test_execute_duplicates_returns_count() {
         skipped_multiple: 0,
     };
 
-    let result = execute_duplicates(&mut conn, &plan, None, None).unwrap();
+    let result = execute_duplicates(&mut conn, &plan, &ReceiptDestination::none(), None).unwrap();
     assert_eq!(result.count, 1);
 }
 
 // =========================================================================
-// execute_set_objects() tests
+// execute_set_objects(, None) tests
 // =========================================================================
 
 #[test]
@@ -177,7 +177,7 @@ fn test_execute_set_objects_marks_excluded() {
         skipped_already_excluded: 0,
     };
 
-    execute_set_objects(&mut conn, &plan, None, None).unwrap();
+    execute_set_objects(&mut conn, &plan, &ReceiptDestination::none(), None).unwrap();
 
     assert!(is_object_excluded(&conn, obj1));
     assert!(is_object_excluded(&conn, obj2));
@@ -203,6 +203,6 @@ fn test_execute_set_objects_returns_count() {
         skipped_already_excluded: 0,
     };
 
-    let result = execute_set_objects(&mut conn, &plan, None, None).unwrap();
+    let result = execute_set_objects(&mut conn, &plan, &ReceiptDestination::none(), None).unwrap();
     assert_eq!(result.count, 1);
 }

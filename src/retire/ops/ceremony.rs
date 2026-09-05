@@ -11,6 +11,7 @@ use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
+use crate::core::ops::receipt::LedgerRootOutcome;
 use crate::core::ops::root_story::RootStory;
 use crate::retire::domain::book_dir_name;
 use crate::retire::ops::frame::{self, TellingArtifact};
@@ -49,12 +50,20 @@ pub struct BindPlan {
 /// book pushes this one to a `-2`/`-3`… sibling; a directory that cannot be
 /// identified refuses the ceremony.
 pub fn plan_bind(story: &RootStory, config: &LedgerConfig, now: i64) -> Result<BindPlan> {
-    let (ledger_root_id, ledger_root_path) =
-        crate::core::ops::receipt::resolve_ledger_root(&story.roots, config).ok_or_else(|| {
-            anyhow::anyhow!(
+    // The entry gate (`validate_retire_target`) asks this same question and
+    // refuses there; this is the backstop for the world moving between the
+    // two — a `roots suspend` in another process — so it speaks the same two
+    // causes rather than collapsing them back into one.
+    let outcome = crate::core::ops::receipt::resolve_ledger_root(&story.roots, config);
+    let (ledger_root_id, ledger_root_path) = match &outcome {
+        LedgerRootOutcome::Found { root_id, root_path } => (*root_id, root_path.clone()),
+        LedgerRootOutcome::NoArchiveRoot => bail!(
             "Retirement needs an archive root to hold the record — no archive root is registered"
-        )
-        })?;
+        ),
+        LedgerRootOutcome::AllArchiveRootsSuspended { roots } => {
+            bail!("{}", super::parked_shelf_refusal(&outcome, roots))
+        }
+    };
     let shelf = PathBuf::from(&ledger_root_path).join(SHELF_DIR);
     let base = book_dir_name(&story.root.path, &iso_date(now));
 

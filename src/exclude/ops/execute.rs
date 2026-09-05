@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use crate::core::domain::format_count;
 use crate::core::ops::decision::DecisionParams;
-use crate::core::ops::receipt::{ReceiptKind, ReceiptPlacement};
+use crate::core::ops::receipt::ReceiptKind;
 use crate::core::repo::Connection;
 use crate::exclude::repo as exclude_repo;
 
@@ -19,6 +19,7 @@ use super::receipt::{
 use super::runner::run_exclusion;
 use super::types::{
     ExcludeClearPlan, ExcludeDuplicatesPlan, ExcludeSetObjectsPlan, ExcludeSetPlan,
+    ReceiptDestination,
 };
 use crate::core::domain::decision::DecisionStatus;
 
@@ -35,7 +36,7 @@ pub struct ExcludeSetResult {
 pub fn execute_set(
     conn: &mut Connection,
     plan: &ExcludeSetPlan,
-    placement: Option<&ReceiptPlacement>,
+    destination: &ReceiptDestination,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSetResult> {
     let source_ids = plan.source_ids();
@@ -44,36 +45,38 @@ pub fn execute_set(
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Excluded {} {noun}", format_count(count));
 
-    let warnings = run_exclusion(
+    let run = run_exclusion(
         conn,
         decision,
-        placement,
+        destination,
         has_items,
         counts_all(count),
         &summary,
         |tx, decision_id| {
             exclude_repo::source::batch_set_excluded(tx, &source_ids, true, decision_id)?;
-            Ok(match (decision, decision_id, placement) {
-                (Some(d), Some(did), Some(p)) if has_items => Some(ExcludeReceipt {
-                    meta: d.receipt_meta(
-                        did,
-                        DecisionStatus::Completed,
-                        &summary,
-                        p.locus_root(),
-                        ReceiptKind::ExcludeSet,
-                        None,
-                    ),
-                    items: exclude_receipt_items(&plan.items),
-                }),
-                _ => None,
-            })
+            Ok(
+                match (decision, decision_id, destination.placement.as_ref()) {
+                    (Some(d), Some(did), Some(p)) if has_items => Some(ExcludeReceipt {
+                        meta: d.receipt_meta(
+                            did,
+                            DecisionStatus::Completed,
+                            &summary,
+                            p.locus_root(),
+                            ReceiptKind::ExcludeSet,
+                            None,
+                        ),
+                        items: exclude_receipt_items(&plan.items),
+                    }),
+                    _ => None,
+                },
+            )
         },
     )?;
 
     Ok(ExcludeSetResult {
         count,
-        summary,
-        warnings,
+        summary: run.summary,
+        warnings: run.warnings,
     })
 }
 
@@ -90,7 +93,7 @@ pub struct ExcludeClearResult {
 pub fn execute_clear(
     conn: &mut Connection,
     plan: &ExcludeClearPlan,
-    placement: Option<&ReceiptPlacement>,
+    destination: &ReceiptDestination,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeClearResult> {
     let source_ids = plan.source_ids();
@@ -99,36 +102,38 @@ pub fn execute_clear(
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Cleared exclusions for {} {noun}", format_count(count));
 
-    let warnings = run_exclusion(
+    let run = run_exclusion(
         conn,
         decision,
-        placement,
+        destination,
         has_items,
         counts_all(count),
         &summary,
         |tx, decision_id| {
             exclude_repo::source::batch_set_excluded(tx, &source_ids, false, decision_id)?;
-            Ok(match (decision, decision_id, placement) {
-                (Some(d), Some(did), Some(p)) if has_items => Some(ExcludeReceipt {
-                    meta: d.receipt_meta(
-                        did,
-                        DecisionStatus::Completed,
-                        &summary,
-                        p.locus_root(),
-                        ReceiptKind::Restore,
-                        None,
-                    ),
-                    items: exclude_receipt_items(&plan.items),
-                }),
-                _ => None,
-            })
+            Ok(
+                match (decision, decision_id, destination.placement.as_ref()) {
+                    (Some(d), Some(did), Some(p)) if has_items => Some(ExcludeReceipt {
+                        meta: d.receipt_meta(
+                            did,
+                            DecisionStatus::Completed,
+                            &summary,
+                            p.locus_root(),
+                            ReceiptKind::Restore,
+                            None,
+                        ),
+                        items: exclude_receipt_items(&plan.items),
+                    }),
+                    _ => None,
+                },
+            )
         },
     )?;
 
     Ok(ExcludeClearResult {
         count,
-        summary,
-        warnings,
+        summary: run.summary,
+        warnings: run.warnings,
     })
 }
 
@@ -145,7 +150,7 @@ pub struct ExcludeDuplicatesResult {
 pub fn execute_duplicates(
     conn: &mut Connection,
     plan: &ExcludeDuplicatesPlan,
-    placement: Option<&ReceiptPlacement>,
+    destination: &ReceiptDestination,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeDuplicatesResult> {
     let source_ids = plan.source_ids();
@@ -154,36 +159,38 @@ pub fn execute_duplicates(
     let noun = if count == 1 { "source" } else { "sources" };
     let summary = format!("Excluded {} {noun}", format_count(count));
 
-    let warnings = run_exclusion(
+    let run = run_exclusion(
         conn,
         decision,
-        placement,
+        destination,
         has_items,
         counts_all(count),
         &summary,
         |tx, decision_id| {
             exclude_repo::source::batch_set_excluded(tx, &source_ids, true, decision_id)?;
-            Ok(match (decision, decision_id, placement) {
-                (Some(d), Some(did), Some(p)) if has_items => Some(DuplicatesReceipt {
-                    meta: d.receipt_meta(
-                        did,
-                        DecisionStatus::Completed,
-                        &summary,
-                        p.locus_root(),
-                        ReceiptKind::ExcludeDuplicates,
-                        None,
-                    ),
-                    groups: duplicate_receipt_groups(&plan.groups),
-                }),
-                _ => None,
-            })
+            Ok(
+                match (decision, decision_id, destination.placement.as_ref()) {
+                    (Some(d), Some(did), Some(p)) if has_items => Some(DuplicatesReceipt {
+                        meta: d.receipt_meta(
+                            did,
+                            DecisionStatus::Completed,
+                            &summary,
+                            p.locus_root(),
+                            ReceiptKind::ExcludeDuplicates,
+                            None,
+                        ),
+                        groups: duplicate_receipt_groups(&plan.groups),
+                    }),
+                    _ => None,
+                },
+            )
         },
     )?;
 
     Ok(ExcludeDuplicatesResult {
         count,
-        summary,
-        warnings,
+        summary: run.summary,
+        warnings: run.warnings,
     })
 }
 
@@ -202,7 +209,7 @@ pub struct ExcludeSetObjectsResult {
 pub fn execute_set_objects(
     conn: &mut Connection,
     plan: &ExcludeSetObjectsPlan,
-    placement: Option<&ReceiptPlacement>,
+    destination: &ReceiptDestination,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSetObjectsResult> {
     let count = plan.objects.len();
@@ -213,10 +220,10 @@ pub fn execute_set_objects(
         count, plan.total_source_count, total_in_source_roots, plan.total_archive_count
     );
 
-    let warnings = run_exclusion(
+    let run = run_exclusion(
         conn,
         decision,
-        placement,
+        destination,
         has_items,
         counts_all(count),
         &summary,
@@ -235,29 +242,31 @@ pub fn execute_set_objects(
                 exclude_repo::object::set_excluded(tx, entry.object_id, true)?;
                 exclude_repo::source::set_decision_id_by_object(tx, entry.object_id, decision_id)?;
             }
-            Ok(match (decision, decision_id, placement) {
-                (Some(d), Some(did), Some(p)) if has_items => Some(ObjectExcludeReceipt {
-                    meta: d.receipt_meta(
-                        did,
-                        DecisionStatus::Completed,
-                        &summary,
-                        p.locus_root(),
-                        ReceiptKind::ExcludeObject,
-                        None,
-                    ),
-                    objects: plan
-                        .objects
-                        .iter()
-                        .map(|o| ObjectExcludeEntry {
-                            hash: o.hash.clone(),
-                            sources: object_stamp_set_entries(
-                                stamp_sets.remove(&o.object_id).unwrap_or_default(),
-                            ),
-                        })
-                        .collect(),
-                }),
-                _ => None,
-            })
+            Ok(
+                match (decision, decision_id, destination.placement.as_ref()) {
+                    (Some(d), Some(did), Some(p)) if has_items => Some(ObjectExcludeReceipt {
+                        meta: d.receipt_meta(
+                            did,
+                            DecisionStatus::Completed,
+                            &summary,
+                            p.locus_root(),
+                            ReceiptKind::ExcludeObject,
+                            None,
+                        ),
+                        objects: plan
+                            .objects
+                            .iter()
+                            .map(|o| ObjectExcludeEntry {
+                                hash: o.hash.clone(),
+                                sources: object_stamp_set_entries(
+                                    stamp_sets.remove(&o.object_id).unwrap_or_default(),
+                                ),
+                            })
+                            .collect(),
+                    }),
+                    _ => None,
+                },
+            )
         },
     )?;
 
@@ -265,7 +274,7 @@ pub fn execute_set_objects(
         count,
         total_source_count: plan.total_source_count,
         total_archive_count: plan.total_archive_count,
-        summary,
-        warnings,
+        summary: run.summary,
+        warnings: run.warnings,
     })
 }

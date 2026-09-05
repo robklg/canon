@@ -213,27 +213,103 @@ pub fn compute_ledger_root_receipt_rel_path(decision_id: i64, command: &str) -> 
     format!(".canon-ledger/{}", receipt_filename(decision_id, command))
 }
 
+/// Where non-targeted receipts land — or why they land nowhere.
+///
+/// The two absences are different facts about the world and take different
+/// answers, so they are two arms rather than one `None`: with no archive root
+/// there is nothing to register, and the way forward is to register one; with
+/// every archive root suspended the shelf and its ledger stand exactly where
+/// they stood, behind a door the user closed, and the only way back is
+/// `canon roots unsuspend`. A reader that could not tell them apart would name
+/// a cause that is false and prescribe a remedy that does not work.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LedgerRootOutcome {
+    Found {
+        root_id: i64,
+        root_path: String,
+    },
+    /// No archive root is registered at all.
+    NoArchiveRoot,
+    /// Archive roots are registered and every one of them is suspended.
+    /// Their paths, lowest root id first — the same order the resolver
+    /// would have picked from.
+    AllArchiveRootsSuspended {
+        roots: Vec<String>,
+    },
+}
+
+impl LedgerRootOutcome {
+    /// The reason no receipt could be placed, as a **record value**: it is
+    /// carried into the decision row's summary, so a row with empty receipt
+    /// columns explains its own gap instead of leaving a reader to guess
+    /// (the consumption-readiness ADR's self-explaining gaps). `None` when a
+    /// root was found and a receipt is owed after all.
+    pub fn unplaceable_reason(&self) -> Option<String> {
+        match self {
+            Self::Found { .. } => None,
+            Self::NoArchiveRoot => {
+                Some("receipt not written: no archive root is registered".to_string())
+            }
+            Self::AllArchiveRootsSuspended { roots } => Some(format!(
+                "receipt not written: every archive root is suspended ({})",
+                roots.join(", ")
+            )),
+        }
+    }
+
+    /// The way back from a closed door, as the command that opens it — named
+    /// for the first parked root, which is the one the resolver would take.
+    /// `canon roots unsuspend`, and only that: the sweep's footer rule, which
+    /// settled this wording for a surface that meets the same door.
+    pub fn unsuspend_hint(&self) -> Option<String> {
+        match self {
+            Self::Found { .. } | Self::NoArchiveRoot => None,
+            Self::AllArchiveRootsSuspended { roots } => roots
+                .first()
+                .map(|p| format!("canon roots unsuspend path:{p}")),
+        }
+    }
+}
+
 /// Resolve which archive root holds non-targeted receipts.
 ///
 /// Uses `config.root` if it names an active archive root; otherwise the lowest-id
-/// active archive root; otherwise `None` (no archive root — the caller warns and
-/// skips the receipt). Returns `(root_id, root_path)`.
-pub fn resolve_ledger_root(roots: &[Root], config: &LedgerConfig) -> Option<(i64, String)> {
+/// active archive root. With neither available the outcome carries *which*
+/// absence it is — the caller states that cause rather than assuming one.
+/// Suspended archive roots are skipped deliberately: a receipt is not written
+/// into a root the user has closed.
+pub fn resolve_ledger_root(roots: &[Root], config: &LedgerConfig) -> LedgerRootOutcome {
     if let Some(configured) = config.root {
         if let Some(r) = roots
             .iter()
             .find(|r| r.id == configured && r.is_active() && r.is_archive())
         {
-            return Some((r.id, r.path.clone()));
+            return LedgerRootOutcome::Found {
+                root_id: r.id,
+                root_path: r.path.clone(),
+            };
         }
         // Configured root is invalid (missing, suspended, or not an archive) —
         // fall through to the default rather than failing.
     }
-    roots
+    if let Some(r) = roots
         .iter()
         .filter(|r| r.is_active() && r.is_archive())
         .min_by_key(|r| r.id)
-        .map(|r| (r.id, r.path.clone()))
+    {
+        return LedgerRootOutcome::Found {
+            root_id: r.id,
+            root_path: r.path.clone(),
+        };
+    }
+    let mut parked: Vec<&Root> = roots.iter().filter(|r| r.is_archive()).collect();
+    if parked.is_empty() {
+        return LedgerRootOutcome::NoArchiveRoot;
+    }
+    parked.sort_by_key(|r| r.id);
+    LedgerRootOutcome::AllArchiveRootsSuspended {
+        roots: parked.into_iter().map(|r| r.path.clone()).collect(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -513,10 +589,89 @@ mod tests {
         );
     }
 
+    fn found(id: i64, path: &str) -> LedgerRootOutcome {
+        LedgerRootOutcome::Found {
+            root_id: id,
+            root_path: path.to_string(),
+        }
+    }
+
     #[test]
     fn test_resolve_ledger_root_none_when_no_archive() {
         let roots = vec![mk_root(1, "source", false)];
-        assert_eq!(resolve_ledger_root(&roots, &LedgerConfig::default()), None);
+        assert_eq!(
+            resolve_ledger_root(&roots, &LedgerConfig::default()),
+            LedgerRootOutcome::NoArchiveRoot
+        );
+    }
+
+    /// The two absences are two facts. An archive root that exists and is
+    /// parked must never read as one that was never registered — the whole
+    /// point of the arm.
+    #[test]
+    fn a_parked_archive_fleet_is_not_an_absent_one() {
+        let roots = vec![
+            mk_root(1, "source", false),
+            mk_root(3, "archive", true),
+            mk_root(2, "archive", true),
+        ];
+        assert_eq!(
+            resolve_ledger_root(&roots, &LedgerConfig::default()),
+            LedgerRootOutcome::AllArchiveRootsSuspended {
+                roots: vec!["/root2".to_string(), "/root3".to_string()],
+            }
+        );
+    }
+
+    /// A configured ledger root that is itself parked falls through to the
+    /// default, and with every archive root parked the fall-through lands on
+    /// the parked arm — never on "no archive root".
+    #[test]
+    fn a_parked_configured_root_falls_through_to_the_parked_arm() {
+        let roots = vec![mk_root(1, "archive", true), mk_root(2, "archive", true)];
+        let cfg = LedgerConfig {
+            root: Some(1),
+            ..LedgerConfig::default()
+        };
+        assert_eq!(
+            resolve_ledger_root(&roots, &cfg),
+            LedgerRootOutcome::AllArchiveRootsSuspended {
+                roots: vec!["/root1".to_string(), "/root2".to_string()],
+            }
+        );
+    }
+
+    /// The reason is a record value: it says which absence this is, and the
+    /// parked one names the roots so the row is readable years later.
+    #[test]
+    fn each_absence_states_its_own_cause() {
+        assert_eq!(
+            LedgerRootOutcome::NoArchiveRoot.unplaceable_reason(),
+            Some("receipt not written: no archive root is registered".to_string())
+        );
+        assert_eq!(
+            LedgerRootOutcome::AllArchiveRootsSuspended {
+                roots: vec!["/a".to_string(), "/b".to_string()],
+            }
+            .unplaceable_reason(),
+            Some("receipt not written: every archive root is suspended (/a, /b)".to_string())
+        );
+        assert_eq!(found(1, "/root1").unplaceable_reason(), None);
+    }
+
+    /// The way back exists only for the door the user closed, and it is
+    /// `canon roots unsuspend` and only that — never the destructive door.
+    #[test]
+    fn only_the_closed_door_offers_a_way_back() {
+        assert_eq!(found(1, "/root1").unsuspend_hint(), None);
+        assert_eq!(LedgerRootOutcome::NoArchiveRoot.unsuspend_hint(), None);
+        assert_eq!(
+            LedgerRootOutcome::AllArchiveRootsSuspended {
+                roots: vec!["/a".to_string(), "/b".to_string()],
+            }
+            .unsuspend_hint(),
+            Some("canon roots unsuspend path:/a".to_string())
+        );
     }
 
     #[test]
@@ -528,7 +683,7 @@ mod tests {
         ];
         assert_eq!(
             resolve_ledger_root(&roots, &LedgerConfig::default()),
-            Some((2, "/root2".to_string()))
+            found(2, "/root2")
         );
     }
 
@@ -539,10 +694,7 @@ mod tests {
             root: Some(5),
             ..LedgerConfig::default()
         };
-        assert_eq!(
-            resolve_ledger_root(&roots, &cfg),
-            Some((5, "/root5".to_string()))
-        );
+        assert_eq!(resolve_ledger_root(&roots, &cfg), found(5, "/root5"));
     }
 
     #[test]
@@ -552,10 +704,7 @@ mod tests {
             root: Some(9),
             ..LedgerConfig::default()
         };
-        assert_eq!(
-            resolve_ledger_root(&roots, &cfg),
-            Some((1, "/root1".to_string()))
-        );
+        assert_eq!(resolve_ledger_root(&roots, &cfg), found(1, "/root1"));
     }
 
     #[test]
@@ -565,10 +714,7 @@ mod tests {
             root: Some(2),
             ..LedgerConfig::default()
         };
-        assert_eq!(
-            resolve_ledger_root(&roots, &cfg),
-            Some((1, "/root1".to_string()))
-        );
+        assert_eq!(resolve_ledger_root(&roots, &cfg), found(1, "/root1"));
     }
 
     #[test]
@@ -576,7 +722,7 @@ mod tests {
         let roots = vec![mk_root(1, "archive", true), mk_root(2, "archive", false)];
         assert_eq!(
             resolve_ledger_root(&roots, &LedgerConfig::default()),
-            Some((2, "/root2".to_string()))
+            found(2, "/root2")
         );
     }
 

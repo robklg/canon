@@ -8,7 +8,7 @@ use crate::core::domain::path::validate_paths_in_roots;
 use crate::core::domain::root::find_containing_root;
 use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::decision::DecisionParams;
-use crate::core::ops::receipt::{resolve_ledger_root, ReceiptPlacement};
+use crate::core::ops::receipt::{resolve_ledger_root, LedgerRootOutcome, ReceiptPlacement};
 use crate::core::ops::scope::{classify_all_indexed, resolve_path};
 use crate::core::repo::{Connection, Db};
 use crate::exclude::ops::execute::{
@@ -22,7 +22,7 @@ use crate::exclude::ops::single::{
 };
 use crate::exclude::ops::types::{
     ExcludeClearParams, ExcludeDuplicatesParams, ExcludeSetObjectsParams, ExcludeSetParams,
-    ObjectSourceInfo,
+    ObjectSourceInfo, ReceiptDestination,
 };
 use crate::expr::Filter;
 
@@ -55,20 +55,41 @@ fn make_decision(
     })
 }
 
-/// Resolve where exclusion receipts land (flat at the ledger root). Warns when a
-/// receipt was expected but no archive root is configured to hold it.
+/// Resolve where exclusion receipts land (flat at the ledger root) — and,
+/// when they land nowhere, the reason, which travels into the decision row's
+/// summary. The dismissal judgment is recorded either way; what a reader of
+/// the row must not have to guess is *why* it carries no receipt, the
+/// consumption-readiness ADR's self-explaining gap. A receipt that was never
+/// owed — `recording = Records`, `--no-receipt`, a dry run — is no gap and
+/// carries no reason.
+///
+/// No way back is named here, deliberately: unlike the retirement doors,
+/// nothing is blocked, and unsuspending afterwards does not write the receipt
+/// this decision did not write — a remedy that does not remedy is worse than
+/// none (the sweep's own footer reasoning, applied to a surface it does not
+/// cover).
 fn resolve_placement(
     conn: &Connection,
     config: &LedgerConfig,
     decision: &DecisionParams,
-) -> Result<Option<ReceiptPlacement>> {
+) -> Result<ReceiptDestination> {
     let roots = crate::core::repo::root::fetch_all(conn)?;
-    let placement = resolve_ledger_root(&roots, config)
-        .map(|(root_id, root_path)| ReceiptPlacement::LedgerRoot { root_id, root_path });
-    if decision.receipt_enabled && placement.is_none() {
-        eprintln!("Warning: No archive root configured — decision details not preserved");
-    }
-    Ok(placement)
+    let outcome = resolve_ledger_root(&roots, config);
+    let placement = match &outcome {
+        LedgerRootOutcome::Found { root_id, root_path } => Some(ReceiptPlacement::LedgerRoot {
+            root_id: *root_id,
+            root_path: root_path.clone(),
+        }),
+        LedgerRootOutcome::NoArchiveRoot | LedgerRootOutcome::AllArchiveRootsSuspended { .. } => {
+            None
+        }
+    };
+    let gap = if decision.receipt_enabled {
+        outcome.unplaceable_reason()
+    } else {
+        None
+    };
+    Ok(ReceiptDestination { placement, gap })
 }
 
 /// Print receipt-write warnings (one per line) to stderr.
@@ -155,8 +176,8 @@ pub fn set(
         reason,
         options.dry_run,
     )?;
-    let placement = resolve_placement(conn, config, &decision)?;
-    let result = execute_set(conn, &plan, placement.as_ref(), Some(&decision))?;
+    let destination = resolve_placement(conn, config, &decision)?;
+    let result = execute_set(conn, &plan, &destination, Some(&decision))?;
     println!("{}", result.summary);
     print_warnings(&result.warnings);
     Ok(())
@@ -229,8 +250,8 @@ pub fn clear(
         reason,
         options.dry_run,
     )?;
-    let placement = resolve_placement(conn, config, &decision)?;
-    let result = execute_clear(conn, &plan, placement.as_ref(), Some(&decision))?;
+    let destination = resolve_placement(conn, config, &decision)?;
+    let result = execute_clear(conn, &plan, &destination, Some(&decision))?;
     println!("{}", result.summary);
     print_warnings(&result.warnings);
     Ok(())
@@ -267,8 +288,8 @@ pub fn set_by_id(
                     reason,
                     options.dry_run,
                 )?;
-                let placement = resolve_placement(conn, config, &decision)?;
-                let result = execute_set_source(conn, &item, placement.as_ref(), Some(&decision))?;
+                let destination = resolve_placement(conn, config, &decision)?;
+                let result = execute_set_source(conn, &item, &destination, Some(&decision))?;
                 println!("{}", result.summary);
                 print_warnings(&result.warnings);
             }
@@ -320,8 +341,8 @@ pub fn set_by_path(
                     reason,
                     options.dry_run,
                 )?;
-                let placement = resolve_placement(conn, config, &decision)?;
-                let result = execute_set_source(conn, &item, placement.as_ref(), Some(&decision))?;
+                let destination = resolve_placement(conn, config, &decision)?;
+                let result = execute_set_source(conn, &item, &destination, Some(&decision))?;
                 println!("{}", result.summary);
                 print_warnings(&result.warnings);
             }
@@ -470,8 +491,8 @@ pub fn exclude_duplicates(
         reason,
         dry_run,
     )?;
-    let placement = resolve_placement(conn, config, &decision)?;
-    let result = execute_duplicates(conn, &plan, placement.as_ref(), Some(&decision))?;
+    let destination = resolve_placement(conn, config, &decision)?;
+    let result = execute_duplicates(conn, &plan, &destination, Some(&decision))?;
     println!("{}", result.summary);
     print_warnings(&result.warnings);
     println!();
@@ -526,14 +547,14 @@ pub fn set_object_by_hash(
                     reason,
                     options.dry_run,
                 )?;
-                let placement = resolve_placement(conn, config, &decision)?;
+                let destination = resolve_placement(conn, config, &decision)?;
                 let result = execute_set_object(
                     conn,
                     object_id,
                     &hash_prefix,
                     &hash,
                     &sources,
-                    placement.as_ref(),
+                    &destination,
                     Some(&decision),
                 )?;
                 println!("{}", result.summary);
@@ -601,14 +622,14 @@ pub fn set_object_by_file(
                     reason,
                     options.dry_run,
                 )?;
-                let placement = resolve_placement(conn, config, &decision)?;
+                let destination = resolve_placement(conn, config, &decision)?;
                 let result = execute_set_object(
                     conn,
                     object_id,
                     &hash_prefix,
                     &hash,
                     &sources,
-                    placement.as_ref(),
+                    &destination,
                     Some(&decision),
                 )?;
                 println!("{}", result.summary);
@@ -721,8 +742,8 @@ pub fn set_objects_by_filter(
         reason,
         options.dry_run,
     )?;
-    let placement = resolve_placement(conn, config, &decision)?;
-    let result = execute_set_objects(conn, &plan, placement.as_ref(), Some(&decision))?;
+    let destination = resolve_placement(conn, config, &decision)?;
+    let result = execute_set_objects(conn, &plan, &destination, Some(&decision))?;
     println!("{}", result.summary);
     print_warnings(&result.warnings);
     Ok(())
@@ -790,13 +811,13 @@ pub fn clear_object(
                     None,
                     options.dry_run,
                 )?;
-                let placement = resolve_placement(conn, config, &decision)?;
+                let destination = resolve_placement(conn, config, &decision)?;
                 let result = execute_clear_object(
                     conn,
                     object_id,
                     &hash_prefix,
                     &hash,
-                    placement.as_ref(),
+                    &destination,
                     Some(&decision),
                 )?;
                 println!("{}", result.summary);

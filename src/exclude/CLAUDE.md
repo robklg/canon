@@ -70,6 +70,14 @@ strata — is private or `pub(super)` at most, visible only within `exclude/`.
 - **Ops never touches stderr** — warnings accumulate into result structs and
   `cli.rs::print_warnings` prints them; `cli.rs` is the only file in the subsystem where
   `eprintln!` appears.
+- **A receipt that could not be placed states its reason *in* the summary, not beside it.**
+  `cli.rs::resolve_placement` conjugates `LedgerRootOutcome` into a placement and, when there is
+  none, the reason; `run_exclusion` joins it onto the summary — the one place that join is
+  spelled — so the printed line, the decision row and the trail's narration stay one composition
+  (self-explaining gaps). A gap means no placement, and no placement means the `mutate` closure
+  builds no receipt, so the body's own copy cannot disagree. A receipt never owed (`Records`
+  mode, `--no-receipt`, a dry run) is no gap. No way back is named: nothing is blocked, and
+  unsuspending later does not write the receipt this decision did not.
 - **The `role DESC, root_path, rel_path` sort is spelled twice**, in `plan.rs` and `single.rs`, so
   the two orderings can drift apart silently; `test_plan_set_objects_source_sort_order` pins the
   `plan.rs` spelling, and on the `single.rs` side `test_fetch_object_sources_includes_role` pins
@@ -84,6 +92,7 @@ fails if it stops holding (all under `exclude/ops/tests/`):
 | Empty plan records nothing — the `has_items` gate prevents `DecisionRecorder::start` | `test_execute_set_empty_plan_records_nothing` |
 | Stamp-set captured **pre-stamp, in-transaction**; tombstones included | `test_object_exclude_receipt_lists_stamp_set_including_tombstones` |
 | A failure inside `mutate` rolls back the `started` row and the flips together | `run_exclusion_rolls_back_on_error` |
+| An unplaceable receipt's reason reaches the row; a placed one leaves the summary alone | `an_unplaceable_receipt_records_its_reason_on_the_row` |
 | `plan_clear` finds source-level-excluded rows only | `test_plan_clear_returns_source_level_only` |
 | Contentless set-aside in `plan_set_objects` | `test_plan_set_objects_skips_empty` |
 | Contentless refusal in `check_set_object_by_file` | `test_check_object_by_file_empty` |

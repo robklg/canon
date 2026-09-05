@@ -4,10 +4,25 @@
 //! since they're used only by receipt tests, not shared with plan/execute.
 
 use crate::core::domain::scope::ScopeMatch;
+use crate::core::ops::receipt::ReceiptPlacement;
 use crate::exclude::ops::types::{
     ExcludeClearParams, ExcludeDuplicatesParams, ExcludeItemData, ExcludeSetObjectsParams,
-    ExcludeSetParams,
+    ExcludeSetParams, ReceiptDestination,
 };
+
+/// A destination that places a receipt — the ordinary case, with no gap.
+pub(super) fn placed(placement: &ReceiptPlacement) -> ReceiptDestination {
+    let ReceiptPlacement::LedgerRoot { root_id, root_path } = placement else {
+        panic!("exclusion receipts are LedgerRoot-placed");
+    };
+    ReceiptDestination {
+        placement: Some(ReceiptPlacement::LedgerRoot {
+            root_id: *root_id,
+            root_path: root_path.clone(),
+        }),
+        gap: None,
+    }
+}
 
 pub(super) fn make_set_params(scopes: Vec<ScopeMatch>) -> ExcludeSetParams {
     ExcludeSetParams {

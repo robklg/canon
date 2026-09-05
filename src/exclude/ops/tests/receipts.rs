@@ -21,10 +21,11 @@ use crate::exclude::ops::single::{
     check_clear_object, check_set_source_by_id, execute_clear_object, execute_set_object,
     execute_set_source, ObjectClearCheck, SourceExclusionCheck,
 };
-use crate::exclude::ops::types::ExcludeSetPlan;
+use crate::exclude::ops::types::{ExcludeSetPlan, ReceiptDestination};
 
 use super::fixtures::{
     item, make_clear_params, make_duplicates_params, make_set_objects_params, make_set_params,
+    placed,
 };
 
 // =========================================================================
@@ -87,7 +88,7 @@ fn run_exclusion_rolls_back_on_error() {
     let result = run_exclusion::<ExcludeReceipt, _>(
         &mut conn,
         Some(&decision),
-        None,
+        &ReceiptDestination::none(),
         true,
         counts_all(1),
         "test",
@@ -133,7 +134,13 @@ fn decision_scopes_populated_for_scoped_exclude() {
         ledger_config: LedgerConfig::default(),
     };
 
-    execute_set(&mut conn, &plan, None, Some(&decision)).unwrap();
+    execute_set(
+        &mut conn,
+        &plan,
+        &ReceiptDestination::none(),
+        Some(&decision),
+    )
+    .unwrap();
 
     let (rid, prefix): (i64, String) = conn
         .query_row("SELECT root_id, rel_prefix FROM decision_scopes", [], |r| {
@@ -165,7 +172,13 @@ fn decision_scopes_empty_for_global_exclude() {
         ledger_config: LedgerConfig::default(),
     };
 
-    execute_set(&mut conn, &plan, None, Some(&decision)).unwrap();
+    execute_set(
+        &mut conn,
+        &plan,
+        &ReceiptDestination::none(),
+        Some(&decision),
+    )
+    .unwrap();
 
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM decision_scopes", [], |r| r.get(0))
@@ -183,7 +196,7 @@ fn test_execute_set_writes_receipt_and_links_decision() {
 
     let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
     let decision = full_decision(DecisionCommand::ExcludeSet);
-    let result = execute_set(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
+    let result = execute_set(&mut conn, &plan, &placed(&placement), Some(&decision)).unwrap();
 
     assert!(
         result.warnings.is_empty(),
@@ -211,7 +224,13 @@ fn test_execute_set_no_placement_records_decision_without_receipt() {
     let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
     let decision = full_decision(DecisionCommand::ExcludeSet);
     // No archive root → placement None → no receipt, but decision still recorded.
-    let result = execute_set(&mut conn, &plan, None, Some(&decision)).unwrap();
+    let result = execute_set(
+        &mut conn,
+        &plan,
+        &ReceiptDestination::none(),
+        Some(&decision),
+    )
+    .unwrap();
 
     assert!(result.warnings.is_empty());
     assert!(is_source_excluded(&conn, id));
@@ -239,7 +258,7 @@ fn test_execute_set_receipt_failure_surfaces_warning() {
 
     let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
     let decision = full_decision(DecisionCommand::ExcludeSet);
-    let result = execute_set(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
+    let result = execute_set(&mut conn, &plan, &placed(&placement), Some(&decision)).unwrap();
 
     // Exclusion still happens; the receipt failure is surfaced, not silent.
     assert!(is_source_excluded(&conn, id));
@@ -262,7 +281,8 @@ fn test_execute_duplicates_writes_grouped_receipt() {
     let prefer = dir.path().to_str().unwrap().to_string();
     let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], &prefer)).unwrap();
     let decision = full_decision(DecisionCommand::ExcludeDuplicates);
-    let result = execute_duplicates(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
+    let result =
+        execute_duplicates(&mut conn, &plan, &placed(&placement), Some(&decision)).unwrap();
 
     assert!(
         result.warnings.is_empty(),
@@ -294,7 +314,8 @@ fn test_execute_set_objects_writes_object_receipt_and_links_all_sources() {
 
     let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
     let decision = full_decision(DecisionCommand::ExcludeSetObject);
-    let result = execute_set_objects(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
+    let result =
+        execute_set_objects(&mut conn, &plan, &placed(&placement), Some(&decision)).unwrap();
 
     assert!(
         result.warnings.is_empty(),
@@ -330,7 +351,7 @@ fn test_execute_clear_links_decision_and_writes_receipt() {
 
     let plan = plan_clear(&mut conn, &make_clear_params(vec![])).unwrap();
     let decision = full_decision(DecisionCommand::ExcludeClear);
-    let result = execute_clear(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
+    let result = execute_clear(&mut conn, &plan, &placed(&placement), Some(&decision)).unwrap();
 
     assert!(
         result.warnings.is_empty(),
@@ -361,7 +382,7 @@ fn test_execute_duplicates_links_excluded_not_kept() {
     let prefer = _dir.path().to_str().unwrap().to_string();
     let plan = plan_duplicates(&mut conn, &make_duplicates_params(vec![], &prefer)).unwrap();
     let decision = full_decision(DecisionCommand::ExcludeDuplicates);
-    execute_duplicates(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
+    execute_duplicates(&mut conn, &plan, &placed(&placement), Some(&decision)).unwrap();
 
     // Excluded copy carries the decision_id; the kept archive copy does NOT.
     assert_eq!(fetch_source_decision_id(&conn, excluded_id), Some(1));
@@ -385,7 +406,8 @@ fn test_execute_set_objects_stamps_all_roles_incl_archive() {
 
     let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
     let decision = full_decision(DecisionCommand::ExcludeSetObject);
-    let result = execute_set_objects(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
+    let result =
+        execute_set_objects(&mut conn, &plan, &placed(&placement), Some(&decision)).unwrap();
 
     assert!(
         result.warnings.is_empty(),
@@ -425,7 +447,7 @@ fn test_execute_set_captures_previous_decision_id_chain() {
 
     let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
     let decision = full_decision(DecisionCommand::ExcludeSet);
-    execute_set(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
+    execute_set(&mut conn, &plan, &placed(&placement), Some(&decision)).unwrap();
 
     // Live pointer advances to the new decision; the receipt preserves the predecessor.
     assert_eq!(fetch_source_decision_id(&conn, id), Some(1));
@@ -450,7 +472,8 @@ fn test_execute_set_source_links_and_writes_receipt() {
         panic!("expected Ready");
     };
     let decision = full_decision(DecisionCommand::ExcludeSet);
-    let result = execute_set_source(&mut conn, &item, Some(&placement), Some(&decision)).unwrap();
+    let result =
+        execute_set_source(&mut conn, &item, &placed(&placement), Some(&decision)).unwrap();
 
     assert!(
         result.warnings.is_empty(),
@@ -487,7 +510,7 @@ fn test_execute_clear_object_unstamps_and_writes_receipt() {
         object_id,
         &hash_prefix,
         &hash,
-        Some(&placement),
+        &placed(&placement),
         Some(&decision),
     )
     .unwrap();
@@ -536,7 +559,7 @@ fn test_object_exclude_receipt_lists_stamp_set_including_tombstones() {
         "tomb_obj_hash",
         "sha256:tomb_obj_hash",
         &[],
-        Some(&placement),
+        &placed(&placement),
         Some(&decision),
     )
     .unwrap();
@@ -576,7 +599,7 @@ fn test_execute_set_empty_plan_records_nothing() {
         not_archived_count: 0,
     };
     let decision = full_decision(DecisionCommand::ExcludeSet);
-    let result = execute_set(&mut conn, &plan, Some(&placement), Some(&decision)).unwrap();
+    let result = execute_set(&mut conn, &plan, &placed(&placement), Some(&decision)).unwrap();
 
     assert_eq!(result.count, 0);
     assert!(
@@ -588,4 +611,61 @@ fn test_execute_set_empty_plan_records_nothing() {
         .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(decisions, 0, "empty plan must not record a decision");
+}
+
+// =========================================================================
+// The self-explaining gap: a row with empty receipt columns says why
+// =========================================================================
+
+fn fetch_decision_summary(conn: &Connection, command: &str) -> String {
+    conn.query_row(
+        "SELECT summary FROM decisions WHERE command = ? ORDER BY id DESC LIMIT 1",
+        [command],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// A receipt that was owed and could not be placed leaves the decision row's
+/// receipt columns empty. The row must not leave a reader to guess why: it
+/// carries the reason in the one summary it prints, records and narrates.
+#[test]
+fn an_unplaceable_receipt_records_its_reason_on_the_row() {
+    let mut conn = setup_test_db();
+    let root = insert_root(&conn, "/src", "source", false);
+    insert_source(&conn, root, "a.jpg", None);
+    let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
+    let decision = full_decision(DecisionCommand::ExcludeSet);
+
+    let unplaceable = ReceiptDestination {
+        placement: None,
+        gap: Some("receipt not written: every archive root is suspended (/archive)".to_string()),
+    };
+    let result = execute_set(&mut conn, &plan, &unplaceable, Some(&decision)).unwrap();
+
+    assert_eq!(
+        result.summary,
+        "Excluded 1 source — receipt not written: every archive root is suspended (/archive)"
+    );
+    assert_eq!(
+        fetch_decision_summary(&conn, "exclude_set"),
+        result.summary,
+        "the printed line and the recorded one are one composition"
+    );
+}
+
+/// A receipt that was placed leaves the summary exactly as ops composed it —
+/// the join is a gap's clause, not a decoration every run carries.
+#[test]
+fn a_placed_receipt_leaves_the_summary_alone() {
+    let mut conn = setup_test_db();
+    let (_archive, _dir, placement) = ledger_root(&conn);
+    let root = insert_root(&conn, "/src", "source", false);
+    insert_source(&conn, root, "a.jpg", None);
+    let plan = plan_set(&mut conn, &make_set_params(vec![])).unwrap();
+    let decision = full_decision(DecisionCommand::ExcludeSet);
+
+    let result = execute_set(&mut conn, &plan, &placed(&placement), Some(&decision)).unwrap();
+
+    assert_eq!(result.summary, "Excluded 1 source");
 }

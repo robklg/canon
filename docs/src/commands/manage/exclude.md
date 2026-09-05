@@ -105,4 +105,4 @@ Exclusions are stored directly on sources and objects in the database.
 
 ## Provenance
 
-Every exclusion is recorded as a [decision](../../concepts/decisions.md). When an archive root is configured, a receipt listing the affected sources lands flat in the archive ledger root's `.canon-ledger/`. `exclude set`, `clear`, `duplicates`, and `set-object` accept `--reason` to annotate why; the global `--no-receipt` flag skips the receipt file for one invocation. See [Receipts](../../concepts/decisions.md#receipts) for placement and per-item detail.
+Every exclusion is recorded as a [decision](../../concepts/decisions.md). When an archive root is registered and active, a receipt listing the affected sources lands flat in the archive ledger root's `.canon-ledger/`; with none available the exclusion still records, and the decision's summary names why it carries no receipt. `exclude set`, `clear`, `duplicates`, and `set-object` accept `--reason` to annotate why; the global `--no-receipt` flag skips the receipt file for one invocation. See [Receipts](../../concepts/decisions.md#receipts) for placement and per-item detail.

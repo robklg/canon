@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::core::domain::decision::DecisionStatus;
 use crate::core::ops::decision::DecisionParams;
-use crate::core::ops::receipt::{ReceiptKind, ReceiptPlacement};
+use crate::core::ops::receipt::ReceiptKind;
 use crate::core::repo::{self, Connection};
 use crate::exclude::repo as exclude_repo;
 
@@ -16,7 +16,7 @@ use super::receipt::{
     object_stamp_set_entries, ExcludeReceipt,
 };
 use super::runner::run_exclusion;
-use super::types::{object_source_info, ExcludeItemData, ObjectSourceInfo};
+use super::types::{object_source_info, ExcludeItemData, ObjectSourceInfo, ReceiptDestination};
 
 /// Outcome of validating a single source for exclusion.
 #[derive(Debug)]
@@ -121,43 +121,45 @@ pub struct ExcludeSourceResult {
 pub fn execute_set_source(
     conn: &mut Connection,
     item: &ExcludeItemData,
-    placement: Option<&ReceiptPlacement>,
+    destination: &ReceiptDestination,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeSourceResult> {
     let path = item.path();
     let summary = format!("Excluded: {path}");
 
-    let warnings = run_exclusion(
+    let run = run_exclusion(
         conn,
         decision,
-        placement,
+        destination,
         true,
         counts_all(1),
         &summary,
         |tx, decision_id| {
             exclude_repo::source::set_excluded(tx, item.source_id, true, decision_id)?;
-            Ok(match (decision, decision_id, placement) {
-                (Some(d), Some(did), Some(p)) => Some(ExcludeReceipt {
-                    meta: d.receipt_meta(
-                        did,
-                        DecisionStatus::Completed,
-                        &summary,
-                        p.locus_root(),
-                        ReceiptKind::ExcludeSet,
-                        None,
-                    ),
-                    items: exclude_receipt_items(std::slice::from_ref(item)),
-                }),
-                _ => None,
-            })
+            Ok(
+                match (decision, decision_id, destination.placement.as_ref()) {
+                    (Some(d), Some(did), Some(p)) => Some(ExcludeReceipt {
+                        meta: d.receipt_meta(
+                            did,
+                            DecisionStatus::Completed,
+                            &summary,
+                            p.locus_root(),
+                            ReceiptKind::ExcludeSet,
+                            None,
+                        ),
+                        items: exclude_receipt_items(std::slice::from_ref(item)),
+                    }),
+                    _ => None,
+                },
+            )
         },
     )?;
 
     Ok(ExcludeSourceResult {
         source_id: item.source_id,
         path,
-        summary,
-        warnings,
+        summary: run.summary,
+        warnings: run.warnings,
     })
 }
 
@@ -261,15 +263,15 @@ pub fn execute_set_object(
     hash_prefix: &str,
     hash: &str,
     sources: &[ObjectSourceInfo],
-    placement: Option<&ReceiptPlacement>,
+    destination: &ReceiptDestination,
     decision: Option<&DecisionParams>,
 ) -> Result<ExcludeObjectResult> {
     let summary = format!("Excluded object: {hash_prefix}...");
 
-    let warnings = run_exclusion(
+    let run = run_exclusion(
         conn,
         decision,
-        placement,
+        destination,
         true,
         counts_all(1),
         &summary,
@@ -285,18 +287,20 @@ pub fn execute_set_object(
             };
             exclude_repo::object::set_excluded(tx, object_id, true)?;
             exclude_repo::source::set_decision_id_by_object(tx, object_id, decision_id)?;
-            Ok(match (decision, decision_id, placement) {
-                (Some(d), Some(did), Some(p)) => Some(object_exclude_receipt(
-                    d,
-                    did,
-                    p.locus_root(),
-                    ReceiptKind::ExcludeObject,
-                    hash,
-                    object_stamp_set_entries(stamp_set),
-                    &summary,
-                )),
-                _ => None,
-            })
+            Ok(
+                match (decision, decision_id, destination.placement.as_ref()) {
+                    (Some(d), Some(did), Some(p)) => Some(object_exclude_receipt(
+                        d,
+                        did,
+                        p.locus_root(),
+                        ReceiptKind::ExcludeObject,
+                        hash,
+                        object_stamp_set_entries(stamp_set),
+                        &summary,
+                    )),
+                    _ => None,
+                },
+            )
         },
     )?;
 
@@ -304,8 +308,8 @@ pub fn execute_set_object(
         object_id,
         hash_prefix: hash_prefix.to_string(),
         source_count: sources.len(),
-        summary,
-        warnings,
+        summary: run.summary,
+        warnings: run.warnings,
     })
 }
 
@@ -350,15 +354,15 @@ pub fn execute_clear_object(
     object_id: i64,
     hash_prefix: &str,
     hash: &str,
-    placement: Option<&ReceiptPlacement>,
+    destination: &ReceiptDestination,
     decision: Option<&DecisionParams>,
 ) -> Result<ClearObjectResult> {
     let summary = format!("Cleared exclusion from object: {hash_prefix}...");
 
-    let warnings = run_exclusion(
+    let run = run_exclusion(
         conn,
         decision,
-        placement,
+        destination,
         true,
         counts_all(1),
         &summary,
@@ -374,26 +378,28 @@ pub fn execute_clear_object(
             };
             exclude_repo::object::set_excluded(tx, object_id, false)?;
             exclude_repo::source::set_decision_id_by_object(tx, object_id, decision_id)?;
-            Ok(match (decision, decision_id, placement) {
-                (Some(d), Some(did), Some(p)) => Some(object_exclude_receipt(
-                    d,
-                    did,
-                    p.locus_root(),
-                    ReceiptKind::RestoreObject,
-                    hash,
-                    object_stamp_set_entries(stamp_set),
-                    &summary,
-                )),
-                _ => None,
-            })
+            Ok(
+                match (decision, decision_id, destination.placement.as_ref()) {
+                    (Some(d), Some(did), Some(p)) => Some(object_exclude_receipt(
+                        d,
+                        did,
+                        p.locus_root(),
+                        ReceiptKind::RestoreObject,
+                        hash,
+                        object_stamp_set_entries(stamp_set),
+                        &summary,
+                    )),
+                    _ => None,
+                },
+            )
         },
     )?;
 
     Ok(ClearObjectResult {
         object_id,
         hash_prefix: hash_prefix.to_string(),
-        summary,
-        warnings,
+        summary: run.summary,
+        warnings: run.warnings,
     })
 }
 

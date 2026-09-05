@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use crate::core::domain::config::LedgerConfig;
 use crate::core::domain::decision::DecisionCommand;
+use crate::core::ops::receipt::LedgerRootOutcome;
 use crate::core::repo;
 
 use super::{iso_date, SHELF_DIR};
@@ -47,8 +48,11 @@ pub enum ShelfLine {
 /// retirements whose book is not standing. When the shelf is unreachable
 /// the rows still answer, hedged (`shelf_reachable`).
 pub struct ShelfListing {
-    /// The shelf's path; `None` when no archive root is registered.
-    pub shelf: Option<String>,
+    /// Where the shelf is — or which absence it is. A shelf that cannot be
+    /// located has two causes, and the header states the one it has: no
+    /// archive root registered at all, or every archive root suspended, the
+    /// books standing on disk behind a door the user closed.
+    pub shelf: LedgerRootOutcome,
     pub shelf_reachable: bool,
     /// Chronological; unidentified directories last.
     pub lines: Vec<ShelfLine>,
@@ -57,6 +61,24 @@ pub struct ShelfListing {
     /// is a full standing book copy the fleet must not silently hide;
     /// fix-forward removes it only when a same-name bind completes.
     pub aside_dirs: Vec<String>,
+}
+
+impl ShelfListing {
+    /// The shelf's path, when the archive root holding it is in view. One
+    /// spelling of the join, shared by the walk that reads the directory and
+    /// the header that names it.
+    pub fn shelf_path(&self) -> Option<String> {
+        shelf_path_of(&self.shelf)
+    }
+}
+
+fn shelf_path_of(outcome: &LedgerRootOutcome) -> Option<String> {
+    match outcome {
+        LedgerRootOutcome::Found { root_path, .. } => Some(format!("{root_path}/{SHELF_DIR}")),
+        LedgerRootOutcome::NoArchiveRoot | LedgerRootOutcome::AllArchiveRootsSuspended { .. } => {
+            None
+        }
+    }
 }
 
 /// The listing probe: identify a book for its fleet line. Identification,
@@ -102,8 +124,8 @@ pub fn compute_shelf_listing(conn: &Connection, config: &LedgerConfig) -> Result
     let roots = repo::root::fetch_all(conn)?;
     let rows =
         crate::retire::repo::fetch_bound_retirements(conn, DecisionCommand::RootsRetire.as_str())?;
-    let shelf = crate::core::ops::receipt::resolve_ledger_root(&roots, config)
-        .map(|(_, path)| format!("{path}/{SHELF_DIR}"));
+    let shelf = crate::core::ops::receipt::resolve_ledger_root(&roots, config);
+    let shelf_path = shelf_path_of(&shelf);
 
     let basename = |rel: &str| rel.rsplit('/').next().unwrap_or(rel).to_string();
 
@@ -111,7 +133,7 @@ pub fn compute_shelf_listing(conn: &Connection, config: &LedgerConfig) -> Result
     let mut book_dirs: HashSet<String> = HashSet::new();
     let mut aside_dirs: Vec<String> = Vec::new();
     let mut shelf_reachable = false;
-    if let Some(shelf_path) = &shelf {
+    if let Some(shelf_path) = &shelf_path {
         if let Ok(entries) = std::fs::read_dir(shelf_path) {
             shelf_reachable = true;
             let mut dirs: Vec<String> = entries
