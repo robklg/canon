@@ -10,6 +10,8 @@
 //! - `resolve_moves()`: Deterministic end-of-walk pairing of moves to rows
 //! - `find_missing()`: Pure function for detecting missing files
 //! - `check_no_overlap()`: Pure predicate guarding new-root creation
+//! - `check_not_filesystem_root()`: The other new-root guard — a root is a
+//!   folder someone chose, and the filesystem root is not one
 //!
 //! ## Design Principles
 //!
@@ -577,6 +579,30 @@ pub fn outermost_scopes(scopes: &[DecisionScope]) -> Vec<DecisionScope> {
     }
 
     kept
+}
+
+/// Refuse the filesystem root as a root path.
+///
+/// A root is a folder someone chose, and `/` is not a choice — it is every
+/// folder there is. The consequence is scope: every path lies under `/`, so
+/// CWD defaulting inside such a root yields the prefix `/`, and a scope that
+/// matches the whole universe has stopped narrowing anything. The
+/// roots-never-nest check already refuses `/` wherever any other root exists,
+/// in both directions; what it cannot see is `/` arriving first.
+///
+/// A path with no parent *is* a filesystem root, which is the structural
+/// spelling of the same fact — no separate `/` literal to keep true.
+/// Pure — no I/O.
+pub fn check_not_filesystem_root(new_path: &Path) -> Result<()> {
+    if new_path.parent().is_none() {
+        bail!(
+            "Cannot create a root at '{}': every path lies under it, so no scope \
+             could ever mean less than everything. Scan the folders you want \
+             indexed with --add instead.",
+            new_path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Check that a new root path does not overlap with any existing root.
@@ -1623,5 +1649,37 @@ mod tests {
 
         let roots = vec![make_root_with(1, "/a/bc", "source")];
         assert!(check_no_overlap(&roots, Path::new("/a/b")).is_ok());
+    }
+
+    // =========================================================================
+    // check_not_filesystem_root() tests
+    // =========================================================================
+
+    /// The filesystem root is refused by name, and the refusal says what to do
+    /// instead. A root at `/` would put every path in the universe inside it,
+    /// so the CWD default would hand every scope-taking command the prefix `/`.
+    #[test]
+    fn the_filesystem_root_is_refused_as_a_root() {
+        let err = check_not_filesystem_root(Path::new("/"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("every path lies under it"), "{err}");
+        assert!(err.contains("--add"), "{err}");
+    }
+
+    /// Why this guard is its own rather than a case inside the overlap check:
+    /// with no other root there is nothing to overlap, so the overlap check
+    /// admits `/` — the reachable case is `/` arriving first, which is exactly
+    /// where the other guard is blind.
+    #[test]
+    fn the_overlap_check_admits_a_first_root_at_the_filesystem_root() {
+        assert!(check_no_overlap(&[], Path::new("/")).is_ok());
+    }
+
+    /// Every other folder is one somebody chose, and passes.
+    #[test]
+    fn an_ordinary_folder_is_not_the_filesystem_root() {
+        assert!(check_not_filesystem_root(Path::new("/a")).is_ok());
+        assert!(check_not_filesystem_root(Path::new("/a/b/c")).is_ok());
     }
 }

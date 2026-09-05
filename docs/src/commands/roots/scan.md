@@ -93,7 +93,7 @@ Warning: skipping /Volumes/Photos/2024/img_0042.jpg: No such file or directory (
 
 The pointer to `--missing` appears only where asserting a deletion would be sound: inside a live root, below its top, and with the root's own path answering on disk. Storage that is not currently there makes everything under it read as gone, at every depth, so a path Canon cannot reach gets the warning alone. `--missing` works at file grain with the same recording as a folder, described below.
 
-A root is a folder, so `--add` and `--candidates` refuse a file argument and name the directory to use instead.
+A root is a folder, so `--add` and `--candidates` refuse a file argument and name the directory to use instead. It is also a folder you chose: `/` is refused, because every path would lie inside it and no scope could then mean less than everything.
 
 **Marking deleted paths as missing:** When you delete a folder that was under a scanned root, Canon still considers those files present. Re-scanning the parent would let Canon discover they're gone, but that can be expensive when the parent holds many other files. Use `--missing` to tell Canon directly that a path no longer exists:
 

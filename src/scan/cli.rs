@@ -301,6 +301,7 @@ pub fn run(
                     }
                     // role is guaranteed to be Some when add_root is true (validated in main.rs)
                     let new_role = role.expect("--role is required with --add");
+                    crate::scan::domain::check_not_filesystem_root(&canonical)?;
                     crate::scan::domain::check_no_overlap(&roots, &canonical)?;
                     let new_root = create_root(conn, &canonical, new_role, comment)?;
                     (new_root.id, canonical.clone(), None, new_role.to_string())
