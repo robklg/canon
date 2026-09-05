@@ -264,9 +264,10 @@ aside — and widening it to cover that would assert an equality that is false b
 **Order is not interchangeable**: a prefix whose root portion is written in the other form must
 match its root before its remainder can be asked about at all.
 
-The type is **infallible on purpose** and stays so: it classifies into four registers —
-`scopes()` / `set_aside()` / `unrooted()` / `recorded()`, with `selection()` a fifth *reading*
-of the first — and never fails, because every failure mode is a caller's own disposition.
+The type is **infallible on purpose** and stays so: it classifies into five registers —
+`scopes()` / `set_aside()` / `unrooted()` / `recorded()` / `measured_from()`, with
+`selection()` a *reading* of the first — and never fails, because every failure mode is a
+caller's own disposition.
 `resolve_recorded_scope`'s `Result` carries *infrastructure* failure (a SQL error) and nothing
 else. Every register is derived from one list of `PrefixOutcome`s through a **single assembly
 site**, `from_outcomes`, which is also the type's only constructor: what each register means is
@@ -293,6 +294,95 @@ at a second door, which had neither half; the policy's terminal rule (a scope th
 must never look like a narrowing) is raised by `cluster refresh` through the same
 `no_sources_known` sentence the argument door uses.
 
+**`measured_from()` is the register the vantage folds**, and the one place the grain is read.
+Every confirmed prefix contributes exactly one `DirectoryLocation`; a set-aside or unrooted one
+contributes nothing, the same absence that keeps it out of `scopes()`. A **directory** scope
+contributes itself; an **item** scope contributes the directory containing it, which is what
+*the deepest directory containing every scope* already says about a file rather than a second
+rule. `containing_location` defaults an absent parent to the root, so a root-level item and a
+root itself both land on the root. Neither sorted nor deduplicated: it feeds a fold where order
+and repetition are immaterial.
+
+`measured_from()` exists **apart from `scopes()`** because measurement and selection ask
+different questions of one confirmed prefix. Selection asks *what did the user name*, and a file
+scope must select that file. Measurement asks *what is there to name below*, and a file has only
+its own name to give. So the grain moves the measurement and moves nothing else — not
+`scopes()`, not the lock header, not the decision record
+(`the_grain_moves_the_measurement_and_no_other_register`).
+
+**`DirectoryLocation`** carries the invariant *this location is a directory, by construction*.
+Minted only in `from_outcomes`, private field, exposing `root_path()` and `location()`.
+`common_path_prefix` states the same thing as a prose precondition that nothing enforced; at the
+vantage's boundary it is now the signature, so an item path cannot be folded even by mistake —
+`ScopeVantage::new` takes `&[DirectoryLocation]`, and passing a `&[DecisionScope]` is a compile
+error rather than a test failure.
+
+**The grain is a fact from the door, never derived here.** `ScopeGrain` is supplied by
+`ops::scope::resolve_recorded_scope`, on the **confirmed byte-form** and for every confirmed
+prefix uniformly — a conditional there would be a second rule about which prefixes have a grain,
+and there is only one. A root short-circuits to `Directory` **without touching the index**,
+because a root with nothing scanned into it is still a directory and the index could only call
+it an item (`a_root_is_a_directory_even_with_a_row_standing_at_its_own_remainder`, asserted on the grain
+itself: both grains measure an empty remainder to the root, so a register-reading test asserts
+nothing, and on an ordinary index the fall-through happens to agree — the case that pins the
+branch is a row standing at the root's own remainder, which the schema permits).
+
+**One question, and it admits no tie**: does a *present* source stand at this path?
+`repo::source::present_source_exists_at_path` answers it. Asking about the path itself rather
+than about what lies below it is what closes the shapes a `below`-reading rule cannot answer
+without choosing — **a path with a past can hold a row at it and rows beneath it at once, on a
+current index, with no staleness at all**. A folder replaced by a file of the same name and
+rescanned by name leaves both standing (the file-grain scan infers no absence, `src/scan/CLAUDE.md`).
+
+**That is a structural guarantee, not a better guess** — and the step that carries it is the
+fold, so it is written out rather than assumed. Take any entry at path `E`. Entries are present
+sources (`batch_fetch_by_roots` filters `present = 1`), so a present source stands at `E`. Some
+confirmed scope `S` selected it, and selection is at-or-under, so `E ⊑ S`. Each scope's
+measuring point `P` is at or above its own scope — equal when `Directory`, the parent when
+`Item` — and the vantage `V` is a **common prefix** of every `P` in the root, so at or above
+each. That gives `E ⊑ S ⊑ P ⊑ V`. If `E = V` every link is equality, which makes `S` a
+`Directory` *and* puts a present source at `S` — and `Directory` means precisely that none
+stands there. Contradiction, so `V` is strictly above `E`, `path_strip_prefix` never returns `""`, and the
+blank destination is *unreachable* rather than unlikely. Several scopes in a root only push `V`
+further up, which is the safe direction.
+
+The argument has one edge, and it is the root: collapsing the links needs `parent(S) ≠ S`, true
+of every non-empty remainder and false at `""`, where `containing_location` returns the root
+again. `scope_grain` answers the root before reaching that, which is why its short-circuit is
+part of the proof rather than a convenience. **Pinned in two halves, each where it lives**:
+`S ⊑ P` at the owner (`a_measuring_point_is_strictly_above_anything_standing_at_its_scope`),
+the edge beside it (`a_root_is_a_directory_even_with_a_row_standing_at_its_own_remainder`), and
+the whole chain through the real vantage against a real index at
+`archive::ops::generate::no_scope_combination_measures_an_entry_to_nothing`. The fold link
+(`P ⊑ V`) is a property of `common_path_prefix` and is argued rather than pinned as a property;
+what is pinned there are its values.
+
+**Presence, because the question is about now.** Filtering to present rows is the ordinary case
+in `repo::source`; the history-inclusive predicates beside this one are the deliberate
+exceptions, and each has its reason. The **confirmation gate** above is history-inclusive on
+purpose — a manifest naming a place whose files have moved out is confirmed, not set aside —
+which is exactly why the grain must not read history: a file that has become a directory leaves
+a row standing at the path, and calling that an item would push every file below it down a
+level (`a_tombstone_at_the_path_is_not_an_item`).
+
+**Index evidence, never the disk** — a presence bit is a scan-time snapshot, not a live `stat`,
+so the measurement is the same whether or not the drive is mounted. Stat-ing here would instead
+make it vary with mount state, which is what the rule exists to prevent; no test asserts the
+mount-invariance itself.
+
+**Selection asks a different question, and at this door reads a different classifier.**
+`cluster generate` classifies its scopes with `ops::scope::classify_all` — disk-only, no index
+fallback — so a detached drive makes every scope `UnderDirectory`. That is harmless, because
+`ScopeMatch::UnderDirectory` resolves through `path_is_under`, which is at-or-under, so a file
+path classified as a directory still selects that file — together with anything the index
+records beneath it, which in the both-live shape is real and which the measurement is
+indifferent to; and the grain is index-only, so the measurement does not move with the mount
+either way. (`classify_all_indexed`, the
+history-inclusive disk-first classifier, is exclusion's and never runs beside the grain. It
+includes tombstones for its own reason — dismissing content must mean the same thing attached
+or detached — which is the same reason the *confirmation* gate is history-inclusive and the
+grain is not.)
+
 **Core entry** is registry-measured: `archive` (generate, refresh and status resolve; `apply`
 takes the answer the lock recorded rather than resolving one) and `expr` (the vantage) consume
 it, and it is substrate they independently computed over rather than any one subsystem's
@@ -300,8 +390,9 @@ finished output.
 
 The law's registered verifier is `a_recorded_prefix_under_no_root_is_still_carried`, the one
 that exercises the resolution a command runs; the rest of the battery sits beside the owner and
-at the manifest door. One rung above the tests: `ScopeVantage::new` takes a `ScopeResolution`,
-so raw manifest strings cannot be constructed into a vantage at all.
+at the manifest door. One rung above the tests: `ScopeVantage::new` takes
+`&[DirectoryLocation]`, so neither raw manifest strings nor a resolved item path can be
+constructed into a vantage at all.
 
 **Where it does not apply**: the `scope_prefixes` sites fed by `ops::scope::resolve_scope`.
 Those prefixes are already root-validated and form-tolerant, so there is no drop for this to

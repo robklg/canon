@@ -21,7 +21,9 @@ use super::fs::canonicalize_maybe_missing;
 use crate::core::domain;
 use crate::core::domain::path::{clean_path, path_strip_prefix, validate_paths_in_roots};
 use crate::core::domain::root::{find_containing_root, Root, RootSpec};
-use crate::core::domain::scope::{DecisionScope, PrefixOutcome, ScopeMatch, ScopeResolution};
+use crate::core::domain::scope::{
+    DecisionScope, PrefixOutcome, ScopeGrain, ScopeMatch, ScopeResolution,
+};
 use crate::core::repo::{self, Connection};
 
 /// Classify a canonicalized path as file or directory scope.
@@ -522,17 +524,69 @@ pub fn resolve_recorded_scope(
     for prefix in prefixes {
         outcomes.push(match domain::scope::attribute_prefix(prefix, roots) {
             Some(scope) => match stored_form_of_rel(conn, scope.root_id, &scope.rel_prefix)? {
-                Some(rel) => PrefixOutcome::Confirmed(DecisionScope::new(
-                    scope.root_id,
-                    scope.root_path,
-                    rel,
-                )),
+                Some(rel) => {
+                    let grain = scope_grain(conn, scope.root_id, &rel)?;
+                    PrefixOutcome::Confirmed(
+                        DecisionScope::new(scope.root_id, scope.root_path, rel),
+                        grain,
+                    )
+                }
                 None => PrefixOutcome::SetAside(scope),
             },
             None => PrefixOutcome::Unrooted(prefix.clone()),
         });
     }
     Ok(ScopeResolution::from_outcomes(outcomes))
+}
+
+/// What a confirmed prefix names — asked on the **confirmed byte-form**, never
+/// on a losing normalization candidate.
+///
+/// Asked of every confirmed prefix, uniformly: a conditional here would be a
+/// second rule about which prefixes have a grain, and there is only one.
+///
+/// **One question, and it admits no tie**: does a *present* source stand at
+/// this path? That is what makes it an item; anything else is a place. Asking
+/// about the path itself rather than about what lies below it is what closes
+/// the shape where both are true at once — a path can hold a row at it *and*
+/// rows beneath it whenever it has a past, and no rule that consults "below"
+/// can answer such a path without choosing.
+///
+/// **This is the structural guarantee, not merely a better answer**, and the
+/// fold is the step that carries it: the vantage is a *common prefix* of every
+/// measuring point in a root, not any one of them, so the single-scope reading
+/// does not prove it. For an entry at `E`: entries are present sources, so one
+/// stands at `E`; the scope `S` that selected it satisfies `E ⊑ S` (selection
+/// is at-or-under); `S`'s measuring point `P` is `S` itself when `Directory`
+/// and `parent(S)` when `Item`, so `S ⊑ P`; and `P ⊑ V` because a common
+/// prefix sits at or above everything it folds. `E = V` would force every link
+/// to equality — `S` a `Directory` with a present source standing at it, which
+/// is what `Directory` denies. So `V` is strictly above `E` and
+/// `path_strip_prefix` cannot return `""`. Several scopes only push `V` up,
+/// which is the safe direction.
+///
+/// **Presence, because the question is about now.** The confirmation gate above
+/// is history-inclusive on purpose — a manifest naming a place whose files have
+/// moved out is confirmed, not set aside — so history cannot answer this: a
+/// file that has become a directory leaves a row standing at the path, and
+/// reading it as an item would push every file below it down a level.
+///
+/// **Index evidence, never the disk.** A presence bit is a scan-time snapshot,
+/// not a live `stat`, so a manifest measures the same whether or not the drive
+/// happens to be mounted — which a `stat` here would not.
+fn scope_grain(conn: &Connection, root_id: i64, rel: &str) -> Result<ScopeGrain> {
+    // A root is a directory, and knowing that needs no index — true of a root
+    // with nothing scanned into it, which the index could only call an item.
+    if rel.is_empty() {
+        return Ok(ScopeGrain::Directory);
+    }
+    Ok(
+        if repo::source::present_source_exists_at_path(conn, root_id, rel)? {
+            ScopeGrain::Item
+        } else {
+            ScopeGrain::Directory
+        },
+    )
 }
 
 /// The one spelling of the refusal a scope that kept nothing gets, at either
@@ -1192,6 +1246,248 @@ mod tests {
             )]
         );
         assert!(resolution.set_aside().is_empty());
+    }
+
+    /// The grain the door supplies, over every case it has to tell apart.
+    ///
+    /// A prefix with a present source standing at it is an `Item`; one with
+    /// none is a `Directory`, whatever the index may still remember beneath it.
+    /// A root is a `Directory` without the index being consulted at all.
+    ///
+    /// **The two rows that carry the whole reason presence is read**, and the
+    /// shapes a path with a past takes on a *current* index:
+    ///
+    /// - `was_dir_now_file` — a directory that has become a file. Tombstones
+    ///   lie beneath it and a live row stands at it, so a history-reading
+    ///   grain calls it a place, measures from it, and hands its own entry
+    ///   `""` — the blank destination this mechanism exists to remove.
+    /// - `was_file_now_dir` — the mirror. A tombstone stands at it and live
+    ///   content lies beneath, and it is a place, which is what presence says.
+    ///
+    /// Both are reachable with no staleness whatever: scan, change the disk,
+    /// scan again.
+    #[test]
+    fn the_door_supplies_the_grain_of_every_confirmed_prefix() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let bury = |rel: &str| {
+            conn.execute(
+                "UPDATE sources SET present = 0 WHERE root_id = ? AND rel_path = ?",
+                rusqlite::params![root_id, rel],
+            )
+            .unwrap();
+        };
+
+        insert_source(&conn, root_id, "dir/a.jpg", None);
+        insert_source(&conn, root_id, "solo.jpg", None);
+
+        // A directory that has become a file.
+        insert_source(&conn, root_id, "was_dir_now_file/old.jpg", None);
+        bury("was_dir_now_file/old.jpg");
+        insert_source(&conn, root_id, "was_dir_now_file", None);
+
+        // A file that has become a directory.
+        insert_source(&conn, root_id, "was_file_now_dir", None);
+        bury("was_file_now_dir");
+        insert_source(&conn, root_id, "was_file_now_dir/new.jpg", None);
+
+        // Both live at once: the file-grain scan infers no absence, so a
+        // folder replaced by a file of the same name and rescanned *by name*
+        // leaves the old contents standing beside the new file.
+        insert_source(&conn, root_id, "both_live/old.jpg", None);
+        insert_source(&conn, root_id, "both_live", None);
+
+        // The grain is observable only through the register it feeds — which
+        // is the layer split working, not a gap in the test.
+        let measures_from = |path: &str| {
+            let resolution = resolve_recorded_scope(&conn, &[path.to_string()], &roots).unwrap();
+            assert_eq!(resolution.scopes().len(), 1, "{path} confirmed");
+            resolution.measured_from()[0].location()
+        };
+
+        assert_eq!(measures_from("/photos/dir"), "/photos/dir", "a directory");
+        assert_eq!(
+            measures_from("/photos/dir/a.jpg"),
+            "/photos/dir",
+            "an item measures from the directory containing it"
+        );
+        assert_eq!(
+            measures_from("/photos/solo.jpg"),
+            "/photos",
+            "a root-level item measures from its root"
+        );
+        assert_eq!(measures_from("/photos"), "/photos", "a root is a directory");
+
+        assert_eq!(
+            measures_from("/photos/was_dir_now_file"),
+            "/photos",
+            "a directory that became a file is an item now — measuring from \
+             itself would hand its own entry a blank destination"
+        );
+        assert_eq!(
+            measures_from("/photos/was_file_now_dir"),
+            "/photos/was_file_now_dir",
+            "and a file that became a directory is a place, tombstone at it \
+             notwithstanding"
+        );
+        assert_eq!(
+            measures_from("/photos/both_live"),
+            "/photos",
+            "a live row at the path settles it however much stands beneath — \
+             no rule that consults `below` can answer this one without choosing"
+        );
+    }
+
+    /// A root is a directory, and knowing that needs no index — true of a root
+    /// with nothing scanned into it, which the index could only call an item.
+    ///
+    /// **Asserted on the grain itself, and against the only thing that can
+    /// make the branch bite.** Reading `measured_from()` here asserts nothing —
+    /// both grains measure an empty remainder to the root — and on an ordinary
+    /// index the fall-through happens to agree, since no ordinary source
+    /// carries an empty `rel_path`. So the case that pins the branch is the one
+    /// where a row *does* stand at the root's own remainder: `rel_path` is
+    /// `NOT NULL` with no non-empty check, so nothing in the schema forbids it,
+    /// and without the short-circuit such a row would make a root an `Item`.
+    ///
+    /// That edge is also the unreachability proof's: the argument needs
+    /// `parent(S) ≠ S`, which holds for every non-empty remainder and fails
+    /// only at the root — where this branch answers before
+    /// `containing_location` is ever reached. A root that measured from its own
+    /// parent would measure from outside itself.
+    #[test]
+    fn a_root_is_a_directory_even_with_a_row_standing_at_its_own_remainder() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+
+        assert_eq!(
+            scope_grain(&conn, root_id, "").unwrap(),
+            ScopeGrain::Directory,
+            "a root with nothing scanned into it is still a directory"
+        );
+
+        insert_source(&conn, root_id, "", None);
+        assert_eq!(
+            scope_grain(&conn, root_id, "").unwrap(),
+            ScopeGrain::Directory,
+            "and stays one even with a row standing at its own remainder — \
+             the index must not be able to make a root an item"
+        );
+    }
+
+    /// Core's half of the unreachability guarantee, over every shape a path
+    /// with a past can take.
+    ///
+    /// The guarantee runs `E ⊑ S ⊑ P ⊑ V`. The `S ⊑ P` link is this layer's —
+    /// a scope's measuring point is at or above the scope, and **strictly**
+    /// above it whenever a present source stands there, because that is what
+    /// makes it an `Item`. The `P ⊑ V` link is a property of
+    /// `common_path_prefix` — argued, and exercised by value in
+    /// `expr::ScopeVantage`'s own battery rather than pinned as a property.
+    /// The whole chain is pinned end to end at `archive::ops::generate`,
+    /// against the real vantage and a real index.
+    ///
+    /// Shapes: a plain directory, a plain file, a directory that became a
+    /// file, a file that became a directory, both-live (the file-grain scan's
+    /// shape), an all-tombstone path, and the root.
+    #[test]
+    fn a_measuring_point_is_strictly_above_anything_standing_at_its_scope() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        let bury = |rel: &str| {
+            conn.execute(
+                "UPDATE sources SET present = 0 WHERE root_id = ? AND rel_path = ?",
+                rusqlite::params![root_id, rel],
+            )
+            .unwrap();
+        };
+
+        insert_source(&conn, root_id, "plain_dir/a.jpg", None);
+        insert_source(&conn, root_id, "plain_file", None);
+        insert_source(&conn, root_id, "d2f/old.jpg", None);
+        bury("d2f/old.jpg");
+        insert_source(&conn, root_id, "d2f", None);
+        insert_source(&conn, root_id, "f2d", None);
+        bury("f2d");
+        insert_source(&conn, root_id, "f2d/new.jpg", None);
+        insert_source(&conn, root_id, "both/old.jpg", None);
+        insert_source(&conn, root_id, "both", None);
+        insert_source(&conn, root_id, "ghost", None);
+        insert_source(&conn, root_id, "ghost/g.jpg", None);
+        bury("ghost");
+        bury("ghost/g.jpg");
+
+        let (mut standing, mut empty_handed) = (0usize, 0usize);
+        for rel in ["plain_dir", "plain_file", "d2f", "f2d", "both", "ghost", ""] {
+            let path = if rel.is_empty() {
+                "/photos".to_string()
+            } else {
+                format!("/photos/{rel}")
+            };
+            let resolution =
+                resolve_recorded_scope(&conn, std::slice::from_ref(&path), &roots).unwrap();
+            let point = resolution.measured_from()[0].location();
+
+            if repo::source::present_source_exists_at_path(&conn, root_id, rel).unwrap() {
+                standing += 1;
+                assert_ne!(
+                    point, path,
+                    "{path} has a present source standing on it, so its measuring \
+                     point must be strictly above it"
+                );
+                assert_eq!(
+                    domain::path::path_strip_prefix(&path, &point),
+                    Some(rel.rsplit('/').next().unwrap()),
+                    "and it must render as its own name from there"
+                );
+            } else {
+                empty_handed += 1;
+                assert_eq!(
+                    point, path,
+                    "{path} holds nothing standing, so it measures from itself"
+                );
+            }
+        }
+        // Both branches must actually have run: a predicate stuck on one
+        // answer would otherwise sweep seven shapes and assert one rule.
+        assert_eq!(
+            (standing, empty_handed),
+            (3, 4),
+            "plain_file/d2f/both stand; plain_dir/f2d/ghost/root do not"
+        );
+    }
+
+    /// The grain is asked on the **confirmed** byte-form, never on the form
+    /// the manifest happened to be typed in. A file recorded in the other
+    /// normalization must still come back as an item: asking the losing
+    /// candidate finds nothing beneath it and nothing at it either, and the
+    /// answer would be right by accident.
+    #[test]
+    fn the_grain_is_asked_on_the_confirmed_byte_form() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, &format!("{NFD_DIR}/a.jpg"), None);
+        let roots = vec![make_test_root(root_id, "/photos", "source")];
+
+        // The directory typed the other way: still a directory.
+        let dir = resolve_recorded_scope(&conn, &[format!("/photos/{NFC_DIR}")], &roots).unwrap();
+        assert_eq!(
+            dir.measured_from()[0].location(),
+            format!("/photos/{NFD_DIR}")
+        );
+
+        // The file inside it, typed the other way: an item, measuring from the
+        // directory in the bytes the index stores.
+        let item =
+            resolve_recorded_scope(&conn, &[format!("/photos/{NFC_DIR}/a.jpg")], &roots).unwrap();
+        assert_eq!(
+            item.measured_from()[0].location(),
+            format!("/photos/{NFD_DIR}"),
+        );
     }
 
     /// The roster law, unchanged by the second stage: a prefix under no known

@@ -263,7 +263,7 @@ impl ClusterGeneratePlan {
 /// with no header at all means the lock predates the field — which is the
 /// whole of what `LockFile::unmeasured_reason` has to tell apart.
 pub(super) fn measure_entries(entries: &mut [LockEntry], scope: &ScopeResolution, roots: &[Root]) {
-    let vantage = ScopeVantage::new(scope);
+    let vantage = ScopeVantage::new(scope.measured_from());
     let root_paths: HashMap<i64, &str> = roots.iter().map(|r| (r.id, r.path.as_str())).collect();
 
     for entry in entries {
@@ -557,8 +557,9 @@ const EMPTY_NOTES: &str = "\n#\n";
 ///
 /// **The confirmed register, not the recorded one.** "Any scope at all" means
 /// a scope there is somewhere to measure *from*, and that is what `scopes()`
-/// carries: the same register the vantage, the lock header and the decision
-/// record read. A recorded line Canon could not confirm contributes nothing to
+/// carries: the same confirmed register the lock header and the decision
+/// record read, and the one the vantage measures from through
+/// `measured_from()`. A recorded line Canon could not confirm contributes nothing to
 /// the measurement, so a manifest whose scope confirmed none of its lines would
 /// be born naming a key that measures nothing at every entry. Unreachable from
 /// the command today — such a run selects nothing and returns before any
@@ -1466,15 +1467,19 @@ mod tests {
     }
 
     /// The same, without a database: every prefix confirmed on its root match
-    /// alone. For the measurement cases, which are about `ScopeVantage` and
-    /// `path_strip_prefix` and have no index to consult.
-    fn attributed(prefixes: &[&str], roots: &[Root]) -> ScopeResolution {
-        use crate::core::domain::scope::{attribute_prefix, PrefixOutcome};
+    /// alone, **every one of them a directory**. For the measurement cases,
+    /// which are about `ScopeVantage` and `path_strip_prefix`.
+    ///
+    /// The grain is named because it is a premise only the index can supply.
+    /// Cases about the grain itself resolve through `scope_of`, against a real
+    /// database, so the answer comes from the door rather than a fixture.
+    fn attributed_dirs(prefixes: &[&str], roots: &[Root]) -> ScopeResolution {
+        use crate::core::domain::scope::{attribute_prefix, PrefixOutcome, ScopeGrain};
         ScopeResolution::from_outcomes(
             prefixes
                 .iter()
                 .map(|p| match attribute_prefix(p, roots) {
-                    Some(scope) => PrefixOutcome::Confirmed(scope),
+                    Some(scope) => PrefixOutcome::Confirmed(scope, ScopeGrain::Directory),
                     None => PrefixOutcome::Unrooted(p.to_string()),
                 })
                 .collect(),
@@ -1505,7 +1510,7 @@ mod tests {
             .map(|rel| lock_entry_at(root, &format!("/R/{rel}")))
             .collect();
 
-        measure_entries(&mut entries, &attributed(&["/R/proj"], &roots), &roots);
+        measure_entries(&mut entries, &attributed_dirs(&["/R/proj"], &roots), &roots);
 
         assert_eq!(
             entries
@@ -1541,7 +1546,7 @@ mod tests {
 
         measure_entries(
             &mut entries,
-            &attributed(&["/R/work/proj-v1", "/R/work/proj-v2"], &roots),
+            &attributed_dirs(&["/R/work/proj-v1", "/R/work/proj-v2"], &roots),
             &roots,
         );
 
@@ -1574,6 +1579,178 @@ mod tests {
         }
     }
 
+    /// The friction, end to end, through the door a run actually resolves
+    /// through — and its neighbour one argument wider, in the same test.
+    ///
+    /// A shell wildcard like `notes-2026-02*` on a sparse month matched
+    /// one file, and every entry's measurement came out `""`: the vantage
+    /// folded the file path into itself, so `path_strip_prefix` had nothing
+    /// left to return. The dozen-file month worked, but only because
+    /// `common_path_prefix` had divergent components to drop. Both are here
+    /// because the single case is only visibly wrong beside the case that
+    /// happened to work.
+    ///
+    /// `scope_of` and not `attributed_dirs`: what a file scope's grain is is
+    /// the index's answer, so the fixture must be a real database or the case
+    /// passes on the premise it exists to test.
+    #[test]
+    fn file_scopes_measure_from_their_directory_however_many_matched() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/R", "source", false);
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+
+        let names: Vec<String> = (0..12).map(|i| format!("notes-{i:02}.md")).collect();
+        for name in &names {
+            insert_source(&conn, root, &format!("dir/{name}"), None);
+        }
+
+        // One match — the sparse month.
+        let mut one = vec![lock_entry_at(root, "/R/dir/notes-00.md")];
+        measure_entries(
+            &mut one,
+            &scope_of(&conn, &["/R/dir/notes-00.md".to_string()]),
+            &roots,
+        );
+        assert_eq!(
+            one[0].scope_rel_path.as_deref(),
+            Some("notes-00.md"),
+            "one match must place the file by name, not at the destination itself"
+        );
+
+        // A dozen matches — the month that worked, now for the same reason.
+        let mut dozen: Vec<LockEntry> = names
+            .iter()
+            .map(|n| lock_entry_at(root, &format!("/R/dir/{n}")))
+            .collect();
+        let prefixes: Vec<String> = names.iter().map(|n| format!("/R/dir/{n}")).collect();
+        measure_entries(&mut dozen, &scope_of(&conn, &prefixes), &roots);
+        assert_eq!(
+            dozen
+                .iter()
+                .map(|e| e.scope_rel_path.clone().unwrap())
+                .collect::<Vec<_>>(),
+            names,
+        );
+
+        // And the directory they sit in, unchanged: the level the user pointed
+        // above still survives.
+        let mut whole = vec![lock_entry_at(root, "/R/dir/notes-00.md")];
+        measure_entries(
+            &mut whole,
+            &scope_of(&conn, &["/R/dir".to_string()]),
+            &roots,
+        );
+        assert_eq!(whole[0].scope_rel_path.as_deref(), Some("notes-00.md"));
+
+        let mut above = vec![lock_entry_at(root, "/R/dir/notes-00.md")];
+        measure_entries(&mut above, &scope_of(&conn, &["/R".to_string()]), &roots);
+        assert_eq!(
+            above[0].scope_rel_path.as_deref(),
+            Some("dir/notes-00.md"),
+            "a directory scope is unmoved by any of this"
+        );
+    }
+
+    /// The unreachability guarantee, end to end and through the **fold**.
+    ///
+    /// `E ⊑ S ⊑ P ⊑ V`: core pins `S ⊑ P`, the vantage owns `P ⊑ V`, and this
+    /// is where they meet — the real `ScopeVantage` over a real index,
+    /// producing the `scope_rel_path` a user actually gets. **Each shape is run
+    /// alone and paired with every other**, which is what puts the real
+    /// per-root grouping and `common_path_prefix` under `measure_entries` at
+    /// all — a single-prefix sweep exercises neither. It is not that a pair can
+    /// fail where its singles pass: every measuring point is individually safe,
+    /// and a vantage at or above one inherits that. It is that the fold is a
+    /// link in the argument, and an argued link with no code path behind it in
+    /// any test is a link nobody has run.
+    ///
+    /// A blank measurement here is the defect this whole mechanism exists to
+    /// remove: `apply` joins it onto the destination and dies on a path ending
+    /// in a separator.
+    /// Shapes: a plain directory, a plain file, a directory that became a
+    /// file, a file that became a directory, both-live, an all-tombstone path,
+    /// and the root — the same seven the core half sweeps, so the two cannot
+    /// drift apart on what a shape is.
+    #[test]
+    fn no_scope_combination_measures_an_entry_to_nothing() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/R", "source", false);
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+
+        let bury = |rel: &str| {
+            conn.execute(
+                "UPDATE sources SET present = 0 WHERE root_id = ? AND rel_path = ?",
+                rusqlite::params![root, rel],
+            )
+            .unwrap();
+        };
+
+        insert_source(&conn, root, "plain_dir/a.jpg", None);
+        insert_source(&conn, root, "plain_file", None);
+        insert_source(&conn, root, "d2f/old.jpg", None);
+        bury("d2f/old.jpg");
+        insert_source(&conn, root, "d2f", None);
+        insert_source(&conn, root, "f2d", None);
+        bury("f2d");
+        insert_source(&conn, root, "f2d/new.jpg", None);
+        insert_source(&conn, root, "both/old.jpg", None);
+        insert_source(&conn, root, "both", None);
+        insert_source(&conn, root, "ghost", None);
+        insert_source(&conn, root, "ghost/g.jpg", None);
+        bury("ghost");
+        bury("ghost/g.jpg");
+
+        // Every present source — the entries any of these scopes could select.
+        let entries = [
+            "plain_dir/a.jpg",
+            "plain_file",
+            "d2f",
+            "f2d/new.jpg",
+            "both",
+            "both/old.jpg",
+        ];
+        let shapes = ["plain_dir", "plain_file", "d2f", "f2d", "both", "ghost", ""];
+        let full = |rel: &str| {
+            if rel.is_empty() {
+                "/R".to_string()
+            } else {
+                format!("/R/{rel}")
+            }
+        };
+
+        let mut cases: Vec<Vec<String>> = shapes.iter().map(|s| vec![full(s)]).collect();
+        for (i, a) in shapes.iter().enumerate() {
+            for b in &shapes[i + 1..] {
+                cases.push(vec![full(a), full(b)]);
+            }
+        }
+
+        let mut measured = 0usize;
+        for prefixes in &cases {
+            let scope = scope_of(&conn, prefixes);
+            let mut lock: Vec<LockEntry> = entries
+                .iter()
+                .map(|rel| lock_entry_at(root, &full(rel)))
+                .collect();
+            measure_entries(&mut lock, &scope, &roots);
+
+            for entry in &lock {
+                if let Some(rel) = &entry.scope_rel_path {
+                    measured += 1;
+                    assert!(
+                        !rel.is_empty(),
+                        "scope {prefixes:?} measured {} to the empty string",
+                        entry.path
+                    );
+                }
+            }
+        }
+        assert!(
+            measured > 0,
+            "the sweep asserted nothing — no entry was measured at all"
+        );
+    }
+
     /// The same-code rule, pinned rather than trusted: generation and refresh
     /// resolve scope through one pipeline and must write **byte-identical** locks
     /// from the same inputs. Two similar loops is the drift this whole class
@@ -1585,7 +1762,7 @@ mod tests {
         let obj = insert_object(&conn, "hash1", false);
         insert_source(&conn, root, "trip/day1/photo.jpg", Some(obj));
         let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
-        let scope = || attributed(&["/photos/trip"], &roots);
+        let scope = || attributed_dirs(&["/photos/trip"], &roots);
 
         let dir = tempfile::tempdir().unwrap();
         let gen_lock = dir.path().join("gen.lock");

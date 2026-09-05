@@ -65,22 +65,35 @@ checks cannot see through a bare `expr::` prefix.
 ## The scope vantage
 
 `{scope.rel_path}` means *the shape I was looking at*. What it measures from is the **vantage**:
-the deepest directory containing every scope that lies in the source's own root. One scope is
-its own vantage; siblings share their parent, so each scope's own name survives at the
-destination and two siblings cannot collide; scopes in several roots each get their own; and it
-can never climb above a root, because every scope in a root is under it
-(`the_vantage_never_rises_above_its_root`, `domain/vantage.rs`).
+the deepest directory containing every scope that lies in the source's own root. One directory
+scope is its own vantage, and one **file** scope is the directory that file sits in — the same
+sentence, since a file's deepest containing directory is its parent; siblings share their
+parent, so each scope's own name survives at the destination and two siblings cannot collide;
+scopes in several roots each get their own; and it can never climb above a root, because every
+scope in a root is under it (`the_vantage_never_rises_above_its_root`, `domain/vantage.rs`).
 
 `domain/vantage.rs` owns it, and it is derived **once per run**, from an already-resolved
 recorded scope the caller hands in — what "the scope" means when there is more than one is not
 a question each reader answers for itself.
 
-**It does not decide which root owns a prefix, and cannot.** That is the path law's question,
-answered once in `core::domain::scope`/`core::ops::scope` before this type is called.
-`ScopeVantage::new` takes a `ScopeResolution`, so passing raw manifest strings is a compile
-error rather than a guess. It also sees only the resolution's **confirmed** scopes: a line the
-index could not confirm reaches it as nothing at all, so it cannot drag a common prefix above
-the sibling that did confirm.
+**Two questions it must not answer for itself are shut at its signature.** `ScopeVantage::new`
+takes `&[DirectoryLocation]` — `core::domain::scope`'s measured-from register — so neither raw
+manifest text nor a resolved *item* path can be folded, and both are compile errors rather than
+guesses. Which root owns a prefix is the path law's question, answered once in
+`core::domain::scope`/`core::ops::scope`; whether a scope names a directory or one item is the
+index's, answered once at the manifest door. What is left here is this type's own law and
+nothing else. It also sees only the resolution's **confirmed** scopes: a line the index could
+not confirm reaches it as nothing at all, so it cannot drag a common prefix above the sibling
+that did confirm.
+
+The item half is why the signature is a `DirectoryLocation` and not a scope. Fold an item path
+and `common_path_prefix` has no divergent component to drop, so the vantage becomes the file
+itself, `path_strip_prefix` yields `""`, and every entry aims at the destination directory —
+surfacing at `apply` as a destination conflict over a blank path, at the far end of the
+pipeline from its cause. Two or more files always leave their directory behind, so the
+multi-file case worked by coincidence rather than by rule; both are now answered by the one
+rule. The neighbour table (`the_grain_table_answers_every_neighbour_by_one_rule`) keeps the
+degenerate row where it can only be read beside the rows that make it obviously wrong.
 
 **A vantage is constructed only where a manifest is written** — `cluster generate` and
 `cluster refresh`, through one shared measure function — which records each entry's measured

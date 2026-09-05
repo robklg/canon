@@ -359,10 +359,11 @@ Named `--where` aliases in `$CANON_HOME/aliases.toml` (e.g. `image = "content.mi
 `{expr}` syntax. **Path accessors**: `{source.rel_path[-1]}` (filename), `[0]`, `[1:3]`, `[:-1]`. **Modifiers**: `|year`, `|month`, `|stem`, `|ext`, `|short`. **Aliases** (patterns only, see `canon facts --show-aliases`): `{filename}` → `{source.rel_path[-1]}`, etc. Example: `pattern = "{content.DateTimeOriginal|yearmonth}/{filename}"`.
 
 **`{scope.rel_path}` measures from the vantage** — the deepest directory containing every scope
-that lies in the source's own root. One scope is its own vantage; siblings share their parent, so
-each scope's own name survives at the destination; scopes in several roots each get their own, and
-it can never climb above a root. Derived once per run (`expr::ScopeVantage`) from the resolved
-recorded scope, and never re-derived per reader.
+that lies in the source's own root. One directory scope is its own vantage and one file scope is
+the directory it sits in; siblings share their parent, so each scope's own name survives at the
+destination; scopes in several roots each get their own, and it can never climb above a root.
+Derived once per run (`expr::ScopeVantage`) from the resolved recorded scope, and never
+re-derived per reader.
 
 **The lock carries the measurement, and that is where placement is settled.** The config is
 editable intent; the lock is the settled decision. A vantage is constructed **only where a

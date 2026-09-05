@@ -99,7 +99,8 @@ instead of one line naming a private enum. The way back is named in the refusal 
 other, because deciding which strings are obviously safe is the same guess in smaller clothes.
 
 **One register, four uses.** A run selects from, measures from, records, and writes its lock header
-from the *same* confirmed scopes (`ScopeResolution::selection`/`scopes`) — never from `recorded()`,
+from the *same* confirmed scopes — `ScopeResolution::selection`/`scopes`, and `measured_from()` for
+the measurement, which is that same confirmed set read as directories — never from `recorded()`,
 which also carries the lines that resolved to nothing. An unrooted prefix can be an **ancestor** of
 a known root, so selecting through it gathers sources no vantage can measure: a lock with a
 non-empty header and unmeasured entries, refused file by file at apply for a line the run had

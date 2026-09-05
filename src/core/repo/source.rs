@@ -291,7 +291,14 @@ pub fn fetch_by_id(conn: &Connection, source_id: i64) -> Result<Option<Source>> 
 
 /// Check if a source (current or historical) stands at exactly this path —
 /// the index's answer to "is this path a file?", for when the disk cannot
-/// answer. Includes `present = 0` records, like [`sources_exist_at_scope`].
+/// answer. Includes `present = 0` records, like [`sources_exist_at_scope`]:
+/// dismissing content must mean the same thing whether a drive is attached or
+/// not, so a path Canon once knew still counts.
+///
+/// **Not the one to reach for when the question is about now.**
+/// [`present_source_exists_at_path`] asks the same boundary with `present = 1`,
+/// for callers deciding what a run will *place* rather than what it may act
+/// on. Picking this one there reads a path's history as its present shape.
 pub fn source_exists_at_path(conn: &Connection, root_id: i64, rel_path: &str) -> Result<bool> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sources WHERE root_id = ? AND rel_path = ?)",
@@ -321,6 +328,40 @@ pub fn sources_exist_at_scope(conn: &Connection, root_id: i64, rel_path: &str) -
             |row| row.get(0),
         )?
     };
+    Ok(exists)
+}
+
+/// Whether a **present** source stands at exactly this path — is this scope
+/// path an item?
+///
+/// The measurement's own question. [`source_exists_at_path`] beside it asks the
+/// same boundary but includes tombstones, because *selection* must mean the
+/// same thing whether a drive is attached or not. Measurement asks instead what
+/// this run will place, and a run places present sources — so a path that
+/// merely *used* to hold a file is not an item now.
+///
+/// **This is what makes a blank measurement unreachable.** A run's entries are
+/// present sources, so a path with an entry standing on it answers `true` here
+/// and measures from its parent instead. The full argument — which has to
+/// account for the vantage being a *common prefix* of several measuring points
+/// rather than any one of them — lives with the rule, at
+/// `core::ops::scope::scope_grain`.
+///
+/// An empty `rel_path` is the root's own remainder. Nothing ordinarily stands
+/// there, so this answers `false` — but the schema permits a row that does, and
+/// this answers honestly for it (`the_root_remainder_answers_for_what_stands_there`).
+/// `scope_grain` short-circuits the root before asking, which is what keeps a
+/// row like that from making a root an item.
+pub fn present_source_exists_at_path(
+    conn: &Connection,
+    root_id: i64,
+    rel_path: &str,
+) -> Result<bool> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sources WHERE root_id = ? AND rel_path = ? AND present = 1)",
+        rusqlite::params![root_id, rel_path],
+        |row| row.get(0),
+    )?;
     Ok(exists)
 }
 
@@ -1233,5 +1274,83 @@ mod tests {
 
         // Root with no sources
         assert!(!sources_exist_at_scope(&conn, root_id, "").unwrap());
+    }
+
+    // =========================================================================
+    // present_source_exists_at_path — the measurement's grain question
+    // =========================================================================
+
+    /// The predicate's whole job: something standing here *now*.
+    #[test]
+    fn a_present_source_at_the_path_makes_it_an_item() {
+        let conn = setup_test_db();
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+        insert_test_source(&conn, root_id, "a.jpg", 1, 1, 1000, 100);
+        insert_test_source(&conn, root_id, "dir/b.jpg", 1, 2, 1000, 100);
+
+        assert!(present_source_exists_at_path(&conn, root_id, "a.jpg").unwrap());
+        assert!(
+            !present_source_exists_at_path(&conn, root_id, "dir").unwrap(),
+            "content beneath a path does not stand at it"
+        );
+        assert!(!present_source_exists_at_path(&conn, root_id, "nothing").unwrap());
+    }
+
+    /// **A tombstone is not an item**, and this is the one difference from
+    /// [`source_exists_at_path`] beside it — asserted against that sibling in
+    /// the same test so the two policies cannot drift into agreement unnoticed.
+    ///
+    /// A file that has become a directory leaves a row standing at the path
+    /// describing what *was* there. Reading it as an item would measure from
+    /// the parent and push every file below it down a level.
+    #[test]
+    fn a_tombstone_at_the_path_is_not_an_item() {
+        let conn = setup_test_db();
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+        let gone = insert_test_source(&conn, root_id, "was_file", 1, 1, 1000, 100);
+        conn.execute(
+            "UPDATE sources SET present = 0 WHERE id = ?",
+            rusqlite::params![gone],
+        )
+        .unwrap();
+        insert_test_source(&conn, root_id, "was_file/now.jpg", 1, 2, 1000, 100);
+
+        assert!(
+            !present_source_exists_at_path(&conn, root_id, "was_file").unwrap(),
+            "nothing stands here now — it is a place again"
+        );
+        assert!(
+            source_exists_at_path(&conn, root_id, "was_file").unwrap(),
+            "while the history-inclusive sibling still knows the file that was \
+             — the two ask different questions and must keep answering differently"
+        );
+    }
+
+    /// The root's own remainder. Nothing ordinarily stands there — no source
+    /// carries an empty `rel_path` — but the schema permits one, and the
+    /// predicate must answer for an input it accepts rather than leave the
+    /// caller to find out. `scope_grain` short-circuits before asking; this is
+    /// what makes that a belt-and-braces choice rather than a load-bearing one.
+    #[test]
+    fn the_root_remainder_answers_for_what_stands_there() {
+        let conn = setup_test_db();
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+        assert!(!present_source_exists_at_path(&conn, root_id, "").unwrap());
+
+        insert_test_source(&conn, root_id, "", 1, 1, 1000, 100);
+        assert!(present_source_exists_at_path(&conn, root_id, "").unwrap());
+    }
+
+    /// An exact-path predicate, so a longer path that merely starts with this
+    /// one is not a match — and `_`/`%` are path bytes, not wildcards.
+    #[test]
+    fn present_at_the_path_is_exact_not_a_prefix() {
+        let conn = setup_test_db();
+        let root_id = crate::core::repo::insert_test_root(&conn, "/photos", "source", false);
+        insert_test_source(&conn, root_id, "dir-other", 1, 1, 1000, 100);
+        insert_test_source(&conn, root_id, "alphaXbeta", 1, 2, 1000, 100);
+
+        assert!(!present_source_exists_at_path(&conn, root_id, "dir").unwrap());
+        assert!(!present_source_exists_at_path(&conn, root_id, "alpha_beta").unwrap());
     }
 }

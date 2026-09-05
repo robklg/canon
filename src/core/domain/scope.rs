@@ -4,6 +4,8 @@
 //! "what kind of match do we want?" separated from the SQL implementation
 //! of "how do we express this in a query?".
 
+use std::path::Path;
+
 use super::path::normalization_candidates;
 use super::root::{find_containing_root, Root};
 
@@ -123,6 +125,66 @@ pub fn attribute_prefix(prefix: &str, roots: &[Root]) -> Option<DecisionScope> {
     })
 }
 
+/// What a confirmed prefix names in the index: a place, or one item standing
+/// at it.
+///
+/// The vantage's own precondition — *the deepest **directory** containing
+/// every scope* — as a fact rather than an assumption. Only the index can
+/// answer it (the disk cannot: a manifest door that stats would settle
+/// placement differently depending on whether a drive happened to be
+/// mounted), so it is supplied by `core::ops::scope::resolve_recorded_scope`
+/// and never derived here. Which question it asks, and why presence rather
+/// than history, belongs to that door and is written there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeGrain {
+    /// No present source stands at this path, so it is a place. Says nothing
+    /// about what lies below it — a path whose content has all been deleted is
+    /// still a place, and so is a root by construction.
+    Directory,
+    /// A present source stands at this path. One item — whatever else the
+    /// index may still remember beneath it, and a path with a past can hold
+    /// both at once.
+    Item,
+}
+
+/// A location a measurement may be taken from: a directory, by construction.
+///
+/// Minted only in [`ScopeResolution::from_outcomes`], from a confirmed scope
+/// and its [`ScopeGrain`] — an item scope contributes its containing
+/// directory, which is what *the deepest directory containing every scope*
+/// already says about a file. [`common_path_prefix`](super::path::common_path_prefix)
+/// states the same thing as a prose precondition; at the vantage's boundary it
+/// is the signature, so an item path cannot be folded even by mistake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryLocation(DecisionScope);
+
+impl DirectoryLocation {
+    /// The root this location lies in — how the vantage groups per root.
+    pub fn root_path(&self) -> &str {
+        &self.0.root_path
+    }
+
+    /// The canonical absolute path measured from.
+    pub fn location(&self) -> String {
+        self.0.display_path()
+    }
+}
+
+/// The directory containing a scope's relative path — a scope's own place when
+/// it names an item.
+///
+/// A root is its own containing location, and both ways of arriving there give
+/// it: a root-level name's parent is `Some("")`, and a root's own empty prefix
+/// has no parent at all — `Path::new("").parent()` is `None`, so the default is
+/// written out rather than left to a panic.
+fn containing_location(scope: &DecisionScope) -> DecisionScope {
+    let parent = Path::new(&scope.rel_prefix)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    DecisionScope::new(scope.root_id, scope.root_path.clone(), parent)
+}
+
 /// What became of one recorded prefix, in the manifest's own order.
 ///
 /// The three answers a recorded prefix can get, and the only input
@@ -130,10 +192,11 @@ pub fn attribute_prefix(prefix: &str, roots: &[Root]) -> Option<DecisionScope> {
 /// exposes is derived from one list rather than accumulated in parallel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrefixOutcome {
-    /// Rooted, and the index knows sources under it. The scope carries the
-    /// stored byte-form throughout: the root's from attribution, the
-    /// remainder's from whoever confirmed it.
-    Confirmed(DecisionScope),
+    /// Rooted, and the index knows sources at or under it. The scope carries
+    /// the stored byte-form throughout: the root's from attribution, the
+    /// remainder's from whoever confirmed it. The grain says which of the two
+    /// the confirmation was, and only the measurement register reads it.
+    Confirmed(DecisionScope, ScopeGrain),
     /// Rooted, but no byte-form of it has any sources. Nothing to measure from
     /// and nothing to select, so it is stated and set aside — never obeyed
     /// silently, never dropped.
@@ -182,6 +245,10 @@ pub struct ScopeResolution {
     /// Every recorded prefix in the manifest's own order: healed as far as it
     /// could be, verbatim past that. What a rewrite writes back.
     recorded: Vec<String>,
+    /// The confirmed scopes as places to measure from — a directory scope as
+    /// itself, an item scope as its containing directory. Neither sorted nor
+    /// deduplicated: it feeds a fold where order and repetition are immaterial.
+    measured_from: Vec<DirectoryLocation>,
 }
 
 impl ScopeResolution {
@@ -197,11 +264,23 @@ impl ScopeResolution {
         let mut set_aside: Vec<String> = Vec::new();
         let mut unrooted: Vec<String> = Vec::new();
         let mut recorded: Vec<String> = Vec::with_capacity(outcomes.len());
+        let mut measured_from: Vec<DirectoryLocation> = Vec::new();
 
         for outcome in outcomes {
             match outcome {
-                PrefixOutcome::Confirmed(scope) => {
+                PrefixOutcome::Confirmed(scope, grain) => {
                     recorded.push(scope.display_path());
+                    // The one place a DirectoryLocation is minted, and the
+                    // only place the grain is read: an item scope contributes
+                    // the directory that contains it, which is what "the
+                    // deepest directory containing every scope" already says
+                    // about a file. `resolved` is unmoved by this — selection,
+                    // the lock header and the decision record see the scope
+                    // the user named.
+                    measured_from.push(DirectoryLocation(match grain {
+                        ScopeGrain::Directory => scope.clone(),
+                        ScopeGrain::Item => containing_location(&scope),
+                    }));
                     resolved.push(scope);
                 }
                 PrefixOutcome::SetAside(scope) => {
@@ -233,11 +312,31 @@ impl ScopeResolution {
             set_aside,
             unrooted,
             recorded,
+            measured_from,
         }
     }
 
-    /// The confirmed prefixes as typed scopes — what the recorder stores, what
-    /// the vantage measures from, and what the lock header carries.
+    /// The places the run measures `{scope.rel_path}` from: every confirmed
+    /// scope as a directory, by construction.
+    ///
+    /// The same register as [`scopes`](Self::scopes) — a set-aside or unrooted
+    /// prefix contributes to neither — read through the grain the index
+    /// supplied. It exists apart from `scopes()` because measurement and
+    /// selection ask different questions of one confirmed prefix: selection
+    /// asks *what did the user name*, and a file scope must select that file;
+    /// measurement asks *what is there to name below*, and a file has only its
+    /// own name to give, measured from the directory it sits in.
+    pub fn measured_from(&self) -> &[DirectoryLocation] {
+        &self.measured_from
+    }
+
+    /// The confirmed prefixes as typed scopes — what the recorder stores,
+    /// what the lock header carries, and what a run selects from.
+    ///
+    /// The vantage reads [`measured_from`](Self::measured_from) rather than
+    /// this: the same confirmed set, read as places to measure from. Both are
+    /// derived from one outcome list at one site, so they are non-empty
+    /// together and neither can carry a prefix the other does not.
     ///
     /// A set-aside prefix is **absent** from here, and that absence is the
     /// behavioural point: a line naming a place Canon cannot confirm stops
@@ -272,8 +371,8 @@ impl ScopeResolution {
     /// The paths a run selects content from: the confirmed scopes, as absolute
     /// display paths.
     ///
-    /// The same register the vantage and the lock header are built from, which
-    /// is the whole point. A set-aside prefix names nothing the index knows,
+    /// The same confirmed register the lock header is built from and the
+    /// vantage measures from, which is the whole point. A set-aside prefix names nothing the index knows,
     /// and an unrooted one may still be an *ancestor* of a known root —
     /// `path_is_under` matches it where `find_containing_root` does not — so
     /// selecting from the recorded list gathers sources no vantage can measure
@@ -354,19 +453,24 @@ mod scope_resolution_tests {
     }
 
     /// The attribution half alone: every prefix that finds a root, confirmed
-    /// on its root match and nothing else.
+    /// on its root match and nothing else, **every one of them a directory**.
+    ///
+    /// The grain is stated in the name because it is a premise, not a default:
+    /// only the index can tell a directory from an item, and a helper that
+    /// picked one silently would let a case about items pass for the wrong
+    /// reason. Cases that need items build their outcomes directly.
     ///
     /// Production never assembles a resolution this way — confirming a prefix
     /// takes an answer only the index has, so `core::ops::scope` always runs
     /// both stages. This is spelled here rather than kept as a production
     /// function so the tree carries no constructor no command uses; what it
     /// pins is the pure half's own claims, which are this module's.
-    fn attributed(prefixes: &[String], roots: &[Root]) -> ScopeResolution {
+    fn attributed_dirs(prefixes: &[String], roots: &[Root]) -> ScopeResolution {
         ScopeResolution::from_outcomes(
             prefixes
                 .iter()
                 .map(|p| match attribute_prefix(p, roots) {
-                    Some(scope) => PrefixOutcome::Confirmed(scope),
+                    Some(scope) => PrefixOutcome::Confirmed(scope, ScopeGrain::Directory),
                     None => PrefixOutcome::Unrooted(p.clone()),
                 })
                 .collect(),
@@ -387,7 +491,7 @@ mod scope_resolution_tests {
     #[test]
     fn a_prefix_typed_in_another_normalization_resolves_to_the_stored_form() {
         let roots = vec![root(1, ROOT_NFD)];
-        let resolution = attributed(&owned(&[&format!("{ROOT_NFC}/2016")]), &roots);
+        let resolution = attributed_dirs(&owned(&[&format!("{ROOT_NFC}/2016")]), &roots);
 
         assert!(
             resolution.unrooted().is_empty(),
@@ -414,7 +518,7 @@ mod scope_resolution_tests {
     #[test]
     fn a_prefix_under_no_root_is_carried_never_dropped() {
         let roots = vec![root(1, "/vol/work")];
-        let resolution = attributed(&owned(&["/vol/gone/proj-v2"]), &roots);
+        let resolution = attributed_dirs(&owned(&["/vol/gone/proj-v2"]), &roots);
 
         assert_eq!(resolution.unrooted(), ["/vol/gone/proj-v2"]);
         assert!(resolution.scopes().is_empty());
@@ -433,7 +537,7 @@ mod scope_resolution_tests {
     #[test]
     fn a_carried_prefix_does_not_displace_its_rooted_siblings() {
         let roots = vec![root(1, "/vol/work")];
-        let resolution = attributed(
+        let resolution = attributed_dirs(
             &owned(&["/vol/work/proj-v1", "/vol/work-archive/proj-v2"]),
             &roots,
         );
@@ -461,7 +565,7 @@ mod scope_resolution_tests {
             "/media/backup",
             "/elsewhere",
         ]);
-        let resolution = attributed(&prefixes, &roots);
+        let resolution = attributed_dirs(&prefixes, &roots);
 
         assert_eq!(resolution.recorded().len(), prefixes.len());
 
@@ -483,7 +587,7 @@ mod scope_resolution_tests {
     #[test]
     fn a_prefix_on_a_suspended_root_stays_rooted() {
         let roots = vec![suspended_root(1, "/vol/work")];
-        let resolution = attributed(&owned(&["/vol/work/proj-v1"]), &roots);
+        let resolution = attributed_dirs(&owned(&["/vol/work/proj-v1"]), &roots);
 
         assert!(resolution.unrooted().is_empty());
         assert_eq!(
@@ -502,11 +606,11 @@ mod scope_resolution_tests {
     #[test]
     fn repeated_resolution_records_identically() {
         let roots = vec![root(1, "/vol/work"), root(2, "/media/backup")];
-        let one = attributed(
+        let one = attributed_dirs(
             &owned(&["/media/backup/b", "/vol/work/a", "/vol/work/a"]),
             &roots,
         );
-        let other = attributed(&owned(&["/vol/work/a", "/media/backup/b"]), &roots);
+        let other = attributed_dirs(&owned(&["/vol/work/a", "/media/backup/b"]), &roots);
 
         assert_eq!(one.scopes(), other.scopes());
         assert_eq!(one.scopes().len(), 2, "the repeat collapsed");
@@ -525,17 +629,23 @@ mod scope_resolution_tests {
         let roots = vec![root(1, "/vol/work")];
 
         // Nothing recorded: global, and an empty list is the right shape.
-        assert_eq!(attributed(&owned(&[]), &roots).selection(), Some(vec![]));
+        assert_eq!(
+            attributed_dirs(&owned(&[]), &roots).selection(),
+            Some(vec![])
+        );
 
         // Recorded, and confirmed: the confirmed scopes as absolute paths.
         assert_eq!(
-            attributed(&owned(&["/vol/work/proj-v1"]), &roots).selection(),
+            attributed_dirs(&owned(&["/vol/work/proj-v1"]), &roots).selection(),
             Some(vec!["/vol/work/proj-v1".to_string()])
         );
 
         // Recorded, and nothing confirmed: no selection at all, which is a
         // different answer from an empty one.
-        assert_eq!(attributed(&owned(&["/vol/gone"]), &roots).selection(), None);
+        assert_eq!(
+            attributed_dirs(&owned(&["/vol/gone"]), &roots).selection(),
+            None
+        );
     }
 
     /// A9 — the selection is the confirmed register and nothing else, so a
@@ -549,7 +659,7 @@ mod scope_resolution_tests {
     #[test]
     fn the_selection_never_carries_a_line_that_measures_nothing() {
         let roots = vec![root(1, "/vol/work")];
-        let resolution = attributed(&owned(&["/vol/work/proj-v1", "/vol"]), &roots);
+        let resolution = attributed_dirs(&owned(&["/vol/work/proj-v1", "/vol"]), &roots);
 
         assert_eq!(resolution.unrooted(), ["/vol"]);
         assert_eq!(
@@ -564,12 +674,99 @@ mod scope_resolution_tests {
         );
     }
 
+    /// The measurement register in one place: what each grain contributes, and
+    /// what nothing contributes.
+    ///
+    /// A directory scope measures from itself. An item scope measures from the
+    /// directory containing it — which is what *the deepest directory
+    /// containing every scope* already says about a file, not a second rule.
+    /// A root-level item lands on the root, and an item at an empty
+    /// remainder — unreachable from the door, which calls a root a directory
+    /// without asking, but constructible here — lands on the root too rather
+    /// than panicking, because `Path::new("").parent()` is `None` and the
+    /// default is written out.
+    #[test]
+    fn the_measurement_register_reads_each_grain() {
+        let cases = [
+            ("dir", ScopeGrain::Directory, "/R/dir"),
+            ("dir/a.jpg", ScopeGrain::Item, "/R/dir"),
+            ("a/b/c/photo.jpg", ScopeGrain::Item, "/R/a/b/c"),
+            ("a.jpg", ScopeGrain::Item, "/R"),
+            ("", ScopeGrain::Directory, "/R"),
+            ("", ScopeGrain::Item, "/R"),
+        ];
+        for (rel, grain, expected) in cases {
+            let resolution = ScopeResolution::from_outcomes(vec![PrefixOutcome::Confirmed(
+                DecisionScope::new(1, "/R".to_string(), rel.to_string()),
+                grain,
+            )]);
+            let measured: Vec<String> = resolution
+                .measured_from()
+                .iter()
+                .map(|m| m.location())
+                .collect();
+            assert_eq!(measured, [expected], "for ({rel:?}, {grain:?})");
+            assert_eq!(
+                resolution.measured_from()[0].root_path(),
+                "/R",
+                "for ({rel:?}, {grain:?})"
+            );
+        }
+    }
+
+    /// The constraint-2 pin: **the grain moves the measurement and nothing
+    /// else.**
+    ///
+    /// An item scope appears in `scopes()`, `recorded()` and `selection()` as
+    /// the path the user named, byte for byte — so selection, the lock header
+    /// and the decision record see today exactly what they saw before. Only
+    /// `measured_from()` reads the grain, and it is the only register that
+    /// differs between these two resolutions.
+    #[test]
+    fn the_grain_moves_the_measurement_and_no_other_register() {
+        let scope = DecisionScope::new(1, "/R".to_string(), "dir/a.jpg".to_string());
+        let as_dir = ScopeResolution::from_outcomes(vec![PrefixOutcome::Confirmed(
+            scope.clone(),
+            ScopeGrain::Directory,
+        )]);
+        let as_item = ScopeResolution::from_outcomes(vec![PrefixOutcome::Confirmed(
+            scope.clone(),
+            ScopeGrain::Item,
+        )]);
+
+        assert_eq!(as_item.scopes(), [scope], "selection's register is unmoved");
+        assert_eq!(as_dir.scopes(), as_item.scopes());
+        assert_eq!(as_dir.recorded(), as_item.recorded());
+        assert_eq!(as_dir.selection(), as_item.selection());
+        assert_eq!(as_item.selection(), Some(vec!["/R/dir/a.jpg".to_string()]));
+
+        assert_ne!(
+            as_dir.measured_from(),
+            as_item.measured_from(),
+            "and the measurement is the one register that does move"
+        );
+    }
+
+    /// A prefix that reaches no confirmation contributes nothing to measure
+    /// from — the same absence that keeps it out of `scopes()`, seen at the
+    /// fifth register. The mirror of `a_set_aside_scope_contributes_no_vantage`
+    /// on this side of the boundary.
+    #[test]
+    fn a_set_aside_or_unrooted_prefix_contributes_nothing_to_measure_from() {
+        let resolution = ScopeResolution::from_outcomes(vec![
+            PrefixOutcome::SetAside(DecisionScope::new(1, "/R".to_string(), "gone".to_string())),
+            PrefixOutcome::Unrooted("/elsewhere".to_string()),
+        ]);
+        assert!(resolution.measured_from().is_empty());
+        assert!(resolution.scopes().is_empty());
+    }
+
     /// A7 — an unrooted prefix is read back to a user against their own file,
     /// so it keeps the order that file wrote it in.
     #[test]
     fn an_unrooted_prefix_keeps_the_manifest_order() {
         let roots = vec![root(1, "/vol/work")];
-        let resolution = attributed(
+        let resolution = attributed_dirs(
             &owned(&["/zeta/last", "/vol/work/kept", "/alpha/first"]),
             &roots,
         );

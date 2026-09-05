@@ -97,8 +97,8 @@ impl LockFile {
     ///
     /// A header whose scope is *not* empty leaves no unmeasured entries at
     /// all — and that rests on one fact, which is why it is worth naming:
-    /// a run selects from `ScopeResolution::selection`, the **same** register
-    /// the header and the vantage are built from. Select from the recorded
+    /// a run selects from `ScopeResolution::selection`, the **same** confirmed
+    /// register the header is built from and the vantage measures from. Select from the recorded
     /// list instead and the claim breaks, because an unrooted prefix can be an
     /// *ancestor* of a known root: `path_is_under` matches it where
     /// `find_containing_root` does not, so it gathers sources no vantage can
