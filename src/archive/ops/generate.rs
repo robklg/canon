@@ -19,7 +19,7 @@ use crate::archive::domain::{
 use crate::core::domain::include::IncludeSet;
 use crate::core::domain::path::path_strip_prefix;
 use crate::core::domain::root::Root;
-use crate::core::domain::scope::{ScopeMatch, ScopeResolution};
+use crate::core::domain::scope::{DecisionScope, ScopeMatch, ScopeResolution};
 use crate::core::domain::{FactEntry, FactType, FactValue};
 use crate::core::repo::{self, Connection};
 use crate::expr::Filter;
@@ -428,7 +428,7 @@ pub fn execute_generate(
             allow: params.allow.clone(),
         },
         output: ManifestOutput {
-            pattern: default_pattern(params.scope.recorded()).to_string(),
+            pattern: default_pattern(params.scope.scopes()).to_string(),
             archive_root_id: params.archive_root_id,
             base_dir: params.base_dir.clone(),
         },
@@ -555,10 +555,20 @@ const EMPTY_NOTES: &str = "\n#\n";
 /// measures from each source's own root, because there is nothing else to
 /// measure from.
 ///
+/// **The confirmed register, not the recorded one.** "Any scope at all" means
+/// a scope there is somewhere to measure *from*, and that is what `scopes()`
+/// carries: the same register the vantage, the lock header and the decision
+/// record read. A recorded line Canon could not confirm contributes nothing to
+/// the measurement, so a manifest whose scope confirmed none of its lines would
+/// be born naming a key that measures nothing at every entry. Unreachable from
+/// the command today — such a run selects nothing and returns before any
+/// manifest is written — and settled here rather than argued, so no later
+/// caller has to know it.
+///
 /// It is a default, not a rule: the pattern is the line of the manifest the
 /// user is most invited to edit, and `{filename}` remains one edit away.
-fn default_pattern(recorded_scope: &[String]) -> &'static str {
-    if recorded_scope.is_empty() {
+fn default_pattern(confirmed_scope: &[DecisionScope]) -> &'static str {
+    if confirmed_scope.is_empty() {
         "{source.rel_path}"
     } else {
         "{scope.rel_path}"
@@ -1702,6 +1712,20 @@ mod tests {
     #[test]
     fn default_pattern_is_root_relative_when_unscoped() {
         assert_eq!(generated_pattern(vec![]), "{source.rel_path}");
+    }
+
+    /// A recorded line Canon could not confirm is not somewhere to measure
+    /// from, so it must not decide the pattern either: the default reads the
+    /// same register the vantage and the lock header read. Unreachable from
+    /// the command — a run confirming nothing selects nothing and returns
+    /// before a manifest is written — and closed here so no later caller has
+    /// to carry the argument.
+    #[test]
+    fn a_scope_confirming_nothing_is_not_a_scope_to_measure_from() {
+        assert_eq!(
+            generated_pattern(vec!["/nowhere".to_string()]),
+            "{source.rel_path}"
+        );
     }
 
     /// E2 — any scope at all measures from the scope, not just one. Several
