@@ -75,6 +75,35 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   no `Error:` prefix, stdout left clean. Guard: `an_ancestor_scope_is_never_history_evidence`.
 **Crossings conventions** (`domain/crossings.rs`, `ops/crossings.rs`, `render::print_crossings`) — the counterpart door, the trail's fourth axis beside place, time and one decision:
 
+- **A closed door is remembering, and the gate is conjugated behind it.** `open_scope` matches
+  `Door::Closed` and reads at the parked places (`ClosedDoor::read_here`), carrying the pause on
+  the resolution so the header states it **once, independent of the cap** and of whether the
+  `roots_suspend` row happens to be in view (`trail_header`, pinned by
+  `the_pause_is_stated_independent_of_the_cap`), and **every** door is named, because a scope can
+  reach places on several closed roots. **Remembering has no set-aside register.** A door the ask
+  *named* is a place to read, not a place to skip, so `open_scope` moves the boundary's `parked`
+  partition onto the reading side — its paths into the gate, taking the same root-top exemption
+  every other prefix takes. Present-tense views keep the two registers apart because for them
+  setting aside *is* the answer; leaving them apart here made the same place answer differently
+  depending on what was named beside it. The trail therefore prints no set-aside line at all, and
+  the pause names only the doors a surviving prefix actually lies behind — a header offering a way
+  back through a door none of the rendered rows stand behind points at nothing.
+  **The gate runs behind a door, never skipped**:
+  it reads sources, notes, extractions and decisions, none of which a door hides, so it answers
+  correctly there — and a place behind a door that Canon has never heard of must still be said to
+  be unknown rather than rendered as a plausible empty view under a header claiming paths are
+  relative to it. What the door changes is the *statement*: `no_history_line` names the door
+  beside the absence, so the reader is never left wondering whether the pause is what hid the
+  place (`an_unknown_place_behind_a_door_names_the_door`). The observation comes first and
+  unchanged and the door follows it: substituting the door for the cause would offer a way back
+  that leads nowhere, since unsuspending reveals nothing about a path Canon never heard of. A parked prefix is gated exactly the
+  way a CWD-defaulted one is — both arrive ungated, for different reasons — with a root's own top
+  exempt at every door alike. **`crossings`'
+  suspended arm is gone** — it re-detected the door from `current_dir()` and refused, which made
+  the same place answer differently named and stood in, against this subsystem's own rule. The
+  boundary now hands back the parked root's own scope, so there *is* a boundary to measure
+  against; `boundless_refusal` has two causes and neither is a door.
+
 - **The view is the boundary, and a global view borrows the named counterpart.** A crossing is a
   row that crosses the view's boundary; a global view has none of its own, so membership-by-view
   would classify everything as a rearrangement and answer nothing. Borrowing is what makes

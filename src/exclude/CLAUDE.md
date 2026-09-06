@@ -86,6 +86,17 @@ strata — is private or `pub(super)` at most, visible only within `exclude/`.
 **Decisions pinned by a guard test** — each row is a claim this subsystem makes, and the test that
 fails if it stops holding (all under `exclude/ops/tests/`):
 
+**The three arms outside `resolve_scope` meet the door themselves.** `set_by_path`,
+`set_object_by_file` and `exclude duplicates` resolve their own paths, so the boundary's
+partition never sees them; each calls `core::ops::scope::refuse_parked_locations` right after
+resolution and before the existence gate. `duplicates`' scope and prefer paths are members of the
+same `validate_sources_exist` carve-out list `compare` belongs to — a location the question rests
+on — and repairing one member of a closed list while leaving another is exactly the drift that
+list exists to prevent. The two single-file arms reach the same call for a plainer reason: they
+are single-target acts, and the closed default refuses every act. The filter-driven arms take the door at the front door instead, with the
+`Refused` verb, before the plan display and the confirmation, so `--yes` cannot get past it.
+
+
 | Decision | Guard test |
 |---|---|
 | Receipt file written **after** commit; write failure is a warning, never a rollback | `test_execute_set_receipt_failure_surfaces_warning` |

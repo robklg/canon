@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use super::fs::canonicalize_maybe_missing;
 use crate::core::domain;
 use crate::core::domain::path::{clean_path, path_strip_prefix, validate_paths_in_roots};
-use crate::core::domain::root::{find_containing_root, Root, RootSpec};
+use crate::core::domain::root::{find_containing_root, ParkedPath, ParkedRoot, Root, RootSpec};
 use crate::core::domain::scope::{
     DecisionScope, PrefixOutcome, ScopeGrain, ScopeMatch, ScopeResolution,
 };
@@ -96,6 +96,25 @@ pub struct ResolvedScope {
     /// these on the channel it states its scope on; nothing acts on them,
     /// and they never become a recorded decision scope.
     pub set_aside: Vec<String>,
+    /// Paths that were asked for and stand on a root the user closed the
+    /// door on — the boundary's third set-aside cause, stated in the same
+    /// position as the second. Same contract: nothing acts on them, and they
+    /// never become a recorded decision scope. Non-empty only beside kept
+    /// prefixes; a scope where the door took everything is a
+    /// [`Door::Closed`], not a narrowing.
+    pub parked: Vec<ParkedPath>,
+    /// The closed doors this reading stands behind — set **only** by a
+    /// remembering caller that turned a [`Door::Closed`] into a scope it
+    /// reads at, and never by the boundary itself. One entry per parked
+    /// root, in the order they were asked about: a scope may name places on
+    /// several closed roots, and stating the first would leave the rest read
+    /// behind a door nobody mentioned. Remembering is a permit:
+    /// a pause of attention does not make Canon forget, so the trail, the
+    /// notes and the story read at a parked place — with the door stated
+    /// once, in the header. Distinct from [`parked`](Self::parked), which is
+    /// what a view set *aside*: the two are opposite dispositions of the same
+    /// fact and must not share a register.
+    pub pause: Vec<ParkedRoot>,
     /// Whether the scope came from CWD defaulting (controls relative path display).
     pub from_cwd: bool,
     /// Whether to auto-include archived sources (scope is inside an archive root).
@@ -107,6 +126,57 @@ impl ResolvedScope {
     pub fn is_global(&self) -> bool {
         self.prefixes.is_empty()
     }
+}
+
+/// What the scope boundary found: something to work on, or a closed door.
+///
+/// **The fact that a place is parked is derived once, here, as data** — never
+/// re-detected from `current_dir()` or from an `is_active()` filter applied to
+/// a root a caller was already handed. Checking the door as a filter partway
+/// down the pipeline removes the parked place from the answer, and a removed
+/// thing cannot be stated: that is what made a closed door read as a false
+/// empty, a silent widening, or a global act from a place the user had shut.
+///
+/// It is an enum rather than a flag on [`ResolvedScope`] because a flag can be
+/// ignored while [`ResolvedScope::is_global`] keeps saying "all roots" about a
+/// place behind a door. Here `is_global()` is unreachable from a closed door
+/// by construction: the type, not the caller's diligence, is what stops
+/// "global" from being said about a parked place.
+///
+/// Every consumer names both arms — the permit class it declares (a view sets
+/// aside, a remembering view reads, an act refuses) is a decision, and a `_`
+/// arm is that decision going unmade.
+#[derive(Debug)]
+pub enum Door {
+    /// Something was kept. `prefixes` empty means global. The two set-aside
+    /// registers beside it — [`set_aside`](ResolvedScope::set_aside), the
+    /// sourceless, and [`parked`](ResolvedScope::parked), the closed — are
+    /// the caller's to state, in the set-aside position.
+    Open(ResolvedScope),
+    /// Every asked-for place — or the place being stood in — is behind a
+    /// closed door. Nothing was kept: a present-tense view has nothing to
+    /// list and says so, a remembering view reads at
+    /// [`places`](ClosedDoor::places), an act refuses.
+    Closed(ClosedDoor),
+}
+
+/// A scope that kept nothing because the door was closed on all of it.
+#[derive(Debug)]
+pub struct ClosedDoor {
+    /// The parked places, in the order they were asked for. Never empty.
+    pub places: Vec<ParkedPath>,
+    /// Paths in the same ask that kept nothing for the *other* reason — no
+    /// sources known there. Carried rather than collapsed: a scope refused
+    /// for two causes states both, or one of them is spoken with the wrong
+    /// reason.
+    pub sourceless: Vec<String>,
+    /// The CWD door: [`places`](Self::places) is the one directory being
+    /// stood in, and the statement says `here` rather than a path.
+    pub here: bool,
+    /// Whether a remembering view reading at these places should widen to
+    /// archived sources — the archive-CWD auto-enable, which a closed door
+    /// does not switch off.
+    pub auto_include_archived: bool,
 }
 
 // ============================================================================
@@ -175,106 +245,103 @@ pub fn resolve_paths(paths: &[PathBuf], roots: &[Root]) -> Result<Vec<String>> {
         .collect()
 }
 
+/// What the root-spec door found: the root, or the door closed on it.
+///
+/// **An absence states what it observes, never a cause** — and the third
+/// answer this used to give was neither. Filtering suspended roots out of the
+/// candidate list made a root that plainly exists come back as
+/// "No root for path", so every caller spoke a false cause about a place the
+/// user had merely closed. The three answers are now distinct: found, closed,
+/// and genuinely unknown — the last still an `Err`, because a spec naming
+/// nothing is a mistake rather than a permission question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootLookup {
+    /// A root, its door open.
+    Found(i64),
+    /// The root exists and the user closed its door.
+    Parked(ParkedRoot),
+}
+
 /// Parse root spec (id:N or path:/path) with optional role validation.
-/// Excludes suspended roots. Use parse_root_spec_any() to include them.
 ///
-/// Callers must fetch roots via `core::repo::root::fetch_all()` first.
-pub fn parse_root_spec(roots: &[Root], spec: &str, required_role: Option<&str>) -> Result<i64> {
-    parse_root_spec_impl(roots, spec, required_role, false)
-}
-
-/// Parse root spec including suspended roots. Used for suspend/unsuspend commands.
-///
-/// Callers must fetch roots via `core::repo::root::fetch_all()` first.
-pub fn parse_root_spec_any(roots: &[Root], spec: &str) -> Result<i64> {
-    parse_root_spec_impl(roots, spec, None, true)
-}
-
-fn parse_root_spec_impl(
+/// Callers must fetch roots via `core::repo::root::fetch_all()` first, and
+/// name both arms of the answer: what a closed door means is the caller's
+/// permit class, not the parser's.
+pub fn parse_root_spec(
     roots: &[Root],
     spec: &str,
     required_role: Option<&str>,
-    include_suspended: bool,
-) -> Result<i64> {
-    // Parse the spec (pure domain logic)
-    let parsed = RootSpec::parse(spec)?;
+) -> Result<RootLookup> {
+    let (root, role) = find_root_by_spec(roots, spec)?;
 
-    // Filter roots by suspension status
-    let candidates: Vec<&Root> = roots
-        .iter()
-        .filter(|r| include_suspended || r.is_active())
-        .collect();
-
-    // Find matching root
-    let (id, role) = match parsed {
-        RootSpec::ById(id) => {
-            let root = candidates
-                .iter()
-                .find(|r| r.id == id)
-                .ok_or_else(|| anyhow::anyhow!("No root with id {id}"))?;
-            (root.id, root.role.clone())
-        }
-        RootSpec::ByPath(ref path) => {
-            let cwd = cwd_for(&[Path::new(path)])?;
-            // Resolve against ALL roots (including suspended) for path recognition
-            let canonical = resolve_path(Path::new(path), roots, &cwd)?;
-            // Find among filtered candidates (respects suspension filter)
-            let root = candidates
-                .iter()
-                .find(|r| r.path == canonical)
-                .ok_or_else(|| anyhow::anyhow!("No root for path: {path}"))?;
-            (root.id, root.role.clone())
-        }
-    };
-
-    // Validate role (domain logic)
+    // Validate role (domain logic). Ahead of the door: naming a source root
+    // where an archive was asked for is a mistake about *which* root, which
+    // stands whether or not that root's door happens to be closed.
     if let Some(req_role) = required_role {
         if role != req_role {
-            bail!("Root {id} has role '{role}', expected '{req_role}'");
+            bail!("Root {} has role '{role}', expected '{req_role}'", root.id);
         }
     }
-    Ok(id)
+    Ok(match root.parked() {
+        Some(parked) => RootLookup::Parked(parked),
+        None => RootLookup::Found(root.id),
+    })
 }
 
-/// Resolve a path to its containing root (any role) and relative subdir.
-/// Excludes suspended roots. Use resolve_root_path_any() to include them.
+/// Parse root spec, taking the id whatever the door's state.
+///
+/// For the callers that **open** the door (`roots suspend`/`unsuspend`) and
+/// for remembering (`roots story`, the retirement review as a reading) —
+/// the two permits a closed door grants, where a `RootLookup` would only be
+/// unwrapped again at the call site.
 ///
 /// Callers must fetch roots via `core::repo::root::fetch_all()` first.
-///
-/// Returns Some((root_id, root_path, role, relative_subdir)) if inside a root, None otherwise.
-fn resolve_root_path(roots: &[Root], path: &Path) -> Result<Option<(i64, String, String, String)>> {
-    resolve_root_path_impl(roots, path, false)
+pub fn parse_root_spec_any(roots: &[Root], spec: &str) -> Result<i64> {
+    Ok(find_root_by_spec(roots, spec)?.0.id)
 }
 
-/// Resolve a path to its containing root, including suspended roots.
-/// Used for internal operations like unsuspend and overlap checking.
+/// The root a spec names, whatever its door — the one lookup both doors above
+/// run, so "unknown" means the same thing at each.
+fn find_root_by_spec<'a>(roots: &'a [Root], spec: &str) -> Result<(&'a Root, String)> {
+    let parsed = RootSpec::parse(spec)?;
+    let root = match parsed {
+        RootSpec::ById(id) => roots
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or_else(|| anyhow::anyhow!("No root with id {id}"))?,
+        RootSpec::ByPath(ref path) => {
+            let cwd = cwd_for(&[Path::new(path)])?;
+            let canonical = resolve_path(Path::new(path), roots, &cwd)?;
+            roots
+                .iter()
+                .find(|r| r.path == canonical)
+                .ok_or_else(|| anyhow::anyhow!("No root for path: {path}"))?
+        }
+    };
+    let role = root.role.clone();
+    Ok((root, role))
+}
+
+/// Resolve a path to its containing root (any role) and relative subdir,
+/// **including** roots whose door is closed.
+///
+/// There is one lookup here, deliberately. The active-only sibling this
+/// module used to carry answered "not inside a root" for a path one root
+/// plainly contains — and every consumer of that answer then said something
+/// false about it: the scope boundary went global, `roots rm` said "no root
+/// for path". A door is a fact to be *stated*, so resolution always finds the
+/// root and the caller asks [`Root::parked`] what to do about it.
 ///
 /// Callers must fetch roots via `core::repo::root::fetch_all()` first.
 pub fn resolve_root_path_any(
     roots: &[Root],
     path: &Path,
 ) -> Result<Option<(i64, String, String, String)>> {
-    resolve_root_path_impl(roots, path, true)
-}
-
-fn resolve_root_path_impl(
-    roots: &[Root],
-    path: &Path,
-    include_suspended: bool,
-) -> Result<Option<(i64, String, String, String)>> {
     let cwd = cwd_for(&[path])?;
     // Resolve against ALL roots for path recognition (soft resolution)
     let path_str = resolve_path(path, roots, &cwd)?;
-
-    // Filter roots by suspension status for the containing-root lookup
-    let candidates: Vec<Root> = roots
-        .iter()
-        .filter(|r| include_suspended || r.is_active())
-        .cloned()
-        .collect();
-
     // Find containing root (pure domain logic)
-    Ok(find_containing_root(&path_str, &candidates))
+    Ok(find_containing_root(&path_str, roots))
 }
 
 /// Resolve a path to its containing archive root and relative subdir.
@@ -299,30 +366,37 @@ pub fn resolve_archive_path(roots: &[Root], path: &Path) -> Result<(i64, String,
         canonicalize_maybe_missing(path)?
     };
 
-    // Filter to active roots only
-    let candidates: Vec<&Root> = roots.iter().filter(|r| r.is_active()).collect();
-
-    for root in candidates {
-        if path_str == root.path {
-            if !root.is_archive() {
-                bail!(
-                    "Path '{}' is inside a {} root, not an archive",
-                    path.display(),
-                    root.role
-                );
-            }
-            return Ok((root.id, root.path.clone(), String::new()));
+    // **All roots, not the active ones.** Filtering here answered
+    // "not inside any registered archive root" about an archive root that
+    // plainly is registered — the same false cause the root-spec door
+    // retired, one door over. The door is a fact to be stated, so the root is
+    // found and its standing is asked about below.
+    for root in roots {
+        let rel = if path_str == root.path {
+            Some(String::new())
+        } else {
+            path_strip_prefix(&path_str, &root.path).map(str::to_string)
+        };
+        let Some(rel) = rel else { continue };
+        if !root.is_archive() {
+            bail!(
+                "Path '{}' is inside a {} root, not an archive",
+                path.display(),
+                root.role
+            );
         }
-        if let Some(rel) = path_strip_prefix(&path_str, &root.path) {
-            if !root.is_archive() {
-                bail!(
-                    "Path '{}' is inside a {} root, not an archive",
-                    path.display(),
-                    root.role
-                );
-            }
-            return Ok((root.id, root.path.clone(), rel.to_string()));
+        // Role first, then the door: naming a source root where an archive
+        // was asked for is a mistake about *which* root, and it stands
+        // whether or not that root's door happens to be closed. Writing into
+        // an archive is an act, so a closed one is refused by name.
+        if let Some(parked) = root.parked() {
+            return Err(crate::core::domain::root::DoorRefused::at(
+                &parked,
+                crate::core::domain::root::DoorVerb::Refused,
+            )
+            .into());
         }
+        return Ok((root.id, root.path.clone(), rel));
     }
 
     bail!(
@@ -334,76 +408,170 @@ pub fn resolve_archive_path(roots: &[Root], path: &Path) -> Result<(i64, String,
 /// Resolve scope for a discovery command.
 ///
 /// Resolution order:
-/// 1. Explicit paths given → resolve, validate they're under known roots, return
-/// 2. `--global` flag → return empty (global)
+/// 1. Explicit paths given → resolve, validate they're under known roots, partition
+/// 2. `--global` flag → global (empty prefixes)
 /// 3. No paths, no `--global` → try CWD:
-///    - CWD inside a known active root → scope to CWD
+///    - CWD inside a known root, open → scope to CWD
+///    - CWD inside a known root, closed → [`Door::Closed`] naming that root
 ///    - CWD not inside any root → global fallback (silent)
 ///    - `current_dir()` fails → global fallback (silent)
 ///
 /// When CWD or explicit path is inside an archive root, sets `auto_include_archived`.
+///
+/// Reads the process's current directory; [`resolve_scope_at`] is the same
+/// resolution with the directory supplied, which is what makes the CWD arm
+/// testable at all.
 pub fn resolve_scope(
     conn: &Connection,
     explicit_paths: &[PathBuf],
     global: bool,
     roots: &[Root],
-) -> Result<ResolvedScope> {
+) -> Result<Door> {
+    resolve_scope_at(
+        conn,
+        explicit_paths,
+        global,
+        roots,
+        std::env::current_dir().ok().as_deref(),
+    )
+}
+
+/// [`resolve_scope`] with the current directory supplied rather than read.
+///
+/// The CWD arm is where the door was silently widening seven commands to the
+/// whole universe, and it went unpinned for exactly one reason: a test cannot
+/// change the process's directory without changing every other test's. `None`
+/// is the arm where `current_dir()` itself failed — global, silently, as
+/// before.
+pub fn resolve_scope_at(
+    conn: &Connection,
+    explicit_paths: &[PathBuf],
+    global: bool,
+    roots: &[Root],
+    cwd: Option<&Path>,
+) -> Result<Door> {
     // Case 1: Explicit paths given
     if !explicit_paths.is_empty() {
         let prefixes = resolve_paths(explicit_paths, roots)?;
         validate_paths_in_roots(&prefixes, roots)?;
-        let ScopePartition { kept, set_aside } =
-            apply_source_existence_policy(conn, prefixes, roots)?;
+        let partition = apply_source_existence_policy(conn, prefixes, roots)?;
+        let ScopePartition {
+            kept,
+            set_aside,
+            parked,
+        } = partition;
+        if kept.is_empty() {
+            // Terminal, and the door is why: state every parked place, and
+            // beside it every path that kept nothing for the other reason.
+            return Ok(Door::Closed(ClosedDoor {
+                places: parked,
+                sourceless: set_aside,
+                here: false,
+                auto_include_archived: false,
+            }));
+        }
         // One derivation of "is any of this inside an archive root": the
         // same role partition survey reads for its frame statement.
         let auto_include_archived = !domain::root::partition_prefixes_by_role(&kept, roots)
             .archive_side
             .is_empty();
-        return Ok(ResolvedScope {
+        return Ok(Door::Open(ResolvedScope {
             prefixes: kept,
             set_aside,
+            parked,
+            pause: Vec::new(),
             from_cwd: false,
             auto_include_archived,
-        });
+        }));
     }
 
     // Case 2: --global flag
     if global {
-        return Ok(ResolvedScope {
-            prefixes: Vec::new(),
-            set_aside: Vec::new(),
-            from_cwd: false,
-            auto_include_archived: false,
-        });
+        return Ok(Door::Open(global_scope()));
     }
 
     // Case 3: No paths, no --global — try CWD
-    let cwd = match std::env::current_dir() {
-        Ok(cwd) => cwd,
-        Err(_) => {
-            return Ok(ResolvedScope {
-                prefixes: Vec::new(),
-                set_aside: Vec::new(),
-                from_cwd: false,
-                auto_include_archived: false,
-            });
-        }
+    let Some(cwd) = cwd else {
+        return Ok(Door::Open(global_scope()));
     };
 
-    // Check if CWD is inside a known active root (excludes suspended)
-    match resolve_root_path(roots, &cwd)? {
-        Some((_, _, role, _)) => Ok(ResolvedScope {
-            prefixes: resolve_paths(&[cwd], roots)?,
-            set_aside: Vec::new(),
-            from_cwd: true,
-            auto_include_archived: role == "archive",
-        }),
-        None => Ok(ResolvedScope {
-            prefixes: Vec::new(),
-            set_aside: Vec::new(),
-            from_cwd: false,
-            auto_include_archived: false,
-        }),
+    // Resolve against **all** roots: an active-only lookup here is what made
+    // standing inside a closed root read as standing nowhere, and "nowhere"
+    // falls through to global. Standing somewhere is naming it.
+    match resolve_root_path_any(roots, cwd)? {
+        Some((root_id, _, role, _)) => {
+            let root = roots
+                .iter()
+                .find(|r| r.id == root_id)
+                .ok_or_else(|| anyhow::anyhow!("root {root_id} vanished during resolution"))?;
+            let prefixes = resolve_paths(&[cwd.to_path_buf()], roots)?;
+            match root.parked() {
+                Some(parked_root) => Ok(Door::Closed(ClosedDoor {
+                    places: prefixes
+                        .into_iter()
+                        .map(|path| ParkedPath {
+                            path,
+                            root: parked_root.clone(),
+                        })
+                        .collect(),
+                    sourceless: Vec::new(),
+                    here: true,
+                    auto_include_archived: role == "archive",
+                })),
+                None => Ok(Door::Open(ResolvedScope {
+                    prefixes,
+                    set_aside: Vec::new(),
+                    parked: Vec::new(),
+                    pause: Vec::new(),
+                    from_cwd: true,
+                    auto_include_archived: role == "archive",
+                })),
+            }
+        }
+        None => Ok(Door::Open(global_scope())),
+    }
+}
+
+impl ClosedDoor {
+    /// This closed door as a scope a **remembering** view reads at.
+    ///
+    /// Remembering is one of the four permits: knowledge Canon already holds
+    /// still reads behind a closed door. The places become the scope, the
+    /// door becomes the pause the header states once, and the sourceless
+    /// companions stay set aside for the caller to state — the same two
+    /// dispositions the open arm carries, only with the parked places on the
+    /// reading side of the line.
+    ///
+    /// Spoken here rather than in each remembering caller, so the trail and
+    /// the notes cannot come to disagree about what reading behind a door
+    /// means.
+    pub fn read_here(self) -> ResolvedScope {
+        let mut pause: Vec<ParkedRoot> = Vec::new();
+        for place in &self.places {
+            if !pause.iter().any(|r| r.root_id == place.root.root_id) {
+                pause.push(place.root.clone());
+            }
+        }
+        ResolvedScope {
+            prefixes: self.places.into_iter().map(|p| p.path).collect(),
+            set_aside: self.sourceless,
+            parked: Vec::new(),
+            pause,
+            from_cwd: self.here,
+            auto_include_archived: self.auto_include_archived,
+        }
+    }
+}
+
+/// The unbounded scope: everything, asked for on purpose or fallen back to.
+fn global_scope() -> ResolvedScope {
+    ResolvedScope {
+        prefixes: Vec::new(),
+        set_aside: Vec::new(),
+        parked: Vec::new(),
+        pause: Vec::new(),
+        from_cwd: false,
+        auto_include_archived: false,
     }
 }
 
@@ -426,6 +594,8 @@ pub fn resolve_history_scope(explicit_paths: &[PathBuf], roots: &[Root]) -> Opti
     Some(ResolvedScope {
         prefixes,
         set_aside: Vec::new(),
+        parked: Vec::new(),
+        pause: Vec::new(),
         from_cwd: false,
         auto_include_archived,
     })
@@ -601,13 +771,15 @@ pub fn no_sources_known(paths: &[String]) -> String {
     format!("no sources known at {}", paths.join(", "))
 }
 
-/// How a scope's asked-for paths came out of the source-existence gate.
+/// How a scope's asked-for paths came out of the boundary's two gates.
 #[derive(Debug)]
 pub struct ScopePartition {
     /// Paths with known sources, in the byte-form the index stores.
     pub kept: Vec<String>,
     /// Paths under a known root with no known sources, in any form.
     pub set_aside: Vec<String>,
+    /// Paths standing on a root whose door the user closed.
+    pub parked: Vec<ParkedPath>,
 }
 
 /// The source-existence policy at the scope boundary, spoken once.
@@ -629,6 +801,19 @@ pub struct ScopePartition {
 ///
 /// Paths not under any known root are a separate, harder failure and are
 /// rejected before this is reached.
+///
+/// **The door is asked about first**, and the order is the whole point: a
+/// parked path is stated as parked whether or not it has sources, because the
+/// closed door is *why* it has nothing to say, and "no sources known" at a
+/// place the user shut is a second, false cause. The root-level exemption
+/// above belongs to the source gate alone — it says a root with nothing
+/// scanned into it is still a valid place to ask about, which is a claim
+/// about sources and not about doors, so a root-level path on a closed root
+/// is parked like any other.
+///
+/// A scope that kept nothing is still terminal, and the caller decides which
+/// terminal: with any parked place it is a closed door (the caller's
+/// [`Door::Closed`]); with none, the sourceless refusal, unchanged.
 fn apply_source_existence_policy(
     conn: &Connection,
     paths: Vec<String>,
@@ -637,17 +822,73 @@ fn apply_source_existence_policy(
     let single = paths.len() == 1;
     let mut kept = Vec::new();
     let mut set_aside = Vec::new();
+    let mut parked = Vec::new();
     for path in paths {
+        if let Some(parked_root) = parked_root_of(&path, roots) {
+            parked.push(ParkedPath {
+                path,
+                root: parked_root,
+            });
+            continue;
+        }
         match stored_form_with_sources(conn, &path, roots)? {
             Some(stored) => kept.push(stored),
             None if single => bail!("{}", no_sources_known(&[path])),
             None => set_aside.push(path),
         }
     }
-    if kept.is_empty() {
+    if kept.is_empty() && parked.is_empty() {
         bail!("{}", no_sources_known(&set_aside));
     }
-    Ok(ScopePartition { kept, set_aside })
+    Ok(ScopePartition {
+        kept,
+        set_aside,
+        parked,
+    })
+}
+
+/// The closed root this path stands on, if any — the one derivation of "is
+/// this place behind a door", asked of the whole root list because an
+/// active-only lookup cannot answer it.
+pub fn parked_root_of(path: &str, roots: &[Root]) -> Option<ParkedRoot> {
+    let (root_id, _, _, _) = find_containing_root(path, roots)?;
+    roots.iter().find(|r| r.id == root_id)?.parked()
+}
+
+/// Refuse a location the question rests on when it stands behind a closed
+/// door.
+///
+/// **The companion of [`validate_sources_exist`], covering its callers and
+/// two more.** Those callers are the carve-outs from the boundary's
+/// proceed-and-state policy: a location so load-bearing that setting it aside
+/// would change the question rather than narrow it — `compare`'s two sides,
+/// `exclude duplicates`' scope and prefer paths, `survey --other`'s
+/// reference. A closed door there is exactly as load-bearing as an absent
+/// one, so the whole ask is refused, naming the door and the way back rather
+/// than answering about a smaller world.
+///
+/// The two extra callers are `exclude`'s single-file arms (`set_by_path`,
+/// `set_object_by_file`), which resolve their own path and never reach the
+/// boundary's partition at all. They are **not** carve-outs — nothing about
+/// them is a comparand — but they are single-target acts, and a single-target
+/// act behind a door is refused for the plainer reason that the closed
+/// default refuses every act. Two roads to one verb, which is why the verb is
+/// not a parameter.
+///
+/// Asked **before** the existence gate: a parked path is stated as parked
+/// whether or not it has sources, the door being the reason.
+pub fn refuse_parked_locations(paths: &[String], roots: &[Root]) -> Result<()> {
+    for path in paths {
+        if let Some(parked) = parked_root_of(path, roots) {
+            return Err(crate::core::domain::root::DoorRefused::new(
+                &parked,
+                crate::core::domain::root::DoorVerb::Refused,
+                path,
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Validate that sources exist at each scope path, returning the paths in
@@ -682,6 +923,23 @@ pub fn validate_sources_exist(
 mod tests {
     use super::*;
     use crate::core::testing::{insert_root, insert_source, setup_test_db};
+
+    /// The open arm, for a test whose subject is the resolution and not the
+    /// door. A closed door here is a test failure that names itself.
+    fn opened(door: Door) -> ResolvedScope {
+        match door {
+            Door::Open(resolved) => resolved,
+            Door::Closed(closed) => panic!("expected an open door, got {closed:?}"),
+        }
+    }
+
+    /// The closed arm, for a test whose subject *is* the door.
+    fn closed(door: Door) -> ClosedDoor {
+        match door {
+            Door::Closed(closed) => closed,
+            Door::Open(resolved) => panic!("expected a closed door, got {resolved:?}"),
+        }
+    }
 
     fn make_test_root(id: i64, path: &str, role: &str) -> Root {
         Root {
@@ -751,7 +1009,8 @@ mod tests {
         let root_id = insert_root(&conn, "/a/b", "source", false);
         insert_source(&conn, root_id, "c/file.txt", None);
         let roots = vec![make_test_root(root_id, "/a/b", "source")];
-        let result = resolve_scope(&conn, &[PathBuf::from("/a/b/c")], false, &roots).unwrap();
+        let result =
+            opened(resolve_scope(&conn, &[PathBuf::from("/a/b/c")], false, &roots).unwrap());
         assert!(!result.is_global());
         assert!(!result.from_cwd);
         assert!(!result.auto_include_archived);
@@ -764,8 +1023,9 @@ mod tests {
         let root_id = insert_root(&conn, "/archive", "archive", false);
         insert_source(&conn, root_id, "photos/file.jpg", None);
         let roots = vec![make_test_root(root_id, "/archive", "archive")];
-        let result =
-            resolve_scope(&conn, &[PathBuf::from("/archive/photos")], false, &roots).unwrap();
+        let result = opened(
+            resolve_scope(&conn, &[PathBuf::from("/archive/photos")], false, &roots).unwrap(),
+        );
         assert!(result.auto_include_archived);
         assert!(!result.from_cwd);
     }
@@ -782,7 +1042,7 @@ mod tests {
     fn resolve_global_flag() {
         let conn = setup_test_db();
         let roots = vec![make_test_root(1, "/a/b", "source")];
-        let result = resolve_scope(&conn, &[], true, &roots).unwrap();
+        let result = opened(resolve_scope(&conn, &[], true, &roots).unwrap());
         assert!(result.is_global());
         assert!(!result.from_cwd);
         assert!(!result.auto_include_archived);
@@ -794,7 +1054,8 @@ mod tests {
         let root_id = insert_root(&conn, "/a/b", "source", false);
         insert_source(&conn, root_id, "c/file.txt", None);
         let roots = vec![make_test_root(root_id, "/a/b", "source")];
-        let result = resolve_scope(&conn, &[PathBuf::from("/a/b/c")], true, &roots).unwrap();
+        let result =
+            opened(resolve_scope(&conn, &[PathBuf::from("/a/b/c")], true, &roots).unwrap());
         assert!(!result.is_global());
         assert_eq!(result.prefixes, vec!["/a/b/c".to_string()]);
     }
@@ -820,7 +1081,8 @@ mod tests {
         insert_source(&conn, root_id, "2011/file.jpg", None);
         let roots = vec![make_test_root(root_id, "/photos", "source")];
 
-        let result = resolve_scope(&conn, &[PathBuf::from("/photos/2011")], false, &roots).unwrap();
+        let result =
+            opened(resolve_scope(&conn, &[PathBuf::from("/photos/2011")], false, &roots).unwrap());
         assert_eq!(result.prefixes, vec!["/photos/2011".to_string()]);
     }
 
@@ -855,13 +1117,15 @@ mod tests {
         insert_source(&conn, root_id, "2011/file.jpg", None);
         let roots = vec![make_test_root(root_id, "/photos", "source")];
 
-        let resolved = resolve_scope(
-            &conn,
-            &[PathBuf::from("/photos/2011"), PathBuf::from("/photos/2012")],
-            false,
-            &roots,
-        )
-        .unwrap();
+        let resolved = opened(
+            resolve_scope(
+                &conn,
+                &[PathBuf::from("/photos/2011"), PathBuf::from("/photos/2012")],
+                false,
+                &roots,
+            )
+            .unwrap(),
+        );
         assert_eq!(resolved.prefixes, vec!["/photos/2011".to_string()]);
         assert_eq!(resolved.set_aside, vec!["/photos/2012".to_string()]);
     }
@@ -933,13 +1197,15 @@ mod tests {
             make_test_root(other_id, "/scans", "source"),
         ];
 
-        let resolved = resolve_scope(
-            &conn,
-            &[PathBuf::from("/photos"), PathBuf::from("/scans")],
-            false,
-            &roots,
-        )
-        .unwrap();
+        let resolved = opened(
+            resolve_scope(
+                &conn,
+                &[PathBuf::from("/photos"), PathBuf::from("/scans")],
+                false,
+                &roots,
+            )
+            .unwrap(),
+        );
         assert_eq!(
             resolved.prefixes,
             vec!["/photos".to_string(), "/scans".to_string()]
@@ -958,13 +1224,15 @@ mod tests {
         insert_source(&conn, root_id, "2011/file.jpg", None);
         let roots = vec![make_test_root(root_id, "/photos", "source")];
 
-        let resolved = resolve_scope(
-            &conn,
-            &[PathBuf::from("/photos/2011"), PathBuf::from("/photos/2012")],
-            false,
-            &roots,
-        )
-        .unwrap();
+        let resolved = opened(
+            resolve_scope(
+                &conn,
+                &[PathBuf::from("/photos/2011"), PathBuf::from("/photos/2012")],
+                false,
+                &roots,
+            )
+            .unwrap(),
+        );
         assert_eq!(resolved.set_aside, vec!["/photos/2012".to_string()]);
 
         let scopes = DecisionScope::decompose(&resolved.prefixes, &roots);
@@ -977,6 +1245,325 @@ mod tests {
             )]
         );
         assert!(scopes.iter().all(|sc| sc.rel_prefix != "2012"));
+    }
+
+    /// **The archive door.** Writing into an archive is an act, so a
+    /// destination inside a closed one is refused by name — never
+    /// "not inside any registered archive root", which was the false cause
+    /// this door kept after the root-spec door retired it.
+    #[test]
+    fn a_destination_inside_a_parked_archive_names_the_door() {
+        let mut archive = make_test_root(1, "/archive", "archive");
+        archive.suspended = true;
+        let roots = vec![archive];
+
+        let err = resolve_archive_path(&roots, Path::new("/archive/2024"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "/archive suspended — refused: /archive · canon roots unsuspend path:/archive"
+        );
+    }
+
+    /// Role precedes the door: naming a source root where an archive was
+    /// asked for is a mistake about *which* root, and it stands whether or
+    /// not that root's door happens to be closed.
+    #[test]
+    fn a_parked_source_root_named_as_a_destination_is_still_the_wrong_role() {
+        let mut source = make_test_root(1, "/photos", "source");
+        source.suspended = true;
+        let roots = vec![source];
+
+        let err = resolve_archive_path(&roots, Path::new("/photos/2024"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("is inside a source root, not an archive"),
+            "{err}"
+        );
+    }
+
+    // ========================================================================
+    // The closed door
+    //
+    // The boundary's third set-aside cause. Every row of the partition's
+    // precedence has a pin, and the CWD arm — which had none, because it read
+    // the process's directory — is reachable through `resolve_scope_at`.
+    // ========================================================================
+
+    fn parked_root(id: i64, path: &str, role: &str) -> Root {
+        let mut root = make_test_root(id, path, role);
+        root.suspended = true;
+        root
+    }
+
+    /// **The law's verifier.** Standing inside a root the user closed used to
+    /// resolve to "not inside any root", which falls through to the whole
+    /// universe: seven commands answered about everything while the user was
+    /// standing in one place, and `exclude set --yes` there dismissed content
+    /// on roots they had never named. The door is now the answer.
+    #[test]
+    fn a_parked_cwd_is_never_global() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+        insert_source(&conn, root_id, "2011/file.jpg", None);
+        let roots = vec![parked_root(root_id, "/photos", "source")];
+
+        let door =
+            resolve_scope_at(&conn, &[], false, &roots, Some(Path::new("/photos/2011"))).unwrap();
+
+        let closed = closed(door);
+        assert!(closed.here, "the CWD door states `here`, not a path");
+        assert_eq!(closed.places.len(), 1);
+        assert_eq!(closed.places[0].root.root_path, "/photos");
+        assert_eq!(closed.places[0].path, "/photos/2011");
+    }
+
+    /// Standing in a place is naming it. The same directory must answer the
+    /// same way through both doors — the trail already pins this for itself,
+    /// and it now holds at the shared boundary.
+    #[test]
+    fn a_parked_cwd_answers_like_the_named_place() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+        insert_source(&conn, root_id, "2011/file.jpg", None);
+        let roots = vec![parked_root(root_id, "/photos", "source")];
+
+        let by_standing = closed(
+            resolve_scope_at(&conn, &[], false, &roots, Some(Path::new("/photos/2011"))).unwrap(),
+        );
+        let by_naming = closed(
+            resolve_scope_at(&conn, &[PathBuf::from("/photos/2011")], false, &roots, None).unwrap(),
+        );
+
+        assert_eq!(
+            by_standing.places[0].path, by_naming.places[0].path,
+            "the same place, whichever door it was reached by"
+        );
+        assert_eq!(
+            by_standing.places[0].root, by_naming.places[0].root,
+            "and the same door"
+        );
+    }
+
+    /// `--global` from inside a closed root asks a different question, and is
+    /// answered as asked. It is the one explicit way to widen, and the door
+    /// does not take it away.
+    #[test]
+    fn global_from_a_parked_cwd_is_still_global() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+        let roots = vec![parked_root(root_id, "/photos", "source")];
+
+        let resolved =
+            opened(resolve_scope_at(&conn, &[], true, &roots, Some(Path::new("/photos"))).unwrap());
+        assert!(resolved.is_global());
+        assert!(resolved.parked.is_empty(), "nothing was narrowed to state");
+    }
+
+    /// A directory under no known root is still the silent global fallback —
+    /// the door changed the answer for closed roots, not for genuinely
+    /// unknown places. A real directory on disk, because the CWD arm resolves
+    /// through the filesystem fallback like every other path.
+    #[test]
+    fn a_cwd_under_no_root_is_still_the_silent_global_fallback() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+        let roots = vec![parked_root(root_id, "/photos", "source")];
+        let elsewhere = tempfile::tempdir().unwrap();
+
+        let resolved =
+            opened(resolve_scope_at(&conn, &[], false, &roots, Some(elsewhere.path())).unwrap());
+        assert!(resolved.is_global());
+    }
+
+    /// One named parked path is terminal: there is nothing left to narrow to,
+    /// and the door is what to say about it.
+    #[test]
+    fn a_single_parked_path_closes_the_door() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+        insert_source(&conn, root_id, "2011/file.jpg", None);
+        let roots = vec![parked_root(root_id, "/photos", "source")];
+
+        let closed =
+            closed(resolve_scope(&conn, &[PathBuf::from("/photos/2011")], false, &roots).unwrap());
+        assert!(!closed.here);
+        assert_eq!(closed.places[0].path, "/photos/2011");
+        assert!(closed.sourceless.is_empty());
+    }
+
+    /// **Precedence: the door before the sources.** A parked path with
+    /// nothing scanned under it is stated as parked, never as "no sources
+    /// known" — the closed door is the reason it has nothing to say, and a
+    /// second cause would be a false one.
+    #[test]
+    fn a_parked_path_is_parked_even_without_sources() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+        let roots = vec![parked_root(root_id, "/photos", "source")];
+
+        let closed =
+            closed(resolve_scope(&conn, &[PathBuf::from("/photos/2011")], false, &roots).unwrap());
+        assert_eq!(closed.places[0].path, "/photos/2011");
+        assert!(
+            closed.sourceless.is_empty(),
+            "the door answered; the source gate never got to speak"
+        );
+    }
+
+    /// The root-level exemption belongs to the source gate — "a root with
+    /// nothing scanned into it is still a place to ask about" — and says
+    /// nothing about doors. A closed root's own top is parked like anything
+    /// under it.
+    #[test]
+    fn a_parked_root_level_path_is_parked() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+        let roots = vec![parked_root(root_id, "/photos", "source")];
+
+        let closed =
+            closed(resolve_scope(&conn, &[PathBuf::from("/photos")], false, &roots).unwrap());
+        assert_eq!(closed.places[0].path, "/photos");
+    }
+
+    /// A scope that kept nothing for two different reasons states both. One
+    /// cause standing in for the other is exactly the false-cause family this
+    /// partition exists to end.
+    #[test]
+    fn parked_and_sourceless_together_name_both_causes() {
+        let conn = setup_test_db();
+        let live = insert_root(&conn, "/live", "source", false);
+        let parked = insert_root(&conn, "/photos", "source", true);
+        insert_source(&conn, live, "2011/file.jpg", None);
+        let roots = vec![
+            make_test_root(live, "/live", "source"),
+            parked_root(parked, "/photos", "source"),
+        ];
+
+        let closed = closed(
+            resolve_scope(
+                &conn,
+                &[PathBuf::from("/photos/2011"), PathBuf::from("/live/2012")],
+                false,
+                &roots,
+            )
+            .unwrap(),
+        );
+        assert_eq!(closed.places[0].path, "/photos/2011");
+        assert_eq!(closed.sourceless, vec!["/live/2012".to_string()]);
+    }
+
+    /// One closed door among several asked-for places is a set-aside, not a
+    /// refusal: the rest runs and the door is stated beside it — the
+    /// boundary's own proceed-and-state policy, third cause.
+    #[test]
+    fn a_multi_path_scope_proceeds_past_a_parked_member() {
+        let conn = setup_test_db();
+        let live = insert_root(&conn, "/live", "source", false);
+        let parked = insert_root(&conn, "/photos", "source", true);
+        insert_source(&conn, live, "2011/file.jpg", None);
+        insert_source(&conn, parked, "2011/file.jpg", None);
+        let roots = vec![
+            make_test_root(live, "/live", "source"),
+            parked_root(parked, "/photos", "source"),
+        ];
+
+        let resolved = opened(
+            resolve_scope(
+                &conn,
+                &[PathBuf::from("/photos/2011"), PathBuf::from("/live/2011")],
+                false,
+                &roots,
+            )
+            .unwrap(),
+        );
+        assert_eq!(resolved.prefixes, vec!["/live/2011".to_string()]);
+        assert_eq!(resolved.parked.len(), 1);
+        assert_eq!(resolved.parked[0].path, "/photos/2011");
+    }
+
+    /// Root membership stays the harder failure: a path under no root at all
+    /// is refused whatever else was asked for, door or no door.
+    #[test]
+    fn root_membership_still_precedes_the_door() {
+        let conn = setup_test_db();
+        let parked = insert_root(&conn, "/photos", "source", true);
+        let roots = vec![parked_root(parked, "/photos", "source")];
+
+        let dir = tempfile::tempdir().unwrap();
+        let stranger = dir.path().join("nowhere");
+        std::fs::create_dir(&stranger).unwrap();
+
+        let err = resolve_scope(
+            &conn,
+            &[PathBuf::from("/photos/2011"), stranger.clone()],
+            false,
+            &roots,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("is not under any known root"), "{err}");
+    }
+
+    /// The recorded-scope class, extended to the third cause: a place behind
+    /// a closed door never becomes a `DecisionScope`, so no act is ever
+    /// written down as having happened there.
+    #[test]
+    fn a_parked_path_never_becomes_a_decision_scope() {
+        use crate::core::domain::scope::DecisionScope;
+
+        let conn = setup_test_db();
+        let live = insert_root(&conn, "/live", "source", false);
+        let parked = insert_root(&conn, "/photos", "source", true);
+        insert_source(&conn, live, "2011/file.jpg", None);
+        insert_source(&conn, parked, "2011/file.jpg", None);
+        let roots = vec![
+            make_test_root(live, "/live", "source"),
+            parked_root(parked, "/photos", "source"),
+        ];
+
+        let resolved = opened(
+            resolve_scope(
+                &conn,
+                &[PathBuf::from("/photos/2011"), PathBuf::from("/live/2011")],
+                false,
+                &roots,
+            )
+            .unwrap(),
+        );
+        let scopes = DecisionScope::decompose(&resolved.prefixes, &roots);
+        assert_eq!(
+            scopes,
+            vec![DecisionScope::new(
+                live,
+                "/live".to_string(),
+                "2011".to_string()
+            )]
+        );
+        assert!(scopes.iter().all(|sc| sc.root_id != parked));
+    }
+
+    /// A closed door a **remembering** view reads at keeps the pause and sets
+    /// nothing aside: the two registers are opposite dispositions of one fact
+    /// and must not be confused, or a reading would print a set-aside line
+    /// about the very places it is showing.
+    #[test]
+    fn reading_behind_a_door_carries_the_pause_and_sets_nothing_aside() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+        let roots = vec![parked_root(root_id, "/photos", "source")];
+
+        let reading = closed(
+            resolve_scope_at(&conn, &[], false, &roots, Some(Path::new("/photos/2011"))).unwrap(),
+        )
+        .read_here();
+
+        assert_eq!(reading.prefixes, vec!["/photos/2011".to_string()]);
+        assert!(reading.parked.is_empty());
+        assert!(reading.from_cwd);
+        assert_eq!(reading.pause[0].root_path, "/photos");
     }
 
     // ========================================================================
@@ -995,13 +1582,15 @@ mod tests {
         insert_source(&conn, root_id, &format!("{NFD_DIR}/file.jpg"), None);
         let roots = vec![make_test_root(root_id, "/photos", "source")];
 
-        let resolved = resolve_scope(
-            &conn,
-            &[PathBuf::from(format!("/photos/{NFC_DIR}"))],
-            false,
-            &roots,
-        )
-        .unwrap();
+        let resolved = opened(
+            resolve_scope(
+                &conn,
+                &[PathBuf::from(format!("/photos/{NFC_DIR}"))],
+                false,
+                &roots,
+            )
+            .unwrap(),
+        );
         assert_eq!(resolved.prefixes, vec![format!("/photos/{NFD_DIR}")]);
     }
 
@@ -1012,13 +1601,15 @@ mod tests {
         insert_source(&conn, root_id, &format!("{NFC_DIR}/file.jpg"), None);
         let roots = vec![make_test_root(root_id, "/photos", "source")];
 
-        let resolved = resolve_scope(
-            &conn,
-            &[PathBuf::from(format!("/photos/{NFD_DIR}"))],
-            false,
-            &roots,
-        )
-        .unwrap();
+        let resolved = opened(
+            resolve_scope(
+                &conn,
+                &[PathBuf::from(format!("/photos/{NFD_DIR}"))],
+                false,
+                &roots,
+            )
+            .unwrap(),
+        );
         assert_eq!(resolved.prefixes, vec![format!("/photos/{NFC_DIR}")]);
     }
 
@@ -1033,13 +1624,15 @@ mod tests {
         insert_source(&conn, root_id, &stored_rel, None);
         let roots = vec![make_test_root(root_id, "/photos", "source")];
 
-        let resolved = resolve_scope(
-            &conn,
-            &[PathBuf::from(format!("/photos/{NFC_DIR}"))],
-            false,
-            &roots,
-        )
-        .unwrap();
+        let resolved = opened(
+            resolve_scope(
+                &conn,
+                &[PathBuf::from(format!("/photos/{NFC_DIR}"))],
+                false,
+                &roots,
+            )
+            .unwrap(),
+        );
 
         let kept = &resolved.prefixes[0];
         let (_, _, _, rel) = domain::root::find_containing_root(kept, &roots).unwrap();
@@ -1072,13 +1665,15 @@ mod tests {
         // Typed with the accent in the other form, as a user would retype it.
         let typed = [format!("/photos/{NFC_DIR}"), "/photos/2011".to_string()];
 
-        let by_argument = resolve_scope(
-            &conn,
-            &typed.iter().map(PathBuf::from).collect::<Vec<_>>(),
-            false,
-            &roots,
-        )
-        .unwrap();
+        let by_argument = opened(
+            resolve_scope(
+                &conn,
+                &typed.iter().map(PathBuf::from).collect::<Vec<_>>(),
+                false,
+                &roots,
+            )
+            .unwrap(),
+        );
         let by_manifest = resolve_recorded_scope(&conn, &typed, &roots).unwrap();
 
         assert_eq!(
@@ -1622,7 +2217,7 @@ mod tests {
             make_test_root(2, "/b", "archive"),
         ];
         let result = parse_root_spec(&roots, "id:2", None);
-        assert_eq!(result.unwrap(), 2);
+        assert_eq!(result.unwrap(), RootLookup::Found(2));
     }
 
     #[test]
@@ -1640,7 +2235,7 @@ mod tests {
     fn parse_root_spec_impl_role_filter_source_accepts_source() {
         let roots = vec![make_test_root(1, "/a", "source")];
         let result = parse_root_spec(&roots, "id:1", Some("source"));
-        assert_eq!(result.unwrap(), 1);
+        assert_eq!(result.unwrap(), RootLookup::Found(1));
     }
 
     #[test]
@@ -1658,7 +2253,7 @@ mod tests {
     fn parse_root_spec_impl_role_filter_archive_accepts_archive() {
         let roots = vec![make_test_root(1, "/a", "archive")];
         let result = parse_root_spec(&roots, "id:1", Some("archive"));
-        assert_eq!(result.unwrap(), 1);
+        assert_eq!(result.unwrap(), RootLookup::Found(1));
     }
 
     #[test]
@@ -1679,19 +2274,33 @@ mod tests {
             make_test_root(2, "/b", "archive"),
         ];
         // None means accept any role
-        assert_eq!(parse_root_spec(&roots, "id:1", None).unwrap(), 1);
-        assert_eq!(parse_root_spec(&roots, "id:2", None).unwrap(), 2);
+        assert_eq!(
+            parse_root_spec(&roots, "id:1", None).unwrap(),
+            RootLookup::Found(1)
+        );
+        assert_eq!(
+            parse_root_spec(&roots, "id:2", None).unwrap(),
+            RootLookup::Found(2)
+        );
     }
 
+    /// **The overturn**: a closed root used to come back as no root at all,
+    /// and every caller then spoke a false cause about it. It is now named as
+    /// what it is, and what to do about it is the caller's permit class.
     #[test]
-    fn parse_root_spec_impl_excludes_suspended() {
+    fn parse_root_spec_names_a_parked_root_not_an_absence() {
         let mut suspended_root = make_test_root(1, "/a", "source");
         suspended_root.suspended = true;
         let roots = vec![suspended_root];
 
-        // parse_root_spec (not _any) should exclude suspended roots
-        let result = parse_root_spec(&roots, "id:1", None);
-        assert!(result.is_err());
+        let found = parse_root_spec(&roots, "id:1", None).unwrap();
+        assert_eq!(
+            found,
+            RootLookup::Parked(ParkedRoot {
+                root_id: 1,
+                root_path: "/a".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -1713,7 +2322,7 @@ mod tests {
     fn parse_root_spec_by_path_matches_root() {
         let roots = vec![make_test_root(1, "/a/b", "source")];
         let result = parse_root_spec(&roots, "path:/a/b", None);
-        assert_eq!(result.unwrap(), 1);
+        assert_eq!(result.unwrap(), RootLookup::Found(1));
     }
 
     #[test]
@@ -1735,15 +2344,23 @@ mod tests {
             .contains("role 'source', expected 'archive'"));
     }
 
+    /// The same overturn at the path door — which is where the false cause
+    /// was actually read: `canon roots rm path:<parked>` answered
+    /// "No root for path" about a root the user had merely closed. That
+    /// sentence is now reserved for a root that genuinely is not there.
     #[test]
-    fn parse_root_spec_by_path_suspended_excluded() {
+    fn parse_root_spec_by_path_names_a_parked_root_not_an_absence() {
         let mut root = make_test_root(1, "/a/b", "source");
         root.suspended = true;
         let roots = vec![root];
-        // Path resolves (against all roots) but root is filtered out of candidates
-        let result = parse_root_spec(&roots, "path:/a/b", None);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No root for path"));
+        let found = parse_root_spec(&roots, "path:/a/b", None).unwrap();
+        assert_eq!(
+            found,
+            RootLookup::Parked(ParkedRoot {
+                root_id: 1,
+                root_path: "/a/b".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -1893,7 +2510,7 @@ mod tests {
             "source",
         )];
         let result = parse_root_spec(&roots, &format!("path:{}", alias.display()), None);
-        assert_eq!(result.unwrap(), 1);
+        assert_eq!(result.unwrap(), RootLookup::Found(1));
     }
 
     #[cfg(unix)]
@@ -1913,7 +2530,7 @@ mod tests {
         symlink(&real_root, &alias).unwrap();
 
         let roots = vec![make_test_root(1, &canonical_root, "source")];
-        let result = resolve_root_path(&roots, &alias).unwrap();
+        let result = resolve_root_path_any(&roots, &alias).unwrap();
         assert_eq!(
             result,
             Some((1, canonical_root, "source".to_string(), String::new()))

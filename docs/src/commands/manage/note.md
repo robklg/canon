@@ -170,6 +170,10 @@ When no path argument is given, `canon note` uses the current working directory,
 - **CWD inside a root**: scope resolves to `(root_id, rel_path)` for that location
 - **CWD not in any root**: view mode falls back to global temporal list; add and clear modes error
 
+## Notes at a suspended location
+
+Reading is unaffected: the view, the listings and the [trail](../query/trail.md) read at a [suspended](../roots/roots.md#suspending-roots) location, with the pause stated once. Adding or clearing a note there is refused by name, with the way back.
+
 ## The directional model
 
 The listing modes look in different directions:

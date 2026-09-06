@@ -266,7 +266,7 @@ impl LedgerRootOutcome {
             Self::Found { .. } | Self::NoArchiveRoot => None,
             Self::AllArchiveRootsSuspended { roots } => roots
                 .first()
-                .map(|p| format!("canon roots unsuspend path:{p}")),
+                .map(|p| crate::core::domain::root::WayBack::unsuspend(p).display()),
         }
     }
 }

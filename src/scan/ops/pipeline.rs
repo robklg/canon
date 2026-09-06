@@ -1188,10 +1188,21 @@ pub fn resolve_missing_target(
             ),
         };
 
-    if let Some(root) = roots.iter().find(|r| r.id == root_id) {
-        if root.is_suspended() {
-            bail!("Root '{root_path}' is suspended. Use 'canon roots unsuspend' to reactivate.");
-        }
+    if let Some(parked) = roots
+        .iter()
+        .find(|r| r.id == root_id)
+        .and_then(|r| r.parked())
+    {
+        // Typed, not spelled: the sentence a user reads has one owner, and
+        // this refusal has a second consumer that is not a screen — the
+        // `--missing` hint, which asks this precondition rather than
+        // re-deriving it. Carrying the closed root out lets the hint answer
+        // from the fact and the interface state it in the one grammar.
+        return Err(crate::core::domain::root::DoorRefused::at(
+            &parked,
+            crate::core::domain::root::DoorVerb::Refused,
+        )
+        .into());
     }
 
     Ok(MissingTarget {

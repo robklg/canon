@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 use crate::core::domain::config::{parse_ledger_config, LedgerConfig};
-use crate::core::domain::root::find_containing_root;
+use crate::core::domain::root::{find_containing_root, DoorVerb};
 use crate::core::domain::IncludeSet;
 
 #[derive(Clone, PartialEq, clap::ValueEnum)]
@@ -841,7 +841,28 @@ fn resolve_canon_home(flag: Option<&Path>) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn main() -> Result<()> {
+/// The front door.
+///
+/// Errors are rendered here rather than by `Result`'s own reporting, for one
+/// reason: **a refusal that is itself a legitimate answer must not wear an
+/// `Error:` prefix**. A closed door is that case exactly — the user shut it,
+/// and being told so is the answer to the question they asked — so a
+/// [`DoorRefused`] anywhere in the chain is stated as it stands. Everything
+/// else is a real failure and renders exactly as before.
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            match err.downcast_ref::<crate::core::domain::root::DoorRefused>() {
+                Some(refusal) => eprintln!("{refusal}"),
+                None => eprintln!("Error: {err:?}"),
+            }
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let command_line = std::env::args().collect::<Vec<_>>().join(" ");
     let cli = Cli::parse();
 
@@ -959,7 +980,11 @@ fn main() -> Result<()> {
             let filters = expr::expand_filter_strings(&filters, &canon_home)?;
             let mut include = include_set_from(&include);
             let all_roots = core::repo::root::fetch_all(db.conn())?;
-            let resolved = core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+            let resolved = scope::open_door(
+                core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?,
+                DoorVerb::SetAside,
+                scope::DoorChannel::Stderr,
+            );
             if resolved.auto_include_archived {
                 include.archived = true;
             }
@@ -999,7 +1024,11 @@ fn main() -> Result<()> {
             let mut include = include_set_from(&include);
 
             let all_roots = core::repo::root::fetch_all(db.conn())?;
-            let resolved = core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+            let resolved = scope::open_door(
+                core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?,
+                DoorVerb::SetAside,
+                scope::DoorChannel::Stderr,
+            );
             if resolved.auto_include_archived {
                 include.archived = true;
             }
@@ -1058,9 +1087,12 @@ fn main() -> Result<()> {
                 }) => {
                     let filters = expr::expand_filter_strings(&filters, &canon_home)?;
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
-                    let resolved =
-                        core::ops::scope::resolve_scope(db.conn(), &paths, false, &all_roots)?;
-                    scope::print_scope_set_asides(&resolved);
+                    let resolved = scope::open_door(
+                        core::ops::scope::resolve_scope(db.conn(), &paths, false, &all_roots)?,
+                        DoorVerb::Refused,
+                        scope::DoorChannel::Stdout,
+                    );
+                    scope::print_scope_set_asides(&resolved, DoorVerb::Refused);
                     // Same visibility a read at this scope would get: the
                     // archive-CWD auto-enable, and nothing else. Deletion
                     // acts on what the matching `ls` would have listed.
@@ -1089,8 +1121,11 @@ fn main() -> Result<()> {
                     let filters = expr::expand_filter_strings(&filters, &canon_home)?;
                     let mut include = include_set_from(&include);
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
-                    let resolved =
-                        core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+                    let resolved = scope::open_door(
+                        core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?,
+                        DoorVerb::SetAside,
+                        scope::DoorChannel::Stdout,
+                    );
                     if resolved.auto_include_archived {
                         include.archived = true;
                     }
@@ -1157,7 +1192,15 @@ fn main() -> Result<()> {
             let filters = expr::expand_filter_strings(&filters, &canon_home)?;
             let mut include = include_set_from(&include);
             let all_roots = core::repo::root::fetch_all(db.conn())?;
-            let resolved = core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+            let resolved = scope::open_door(
+                core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?,
+                DoorVerb::SetAside,
+                if compact {
+                    scope::DoorChannel::Stderr
+                } else {
+                    scope::DoorChannel::Stdout
+                },
+            );
             if resolved.auto_include_archived {
                 include.archived = true;
             }
@@ -1201,7 +1244,15 @@ fn main() -> Result<()> {
                 );
             }
             let all_roots = core::repo::root::fetch_all(db.conn())?;
-            let resolved = core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
+            let resolved = scope::open_door(
+                core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?,
+                DoorVerb::SetAside,
+                if survey::machine_shaped_stdout(detail, null_delim) {
+                    scope::DoorChannel::Stderr
+                } else {
+                    scope::DoorChannel::Stdout
+                },
+            );
             let scope_prefixes = resolved.prefixes.clone();
             let options = survey::SurveyOptions {
                 original_filters: filters,
@@ -1276,9 +1327,12 @@ fn main() -> Result<()> {
             } => {
                 let expanded = expr::expand_filter_strings(&filters, &canon_home)?;
                 let all_roots = core::repo::root::fetch_all(db.conn())?;
-                let resolved =
-                    core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
-                scope::print_scope_set_asides(&resolved);
+                let resolved = scope::open_door(
+                    core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?,
+                    DoorVerb::Refused,
+                    scope::DoorChannel::Stdout,
+                );
+                scope::print_scope_set_asides(&resolved, DoorVerb::Refused);
                 let options = archive::GenerateOptions {
                     force,
                     allow_archived: allow.contains(&ClusterAllow::Archived),
@@ -1406,9 +1460,12 @@ fn main() -> Result<()> {
                     )?;
                 } else {
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
-                    let resolved =
-                        core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
-                    scope::print_scope_set_asides(&resolved);
+                    let resolved = scope::open_door(
+                        core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?,
+                        DoorVerb::Refused,
+                        scope::DoorChannel::Stdout,
+                    );
+                    scope::print_scope_set_asides(&resolved, DoorVerb::Refused);
                     exclude::set(
                         &mut db,
                         &resolved.prefixes,
@@ -1432,9 +1489,12 @@ fn main() -> Result<()> {
                 let filters = expr::expand_filter_strings(&filters, &canon_home)?;
                 let options = exclude::ClearOptions { dry_run, yes };
                 let all_roots = core::repo::root::fetch_all(db.conn())?;
-                let resolved =
-                    core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
-                scope::print_scope_set_asides(&resolved);
+                let resolved = scope::open_door(
+                    core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?,
+                    DoorVerb::Refused,
+                    scope::DoorChannel::Stdout,
+                );
+                scope::print_scope_set_asides(&resolved, DoorVerb::Refused);
                 exclude::clear(
                     &mut db,
                     &resolved.prefixes,
@@ -1506,9 +1566,12 @@ fn main() -> Result<()> {
                     )?;
                 } else {
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
-                    let resolved =
-                        core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?;
-                    scope::print_scope_set_asides(&resolved);
+                    let resolved = scope::open_door(
+                        core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?,
+                        DoorVerb::Refused,
+                        scope::DoorChannel::Stdout,
+                    );
+                    scope::print_scope_set_asides(&resolved, DoorVerb::Refused);
                     if resolved.prefixes.is_empty() && filters.is_empty() {
                         anyhow::bail!("Provide a hash (--hash), file path, or filters (--where)");
                     }
@@ -1775,5 +1838,59 @@ mod tests {
                 "expected {argv:?} to be refused"
             );
         }
+    }
+
+    /// **Every emitted way back parses as a real invocation.** A way back that
+    /// does not run is worse than none, and the closed door offers one at
+    /// every surface Canon has. The sweep's footer already lives under this
+    /// law; the door joins it through the same spelling, so one pin covers
+    /// both — `roots unsuspend` takes a root specifier, never a bare path.
+    #[test]
+    fn every_emitted_way_back_parses() {
+        use crate::core::domain::root::WayBack;
+
+        for way_back in [
+            WayBack::unsuspend("/mnt/d1"),
+            WayBack::unsuspend("/mnt/two words"),
+            WayBack::list_suspended(),
+        ] {
+            Cli::try_parse_from(way_back.argv()).unwrap_or_else(|e| {
+                panic!("emitted command must parse: {}\n{e}", way_back.display())
+            });
+        }
+
+        // The spaced path is quoted for display and raw in the argv — the
+        // same discipline the sweep's handoff lines follow.
+        let spaced = WayBack::unsuspend("/mnt/two words");
+        assert_eq!(
+            spaced.display(),
+            "canon roots unsuspend 'path:/mnt/two words'"
+        );
+        assert_eq!(spaced.argv().last().unwrap(), "path:/mnt/two words");
+    }
+
+    /// The sweep's footer, the closed door's sentence and the unplaceable
+    /// receipt's hint are three surfaces of one command. One spelling, so a
+    /// repair to any of them repairs all three.
+    #[test]
+    fn the_sweep_and_the_door_share_one_way_back() {
+        use crate::core::domain::root::{DoorVerb, ParkedRoot, WayBack};
+
+        let expected = WayBack::unsuspend("/mnt/d1").display();
+
+        let parked = ParkedRoot {
+            root_id: 1,
+            root_path: "/mnt/d1".to_string(),
+        };
+        assert!(parked
+            .door_line(DoorVerb::Refused, "here")
+            .ends_with(&expected));
+        assert!(parked.pause_line().ends_with(&expected));
+
+        let receipt_hint = core::ops::receipt::LedgerRootOutcome::AllArchiveRootsSuspended {
+            roots: vec!["/mnt/d1".to_string()],
+        }
+        .unsuspend_hint();
+        assert_eq!(receipt_hint.as_deref(), Some(expected.as_str()));
     }
 }

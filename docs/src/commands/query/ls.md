@@ -56,6 +56,8 @@ canon ls --where 'NOT archived? AND mime~image/*'
 
 **Scope display:** When scoped (via CWD or explicit path), `ls` prints `scope: /path` to stderr. When global, no scope line is printed.
 
+A path on a [suspended](../roots/roots.md#suspending-roots) root, or the current directory inside one, is set aside and stated on stderr beside the scope line; when that is the whole scope, nothing is listed and the exit code is 1.
+
 **Path display:**
 - CWD-scoped (no explicit path, inside a root) → relative output paths
 - Explicit absolute path or `--global` → absolute output paths

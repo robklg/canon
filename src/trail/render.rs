@@ -24,6 +24,25 @@ use crate::trail::ops::crossings::{
 use crate::trail::ops::show::ShowExtraction;
 use crate::trail::{TrailResult, TrailView};
 
+/// The trail's header line: where it looked, when, and — behind a closed
+/// door — the pause.
+///
+/// **The pause is read from the scope, never from the rows.** It is a
+/// property of the place being read at, so it is stated whether or not the
+/// `roots_suspend` decision happens to fall inside the listing's cap, and
+/// whether the place was named or stood in. A reader deducing the door from
+/// a row that might not be there is exactly the silence the closed door is
+/// supposed to end.
+fn trail_header(scope_part: &str, time_label: Option<&str>, resolved: &ResolvedScope) -> String {
+    let pause = crate::scope::parked_pause(&resolved.pause)
+        .map(|line| format!(" — {line}"))
+        .unwrap_or_default();
+    match time_label {
+        Some(label) => format!("Decision trail: {scope_part} — {label}{pause}"),
+        None => format!("Decision trail: {scope_part}{pause}"),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn print_human(
     result: &TrailResult,
@@ -39,10 +58,7 @@ pub(super) fn print_human(
     } else {
         resolved.prefixes.join(", ")
     };
-    match time_label {
-        Some(label) => println!("Decision trail: {scope_part} — {label}"),
-        None => println!("Decision trail: {scope_part}"),
-    }
+    println!("{}", trail_header(&scope_part, time_label, resolved));
 
     let view_root = result.view_root.as_deref();
 
@@ -300,7 +316,10 @@ pub(super) fn print_crossings(
     } else {
         resolved.prefixes.join(", ")
     };
-    println!("Crossings: {scope_part}");
+    let pause = crate::scope::parked_pause(&resolved.pause)
+        .map(|line| format!(" — {line}"))
+        .unwrap_or_default();
+    println!("Crossings: {scope_part}{pause}");
 
     for section in &result.sections {
         println!();
@@ -1983,6 +2002,9 @@ mod tests {
         let scoped = ResolvedScope {
             prefixes: vec!["/photos".to_string()],
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: true,
             auto_include_archived: false,
         };
@@ -1995,6 +2017,9 @@ mod tests {
         let global = ResolvedScope {
             prefixes: Vec::new(),
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: false,
             auto_include_archived: false,
         };
@@ -2009,6 +2034,9 @@ mod tests {
         let scoped = ResolvedScope {
             prefixes: vec!["/a/foto".to_string()],
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: true,
             auto_include_archived: false,
         };
@@ -2041,6 +2069,9 @@ mod tests {
         let global = ResolvedScope {
             prefixes: Vec::new(),
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: false,
             auto_include_archived: false,
         };
@@ -2059,6 +2090,9 @@ mod tests {
         let global = ResolvedScope {
             prefixes: Vec::new(),
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: false,
             auto_include_archived: false,
         };
@@ -2077,6 +2111,9 @@ mod tests {
         let scoped = ResolvedScope {
             prefixes: vec!["/archive/2016".to_string()],
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: true,
             auto_include_archived: false,
         };
@@ -2099,6 +2136,9 @@ mod tests {
         let scoped = ResolvedScope {
             prefixes: vec!["/a/x".to_string(), "/b/y".to_string()],
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: false,
             auto_include_archived: false,
         };
@@ -2112,6 +2152,9 @@ mod tests {
         let global = ResolvedScope {
             prefixes: Vec::new(),
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: false,
             auto_include_archived: false,
         };
@@ -2125,6 +2168,9 @@ mod tests {
         let scoped = ResolvedScope {
             prefixes: vec!["/archive/2016".to_string()],
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: true,
             auto_include_archived: false,
         };
@@ -2179,6 +2225,9 @@ mod tests {
         let global = ResolvedScope {
             prefixes: Vec::new(),
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: false,
             auto_include_archived: false,
         };
@@ -2219,6 +2268,9 @@ mod tests {
         let global = ResolvedScope {
             prefixes: Vec::new(),
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: false,
             auto_include_archived: false,
         };
@@ -2259,6 +2311,9 @@ mod tests {
         let scoped = ResolvedScope {
             prefixes: vec!["/Archive/Media".to_string()],
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: true,
             auto_include_archived: false,
         };
@@ -2282,6 +2337,9 @@ mod tests {
         let scoped = ResolvedScope {
             prefixes: vec!["/Archive/Media/2016/Italy".to_string()],
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: true,
             auto_include_archived: false,
         };
@@ -2308,6 +2366,9 @@ mod tests {
         let scoped = ResolvedScope {
             prefixes: vec!["/Volumes/old-laptop".to_string()],
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: true,
             auto_include_archived: false,
         };
@@ -2338,6 +2399,9 @@ mod tests {
         let global = ResolvedScope {
             prefixes: Vec::new(),
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: false,
             auto_include_archived: false,
         };
@@ -2373,6 +2437,9 @@ mod tests {
         let scoped = ResolvedScope {
             prefixes: vec!["/Volumes/old-laptop".to_string()],
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: true,
             auto_include_archived: false,
         };
@@ -2547,6 +2614,9 @@ mod tests {
         let global = ResolvedScope {
             prefixes: Vec::new(),
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: false,
             auto_include_archived: false,
         };
@@ -2832,6 +2902,9 @@ mod tests {
         ResolvedScope {
             prefixes: prefixes.iter().map(|p| p.to_string()).collect(),
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: false,
             auto_include_archived: false,
         }
@@ -5106,5 +5179,41 @@ mod tests {
         // A root-level directory renders as ".", not an empty cell.
         let dot = drew_from_lines(&[show_group("/a", 3, None, false, &[("", 1), ("x", 2)])]);
         assert_eq!(dot[1], "      . — 1 file");
+    }
+
+    /// **The pause is stated independent of the cap.** It is a property of
+    /// the scope being read at, so a `--limit 1` view of a closed root still
+    /// says the door is closed — the reader never has to spot the
+    /// `roots_suspend` row among the listing, and there may not be one in
+    /// view to spot.
+    #[test]
+    fn the_pause_is_stated_independent_of_the_cap() {
+        use crate::core::domain::root::ParkedRoot;
+
+        let mut parked = ResolvedScope {
+            prefixes: vec!["/mnt/d1/photos".to_string()],
+            set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: vec![ParkedRoot {
+                root_id: 7,
+                root_path: "/mnt/d1".to_string(),
+            }],
+            from_cwd: true,
+            auto_include_archived: false,
+        };
+
+        assert_eq!(
+            trail_header("/mnt/d1/photos", None, &parked),
+            "Decision trail: /mnt/d1/photos — /mnt/d1 suspended · canon roots unsuspend path:/mnt/d1"
+        );
+        // The time lens carries it too — both labels, one line.
+        assert!(trail_header("/mnt/d1/photos", Some("today"), &parked)
+            .contains("— today — /mnt/d1 suspended · "));
+
+        parked.pause = Vec::new();
+        assert_eq!(
+            trail_header("/mnt/d1/photos", None, &parked),
+            "Decision trail: /mnt/d1/photos"
+        );
     }
 }

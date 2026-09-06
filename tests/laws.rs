@@ -545,6 +545,19 @@ const LAWS: &[Law] = &[
         record: "2026-08-03",
     },
     Law {
+        // The one derivation of "this place is behind a door the user
+        // closed". The verifier is the arm that was silently widening seven
+        // commands to the whole universe; the sibling doors (`RootLookup`,
+        // and the recorded scope's own arm when it lands) project the same
+        // fact from their own inputs.
+        name: "closed door",
+        owner: "core/ops/scope.rs",
+        verifier: "a_parked_cwd_is_never_global",
+        reach: Reach::Unit("core"),
+        authority: Authority::Recognised,
+        record: "2026-09-06",
+    },
+    Law {
         name: "contentless",
         owner: "core/domain/source.rs",
         verifier: "the_classifier_reads_the_empty_source_as_contentless",

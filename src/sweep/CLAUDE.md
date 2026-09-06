@@ -320,7 +320,11 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   because `--all` reveals what the floors and the cap hid, never a door the user closed. The way
   back is `canon roots unsuspend` and only that: a sweep-local flag partially undoing
   `roots suspend` would be a second control for one meaning. "Not ranked", never "hidden" or
-  "removed" — suspension changes position, never existence.
+  "removed" — suspension changes position, never existence. **The way back's spelling is no
+  longer the footer's own** — `suspended_lines` builds it through `core::domain::root::WayBack`,
+  the one construction the closed door and the unplaceable-receipt hint also speak through, so
+  the round-trip pin proves one command rather than three lookalikes. The footer's grammar and
+  its third verb stay here; only the tail moved.
 - **Known imprecision, stated rather than papered over**: `SweepStats.below_floor_subjects` counts
   every below-floor subject including parked ones, so `--all` reveals fewer entries than that count
   offers. The suspended lines cannot close the gap and must not be described as doing so — the two

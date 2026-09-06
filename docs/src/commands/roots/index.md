@@ -2,7 +2,7 @@
 
 To track files in Canon, first you add and scan [roots](../../concepts/roots.md).
 This makes these sources available for further enrichment or archive operations.
-You can suspend roots to temporarily mask them from Canon commands.
+You can suspend a root to close the door on it: everything in it stays as you left it, set aside until you open it again.
 
 Adding new roots, or scanning existing is performed through the [scan](scan.md) command.
 

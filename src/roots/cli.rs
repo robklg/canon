@@ -8,10 +8,11 @@ use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::format::format_time_ago;
 use crate::core::domain::format_count;
+use crate::core::domain::root::DoorVerb;
 use crate::core::domain::scope::DecisionScope;
 use crate::core::domain::Root;
 use crate::core::ops::decision::DecisionParams;
-use crate::core::ops::scope::{parse_root_spec, parse_root_spec_any, resolve_path};
+use crate::core::ops::scope::{parse_root_spec, parse_root_spec_any, resolve_path, RootLookup};
 use crate::core::repo::{self, Db};
 use crate::roots::repo as roots_repo;
 
@@ -122,8 +123,18 @@ pub fn remove(
     // Fetch all roots for spec resolution
     let roots = repo::root::fetch_all(conn)?;
 
-    // Parse the spec to get root id and validate it exists
-    let root_id = parse_root_spec(&roots, spec, None)?;
+    // Removing a root is an act, and an act at a closed door is refused by
+    // name with the way back stated — the door is exactly what protects what
+    // is inside from destruction, so the way out is to open it deliberately
+    // rather than to be let through by silence. Until now this said
+    // "No root for path" about a root that plainly exists.
+    let root_id = match parse_root_spec(&roots, spec, None)? {
+        RootLookup::Found(id) => id,
+        RootLookup::Parked(parked) => {
+            eprintln!("{}", parked.door_line(DoorVerb::Refused, &parked.root_path));
+            std::process::exit(1);
+        }
+    };
 
     let plan = crate::roots::ops::plan_remove(conn, root_id)?;
 
@@ -193,8 +204,11 @@ pub fn set_comment(db: &Db, spec: &str, comment: Option<&str>) -> Result<()> {
     // Fetch all roots for spec resolution
     let roots = repo::root::fetch_all(conn)?;
 
-    // Parse the spec to get root id and validate it exists
-    let root_id = parse_root_spec(&roots, spec, None)?;
+    // A comment is the label on the door, not a hand inside it: root-grain
+    // metadata, never content standing. It stays permitted while the door is
+    // closed — and the false "No root for path" it used to answer with is
+    // retired here too.
+    let root_id = parse_root_spec_any(&roots, spec)?;
 
     roots_repo::root::set_comment(conn, root_id, comment)?;
 

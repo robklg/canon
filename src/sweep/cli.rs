@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 
 use crate::core::domain::format::{format_count, format_size, shell_quote};
+use crate::core::domain::root::WayBack;
 use crate::core::repo::Db;
 use crate::notes::format_note_date;
 use crate::sweep::domain::{
@@ -178,12 +179,11 @@ fn suspended_lines(tallies: &[SuspendedRootTally]) -> Vec<(String, Vec<String>)>
         return Vec::new();
     }
     if tallies.len() > SUSPENDED_ROOTS_NAMED_CAP {
-        let argv = vec![
-            "canon".to_string(),
-            "roots".to_string(),
-            "list".to_string(),
-            "--suspended".to_string(),
-        ];
+        // The way back is the closed door's own, spelled once in the domain:
+        // the sweep's footer, the door's sentence and the unplaceable-receipt
+        // hint are three surfaces of one command.
+        let way_back = WayBack::list_suspended();
+        let argv = way_back.argv().to_vec();
         return vec![(
             format!(
                 "{} — not ranked: {} · {}",
@@ -199,7 +199,7 @@ fn suspended_lines(tallies: &[SuspendedRootTally]) -> Vec<(String, Vec<String>)>
                     },
                     "them",
                 ),
-                display_argv(&argv),
+                way_back.display(),
             ),
             argv,
         )];
@@ -207,12 +207,8 @@ fn suspended_lines(tallies: &[SuspendedRootTally]) -> Vec<(String, Vec<String>)>
     tallies
         .iter()
         .map(|t| {
-            let argv = vec![
-                "canon".to_string(),
-                "roots".to_string(),
-                "unsuspend".to_string(),
-                format!("path:{}", t.root_path),
-            ];
+            let way_back = WayBack::unsuspend(&t.root_path);
+            let argv = way_back.argv().to_vec();
             (
                 format!(
                     "{} suspended — not ranked: {} · {}",
@@ -228,7 +224,7 @@ fn suspended_lines(tallies: &[SuspendedRootTally]) -> Vec<(String, Vec<String>)>
                         },
                         "it",
                     ),
-                    display_argv(&argv),
+                    way_back.display(),
                 ),
                 argv,
             )

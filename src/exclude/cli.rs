@@ -314,6 +314,9 @@ pub fn set_by_path(
     let roots = crate::core::repo::root::fetch_all(conn)?;
     let cwd = std::env::current_dir()?;
     let path_str = resolve_path(file_path, &roots, &cwd)?;
+    // Dismissing one named file is an act aimed at a place, and behind a
+    // closed door it is refused by name.
+    crate::core::ops::scope::refuse_parked_locations(std::slice::from_ref(&path_str), &roots)?;
 
     // Find which root contains this path (domain layer)
     let Some((root_id, _root_path, _role, rel_path)) = find_containing_root(&path_str, &roots)
@@ -394,10 +397,19 @@ pub fn exclude_duplicates(
         vec![]
     };
     validate_paths_in_roots(&scope_prefixes, &all_roots)?;
+    // Both locations are load-bearing here — which copies are preferred is
+    // the whole question — so a closed door on either is refused by name
+    // rather than narrowed past. The door precedes the existence gate: a
+    // parked place is stated as parked, never as empty.
+    crate::core::ops::scope::refuse_parked_locations(&scope_prefixes, &all_roots)?;
     let scope_prefixes =
         crate::core::ops::scope::validate_sources_exist(conn, &scope_prefixes, &all_roots)?;
     let prefer_prefix = resolve_path(prefer_path, &all_roots, &cwd)?;
     validate_paths_in_roots(std::slice::from_ref(&prefer_prefix), &all_roots)?;
+    crate::core::ops::scope::refuse_parked_locations(
+        std::slice::from_ref(&prefer_prefix),
+        &all_roots,
+    )?;
     let prefer_prefix = crate::core::ops::scope::validate_sources_exist(
         conn,
         std::slice::from_ref(&prefer_prefix),
@@ -582,6 +594,9 @@ pub fn set_object_by_file(
     let roots = crate::core::repo::root::fetch_all(conn)?;
     let cwd = std::env::current_dir()?;
     let path_str = resolve_path(file_path, &roots, &cwd)?;
+    // Naming a file to reach its object is still an act aimed at a place, and
+    // behind a closed door it is refused by name.
+    crate::core::ops::scope::refuse_parked_locations(std::slice::from_ref(&path_str), &roots)?;
 
     // Find which root contains this path (domain layer)
     let Some((root_id, _root_path, _role, rel_path)) = find_containing_root(&path_str, &roots)

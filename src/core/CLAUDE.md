@@ -45,6 +45,20 @@ path manipulation and offline resolution, `ScopeMatch` and `DecisionScope`, disp
 formatting, the visibility set, ledger-config parsing. Same purity rule throughout: no I/O, so
 path matching and scope resolution are testable with known inputs.
 
+`domain::root` also carries the **closed door's vocabulary**: `ParkedRoot` (constructible only
+from a suspended `Root`, via `Root::parked`, so a live root cannot be spoken of as parked),
+`ParkedPath`, the permit class `DoorVerb`, and the sentence itself —
+`ParkedRoot::door_line(verb, what)`, `<root> suspended — <verb>: <what> · <way back>`, with
+`pause_line` for the verbless form a remembering view states. **The sentence is composed here
+rather than in the interface because its consumers are not all in one layer**: an operation
+cannot print, and three refusals raised from operations must speak the same sentence a command
+prints, or the second spelling drifts. Grouping, capping and the channel stay in `src/scope.rs`,
+where a screen is. Beside it `WayBack` — the one spelling of `canon roots unsuspend path:<root>`
+and of the above-cap `canon roots list --suspended` — carried as the argv it would run, so a
+round-trip pin (`every_emitted_way_back_parses`) proves what was printed; and `DoorRefused`, the
+error that carries a door out through the ordinary error channel so the front door can state it
+without an `Error:` prefix.
+
 These are here because the Feature-First Structure ADR names them as the spine, not because
 two consumers were counted. The membership criteria below apply to everything else.
 
@@ -215,15 +229,43 @@ effect; a verb that did nothing records nothing), and **transition** (the effect
 in registered vocabulary).
 
 `ops::scope` is the one scope-resolution pipeline — CWD defaulting, `--global`, root
-membership, source existence. It is here because every scope-taking command resolves through
-it, and because it is the fallback half of `domain::path`'s pure resolution: same function
-names in both, the pure half returning `None` where this one reaches the filesystem. It owns
-the two laws that live at that boundary.
+membership, source existence, the door. It is here because every scope-taking command resolves
+through it, and because it is the fallback half of `domain::path`'s pure resolution: same
+function names in both, the pure half returning `None` where this one reaches the filesystem.
+It owns the three laws that live at that boundary.
+
+The **closed door**: *whether a place is behind a door the user closed is derived once, here,
+as data — never re-detected from `current_dir()` or from an `is_active()` filter applied to a
+root the caller was already handed resolved.* Owner `resolve_scope`'s `Door` outcome (`Open` a
+`ResolvedScope`, `Closed` a `ClosedDoor` naming the parked places); verifier
+`a_parked_cwd_is_never_global`; reach `core`. It is an enum and not a flag because
+`ResolvedScope::is_global()` would otherwise keep saying "all roots" about a place behind a
+door — `Closed` is unreachable from it by construction, and `tests/architecture.rs`'s
+`the_door_types_are_consumed_by_name` refuses a `_` arm, so each consumer names the permit
+class it is declaring. Two sibling doors project the same fact from their own inputs:
+`RootLookup` at the root-spec door (`Found` / `Parked`; a genuinely unknown root stays `Err`),
+and `resolve_recorded_scope`'s own arm when it lands. **Precedence in the partition**: root
+membership (the harder failure) > the door > source existence — a parked path is stated as
+parked whether or not it has sources, because the closed door is *why* it has nothing to say.
+`ClosedDoor::read_here` is the one conversion a **remembering** consumer makes; the pause it
+carries (`ResolvedScope::pause`) and the set-aside register beside it (`parked`) are opposite
+dispositions of one fact and must not be merged. **Where it does not apply**: a directory
+under no known root, which is still the silent global fallback, and `--global`, which asks a
+different question and is answered as asked. The sentence itself is not here — the grammar
+lives on `domain::root::ParkedRoot::door_line`, because its consumers are not all in one
+layer.
 
 The **scope-boundary honesty policy**: the source-existence gate returns a `ScopePartition`,
 not a verdict, so a sourceless path among several is set aside and stated rather than aborting
 the invocation; `validate_sources_exist` survives beside it as the abort spelling, and its
-caller list *is* the carve-out list. **The gate sits on `resolve_scope`'s explicit-path arm
+caller list *is* the carve-out list — `refuse_parked_locations` is its door-shaped companion,
+covering those callers and, additionally, `exclude`'s two single-file arms, which resolve their
+own path and never reach the partition. Those two are not carve-outs; they are single-target
+acts, refused by the closed default rather than by load-bearing-ness. Two roads, one verb, which
+is why the verb is not a parameter. The parked partition is the policy's **third
+cause**, carried on `ResolvedScope::parked` beside the sourceless `set_aside`: same position,
+same channels, same terminal rule, and the same "never becomes a `DecisionScope`" pin
+(`a_parked_path_never_becomes_a_decision_scope`). **The gate sits on `resolve_scope`'s explicit-path arm
 alone** — `--global` yields nothing to gate, and the CWD-defaulting arm hands the current
 directory over ungated, because defaulting to CWD is a context switch rather than a claim
 about content. A consumer that reads "came from `resolve_scope`" as "met the gate" is wrong on

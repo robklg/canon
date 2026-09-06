@@ -12,8 +12,9 @@ use crate::core::repo::{self, Connection};
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 use crate::expr::{Filter, UsedStatus};
 
+use crate::core::domain::root::{DoorRefused, DoorVerb};
 use crate::core::domain::scope::ScopeMatch;
-use crate::core::ops::scope::parse_root_spec;
+use crate::core::ops::scope::{parse_root_spec, RootLookup};
 
 /// Statistics for a set of sources.
 pub struct CoverageStats {
@@ -91,7 +92,16 @@ pub fn resolve_archive_root(conn: &Connection, spec: Option<&str>) -> Result<Opt
     match spec {
         Some(spec) => {
             let roots = repo::root::fetch_all(conn)?;
-            Ok(Some(parse_root_spec(&roots, spec, Some("archive"))?))
+            match parse_root_spec(&roots, spec, Some("archive"))? {
+                RootLookup::Found(id) => Ok(Some(id)),
+                // The one archive this view was told to measure against
+                // stands behind a closed door. Its copies still testify —
+                // but nothing here can see them yet, so answering would put
+                // a zero where content stands. The door is named instead.
+                RootLookup::Parked(parked) => {
+                    Err(DoorRefused::at(&parked, DoorVerb::Refused).into())
+                }
+            }
         }
         None => Ok(None),
     }

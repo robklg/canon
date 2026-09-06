@@ -172,9 +172,23 @@ select list, and the no-join shape exists so the ordinary zero-error path stays 
   `scan_root`'s hot loop. What `observe_file` *lacks* is the point: no `expected_ids` fetch, no
   `find_missing`, no mount-stability gate, no `capture_deletions`. The interface picks the sibling
   from one question — is the canonicalized path a directory.
+- **The door is asked about once, before the recorder opens a row.** `cli::run` walks the
+  resolved scan paths against `core::ops::scope::parked_root_of` ahead of
+  `DecisionRecorder::start`, so a scan aimed behind a closed door is refused by name with the
+  way back and leaves *nothing* behind — not even the `started` row that would read as a scan
+  killed mid-walk. Both arms arrive there: a walk canonicalizes its path, and `--missing` —
+  whose whole premise is that the folder is gone — resolves lexically against the known roots,
+  which is the same list the decision's scope was built from. The inline check that used to sit
+  in the walk loop is gone; a second spelling of one rule is free to drift from the sentence the
+  first one speaks (`cli::a_scan_at_a_parked_root_is_refused_before_any_row_is_written`).
+  **`--all` never reaches the door**: it selects the active roots up front, so a parked root is
+  simply not among what it was asked to scan, and there is nothing to refuse. That is a
+  different question from naming a place behind a door, and it is unchanged.
 - **A suggestion consults the act's preconditions; it never re-derives them.**
   `resolve_missing_target` is where `--missing`'s two refusals live (under no known root,
-  suspended root), and both the act and the interface's hint ask it. Two spellings of one rule
+  suspended root — the second carried as a typed `DoorRefused` rather than a spelled sentence,
+  because the user-facing wording has one owner and the hint is a second consumer that is not a
+  screen), and both the act and the interface's hint ask it. Two spellings of one rule
   drift silently, because nothing fails when a suggestion and a refusal disagree — and the
   drift runs toward recommending an act Canon would refuse, or accept and should not. The hint
   adds one question the act deliberately does not ask, whether the root's own path resolves on

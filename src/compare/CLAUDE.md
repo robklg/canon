@@ -32,6 +32,13 @@ a tidy-up; the first step of it is pinned by
 both sides share one, so A fully resolves before B starts. Parallelizing would need a second
 connection, which is a different design.
 
+**Both sides are load-bearing, at the door as at the gate.** `run_compare` calls
+`refuse_parked_locations` before the existence gate, so a side standing on a root the user
+closed refuses the whole ask by name rather than reporting three false lines about a smaller
+world — the same reason `validate_sources_exist` aborts here instead of setting a sourceless
+side aside. The one-path form's CWD subject takes the same check at the front door, because
+standing in a place is naming it.
+
 **Compare uses `RolePolicy::AnyRole`**: both sides are compared whatever their roots' roles.
 Asking whether two places hold the same content is a question about the places, not about
 whether either is an archive — so `--include` here accepts only `excluded`, and there is no

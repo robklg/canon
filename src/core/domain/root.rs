@@ -113,6 +113,202 @@ pub fn find_containing_root(
     None
 }
 
+/// A root the user closed the door on.
+///
+/// Suspension is the user's own act — everything about the root closed by
+/// default until the same hand opens it again — so a place behind that door
+/// is never spoken of as absent, empty or global. This is the payload every
+/// door carries when it answers "closed": which root, and where it stands.
+///
+/// Constructed only from a [`Root`] that is actually suspended
+/// ([`Root::parked`]), so a live root cannot be spoken of as parked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParkedRoot {
+    /// Database id of the closed root.
+    pub root_id: i64,
+    /// The root's own path — what the statement names and what the way back
+    /// takes.
+    pub root_path: String,
+}
+
+impl ParkedRoot {
+    /// The way back through this particular door.
+    pub fn way_back(&self) -> WayBack {
+        WayBack::unsuspend(&self.root_path)
+    }
+
+    /// The closed door's one sentence:
+    /// `<root> suspended — <verb>: <what> · <way back>`.
+    ///
+    /// The sweep's footer grammar, generalised — the verb is the surface's
+    /// permit class and `what` is the place as it was asked about (`here` at
+    /// the CWD door, the path otherwise, a count for a lock or a batch).
+    /// Every door speaks it: the scope boundary, the root-spec door, the acts
+    /// that refuse from inside operations. **Composed here, in the domain,
+    /// precisely because its consumers are not all in one layer** — a second
+    /// spelling is how three refusals came to say the same thing three ways.
+    /// Terminal shaping (grouping several doors, capping the list, choosing a
+    /// channel) stays in the interface, where a screen is.
+    pub fn door_line(&self, verb: DoorVerb, what: &str) -> String {
+        format!(
+            "{} suspended — {}: {what} · {}",
+            self.root_path,
+            verb.label(),
+            self.way_back().display(),
+        )
+    }
+
+    /// What a **remembering** view states about the door it is reading
+    /// behind: the pause and the way back, and no verb — it neither set
+    /// aside nor refused. It read.
+    pub fn pause_line(&self) -> String {
+        format!(
+            "{} suspended · {}",
+            self.root_path,
+            self.way_back().display()
+        )
+    }
+}
+
+/// A place that was asked about — by naming it or by standing in it — which
+/// turns out to stand on a closed root.
+///
+/// The path is the one the boundary resolved, not a narrowing of it: what is
+/// stated is what was asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParkedPath {
+    /// The asked-for place, resolved.
+    pub path: String,
+    /// The door it stands behind.
+    pub root: ParkedRoot,
+}
+
+/// What a surface's permit class does about a closed door — the only thing
+/// the door's sentence varies by.
+///
+/// The registry's four permits are the vocabulary: a **view** sets the root
+/// aside and says so; an **act** is refused by name with the way back stated.
+/// Remembering states a pause and no verb at all (it read), and the sweep's
+/// board speaks a third verb from its own file — it partitions a universe
+/// rather than a scope, and has no scope to set aside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoorVerb {
+    /// A view: the parked places are set aside and stated.
+    SetAside,
+    /// An act: refused by name, nothing written.
+    Refused,
+}
+
+impl DoorVerb {
+    /// The word the sentence uses.
+    pub fn label(self) -> &'static str {
+        match self {
+            DoorVerb::SetAside => "set aside",
+            DoorVerb::Refused => "refused",
+        }
+    }
+}
+
+/// A refusal that is itself a legitimate answer: the door was closed.
+///
+/// **Why an error type and not a printed line.** The exit convention — a
+/// refusal that is an answer exits non-zero with no `Error:` prefix, because
+/// nothing went wrong — is the interface's to carry out, and an operation may
+/// not print. Every door reachable only from inside an operation would
+/// otherwise have to choose between saying the wrong thing (`Error:` on a
+/// door the user closed themselves) and threading a typed outcome through
+/// every result struct between it and the screen. This carries the sentence
+/// out through the ordinary error channel and is recognised at the front
+/// door, which states it as it stands.
+///
+/// It cannot hold a free string: the sentence comes from
+/// [`ParkedRoot::door_line`], so a refusal raised from an operation and one
+/// printed by a command are the same sentence by construction.
+#[derive(Debug)]
+pub struct DoorRefused {
+    line: String,
+}
+
+impl DoorRefused {
+    pub fn new(root: &ParkedRoot, verb: DoorVerb, what: &str) -> Self {
+        Self {
+            line: root.door_line(verb, what),
+        }
+    }
+
+    /// The whole place, named as itself — the commonest `what` there is.
+    pub fn at(root: &ParkedRoot, verb: DoorVerb) -> Self {
+        Self::new(root, verb, &root.root_path)
+    }
+}
+
+impl std::fmt::Display for DoorRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.line)
+    }
+}
+
+impl std::error::Error for DoorRefused {}
+
+/// A command Canon prints as the way out of a situation it is refusing or
+/// setting aside — carried as the argv it would run, never as loose text.
+///
+/// **A way back that does not run is worse than none.** The invariant this
+/// type exists to carry is that the printed form and the runnable form cannot
+/// disagree: there is one construction and two projections of it, so a
+/// round-trip pin over [`argv`](Self::argv) proves what
+/// [`display`](Self::display) put on the screen. Two functions returning a
+/// string and a vector would be two spellings of one command, free to drift.
+///
+/// The sweep's footer, the closed door's sentence and the unplaceable-receipt
+/// hint all speak through this — the third consumer is what made it a type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WayBack {
+    argv: Vec<String>,
+}
+
+impl WayBack {
+    /// Open this root's door again — the way back from every closed door, and
+    /// only this: never the destructive one.
+    pub fn unsuspend(root_path: &str) -> Self {
+        Self {
+            argv: vec![
+                "canon".to_string(),
+                "roots".to_string(),
+                "unsuspend".to_string(),
+                format!("path:{root_path}"),
+            ],
+        }
+    }
+
+    /// See the closed doors, when there are too many to name one by one.
+    pub fn list_suspended() -> Self {
+        Self {
+            argv: vec![
+                "canon".to_string(),
+                "roots".to_string(),
+                "list".to_string(),
+                "--suspended".to_string(),
+            ],
+        }
+    }
+
+    /// What the user would type: shell-quoted, so a path with a space runs as
+    /// printed.
+    pub fn display(&self) -> String {
+        self.argv
+            .iter()
+            .map(|a| super::format::shell_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The argv this line claims will run — what the round-trip pin parses.
+    pub fn argv(&self) -> &[String] {
+        &self.argv
+    }
+}
+
 /// A root directory registered in canon.
 ///
 /// Roots are the top-level directories that canon manages. Each root has a role
@@ -145,6 +341,17 @@ impl Root {
     /// Check if this root is active (not suspended).
     pub fn is_active(&self) -> bool {
         !self.suspended
+    }
+
+    /// This root as a closed door, or `None` if its door is open.
+    ///
+    /// The only constructor of [`ParkedRoot`]: speaking of a place as parked
+    /// requires a root that actually is.
+    pub fn parked(&self) -> Option<ParkedRoot> {
+        self.suspended.then(|| ParkedRoot {
+            root_id: self.id,
+            root_path: self.path.clone(),
+        })
     }
 
     /// Check if this root has the "source" role.

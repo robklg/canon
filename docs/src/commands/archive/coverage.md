@@ -31,6 +31,8 @@ canon coverage --include all
 
 The output begins with a scope header (`Coverage: /path` or `Coverage: all roots`).
 
+A path on a [suspended](../roots/roots.md#suspending-roots) root, or the current directory inside one, is set aside and stated under the header; when that is the whole scope, nothing is reported and the exit code is 1. Under `--compact` the statement goes to stderr and no row is emitted for the suspended path.
+
 Example output (global):
 ```
 Coverage: all roots

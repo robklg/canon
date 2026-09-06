@@ -33,3 +33,5 @@ Compare reports on content; whether two folders correspond file-by-file,
 empty files included, is a question it deliberately does not answer.
 
 Exit code is 0 if identical, 1 if differences found.
+
+Both sides are load-bearing here, so a side on a [suspended](../roots/roots.md#suspending-roots) root refuses the whole comparison by name rather than answering about one side alone. The same holds for the current directory when only one path is given.

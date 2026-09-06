@@ -15,4 +15,4 @@ pub use ops::compute::compute_survey;
 #[allow(unused_imports)]
 pub use ops::compute::{SurveyOutcome, SurveyParams};
 
-pub use cli::{run, DetailMode, SurveyExit, SurveyOptions};
+pub use cli::{machine_shaped_stdout, run, DetailMode, SurveyExit, SurveyOptions};

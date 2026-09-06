@@ -138,6 +138,27 @@ pub fn run(
             }
         })
         .collect();
+    // The door, asked once and before anything is written. A scan is an act,
+    // and an act behind a closed door is refused by name with the way back —
+    // never performed, and never leaving a `started` decision row behind to
+    // read as a scan killed mid-walk. This precedes the recorder for exactly
+    // that reason.
+    //
+    // Both of scan's arms arrive here: a walk resolves its path by
+    // canonicalizing, and `--missing` — whose whole premise is that the
+    // folder is gone — resolves lexically against the roots Canon already
+    // knows, which is the same list `scan_scope` was just built from.
+    for path in &scan_scope {
+        if let Some(parked) = crate::core::ops::scope::parked_root_of(path, &roots) {
+            return Err(crate::core::domain::root::DoorRefused::new(
+                &parked,
+                crate::core::domain::root::DoorVerb::Refused,
+                path,
+            )
+            .into());
+        }
+    }
+
     let decision = DecisionParams {
         command: DecisionCommand::Scan,
         scope: DecisionScope::decompose(&scan_scope, &roots),
@@ -236,15 +257,10 @@ pub fn run(
                 &roots, &canonical,
             )? {
                 Some((id, root_path, existing_role, rel_path)) => {
-                    // Path is inside an existing root - check if suspended using cached roots
-                    let root = roots.iter().find(|r| r.id == id);
-                    if let Some(r) = root {
-                        if r.is_suspended() {
-                            bail!(
-                            "Root '{root_path}' is suspended. Use 'canon roots unsuspend' to reactivate."
-                        );
-                        }
-                    }
+                    // The door was asked about above, once, over the same
+                    // roots and the same resolved paths — a second check here
+                    // would be a second spelling of one rule, free to drift
+                    // from the sentence the first one speaks.
 
                     // Path is inside an existing active root
                     if add_root {
@@ -731,11 +747,17 @@ mod tests {
     /// only backfilled at completion.
     ///
     /// The distinction is only visible on a run that never *reaches*
-    /// completion, which is what this drives: a suspended root makes the
-    /// `--missing` arm bail after `start()`, so `record_scopes` never runs
-    /// and the only scope row that can exist is the one start-time wrote.
-    /// Deleting the lexical fallback leaves an interrupted decision claiming
-    /// nowhere.
+    /// completion, so this drives one: a second `--missing` path under no
+    /// known root bails after `start()`, `record_scopes` never runs, and the
+    /// only scope row that can exist is the one start-time wrote for the
+    /// first path. Deleting the lexical fallback leaves an interrupted
+    /// decision claiming nowhere.
+    ///
+    /// **The vehicle used to be a suspended root**, which no longer reaches
+    /// this far: the door is asked about once, before the recorder opens a
+    /// row, so a refused scan writes no decision at all. The subject here is
+    /// start-time decomposition, not the door, and it needs only *some*
+    /// failure after `start()`.
     #[test]
     fn a_scan_scope_survives_a_path_that_no_longer_canonicalizes() {
         assert!(
@@ -743,13 +765,20 @@ mod tests {
             "the fixture path must not exist on disk"
         );
         let conn = repo::open_in_memory_for_test();
-        let root_id = repo::insert_test_root(&conn, "/photos", "source", true);
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
         let db = Db::from_connection(conn);
 
-        let err = run_scan(&db, &[PathBuf::from("/photos/vacation")], true)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("suspended"), "{err}");
+        let err = run_scan(
+            &db,
+            &[
+                PathBuf::from("/photos/vacation"),
+                PathBuf::from("/elsewhere/gone"),
+            ],
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not under any known root"), "{err}");
 
         let status: String = db
             .conn()
@@ -778,18 +807,19 @@ mod tests {
     /// is owned by `core/ops/decision.rs`; scan supplies the word, because
     /// which outcome an error deserves is the caller's knowledge. This test is
     /// that projection's pin — it fails if the arm stops settling.
+    ///
+    /// The vehicle is a `--missing` path under no known root; a suspended
+    /// root used to serve, and no longer reaches past the door.
     #[test]
     fn a_scan_that_errors_after_start_completes_its_decision_as_interrupted() {
         let conn = repo::open_in_memory_for_test();
-        // A suspended root: the walk arm refuses it, after the decision row
-        // has already been opened.
-        repo::insert_test_root(&conn, "/photos", "source", true);
+        repo::insert_test_root(&conn, "/photos", "source", false);
         let db = Db::from_connection(conn);
 
-        let err = run_scan(&db, &[PathBuf::from("/photos")], true)
+        let err = run_scan(&db, &[PathBuf::from("/elsewhere/gone")], true)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("suspended"), "{err}");
+        assert!(err.contains("not under any known root"), "{err}");
 
         let (status, summary): (String, Option<String>) = db
             .conn()
@@ -799,9 +829,44 @@ mod tests {
             .unwrap();
         assert_eq!(status, "interrupted");
         assert!(
-            summary.as_deref().unwrap_or_default().contains("suspended"),
+            summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not under any known root"),
             "the summary carries the error: {summary:?}"
         );
+    }
+
+    /// **The door precedes the recorder**: a scan aimed behind a closed door
+    /// is refused by name with the way back, and leaves nothing behind — not
+    /// even the `started` row that would read as a scan killed mid-walk.
+    #[test]
+    fn a_scan_at_a_parked_root_is_refused_before_any_row_is_written() {
+        let conn = repo::open_in_memory_for_test();
+        repo::insert_test_root(&conn, "/photos", "source", true);
+        let db = Db::from_connection(conn);
+
+        let err = run_scan(&db, &[PathBuf::from("/photos/vacation")], true).unwrap_err();
+        let line = err.to_string();
+        assert!(
+            line.starts_with("/photos suspended — refused:"),
+            "the one grammar: {line}"
+        );
+        assert!(
+            line.contains("canon roots unsuspend path:/photos"),
+            "{line}"
+        );
+        assert!(
+            err.downcast_ref::<crate::core::domain::root::DoorRefused>()
+                .is_some(),
+            "carried as the refusal the front door prints without `Error:`"
+        );
+
+        let rows: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "a refused act writes no decision row");
     }
 
     // =========================================================================

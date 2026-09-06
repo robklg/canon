@@ -11,7 +11,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::core::domain::IncludeSet;
-use crate::core::ops::scope::{classify_all, resolve_path, validate_sources_exist};
+use crate::core::ops::scope::{
+    classify_all, refuse_parked_locations, resolve_path, validate_sources_exist,
+};
 use crate::core::repo::{self, Connection};
 use crate::expr::Filter;
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
@@ -55,6 +57,11 @@ pub fn run_compare(
     let prefix_a = resolve_path(path_a, &all_roots, &cwd)?;
     let prefix_b = resolve_path(path_b, &all_roots, &cwd)?;
 
+    // Both sides are load-bearing: comparing against a place Canon has been
+    // told to stop looking at would answer a different question from the one
+    // asked, with three false lines. The door is refused before the existence
+    // gate, so a parked side is never reported as an empty one.
+    refuse_parked_locations(&[prefix_a.clone(), prefix_b.clone()], &all_roots)?;
     // The gate hands back the byte-form the index stores, so both sides
     // select the rows they name.
     let stored = validate_sources_exist(conn, &[prefix_a, prefix_b], &all_roots)?;

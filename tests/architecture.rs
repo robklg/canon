@@ -1502,6 +1502,140 @@ fn positional_probes(text: &str) -> usize {
 /// inside that coverage is this file, exempt wholesale so the self-tests can
 /// plant probes — an unbounded exemption, and the reason the self-tests
 /// carry the weight of the matcher's correctness rather than a count does.
+/// The door types: a permit class is a decision, and a `_` arm is that
+/// decision going unmade.
+///
+/// `Door` and `RootLookup` are the two answers the boundary and the root-spec
+/// door give about a place the user closed. Each consumer's arm *is* its
+/// declared permit — a view sets aside, a remembering view reads, an act
+/// refuses — so a wildcard is not a shorthand here: it is a surface silently
+/// picking whatever the other arm happened to be, which is how a closed door
+/// came to read as "all roots" at seven commands at once.
+const DOOR_TYPES: &[&str] = &["Door", "RootLookup"];
+
+/// How many `match` blocks in `text` name a door type in one arm and carry a
+/// wildcard arm beside it.
+///
+/// Deliberately lexical, and its blind spots are enumerated below so that it
+/// is not *secretly* dumb — the path law's guard sets that precedent, and a
+/// guard whose aperture is undeclared is one a reader over-trusts.
+///
+/// A `match` block is read as the lines from the one holding `match` down to
+/// the first line at or left of its own indentation that closes a brace; only
+/// arms at exactly one indent step in are read, so a nested match on some
+/// other type cannot lend its catch-all to this one. An arm "names a door
+/// type" when the pattern left of its `=>` spells `Door::` or `RootLookup::`,
+/// however it is qualified. A **catch-all** is `_`, `_ if …`, or a bare
+/// lowercase binding (`other => …`) — the two spellings of the same silent
+/// decision.
+///
+/// **What it cannot see**, each stated with why it is tolerable today:
+///
+/// - a match whose arms never spell the type at all — bare
+///   `Open(..)`/`Closed(..)` through a glob import. Nothing in this tree
+///   imports them that way, and every site is written qualified so this stays
+///   true;
+/// - `let Door::Open(x) = door else { … }` and `if let … else` — real, and
+///   idiomatic Rust, but not the same defect: both *force* the other branch to
+///   be written, so nothing falls through silently. What they cost is the
+///   arm's name, not the decision;
+/// - `parse_root_spec_any`, which routes around `RootLookup` entirely. It
+///   exists for the two permits a closed door grants (opening, remembering)
+///   and a new caller reaching for it to skip the door is a review finding by
+///   name, not something a text scan can tell from a legitimate use;
+/// - a match written across lines this indentation rule mis-reads. The scan
+///   covers `src/` and `tests/`, and `tests/architecture.rs` is exempt
+///   wholesale so the checks here can plant probes.
+fn wildcard_arms_on_door_types(text: &str) -> usize {
+    let indent_of = |line: &str| line.len() - line.trim_start().len();
+    let mut count = 0;
+    let lines: Vec<&str> = text.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if !line.contains("match ") {
+            continue;
+        }
+        let base = indent_of(line);
+        let arm = base + 4;
+        let mut names_door = false;
+        let mut wildcard = false;
+        for probe in lines.iter().skip(i + 1) {
+            let trimmed = probe.trim_start();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let indent = indent_of(probe);
+            if indent <= base && trimmed.starts_with('}') {
+                break;
+            }
+            if indent != arm {
+                continue;
+            }
+            let pattern = trimmed.split("=>").next().unwrap_or_default();
+            if DOOR_TYPES
+                .iter()
+                .any(|ty| pattern.contains(&format!("{ty}::")))
+            {
+                names_door = true;
+            }
+            if is_catch_all(pattern) {
+                wildcard = true;
+            }
+        }
+        if names_door && wildcard {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Whether an arm's pattern matches everything: `_`, `_ if …`, or a bare
+/// lowercase binding. A binding is the same silent decision as an underscore
+/// — it just gives the thing it ignored a name.
+fn is_catch_all(pattern: &str) -> bool {
+    let p = pattern.split(" if ").next().unwrap_or_default().trim();
+    // `_` satisfies the run below on its own; there is no separate case.
+    !p.is_empty()
+        && p.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+        && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// **No consumer of the closed door reads it with a wildcard.**
+#[test]
+fn the_door_types_are_consumed_by_name() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let base = Path::new(&manifest_dir);
+
+    let mut found: Vec<(String, usize)> = Vec::new();
+    for dir in ["src", "tests"] {
+        for path in collect_rs_files(&base.join(dir)) {
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == "tests/architecture.rs" {
+                continue;
+            }
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+            let count = wildcard_arms_on_door_types(&text);
+            if count > 0 {
+                found.push((rel, count));
+            }
+        }
+    }
+    found.sort();
+
+    assert!(
+        found.is_empty(),
+        "\n  A closed door is read with a `_` arm: {found:?}\n  \
+         Each arm of `Door`/`RootLookup` is a surface's declared permit class — \
+         a view sets aside, a remembering view reads, an act refuses. Name the arm \
+         you mean; a wildcard picks one silently, which is the defect the type exists \
+         to make unwritable."
+    );
+}
+
 #[test]
 fn the_containment_probe_is_spelled_only_inside_the_path_law() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
@@ -2118,6 +2252,120 @@ fn the_book_never_spells_a_fate_word_as_a_literal() {
 #[cfg(test)]
 mod self_tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // The door-type matcher.
+    //
+    // A matcher exercised only by a tree scan that returns zero cannot be
+    // told apart from a disarmed one. These plant the defect it names, in
+    // both of its spellings, and one legitimate shape it must not flag.
+    // ------------------------------------------------------------------
+
+    /// The underscore, which is what the guard was written for.
+    #[test]
+    fn a_planted_underscore_arm_on_a_door_type_is_seen() {
+        let text = "\
+fn f(door: Door) -> usize {
+    match door {
+        Door::Open(scope) => scope.len(),
+        _ => 0,
+    }
+}
+";
+        assert_eq!(wildcard_arms_on_door_types(text), 1);
+    }
+
+    /// **The same silent decision, with a name on it.** A bare binding is
+    /// irrefutable exactly as `_` is; the only difference is that it reads
+    /// like a considered arm. This is the shape the first version of the
+    /// guard let through.
+    #[test]
+    fn a_planted_named_catch_all_on_a_door_type_is_seen() {
+        let text = "\
+fn f(lookup: RootLookup) -> i64 {
+    match lookup {
+        RootLookup::Found(id) => id,
+        other => fallback(other),
+    }
+}
+";
+        assert_eq!(wildcard_arms_on_door_types(text), 1);
+    }
+
+    /// A match that names every arm is not flagged, and neither is a nested
+    /// match on some other type that carries its own wildcard — the arm
+    /// indentation is what keeps one from lending its catch-all to the other.
+    #[test]
+    fn a_fully_named_door_match_is_not_flagged() {
+        let text = "\
+fn f(door: Door) -> usize {
+    match door {
+        Door::Open(scope) => match scope.kind {
+            Kind::A => 1,
+            _ => 2,
+        },
+        Door::Closed(closed) => closed.places.len(),
+    }
+}
+";
+        assert_eq!(wildcard_arms_on_door_types(text), 0);
+    }
+
+    /// The catch-all predicate itself, over the shapes an arm can take.
+    ///
+    /// The negatives include three that are **lowercase** — `x @ Door::Open`,
+    /// `ref other`, `d @ _` — because without them every negative is rejected
+    /// by the first character alone and the rest of the predicate is never
+    /// exercised at all.
+    #[test]
+    fn a_catch_all_is_a_pattern_that_refuses_nothing() {
+        for pattern in ["_ ", "_ if x.is_empty() ", "other ", "anything_else ", "d "] {
+            assert!(is_catch_all(pattern), "{pattern:?} matches everything");
+        }
+        for pattern in [
+            "Door::Open(scope) ",
+            "RootLookup::Found(id) ",
+            "Some(x) ",
+            "A | B ",
+            "Door::Open(_) ",
+            "x @ Door::Open(_) ",
+            "ref other ",
+            "d @ _ ",
+        ] {
+            assert!(!is_catch_all(pattern), "{pattern:?} refuses something");
+        }
+    }
+
+    /// The guard reads its own tree, so the corpus it runs against must not
+    /// be empty — a scan over nothing also returns zero.
+    ///
+    /// **Asked per type**, over the same two directories the guard scans: a
+    /// stale entry in `DOOR_TYPES` whose type has been renamed away is half a
+    /// disarmed guard, and a total across types hides it behind the other's
+    /// hits.
+    #[test]
+    fn every_door_type_is_actually_present_in_the_tree() {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+        let base = Path::new(&manifest_dir);
+        let corpus: Vec<String> = ["src", "tests"]
+            .iter()
+            .flat_map(|dir| collect_rs_files(&base.join(dir)))
+            .map(|path| fs::read_to_string(&path).unwrap())
+            .collect();
+
+        for ty in DOOR_TYPES {
+            let files = corpus
+                .iter()
+                .filter(|text| text.contains(&format!("{ty}::")))
+                .count();
+            assert!(
+                files > 0,
+                "`{ty}` is on the guard's table and named nowhere in the tree it scans — \
+                 either the type was renamed and the row is stale, or the guard is \
+                 half disarmed"
+            );
+        }
+    }
 
     // ------------------------------------------------------------------
     // The containment-probe matcher.
@@ -3352,6 +3600,10 @@ mod source {
                 "SurveyOutcome",
                 "SurveyParams",
                 "compute_survey",
+                // Which channel survey's scope statement — and the closed
+                // door's — belongs on is survey's own knowledge; the front
+                // door asks rather than re-deriving it.
+                "machine_shaped_stdout",
                 "run",
             ],
         ),

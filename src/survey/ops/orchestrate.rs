@@ -114,6 +114,10 @@ pub fn run_survey(
     let other_resolved = if !orchestration.other_paths.is_empty() {
         let resolved =
             crate::core::ops::scope::resolve_paths(&orchestration.other_paths, &all_roots)?;
+        // The reference is load-bearing: a parked one set aside would turn
+        // "how much of this stands there too" into a different question and
+        // answer it with a false zero.
+        crate::core::ops::scope::refuse_parked_locations(&resolved, &all_roots)?;
         crate::core::ops::scope::validate_sources_exist(conn, &resolved, &all_roots)?
     } else {
         Vec::new()
@@ -125,14 +129,25 @@ pub fn run_survey(
         }
     }
 
-    let archive_root_id = if let Some(ref spec) = orchestration.archive {
-        Some(crate::core::ops::scope::parse_root_spec(
-            &all_roots,
-            spec,
-            Some("archive"),
-        )?)
-    } else {
-        None
+    let archive_root_id = match orchestration.archive {
+        Some(ref spec) => {
+            match crate::core::ops::scope::parse_root_spec(&all_roots, spec, Some("archive"))? {
+                crate::core::ops::scope::RootLookup::Found(id) => Some(id),
+                // The archive this survey was told to measure against is behind a
+                // closed door. Its copies still testify — but survey's outward
+                // side cannot see them yet, so answering would report zero
+                // overlap with content that is standing there. The door is named
+                // instead of a false count.
+                crate::core::ops::scope::RootLookup::Parked(parked) => {
+                    return Err(crate::core::domain::root::DoorRefused::at(
+                        &parked,
+                        crate::core::domain::root::DoorVerb::Refused,
+                    )
+                    .into())
+                }
+            }
+        }
+        None => None,
     };
     let archive_label = archive_root_id.map(|id| {
         let root = all_roots.iter().find(|r| r.id == id).unwrap();

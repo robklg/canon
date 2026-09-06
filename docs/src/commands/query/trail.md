@@ -413,7 +413,11 @@ $ canon trail crossings --global --origin /Volumes/old-backup/archived
 
 reads everything that drive ever delivered, wherever it went. This is the same computation as standing at the drive. `--global` therefore requires `--origin` or `--destination`; on its own there is nothing to measure against, and the command errors.
 
-The same refusal applies without the flag. Running `canon trail crossings` from a directory no open root contains resolves to every root, which is the same boundless state, and it errors for the same reason: a view with no boundary cannot report a crossing, because every place is inside it. Two such directories answer instead of erroring — a [retired root's old path](#after-retirement-the-trail-stays-whole), which states its retirement, and a directory inside a suspended root, whose message names the suspension and the way back.
+The same refusal applies without the flag. Running `canon trail crossings` from a directory no known root contains resolves to every root, which is the same boundless state, and it errors for the same reason: a view with no boundary cannot report a crossing, because every place is inside it. A [retired root's old path](#after-retirement-the-trail-stays-whole) answers instead of erroring, stating its retirement.
+
+A directory inside a [suspended](../roots/roots.md#suspending-roots) root is not boundless: the boundary is that root, and crossings reads there like anywhere else, with the pause stated in the header. Naming the same path answers identically.
+
+The trail reads at a suspended place whether it is named alone or beside a live one, and states the door once in its header. Unlike the query commands, it sets nothing aside there: what Canon already recorded still reads.
 
 When `--global` names both, the boundary is the deeper of the two where one contains the other, and the origin otherwise. Where the two paths do not nest, both choices select the same records and only the section header differs. Where one contains the other they select differently, and the deeper path is the one that reads the movement between them as a crossing rather than as a rearrangement inside the wider place.
 

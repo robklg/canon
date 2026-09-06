@@ -747,8 +747,22 @@ pub fn filter_by_roots<'a>(
 
     let mut root_ids = std::collections::HashSet::new();
     for spec in root_specs {
-        let id = crate::core::ops::scope::parse_root_spec(all_roots, spec, None)?;
-        root_ids.insert(id);
+        match crate::core::ops::scope::parse_root_spec(all_roots, spec, None)? {
+            crate::core::ops::scope::RootLookup::Found(id) => {
+                root_ids.insert(id);
+            }
+            // Naming a closed root to narrow an apply to is an act aimed
+            // behind the door: nothing on it may be transferred, and the
+            // entries would be refused a step later for a cause that names
+            // neither the root nor the way back.
+            crate::core::ops::scope::RootLookup::Parked(parked) => {
+                return Err(crate::core::domain::root::DoorRefused::at(
+                    &parked,
+                    crate::core::domain::root::DoorVerb::Refused,
+                )
+                .into())
+            }
+        }
     }
 
     Ok(sources

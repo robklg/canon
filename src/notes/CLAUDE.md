@@ -26,6 +26,17 @@ production seeds notes through notes' own cli and ops. It carries
 `#[allow(unused_imports)]` for exactly that reason: nothing in this crate's non-test code
 calls it through the barrel.
 
+**The two note modes take different permits at a closed door.** Adding or clearing a note is a
+write inside the closet and meets the closed default: `resolve_single_scope` refuses through
+`scope::open_door` with the `Refused` verb, on stderr, exit 1 — replacing a bail that named a
+false cause ("not inside a known root" for a directory one root plainly contains). Viewing is
+**remembering**: `resolve_single_scope_optional` reads at the parked place via
+`ClosedDoor::read_here` and states the pause once, because falling through to the global listing
+is the silent widening the door exists to end. Held by `a_note_view_at_a_parked_cwd_reads_here`
+and, over the source rather than the behaviour, `the_note_add_door_is_spelled_as_a_refusal` —
+the two modes differ by one call, so the wrong one is silent; the refusal itself is observed on
+the binary by the census.
+
 **Roots owns its own notes-table SQL.** `roots::repo`'s inner `note` module
 (`delete_by_root`) mirrors the `notes` table's shape rather than reaching into this
 subsystem, and lives in `roots/repo.rs`, unrelated to `notes/repo.rs` despite the name.

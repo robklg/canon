@@ -33,6 +33,8 @@ canon worklist --emit content.geo.lat --emit content.geo.lon
 
 Choosing a `--where` gate that a repeated pass converges on is covered in [Writing Processors](processors.md#resuming-a-pass).
 
+A path on a [suspended](../roots/roots.md#suspending-roots) root, or the current directory inside one, emits nothing on stdout: the statement goes to stderr and the exit code is 1, so a consumer never reads an empty stream as "nothing here".
+
 ## Output Format
 
 Each line is a JSON object with source metadata:

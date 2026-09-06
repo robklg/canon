@@ -17,10 +17,10 @@ use chrono::{Local, TimeZone};
 use crate::ceremony;
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
-use crate::core::domain::root::Root;
+use crate::core::domain::root::{DoorVerb, Root};
 use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::decision::DecisionParams;
-use crate::core::ops::scope::resolve_scope;
+use crate::core::ops::scope::{resolve_scope, Door};
 use crate::core::repo::{self, Db};
 use crate::notes::domain::{note_display_path, LocationEntry};
 use crate::notes::ops as notes_ops;
@@ -168,7 +168,15 @@ fn resolve_single_scope(
 ) -> Result<NoteScope> {
     let all_roots = repo::root::fetch_all(conn)?;
     let paths: Vec<PathBuf> = path.iter().map(|p| p.to_path_buf()).collect();
-    let resolved = resolve_scope(conn, &paths, global, &all_roots)?;
+    // Writing a thought inside a place the user closed is a write inside the
+    // closed door, and meets the closed default: refused by name, with the
+    // way back. The old bail here named a false cause — "not inside a known
+    // root" for a directory one root plainly contains.
+    let resolved = crate::scope::open_door(
+        resolve_scope(conn, &paths, global, &all_roots)?,
+        DoorVerb::Refused,
+        crate::scope::DoorChannel::Stderr,
+    );
 
     if resolved.is_global() {
         anyhow::bail!("Not inside a known root. Specify a path or cd into a scanned directory.");
@@ -190,7 +198,14 @@ fn resolve_single_scope_optional(
 ) -> Result<Option<NoteScope>> {
     let all_roots = repo::root::fetch_all(conn)?;
     let paths: Vec<PathBuf> = path.iter().map(|p| p.to_path_buf()).collect();
-    let resolved = resolve_scope(conn, &paths, false, &all_roots)?;
+    // A view of what the user already wrote down is remembering, not a write:
+    // it reads at the parked place, with the pause stated once. Standing in a
+    // closed root must never fall through to the global listing — that is the
+    // silent widening, one surface over.
+    let resolved = match resolve_scope(conn, &paths, false, &all_roots)? {
+        Door::Open(resolved) => resolved,
+        Door::Closed(closed) => closed.read_here(),
+    };
 
     if resolved.is_global() {
         return Ok(None);
@@ -200,6 +215,9 @@ fn resolve_single_scope_optional(
         anyhow::bail!("Note operates on a single scope, got multiple paths");
     }
 
+    if let Some(line) = crate::scope::parked_pause(&resolved.pause) {
+        eprintln!("{line}");
+    }
     let scope = notes_ops::resolve_note_scope(&resolved.prefixes[0], &all_roots)?;
     Ok(Some(scope))
 }
@@ -381,5 +399,66 @@ fn print_spatial(result: &NoteSpatialResult, use_full_path: bool) {
         .saturating_sub(result.locations.len());
     if remaining > 0 {
         eprintln!("({remaining} more locations with notes)");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::testing::{insert_root, insert_source, setup_test_db};
+
+    /// **Remembering reads at a closed door.** A view of what the user
+    /// already wrote down is not a write, so `note` at a parked place lists
+    /// *here* — never the global listing, which is what standing in a closed
+    /// root used to fall through to.
+    #[test]
+    fn a_note_view_at_a_parked_cwd_reads_here() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+        insert_source(&conn, root_id, "2011/file.jpg", None);
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+
+        let door = crate::core::ops::scope::resolve_scope_at(
+            &conn,
+            &[],
+            false,
+            &roots,
+            Some(Path::new("/photos/2011")),
+        )
+        .unwrap();
+        let reading = match door {
+            crate::core::ops::scope::Door::Closed(closed) => closed.read_here(),
+            crate::core::ops::scope::Door::Open(open) => panic!("expected a door: {open:?}"),
+        };
+
+        assert!(
+            !reading.is_global(),
+            "a closed door must never fall through to the global listing"
+        );
+        let scope = notes_ops::resolve_note_scope(&reading.prefixes[0], &roots).unwrap();
+        assert_eq!(scope.root_id, root_id);
+        assert_eq!(scope.rel_path, "2011");
+        assert!(!reading.pause.is_empty(), "and the pause travels with it");
+    }
+
+    /// **The add/clear door is spelled as a refusal, not a reading** — an
+    /// anti-drift check over the source, because the two modes differ by one
+    /// call and the wrong one is silent. The behaviour it guards (a note
+    /// added at a closed door is refused by name, and nothing is written) is
+    /// observed on the binary by the census.
+    #[test]
+    fn the_note_add_door_is_spelled_as_a_refusal() {
+        let body = include_str!("cli.rs");
+        let start = body.find("fn resolve_single_scope(").unwrap();
+        let end = body[start..].find("\n}\n").unwrap() + start;
+        let region = &body[start..end];
+        assert!(
+            region.contains("DoorVerb::Refused"),
+            "the add/clear door refuses; it does not read"
+        );
+        assert!(
+            region.contains("open_door("),
+            "and it meets the door through the one interface helper"
+        );
     }
 }

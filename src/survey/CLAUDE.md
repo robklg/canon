@@ -67,8 +67,15 @@ machine stream was asked for (`-0` with a machine-rendering detail view) the wor
 archive root gets. What a closed door permits is suspension's own question, and this seam does
 not consult it. `resolve_scope`'s explicit-path arm re-derives `auto_include_archived` through
 the same `partition_prefixes_by_role`, one derivation across the two; its CWD-defaulting arm
-reads role from `resolve_root_path` instead, a deliberately different lookup that consults only
-*active* roots.
+reads role from the containing root it resolved, which now finds parked roots too.
+
+**The door precedes the frame.** A scope wholly behind a closed door is answered by the spine's
+statement in `main.rs`, before survey runs — the sentence is universal, while `ArchiveScope`'s
+is survey's own and points at `trail`/`ls`. A parked `--archive` and a parked `--other` are
+**refused** rather than set aside: both are load-bearing comparands, and until the outward side
+counts parked evidence, answering would put a zero where content stands.
+`machine_shaped_stdout` is survey's one derivation of which channel its scope statement belongs
+on, asked by the front door rather than re-derived there.
 
 **The outward side reads active roots only.** The `is_active()` filters in `ops/compute.rs`
 apply on the outward side as well as the selection side, so a parked archive's copies stop

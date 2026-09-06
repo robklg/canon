@@ -58,6 +58,12 @@ canon survey --global
 | `--verbose` | Show all locations (summary) or all paths per location (detail views). |
 | `-0` | Null-delimited output for `--detail unique`, `--detail overlap`, or `--detail residual`. |
 
+## Surveying a suspended location
+
+A scope on a [suspended](../roots/roots.md#suspending-roots) root is stated rather than surveyed: the pause and the way back, nothing listed, exit code 1. A scope naming a suspended path beside a live one narrows to the live one and says what it set aside.
+
+`--other` and `--archive` name locations the question rests on, so a suspended one refuses the whole ask rather than answering about a smaller world.
+
 ## Surveying an archive location
 
 Survey reads source-side selections. Archive content is its outward side,

@@ -233,39 +233,24 @@ fn resolve_counterpart(value: Option<&str>, roots: &[Root]) -> Result<Option<Str
 /// cause, each carrying its own remedy rather than a shared tail that fits
 /// none of them well.
 ///
-/// Scope resolution's CWD arm skips **suspended** roots, so standing inside
-/// one lands here, and "no root contains this directory" would be false:
-/// one does, and the user closed the door on it themselves. The pause is
-/// always stated, never denied and never re-described as absence — so it is
-/// named, with unsuspending offered first, because that is what the reader
-/// actually wants.
-fn boundless_refusal(global: bool, roots: &[Root]) -> String {
+/// **Two causes today, not three.** Standing inside a suspended root used to
+/// arrive here, because the CWD arm skipped suspended roots and "nowhere"
+/// fell through to global; this door re-detected the suspension itself and
+/// refused. It no longer arrives: the boundary hands back the parked root's
+/// own scope, so crossings measures the boundary that is actually there and
+/// the pause is stated in the header like every other remembering view. The
+/// retired sentence's reading — the door is named, never re-described as
+/// absence, and unsuspending is what is offered — survives as the spine's.
+fn boundless_refusal(global: bool, _roots: &[Root]) -> String {
     if global {
         return "a global crossings view needs a counterpart to measure against: \
                 add --origin <path> or --destination <path>"
             .to_string();
     }
-    let suspended = std::env::current_dir()
-        .ok()
-        .map(|cwd| crate::core::domain::path::clean_path(&cwd, &cwd))
-        .and_then(|cwd| {
-            let cwd = cwd.to_string_lossy().into_owned();
-            roots
-                .iter()
-                .find(|r| !r.is_active() && crate::core::domain::path::path_is_under(&cwd, &r.path))
-                .map(|r| r.path.clone())
-        });
-    match suspended {
-        Some(path) => format!(
-            "{path} is suspended, so there is no boundary to measure against here — \
-             `canon roots unsuspend` opens it again, or name a counterpart with \
-             --origin <path> or --destination <path>"
-        ),
-        None => "no root contains this directory, so there is no boundary to measure \
-                 against — cd into a root, or name a counterpart with --origin <path> \
-                 or --destination <path>"
-            .to_string(),
-    }
+    "no root contains this directory, so there is no boundary to measure \
+     against — cd into a root, or name a counterpart with --origin <path> \
+     or --destination <path>"
+        .to_string()
 }
 
 /// Whether this ask has no boundary to measure against at all.
@@ -320,7 +305,14 @@ fn open_scope(
 ) -> Result<ScopeDoor> {
     let mut resolved =
         match crate::core::ops::scope::resolve_scope(db.conn(), paths, global, all_roots) {
-            Ok(resolved) => resolved,
+            Ok(crate::core::ops::scope::Door::Open(resolved)) => resolved,
+            // Remembering: a pause of attention does not make Canon forget,
+            // so the trail reads at the parked place — the same place,
+            // answering the same way whether it was named or is where the
+            // user is standing. What it does *not* do is exempt the place
+            // from the evidence gate below: the door is a fact to state
+            // beside the answer, never a reason to stop asking the question.
+            Ok(crate::core::ops::scope::Door::Closed(closed)) => closed.read_here(),
             // An explicit path that misses every live root may be a retired
             // root's old mount path — then the retirement is the answer, not
             // the error. On a live root, a miss means the place has no
@@ -354,9 +346,79 @@ fn open_scope(
     // A root's own top is exempt at both doors alike — the boundary policy
     // always keeps a root-level path, and a root that has been added is a
     // place Canon knows by definition.
+    // Two kinds of prefix arrive here ungated, and both must earn their place
+    // in the view the way a set-aside does: one reached by standing in it,
+    // because CWD defaulting is a context switch rather than a claim about
+    // content, and one behind a **closed door**, because the door answered
+    // before the source gate could ask.
+    //
+    // **The gate is conjugated behind a door, never skipped.** It reads
+    // sources, notes, extractions and decisions, none of which a closed door
+    // hides, so it answers correctly there — and skipping it would render a
+    // plausible, empty view of a place Canon has never heard of, with a
+    // header claiming paths are relative to it. What the door changes is the
+    // *statement*: an unknown place behind one names the door too, so the
+    // reader is never left wondering whether the pause is what hid it.
+    //
+    // A root's own top is exempt at every door alike: a root that has been
+    // added is a place Canon knows by definition.
     let mut to_check = std::mem::take(&mut resolved.set_aside);
-    if resolved.from_cwd && !cwd_scope_is_a_root_top(&resolved.prefixes, all_roots) {
-        to_check.append(&mut resolved.prefixes);
+
+    // **Remembering has no set-aside register.** A door the ask named is a
+    // place to *read*, not a place to skip — the permit says knowledge Canon
+    // already holds still reads, and a live keeper standing beside it changes
+    // nothing about that. So the boundary's `parked` partition moves onto the
+    // reading side here: its paths into the gate, its doors onto the pause the
+    // header states. Present-tense views keep the two registers apart, because
+    // for them setting aside is the whole answer; for this one there is no
+    // such answer to give, and leaving them apart made the same place answer
+    // differently depending on what was named beside it.
+    let reading_behind_a_door = !resolved.pause.is_empty();
+    let named_parked = std::mem::take(&mut resolved.parked);
+    // Every door this ask touches, from both arms — the wholly-closed one,
+    // whose places `read_here` already put on the pause, and the mixed one,
+    // whose places arrive here. Held apart from `pause` until the gate has
+    // run, because a door is only *stood behind* if something of it survived:
+    // see the derivation below.
+    let mut doors = std::mem::take(&mut resolved.pause);
+    for place in &named_parked {
+        if !doors.iter().any(|root| root.root_id == place.root.root_id) {
+            doors.push(place.root.clone());
+        }
+    }
+    // The order to restore below. **Kept-then-parked, not the literal ask**:
+    // the boundary partitioned these into two lists and the interleaving is
+    // not recoverable from here, so a scope naming a parked path before a live
+    // one renders the live one first. Ordering is preserved *within* what the
+    // boundary handed over, which is as far as this can honestly reach.
+    let asked: Vec<String> = resolved
+        .prefixes
+        .iter()
+        .cloned()
+        .chain(named_parked.iter().map(|place| place.path.clone()))
+        .collect();
+    // A parked place takes **the same root-top exemption every other prefix
+    // takes**: a root that has been added is a place Canon knows by
+    // definition, and exempting it only when it arrives through the other arm
+    // would make the same root top answer differently beside a sibling — the
+    // very shape this whole conjugation exists to remove, one door narrower.
+    for place in named_parked {
+        if scope_is_a_root_top(&place.path, all_roots) {
+            resolved.prefixes.push(place.path);
+        } else {
+            to_check.push(place.path);
+        }
+    }
+
+    // Asked before the doors were gathered: the prefixes that arrive *ungated*
+    // are the CWD arm's and a wholly-closed door's. A live keeper came through
+    // the source gate already and is not re-asked.
+    if resolved.from_cwd || reading_behind_a_door {
+        let (exempt, gated): (Vec<String>, Vec<String>) = std::mem::take(&mut resolved.prefixes)
+            .into_iter()
+            .partition(|prefix| scope_is_a_root_top(prefix, all_roots));
+        resolved.prefixes = exempt;
+        to_check.extend(gated);
     }
 
     let mut unknown: Vec<String> = Vec::new();
@@ -370,10 +432,27 @@ fn open_scope(
             ops::place::PlaceKnowledge::Unknown => unknown.push(prefix),
         }
     }
+    restore_asked_order(&mut resolved.prefixes, &asked);
+    restore_asked_order(&mut unknown, &asked);
+
+    // **The pause names the doors the surviving view actually stands behind.**
+    // A door is gathered from the ask, but a place the gate dropped is not in
+    // the view, and a header offering the way back through a door none of the
+    // rendered rows lie behind points at nothing. The absence lines above still
+    // name their own door, from `doors`, because that statement *is* about the
+    // dropped place.
+    resolved.pause = doors
+        .iter()
+        .filter(|root| {
+            resolved
+                .prefixes
+                .iter()
+                .any(|prefix| crate::core::domain::path::path_is_under(prefix, &root.root_path))
+        })
+        .cloned()
+        .collect();
     for prefix in &unknown {
-        eprintln!(
-            "No history known at {prefix} — no sources, notes, or decisions record this place."
-        );
+        eprintln!("{}", no_history_line(prefix, &doors));
     }
     if !unknown.is_empty() && paths.len() == 1 {
         if let Some(arg) = paths[0].to_str() {
@@ -404,14 +483,50 @@ fn open_scope(
     Ok(ScopeDoor::Resolved(resolved))
 }
 
-/// Whether a CWD-defaulted scope is a root's own top rather than a place
-/// inside one. Pure given its inputs; the exemption it carries is the
-/// boundary policy's own ("root-level paths are always kept").
-fn cwd_scope_is_a_root_top(prefixes: &[String], roots: &[Root]) -> bool {
-    prefixes.iter().any(|p| {
-        crate::core::domain::root::find_containing_root(p, roots)
-            .is_none_or(|(_, _, _, rel)| rel.is_empty())
-    })
+/// Whether a scope path is a root's own top rather than a place inside one.
+/// Pure given its inputs; the exemption it carries is the boundary policy's
+/// own ("root-level paths are always kept").
+fn scope_is_a_root_top(prefix: &str, roots: &[Root]) -> bool {
+    crate::core::domain::root::find_containing_root(prefix, roots)
+        .is_none_or(|(_, _, _, rel)| rel.is_empty())
+}
+
+/// Put a list of prefixes back into the order they were asked in.
+///
+/// The evidence gate splits a scope and pushes the survivors back, so what
+/// comes out of it is ordered by disposition rather than by the ask. That is
+/// invisible to every consumer but the reader, who sees the header and the
+/// unknown-place lines — and who has no way to account for an order they did
+/// not type. Anything not in the ask (a set-aside the boundary produced
+/// separately) keeps its place at the end.
+fn restore_asked_order(prefixes: &mut [String], asked: &[String]) {
+    prefixes.sort_by_key(|prefix| asked.iter().position(|a| a == prefix).unwrap_or(usize::MAX));
+}
+
+/// What a place with no history is told about itself.
+///
+/// **An absence states what it observes, and the door is stated beside it —
+/// never in its place.** The absence is the same absence either way, because
+/// the gate reads sources, notes, extractions and decisions and a closed door
+/// hides none of them. So the observation comes first and unchanged; the door
+/// follows as a second fact, because a reader standing behind one would
+/// otherwise wonder whether the pause is what hid the place. Substituting the
+/// door for the cause would be worse than silence: it would offer a way back
+/// that does not lead anywhere, since unsuspending reveals nothing about a
+/// path Canon has never heard of.
+///
+/// Pure: composed here so the claim can be pinned without a process.
+fn no_history_line(prefix: &str, pause: &[crate::core::domain::root::ParkedRoot]) -> String {
+    let absence = format!(
+        "No history known at {prefix} — no sources, notes, or decisions record this place."
+    );
+    match pause
+        .iter()
+        .find(|root| crate::core::domain::path::path_is_under(prefix, &root.root_path))
+    {
+        Some(root) => format!("{absence} {}", root.pause_line()),
+        None => absence,
+    }
 }
 
 /// The newest bound retirement covering any of the requested paths, cleaned
@@ -591,6 +706,8 @@ mod tests {
         crate::core::ops::scope::ResolvedScope {
             prefixes: prefixes.iter().map(|p| p.to_string()).collect(),
             set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: Vec::new(),
             from_cwd,
             auto_include_archived: false,
         }
@@ -793,16 +910,13 @@ mod tests {
     /// top is exempt at both alike, matching the boundary policy's
     /// "root-level paths are always kept".
     #[test]
-    fn a_cwd_scope_at_a_root_top_is_exempt_from_the_evidence_gate() {
+    fn a_scope_at_a_root_top_is_exempt_from_the_evidence_gate() {
         let conn = setup_test_db();
         insert_root(&conn, "/photos", "source", false);
         let roots = roots_of(&conn);
 
-        assert!(cwd_scope_is_a_root_top(&["/photos".to_string()], &roots));
-        assert!(!cwd_scope_is_a_root_top(
-            &["/photos/2012".to_string()],
-            &roots
-        ));
+        assert!(scope_is_a_root_top("/photos", &roots));
+        assert!(!scope_is_a_root_top("/photos/2012", &roots));
     }
 
     fn mk_scope(path: &str, relation: ScopeRelation) -> ShowScope {
@@ -852,12 +966,99 @@ mod tests {
     /// A path under no known root cannot be gated on evidence it could never
     /// have — the global fallback owns that case, so it reads as exempt here.
     #[test]
-    fn a_cwd_scope_under_no_known_root_is_exempt() {
+    fn a_scope_under_no_known_root_is_exempt() {
         let conn = setup_test_db();
         insert_root(&conn, "/photos", "source", false);
-        assert!(cwd_scope_is_a_root_top(
-            &["/elsewhere".to_string()],
-            &roots_of(&conn)
-        ));
+        assert!(scope_is_a_root_top("/elsewhere", &roots_of(&conn)));
+    }
+
+    // ========================================================================
+    // The closed door — remembering
+    // ========================================================================
+
+    /// A pause of attention does not make Canon forget. Standing in a closed
+    /// root used to show the whole universe's trail; it now shows this
+    /// place's, with the door stated once in the header.
+    #[test]
+    fn a_parked_cwd_reads_its_own_trail_not_the_global_one() {
+        use crate::core::ops::scope::{resolve_scope_at, Door};
+
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+        let roots = roots_of(&conn);
+
+        let door = resolve_scope_at(
+            &conn,
+            &[],
+            false,
+            &roots,
+            Some(std::path::Path::new("/photos/2011")),
+        )
+        .unwrap();
+        let reading = match door {
+            Door::Closed(closed) => closed.read_here(),
+            Door::Open(open) => panic!("expected a closed door, got {open:?}"),
+        };
+
+        assert!(!reading.is_global(), "the parked place is the subject");
+        assert_eq!(reading.prefixes, vec!["/photos/2011".to_string()]);
+        assert_eq!(reading.pause[0].root_id, root_id);
+    }
+
+    /// **`crossings` at a closed door reads.** It used to re-detect the
+    /// suspension here and refuse — the one surface that noticed, answering
+    /// differently from the same place named on the command line. The
+    /// boundary now hands back the parked root's own scope, so there *is* a
+    /// boundary to measure against.
+    #[test]
+    fn crossings_at_a_parked_cwd_measures_the_parked_boundary() {
+        let conn = setup_test_db();
+        insert_root(&conn, "/photos", "source", true);
+        let roots = roots_of(&conn);
+
+        // The refusal's remaining causes are two, and neither is a door.
+        assert!(!boundless_refusal(true, &roots).contains("suspended"));
+        assert!(!boundless_refusal(false, &roots).contains("suspended"));
+        assert!(
+            !fn_body("boundless_refusal").contains("is_active"),
+            "the door is derived at the boundary and never re-detected here"
+        );
+
+        // And a parked CWD is no longer boundless: it has its own scope.
+        let scope = scope(&["/photos/2011"], true);
+        assert!(!is_boundless(&scope, None, None));
+    }
+
+    /// **An unknown place behind a closed door names the door.** The gate
+    /// runs there — it reads sources, notes, extractions and decisions, none
+    /// of which a door hides — so a path Canon has never heard of is still
+    /// said to be unknown rather than rendered as a plausible empty view. What
+    /// the door adds is the cause, so the reader is not left wondering whether
+    /// the pause is what hid the place.
+    #[test]
+    fn an_unknown_place_behind_a_door_names_the_door() {
+        use crate::core::domain::root::ParkedRoot;
+
+        let parked = ParkedRoot {
+            root_id: 1,
+            root_path: "/photos".to_string(),
+        };
+
+        let behind = no_history_line("/photos/nosuchdir", std::slice::from_ref(&parked));
+        assert_eq!(
+            behind,
+            "No history known at /photos/nosuchdir — no sources, notes, or decisions record this place. /photos suspended · canon roots unsuspend path:/photos"
+        );
+        assert!(
+            behind.starts_with(&no_history_line("/photos/nosuchdir", &[])),
+            "the observation is unchanged; the door is a second fact beside it: {behind}"
+        );
+
+        // A place under no closed door keeps the plain sentence, and a place
+        // under *another* root's door is not attributed to it.
+        let plain =
+            "No history known at /live/nosuchdir — no sources, notes, or decisions record this place.";
+        assert_eq!(no_history_line("/live/nosuchdir", &[]), plain);
+        assert_eq!(no_history_line("/live/nosuchdir", &[parked]), plain);
     }
 }

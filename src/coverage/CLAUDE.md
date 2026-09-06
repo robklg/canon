@@ -33,3 +33,9 @@ several sources can share one object and the user is being told about their file
 share no private helpers, only `crate::scope::print_report_scope` and `format_count`. Coverage
 has one output voice printed at two densities rather than two voices, so the renderers sit
 beside the command instead of in a `render.rs` of their own.
+
+**A parked `--archive` is refused, not answered.** `resolve_archive_root` names the door
+(`RootLookup::Parked` → `DoorRefused`) instead of the old "No root with id N", which was a false
+cause about a root that exists. Refused rather than set aside because it is the one comparand the
+question rests on: with the archive side gone there is nothing left to measure coverage against,
+and a zero would read as an answer.

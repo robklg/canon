@@ -32,6 +32,14 @@ for that reason, the same treatment `exclude.rs`/`trail.rs` give their test-only
     report, only a summary.
   - `set_comment` and `list` record no decision at all — annotation and reads aren't content-fate
     transitions.
+- **`rm` and `comment` take opposite permits at a closed door.** Removing a root is an act and
+  meets the closed default — refused by name with the way back, because the door is exactly what
+  protects what is inside from destruction. A comment is the label on the door, not a hand inside
+  it (root-grain metadata, never content standing), so it stays permitted and reaches the root
+  through `parse_root_spec_any`. Both used to answer `No root for path` about a root that plainly
+  exists; that sentence is now reserved for a root that genuinely is not there
+  (`parse_root_spec_by_path_names_a_parked_root_not_an_absence`).
+
 - **The suspend family's no-op protocol is a substring contract across the ops boundary.**
   `execute_suspend`/`execute_unsuspend` `bail!` on already-in-state, and the cli string-matches
   the error (`.contains("already suspended")` / `.contains("not suspended")`) to downgrade it to

@@ -63,6 +63,8 @@ Facts: /mnt/old-drive/photos
 No sources match the given filters.
 ```
 
+A path on a [suspended](../roots/roots.md#suspending-roots) root, or the current directory inside one, is set aside and stated instead of counted; when that is the whole scope, nothing is reported and the exit code is 1. `facts delete` refuses there by name.
+
 Example output:
 ```
 Facts: all roots

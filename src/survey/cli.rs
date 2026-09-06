@@ -65,9 +65,22 @@ fn narrowed_header_scope(
     Some(ResolvedScope {
         prefixes: source_side_prefixes,
         set_aside: resolved.set_aside.clone(),
+        parked: resolved.parked.clone(),
+        pause: resolved.pause.clone(),
         from_cwd: resolved.from_cwd,
         auto_include_archived: resolved.auto_include_archived,
     })
+}
+
+/// Whether this invocation's stdout is a bare machine stream carrying no
+/// scope header of its own — so the scope statement, and the closed door's,
+/// bend to stderr rather than going unsaid or landing in the stream.
+///
+/// One derivation, consumed by the front door before dispatch and by the
+/// detail arms below; `--detail unique` is a bare path stream whatever the
+/// delimiter, the rest only under `-0`.
+pub fn machine_shaped_stdout(detail: Option<DetailMode>, null_delim: bool) -> bool {
+    detail == Some(DetailMode::Unique) || suppress_early_exit_header(null_delim, detail)
 }
 
 /// Whether an early-exit outcome (empty or all-unhashed selection) must
@@ -187,7 +200,14 @@ pub fn run(
         }
         SurveyOutcome::Empty => {
             let suppress = suppress_early_exit_header(options.null_delim, options.detail);
-            if !suppress {
+            if suppress {
+                // The header is suppressed because stdout is a machine
+                // stream, not because there is nothing to say: what the
+                // boundary set aside is a difference between what was asked
+                // and what ran, and an empty result is unrelated to it. The
+                // channel bends; the statement never goes unsaid.
+                render::eprint_set_asides(&header);
+            } else {
                 render::print_survey_header(&header, &options.original_filters, 0, 0, 0, 0, None);
                 if let Some((ref ctx, ref scope_rel)) = note_context {
                     render::print_notes_section(ctx, scope_rel, options.verbose);
@@ -196,7 +216,9 @@ pub fn run(
         }
         SurveyOutcome::AllUnhashed { total_count } => {
             let suppress = suppress_early_exit_header(options.null_delim, options.detail);
-            if !suppress {
+            if suppress {
+                render::eprint_set_asides(&header);
+            } else {
                 render::print_survey_header(
                     &header,
                     &options.original_filters,
@@ -414,6 +436,9 @@ mod tests {
             scope: ResolvedScope {
                 prefixes: vec!["/mnt/drive".to_string()],
                 set_aside: Vec::new(),
+                parked: Vec::new(),
+                pause: Vec::new(),
+
                 from_cwd: false,
                 auto_include_archived: false,
             },
@@ -458,6 +483,9 @@ mod tests {
         let resolved = ResolvedScope {
             prefixes: vec!["/photos/2011".to_string(), "/archive/media".to_string()],
             set_aside: vec!["/photos/empty".to_string()],
+            parked: Vec::new(),
+            pause: Vec::new(),
+
             from_cwd: false,
             auto_include_archived: true,
         };
@@ -488,6 +516,9 @@ mod tests {
             scope: ResolvedScope {
                 prefixes: vec!["/archive/media".to_string()],
                 set_aside: Vec::new(),
+                parked: Vec::new(),
+                pause: Vec::new(),
+
                 from_cwd: false,
                 auto_include_archived: true,
             },
