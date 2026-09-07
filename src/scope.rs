@@ -120,43 +120,124 @@ pub fn closed_door_lines(places: &[ParkedPath], verb: DoorVerb, here: bool) -> V
         }
     }
 
-    if groups.len() > PARKED_ROOTS_NAMED_CAP {
-        // Too many doors to name one by one, so the statement counts them and
-        // the way back becomes "see them all" — the sweep's cap, reused.
-        return vec![format!(
-            "{} — {}: {} · {}",
-            counted(groups.len(), "suspended root"),
-            verb.label(),
-            counted(places.len(), "path"),
-            WayBack::list_suspended().display(),
-        )];
-    }
-
     let gesture = if here && verb == DoorVerb::SetAside {
         " or --global"
     } else {
         ""
     };
-    groups
+    let doors: Vec<(&ParkedRoot, String)> = groups
         .iter()
         .map(|(first, paths)| {
             let what = if here {
                 "here".to_string()
-            } else if paths.len() > PARKED_PATHS_NAMED_CAP {
-                counted(paths.len(), "path")
             } else {
-                paths.join(", ")
+                place_reach(paths)
             };
-            format!("{}{gesture}", first.root.door_line(verb, &what))
+            (&first.root, what)
         })
+        .collect();
+    let doors: Vec<(&ParkedRoot, DoorVerb, String)> = doors
+        .into_iter()
+        .map(|(root, what)| (root, verb, what))
+        .collect();
+    door_lines(&doors, (verb, &counted(places.len(), "path")), gesture)
+}
+
+/// The `<what>` a **place** door takes: the places asked for at that root, or
+/// a count of them above the cap.
+///
+/// Spoken here because two surfaces compose it — the scope boundary's own
+/// grouping, and the manifest door's report, which must fold a place and a
+/// role into one line for a root reached both ways. The cap is the door
+/// statement's, not each caller's.
+pub fn place_reach(paths: &[&str]) -> String {
+    if paths.len() > PARKED_PATHS_NAMED_CAP {
+        counted(paths.len(), "path")
+    } else {
+        paths.join(", ")
+    }
+}
+
+/// The same statement about doors a surface reaches through a **record**
+/// rather than through a place anyone asked for — the manifest door, where
+/// `<what>` is the role the root plays in the act (its origin end, its
+/// destination) rather than a path.
+///
+/// Each door carries its own verb, because a report states one act's door in
+/// that act's own conditional and a root can be reached by two acts at once;
+/// `collapsed` is the verb and the `<what>` of the single line the statement
+/// becomes above the roots cap. No `--global` gesture: this door is met
+/// through a record rather than through where the user is standing, so there
+/// is no wider question to ask instead.
+pub fn closed_door_reaches(
+    doors: &[(ParkedRoot, DoorVerb, String)],
+    collapsed: (DoorVerb, &str),
+) -> Vec<String> {
+    let named: Vec<(&ParkedRoot, DoorVerb, String)> = doors
+        .iter()
+        .map(|(root, verb, what)| (root, *verb, what.clone()))
+        .collect();
+    door_lines(&named, collapsed, "")
+}
+
+/// The `<what>` a lock's **origin end** takes: the role, and the sources
+/// standing behind that door now.
+///
+/// Spelled once because two surfaces say it of the same fact — `apply`
+/// refuses on it and `cluster status` reports it — and they must count the
+/// same thing in the same words. Sources rather than lock entries,
+/// deliberately: what is counted is what the run would carry, read from the
+/// index, and the lock is only how it was reached.
+pub fn origin_reach(count: usize) -> String {
+    format!("origin of {}", counted(count, "source"))
+}
+
+/// The `<what>` the **destination end** takes. A role with nothing to count:
+/// a manifest has one destination.
+pub const DESTINATION_REACH: &str = "destination";
+
+/// One line per closed door, collapsing to a single counted line above the
+/// cap — the grammar, the cap and the way back, spoken once.
+///
+/// Each door's `<what>` is the caller's, because what a surface names differs
+/// (places asked for at a scope boundary, a role in the act at the manifest
+/// door) while none of the rest does, and so is its verb, because a report
+/// states one act's door per line; `collapsed` is the verb and the `<what>`
+/// of the counted line the statement becomes when there are too many doors to
+/// name one by one — the sweep's cap, reused.
+fn door_lines(
+    doors: &[(&ParkedRoot, DoorVerb, String)],
+    collapsed: (DoorVerb, &str),
+    gesture: &str,
+) -> Vec<String> {
+    if doors.is_empty() {
+        return Vec::new();
+    }
+    let (collapsed_verb, collapsed_what) = collapsed;
+    if doors.len() > PARKED_ROOTS_NAMED_CAP {
+        return vec![format!(
+            "{} — {}: {collapsed_what} · {}",
+            counted(doors.len(), "suspended root"),
+            collapsed_verb.label(),
+            WayBack::list_suspended().display(),
+        )];
+    }
+    doors
+        .iter()
+        .map(|(root, verb, what)| format!("{}{gesture}", root.door_line(*verb, what)))
         .collect()
 }
 
 /// `N thing` / `N things`, with the project's thousands separators.
+///
+/// Every noun a door statement counts pluralises with an `s`; the irregular
+/// half of this pair went with the lock-entry count it was written for, and a
+/// noun that needs its own plural gets it back rather than being bent.
 fn counted(count: usize, noun: &str) -> String {
-    let plural = if count == 1 { "" } else { "s" };
+    let plural = format!("{noun}s");
+    let word = if count == 1 { noun } else { plural.as_str() };
     format!(
-        "{} {noun}{plural}",
+        "{} {word}",
         crate::core::domain::format::format_count(count)
     )
 }

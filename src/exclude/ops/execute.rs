@@ -23,6 +23,45 @@ use super::types::{
 };
 use crate::core::domain::decision::DecisionStatus;
 
+/// Refuse, inside the transaction, if a door has closed since the plan was
+/// made.
+///
+/// **The backstop for a root parked by another process between plan and
+/// execute** — retirement's `plan_bind` re-check is the shape. The planning
+/// selection never offers a parked source, so a plan cannot name one; what it
+/// cannot rule out is the user closing a door while the confirmation prompt
+/// stands. Raised from inside `mutate`, so the `started` row and any flips
+/// already made roll back together, exactly as any other failure there does.
+///
+/// Asked of the **root paths the plan carries**, which is what makes it cheap:
+/// a source does not change root mid-run, so the roots table alone answers it
+/// and no source needs re-fetching.
+///
+/// **Where it does not apply**: object exclusion, which is about the object
+/// everywhere and proceeds with parked sharers counted rather than filtered
+/// (the stamp-set is the receipt-set); and the single-target arms, whose
+/// check-outside/execute-inside window this subsystem accepts by name.
+fn refuse_if_a_door_closed<'a>(
+    tx: &Connection,
+    roots_touched: impl Iterator<Item = &'a str>,
+) -> Result<()> {
+    let roots = crate::core::repo::root::fetch_all(tx)?;
+    for path in roots_touched {
+        if let Some(parked) = roots
+            .iter()
+            .find(|r| r.path == path)
+            .and_then(crate::core::domain::root::Root::parked)
+        {
+            return Err(crate::core::domain::root::DoorRefused::at(
+                &parked,
+                crate::core::domain::root::DoorVerb::Refused,
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Result of an exclude-set execution.
 #[allow(dead_code)]
 pub struct ExcludeSetResult {
@@ -53,6 +92,7 @@ pub fn execute_set(
         counts_all(count),
         &summary,
         |tx, decision_id| {
+            refuse_if_a_door_closed(tx, plan.items.iter().map(|i| i.root.as_str()))?;
             exclude_repo::source::batch_set_excluded(tx, &source_ids, true, decision_id)?;
             Ok(
                 match (decision, decision_id, destination.placement.as_ref()) {
@@ -110,6 +150,7 @@ pub fn execute_clear(
         counts_all(count),
         &summary,
         |tx, decision_id| {
+            refuse_if_a_door_closed(tx, plan.items.iter().map(|i| i.root.as_str()))?;
             exclude_repo::source::batch_set_excluded(tx, &source_ids, false, decision_id)?;
             Ok(
                 match (decision, decision_id, destination.placement.as_ref()) {
@@ -167,6 +208,12 @@ pub fn execute_duplicates(
         counts_all(count),
         &summary,
         |tx, decision_id| {
+            refuse_if_a_door_closed(
+                tx,
+                plan.groups
+                    .iter()
+                    .flat_map(|g| g.excluded.iter().map(|i| i.root.as_str())),
+            )?;
             exclude_repo::source::batch_set_excluded(tx, &source_ids, true, decision_id)?;
             Ok(
                 match (decision, decision_id, destination.placement.as_ref()) {

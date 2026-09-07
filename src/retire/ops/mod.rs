@@ -70,7 +70,7 @@ mod verify;
 // used to carry now lives in the story subsystem and renders itself).
 pub use ceremony::{begin_ceremony, plan_bind, CeremonyParams, ReleaseOutcome, RetireCeremony};
 pub use review::{
-    find_retirement_covering_path, readiness_lens, validate_retire_target, ReadinessReview,
-    RetiredScope,
+    find_retirement_covering_path, readiness_lens, shelf_blocker, validate_retire_subject,
+    ReadinessReview, RetiredScope,
 };
 pub use shelf::{compute_shelf_listing, ShelfLine};

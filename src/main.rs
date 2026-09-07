@@ -672,15 +672,21 @@ enum RootsAction {
         /// Comment text (omit to clear)
         comment: Option<String>,
     },
-    /// Suspend a root (hide from all operations)
+    /// Close the door on a root: kept safe, out of view, until you open it again
     Suspend {
         /// Root specifier: id:<N> or path:<path>
         spec: String,
+        /// Reason for this operation (recorded in decision log)
+        #[arg(long)]
+        reason: Option<String>,
     },
-    /// Unsuspend a root (make visible again)
+    /// Open the door again on a suspended root
     Unsuspend {
         /// Root specifier: id:<N> or path:<path>
         spec: String,
+        /// Reason for this operation (recorded in decision log)
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// List the retired fleet: the books on the shelf
     Retired,
@@ -1720,11 +1726,25 @@ fn run() -> Result<()> {
             Some(RootsAction::Comment { spec, comment }) => {
                 roots::set_comment(&db, &spec, comment.as_deref())?;
             }
-            Some(RootsAction::Suspend { spec }) => {
-                roots::suspend(&db, &spec, &command_line, &config, cli.no_receipt)?;
+            Some(RootsAction::Suspend { spec, reason }) => {
+                roots::suspend(
+                    &db,
+                    &spec,
+                    &command_line,
+                    &config,
+                    cli.no_receipt,
+                    reason.as_deref(),
+                )?;
             }
-            Some(RootsAction::Unsuspend { spec }) => {
-                roots::unsuspend(&db, &spec, &command_line, &config, cli.no_receipt)?;
+            Some(RootsAction::Unsuspend { spec, reason }) => {
+                roots::unsuspend(
+                    &db,
+                    &spec,
+                    &command_line,
+                    &config,
+                    cli.no_receipt,
+                    reason.as_deref(),
+                )?;
             }
             Some(RootsAction::Retired) => {
                 retire::retired(&db, &config)?;
@@ -1892,5 +1912,34 @@ mod tests {
         }
         .unsuspend_hint();
         assert_eq!(receipt_hint.as_deref(), Some(expected.as_str()));
+    }
+
+    /// Closing a door and opening one are recorded acts like any other, so
+    /// they take `--reason` under its existing meaning — and the way back
+    /// Canon prints everywhere still parses beside it, which is what stops the
+    /// flag from being added on one form only.
+    #[test]
+    fn the_suspend_family_takes_a_reason() {
+        for argv in [
+            vec!["canon", "roots", "suspend", "path:/mnt/d1"],
+            vec![
+                "canon",
+                "roots",
+                "suspend",
+                "path:/mnt/d1",
+                "--reason",
+                "steering the sweep; revisit after the phone import",
+            ],
+            vec![
+                "canon",
+                "roots",
+                "unsuspend",
+                "id:7",
+                "--reason",
+                "back to work on it",
+            ],
+        ] {
+            Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("must parse: {argv:?}\n{e}"));
+        }
     }
 }

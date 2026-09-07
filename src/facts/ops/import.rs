@@ -61,6 +61,14 @@ pub struct ImportStats {
     pub skipped_stale: u64,
     pub skipped_reserved: u64,
     pub skipped_archived: u64,
+    /// Records naming a source that stands behind a door the user closed.
+    ///
+    /// A batch surface takes the closed default per **record**, not per run:
+    /// refusing the whole import would break a pipeline over one parked root,
+    /// while writing the facts would be a write inside the closet. So the
+    /// record is set aside, counted, and stated in the summary — never
+    /// silent, never fatal.
+    pub skipped_suspended: u64,
     pub skipped_type_mismatch: u64,
     pub objects_created: u64,
     pub facts_promoted: u64,
@@ -71,12 +79,13 @@ impl ImportStats {
     pub fn compose_summary(&self) -> String {
         use crate::core::domain::format_count;
         format!(
-            "Processed {} lines: {} facts imported, {} skipped (stale), {} skipped (reserved), {} skipped (archived), {} skipped (type mismatch), {} objects created, {} facts promoted",
+            "Processed {} lines: {} facts imported, {} skipped (stale), {} skipped (reserved), {} skipped (archived), {} skipped (on suspended roots), {} skipped (type mismatch), {} objects created, {} facts promoted",
             format_count(self.lines_processed),
             format_count(self.facts_imported),
             format_count(self.skipped_stale),
             format_count(self.skipped_reserved),
             format_count(self.skipped_archived),
+            format_count(self.skipped_suspended),
             format_count(self.skipped_type_mismatch),
             format_count(self.objects_created),
             format_count(self.facts_promoted),
@@ -138,6 +147,17 @@ pub fn process_record(
     // Check if source is in an archive root
     if source.is_from_role("archive") && !allow_archived {
         state.stats.skipped_archived += 1;
+        return Ok(outcome);
+    }
+
+    // The door, per record. Writing a fact onto a source behind a root the
+    // user closed is a write inside the closet; refusing the whole batch over
+    // one parked root would break an import that is otherwise entirely
+    // legitimate. So this record is set aside and counted, and the root is
+    // never touched — including the object link and the fact promotion below,
+    // which is why this stands ahead of every one of them.
+    if source.root_suspended {
+        state.stats.skipped_suspended += 1;
         return Ok(outcome);
     }
 
@@ -813,6 +833,54 @@ mod tests {
         let outcome = process_record(&mut conn, &record, &mut state, false).unwrap();
         assert!(outcome.warnings.is_empty());
         assert_eq!(state.stats.skipped_archived, 1);
+    }
+
+    /// A record naming a source behind a closed door is set aside and
+    /// counted — never written, never fatal to the batch, and the root is not
+    /// touched at all: no fact, no object link, and no scope row claiming this
+    /// import acted there.
+    #[test]
+    fn an_import_record_on_a_parked_root_is_counted_not_written() {
+        let mut conn = setup_test_db();
+        let parked = insert_root(&conn, "/photos", "source", true);
+        let live = insert_root(&conn, "/live", "source", false);
+        let behind = insert_source(&conn, parked, "photo.jpg", None);
+        let keeper = insert_source(&conn, live, "photo.jpg", None);
+        let mut state = init_state(&conn).unwrap();
+
+        let facts = || {
+            HashMap::from([(
+                "content.hash.sha256".to_string(),
+                Value::String("abc123def456".to_string()),
+            )])
+        };
+        let outcome = process_record(
+            &mut conn,
+            &make_record(behind, 0, facts()),
+            &mut state,
+            false,
+        )
+        .unwrap();
+
+        assert!(outcome.warnings.is_empty(), "set aside is not a warning");
+        assert_eq!(state.stats.skipped_suspended, 1);
+        assert_eq!(state.stats.facts_imported, 0);
+        assert_eq!(state.stats.objects_created, 0, "not even the object link");
+        assert!(
+            !state.touched_roots.contains(&parked),
+            "a set-aside record never claims its root as acted on"
+        );
+
+        // And the batch runs on: the next record imports as it always did.
+        process_record(
+            &mut conn,
+            &make_record(keeper, 0, facts()),
+            &mut state,
+            false,
+        )
+        .unwrap();
+        assert_eq!(state.stats.objects_created, 1);
+        assert!(state.touched_roots.contains(&live));
     }
 
     #[test]

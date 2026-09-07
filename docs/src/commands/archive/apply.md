@@ -178,6 +178,31 @@ Use `--root` to apply only a subset of sources from the manifest. Useful for sta
 - `--root id:N` - Filter by root ID (shown in manifest as `root_id`)
 - `--root path:/path` - Filter by root path (must match exactly)
 
+**Suspended roots refuse first**, at either end and before the summary and the
+confirmation, so `--dry-run` and `--yes` both meet the refusal and nothing is
+written:
+
+The origin end, counting the sources this run would have carried from there:
+
+```
+/path/to/photos suspended — refused: origin of 12 sources · canon roots unsuspend path:/path/to/photos
+```
+
+Or the destination:
+
+```
+/path/to/archive suspended — refused: destination · canon roots unsuspend path:/path/to/archive
+```
+
+One or the other, never both: the run stops at the first door it meets, and it
+looks at the destination first. Exit code 1, no `Error:` prefix, and no decision
+row.
+[`canon roots unsuspend`](../roots/roots.md) is one way back. At the origin end
+there is a second: [`cluster refresh`](cluster.md) rebuilds the lock from the open
+world, leaving the suspended root's files out, and the apply then carries what is
+left. At the destination end no rebuild helps — the files are going there either
+way.
+
 **Pre-flight checks** (mandatory). These run once the lock file has been read: a lock
 written before Canon recorded where each file goes refuses before any of them.
 

@@ -547,9 +547,10 @@ const LAWS: &[Law] = &[
     Law {
         // The one derivation of "this place is behind a door the user
         // closed". The verifier is the arm that was silently widening seven
-        // commands to the whole universe; the sibling doors (`RootLookup`,
-        // and the recorded scope's own arm when it lands) project the same
-        // fact from their own inputs.
+        // commands to the whole universe; the sibling doors — `RootLookup` at
+        // the root spec, and `PrefixOutcome::Parked` at the manifest — project
+        // the same fact from their own inputs, and all three carry the same
+        // `ParkedRoot` payload rather than re-deriving one.
         name: "closed door",
         owner: "core/ops/scope.rs",
         verifier: "a_parked_cwd_is_never_global",

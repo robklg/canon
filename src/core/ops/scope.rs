@@ -692,8 +692,26 @@ pub fn resolve_recorded_scope(
 ) -> Result<ScopeResolution> {
     let mut outcomes = Vec::with_capacity(prefixes.len());
     for prefix in prefixes {
-        outcomes.push(match domain::scope::attribute_prefix(prefix, roots) {
-            Some(scope) => match stored_form_of_rel(conn, scope.root_id, &scope.rel_prefix)? {
+        let Some(scope) = domain::scope::attribute_prefix(prefix, roots) else {
+            outcomes.push(PrefixOutcome::Unrooted(prefix.clone()));
+            continue;
+        };
+        // The door, asked between attribution and confirmation — the argument
+        // door's own precedence (root membership > the door > source
+        // existence). That order is why a parked prefix with no sources comes
+        // back parked rather than set aside: the closed door is why it has
+        // nothing to say, and it is also why the index is never asked about a
+        // closed root's remainder.
+        if let Some(root) = roots
+            .iter()
+            .find(|r| r.id == scope.root_id)
+            .and_then(Root::parked)
+        {
+            outcomes.push(PrefixOutcome::Parked(scope, root));
+            continue;
+        }
+        outcomes.push(
+            match stored_form_of_rel(conn, scope.root_id, &scope.rel_prefix)? {
                 Some(rel) => {
                     let grain = scope_grain(conn, scope.root_id, &rel)?;
                     PrefixOutcome::Confirmed(
@@ -703,8 +721,7 @@ pub fn resolve_recorded_scope(
                 }
                 None => PrefixOutcome::SetAside(scope),
             },
-            None => PrefixOutcome::Unrooted(prefix.clone()),
-        });
+        );
     }
     Ok(ScopeResolution::from_outcomes(outcomes))
 }
@@ -1507,9 +1524,18 @@ mod tests {
         assert!(err.contains("is not under any known root"), "{err}");
     }
 
-    /// The recorded-scope class, extended to the third cause: a place behind
-    /// a closed door never becomes a `DecisionScope`, so no act is ever
-    /// written down as having happened there.
+    /// The recorded-scope class, extended to the third cause: **resolution
+    /// never turns a place behind a closed door into a `DecisionScope`**, so
+    /// no act is written down as scoped to a place this run was told it could
+    /// not touch.
+    ///
+    /// The claim is about **this boundary**, and stops there deliberately. A
+    /// scope settled into a lock header while its root was open is a different
+    /// provenance path: `apply` records what the lock settled, and a root
+    /// closed *after* that does not rewrite what the manifest was scoped to.
+    /// Widening this sentence to "no decision row ever names a parked root"
+    /// would assert something the tree does not do and should not — a
+    /// historical scope is a fact about when it was recorded.
     #[test]
     fn a_parked_path_never_becomes_a_decision_scope() {
         use crate::core::domain::scope::DecisionScope;
@@ -1564,6 +1590,86 @@ mod tests {
         assert!(reading.parked.is_empty());
         assert!(reading.from_cwd);
         assert_eq!(reading.pause[0].root_path, "/photos");
+    }
+
+    /// **The manifest door's own arm.** A recorded prefix on a closed root
+    /// comes back parked, not set aside — and it comes back parked *whether or
+    /// not* the index knows sources under it, because the door is asked
+    /// between attribution and confirmation. Setting it aside instead would
+    /// speak the second, false cause ("no sources known") about a place the
+    /// user merely shut, at the one door where a false cause costs a lock
+    /// file.
+    #[test]
+    fn a_parked_recorded_prefix_is_parked_not_set_aside() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+        insert_source(&conn, root_id, "2011/a.jpg", None);
+        let roots = vec![parked_root(root_id, "/photos", "source")];
+
+        // One prefix with sources under it, one without: the door answers for
+        // both, so the second is parked rather than sourceless.
+        let resolution = resolve_recorded_scope(
+            &conn,
+            &["/photos/2011".to_string(), "/photos/2012".to_string()],
+            &roots,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolution
+                .parked()
+                .iter()
+                .map(|p| p.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/photos/2011", "/photos/2012"]
+        );
+        assert_eq!(resolution.parked()[0].root.root_path, "/photos");
+        assert!(
+            resolution.set_aside().is_empty(),
+            "the door is the cause, and it is the only one stated"
+        );
+        assert!(resolution.unrooted().is_empty());
+    }
+
+    /// The recorded-scope class, at the third door: a parked prefix never
+    /// becomes a `DecisionScope`, is never measured from, and is never
+    /// selected from — while the user's own line still comes back verbatim in
+    /// the write-back, because a rewrite is not a place to narrow someone's
+    /// file for them.
+    #[test]
+    fn a_parked_recorded_prefix_never_becomes_a_decision_scope() {
+        let conn = setup_test_db();
+        let parked = insert_root(&conn, "/photos", "source", true);
+        let live = insert_root(&conn, "/live", "source", false);
+        insert_source(&conn, parked, "2011/a.jpg", None);
+        insert_source(&conn, live, "2011/b.jpg", None);
+        let roots = vec![
+            parked_root(parked, "/photos", "source"),
+            make_test_root(live, "/live", "source"),
+        ];
+
+        let resolution = resolve_recorded_scope(
+            &conn,
+            &["/photos/2011".to_string(), "/live/2011".to_string()],
+            &roots,
+        )
+        .unwrap();
+
+        assert!(
+            resolution.scopes().iter().all(|s| s.root_id == live),
+            "a parked prefix is not a scope: {:?}",
+            resolution.scopes()
+        );
+        assert!(resolution
+            .measured_from()
+            .iter()
+            .all(|m| m.root_path() == "/live"));
+        assert_eq!(
+            resolution.selection(),
+            Some(vec!["/live/2011".to_string()]),
+            "and nothing selects from behind the door"
+        );
+        assert_eq!(resolution.recorded(), ["/photos/2011", "/live/2011"]);
     }
 
     // ========================================================================

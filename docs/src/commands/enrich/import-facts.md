@@ -71,3 +71,13 @@ Then re-run your processor with proper type hints.
 ## Archive Sources
 
 By default, importing facts for sources in archive roots is skipped. Use `--allow archived` to enable this (useful for backfilling metadata on already-archived files).
+
+## Suspended Roots
+
+A record naming a source on a [suspended root](../roots/roots.md) is set aside and counted in the summary:
+
+```
+Processed 240 lines: 238 facts imported, 0 skipped (stale), 0 skipped (reserved), 0 skipped (archived), 2 skipped (on suspended roots), 0 skipped (type mismatch), 0 objects created, 0 facts promoted
+```
+
+Nothing is written for those records, and the import is not stopped: one suspended root never breaks a batch. Unsuspend the root and re-run the import to fill them in.

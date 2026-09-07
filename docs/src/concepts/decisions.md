@@ -137,7 +137,7 @@ canon apply manifest.toml --reason "Italy 2016 — assembled from three drives"
 canon scan /mnt/old-laptop --reason "Deleted duplicate movies, originals confirmed in archive"
 ```
 
-`--reason` is available on: `exclude set`, `exclude clear`, `exclude duplicates`, `exclude set-object`, `apply`, `scan`, `roots rm`.
+`--reason` is available on: `exclude set`, `exclude clear`, `exclude duplicates`, `exclude set-object`, `apply`, `scan`, `roots rm`, `roots retire`, `roots suspend`, `roots unsuspend`.
 
 When not provided, no reason is stored and you are not prompted. When provided, the reason is written into both the decision record and the receipt's `[meta]`, so it travels with the durable artifact.
 

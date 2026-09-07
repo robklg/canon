@@ -47,16 +47,31 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   extraction row lacks a disposition (the moved count is unsupported; omitted, never guessed).
   Bytes are all-or-omitted.
 - **A review records no decision** (read-only; recording gates on effectful actions).
-  Ceremony-entry policy lives in ops (`validate_retire_target`): an archive-role target is
-  refused, and no shelf to bind to is a hard error — the book would have nowhere to stand. The
-  refusal states **which** absence it met (`LedgerRootOutcome`): with no archive root registered
-  the bookless removal stays `roots rm`; with every archive root **suspended** the shelf and its
+  Ceremony-entry policy lives in ops and is **two questions, not one**, because they hold at
+  different doors. What the subject *is* (`validate_retire_subject`) holds at every door: an
+  archive-role target is refused, since the archive is where books live. Whether there is a
+  shelf to bind to (`shelf_blocker`) is a precondition of the **act**, returned as a sentence
+  rather than an error so a reading can state it without being stopped by it. The statement
+  names **which** absence it met (`LedgerRootOutcome`): with no archive root registered the
+  bookless removal stays `roots rm`; with every archive root **suspended** the shelf and its
   books stand where they stood, so the way back is `canon roots unsuspend` and only that, and the
   destructive door is not offered
   (`validate_names_a_parked_archive_fleet_and_offers_only_unsuspend`). `plan_bind` speaks the
   same two causes as the backstop for a root parked between gate and bind, and the parked
-  sentence is spelled once for both doors (`ops::parked_shelf_refusal`). The *target* is the
-  other way round: suspended or unreachable, it retires on faith — surfaced, never refused.
+  sentence is spelled once for both doors (`ops::parked_shelf_refusal`).
+- **Retirement opens the door first, and the two permits split at `--dry-run`.** A parked
+  *target* is refused before any bind, by name and with the way back, and records nothing — the
+  ceremony is an act, and the door is exactly what protects what is behind it. **On a real run the subject's own
+  door is asked before the shelf's**, and before the review is printed: the user named *this*
+  root, so this root's door is the answer to what they asked and its way back is the one that
+  unblocks them — with both closed, hearing only about the archive answers a question nobody asked
+  (`retire_dry_run_reads_a_parked_root_and_a_real_run_refuses`). Under `--dry-run` neither is a
+  refusal and the order is the reading's: review, then the pause, then the shelf. The review is
+  **remembering**, so `--dry-run` reads at a parked root and closes with the verbless pause line
+  in place of the `To retire anyway:` hint, which is withheld because it names an act the door
+  turns away. The shelf's own absence is stated there too rather than raised: a rehearsal that
+  stops on the act's preconditions denies the one thing a rehearsal is for. Only the *unreachable*
+  root still retires on faith — surfaced, never refused; suspension is no longer coupled to it.
 
 ## The book
 

@@ -226,6 +226,24 @@ command's deliverable rather than a provenance side-channel.
   is where the books live.
 - An **archive root must be registered** — the book needs a shelf. Removing a root
   without binding its story remains available as [`canon roots rm`](roots.md).
-- A suspended or unreachable root **can** be retired — surfaced as retiring on faith:
-  the story is bound as last observed, and the drive-local ledger's absence is
-  recorded in the book as a gap.
+- An **unreachable** root can be retired — surfaced as retiring on faith: the story
+  is bound as last observed, and the drive-local ledger's absence is recorded in the
+  book as a gap.
+- A **suspended** root is not retired until you open its door again. Retirement is an
+  act, and the door is what protects what is behind it; `--dry-run` still reads the
+  review and closes by naming the door and the way back:
+
+  ```
+  /Volumes/Old suspended · canon roots unsuspend path:/Volumes/Old
+  ```
+
+  A real run refuses before anything is bound, and records nothing:
+
+  ```
+  /Volumes/Old suspended — refused: /Volumes/Old · canon roots unsuspend path:/Volumes/Old
+  ```
+
+  The same holds for the shelf: with every archive root suspended there is nowhere to
+  bind a book, so a real run refuses and names the archive to open. A `--dry-run`
+  reads the review and states that at the end instead — a rehearsal answers about the
+  root whether or not the shelf is in view.

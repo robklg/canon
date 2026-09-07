@@ -166,4 +166,54 @@ A path that *is* rewritten comes back in the byte-form the index stores as far a
 
 [`apply`](apply.md) does not read `meta.scope`, so it neither refuses on these nor repeats them. `cluster status` states them alongside its counts.
 
+### A manifest that reaches a suspended root
+
+A refresh refuses when the manifest's own `meta.scope` names a suspended root, whole, and touches
+neither file:
+
+```
+/path/to/photos suspended — refused: /path/to/photos · canon roots unsuspend path:/path/to/photos
+Refresh aborted — manifest.toml and its lock file are unchanged.
+```
+
+Refreshing part of it is not offered, and neither is refreshing a scope with one suspended line
+beside live ones: a scope is a declaration of what you are assembling, so a lock rebuilt from half
+of one would read as whole. Exit code 1, with no `Error:` prefix.
+[`canon roots unsuspend`](../roots/roots.md) is the way back.
+
+**Lock entries on a suspended root are not a refresh's business.** The lock is Canon's snapshot of
+where your files stood when the selection was last made; a refresh asks again, and what stands
+behind a closed door is simply not gathered — the new lock is written without it, silently, like
+any other act that ignores suspended content. They are refused where they would be *carried
+across*: at [`apply`](apply.md).
+
+`cluster status` states every door the manifest reaches, naming the act each one would turn away:
+
+```
+Lock: 1 entries
+/path/to/photos suspended — apply would refuse: origin of 1 source · canon roots unsuspend path:/path/to/photos
+```
+
+A suspended destination is stated the same way. A root the manifest reaches through its scope
+*and* its lock is named once, with both acts in the line
+(`cluster refresh and apply would refuse`).
+
+Each next step is withheld where its own act meets a door — an apply invitation by a suspended lock
+entry or destination, the lock rebuild by a suspended scope line. Where a rebuild is the act that
+brings the apply back within reach, the report offers it:
+
+```
+To rebuild the lock: canon cluster refresh manifest.toml
+```
+
+A suspended *destination* gets no step at all: no rebuild changes where the files are going, and
+the way back was stated with the door itself.
+
+What a rebuild would *find* is a different kind of question, and the report does not guess at it: a
+refresh re-queries the open world, so a lock standing entirely on suspended roots may come back
+holding content gathered since, or may match nothing and be removed. The report names the command;
+the refresh states its own outcome. A lock is what your query, your scope and the index add up to,
+so unsuspending and refreshing again rebuilds it from the same query and scope — over the world as
+it stands then, which is not always the world it described before.
+
 When the query matches nothing, the lock file is removed and `lock_hash` is emptied. The manifest is rewritten in full, with the Cluster Summary stating the zero match and the Notes section preserved as on any other refresh.

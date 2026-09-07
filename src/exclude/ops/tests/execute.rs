@@ -172,6 +172,7 @@ fn test_execute_set_objects_marks_excluded() {
         ],
         total_source_count: 2,
         total_archive_count: 0,
+        total_suspended_count: 0,
         skipped_no_hash: 0,
         skipped_empty: 0,
         skipped_already_excluded: 0,
@@ -198,6 +199,7 @@ fn test_execute_set_objects_returns_count() {
         }],
         total_source_count: 1,
         total_archive_count: 0,
+        total_suspended_count: 0,
         skipped_no_hash: 0,
         skipped_empty: 0,
         skipped_already_excluded: 0,
@@ -205,4 +207,47 @@ fn test_execute_set_objects_returns_count() {
 
     let result = execute_set_objects(&mut conn, &plan, &ReceiptDestination::none(), None).unwrap();
     assert_eq!(result.count, 1);
+}
+
+/// **The backstop for a door that closes while the prompt stands.** Planning
+/// never offers a parked source, so a plan cannot name one — but another
+/// process (or another terminal) can close a root between the plan and the
+/// execute. The re-check lives inside the transaction, so the refusal leaves
+/// the world exactly as it found it: nothing flipped, and the `started` row
+/// rolled back with it.
+#[test]
+fn an_exclude_execute_refuses_a_root_parked_since_the_plan() {
+    let mut conn = setup_test_db();
+    let root = insert_root(&conn, "/photos", "source", false);
+    let id1 = insert_source(&conn, root, "a.jpg", None);
+    let id2 = insert_source(&conn, root, "b.jpg", None);
+
+    let plan = ExcludeSetPlan {
+        items: vec![item(id1, "/photos", "a.jpg"), item(id2, "/photos", "b.jpg")],
+        root_count: 1,
+        not_archived_count: 2,
+    };
+
+    // The world moves between the plan and the execute.
+    conn.execute("UPDATE roots SET suspended = 1 WHERE id = ?", [root])
+        .unwrap();
+
+    let outcome = execute_set(&mut conn, &plan, &ReceiptDestination::none(), None);
+    let err = match outcome {
+        Ok(_) => panic!("a door closed since the plan must refuse"),
+        Err(e) => e,
+    };
+
+    // The one sentence, raised from inside an operation — the way back, and
+    // no `Error:` (the front door states it as it stands).
+    let said = err.to_string();
+    assert!(said.contains("/photos suspended — refused:"), "{said}");
+    assert!(
+        said.contains("canon roots unsuspend path:/photos"),
+        "{said}"
+    );
+
+    // And nothing was written.
+    assert!(!is_source_excluded(&conn, id1));
+    assert!(!is_source_excluded(&conn, id2));
 }

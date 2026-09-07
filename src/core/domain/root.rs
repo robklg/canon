@@ -197,6 +197,12 @@ pub enum DoorVerb {
     SetAside,
     /// An act: refused by name, nothing written.
     Refused,
+    /// A **report about acts it does not perform**: the door is stated in the
+    /// conditional, naming the act it would turn away. `cluster status` is
+    /// its one surface — it neither refuses nor narrows anything of its own,
+    /// and a reader whose next step has just been withheld is owed the act
+    /// that is blocked rather than the report's own disposition.
+    WouldRefuse(RefusedAct),
 }
 
 impl DoorVerb {
@@ -205,6 +211,51 @@ impl DoorVerb {
         match self {
             DoorVerb::SetAside => "set aside",
             DoorVerb::Refused => "refused",
+            DoorVerb::WouldRefuse(act) => act.label(),
+        }
+    }
+}
+
+/// Which act a report says a door would turn away — the payload of
+/// [`DoorVerb::WouldRefuse`].
+///
+/// A closed set, and deliberately: the acts a *record* can reach behind a door
+/// through are exactly the two that read a manifest, and a report naming a
+/// third would be naming one nobody derived. The union arm exists because one
+/// root can be reached by both — the manifest's scope names it and its lock
+/// draws from it — and one door still gets one line.
+///
+/// The command names are spelled here beside the way back's, which is the one
+/// place canon commands belong in the spine: a printed line and the command it
+/// names must not drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusedAct {
+    /// Only `apply` — the lock's origin end, or the destination.
+    Apply,
+    /// Only `cluster refresh` — the manifest's recorded scope.
+    Refresh,
+    /// Both, for a root the manifest reaches through its scope *and* its lock.
+    RefreshAndApply,
+}
+
+impl RefusedAct {
+    /// The conditional phrase that fills the verb slot.
+    pub fn label(self) -> &'static str {
+        match self {
+            RefusedAct::Apply => "apply would refuse",
+            RefusedAct::Refresh => "cluster refresh would refuse",
+            RefusedAct::RefreshAndApply => "cluster refresh and apply would refuse",
+        }
+    }
+
+    /// The act, or acts, a caller has found at one door. `None` where neither
+    /// is turned away, so a caller cannot state a door with nothing behind it.
+    pub fn of(refresh: bool, apply: bool) -> Option<Self> {
+        match (refresh, apply) {
+            (true, true) => Some(RefusedAct::RefreshAndApply),
+            (true, false) => Some(RefusedAct::Refresh),
+            (false, true) => Some(RefusedAct::Apply),
+            (false, false) => None,
         }
     }
 }

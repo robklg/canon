@@ -203,6 +203,10 @@ pub struct ExcludeSetObjectsPlan {
     pub total_source_count: usize,
     /// Total archive source count across all objects.
     pub total_archive_count: usize,
+    /// How many of those sources stand behind a closed door. Counted, never
+    /// filtered: the act is about the object everywhere and the stamp reaches
+    /// every sharer, so the honest thing is to say how far it reaches.
+    pub total_suspended_count: usize,
     /// Sources skipped because they have no hash.
     pub skipped_no_hash: usize,
     /// Empty files skipped (size = 0). Counts sources, not deduped objects —
@@ -228,6 +232,15 @@ pub struct ObjectPlanEntry {
 pub struct ObjectSourceInfo {
     pub path: String,
     pub is_archive: bool,
+    /// Whether this copy stands behind a door the user closed.
+    ///
+    /// Object exclusion is about the object **everywhere**, so a parked
+    /// sharer is stamped like any other — the stamp-set is the receipt-set,
+    /// and filtering one out would break that law. What is owed is the
+    /// statement: the ceremony counts how many of the sources this dismissal
+    /// reaches stand behind a closed door, so a user is never surprised by a
+    /// judgment landing somewhere they had shut.
+    pub is_suspended: bool,
 }
 
 /// Map a fetched source to object-source display info.
@@ -235,5 +248,6 @@ pub(super) fn object_source_info(s: &Source) -> ObjectSourceInfo {
     ObjectSourceInfo {
         path: s.path(),
         is_archive: s.is_from_role("archive"),
+        is_suspended: s.root_suspended,
     }
 }

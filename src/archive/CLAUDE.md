@@ -200,13 +200,85 @@ The dispositions differ by what each command is about to do, and none of them is
   `set_aside_scope` and lets the interface print them; `all_accounted_for()` is untouched, since its
   claim is about source files and is still true. Its **next-step hint** names the way forward
   *unless apply cannot run at all* — two states, and never an unresolvable scope line:
-  `lock_predates_measurement` gets the rebuild, and `pattern_unexpandable` gets **no step**, because
-  no one command supplies what a pattern is missing; the report states the reasons in their own
-  block instead, which is what makes the silence honest. Whether there is a step is never the
-  scope's business: a manifest with nothing pending, or with content missing, has no step to offer,
-  and sending either to a refresh clears the lock for nothing.
+  `lock_predates_measurement` gets the rebuild (narrowed again at the manifest door, below), and
+  `pattern_unexpandable` gets **no step**, because no one command supplies what a pattern is
+  missing; the report states the reasons in their own block instead, which is what makes the
+  silence honest. Whether there is a step is never the scope's business: a manifest with nothing
+  pending has no step to offer.
 
 The recorded-scope resolution itself, and its pins, live in `src/core/CLAUDE.md`.
+
+## The manifest door
+
+A manifest can reach behind a door the user closed in **three** ways, each belonging to a
+different act: its **recorded scope** can name a closed root (`ScopeResolution::parked`, the
+manifest door's own arm), its **lock** can hold entries whose sources stand on one, and its
+**destination** can be one. A manifest with no scope at all still holds entries gathered before a
+root was closed.
+
+**Which act meets which door turns on one distinction: a naming versus a record.** A recorded
+scope is a *naming* — a durable declaration of what collection is being assembled — so a line of
+it standing on a closed root refuses the act that reads it. A lock entry is a *record*: a snapshot
+of where a source stood when the selection was last made. A refresh is asking again, so it
+re-selects from the open world (which already leaves parked roots out) and rebuilds the lock
+without them — an act ignoring parked content, silently. The lock is refused where it would be
+**carried across**, which is `apply`.
+
+**One computation, two readers.** `ops::status::parked_lock_entries` answers "how many of this
+lock's entries stand behind each closed door", and `apply` and `cluster status` both read it — a
+report inviting an apply that apply itself turns away is exactly the drift this closes. It asks
+the **index**, never the entry's own recorded `root_id`: the door is a question about where a
+source stands now, and a lock is a snapshot of where it stood.
+
+- **`cluster refresh` refuses on its recorded scope and on nothing else**, before the selection and
+  before anything is written, stating that the manifest and its lock are unchanged. **Whole**,
+  including a parked line standing beside live ones: the argument door's set-aside does not
+  conjugate here, because an argument is a one-off invocation while a scope is a declaration, so a
+  lock rebuilt from half of one is a wrong artifact that reads as whole. The guard stays above the
+  selection; the census compares the lock's bytes across a refused refresh
+  (`a_refresh_through_a_parked_root_leaves_the_lock_standing`).
+- **`cluster status` states** every door it reaches **in the conditional, naming the act each one
+  turns away** (`apply would refuse`, `cluster refresh would refuse`). A report performs nothing,
+  so `set aside` and `refused` are both false of it, and a reader whose next step has just been
+  withheld needs the act that is blocked. A root reached more than one way is stated **once**, with
+  both acts in the verb and `<what>` by precedence place > destination > origin — the dedupe is
+  honest only because the verb carries what it drops (`cli/cluster.rs::manifest_door_lines`).
+- **A step is withheld exactly where that step's own act meets a door**, and **the two acts meet
+  different doors**: `apply` transfers from the lock's entries into the destination and reads no
+  recorded scope, while `cluster refresh` re-queries from that scope and is stopped by neither a
+  parked entry nor a parked destination. Two derivations, `apply_meets_a_door` and
+  `refresh_meets_a_door`, so the interface never re-tests the causes
+  (`a_step_is_withheld_exactly_where_its_own_act_meets_the_door`). One qualification: `apply` asks
+  its origin door on the entries `--root` left it, while the report asks over all of them, so a
+  *narrowed* apply can run where the report offered nothing.
+- **A next step is offered where it is the act that brings an apply within reach**; otherwise the
+  door's own way back is the step. Parked entries with an open scope and destination are that case
+  — a rebuild leaves them out and the apply runs. A parked destination is not, whatever else is
+  closed: no rebuild changes where the files are going, and printing one under a
+  parked-destination line reads as if a refresh addressed it. Narrower than the bullet above,
+  deliberately — **and it reaches only what the report knows, never what a query will match**. A
+  parked destination is a structural fact. What a rebuild would *select* is not: a refresh
+  re-queries the open world, so a lock standing wholly behind doors may rebuild into an applicable
+  one or into nothing, and a predicate over the lock answers the wrong way in both directions.
+  Where the answer needs the selection this report does not run, it names the act that runs and
+  lets the refresh state its own outcome
+  (`a_lock_wholly_behind_a_door_is_still_pointed_at_the_rebuild`). A lock is a pure function of the
+  query, the scope and the index, so a rebuild rebuilds from the same query and scope — over the
+  world as it stands then, which after a partial apply is not the world it described before.
+- **`apply` refuses at either end**, before the summary and the confirmation — the position rule,
+  which a check inside `plan_apply` would break, since planning runs *after* the prompt. Nothing is
+  written and no decision row is opened: the recorder starts inside the transfer op, which a
+  refused run never reaches. `--dry-run` and `--resume` inherit both gates by position.
+- **The `<what>` slot speaks one vocabulary across the three surfaces**, in two shapes: a **place**
+  (the path, `here`, `N paths`) or a **role** in the act (`destination`, `origin of N sources`). A
+  scope line is a place; the origin end and the destination are roles. Composed in `scope.rs`
+  (`place_reach`, `origin_reach`, `DESTINATION_REACH`), so refusal and report use the same words.
+- **A refresh through a parked *destination* is not refused**, and neither is an **apply** whose
+  recorded scope names a closed root while its entries stand elsewhere — the deliberate edges of
+  the rule above, and `cluster status` states every such door whatever it withholds.
+- **`cluster generate` reads no `parked()` register**, and needs none: its prefixes arrive from
+  `core::ops::scope::resolve_scope`, which refuses a wholly parked scope and sets a parked path
+  aside before this command is called, so the register is empty by construction.
 
 A **refresh writes `CURRENT_MANIFEST_VERSION`** rather than carrying the old number forward: it
 rewrites the whole document, so a v1 stamp on the v2 body it emits would be false.

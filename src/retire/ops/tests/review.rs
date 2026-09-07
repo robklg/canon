@@ -3,7 +3,7 @@ use crate::core::repo::db::open_in_memory_for_test;
 use crate::core::repo::insert_test_root;
 use crate::retire::domain::Readiness;
 use crate::retire::ops::review::compute_readiness;
-use crate::retire::ops::{find_retirement_covering_path, validate_retire_target};
+use crate::retire::ops::{find_retirement_covering_path, shelf_blocker, validate_retire_subject};
 
 use super::fixtures::{
     extraction_from, insert_bound_retirement, insert_decision, insert_object, insert_source,
@@ -135,14 +135,15 @@ fn find_retirement_marks_a_removed_archive_root() {
     assert_eq!(hit.book_display, "root #777 (removed)/retired/gone");
 }
 
-// validate_retire_target
+// The ceremony's entry policy: what a subject is, and whether there is a
+// shelf to bind to
 
 #[test]
 fn validate_refuses_an_archive_root() {
     let conn = open_in_memory_for_test();
     insert_test_root(&conn, "/archive", "archive", false);
     let roots = repo::root::fetch_all(&conn).unwrap();
-    let err = validate_retire_target(&roots, roots[0].id, &ledger_config()).unwrap_err();
+    let err = validate_retire_subject(&roots, roots[0].id).unwrap_err();
     assert!(err.to_string().contains("archive root is not retired"));
 }
 
@@ -151,9 +152,10 @@ fn validate_requires_an_archive_root_to_exist() {
     let conn = open_in_memory_for_test();
     let root_id = insert_test_root(&conn, "/source", "source", false);
     let roots = repo::root::fetch_all(&conn).unwrap();
-    let err = validate_retire_target(&roots, root_id, &ledger_config()).unwrap_err();
-    assert!(err.to_string().contains("needs an archive root"));
-    assert!(err.to_string().contains("canon roots rm"));
+    validate_retire_subject(&roots, root_id).expect("the subject itself is fine");
+    let blocker = shelf_blocker(&roots, &ledger_config()).expect("no shelf to bind to");
+    assert!(blocker.contains("needs an archive root"));
+    assert!(blocker.contains("canon roots rm"));
 }
 
 /// The parked arm names the cause it actually has, and offers the door that
@@ -165,9 +167,8 @@ fn validate_names_a_parked_archive_fleet_and_offers_only_unsuspend() {
     let root_id = insert_test_root(&conn, "/source", "source", false);
     insert_test_root(&conn, "/archive", "archive", true);
     let roots = repo::root::fetch_all(&conn).unwrap();
-    let err = validate_retire_target(&roots, root_id, &ledger_config())
-        .unwrap_err()
-        .to_string();
+    validate_retire_subject(&roots, root_id).expect("the subject itself is fine");
+    let err = shelf_blocker(&roots, &ledger_config()).expect("the shelf is behind a door");
     assert!(
         err.contains("every archive root is suspended (/archive)"),
         "{err}"
@@ -183,7 +184,8 @@ fn validate_passes_a_source_root_with_an_archive_registered() {
     let root_id = insert_test_root(&conn, "/source", "source", false);
     insert_test_root(&conn, "/archive", "archive", false);
     let roots = repo::root::fetch_all(&conn).unwrap();
-    validate_retire_target(&roots, root_id, &ledger_config()).unwrap();
+    validate_retire_subject(&roots, root_id).unwrap();
+    assert!(shelf_blocker(&roots, &ledger_config()).is_none());
 }
 
 // compute_readiness — the account, end to end

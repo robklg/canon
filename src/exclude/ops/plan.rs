@@ -289,12 +289,19 @@ pub fn plan_set_objects(
         role_policy: RolePolicy::SourceOnly,
     };
     let selection = select_sources(conn, &sel_params)?;
+    // **What this plan searches and what its act reaches are different sets.**
+    // The selection is source-side and passes over every closed door in
+    // silence, like any other act; the *act* reaches every sharer of a
+    // selected object, parked ones included, because the stamp-set is the
+    // receipt-set. That second fact is `total_suspended_count`, counted here
+    // and stated under the sources line it is a share of.
 
     if selection.sources.is_empty() {
         return Ok(ExcludeSetObjectsPlan {
             objects: vec![],
             total_source_count: 0,
             total_archive_count: 0,
+            total_suspended_count: 0,
             skipped_no_hash: 0,
             skipped_empty: 0,
             skipped_already_excluded: 0,
@@ -332,6 +339,7 @@ pub fn plan_set_objects(
             objects: vec![],
             total_source_count: 0,
             total_archive_count: 0,
+            total_suspended_count: 0,
             skipped_no_hash,
             skipped_empty,
             skipped_already_excluded: 0,
@@ -348,6 +356,7 @@ pub fn plan_set_objects(
     let mut objects: Vec<ObjectPlanEntry> = Vec::new();
     let mut total_source_count = 0;
     let mut total_archive_count = 0;
+    let mut total_suspended_count = 0;
     let mut skipped_already_excluded = 0;
 
     for &object_id in &object_ids_to_check {
@@ -381,6 +390,7 @@ pub fn plan_set_objects(
 
         let archive_count = sources.iter().filter(|s| s.is_archive).count();
         total_archive_count += archive_count;
+        total_suspended_count += sources.iter().filter(|s| s.is_suspended).count();
         total_source_count += sources.len();
 
         objects.push(ObjectPlanEntry {
@@ -395,6 +405,7 @@ pub fn plan_set_objects(
         objects,
         total_source_count,
         total_archive_count,
+        total_suspended_count,
         skipped_no_hash,
         skipped_empty,
         skipped_already_excluded,

@@ -6,6 +6,7 @@ use crate::ceremony;
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::format::{format_date, format_size, format_time_ago};
 use crate::core::domain::format_count;
+use crate::core::domain::root::{DoorVerb, Root};
 use crate::core::ops::receipt::LedgerRootOutcome;
 use crate::core::ops::scope::parse_root_spec_any;
 use crate::core::repo::{self, Db};
@@ -157,9 +158,38 @@ pub fn retire(
 ) -> Result<()> {
     let conn = db.conn();
     let roots = repo::root::fetch_all(conn)?;
-    // `_any`: a suspended root retires on faith — surfaced, never refused.
+    // `_any`: the review is **remembering**, and remembering reads behind a
+    // closed door. What the door governs is the ceremony, below.
     let root_id = parse_root_spec_any(&roots, spec)?;
-    super::ops::validate_retire_target(&roots, root_id, config)?;
+    let target_door = roots
+        .iter()
+        .find(|r| r.id == root_id)
+        .and_then(Root::parked);
+
+    // What the subject *is* holds at every door.
+    super::ops::validate_retire_subject(&roots, root_id)?;
+
+    if !dry_run {
+        // **Retirement opens the door on its subject first.** The ceremony is
+        // an act, and an act behind a closed door is refused by name with the
+        // way back — before any bind, and before the shelf is even asked
+        // about: the user named *this* root, so this root's door is the answer
+        // to what they asked, and its way back is the one that unblocks them.
+        // Asked ahead of `begin_ceremony`, so no decision row is opened.
+        // Retiring a parked root used to proceed on faith, binding a story
+        // about a place the user had deliberately set down.
+        if let Some(parked) = &target_door {
+            println!("{}", parked.door_line(DoorVerb::Refused, &parked.root_path));
+            std::process::exit(1);
+        }
+        // The shelf is the act's other precondition — a precondition of the
+        // act alone, which is why a reading states it at the end instead of
+        // stopping on it: a rehearsal that refuses on the act's preconditions
+        // denies the one thing a rehearsal is for.
+        if let Some(reason) = super::ops::shelf_blocker(&roots, config) {
+            anyhow::bail!("{reason}");
+        }
+    }
 
     let story = crate::core::ops::root_story::fetch_root_story(conn, root_id)?;
     let review = super::ops::readiness_lens(&story);
@@ -171,7 +201,10 @@ pub fn retire(
                 "NOT READY for retirement — {} sources are neither archived nor excluded.",
                 format_count(*unresolved)
             );
-            if !allow_unresolved {
+            // Withheld behind a door: the acknowledgment would not get the
+            // user through it, and a report must never name the one command
+            // that cannot run. What to do instead is the line below.
+            if !allow_unresolved && target_door.is_none() {
                 println!(
                     "To retire anyway: canon roots retire path:{} --allow unresolved",
                     review.root.path
@@ -187,8 +220,18 @@ pub fn retire(
     // The report exits 0 even on a NOT READY verdict; only a real run turns
     // that verdict into the non-zero exit below.
     if dry_run {
+        // A reading closes by stating what stands between it and a real
+        // retirement — the pause on its subject, in the verbless form
+        // remembering speaks, and whatever there is (or is not) to bind to.
+        if let Some(parked) = &target_door {
+            println!("{}", parked.pause_line());
+        }
+        if let Some(reason) = super::ops::shelf_blocker(&roots, config) {
+            println!("{reason}");
+        }
         return Ok(());
     }
+
     if review.readiness.blocks(allow_unresolved) {
         std::process::exit(1);
     }

@@ -90,6 +90,17 @@ canon exclude list-objects
 
 `exclude set-object` defaults to a dry-run; pass `--yes` to execute. See [Objects](../../concepts/object.md) for how content-level exclusion differs from path-level source exclusion.
 
+Object exclusion is about the content everywhere, so it reaches copies on [suspended roots](../roots/roots.md) too — and says how many, under the sources line that count is a share of:
+
+```
+Would exclude 2 objects affecting 5 sources (4 in source roots, 1 in archives):
+  of which 1 on suspended roots
+```
+
+The line prints whether you are previewing or running with `--yes`.
+
+Nothing else is said about suspended roots. Suspending is how you take content out of scope, so `exclude` — like every other act — passes over what stands behind a closed door without remarking on it. A run that finds nothing outside them says so plainly.
+
 **How exclusions affect other commands:**
 
 | Command | Default behavior | Override |

@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::archive::domain::LockEntry;
+use crate::core::domain::root::{ParkedRoot, Root};
 use crate::core::ops::scope::resolve_recorded_scope;
 use crate::core::repo::{self, Connection};
 use crate::expr::prefetch_pattern_facts;
@@ -37,6 +39,56 @@ pub enum EntryStatus {
     Pending,
     /// Not at the destination, and the source is gone.
     SourceLost,
+}
+
+/// The closed doors a lock reaches behind: how many of its entries stand on
+/// each root the user has closed.
+///
+/// **One computation, two readers.** `apply` refuses on it before its own
+/// summary, and `cluster status` states it in apply's conditional — what a
+/// lock reaches behind a door must be one fact at both, or a report invites an
+/// act that the act itself turns away. What each *does* about it is its permit
+/// class, not this function's.
+///
+/// **`cluster refresh` is deliberately not a reader.** A record is not a
+/// naming: the lock is a snapshot of where sources stood when the selection
+/// was last made, and a refresh is asking again, so it re-selects from the
+/// open world and simply does not gather what stands behind a door. The lock
+/// is refused where it would be *carried across* — at apply.
+///
+/// Asked of the **index**, never of the lock's own recorded `root_id`: the
+/// door is a question about where a source stands *now*, and a lock is a
+/// snapshot of where it stood when the selection was made. An entry with no
+/// *present* source behind it contributes nothing — gone from the index, or
+/// standing as a tombstone, there is no standing left to read either way.
+///
+/// Counts are ordered by root id, so the same lock states itself the same way
+/// on every run.
+pub fn parked_lock_entries(
+    conn: &Connection,
+    entries: &[LockEntry],
+    roots: &[Root],
+) -> Result<Vec<(ParkedRoot, usize)>> {
+    let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
+    let sources = repo::source::batch_fetch_by_ids(conn, &ids)?;
+
+    let mut counts: Vec<(ParkedRoot, usize)> = Vec::new();
+    for source in sources.values() {
+        match counts.iter_mut().find(|(r, _)| r.root_id == source.root_id) {
+            Some((_, n)) => *n += 1,
+            None => {
+                if let Some(parked) = roots
+                    .iter()
+                    .find(|r| r.id == source.root_id)
+                    .and_then(Root::parked)
+                {
+                    counts.push((parked, 1));
+                }
+            }
+        }
+    }
+    counts.sort_by_key(|(r, _)| r.root_id);
+    Ok(counts)
 }
 
 /// The one derivation of an entry's status from what was found on disk.
@@ -102,6 +154,17 @@ pub struct ManifestStatus {
     /// cannot confirm, rather than one it has never heard of. Reported for the
     /// same reason and on the same terms.
     pub set_aside_scope: Vec<String>,
+    /// Scope prefixes standing on a root the user closed — the manifest
+    /// door's third partition. Carried, never acted on: a report reports, and
+    /// `cluster status` is a **view**, which states the pause and refuses
+    /// nothing.
+    pub parked_scope: Vec<crate::core::domain::root::ParkedPath>,
+    /// How many lock entries stand behind each closed door.
+    pub parked_entries: Vec<(ParkedRoot, usize)>,
+    /// The destination's own door, when the archive root this manifest writes
+    /// into is one the user closed. Nothing would be written there until it is
+    /// opened, so the report says so rather than inviting an apply.
+    pub parked_destination: Option<ParkedRoot>,
     /// Whether the lock file predates the recorded measurement, and so is
     /// refused by `apply` outright, whatever the pattern says.
     pub lock_predates_measurement: bool,
@@ -133,6 +196,45 @@ impl ManifestStatus {
     /// Are all source files accounted for (either at source or at destination)?
     pub fn all_accounted_for(&self) -> bool {
         self.source_lost == 0 && self.size_mismatch == 0
+    }
+
+    /// Would `apply` be refused at a door, as this manifest stands?
+    ///
+    /// **The two ends it actually has**: it transfers *from* the lock's
+    /// entries and *into* the destination, and it meets a door at each. The
+    /// recorded scope is neither end — `apply` selects nothing and carries out
+    /// a lock already built, reading its scope from the lock's header rather
+    /// than from `meta.scope`, so a scope line naming a closed root does not
+    /// stop it. A manifest whose scope spans two roots with entries on only
+    /// one is the shape that shows it: park the other, and the apply runs.
+    pub fn apply_meets_a_door(&self) -> bool {
+        !self.parked_entries.is_empty() || self.parked_destination.is_some()
+    }
+
+    /// Would `cluster refresh` be refused at a door, as this manifest stands?
+    ///
+    /// **Its one, which is neither of apply's.** A refresh re-queries from the
+    /// recorded scope and rewrites the manifest and its lock — files that live
+    /// where the user put them, never inside the archive root — so a parked
+    /// **scope line** closes it, and neither a parked lock entry nor a parked
+    /// destination does. A lock entry is a record, not a naming: the rebuild
+    /// re-selects from the open world and leaves parked content out of the new
+    /// lock, which is what an act ignoring parked content looks like here.
+    ///
+    /// The two predicates now share no cause at all, which is the whole point
+    /// of having two: a suggestion consults **its own act's** precondition. The
+    /// rule they serve is that a report must name no command that would be
+    /// turned away, and each half of *that* has been the defect once. Its
+    /// converse does not hold: a command that would run is named only where it
+    /// brings the withheld act within reach, which is `write_next_step`'s to
+    /// state and not this predicate's.
+    ///
+    /// **The door is not the only thing that turns a refresh away**, and this
+    /// answers for the door alone: a recorded scope that kept nothing refuses
+    /// too, by the boundary policy's terminal rule, and a report naming the
+    /// rebuild does not consult that. Known, and not closed here.
+    pub fn refresh_meets_a_door(&self) -> bool {
+        !self.parked_scope.is_empty()
     }
 }
 
@@ -322,6 +424,9 @@ pub fn compute_manifest_status(
         source_still_present,
         unrooted_scope: scope.unrooted().to_vec(),
         set_aside_scope: scope.set_aside().to_vec(),
+        parked_scope: scope.parked().to_vec(),
+        parked_entries: parked_lock_entries(conn, &lock_entries, &roots)?,
+        parked_destination: archive_root.parked(),
         lock_predates_measurement,
         pattern_unexpandable,
         expansion_failures,
@@ -618,5 +723,76 @@ mod tests {
 
         let tampered = compute_manifest_status(&mut conn, &manifest).unwrap();
         assert!(!tampered.lock_hash_valid);
+    }
+
+    // =========================================================================
+    // The doors a lock reaches behind
+    // =========================================================================
+
+    /// A lock entry standing on a closed root is found, counted per root, and
+    /// the root is named — which is what both surfaces reading this need:
+    /// status to state it in apply's conditional, apply to refuse before it
+    /// asks the user to proceed. A refresh reads none of it.
+    fn entry(id: i64, root_id: i64) -> LockEntry {
+        LockEntry {
+            id,
+            root_id,
+            path: format!("/photos/{id}.jpg"),
+            device: 1,
+            inode: id,
+            size: 10,
+            mtime: 0,
+            partial_hash: "ph".to_string(),
+            object_id: None,
+            hash_type: None,
+            hash_value: None,
+            scope_rel_path: None,
+        }
+    }
+
+    #[test]
+    fn parked_lock_entries_counts_one_line_per_door() {
+        let conn = setup_test_db();
+        let parked = insert_root(&conn, "/photos", "source", true);
+        let live = insert_root(&conn, "/live", "source", false);
+        let a = crate::core::testing::insert_source(&conn, parked, "a.jpg", None);
+        let b = crate::core::testing::insert_source(&conn, parked, "b.jpg", None);
+        let c = crate::core::testing::insert_source(&conn, live, "c.jpg", None);
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+
+        let doors = parked_lock_entries(
+            &conn,
+            &[entry(a, parked), entry(b, parked), entry(c, live)],
+            &roots,
+        )
+        .unwrap();
+
+        assert_eq!(doors.len(), 1, "one door: {doors:?}");
+        assert_eq!(doors[0].0.root_path, "/photos");
+        assert_eq!(doors[0].1, 2);
+    }
+
+    /// Asked of the **index**, not of the lock's own recorded root: a lock is
+    /// a snapshot of where a source stood when the selection was made, and the
+    /// door is a question about where it stands now. An entry whose source has
+    /// left the index has no standing left to read and contributes nothing.
+    #[test]
+    fn parked_lock_entries_reads_the_index_rather_than_the_lock() {
+        let conn = setup_test_db();
+        let parked = insert_root(&conn, "/photos", "source", true);
+        let live = insert_root(&conn, "/live", "source", false);
+        let moved = crate::core::testing::insert_source(&conn, parked, "a.jpg", None);
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+
+        // The lock says this entry stood on the live root; the index says it
+        // stands behind a door now.
+        let doors = parked_lock_entries(&conn, &[entry(moved, live)], &roots).unwrap();
+        assert_eq!(doors.len(), 1);
+        assert_eq!(doors[0].0.root_path, "/photos");
+
+        // And an entry the index no longer knows says nothing either way.
+        assert!(parked_lock_entries(&conn, &[entry(9999, parked)], &roots)
+            .unwrap()
+            .is_empty());
     }
 }

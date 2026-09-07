@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::ceremony;
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
+use crate::core::domain::format_count;
 use crate::core::domain::path::validate_paths_in_roots;
 use crate::core::domain::root::find_containing_root;
 use crate::core::domain::scope::DecisionScope;
@@ -713,6 +714,7 @@ pub fn set_objects_by_filter(
             total_in_source_roots,
             plan.total_archive_count
         );
+        print_suspended_share(plan.total_suspended_count);
         for entry in &plan.objects {
             let archive_count = entry.sources.iter().filter(|s| s.is_archive).count();
             let src_count = entry.sources.len() - archive_count;
@@ -760,6 +762,7 @@ pub fn set_objects_by_filter(
     let destination = resolve_placement(conn, config, &decision)?;
     let result = execute_set_objects(conn, &plan, &destination, Some(&decision))?;
     println!("{}", result.summary);
+    print_suspended_share(plan.total_suspended_count);
     print_warnings(&result.warnings);
     Ok(())
 }
@@ -770,6 +773,7 @@ fn print_source_locations(sources: &[ObjectSourceInfo], verbose: bool) {
     let source_count = sources.len() - archive_count;
 
     println!("  Sources: {source_count} in source roots, {archive_count} in archive roots");
+    print_suspended_share(sources.iter().filter(|s| s.is_suspended).count());
 
     // Show paths (limited unless verbose)
     const DEFAULT_LIMIT: usize = 3;
@@ -790,6 +794,31 @@ fn print_source_locations(sources: &[ObjectSourceInfo], verbose: bool) {
             "    ... and {} more (use --verbose to show all)",
             sources.len() - show_count
         );
+    }
+}
+
+/// How much of what this dismissal reaches stands behind a closed door.
+///
+/// **Counted, never filtered.** An object exclusion is about the object
+/// everywhere, and the stamp reaches every source sharing it — stamp-set is
+/// receipt-set, so dropping a parked sharer would break that law and leave the
+/// receipt claiming rows the stamp never touched. What is owed instead is the
+/// statement — a fact about what the act does, which is the one thing a count
+/// behind a door is owed for.
+///
+/// **Directly under the sources line it qualifies**, on whichever path the run
+/// takes: the preview's `Would exclude … affecting N sources`, or the summary
+/// the executing path prints. It is a share of that number and reads as one
+/// only beside it; stated before either, it was a figure with nothing to be a
+/// share of.
+///
+/// Suppressed at zero, like every other count here — a line saying "0 on
+/// suspended roots" is furniture on the commonest run there is. No way back is
+/// offered: nothing is being refused, and unsuspending would not change what
+/// this act does.
+fn print_suspended_share(count: usize) {
+    if count > 0 {
+        println!("  of which {} on suspended roots", format_count(count));
     }
 }
 

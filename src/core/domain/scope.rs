@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use super::path::normalization_candidates;
-use super::root::{find_containing_root, Root};
+use super::root::{find_containing_root, ParkedPath, ParkedRoot, Root};
 
 /// Domain concept: what kind of scope match do we want?
 ///
@@ -220,6 +220,17 @@ pub enum PrefixOutcome {
     /// and nothing to select, so it is stated and set aside — never obeyed
     /// silently, never dropped.
     SetAside(DecisionScope),
+    /// Rooted on a root whose door the user closed. The manifest door's
+    /// projection of the closed door, carrying the same [`ParkedRoot`] payload
+    /// the other two doors carry.
+    ///
+    /// **Asked before confirmation, never after** — the same precedence the
+    /// argument door's partition holds (root membership > the door > source
+    /// existence). A parked prefix with no sources is *parked*: the closed
+    /// door is why it has nothing to say, and "no sources known" at a place
+    /// the user shut is a second, false cause. It also means the index is
+    /// never asked about a closed root's remainder at all.
+    Parked(DecisionScope, ParkedRoot),
     /// Matches no known root at all, verbatim as the manifest wrote it.
     Unrooted(String),
 }
@@ -261,6 +272,11 @@ pub struct ScopeResolution {
     /// In the manifest's own order, first occurrence only — likewise read back
     /// to a user against their own file.
     unrooted: Vec<String>,
+    /// The prefixes standing on a root the user closed, in the manifest's own
+    /// order. A register of its own rather than a second kind of set-aside:
+    /// the two causes take different sentences and different dispositions, and
+    /// collapsing them would speak a false cause about one of them.
+    parked: Vec<ParkedPath>,
     /// Every recorded prefix in the manifest's own order: healed as far as it
     /// could be, verbatim past that. What a rewrite writes back.
     recorded: Vec<String>,
@@ -282,6 +298,7 @@ impl ScopeResolution {
         let mut resolved: Vec<DecisionScope> = Vec::new();
         let mut set_aside: Vec<String> = Vec::new();
         let mut unrooted: Vec<String> = Vec::new();
+        let mut parked: Vec<ParkedPath> = Vec::new();
         let mut recorded: Vec<String> = Vec::with_capacity(outcomes.len());
         let mut measured_from: Vec<DirectoryLocation> = Vec::new();
 
@@ -314,6 +331,20 @@ impl ScopeResolution {
                         set_aside.push(display);
                     }
                 }
+                PrefixOutcome::Parked(scope, root) => {
+                    // Healed in the root half and verbatim past it, exactly as
+                    // a set-aside is: the root portion matched, the remainder
+                    // was never asked about, and a refresh writes the user's
+                    // own line back rather than narrowing it on their behalf.
+                    let display = scope.display_path();
+                    recorded.push(display.clone());
+                    if !parked.iter().any(|p| p.path == display) {
+                        parked.push(ParkedPath {
+                            path: display,
+                            root,
+                        });
+                    }
+                }
                 PrefixOutcome::Unrooted(prefix) => {
                     if !unrooted.contains(&prefix) {
                         unrooted.push(prefix.clone());
@@ -330,6 +361,7 @@ impl ScopeResolution {
             resolved,
             set_aside,
             unrooted,
+            parked,
             recorded,
             measured_from,
         }
@@ -373,6 +405,21 @@ impl ScopeResolution {
     /// The prefixes that match no known root, in the manifest's own order.
     pub fn unrooted(&self) -> &[String] {
         &self.unrooted
+    }
+
+    /// The prefixes standing behind a closed door, in the manifest's own
+    /// order — the third door's projection of the one fact.
+    ///
+    /// Absent from [`scopes`](Self::scopes) and
+    /// [`measured_from`](Self::measured_from) like every other unconfirmed
+    /// register, so a parked line is never selected from, never measured from
+    /// and never becomes a `DecisionScope`; present in
+    /// [`recorded`](Self::recorded), because a rewrite writes the user's own
+    /// file back. What to *do* about a closed door is the consumer's permit
+    /// class, not this type's: `cluster refresh` refuses on it, `cluster
+    /// status` states it.
+    pub fn parked(&self) -> &[ParkedPath] {
+        &self.parked
     }
 
     /// Every recorded prefix, healed as far as it could be and verbatim past

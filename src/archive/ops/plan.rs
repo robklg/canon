@@ -139,8 +139,6 @@ pub struct ApplyViolations {
     pub archive_conflicts_other: Vec<(String, String)>,
     /// Sources marked as excluded since manifest generation: (id, path).
     pub excluded_sources: Vec<(i64, String)>,
-    /// Sources from suspended roots: (id, path).
-    pub suspended_sources: Vec<(i64, String)>,
     /// Destination paths that resolve outside the archive root: (source_path, resolved_dest).
     pub escaped_paths: Vec<(String, String)>,
     /// Source files that are missing (stat failed, not found).
@@ -517,12 +515,13 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
                     .push((transfer.source_id, transfer.source_path.clone()));
             }
 
-            // Suspended check
-            if !db_source.is_active() {
-                violations
-                    .suspended_sources
-                    .push((transfer.source_id, transfer.source_path.clone()));
-            }
+            // The door is **not** asked here. It is asked before the summary
+            // and the confirmation, in `cli/apply.rs`, through the one
+            // computation `cluster refresh` and `cluster status` also read
+            // (`ops::status::parked_lock_entries`) — a run refused at a door
+            // must be refused before it asks the user to proceed, and a second
+            // spelling here could disagree with the two surfaces that report
+            // the same fact.
 
             // DB-based staleness check (compare lock entry vs current DB state)
             let mut mismatches = Vec::new();
@@ -1547,42 +1546,6 @@ mod tests {
 
         assert_eq!(plan.violations.excluded_sources.len(), 1);
         assert_eq!(plan.violations.excluded_sources[0].0, src_id);
-    }
-
-    #[test]
-    fn test_plan_apply_detects_suspended() {
-        let mut conn = setup_test_db();
-        let root_id = insert_root(&conn, "/photos", "source", true); // suspended
-        let archive_id = insert_root(&conn, "/archive", "archive", false);
-        let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(
-            &conn,
-            root_id,
-            "photo.jpg",
-            Some(obj_id),
-            1000,
-            1704067200,
-        );
-
-        let entry = make_lock_entry(
-            src_id,
-            root_id,
-            "/photos/photo.jpg",
-            Some(obj_id),
-            Some("hash1"),
-        );
-        let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
-        let mut root_paths = HashMap::new();
-        root_paths.insert(root_id, "/photos".to_string());
-        root_paths.insert(archive_id, "/archive".to_string());
-
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
-        let plan = plan_apply(&mut conn, &params).unwrap();
-
-        assert_eq!(plan.violations.suspended_sources.len(), 1);
-        assert_eq!(plan.violations.suspended_sources[0].0, src_id);
     }
 
     // =========================================================================

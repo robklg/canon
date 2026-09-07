@@ -7,12 +7,13 @@ use crate::archive::domain::{
     extract_notes, parse_manifest_allow, parse_manifest_config, LockEntry,
 };
 use crate::archive::ops::execute::{self, TransferMode};
-use crate::archive::ops::{manifest, pattern, plan};
+use crate::archive::ops::{manifest, pattern, plan, status};
 use crate::ceremony;
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
+use crate::core::domain::root::{DoorVerb, ParkedRoot};
 use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
@@ -181,6 +182,22 @@ pub fn run(
             archive_root.role
         );
     }
+
+    // The destination's own door, asked here — before the summary, before the
+    // confirmation, and before the plan. An act behind a closed door is
+    // refused by name, and the refusal must precede the ceremony rather than
+    // follow it: a run that asks "Proceed?" about a transfer it is going to
+    // refuse has already told the user the wrong thing. Nothing is written and
+    // no decision row is opened, the recorder starting inside the transfer op
+    // that this never reaches — the same standing every pre-transfer refusal
+    // here leaves. Exit 1 with no `Error:` prefix: nothing went wrong.
+    if let Some(parked) = archive_root.parked() {
+        eprintln!(
+            "{}",
+            parked.door_line(DoorVerb::Refused, crate::scope::DESTINATION_REACH)
+        );
+        std::process::exit(1);
+    }
     let archive_root_path = &archive_root.path;
 
     // Construct full base_dir from archive root + relative subdir
@@ -193,6 +210,32 @@ pub fn run(
     // Filter sources by root if specified
     let filtered_sources = plan::filter_by_roots(&sources, &options.roots, &roots)?;
     let skipped_by_filter = sources.len() - filtered_sources.len();
+
+    // The origin end's door, asked of what this run would actually carry —
+    // and asked *here*, beside the destination's, so both precede the summary
+    // and the confirmation. Through the same computation `cluster status`
+    // states in this act's own conditional, because what a lock reaches behind
+    // a door is one fact and the report must not invite a run this refuses.
+    // Sources are re-read from the index rather than trusted from the lock:
+    // the door is a question about where a source stands now, and a lock is a
+    // record of where it stood — which is why a *refresh* reads none of this
+    // and simply rebuilds without them.
+    let owned: Vec<LockEntry> = filtered_sources.iter().map(|e| (*e).clone()).collect();
+    let parked_origins = status::parked_lock_entries(conn, &owned, &roots)?;
+    if !parked_origins.is_empty() {
+        let total: usize = parked_origins.iter().map(|(_, n)| n).sum();
+        let doors: Vec<(ParkedRoot, DoorVerb, String)> = parked_origins
+            .into_iter()
+            .map(|(root, n)| (root, DoorVerb::Refused, crate::scope::origin_reach(n)))
+            .collect();
+        for line in crate::scope::closed_door_reaches(
+            &doors,
+            (DoorVerb::Refused, &crate::scope::origin_reach(total)),
+        ) {
+            eprintln!("{line}");
+        }
+        std::process::exit(1);
+    }
 
     // Show summary and confirm (unless --yes)
     let sample_dests = if !options.yes {
@@ -507,21 +550,6 @@ pub fn run(
         }
         eprintln!("\nExcluded sources cannot be applied. Regenerate the manifest after clearing exclusions.");
         bail!("Aborting due to excluded sources in manifest");
-    }
-
-    if !v.suspended_sources.is_empty() {
-        eprintln!(
-            "Error: {} sources in manifest are from suspended roots:",
-            v.suspended_sources.len()
-        );
-        for (id, path) in &v.suspended_sources {
-            eprintln!("  {path} (id: {id})");
-        }
-        eprintln!("\nSources from suspended roots cannot be applied.");
-        eprintln!(
-            "Use 'canon roots unsuspend' to reactivate the root, or regenerate the manifest."
-        );
-        bail!("Aborting due to sources from suspended roots");
     }
 
     // A source that changed since the manifest was generated invalidates the

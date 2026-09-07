@@ -95,6 +95,88 @@ impl Fixture {
         self.run_in(self.dir.path(), args)
     }
 
+    /// The one surface that takes its subjects on stdin rather than as
+    /// arguments — `import-facts`, whose door is per record.
+    fn run_with_stdin(&self, args: &[&str], input: &str) -> Run {
+        use std::io::Write as _;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_canon"))
+            .args(args)
+            .current_dir(self.dir.path())
+            .env("CANON_HOME", self.path("home"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("canon must run");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().expect("canon must finish");
+        Run {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            code: out.status.code().unwrap_or(-1),
+        }
+    }
+
+    /// A manifest and its lock, generated from `live` into `arc` while every
+    /// door is still open — the state the manifest door's rows start from.
+    fn manifest(&self) -> PathBuf {
+        let manifest = self.path("m.toml");
+        self.run(&[
+            "cluster",
+            "generate",
+            &self.path_str("live"),
+            "--dest",
+            &format!("{}/out", self.path_str("arc")),
+            "--where",
+            "source.ext = 'jpg'",
+            "--output",
+            &manifest.to_string_lossy(),
+        ])
+        .ok();
+        manifest
+    }
+
+    /// A manifest with **no recorded scope** — generated globally, so the only
+    /// way it can reach behind a door is through its lock's own entries.
+    fn global_manifest(&self) -> PathBuf {
+        let manifest = self.path("g.toml");
+        self.run(&[
+            "cluster",
+            "generate",
+            "--global",
+            "--dest",
+            &format!("{}/out", self.path_str("arc")),
+            "--where",
+            "source.ext = 'jpg'",
+            "--allow",
+            "archived,duplicates",
+            "--output",
+            &manifest.to_string_lossy(),
+        ])
+        .ok();
+        manifest
+    }
+
+    /// The id the index gave a source, for the record-shaped surfaces that
+    /// name one.
+    fn source_id(&self, rel: &str) -> i64 {
+        let run = self.run(&["worklist", "--global"]);
+        run.ok();
+        let needle = self.path_str(rel);
+        for line in run.stdout.lines() {
+            let v: serde_json::Value = serde_json::from_str(line).expect("jsonl");
+            if v["path"].as_str() == Some(needle.as_str()) {
+                return v["source_id"].as_i64().expect("source_id");
+            }
+        }
+        panic!("no source at {needle} in the worklist");
+    }
+
     fn run_in(&self, cwd: &Path, args: &[&str]) -> Run {
         let out: Output = Command::new(env!("CARGO_BIN_EXE_canon"))
             .args(args)
@@ -763,5 +845,693 @@ fn a_machine_survey_states_its_set_asides_even_when_nothing_matched() {
             .contains(&format!("{root} suspended — set aside:")),
         "an empty result is not a reason to go silent: {:?}",
         run.stderr
+    );
+}
+
+// ===========================================================================
+// S3 — the manifest door, and the acts reached through a record
+// ===========================================================================
+
+/// **A refresh through a closed door leaves the lock exactly where it was.**
+///
+/// This was the epic's one destructive silence: a manifest whose root had been
+/// parked refreshed to "No sources matched the query" and *removed its lock
+/// file* — the work of building the selection lost, with a false cause printed
+/// over it. The lock's bytes are compared before and after, which is what
+/// fails if the guard ever moves below the selection.
+#[test]
+fn a_refresh_through_a_parked_root_leaves_the_lock_standing() {
+    let fx = Fixture::new();
+    let manifest = fx.manifest();
+    let lock = manifest.with_extension("lock");
+    let before = std::fs::read(&lock).expect("the lock exists before");
+    let manifest_before = std::fs::read(&manifest).unwrap();
+    fx.park("live");
+    let root = fx.path_str("live");
+
+    let run = fx.run(&["cluster", "refresh", &manifest.to_string_lossy()]);
+
+    assert_eq!(run.code, 1, "a door refuses: {}{}", run.stdout, run.stderr);
+    let spoken = format!("{}{}", run.stdout, run.stderr);
+    assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "refused");
+    assert!(!spoken.contains("Error:"), "{spoken}");
+    assert!(
+        !spoken.contains("No sources matched"),
+        "never the false cause: {spoken}"
+    );
+    assert!(
+        spoken.contains("unchanged"),
+        "the refusal says what it left alone: {spoken}"
+    );
+    assert_eq!(
+        before,
+        std::fs::read(&lock).unwrap(),
+        "the lock is byte-identical"
+    );
+    assert_eq!(manifest_before, std::fs::read(&manifest).unwrap());
+}
+
+/// **The scope refuses on its own, with every lock entry standing in the
+/// open.** A manifest scoped across two roots whose entries all come from one
+/// of them: park the *other*, and nothing the lock holds is behind a door —
+/// only the declaration is. The refusal still fires, once, and the lock is
+/// untouched.
+///
+/// This is the shape that separates the two causes, which no fixture where the
+/// scope and the entries share a root can. Its mirror is
+/// `an_apply_invitation_stands_where_the_door_is_not_its_own`, where the same
+/// world lets the apply through.
+#[test]
+fn a_parked_scope_line_refuses_a_refresh_whose_entries_stand_in_the_open() {
+    let fx = Fixture::new();
+    let manifest = fx.path("two-roots.toml");
+    // Only `live` holds a file named d.jpg, so every lock entry stands there
+    // and `src` — named in the scope — contributes none.
+    fx.run(&[
+        "cluster",
+        "generate",
+        &fx.path_str("src"),
+        &fx.path_str("live"),
+        "--dest",
+        &format!("{}/out", fx.path_str("arc")),
+        "--where",
+        "filename = 'd.jpg'",
+        "--output",
+        &manifest.to_string_lossy(),
+    ])
+    .ok();
+    let lock = manifest.with_extension("lock");
+    let before = std::fs::read(&lock).expect("the lock exists before");
+    fx.park("src");
+    let root = fx.path_str("src");
+
+    let run = fx.run(&["cluster", "refresh", &manifest.to_string_lossy()]);
+
+    assert_eq!(run.code, 1, "{}{}", run.stdout, run.stderr);
+    let spoken = format!("{}{}", run.stdout, run.stderr);
+    let doors: Vec<&str> = spoken
+        .lines()
+        .filter(|l| l.contains(&format!("{root} suspended")))
+        .collect();
+    assert_eq!(doors.len(), 1, "one door, one line: {spoken}");
+    assert_door_line(doors[0], &root, "refused");
+    // Not decorative: `parked_doors` composes place reaches only, so this
+    // fails the day a lock cause is wired back into the refresh's door —
+    // which is the defect the repair removed.
+    assert!(
+        !spoken.contains("lock entr") && !spoken.contains("origin of"),
+        "nothing in the lock is behind this door: {spoken}"
+    );
+    assert_eq!(before, std::fs::read(&lock).unwrap(), "the lock stands");
+}
+
+/// **A status behind a door states it, and points at no act that door turns
+/// away.** Here both ends are exercised one at a time, and each is a door
+/// `apply` meets — so the invitation is withheld and the way back, stated with
+/// the door itself, is what is left. Which steps a door withholds is the
+/// separate question `a_status_withholds_only_the_steps_its_own_door_turns_away`
+/// asks; this row asks that the door is *stated*, once per root, at each end.
+#[test]
+fn a_status_behind_a_door_states_it_and_names_no_apply() {
+    let fx = Fixture::new();
+    let manifest = fx.manifest();
+
+    // The origin end.
+    fx.park("live");
+    let source_root = fx.path_str("live");
+    let run = fx.run(&["cluster", "status", &manifest.to_string_lossy()]);
+    run.ok();
+    assert!(
+        run.stdout.contains(&format!("{source_root} suspended")),
+        "the entries' door is stated: {}",
+        run.stdout
+    );
+    assert_eq!(
+        run.stdout
+            .lines()
+            .filter(|l| l.contains(&format!("{source_root} suspended")))
+            .count(),
+        1,
+        "one door, one line — this manifest reaches it through its scope and \
+         its lock alike: {}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("1 pending"),
+        "the fixture must have something to invite an apply for — every status \
+         prints the word `pending`, so the count is what makes this a guard: {}",
+        run.stdout
+    );
+    assert!(!run.stdout.contains("To apply:"), "{}", run.stdout);
+    assert!(!run.stdout.contains("canon apply"), "{}", run.stdout);
+
+    // And the destination end, on its own.
+    fx.run(&["roots", "unsuspend", &format!("path:{source_root}")])
+        .ok();
+    fx.park("arc");
+    let dest_root = fx.path_str("arc");
+    let run = fx.run(&["cluster", "status", &manifest.to_string_lossy()]);
+    run.ok();
+    assert!(
+        run.stdout.contains(&format!("{dest_root} suspended")),
+        "{}",
+        run.stdout
+    );
+    assert!(!run.stdout.contains("To apply:"), "{}", run.stdout);
+}
+
+/// **A lock entry behind a door is `apply`'s to refuse, and a refresh simply
+/// rebuilds without it.**
+///
+/// A record is not a naming. The lock is Canon's snapshot of where sources
+/// stood when the selection was last made; a refresh is asking again, and the
+/// open world it asks about no longer holds the parked root. So the rebuild
+/// leaves those entries out and refuses nothing — while `apply`, which would
+/// carry them across, still refuses, and the report says so in apply's own
+/// conditional and points at the rebuild that clears them.
+///
+/// Refusing the refresh here would leave a user with a lock they can neither
+/// apply nor rebuild, and no way forward but to unsuspend a root they closed
+/// on purpose.
+#[test]
+fn a_refresh_rebuilds_a_lock_without_what_stands_behind_a_door() {
+    let fx = Fixture::new();
+    let manifest = fx.global_manifest();
+    let lock = manifest.with_extension("lock");
+    let before = std::fs::read_to_string(&lock).expect("the lock exists before");
+    assert!(
+        before.contains("/c.jpg"),
+        "the fixture's lock must hold an entry on the root about to be parked: {before}"
+    );
+    fx.park("src");
+    let root = fx.path_str("src");
+
+    // The report: apply's door, in apply's conditional, with the rebuild
+    // offered as the act that clears it.
+    let status = fx.run(&["cluster", "status", &manifest.to_string_lossy()]);
+    status.ok();
+    let door = status
+        .stdout
+        .lines()
+        .find(|l| l.contains("suspended"))
+        .unwrap_or_default();
+    assert_door_line(door, &root, "apply would refuse");
+    assert!(door.contains("origin of"), "what stands behind it: {door}");
+    assert!(!status.stdout.contains("To apply:"), "{}", status.stdout);
+    assert!(
+        status
+            .stdout
+            .contains("To rebuild the lock: canon cluster refresh"),
+        "the act that brings the apply within reach is the step: {}",
+        status.stdout
+    );
+
+    // And the rebuild runs, leaving the parked root's content out of the new
+    // lock — the act ignoring parked content, silently.
+    let refresh = fx.run(&["cluster", "refresh", &manifest.to_string_lossy()]);
+    refresh.ok();
+    let spoken = format!("{}{}", refresh.stdout, refresh.stderr);
+    assert!(
+        !spoken.contains("suspended"),
+        "a lock entry is no door of the refresh's: {spoken}"
+    );
+    let after = std::fs::read_to_string(&lock).expect("the lock still exists");
+    assert!(
+        !after.contains(&root),
+        "the parked root's entries are not in the new lock: {after}"
+    );
+    assert!(
+        after.contains("d.jpg"),
+        "and the open world's still are: {after}"
+    );
+}
+
+/// **A lock standing wholly behind doors is still pointed at the rebuild** —
+/// because what a rebuild would find is a question about the open world, not
+/// about the lock.
+///
+/// Here every entry in the lock stands on the parked root, and the open world
+/// has gained a file the manifest's query matches. The report cannot know that
+/// without running the selection it does not run, so it names the act that
+/// runs; the rebuild then finds the new content and the apply becomes
+/// available. A predicate over the lock — "every entry is parked, so the
+/// rebuild would empty it" — withholds exactly here, and is what this row
+/// refuses.
+///
+/// The other direction of that same guess is worse: it invites a rebuild that
+/// empties a partly-applied lock, whose entries have left the source root for
+/// the archive and so count as neither parked nor present. Both are why the
+/// narrowing reaches only structural facts.
+#[test]
+fn a_lock_wholly_behind_a_door_is_still_pointed_at_the_rebuild() {
+    let fx = Fixture::new();
+    let manifest = fx.path("d.toml");
+    // Scoped nowhere, matching one file, which stands on `live`.
+    fx.run(&[
+        "cluster",
+        "generate",
+        "--global",
+        "--dest",
+        &format!("{}/out", fx.path_str("arc")),
+        "--where",
+        "filename = 'd.jpg'",
+        "--output",
+        &manifest.to_string_lossy(),
+    ])
+    .ok();
+    fx.park("live");
+
+    // The open world gains a match the lock has never seen.
+    write(fx.path("src/d.jpg"), "delta");
+    fx.run(&["scan", &fx.path_str("src")]).ok();
+
+    let status = fx.run(&["cluster", "status", &manifest.to_string_lossy()]);
+    status.ok();
+    assert!(
+        status
+            .stdout
+            .lines()
+            .any(|l| l.contains("suspended") && l.contains("apply would refuse")),
+        "the door is stated: {}",
+        status.stdout
+    );
+    assert!(
+        status
+            .stdout
+            .contains("To rebuild the lock: canon cluster refresh"),
+        "and the act that runs is named: {}",
+        status.stdout
+    );
+
+    // Which was the right thing to name: the rebuild finds the open world's
+    // copy, and the apply the report withheld becomes available.
+    fx.run(&["cluster", "refresh", &manifest.to_string_lossy()])
+        .ok();
+    let after = fx.run(&["cluster", "status", &manifest.to_string_lossy()]);
+    after.ok();
+    assert!(
+        after.stdout.contains("To apply: canon apply"),
+        "the rebuild brought the apply within reach: {}",
+        after.stdout
+    );
+    assert!(
+        !after.stdout.contains("suspended"),
+        "and nothing stands behind a door any more: {}",
+        after.stdout
+    );
+}
+
+/// **Apply refuses at either end, `--dry-run` included, and writes nothing.**
+/// The destination end was silent before this story: a rehearsal printed
+/// sample destinations inside a parked archive, and a real run would have
+/// written files and a receipt there.
+#[test]
+fn apply_refuses_at_either_end_of_a_closed_door() {
+    let fx = Fixture::new();
+    let manifest = fx.manifest();
+
+    for (park, expect_root) in [("arc", "arc"), ("live", "live")] {
+        fx.park(park);
+        let root = fx.path_str(expect_root);
+        let manifest_arg = manifest.to_string_lossy().into_owned();
+        for extra in [vec![], vec!["--dry-run"], vec!["--resume"]] {
+            let mut argv = vec!["apply", manifest_arg.as_str(), "--yes"];
+            argv.extend(extra.iter().copied());
+            let run = fx.run(&argv);
+            assert_eq!(run.code, 1, "{argv:?}: {}{}", run.stdout, run.stderr);
+            let spoken = format!("{}{}", run.stdout, run.stderr);
+            let door = spoken
+                .lines()
+                .find(|l| l.contains("suspended"))
+                .unwrap_or_default();
+            assert_door_line(door, &root, "refused");
+            // The `<what>` slot's role vocabulary: how the act reached the
+            // root, in the act's own nouns — the destination, or the origin
+            // and the sources this run would have carried from it.
+            let reach = if expect_root == "arc" {
+                "destination"
+            } else {
+                "origin of"
+            };
+            assert!(door.contains(reach), "{argv:?}: {door}");
+            assert!(!spoken.contains("Error:"), "{argv:?}: {spoken}");
+            assert!(
+                !spoken.contains("regenerate the manifest"),
+                "a way back that does not run: {spoken}"
+            );
+        }
+        fx.run(&["roots", "unsuspend", &format!("path:{root}")])
+            .ok();
+    }
+
+    assert!(
+        !fx.path("arc/out").exists(),
+        "nothing was written into the archive"
+    );
+    // Read from the machine stream, and by the recorded **command**: the
+    // human timeline's own column carries the transition word (`archived`),
+    // never the command, so a text scan for "apply" there passes whether or
+    // not a row was written — a guard that cannot fail against the defect it
+    // names. The doors were opened and closed in between, so the whole trail
+    // cannot be compared before and after either.
+    let trail = fx.run(&["trail", "--global", "--jsonl"]);
+    trail.ok();
+    let commands: Vec<String> = trail
+        .stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v["command"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        commands.iter().any(|c| c == "cluster_generate"),
+        "the fixture must have rows to look through: {commands:?}"
+    );
+    assert!(
+        !commands.iter().any(|c| c == "apply"),
+        "a refused apply leaves no decision row behind: {commands:?}"
+    );
+}
+
+/// **A record naming a parked source is set aside and counted** — a batch
+/// surface takes the closed default per record, so one parked root never
+/// breaks an import, and the fact is never written behind the door.
+#[test]
+fn an_import_record_behind_a_door_is_counted_not_written() {
+    let fx = Fixture::new();
+    let behind = fx.source_id("src/a.jpg");
+    let keeper = fx.source_id("live/d.jpg");
+    fx.park("src");
+
+    let input = format!(
+        "{{\"source_id\":{behind},\"basis_rev\":0,\"facts\":{{\"Make\":\"Canon\"}}}}\n\
+         {{\"source_id\":{keeper},\"basis_rev\":0,\"facts\":{{\"Make\":\"Canon\"}}}}\n"
+    );
+    let run = fx.run_with_stdin(&["import-facts"], &input);
+    run.ok();
+
+    let spoken = format!("{}{}", run.stdout, run.stderr);
+    assert!(
+        spoken.contains("1 skipped (on suspended roots)"),
+        "counted, and stated: {spoken}"
+    );
+    assert!(
+        spoken.contains("1 facts imported"),
+        "the batch ran on: {spoken}"
+    );
+
+    // And nothing was written behind the door.
+    let facts = fx.run(&["facts", &fx.path_str("live"), "--key", "content.Make"]);
+    facts.ok();
+    assert!(facts.stdout.contains("Canon"), "{}", facts.stdout);
+}
+
+/// **Object exclusion counts its parked sharers rather than filtering them,
+/// on both of its paths.**
+///
+/// The act is about the object everywhere and the stamp reaches every source
+/// sharing it — stamp-set is receipt-set — so what is owed is the statement:
+/// a fact about what this act *does*, which is the one thing a count behind a
+/// door is owed for. It stands under the sources line it qualifies, on the
+/// preview and on the executing path alike, because a `--yes` user is the one
+/// who most needs it and a preview they skipped is no place to keep it.
+///
+/// What the run *searched* is not stated: an act ignores parked content
+/// silently, and a wide dismissal whose own statement is already true owes no
+/// standing footer about the rooms it never entered.
+#[test]
+fn object_exclusion_states_how_far_behind_a_door_it_reaches() {
+    let fx = Fixture::new();
+    fx.park("src");
+    let root = fx.path_str("src");
+
+    // The preview path. `a.jpg` stands in all three roots; `live` is where the
+    // ask is made.
+    let run = fx.run(&[
+        "exclude",
+        "set-object",
+        &fx.path_str("live"),
+        "--where",
+        "source.ext = 'jpg'",
+    ]);
+    run.ok();
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    let share = lines
+        .iter()
+        .position(|l| l.contains("of which 1 on suspended roots"))
+        .unwrap_or_else(|| panic!("the reach is counted: {}", run.stdout));
+    assert!(
+        lines[share.saturating_sub(1)].contains("sources"),
+        "and it stands under the sources line it is a share of: {}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains(&root),
+        "what it did not search is not a footer: {}",
+        run.stdout
+    );
+
+    // And the executing path, where the act really happens.
+    let executed = fx.run(&[
+        "exclude",
+        "set-object",
+        "--global",
+        "--where",
+        // The live copy of content that also stands behind the door: selected
+        // from an open root, and its object shared with a parked source.
+        "filename = 'a-copy.jpg'",
+        "--yes",
+    ]);
+    executed.ok();
+    assert!(
+        executed.stdout.contains("of which 1 on suspended roots"),
+        "the count is owed where the act happens: {}",
+        executed.stdout
+    );
+    assert!(
+        executed.stdout.contains("Excluded"),
+        "and the act proceeded, as an act about content everywhere must: {}",
+        executed.stdout
+    );
+}
+
+/// **Retirement opens the door first — and the review still reads.** The
+/// ceremony is an act and meets the closed default; the review is remembering,
+/// so `--dry-run` renders it and closes by naming the door instead of the
+/// acknowledgment hint, which would name a run the door turns away.
+#[test]
+fn retire_dry_run_reads_a_parked_root_and_a_real_run_refuses() {
+    let fx = Fixture::new();
+    fx.park("src");
+    let root = fx.path_str("src");
+    let before = fx.run(&["trail", "--global"]).stdout;
+
+    let review = fx.run(&["roots", "retire", &format!("path:{root}"), "--dry-run"]);
+    review.ok();
+    assert!(
+        review.stdout.contains("Retirement review:"),
+        "remembering reads: {}",
+        review.stdout
+    );
+    assert!(
+        review.stdout.contains(&format!(
+            "{root} suspended · canon roots unsuspend path:{root}"
+        )),
+        "and closes with the pause, in the verbless form: {}",
+        review.stdout
+    );
+    assert!(
+        !review.stdout.contains("To retire anyway:"),
+        "the hint names an act the door turns away: {}",
+        review.stdout
+    );
+
+    let real = fx.run(&["roots", "retire", &format!("path:{root}"), "--yes"]);
+    assert_eq!(real.code, 1);
+    let spoken = format!("{}{}", real.stdout, real.stderr);
+    // **The subject's own door answers first**, ahead of the review and ahead
+    // of the shelf's: the user named this root, so this root's door is the
+    // answer to what they asked, and its way back is the one that unblocks
+    // them. Asserted on the *first* line, which is what distinguishes the
+    // ordering — a door stated last would pass a "somewhere in the output"
+    // check under either arrangement.
+    assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "refused");
+    assert!(
+        !spoken.contains("Retirement review:"),
+        "a refused act shows no review: {spoken}"
+    );
+    assert!(!spoken.contains("Error:"), "{spoken}");
+    assert!(
+        !fx.path("arc/retired").exists(),
+        "nothing was bound: the door precedes the bind"
+    );
+    assert_eq!(
+        before,
+        fx.run(&["trail", "--global"]).stdout,
+        "and no decision row was opened"
+    );
+
+    // And with the shelf closed too, the subject's door is still the one that
+    // speaks: the other root's way back would not unblock what was asked.
+    fx.park("arc");
+    let both = fx.run(&["roots", "retire", &format!("path:{root}"), "--yes"]);
+    assert_eq!(both.code, 1);
+    let spoken = format!("{}{}", both.stdout, both.stderr);
+    assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "refused");
+    assert!(
+        !spoken.contains("needs an archive root"),
+        "the shelf's absence is not the answer to a question about this root: {spoken}"
+    );
+}
+
+/// **Closing a door is a recorded act, and takes a reason like any other.**
+/// The registry gives "why did I park this" a home in the act of parking, and
+/// the trail is where it answers.
+#[test]
+fn suspending_a_root_records_its_reason() {
+    let fx = Fixture::new();
+    let root = fx.path_str("src");
+
+    let run = fx.run(&[
+        "roots",
+        "suspend",
+        &format!("path:{root}"),
+        "--reason",
+        "steering the sweep; revisit after the phone import",
+    ]);
+    run.ok();
+
+    let trail = fx.run(&["trail", "--global"]);
+    trail.ok();
+    assert!(
+        trail.stdout.contains("steering the sweep"),
+        "the trail answers why: {}",
+        trail.stdout
+    );
+
+    let opened = fx.run(&[
+        "roots",
+        "unsuspend",
+        &format!("path:{root}"),
+        "--reason",
+        "back to work on it",
+    ]);
+    opened.ok();
+    let trail = fx.run(&["trail", "--global"]);
+    trail.ok();
+    assert!(
+        trail.stdout.contains("back to work on it"),
+        "{}",
+        trail.stdout
+    );
+}
+
+/// **A refresh remedy is withheld where a refresh would refuse, and nowhere
+/// else.**
+///
+/// A report must name no command the door turns away. `cluster refresh`
+/// re-queries from the manifest's recorded **scope** and rewrites files that
+/// live where the user put them, so a parked **scope line** turns it away and
+/// a parked destination does not — and neither does a parked lock entry, which
+/// the rebuild simply leaves out. The manifest here is scoped to the root that
+/// gets parked, which is what makes this the refusing case. The remedy under
+/// the source-lost warning is a refresh, so it follows that split, and it is
+/// one sentence across two lines: withheld, the lead goes with it rather than
+/// trailing off mid-thought.
+///
+/// A lost source is what raises this remedy, and it also makes the report
+/// account for nothing — so no apply invitation arises here either way. That
+/// half of the rule is `an_apply_invitation_stands_where_the_door_is_not_its_own`
+/// below, which is the state where it can actually be asked.
+#[test]
+fn a_status_withholds_only_the_steps_its_own_door_turns_away() {
+    for (park, remedy_expected) in [("arc", true), ("live", false)] {
+        let fx = Fixture::new();
+        let manifest = fx.manifest();
+        // A lost source is what raises the remedy at all.
+        std::fs::remove_file(fx.path("live/a-copy.jpg")).unwrap();
+        std::fs::remove_file(fx.path("live/d.jpg")).unwrap();
+        fx.park(park);
+
+        let run = fx.run(&["cluster", "status", &manifest.to_string_lossy()]);
+        run.ok();
+        assert!(
+            run.stdout.contains("source files are missing"),
+            "{park}: the fixture must reach the warning: {}",
+            run.stdout
+        );
+        assert_eq!(
+            run.stdout
+                .contains("refresh the manifest: canon cluster refresh"),
+            remedy_expected,
+            "{park}: the remedy follows its own act, not any door: {}",
+            run.stdout
+        );
+        // Whichever way it went, the sentence is whole: the lead never stands
+        // without the remedy it introduces.
+        assert!(
+            !run.stdout.contains("If files are truly lost,\n\n")
+                && !run.stdout.trim_end().ends_with("If files are truly lost,"),
+            "{park}: a sentence was cut in half: {}",
+            run.stdout
+        );
+    }
+}
+
+/// **An apply invitation stands where the closed door is not apply's own.**
+///
+/// `apply` carries out a lock: it transfers from the lock's entries into the
+/// destination, and reads no recorded scope. So a manifest scoped across two
+/// roots whose entries all stand on one of them applies perfectly well when
+/// the *other* is closed — the door is stated, and the invitation stands.
+/// Withholding it there would keep the working command from the user who needs
+/// it, which is the same fault as naming one that refuses.
+#[test]
+fn an_apply_invitation_stands_where_the_door_is_not_its_own() {
+    let fx = Fixture::new();
+    let manifest = fx.path("two-roots.toml");
+    // Scoped across both source roots; only `live` holds a file named d.jpg,
+    // so every lock entry stands there and `src` contributes none.
+    fx.run(&[
+        "cluster",
+        "generate",
+        &fx.path_str("src"),
+        &fx.path_str("live"),
+        "--dest",
+        &format!("{}/out", fx.path_str("arc")),
+        "--where",
+        "filename = 'd.jpg'",
+        "--output",
+        &manifest.to_string_lossy(),
+    ])
+    .ok();
+    fx.park("src");
+    let parked = fx.path_str("src");
+
+    let run = fx.run(&["cluster", "status", &manifest.to_string_lossy()]);
+    run.ok();
+
+    // The door is stated — seeing is owed whatever the step turns out to be.
+    let door = run
+        .stdout
+        .lines()
+        .find(|l| l.contains("suspended"))
+        .unwrap_or_default();
+    // Status states the door in the act's own conditional: this one is
+    // `cluster refresh`'s, whose re-query reads the recorded scope.
+    assert_door_line(door, &parked, "cluster refresh would refuse");
+
+    // And the step stands, because this door is not one an apply meets.
+    assert!(
+        run.stdout.contains("To apply: canon apply"),
+        "the invitation is owed here: {}",
+        run.stdout
+    );
+
+    // Which is true: the apply runs.
+    let applied = fx.run(&["apply", &manifest.to_string_lossy(), "--yes"]);
+    applied.ok();
+    assert!(
+        fx.path("arc/out").exists(),
+        "the report invited an act that works"
     );
 }

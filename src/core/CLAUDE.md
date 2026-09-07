@@ -49,7 +49,11 @@ path matching and scope resolution are testable with known inputs.
 from a suspended `Root`, via `Root::parked`, so a live root cannot be spoken of as parked),
 `ParkedPath`, the permit class `DoorVerb`, and the sentence itself —
 `ParkedRoot::door_line(verb, what)`, `<root> suspended — <verb>: <what> · <way back>`, with
-`pause_line` for the verbless form a remembering view states. **The sentence is composed here
+`pause_line` for the verbless form a remembering view states. `DoorVerb`'s third arm,
+`WouldRefuse(RefusedAct)`, is for a **report about acts it does not perform**: it names the act
+the door turns away, in the conditional, because `set aside` and `refused` are both false of a
+report and a withheld next step owes its reader the act that is blocked. Reach is `cluster
+status`. **The sentence is composed here
 rather than in the interface because its consumers are not all in one layer**: an operation
 cannot print, and three refusals raised from operations must speak the same sentence a command
 prints, or the second spelling drifts. Grouping, capping and the channel stay in `src/scope.rs`,
@@ -244,9 +248,12 @@ door — `Closed` is unreachable from it by construction, and `tests/architectur
 `the_door_types_are_consumed_by_name` refuses a `_` arm, so each consumer names the permit
 class it is declaring. Two sibling doors project the same fact from their own inputs:
 `RootLookup` at the root-spec door (`Found` / `Parked`; a genuinely unknown root stays `Err`),
-and `resolve_recorded_scope`'s own arm when it lands. **Precedence in the partition**: root
-membership (the harder failure) > the door > source existence — a parked path is stated as
-parked whether or not it has sources, because the closed door is *why* it has nothing to say.
+and `PrefixOutcome::Parked` at the manifest door, which `resolve_recorded_scope` emits and
+`ScopeResolution::parked()` carries. All three carry the same `ParkedRoot` payload rather than
+each re-deriving one, which is what lets a consumer state a door without a second lookup.
+**Precedence in the partition**: root membership (the harder failure) > the door > source
+existence — a parked path is stated as parked whether or not it has sources, because the closed
+door is *why* it has nothing to say.
 `ClosedDoor::read_here` is the one conversion a **remembering** consumer makes; the pause it
 carries (`ResolvedScope::pause`) and the set-aside register beside it (`parked`) are opposite
 dispositions of one fact and must not be merged. **Where it does not apply**: a directory
@@ -265,7 +272,9 @@ acts, refused by the closed default rather than by load-bearing-ness. Two roads,
 is why the verb is not a parameter. The parked partition is the policy's **third
 cause**, carried on `ResolvedScope::parked` beside the sourceless `set_aside`: same position,
 same channels, same terminal rule, and the same "never becomes a `DecisionScope`" pin
-(`a_parked_path_never_becomes_a_decision_scope`). **The gate sits on `resolve_scope`'s explicit-path arm
+(`a_parked_path_never_becomes_a_decision_scope`) — a claim about **what resolution produces**, and
+not about every row in the table: a scope settled into a manifest's lock while its root was open
+stays what that act was scoped to, and a root closed afterwards does not rewrite it. **The gate sits on `resolve_scope`'s explicit-path arm
 alone** — `--global` yields nothing to gate, and the CWD-defaulting arm hands the current
 directory over ungated, because defaulting to CWD is a context switch rather than a claim
 about content. A consumer that reads "came from `resolve_scope`" as "met the gate" is wrong on
@@ -307,10 +316,17 @@ That pin says nothing about a *sourceless* path, where the two doors legitimatel
 argument door aborts on a lone one and sets aside among several, the manifest door always sets
 aside — and widening it to cover that would assert an equality that is false by design.
 **Order is not interchangeable**: a prefix whose root portion is written in the other form must
-match its root before its remainder can be asked about at all.
+match its root before its remainder can be asked about at all. The **door** is asked between
+those two stages, never after: a prefix on a closed root comes back `Parked` whether or not the
+index knows sources under it, which is the argument door's own precedence (root membership >
+the door > source existence) at the second door, and which is why a closed root's remainder is
+never asked about at all (`a_parked_recorded_prefix_is_parked_not_set_aside`). What each
+command does about a parked prefix is its permit class: `cluster refresh` refuses on it,
+`cluster status` states it, and — like the argument door's own parked register — it never
+becomes a `DecisionScope`.
 
-The type is **infallible on purpose** and stays so: it classifies into five registers —
-`scopes()` / `set_aside()` / `unrooted()` / `recorded()` / `measured_from()`, with
+The type is **infallible on purpose** and stays so: it classifies into six registers —
+`scopes()` / `set_aside()` / `unrooted()` / `parked()` / `recorded()` / `measured_from()`, with
 `selection()` a *reading* of the first — and never fails, because every failure mode is a
 caller's own disposition.
 `resolve_recorded_scope`'s `Result` carries *infrastructure* failure (a SQL error) and nothing
@@ -322,8 +338,8 @@ so a resolution assembled without the index would be a second, weaker answer to 
 question this type exists to answer once.
 
 **What `scopes()` excludes is the behavioural half of the law.** A confirmed prefix reaches the
-vantage, the lock header, the decision record **and the selection**; a set-aside or unrooted
-one reaches none of them. The selection belongs in that list rather than beside it:
+vantage, the lock header, the decision record **and the selection**; a set-aside, unrooted or
+parked one reaches none of them. The selection belongs in that list rather than beside it:
 `selection()` is the same register, spelled as absolute paths, because a run that selects from
 a line it has told the user measures nothing gathers content it must then refuse one file at a
 time. An unrooted prefix can be an *ancestor* of a known root — `path_is_under` matches it
@@ -340,9 +356,9 @@ must never look like a narrowing) is raised by `cluster refresh` through the sam
 `no_sources_known` sentence the argument door uses.
 
 **`measured_from()` is the register the vantage folds**, and the one place the grain is read.
-Every confirmed prefix contributes exactly one `DirectoryLocation`; a set-aside or unrooted one
-contributes nothing, the same absence that keeps it out of `scopes()`. A **directory** scope
-contributes itself; an **item** scope contributes the directory containing it, which is what
+Every confirmed prefix contributes exactly one `DirectoryLocation`; a set-aside, unrooted or
+parked one contributes nothing, the same absence that keeps it out of `scopes()`. A
+**directory** scope contributes itself; an **item** scope contributes the directory containing it, which is what
 *the deepest directory containing every scope* already says about a file rather than a second
 rule. `containing_location` defaults an absent parent to the root, so a root-level item and a
 root itself both land on the root. Neither sorted nor deduplicated: it feeds a fold where order

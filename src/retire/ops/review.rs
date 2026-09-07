@@ -53,11 +53,9 @@ pub struct ReadinessReview {
     pub snapshot_max_decision_id: Option<i64>,
 }
 
-/// Ceremony-entry policy: what may be retired at all. An archive root is
-/// refused — the archive is where books live, not what gets retired. And
-/// with no archive root registered the book has no shelf: a bookless
-/// retirement is `roots rm`, which remains available.
-pub fn validate_retire_target(roots: &[Root], root_id: i64, config: &LedgerConfig) -> Result<()> {
+/// What a retirement subject must be, whatever is being asked of it: a known
+/// root, and not an archive one.
+pub fn validate_retire_subject(roots: &[Root], root_id: i64) -> Result<()> {
     let root = roots
         .iter()
         .find(|r| r.id == root_id)
@@ -68,14 +66,26 @@ pub fn validate_retire_target(roots: &[Root], root_id: i64, config: &LedgerConfi
             root.path
         );
     }
+    Ok(())
+}
+
+/// Why there is nowhere to bind a book, if there is nowhere — the act's own
+/// precondition, as a sentence rather than an error, so a reading can state
+/// what a run would meet without being stopped by it.
+///
+/// `None` when a shelf stands. The two absences are different worlds and say
+/// so: with no archive root at all the bookless removal is still open, while
+/// a shelf merely behind a closed door needs only opening — and its way back
+/// is `canon roots unsuspend` and only that.
+pub fn shelf_blocker(roots: &[Root], config: &LedgerConfig) -> Option<String> {
     let outcome = crate::core::ops::receipt::resolve_ledger_root(roots, config);
     match &outcome {
-        LedgerRootOutcome::Found { .. } => Ok(()),
-        LedgerRootOutcome::NoArchiveRoot => bail!(
-            "Retirement needs an archive root to hold the record — no archive root is registered. To remove the root without binding its story: canon roots rm"
+        LedgerRootOutcome::Found { .. } => None,
+        LedgerRootOutcome::NoArchiveRoot => Some(
+            "Retirement needs an archive root to hold the record — no archive root is registered. To remove the root without binding its story: canon roots rm".to_string()
         ),
         LedgerRootOutcome::AllArchiveRootsSuspended { roots } => {
-            bail!("{}", super::parked_shelf_refusal(&outcome, roots))
+            Some(super::parked_shelf_refusal(&outcome, roots))
         }
     }
 }

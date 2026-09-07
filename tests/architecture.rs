@@ -1505,13 +1505,19 @@ fn positional_probes(text: &str) -> usize {
 /// The door types: a permit class is a decision, and a `_` arm is that
 /// decision going unmade.
 ///
-/// `Door` and `RootLookup` are the two answers the boundary and the root-spec
-/// door give about a place the user closed. Each consumer's arm *is* its
-/// declared permit — a view sets aside, a remembering view reads, an act
-/// refuses — so a wildcard is not a shorthand here: it is a surface silently
-/// picking whatever the other arm happened to be, which is how a closed door
-/// came to read as "all roots" at seven commands at once.
-const DOOR_TYPES: &[&str] = &["Door", "RootLookup"];
+/// `Door`, `RootLookup` and `PrefixOutcome` are the three answers the
+/// boundary, the root-spec door and the manifest door give about a place the
+/// user closed. Each consumer's arm *is* its declared permit — a view sets
+/// aside, a remembering view reads, an act refuses — so a wildcard is not a
+/// shorthand here: it is a surface silently picking whatever the other arm
+/// happened to be, which is how a closed door came to read as "all roots" at
+/// seven commands at once.
+///
+/// `PrefixOutcome` joins them because its own catch-all costs a lock file: a
+/// `_` arm folding `Parked` in with `Confirmed` selects from behind the door,
+/// and one folding it in with `SetAside` refuses a manifest with the wrong
+/// cause and then deletes the lock it was refusing to touch.
+const DOOR_TYPES: &[&str] = &["Door", "RootLookup", "PrefixOutcome"];
 
 /// How many `match` blocks in `text` name a door type in one arm and carry a
 /// wildcard arm beside it.
@@ -1524,8 +1530,8 @@ const DOOR_TYPES: &[&str] = &["Door", "RootLookup"];
 /// the first line at or left of its own indentation that closes a brace; only
 /// arms at exactly one indent step in are read, so a nested match on some
 /// other type cannot lend its catch-all to this one. An arm "names a door
-/// type" when the pattern left of its `=>` spells `Door::` or `RootLookup::`,
-/// however it is qualified. A **catch-all** is `_`, `_ if …`, or a bare
+/// type" when the pattern left of its `=>` spells one of [`DOOR_TYPES`]
+/// followed by `::`, however it is qualified. A **catch-all** is `_`, `_ if …`, or a bare
 /// lowercase binding (`other => …`) — the two spellings of the same silent
 /// decision.
 ///
@@ -2286,6 +2292,22 @@ fn f(lookup: RootLookup) -> i64 {
     match lookup {
         RootLookup::Found(id) => id,
         other => fallback(other),
+    }
+}
+";
+        assert_eq!(wildcard_arms_on_door_types(text), 1);
+    }
+
+    /// The manifest door's own type, planted the same way — the row that
+    /// fails if `PrefixOutcome` is dropped from the table, since a type named
+    /// nowhere on it is simply not scanned for.
+    #[test]
+    fn a_planted_wildcard_on_the_manifest_door_is_seen() {
+        let text = "\
+fn f(outcome: PrefixOutcome) -> usize {
+    match outcome {
+        PrefixOutcome::Confirmed(scope, _) => scope.len(),
+        _ => 0,
     }
 }
 ";

@@ -751,3 +751,34 @@ fn test_plan_set_objects_source_sort_order() {
     assert!(!sources[0].is_archive, "Source root should come first");
     assert!(sources[1].is_archive, "Archive root should come second");
 }
+
+// =========================================================================
+// The closed door: counted, never filtered
+// =========================================================================
+
+/// Object exclusion is about the object **everywhere**, so a sharer standing
+/// behind a closed door is stamped like any other — the stamp-set is the
+/// receipt-set, and filtering one out would break that law. What is owed is
+/// the count, so the ceremony can say how far the dismissal reaches.
+#[test]
+fn object_exclusion_counts_parked_sharers_without_filtering_them() {
+    let mut conn = setup_test_db();
+    let live = insert_root(&conn, "/live", "source", false);
+    let parked = insert_root(&conn, "/photos", "source", true);
+    let obj = insert_object(&conn, "shared_across_doors", false);
+    insert_source(&conn, live, "copy.jpg", Some(obj));
+    insert_source(&conn, parked, "copy.jpg", Some(obj));
+
+    let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+
+    assert_eq!(plan.objects.len(), 1);
+    assert_eq!(
+        plan.total_source_count, 2,
+        "the parked sharer is still in the stamp-set"
+    );
+    assert_eq!(plan.total_suspended_count, 1);
+    assert!(
+        plan.objects[0].sources.iter().any(|s| s.is_suspended),
+        "and it is marked, so the ceremony can count it"
+    );
+}

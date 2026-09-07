@@ -25,6 +25,14 @@ edge, not a barrel item.
 dispatch, display" is a property every cli file has, not a bond between these two. Their
 entry points are `run` and `import_run`, because one barrel cannot carry two `run`s.
 
+**The import takes the closed default per record, not per run.** A record naming a source behind
+a door the user closed is set aside and counted (`ImportStats.skipped_suspended`, stated in the
+summary), never written and never fatal: refusing the whole batch over one parked root would break
+an import that is otherwise entirely legitimate, while writing the facts would be a write inside
+the closet. The check stands ahead of the object link and the fact promotion, so the parked root
+is not touched at all — and ahead of `touched_roots`, so a set-aside record never puts its root in
+the decision's scope.
+
 **Each cli file carries its own drift-baseline entry.** Both call
 `core::repo::root::fetch_all`, and the architecture test's baseline keys on the violating
 file's own path, so a single entry naming one of them leaves the other unmatched and

@@ -226,6 +226,7 @@ pub fn suspend(
     command_line: &str,
     config: &LedgerConfig,
     no_receipt: bool,
+    reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn();
 
@@ -248,7 +249,12 @@ pub fn suspend(
             .map(|p| vec![DecisionScope::new(root_id, p, String::new())])
             .unwrap_or_default(),
         command_line: command_line.to_string(),
-        reason: None,
+        // The provenance flag's existing meaning, at the act the registry
+        // gives the thought a home in: closing a door is where "why did I park
+        // this" belongs, and the trail then answers it. Empty is no reason.
+        reason: reason
+            .map(|r| r.to_string())
+            .filter(|r| !r.trim().is_empty()),
         record_enabled: config.recording != RecordingMode::Off,
         receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
         ledger_config: config.clone(),
@@ -279,6 +285,7 @@ pub fn unsuspend(
     command_line: &str,
     config: &LedgerConfig,
     no_receipt: bool,
+    reason: Option<&str>,
 ) -> Result<()> {
     let conn = db.conn();
 
@@ -301,7 +308,9 @@ pub fn unsuspend(
             .map(|p| vec![DecisionScope::new(root_id, p, String::new())])
             .unwrap_or_default(),
         command_line: command_line.to_string(),
-        reason: None,
+        reason: reason
+            .map(|r| r.to_string())
+            .filter(|r| !r.trim().is_empty()),
         record_enabled: config.recording != RecordingMode::Off,
         receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
         ledger_config: config.clone(),
