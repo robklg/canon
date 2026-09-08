@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use crate::core::domain::format_count;
 use crate::core::ops::scope::ResolvedScope;
 use crate::notes::{format_note_date, relative_to_scope, SurveyNoteContext};
+use crate::survey::domain::analysis::{standing_first, ScopeLocation};
 use crate::survey::ops::compute::{ArchivedLocationDetail, LocationResult};
 
 /// `1 empty file` / `N empty files`, thousands-separated — the noun agrees
@@ -221,10 +222,23 @@ pub(super) fn print_notes_section(ctx: &SurveyNoteContext, scope_rel_path: &str,
     }
 }
 
+/// What a cited location says about the door in front of it.
+///
+/// Testimony, not a refusal: no verb and no way back, because the place is
+/// being offered as evidence rather than blocking anything. Stated, never
+/// headlined — the ordering beside it is the other half of that rule.
+fn door_marker(suspended: bool) -> &'static str {
+    if suspended {
+        " (suspended)"
+    } else {
+        ""
+    }
+}
+
 pub(super) fn print_archive_section(
     archived_count: usize,
     total_hashed: usize,
-    archive_scopes: &[(String, usize)],
+    archive_scopes: &[ScopeLocation],
     archive_label: Option<&str>,
     verbose: bool,
 ) {
@@ -247,9 +261,16 @@ pub(super) fn print_archive_section(
         pct,
     );
 
-    // Sort by count descending for display
-    let mut sorted: Vec<&(String, usize)> = archive_scopes.iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    // Standing first, then count descending. A location the user has closed
+    // the door on never leads a list of places to go — the registry's
+    // testifying clause: its copies count, and they are stated rather than
+    // headlined.
+    let mut sorted: Vec<&ScopeLocation> = archive_scopes.iter().collect();
+    sorted.sort_by(|a, b| {
+        standing_first(a.suspended, b.suspended)
+            .then(b.count.cmp(&a.count))
+            .then(a.path.cmp(&b.path))
+    });
 
     // Adaptive cap: show all when ≤20, top 10 when >20 (unless --verbose)
     let (display, hidden) = if verbose || sorted.len() <= DETAIL_SHOW_ALL_THRESHOLD {
@@ -260,18 +281,19 @@ pub(super) fn print_archive_section(
     };
 
     // Scope-grouped archive paths with right-aligned counts
-    let max_path_len = display.iter().map(|(p, _)| p.len()).max().unwrap_or(0);
+    let max_path_len = display.iter().map(|l| l.path.len()).max().unwrap_or(0);
     let max_count_len = display
         .iter()
-        .map(|(_, c)| format_count(*c).len())
+        .map(|l| format_count(l.count).len())
         .max()
         .unwrap_or(0);
 
-    for (path, count) in display {
+    for location in display {
         println!(
-            "  {:path_w$}  {:>count_w$}",
-            path,
-            format_count(*count),
+            "  {:path_w$}  {:>count_w$}{}",
+            location.path,
+            format_count(location.count),
+            door_marker(location.suspended),
             path_w = max_path_len,
             count_w = max_count_len,
         );
@@ -323,8 +345,9 @@ pub(super) fn print_archived_detail(
     for detail in details {
         let count = detail.pairs.len();
         println!(
-            "  Archived at {} ({} files):",
+            "  Archived at {}{} ({} files):",
             detail.path,
+            door_marker(detail.suspended),
             format_count(count),
         );
 
@@ -422,6 +445,11 @@ pub(super) fn print_related_locations(
             print!("  ({} notes)", count);
         }
 
+        // The door, last on the line and after the counts: the place is
+        // being offered as evidence, so the mark qualifies it rather than
+        // introducing it.
+        print!("{}", door_marker(loc.suspended));
+
         println!();
     }
 
@@ -459,8 +487,9 @@ pub(super) fn print_complement_detail(
                 any_output = true;
                 println!();
                 println!(
-                    "  {} — no complementary content ({} of {} shared)",
+                    "  {}{} — no complementary content ({} of {} shared)",
                     loc.path,
+                    door_marker(loc.suspended),
                     format_count(loc.shared_count),
                     format_count(total_hashed),
                 );
@@ -477,13 +506,19 @@ pub(super) fn print_complement_detail(
         let only_here = loc.only_here_count.unwrap_or(0);
         if only_here > 0 {
             println!(
-                "  {} (+{}, {} unique):",
+                "  {}{} (+{}, {} unique):",
                 loc.path,
+                door_marker(loc.suspended),
                 format_count(comp_count),
                 format_count(only_here),
             );
         } else {
-            println!("  {} (+{}):", loc.path, format_count(comp_count));
+            println!(
+                "  {}{} (+{}):",
+                loc.path,
+                door_marker(loc.suspended),
+                format_count(comp_count)
+            );
         }
 
         // Paths (capped unless --verbose or small enough to show all)
@@ -570,8 +605,9 @@ pub(super) fn print_overlap_detail(
 
         // Header: /path/ (N of M overlap):
         println!(
-            "  {} ({} of {} overlap):",
+            "  {}{} ({} of {} overlap):",
             crate::core::domain::path::format_path(&loc.path, cwd),
+            door_marker(loc.suspended),
             format_count(loc.shared_count),
             format_count(total_hashed),
         );
@@ -651,8 +687,9 @@ pub(super) fn print_residual_detail(
         };
 
         println!(
-            "Not at {} (residual):",
+            "Not at {}{} (residual):",
             crate::core::domain::path::format_path(&loc.path, cwd),
+            door_marker(loc.suspended),
         );
 
         if paths.is_empty() {

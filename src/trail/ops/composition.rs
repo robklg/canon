@@ -82,6 +82,15 @@ pub fn compute_composition(
     // Keyed by path, not id: a root removed and re-added carries a new id but
     // the same location, and a location that exists today is visitable today.
     let live_root_paths: HashSet<String> = roots.iter().map(|r| r.path.clone()).collect();
+    // Keyed the same way and for the same reason. The card is a present-tense
+    // statement, so an origin still in the index but behind a door the user
+    // closed is a fact about *this* place now — not a claim about the past,
+    // which is why the historical surfaces beside it carry no such mark.
+    let parked_root_paths: HashSet<String> = roots
+        .iter()
+        .filter(|r| r.is_suspended())
+        .map(|r| r.path.clone())
+        .collect();
 
     // A removed origin root that was retired points at its book — the origin
     // reads as bound history rather than a dead end, the same repair
@@ -111,6 +120,7 @@ pub fn compute_composition(
         &decisions,
         &extractions_by_decision,
         &live_root_paths,
+        &parked_root_paths,
         &retired_books,
         prefixes,
     );

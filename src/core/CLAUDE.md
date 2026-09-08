@@ -37,13 +37,21 @@ positive half alone, is what gets reviewed when either changes.
 
 ### It names — `domain::{source, root, object, fact}`
 
-`Source`, `Root`, `RootSpec`, `Object`, `FactEntry`/`FactType`/`FactValue`, and the predicates
+`Source`, `Root`, `RootSpec`, `Object`, `ArchiveCopy`/`ArchiveLocation`,
+`FactEntry`/`FactType`/`FactValue`, and the predicates
 that read them (`is_excluded`, `is_contentless`, `matches_scope`, `find_containing_root`).
 Every subsystem speaks these; nothing here knows about any subsystem. Beside them the pure
 shape the nouns need to be handled at all — `domain::{path, scope, format, include, config}`:
 path manipulation and offline resolution, `ScopeMatch` and `DecisionScope`, display
 formatting, the visibility set, ledger-config parsing. Same purity rule throughout: no I/O, so
 path matching and scope resolution are testable with known inputs.
+
+`ArchiveCopy`/`ArchiveLocation` are what the archived-ness projections answer with: one
+archive-side copy, its path where a path is wanted, and **the standing of its root beside it**.
+Carried as data rather than looked up per surface — a surface asking the roots table again is
+the re-detection the closed door's rule forbids. `domain::root::only_on_suspended_segment` is
+the one spelling of the sentence that says so, capped at three named roots like the door
+statement, and carrying **no way back**: it qualifies a claim rather than blocking one.
 
 `domain::root` also carries the **closed door's vocabulary**: `ParkedRoot` (constructible only
 from a suspended `Root`, via `Root::parked`, so a live root cannot be spoken of as parked),
@@ -69,11 +77,22 @@ two consumers were counted. The membership criteria below apply to everything el
 ### It warrants — `domain::{resolution, fate, extraction}`
 
 - **`domain::resolution`** — `ResolutionAccount`, `StandingBucket`, `AbsentBucket`,
-  `classify_present`, `classify_absent`, `build_account`, `unresolved_remainder`. Shared
+  `classify_present`, `classify_absent`, `build_account`, `unresolved_remainder`,
+  `only_on_suspended`, `ParkedEvidence`. Shared
   substrate `retire`'s readiness gate, `story`'s place lens and `sweep`'s root-nearness term
   each independently compute over; no subsystem owns it, which is exactly why it is here.
   `retire`'s own verdict (`Readiness`, derived *from* this account) and its book-compile fate
   model stay in `retire/domain.rs`: one consumer, so they do not qualify.
+  - **What a claim rests on** (`only_on_suspended`, `ParkedEvidence`) — whether the archive
+    copies grounding a claim stand **solely** behind closed doors. Both halves are load-bearing:
+    non-empty, since no copies is no claim; and *every*, since one copy on an open root means
+    nothing needs opening. Reached through `ParkedEvidence::observe`, the one accumulation site,
+    which the account and coverage both call — so the law is consulted once and not re-spelled
+    beside each counter. `ParkedEvidence` pairs the count with the roots it rests on **as one
+    value**, so a line cannot name roots its own claim does not stand behind — the account
+    carries one per claim rather than pooling them, and `build_account` takes the copies map
+    rather than a set of ids, a set being unable to say where the evidence stands. A statement,
+    never a refusal: no verb, no way back.
   - **The remainder projection** (`unresolved_remainder`) is the readiness review's own
     measure of what is left on a root, computed where the archived-from-here evidence is
     *not* on hand. It routes through `classify_present`, so this is **one law with two call

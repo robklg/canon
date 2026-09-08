@@ -514,6 +514,7 @@ fn crossing_section_lines(
             let marker = origin_marker(
                 counterpart.retired_book.as_deref(),
                 counterpart.root_removed,
+                RootStanding::AsItWasThen,
             );
             if marker.is_empty() {
                 out.push(format!("{head}."));
@@ -649,6 +650,7 @@ fn counterpart_lines(line: &CounterpartLine) -> Vec<String> {
         &origin_marker(
             line.counterpart.retired_book.as_deref(),
             line.counterpart.root_removed,
+            RootStanding::AsItWasThen,
         ),
         &counts,
         DOOR_INDENTS,
@@ -969,7 +971,11 @@ const DREW_FROM_DIR_CAP: usize = 5;
 pub(super) fn drew_from_lines(extractions: &[ShowExtraction]) -> Vec<String> {
     let mut out = Vec::new();
     for group in extractions {
-        let marker = origin_marker(group.retired_book.as_deref(), group.root_removed);
+        let marker = origin_marker(
+            group.retired_book.as_deref(),
+            group.root_removed,
+            RootStanding::AsItWasThen,
+        );
         out.push(format!(
             "    {} — {}{marker}",
             group.location,
@@ -1220,6 +1226,7 @@ fn format_origin_line(line: &OriginLine) -> Vec<String> {
         OriginLine::FromRoot {
             root_path,
             root_removed,
+            root_suspended,
             retired_book,
             from_within,
             files,
@@ -1235,7 +1242,13 @@ fn format_origin_line(line: &OriginLine) -> Vec<String> {
             };
             keyed_entry_lines(
                 &head,
-                &origin_marker(retired_book.as_deref(), *root_removed),
+                &origin_marker(
+                    retired_book.as_deref(),
+                    *root_removed,
+                    RootStanding::AsItStandsNow {
+                        suspended: *root_suspended,
+                    },
+                ),
                 &format!(
                     "{} \u{00b7} {} \u{00b7} {}",
                     format_bucket(*files, *bytes),
@@ -1657,6 +1670,29 @@ fn arrival_narration(row: &DecisionExtraction, roots: &HashMap<i64, Root>) -> St
 /// as a visitable location.
 const ROOT_REMOVED_MARKER: &str = " (root removed)";
 
+/// Whether the line an origin marker is going on speaks about now or about
+/// then — which decides whether a *standing* belongs on it at all.
+///
+/// A root's door is a fact about the user's attention **right now**. On a
+/// present-tense line ("what stands here, and where it came from") that is
+/// what the reader needs before going to look. On a historical line ("this
+/// decision drew from there, then") it would be a claim about the past that
+/// is not true of the past — so those lines say nothing about it, and say so
+/// by name rather than by passing a `false` that reads like an assertion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RootStanding {
+    /// The card: a statement of what stands here now.
+    AsItStandsNow { suspended: bool },
+    /// `trail show`'s `drew from:` groups and `crossings`' counterparts: a
+    /// record of what happened, which no present standing qualifies.
+    AsItWasThen,
+}
+
+/// The established marker for a root the user has closed the door on. Not a
+/// door *statement* — no verb, no way back: the line is testimony, and the
+/// registry's testifying clause is stated, never headlined.
+const ROOT_SUSPENDED_MARKER: &str = " (suspended)";
+
 /// What an origin location's own line says about the root behind it, one
 /// spelling for every surface that names an origin.
 ///
@@ -1672,11 +1708,16 @@ const ROOT_REMOVED_MARKER: &str = " (root removed)";
 /// `trail crossings`' counterparts. Before this had one carrier they had
 /// drifted — one door pointed at the book while its neighbour, naming the
 /// same root, said only `(root removed)`.
-fn origin_marker(retired_book: Option<&str>, root_removed: bool) -> String {
-    match (retired_book, root_removed) {
-        (Some(book), _) => format!(" (root retired \u{2014} the book: {book})"),
-        (None, true) => ROOT_REMOVED_MARKER.to_string(),
-        (None, false) => String::new(),
+fn origin_marker(retired_book: Option<&str>, root_removed: bool, standing: RootStanding) -> String {
+    match (retired_book, root_removed, standing) {
+        (Some(book), _, _) => format!(" (root retired \u{2014} the book: {book})"),
+        (None, true, _) => ROOT_REMOVED_MARKER.to_string(),
+        // Below the two absence markers: a root that is gone has no door,
+        // and a retired one is answered better by its book.
+        (None, false, RootStanding::AsItStandsNow { suspended: true }) => {
+            ROOT_SUSPENDED_MARKER.to_string()
+        }
+        (None, false, _) => String::new(),
     }
 }
 
@@ -3930,6 +3971,7 @@ mod tests {
         OriginLine::FromRoot {
             root_path: root_path.to_string(),
             root_removed,
+            root_suspended: false,
             retired_book: None,
             from_within: false,
             files,
@@ -3947,6 +3989,7 @@ mod tests {
             OriginLine::FromRoot {
                 root_path,
                 root_removed,
+                root_suspended,
                 from_within,
                 files,
                 bytes,
@@ -3957,6 +4000,7 @@ mod tests {
             } => OriginLine::FromRoot {
                 root_path,
                 root_removed,
+                root_suspended,
                 retired_book: Some(book.to_string()),
                 from_within,
                 files,
@@ -4010,6 +4054,7 @@ mod tests {
     fn format_origin_line_from_within_says_elsewhere_in_the_root() {
         let ts = local_ts_on("2026-05-12");
         let line = OriginLine::FromRoot {
+            root_suspended: false,
             root_path: "/archive".to_string(),
             root_removed: false,
             retired_book: None,
@@ -4086,6 +4131,7 @@ mod tests {
         // displace each other.
         let ts = local_ts_on("2026-05-12");
         let line = OriginLine::FromRoot {
+            root_suspended: false,
             root_path: "/archive".to_string(),
             root_removed: true,
             retired_book: None,
@@ -4207,6 +4253,7 @@ mod tests {
             } => OriginLine::FromRoot {
                 root_path,
                 root_removed,
+                root_suspended: false,
                 retired_book,
                 from_within: true,
                 files,
@@ -5214,6 +5261,82 @@ mod tests {
         assert_eq!(
             trail_header("/mnt/d1/photos", None, &parked),
             "Decision trail: /mnt/d1/photos"
+        );
+    }
+
+    #[test]
+    fn the_card_marks_a_parked_origin() {
+        // The card is present-tense by design, so a door the user has
+        // closed on an origin is exactly what a reader about to go looking
+        // needs to know.
+        let ts = local_ts_on("2024-01-05");
+        let parked = match mk_from_root("/vol/sd", false, 3, vec![1], ts, ts) {
+            OriginLine::FromRoot {
+                root_path,
+                root_removed,
+                retired_book,
+                from_within,
+                files,
+                bytes,
+                decision_ids,
+                first_at,
+                last_at,
+                ..
+            } => OriginLine::FromRoot {
+                root_path,
+                root_removed,
+                root_suspended: true,
+                retired_book,
+                from_within,
+                files,
+                bytes,
+                decision_ids,
+                first_at,
+                last_at,
+            },
+            other => other,
+        };
+        let lines = format_origin_line(&parked);
+        assert!(lines.iter().any(|l| l.contains("(suspended)")), "{lines:?}");
+        assert!(
+            !lines.iter().any(|l| l.contains("root removed")),
+            "a parked root is still in the index: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_removed_or_retired_origin_outranks_the_door() {
+        // A root the index no longer knows has no door to open, and a
+        // retired one is answered better by its book. Precedence is stated
+        // where the marker is spelled; this is the pin on it.
+        assert_eq!(
+            origin_marker(None, true, RootStanding::AsItStandsNow { suspended: true }),
+            ROOT_REMOVED_MARKER
+        );
+        assert!(origin_marker(
+            Some("/arc/books/sd"),
+            true,
+            RootStanding::AsItStandsNow { suspended: true }
+        )
+        .contains("the book"),);
+    }
+
+    #[test]
+    fn a_historical_line_says_nothing_about_a_door() {
+        // `trail show`'s `drew from:` groups and `crossings`' counterparts
+        // record what happened then; a standing that is true only now would
+        // be a claim about the past that is not true of the past.
+        assert_eq!(
+            origin_marker(None, false, RootStanding::AsItWasThen),
+            String::new()
+        );
+        assert_eq!(
+            origin_marker(
+                None,
+                false,
+                RootStanding::AsItStandsNow { suspended: false }
+            ),
+            String::new()
         );
     }
 }

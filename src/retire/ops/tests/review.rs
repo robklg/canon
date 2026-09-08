@@ -393,3 +393,33 @@ fn reachable_path_reads_as_connected() {
     let review = compute_readiness(&conn, root).unwrap();
     assert!(review.gaps.reachable);
 }
+
+#[test]
+fn the_review_and_the_story_share_the_account_count() {
+    // Both lenses read the one fetch, so what the review's covered line
+    // says and what the story's closing totals say cannot come apart —
+    // which is the whole reason the count lives on the account.
+    use crate::core::ops::root_story::fetch_root_story;
+
+    let conn = crate::core::repo::open_in_memory_for_test();
+    let root_id = crate::core::testing::insert_root(&conn, "/src", "source", false);
+    crate::core::testing::insert_root(&conn, "/arc-parked", "archive", true);
+    let obj = super::fixtures::insert_object(&conn, "abc");
+    super::fixtures::insert_source(&conn, root_id, "a.jpg", Some(obj), true, false, None);
+    super::fixtures::insert_source(&conn, 2, "a.jpg", Some(obj), true, false, None);
+
+    let story = fetch_root_story(&conn, root_id).unwrap();
+    let review = crate::retire::ops::review::readiness_lens(&story);
+    let report = crate::story::report_over(&conn, &story, &Default::default()).unwrap();
+
+    assert_eq!(review.account.covered, 1);
+    assert_eq!(review.account.covered_only_parked.count, 1);
+    assert_eq!(
+        review.account.covered_only_parked,
+        report.account.covered_only_parked
+    );
+    assert_eq!(
+        review.account.covered_only_parked.segment(&review.roots),
+        Some("1 only on suspended /arc-parked".to_string())
+    );
+}

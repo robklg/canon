@@ -11,6 +11,18 @@ use crate::story::domain::place::{PlaceStanding, StoryParams, StoryPlace};
 use super::fixtures::{
     child_paths, dinfo, excluded_src, extraction, no_dust, src, stamped, Fixture,
 };
+use crate::core::domain::object::{ArchiveCopy, ArchiveLocation};
+
+/// The emitted place at `rel`, from anywhere in the tree.
+fn find_place<'a>(place: &'a StoryPlace, rel: &str) -> &'a StoryPlace {
+    fn walk<'a>(place: &'a StoryPlace, rel: &str) -> Option<&'a StoryPlace> {
+        if place.rel_path == rel {
+            return Some(place);
+        }
+        place.children.iter().find_map(|child| walk(child, rel))
+    }
+    walk(place, rel).unwrap_or_else(|| panic!("no place at {rel:?}"))
+}
 
 #[test]
 fn archive_stamped_row_does_not_double_count_the_extraction() {
@@ -86,7 +98,8 @@ fn uniform_undecided_tree_merges_to_one_line() {
         root.covered_where.locations,
         vec![crate::story::domain::locations::LocationCount {
             path: "/archive/media".into(),
-            files: 3
+            files: 3,
+            suspended: false,
         }]
     );
 }
@@ -918,7 +931,7 @@ fn agreement_law_place_sums_fold_to_the_account() {
     let account = build_account(
         &fx.present,
         &fx.absent,
-        &fx.archived,
+        &fx.archive_copies,
         &fx.archived_from_here,
         &fx.extractions,
         &stamp_families,
@@ -930,4 +943,69 @@ fn agreement_law_place_sums_fold_to_the_account() {
     assert_eq!(sum.unresolved, account.unresolved);
     assert_eq!(sum.unhashed_unresolved, account.unhashed_unresolved);
     assert_eq!(sum.missing_unexplained, account.unexplained_missing);
+}
+
+#[test]
+fn a_covered_place_carries_the_standing_of_the_archive_it_cites() {
+    // The marker must survive aggregation: directories merge, so an entry
+    // is marked only when every copy it accounts for is behind a door.
+    let mut fx = Fixture::new();
+    fx.covered_behind_a_door(1, "italy/a.jpg", &["/archive/parked/2016/a.jpg"]);
+    fx.covered(2, "spain/b.jpg", &["/archive/live/2016/b.jpg"]);
+
+    let root = fx.build(&no_dust());
+    let italy = find_place(&root, "italy");
+    let spain = find_place(&root, "spain");
+
+    assert!(
+        italy.covered_where.locations.iter().all(|l| l.suspended),
+        "{:?}",
+        italy.covered_where
+    );
+    assert!(
+        spain.covered_where.locations.iter().all(|l| !l.suspended),
+        "{:?}",
+        spain.covered_where
+    );
+}
+
+#[test]
+fn each_covered_location_speaks_for_its_own_copies() {
+    let mut fx = Fixture::new();
+    fx.covered_at(
+        1,
+        "italy/a.jpg",
+        &[
+            ArchiveLocation {
+                path: "/archive/live/a.jpg".to_string(),
+                root: ArchiveCopy {
+                    root_id: 9,
+                    root_suspended: false,
+                },
+            },
+            ArchiveLocation {
+                path: "/archive/parked/a.jpg".to_string(),
+                root: ArchiveCopy {
+                    root_id: 10,
+                    root_suspended: true,
+                },
+            },
+        ],
+    );
+
+    // One branch, so the whole story is the root place.
+    let root = fx.build(&no_dust());
+    let marked: Vec<&str> = root
+        .covered_where
+        .locations
+        .iter()
+        .filter(|l| l.suspended)
+        .map(|l| l.path.as_str())
+        .collect();
+    assert_eq!(
+        marked,
+        vec!["/archive/parked"],
+        "each location speaks for its own copies: {:?}",
+        root.covered_where
+    );
 }

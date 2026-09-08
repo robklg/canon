@@ -64,6 +64,18 @@ applies), covered (content verified present in the archive), excluded, empty fil
 blocking), and unresolved. A file copied to the archive appears in both registers,
 and the `(moved, copied)` split is what keeps that readable.
 
+Where the archive copies behind a count all stand on
+[suspended](roots.md#suspending-roots) roots, the line says so:
+
+```
+    archived from here   612   (this copy still stands; the archive holds it; 40 only on suspended /path/to/archive2)
+    covered              3,980   (content verified present in the archive; 118 only on suspended /path/to/archive2)
+```
+
+Each line names the roots its own count rests on. Suspending an archive changes
+nothing about what is archived; the segment says what you would have to open a door
+to check.
+
 **`first indexed`** is row evidence, the time the earliest surviving source was first
 indexed rather than a scan-decision date, so it stays honest on roots older than
 decision recording. The first *recorded* scan opens the book's timeline.

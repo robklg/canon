@@ -23,11 +23,11 @@ the contentless-law canary (`contentless_law_tests.rs`) reaches the rest. Every 
 - **Detail views** (`--detail`): `complement`, `unique`, `overlap`, `residual` (`residual`
   requires `--other`).
 - **Asymmetric visibility**: selection side = active source roots, non-excluded (unless
-  `--include excluded`), scope + `--where`. Outward side = active roots of any role (source and
-  archive), non-excluded always — archives are visible because "what's resolved?" is the
-  question being asked.
+  `--include excluded`), scope + `--where`. Outward side = roots of any role (source and
+  archive) **whatever their standing**, non-excluded always — archives are visible because
+  "what's resolved?" is the question being asked.
 - **In-memory object index**: `HashMap<i64, Vec<&Source>>` keyed by `object_id`, built from all
-  active non-excluded hashed sources; powers overlap, archive status, only-here, uniqueness.
+  non-excluded hashed sources; powers overlap, archive status, only-here, uniqueness.
 - **"Only here" counts unique objects, not sources** — the one exception to source-based
   counting, because duplicates don't make content more irreplaceable.
 - **Classification** (`domain/analysis.rs`, pure `classify_location()`): Superset (≥), Lead (>),
@@ -71,23 +71,68 @@ reads role from the containing root it resolved, which now finds parked roots to
 
 **The door precedes the frame.** A scope wholly behind a closed door is answered by the spine's
 statement in `main.rs`, before survey runs — the sentence is universal, while `ArchiveScope`'s
-is survey's own and points at `trail`/`ls`. A parked `--archive` and a parked `--other` are
-**refused** rather than set aside: both are load-bearing comparands, and until the outward side
-counts parked evidence, answering would put a zero where content stands.
-`machine_shaped_stdout` is survey's one derivation of which channel its scope statement belongs
-on, asked by the front door rather than re-derived there.
+is survey's own and points at `trail`/`ls`. `machine_shaped_stdout` is survey's one derivation of
+which channel its scope statement belongs on, asked by the front door rather than re-derived
+there.
 
-**The outward side reads active roots only.** The `is_active()` filters in `ops/compute.rs`
-apply on the outward side as well as the selection side, so a parked archive's copies stop
-grounding claims about other places: the same content reads `0 unique` while its root is live
-and `3 unique`, `No related locations found.` while it is parked — survey's answer inverted by
-an act that changes attention, not truth. It contradicts suspension's testifying clause, and is
-recorded rather than quietly narrowed because the same filter is correct on the selection side.
+## The outward side, and the door
+
+**The outward side reads every root, whatever the standing of its door.** `is_active()` survives
+on the **selection** side alone (`ops/compute.rs`, the selection and its hidden-excluded count):
+what you survey is what you can see. The four outward reads — the object index, the `--other`
+location object set, the per-location totals, the affinity complementary set — carry no such
+filter, because they answer *where else does this content live?* and a copy behind a door the
+user closed is still a copy. Testifying is the one thing a closed door does not stop; custody
+stands, and parking never un-archives.
+
+The filter used to apply on both sides, and inverted survey's own answer: the same content read
+`0 unique` while a neighbouring root was live and `3 unique`, `No related locations found.` once
+it was parked — the world's answer changed by an act that changes only attention. Pinned from
+both sides (`survey_counts_parked_evidence_on_the_outward_side`,
+`the_selection_side_still_sets_parked_sources_aside`).
+
+**Every cited place says whether reaching it means opening a door**, all-or-nothing:
+`LocationResult.suspended` is true when every source Canon knows there stands on a parked root.
+One copy on an open root and nothing needs opening, so a mark would raise a question the place
+does not pose. Read **from what stands at the place**, not from a discovered scope's root, which
+is what lets a `--other` location answer the same way a discovered one does. A discovered location lies in
+one root, so the *every* and *any* readings coincide there; a `--other` location is a path the
+user chose and can contain several roots, which is where the two readings part and the rule earns
+its keep (`an_other_location_spanning_two_standings_is_unmarked`).
+`render::door_marker` is the one spelling **for cited locations** — the summary's two lists and
+every `--detail` view, so a place cannot be marked in one and bare in the other; the frame label
+(`ops/orchestrate.rs`) composes its own, being a label rather than a location. Testimony either
+way, so no verb and no way back.
+
+**Standing is the ordering's primary key**, ahead of the relation itself, at every list that
+cites places — related locations, the archive breakdown, and the archived detail view: a parked
+place never leads, even carrying the stronger relation
+(`survey_never_leads_with_a_parked_location`, and
+`a_detail_view_marks_and_orders_the_places_the_summary_named` on the binary). **Standing is the
+only key the lists share.** Below it each sorts on its own measure — the breakdown on archive-side
+sources at the location, its detail view on selection-side sources archived there — so the two can
+legitimately disagree about which live place leads. What they may not disagree about is whether a
+place is marked, or whether a parked one leads at all. A list's first line is its headline, and
+testimony is *stated, never headlined*. This is a conformance to the **suspension
+citation-evidence split**, not a rule of survey's own: that law binds Canon-wide and already
+bound survey, so realising it here is delivery of a grant, not a new one. The sweep picks one
+citation and survey ranks many, so the two consume the key through different operations and
+share no code; what is shared is the law, and each surface carries its own pin. **Inside** survey
+the key is spelled once — `domain::analysis::standing_first`, the head of all four comparisons —
+so a fifth list cannot restate it differently. `--other` keeps the
+user's own order; the marker still states each place.
+
+**A parked `--archive` is answered and marked, never refused** — the frame's label carries
+`(suspended)`; it was refused only while the index hid those copies. A parked **`--other`** is
+still refused by the spine's location gate: `--other` names a place to ask *about*, and a scope
+on a closed root is refused, made aware of, and left untouched.
 
 ## The contentless law's index site
 
 **`ObjectIndex::build()` (`domain/object_index.rs`) refuses contentless sources** — the law's
-enforcement point in the index. A computation reading through the index inherits the refusal;
+enforcement point in the index. Its **population** is the caller's and widened here (every root,
+open door or closed); its **predicate** is the law's and unchanged, which is why the canary stays
+green. A computation reading through the index inherits the refusal;
 one reading `all_sources` or `selection` directly past it must re-apply the predicate itself,
 and five do (`ops/compute.rs`): selection identity (`sel_object_ids`), the `--other` location
 object sets, the per-location totals, the affinity complementary set, and the residual detail

@@ -172,6 +172,24 @@ pub fn find_unique_object_ids(
         .collect()
 }
 
+/// The standing key, spoken once: a place behind a door the user closed
+/// never leads a list of places to go.
+///
+/// Survey's conjugation of the **suspension citation-evidence split** — the
+/// law the sweep owns, which decides which place is *cited* as evidence and
+/// never what the evidence says. The sweep picks one citation and survey
+/// ranks many, so the two consume this key through different operations and
+/// share no code; what they must share is the key itself, and inside survey
+/// that is here rather than at each of the four lists that sort by it.
+///
+/// Always the **head** of a comparison — the relation orders within
+/// standing, never across it, because a list's first line is its headline
+/// and testimony is stated, never headlined.
+/// Verified by `survey_never_leads_with_a_parked_location`.
+pub fn standing_first(a: bool, b: bool) -> std::cmp::Ordering {
+    a.cmp(&b)
+}
+
 /// Classification of a related location.
 /// Variant order defines sort priority (lowest first): Superset → Lead → Subset → Mirror.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -208,32 +226,51 @@ pub fn classify_location(
     }
 }
 
-/// Group sources by root, run discover_scopes per root,
-/// return (absolute_scope_path, count) pairs.
-pub fn discover_scopes_by_root(sources: &[&Source]) -> Vec<(String, usize)> {
-    // Group by root_path (BTreeMap for deterministic iteration)
-    let mut by_root: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+/// Group sources by root, run discover_scopes per root, and return the
+/// absolute locations with their counts and standing.
+pub fn discover_scopes_by_root(sources: &[&Source]) -> Vec<ScopeLocation> {
+    // Group by root_path (BTreeMap for deterministic iteration). The
+    // group's standing is the root's: every source in it sits on that root,
+    // so "every copy here is behind a door" and "this root's door is closed"
+    // are the same statement at this grain.
+    let mut by_root: BTreeMap<&str, (Vec<&str>, bool)> = BTreeMap::new();
     for source in sources {
-        by_root
-            .entry(&source.root_path)
-            .or_default()
-            .push(&source.rel_path);
+        let entry = by_root.entry(&source.root_path).or_default();
+        entry.0.push(&source.rel_path);
+        entry.1 = source.root_suspended;
     }
 
     let mut results = Vec::new();
-    for (root_path, rel_paths) in &by_root {
+    for (root_path, (rel_paths, suspended)) in &by_root {
         let refs: Vec<&str> = rel_paths.to_vec();
         let scopes = discover_scopes(&refs);
         for scope in scopes {
-            let absolute = if scope.prefix.is_empty() {
+            let path = if scope.prefix.is_empty() {
                 root_path.to_string()
             } else {
                 format!("{}/{}", root_path, scope.prefix)
             };
-            results.push((absolute, scope.count));
+            results.push(ScopeLocation {
+                path,
+                count: scope.count,
+                suspended: *suspended,
+            });
         }
     }
     results
+}
+
+/// A discovered location: where content sits, how much of it, and whether
+/// the user has closed the door on the root it sits on.
+///
+/// The standing rides along because the surfaces that list these places
+/// cite them as somewhere to *go*, and a reader owed the citation is owed
+/// the fact that reaching it means opening a door.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeLocation {
+    pub path: String,
+    pub count: usize,
+    pub suspended: bool,
 }
 
 #[cfg(test)]
@@ -581,10 +618,10 @@ mod tests {
         let result = discover_scopes_by_root(&sources);
         assert_eq!(result.len(), 2);
         // BTreeMap orders by root_path: /mnt/disk1 before /mnt/disk2
-        assert_eq!(result[0].0, "/mnt/disk1/photos");
-        assert_eq!(result[0].1, 2);
-        assert_eq!(result[1].0, "/mnt/disk2/backup/2024");
-        assert_eq!(result[1].1, 1);
+        assert_eq!(result[0].path, "/mnt/disk1/photos");
+        assert_eq!(result[0].count, 2);
+        assert_eq!(result[1].path, "/mnt/disk2/backup/2024");
+        assert_eq!(result[1].count, 1);
     }
 
     // =========================================================================

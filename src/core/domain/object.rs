@@ -64,6 +64,36 @@ impl Object {
     }
 }
 
+/// One archive-side copy of an object, with the standing of the root it
+/// stands on.
+///
+/// The archived-ness projections return these rather than bare ids or bare
+/// paths so that **the standing travels beside the evidence**. A copy on a
+/// suspended root still counts — testifying is what a closed door permits —
+/// but a surface citing it owes the reader the fact that the place is parked,
+/// and a surface deriving a *claim* from it (coverage, the readiness review)
+/// owes the reader how much of the claim rests there. Neither is answerable
+/// from an id alone, and asking the roots table a second time is the
+/// re-detection the closed door's own rule forbids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveCopy {
+    pub root_id: i64,
+    /// The root's door: `true` when the user has closed it.
+    pub root_suspended: bool,
+}
+
+/// One archive-side copy located: where the content stands, and on what.
+///
+/// `path` is the copy's absolute path, composed the way every archive-path
+/// answer has always composed it. `root` carries the same standing
+/// [`ArchiveCopy`] does, so a caller that only wants paths maps over the
+/// field and a caller that marks its citations reads the flag beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveLocation {
+    pub path: String,
+    pub root: ArchiveCopy,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

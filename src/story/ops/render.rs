@@ -13,7 +13,7 @@ use crate::core::domain::format::{
     format_count, format_date, format_size, format_time_ago, shell_quote,
 };
 use crate::story::domain::acts::ActGroup;
-use crate::story::domain::locations::LocationAggregate;
+use crate::story::domain::locations::{LocationAggregate, LocationCount};
 use crate::story::domain::place::StoryPlace;
 
 use super::report::StoryReport;
@@ -85,12 +85,24 @@ pub fn story_lines(report: &StoryReport, cap: usize, now: i64) -> Vec<String> {
     }
     let mut parts: Vec<String> = Vec::new();
     if account.archived_standing > 0 {
-        parts.push(format!(
+        let mut archived = format!(
             "{} archived from here",
             format_count(account.archived_standing)
-        ));
+        );
+        if let Some(segment) = account.archived_standing_only_parked.segment(&report.roots) {
+            archived.push_str(&format!(" ({segment})"));
+        }
+        parts.push(archived);
     }
-    parts.push(format!("{} covered", format_count(account.covered)));
+    // The claim's own qualifier, in the closing totals: what a reader
+    // deciding this root's fate would otherwise have to open a door to
+    // find out. Judgment voice only — `story_lines` is `canon roots story`,
+    // and the bound reading composes its own frame.
+    let mut covered = format!("{} covered", format_count(account.covered));
+    if let Some(segment) = account.covered_only_parked.segment(&report.roots) {
+        covered.push_str(&format!(" ({segment})"));
+    }
+    parts.push(covered);
     parts.push(format!("{} excluded", format_count(account.excluded)));
     if account.contentless > 0 {
         parts.push(format!("{} empty files", format_count(account.contentless)));
@@ -319,7 +331,10 @@ fn act_lines(group: &ActGroup, indent: &str, voicing: Voicing, lines: &mut Vec<S
         }
     }
     if !group.destination.is_empty() {
-        line.push_str(&format!(" → {}", fmt_locations(&group.destination)));
+        line.push_str(&format!(
+            " → {}",
+            fmt_locations(&group.destination, voicing)
+        ));
     }
     if group.decisions.len() == 1 {
         let decision = &group.decisions[0];
@@ -394,7 +409,7 @@ fn standing_lines(place: &StoryPlace, indent: &str, voicing: Voicing, lines: &mu
         if standing.covered == 0 && !place.covered_where.is_empty() {
             line.push_str(&format!(
                 " — copies stand in {}",
-                fmt_locations(&place.covered_where)
+                fmt_locations(&place.covered_where, voicing)
             ));
         }
         lines.push(line);
@@ -410,7 +425,7 @@ fn standing_lines(place: &StoryPlace, indent: &str, voicing: Voicing, lines: &mu
             ),
         };
         if !place.covered_where.is_empty() {
-            let locations = fmt_locations(&place.covered_where);
+            let locations = fmt_locations(&place.covered_where, voicing);
             line.push_str(&match voicing {
                 Voicing::Judgment => format!(" — copies stand in {locations}"),
                 Voicing::Reference => format!(" — {locations}"),
@@ -516,13 +531,33 @@ fn standing_lines(place: &StoryPlace, indent: &str, voicing: Voicing, lines: &mu
 /// A location aggregate for one line: a single coherent answer renders as
 /// the bare path; a genuine divergence lists prefixes with counts; the
 /// remainder is counted, never silent.
-pub fn fmt_locations(agg: &LocationAggregate) -> String {
+pub fn fmt_locations(agg: &LocationAggregate, voicing: Voicing) -> String {
+    // A location every one of whose copies stands behind a closed door says
+    // so: this is a *where* line, and the reader's next move is to go there.
+    // A mixed location is unmarked — one open copy means nothing needs
+    // opening, and a marker there would raise a question the place does not
+    // pose.
+    //
+    // **Only in the judgment voice.** Which doors the user has closed is a
+    // fact about their attention right now, and the bound reading forswears
+    // bind-time claims for exactly this reason: a book is never rewritten,
+    // so a marker in one would outlive the pause it describes and mislead
+    // the reader it was written for. Whether a book should cite a parked
+    // location at all is not the engine's call, and this is where the
+    // engine stops.
+    let mark = |l: &LocationCount| {
+        if l.suspended && voicing == Voicing::Judgment {
+            " (suspended)"
+        } else {
+            ""
+        }
+    };
     let mut out = if agg.locations.len() == 1 && agg.omitted_locations == 0 {
-        agg.locations[0].path.clone()
+        format!("{}{}", agg.locations[0].path, mark(&agg.locations[0]))
     } else {
         agg.locations
             .iter()
-            .map(|l| format!("{} ({})", l.path, format_count(l.files)))
+            .map(|l| format!("{} ({}){}", l.path, format_count(l.files), mark(l)))
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -586,10 +621,20 @@ mod tests {
                 .map(|(path, files)| LocationCount {
                     path: path.to_string(),
                     files: *files,
+                    suspended: false,
                 })
                 .collect(),
             omitted_locations: 0,
         }
+    }
+
+    /// Locations whose every copy stands behind a closed door.
+    fn parked_locations(entries: &[(&str, i64)]) -> LocationAggregate {
+        let mut agg = locations(entries);
+        for loc in &mut agg.locations {
+            loc.suspended = true;
+        }
+        agg
     }
 
     fn act(transition: &'static str, files: i64, decisions: Vec<(i64, Option<&str>)>) -> ActGroup {
@@ -630,6 +675,9 @@ mod tests {
             contentless: 0,
             unresolved: 0,
             unhashed_unresolved: 0,
+            covered_only_parked: crate::core::domain::resolution::ParkedEvidence::default(),
+            archived_standing_only_parked: crate::core::domain::resolution::ParkedEvidence::default(
+            ),
         }
     }
 
@@ -651,6 +699,7 @@ mod tests {
             reachable: true,
             places,
             account,
+            roots: Vec::new(),
         }
     }
 
@@ -1287,5 +1336,89 @@ mod tests {
         }
         let (display, _) = trail_handoff("/r/with space/x");
         assert!(display.contains("'/r/with space/x'"), "{display}");
+    }
+
+    // ------------------------------------------------------------------
+    // Testimony: a where-line says which of its places is behind a door
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn a_covered_where_line_marks_a_wholly_parked_location() {
+        let mut italy = place("italy");
+        italy.standing.covered = 2;
+        italy.covered_where = parked_locations(&[("/archive/a", 2)]);
+        let mut root = place("");
+        root.children.push(italy);
+
+        let lines = story_lines(&report(root), usize::MAX, 0);
+        assert_has_line(&lines, "2 covered — copies stand in /archive/a (suspended)");
+    }
+
+    #[test]
+    fn a_where_line_marks_only_the_entries_behind_a_door() {
+        // The mark belongs to the entry, not the line: a line naming two
+        // places says which of them needs a door opened.
+        let mut italy = place("italy");
+        italy.standing.covered = 2;
+        let mut mixed = locations(&[("/archive/live", 1), ("/archive/parked", 1)]);
+        mixed.locations[1].suspended = true;
+        italy.covered_where = mixed;
+        let mut root = place("");
+        root.children.push(italy);
+
+        let lines = story_lines(&report(root), usize::MAX, 0);
+        assert_has_line(
+            &lines,
+            "2 covered — copies stand in /archive/live (1), /archive/parked (1) (suspended)",
+        );
+    }
+
+    #[test]
+    fn the_bound_reading_never_marks_a_door() {
+        // A book is never rewritten, so a marker in one would outlive the
+        // pause it describes and mislead the reader it was written for.
+        let mut italy = place("italy");
+        italy.standing.covered = 2;
+        italy.covered_where = parked_locations(&[("/archive/a", 2)]);
+        let mut root = place("");
+        root.children.push(italy);
+
+        let lines = reference_place_lines(&report(root));
+
+        assert!(
+            lines.iter().any(|l| l.contains("/archive/a")),
+            "the location is still cited: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("(suspended)")),
+            "the bound reading forswears bind-time claims: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_closing_totals_say_what_the_covered_claim_rests_on() {
+        let mut account = zero_account();
+        account.covered = 5;
+        account.covered_only_parked = crate::core::domain::resolution::ParkedEvidence {
+            count: 2,
+            roots: vec![7],
+        };
+        let mut report = report_with(place(""), account);
+        report.roots = vec![Root {
+            id: 7,
+            path: "/arc-parked".to_string(),
+            role: "archive".to_string(),
+            comment: None,
+            last_scanned_at: None,
+            suspended: true,
+        }];
+        let lines = story_lines(&report, usize::MAX, 0);
+
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("5 covered (2 only on suspended /arc-parked)")),
+            "{lines:?}"
+        );
     }
 }

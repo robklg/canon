@@ -26,7 +26,29 @@ pub fn run(
 
     let scopes = classify_all(scope_prefixes);
 
-    let archive_root_id = ops::resolve_archive_root(conn, archive_spec)?;
+    let archive_target = ops::resolve_archive_root(conn, archive_spec)?;
+    let archive_root_id = archive_target.as_ref().map(|t| t.root_id);
+    // A parked archive is measured against and **marked**, never refused:
+    // its copies still testify. The marker rides the header label so every
+    // line beneath it is read in the right light.
+    let archive_label: Option<String> = archive_target.as_ref().map(|target| {
+        let spec = archive_spec.unwrap_or_default();
+        match &target.parked {
+            Some(_) => format!("{spec} (suspended)"),
+            None => spec.to_string(),
+        }
+    });
+    let archive_label: Option<&str> = archive_label.as_deref();
+
+    // The compact renderers carry no header, so the marker riding the label
+    // would go unsaid on the one output shape whose stdout must stay exactly
+    // what was asked for. The channel bends, the statement never does: the
+    // pause goes to stderr, in the verbless form a reading states.
+    if compact {
+        if let Some(parked) = archive_target.as_ref().and_then(|t| t.parked.as_ref()) {
+            eprintln!("{}", parked.pause_line());
+        }
+    }
 
     // Get mutable reference for operations
     let conn = db.conn_mut();
@@ -51,7 +73,7 @@ pub fn run(
         if compact {
             display_compact_scoped(&stats, scope);
         } else {
-            display_scoped_stats(&stats, scope, archive_spec);
+            display_scoped_stats(&stats, scope, archive_label);
         }
         (used_status, excluded_count)
     } else {
@@ -61,7 +83,7 @@ pub fn run(
         if compact {
             display_compact_per_root(&per_root_stats, &overall, scope);
         } else {
-            display_per_root_stats(&per_root_stats, &overall, archive_spec, scope);
+            display_per_root_stats(&per_root_stats, &overall, archive_label, scope);
         }
         (used_status, excluded_count)
     };
@@ -195,23 +217,36 @@ fn display_scoped_stats(stats: &CoverageStats, scope: &ResolvedScope, archive: O
             format_count(stats.contentless_sources)
         );
     }
+    let label = if archive.is_some() {
+        "In this archive:"
+    } else {
+        "Archived:"
+    };
+    println!(
+        "  {label:<16} {:>8} ({:.1}% of {} with content){}",
+        format_count(stats.archived_sources),
+        stats.archived_pct(),
+        format_count(stats.coverable_sources()),
+        only_parked_suffix(stats),
+    );
     if archive.is_some() {
-        println!(
-            "  In this archive: {:>8} ({:.1}% of {} with content)",
-            format_count(stats.archived_sources),
-            stats.archived_pct(),
-            format_count(stats.coverable_sources())
-        );
         println!("  Not in archive:  {:>8}", format_count(stats.unarchived()));
     } else {
-        println!(
-            "  Archived:        {:>8} ({:.1}% of {} with content)",
-            format_count(stats.archived_sources),
-            stats.archived_pct(),
-            format_count(stats.coverable_sources())
-        );
         println!("  Unarchived:      {:>8}", format_count(stats.unarchived()));
     }
+}
+
+/// What the archived line adds when part of the count rests solely behind a
+/// closed door — nothing at all when it does not.
+///
+/// The registry's testifying clause, at the surface a user reads before
+/// deciding a drive can go: parking never un-archives, so the number is
+/// unchanged and the qualifier trails it rather than replacing it.
+fn only_parked_suffix(stats: &CoverageStats) -> String {
+    stats
+        .only_parked_segment()
+        .map(|segment| format!(" · {segment}"))
+        .unwrap_or_default()
 }
 
 fn display_per_root_stats(
@@ -281,34 +316,19 @@ fn display_per_root_stats(
         {
             return;
         }
-        if archive.is_some() {
-            if writeln!(
-                handle,
-                "  In this archive: {:>8} ({:.1}% of {} with content)",
-                format_count(stats.archived_sources),
-                stats.archived_pct(),
-                format_count(stats.coverable_sources())
-            )
-            .is_err()
-            {
-                return;
-            }
-            if writeln!(
-                handle,
-                "  Not in archive:  {:>8}",
-                format_count(stats.unarchived())
-            )
-            .is_err()
-            {
-                return;
-            }
+        let label = if archive.is_some() {
+            "In this archive:"
         } else {
+            "Archived:"
+        };
+        {
             if writeln!(
                 handle,
-                "  Archived:        {:>8} ({:.1}% of {} with content)",
+                "  {label:<16} {:>8} ({:.1}% of {} with content){}",
                 format_count(stats.archived_sources),
                 stats.archived_pct(),
-                format_count(stats.coverable_sources())
+                format_count(stats.coverable_sources()),
+                only_parked_suffix(stats),
             )
             .is_err()
             {
@@ -316,7 +336,12 @@ fn display_per_root_stats(
             }
             if writeln!(
                 handle,
-                "  Unarchived:      {:>8}",
+                "  {:<16} {:>8}",
+                if archive.is_some() {
+                    "Not in archive:"
+                } else {
+                    "Unarchived:"
+                },
                 format_count(stats.unarchived())
             )
             .is_err()
@@ -356,31 +381,27 @@ fn display_per_root_stats(
             format_count(overall.contentless_sources)
         );
     }
-    if archive.is_some() {
-        let _ = writeln!(
-            handle,
-            "  In this archive: {:>8} ({:.1}% of {} with content)",
-            format_count(overall.archived_sources),
-            overall.archived_pct(),
-            format_count(overall.coverable_sources())
-        );
-        let _ = writeln!(
-            handle,
-            "  Not in archive:  {:>8}",
-            format_count(overall.unarchived())
-        );
+    let label = if archive.is_some() {
+        "In this archive:"
     } else {
-        let _ = writeln!(
-            handle,
-            "  Archived:        {:>8} ({:.1}% of {} with content)",
-            format_count(overall.archived_sources),
-            overall.archived_pct(),
-            format_count(overall.coverable_sources())
-        );
-        let _ = writeln!(
-            handle,
-            "  Unarchived:      {:>8}",
-            format_count(overall.unarchived())
-        );
-    }
+        "Archived:"
+    };
+    let _ = writeln!(
+        handle,
+        "  {label:<16} {:>8} ({:.1}% of {} with content){}",
+        format_count(overall.archived_sources),
+        overall.archived_pct(),
+        format_count(overall.coverable_sources()),
+        only_parked_suffix(overall),
+    );
+    let _ = writeln!(
+        handle,
+        "  {:<16} {:>8}",
+        if archive.is_some() {
+            "Not in archive:"
+        } else {
+            "Unarchived:"
+        },
+        format_count(overall.unarchived())
+    );
 }

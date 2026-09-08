@@ -36,7 +36,7 @@ use anyhow::Result;
 use rusqlite::OptionalExtension;
 
 use super::db::Connection;
-use crate::core::domain::object::Object;
+use crate::core::domain::object::{ArchiveCopy, ArchiveLocation, Object};
 
 /// Batch size for SQL IN clauses (consistent with other repos).
 const BATCH_SIZE: usize = 1000;
@@ -109,42 +109,49 @@ pub fn fetch_by_hash(conn: &Connection, hash: &str) -> Result<Option<Object>> {
     Ok(result)
 }
 
-/// Check which objects have copies in archive root(s).
+/// Every archive-side copy of these objects, with the standing of the root
+/// each stands on.
 ///
-/// Returns set of object IDs that have at least one source in an archive root.
-/// An object is "archived" if EXISTS a source with that object_id under a
-/// root with role='archive' and present=1.
+/// An object is "archived" if a source holding it stands under a root with
+/// `role='archive'` and `present=1`. The suspension of that root is
+/// **returned, never filtered**: a closed door is the user's own act of
+/// setting a place aside from their attention, and content does not stop
+/// standing where it stands because attention moved. Filtering here would
+/// make every coverage claim in Canon conditional on which roots happen to
+/// be parked today — which is the inversion this projection exists to make
+/// unwritable. Surfaces state the standing; nothing here decides it.
 ///
-/// If `archive_root_id` is Some, checks only that specific archive.
-/// If `archive_root_id` is None, checks all archive roots.
+/// If `archive_root_id` is Some, only that archive is read.
 ///
-/// SQL projection of the contentless law (`Source::is_contentless`, ADR
-/// 2026-08-04-contentless-law): the archive side requires `s.size > 0` —
-/// an empty archive copy is no coverage evidence (the universal empty
-/// object would hollowly "cover" every empty file in the universe).
+/// SQL projection of the contentless law (`Source::is_contentless`): the
+/// archive side requires `s.size > 0` — an empty archive copy is no coverage
+/// evidence (the universal empty object would hollowly "cover" every empty
+/// file in the universe).
 ///
 /// **Important**: Callers must filter out sources with object_id=None before
 /// calling this function. Only valid object IDs should be passed.
-pub fn batch_check_archived(
+pub fn batch_archive_copies(
     conn: &Connection,
     object_ids: &[i64],
     archive_root_id: Option<i64>,
-) -> Result<HashSet<i64>> {
+) -> Result<HashMap<i64, Vec<ArchiveCopy>>> {
     if object_ids.is_empty() {
-        return Ok(HashSet::new());
+        return Ok(HashMap::new());
     }
 
-    let mut result = HashSet::new();
+    let mut result: HashMap<i64, Vec<ArchiveCopy>> = HashMap::new();
 
     for chunk in object_ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
 
         let (sql, params): (String, Vec<rusqlite::types::Value>) =
             if let Some(root_id) = archive_root_id {
-                // Specific archive root - no need to join roots table
+                // Specific archive root. The role is not re-checked: the id
+                // came from a spec the caller already resolved against it.
                 let sql = format!(
-                    "SELECT DISTINCT s.object_id
+                    "SELECT DISTINCT s.object_id, r.id, r.suspended
                  FROM sources s
+                 JOIN roots r ON s.root_id = r.id
                  WHERE s.root_id = ? AND s.present = 1 AND s.size > 0
                    AND s.object_id IN ({})",
                     placeholders.join(",")
@@ -153,9 +160,8 @@ pub fn batch_check_archived(
                 params.extend(chunk.iter().map(|&id| rusqlite::types::Value::from(id)));
                 (sql, params)
             } else {
-                // Any archive root - need to join roots table
                 let sql = format!(
-                    "SELECT DISTINCT s.object_id
+                    "SELECT DISTINCT s.object_id, r.id, r.suspended
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
                  WHERE r.role = 'archive' AND s.present = 1 AND s.size > 0
@@ -171,15 +177,41 @@ pub fn batch_check_archived(
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
-            row.get::<_, i64>(0)
+            Ok((
+                row.get::<_, i64>(0)?,
+                ArchiveCopy {
+                    root_id: row.get(1)?,
+                    root_suspended: row.get(2)?,
+                },
+            ))
         })?;
 
         for row in rows {
-            result.insert(row?);
+            let (object_id, copy) = row?;
+            result.entry(object_id).or_default().push(copy);
         }
     }
 
     Ok(result)
+}
+
+/// Check which objects have copies in archive root(s).
+///
+/// The key set of [`batch_archive_copies`] — one spelling of the
+/// archived-ness WHERE, so a caller that only asks *whether* and a caller
+/// that asks *where, and on what standing* can never come apart.
+/// Pinned by `batch_check_archived_is_the_key_set_of_the_copies`.
+///
+/// **Important**: Callers must filter out sources with object_id=None before
+/// calling this function. Only valid object IDs should be passed.
+pub fn batch_check_archived(
+    conn: &Connection,
+    object_ids: &[i64],
+    archive_root_id: Option<i64>,
+) -> Result<HashSet<i64>> {
+    Ok(batch_archive_copies(conn, object_ids, archive_root_id)?
+        .into_keys()
+        .collect())
 }
 
 /// Which of these objects were archived *from* the given root: an archive
@@ -205,7 +237,7 @@ pub fn batch_check_archived_from_root(
 
     for chunk in object_ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        // s.size > 0: the contentless law (see batch_check_archived) —
+        // s.size > 0: the contentless law (see batch_archive_copies) —
         // consistent with the classifier, which never lets an empty source
         // reach the Archived standing.
         let sql = format!(
@@ -234,32 +266,39 @@ pub fn batch_check_archived_from_root(
     Ok(result)
 }
 
-/// Find archive paths for objects.
+/// Find every archive-side location of these objects.
 ///
-/// Returns map from object_id to list of archive paths where that content exists.
-/// Only includes objects that have archive copies. Objects without archive copies
-/// are not included in the result map.
+/// Returns map from object_id to the archive locations holding that content,
+/// each carrying the standing of the root it stands on ([`ArchiveLocation`]).
+/// Objects with no archive copies are absent from the map. A caller wanting
+/// bare paths maps over `.path`; a caller that marks its citations reads
+/// `.root.root_suspended` beside it — which is the whole reason the standing
+/// travels here rather than being looked up again per surface.
+///
+/// Suspension is **returned, never filtered**, for the reason
+/// [`batch_archive_copies`] states.
+///
+/// `s.size > 0`: the contentless law (see [`batch_archive_copies`]) — the
+/// universal empty object claims no locations, so coverage-location answers
+/// (cluster's skip set, the story's covered-where, the compile's locations)
+/// never see it.
 ///
 /// **Important**: Callers must filter out sources with object_id=None before
 /// calling this function. Only valid object IDs should be passed.
 pub fn batch_find_archive_paths(
     conn: &Connection,
     object_ids: &[i64],
-) -> Result<HashMap<i64, Vec<String>>> {
+) -> Result<HashMap<i64, Vec<ArchiveLocation>>> {
     if object_ids.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let mut result: HashMap<i64, Vec<String>> = HashMap::new();
+    let mut result: HashMap<i64, Vec<ArchiveLocation>> = HashMap::new();
 
     for chunk in object_ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        // s.size > 0: the contentless law (see batch_check_archived) — the
-        // universal empty object claims no locations, so coverage-location
-        // answers (cluster's skip set, the story's covered-where, the
-        // compile's locations) never see it.
         let sql = format!(
-            "SELECT s.object_id, r.path, s.rel_path
+            "SELECT s.object_id, r.path, s.rel_path, r.id, r.suspended
              FROM sources s
              JOIN roots r ON s.root_id = r.id
              WHERE r.role = 'archive' AND s.present = 1 AND s.size > 0
@@ -278,17 +317,24 @@ pub fn batch_find_archive_paths(
             let object_id: i64 = row.get(0)?;
             let root_path: String = row.get(1)?;
             let rel_path: String = row.get(2)?;
-            Ok((object_id, root_path, rel_path))
+            let root = ArchiveCopy {
+                root_id: row.get(3)?,
+                root_suspended: row.get(4)?,
+            };
+            Ok((object_id, root_path, rel_path, root))
         })?;
 
         for row in rows {
-            let (object_id, root_path, rel_path) = row?;
-            let full_path = if rel_path.is_empty() {
+            let (object_id, root_path, rel_path, root) = row?;
+            let path = if rel_path.is_empty() {
                 root_path
             } else {
                 format!("{root_path}/{rel_path}")
             };
-            result.entry(object_id).or_default().push(full_path);
+            result
+                .entry(object_id)
+                .or_default()
+                .push(ArchiveLocation { path, root });
         }
     }
 
@@ -327,7 +373,7 @@ pub fn batch_find_archive_info_by_hash(
 
     for chunk in hash_values.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        // s.size > 0: the contentless law (see batch_check_archived) —
+        // s.size > 0: the contentless law (see batch_archive_copies) —
         // identity-keyed archive-conflict claims about empty content are
         // vacuous (an empty file being applied must not "conflict" with
         // every empty file already in the archive).
@@ -634,6 +680,14 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    /// Insert a test root whose door the user has closed.
+    fn insert_parked_root(conn: &RusqliteConnection, path: &str, role: &str) -> i64 {
+        let id = insert_root(conn, path, role);
+        conn.execute("UPDATE roots SET suspended = 1 WHERE id = ?", [id])
+            .unwrap();
+        id
     }
 
     /// Insert a test source and return its ID.
@@ -945,7 +999,7 @@ mod tests {
         assert_eq!(result.len(), 1);
         let paths = result.get(&obj_id).unwrap();
         assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0], "/archive/subdir/file.jpg");
+        assert_eq!(paths[0].path, "/archive/subdir/file.jpg");
     }
 
     #[test]
@@ -960,7 +1014,7 @@ mod tests {
         let result = batch_find_archive_paths(&conn, &[obj_id]).unwrap();
 
         let paths = result.get(&obj_id).unwrap();
-        assert_eq!(paths[0], "/archive"); // No trailing slash
+        assert_eq!(paths[0].path, "/archive"); // No trailing slash
     }
 
     #[test]
@@ -980,8 +1034,8 @@ mod tests {
         let paths = result.get(&obj_id).unwrap();
         assert_eq!(paths.len(), 2);
         // Ordered by root path, then rel_path
-        assert_eq!(paths[0], "/archive1/file.jpg");
-        assert_eq!(paths[1], "/archive2/copy.jpg");
+        assert_eq!(paths[0].path, "/archive1/file.jpg");
+        assert_eq!(paths[1].path, "/archive2/copy.jpg");
     }
 
     #[test]
@@ -1569,5 +1623,153 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))
             .unwrap();
         assert_eq!(src_count, 2);
+    }
+
+    // ========================================================================
+    // The archived-ness WHERE, spoken once
+    // ========================================================================
+
+    #[test]
+    fn batch_archive_copies_returns_parked_roots_rather_than_hiding_them() {
+        // Testifying is what a closed door permits: content does not stop
+        // standing where it stands because the user parked the root.
+        let conn = setup_test_db();
+        let live = insert_root(&conn, "/arc-live", "archive");
+        let parked = insert_parked_root(&conn, "/arc-parked", "archive");
+        let both = insert_object(&conn, "both", false);
+        let only_parked = insert_object(&conn, "onlyparked", false);
+        insert_source(&conn, live, "a.jpg", Some(both), true);
+        insert_source(&conn, parked, "a.jpg", Some(both), true);
+        insert_source(&conn, parked, "b.jpg", Some(only_parked), true);
+
+        let copies = batch_archive_copies(&conn, &[both, only_parked], None).unwrap();
+
+        let mut both_copies = copies.get(&both).unwrap().clone();
+        both_copies.sort_by_key(|c| c.root_id);
+        assert_eq!(
+            both_copies,
+            vec![
+                ArchiveCopy {
+                    root_id: live,
+                    root_suspended: false
+                },
+                ArchiveCopy {
+                    root_id: parked,
+                    root_suspended: true
+                },
+            ]
+        );
+        assert_eq!(
+            copies.get(&only_parked).unwrap(),
+            &vec![ArchiveCopy {
+                root_id: parked,
+                root_suspended: true
+            }],
+            "an object standing only behind a door is still archived"
+        );
+    }
+
+    #[test]
+    fn batch_check_archived_is_the_key_set_of_the_copies() {
+        // One spelling of the archived-ness WHERE: the whether-question and
+        // the where-and-on-what-standing question can never come apart.
+        let conn = setup_test_db();
+        let live = insert_root(&conn, "/arc-live", "archive");
+        let parked = insert_parked_root(&conn, "/arc-parked", "archive");
+        let source_root = insert_root(&conn, "/src", "source");
+
+        let on_live = insert_object(&conn, "onlive", false);
+        let on_parked = insert_object(&conn, "onparked", false);
+        let on_both = insert_object(&conn, "onboth", false);
+        let empty = insert_object(&conn, "empty", false);
+        let source_side_only = insert_object(&conn, "srconly", false);
+        let absent = insert_object(&conn, "absent", false);
+
+        insert_source(&conn, live, "1.jpg", Some(on_live), true);
+        insert_source(&conn, parked, "2.jpg", Some(on_parked), true);
+        insert_source(&conn, live, "3.jpg", Some(on_both), true);
+        insert_source(&conn, parked, "3.jpg", Some(on_both), true);
+        insert_source(&conn, source_root, "4.jpg", Some(source_side_only), true);
+        insert_source(&conn, parked, "5.jpg", Some(absent), false);
+        let empty_id = insert_source(&conn, live, "6.jpg", Some(empty), true);
+        conn.execute("UPDATE sources SET size = 0 WHERE id = ?", [empty_id])
+            .unwrap();
+
+        let ids = vec![on_live, on_parked, on_both, empty, source_side_only, absent];
+        for archive in [None, Some(live), Some(parked)] {
+            let copies = batch_archive_copies(&conn, &ids, archive).unwrap();
+            let archived = batch_check_archived(&conn, &ids, archive).unwrap();
+            let keys: HashSet<i64> = copies.keys().copied().collect();
+            assert_eq!(archived, keys, "restricted to {archive:?}");
+        }
+
+        // The parity would hold vacuously if both were empty, so pin what
+        // the fixture is actually saying.
+        let archived = batch_check_archived(&conn, &ids, None).unwrap();
+        assert_eq!(archived, HashSet::from([on_live, on_parked, on_both]));
+    }
+
+    #[test]
+    fn the_archive_locations_carry_the_standing_of_their_root() {
+        let conn = setup_test_db();
+        let live = insert_root(&conn, "/arc-live", "archive");
+        let parked = insert_parked_root(&conn, "/arc-parked", "archive");
+        let obj = insert_object(&conn, "abc", false);
+        insert_source(&conn, live, "keep/a.jpg", Some(obj), true);
+        insert_source(&conn, parked, "keep/a.jpg", Some(obj), true);
+
+        let found = batch_find_archive_paths(&conn, &[obj]).unwrap();
+        let locations = found.get(&obj).unwrap();
+
+        // Ordered by root path, so the live archive comes first here.
+        assert_eq!(locations[0].path, "/arc-live/keep/a.jpg");
+        assert!(!locations[0].root.root_suspended);
+        assert_eq!(locations[1].path, "/arc-parked/keep/a.jpg");
+        assert!(locations[1].root.root_suspended);
+    }
+
+    #[test]
+    fn archive_copies_survive_the_sql_chunking_boundary() {
+        // `BATCH_SIZE` chunks the IN-list, and the map is accumulated across
+        // chunks. An object cannot straddle a chunk — the chunking is over
+        // object ids — so what this guards is the accumulator itself: a map
+        // rebuilt per chunk, or a `collect` that kept only the last one,
+        // would answer for a suffix of the ids and every claim about what a
+        // count rests on would be short by a chunk. Silent, and only at
+        // scale.
+        let conn = setup_test_db();
+        let live = insert_root(&conn, "/arc-live", "archive");
+        let parked = insert_parked_root(&conn, "/arc-parked", "archive");
+
+        let mut ids = Vec::new();
+        for i in 0..1_100 {
+            let obj = insert_object(&conn, &format!("hash{i}"), false);
+            // Every object stands in the parked archive; every third also in
+            // the live one, so the all-parked answer varies across chunks.
+            insert_source(&conn, parked, &format!("p{i}.jpg"), Some(obj), true);
+            if i % 3 == 0 {
+                insert_source(&conn, live, &format!("l{i}.jpg"), Some(obj), true);
+            }
+            ids.push(obj);
+        }
+        assert!(ids.len() > BATCH_SIZE, "the fixture must cross the seam");
+
+        let copies = batch_archive_copies(&conn, &ids, None).unwrap();
+        assert_eq!(copies.len(), ids.len());
+        let only_parked = ids
+            .iter()
+            .filter(|id| {
+                crate::core::domain::resolution::only_on_suspended(copies.get(id).unwrap())
+            })
+            .count();
+        assert_eq!(
+            only_parked,
+            1_100 - 1_100_usize.div_ceil(3),
+            "every object with a live copy is excluded, across the seam"
+        );
+        assert_eq!(
+            batch_check_archived(&conn, &ids, None).unwrap().len(),
+            ids.len()
+        );
     }
 }

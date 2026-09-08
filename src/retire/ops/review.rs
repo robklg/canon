@@ -44,6 +44,9 @@ pub struct ReadinessReview {
     /// the timeline's opening line, not an identity claim.
     pub first_indexed: Option<i64>,
     pub account: ResolutionAccount,
+    /// The fleet at review time, so the standing lines can name the parked
+    /// roots their claims rest on without a second fetch.
+    pub roots: Vec<Root>,
     pub gaps: GapFacts,
     pub readiness: Readiness,
     /// Review-time basis: total source rows (present + absent). Consumed by
@@ -180,7 +183,7 @@ pub fn readiness_lens(story: &RootStory) -> ReadinessReview {
     let account = build_account(
         &story.present,
         &story.absent,
-        &story.archived,
+        &story.archive_copies,
         &story.archived_from_here,
         &story.extractions,
         &story.stamp_families,
@@ -197,6 +200,7 @@ pub fn readiness_lens(story: &RootStory) -> ReadinessReview {
         root: story.root.clone(),
         first_indexed: story.first_indexed,
         account,
+        roots: story.roots.clone(),
         gaps,
         readiness,
         snapshot_source_count: (story.present.len() + story.absent.len()) as i64,

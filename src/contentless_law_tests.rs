@@ -47,8 +47,11 @@ fn canary() -> Canary {
 
 #[test]
 fn archived_ness_never_reads_empty_content() {
-    // The `archived?` predicate, coverage stats, the ceremonies' archive
-    // context, and the readiness archived-set all derive here.
+    // The archived-ness WHERE is spelled once, in `batch_archive_copies`;
+    // this asks it through `batch_check_archived`, its key set, which is the
+    // shape the `archived?` predicate and the ceremonies' archive context
+    // use. Coverage and the readiness account read the copies directly, and
+    // inherit the same predicate from the same spelling.
     let c = canary();
     let archived =
         repo::object::batch_check_archived(&c.conn, &[c.empty_obj, c.data_obj], None).unwrap();

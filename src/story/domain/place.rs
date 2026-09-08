@@ -10,6 +10,7 @@ use super::acts::ActGroup;
 use super::locations::LocationAggregate;
 use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::fate::{fate_transition, DecisionFamily, FateAspect};
+use crate::core::domain::object::ArchiveLocation;
 use crate::core::domain::source::Source;
 use crate::notes::Note;
 
@@ -65,7 +66,10 @@ pub struct StoryInputs<'a> {
     /// Object id → full paths of the archive copies. Zero-byte objects are
     /// excluded upstream (the book's contentless gate, reused), so a covered
     /// empty file counts in the standing but claims no locations.
-    pub archive_locations: &'a HashMap<i64, Vec<String>>,
+    /// `object_id` → where its content stands in the archive, each location
+    /// carrying the standing of its root — the covered-where answer's
+    /// evidence, and the marker on it.
+    pub archive_locations: &'a HashMap<i64, Vec<ArchiveLocation>>,
     /// Known root paths — the legibility bases for every "where" answer.
     pub bases: &'a [String],
 }

@@ -37,6 +37,13 @@ pub enum OriginLine {
         root_path: String,
         /// Whether the origin root is still known to the live index.
         root_removed: bool,
+        /// Whether the origin root is one the user has closed the door on.
+        ///
+        /// Present-tense, like the card itself: content still stands there
+        /// and the origin claim is unchanged, but going to look means
+        /// opening a door. Mutually exclusive with `root_removed` by
+        /// construction — a root the index no longer knows has no door.
+        root_suspended: bool,
         /// Where a removed origin root's story lives now, when it was
         /// retired: the bound book's display path. `None` for a live root or
         /// for a plain `roots rm` (no bound story to point at).
@@ -268,6 +275,9 @@ fn contains_view(root_path: &str, prefixes: &[String]) -> bool {
 ///
 /// `prefixes` is the viewed scope, used only to tell a real origin from this
 /// place itself (see the rearrangement guard below).
+/// `parked_root_paths` names the roots whose door the user has closed —
+/// keyed by path like `live_root_paths`, and read for the same reason: what
+/// stands here now, and what reaching it would take.
 /// `retired_books` maps an origin root's snapshot path to the display path of
 /// the book its story was bound into — a DB read, so ops looks it up and
 /// passes it in, exactly as it already does for `live_root_paths`. A path
@@ -278,6 +288,7 @@ pub fn build_card(
     decisions: &HashMap<i64, Decision>,
     extractions_by_decision: &HashMap<i64, Vec<DecisionExtraction>>,
     live_root_paths: &HashSet<String>,
+    parked_root_paths: &HashSet<String>,
     retired_books: &HashMap<String, String>,
     prefixes: &[String],
 ) -> CompositionCard {
@@ -422,6 +433,7 @@ pub fn build_card(
         // Decided from the group key, so a root removed and re-added can't be
         // called removed on the strength of whichever stale row merged first.
         let root_removed = !live_root_paths.iter().any(|p| p == &root_path);
+        let root_suspended = parked_root_paths.contains(&root_path);
         // Gated on removal for the same reason `show`'s `drew from:` gates
         // it: a bound-but-unreleased retirement leaves its artifact
         // reference recorded while the root stays fully indexed, and a live
@@ -434,6 +446,7 @@ pub fn build_card(
         origins.push(OriginLine::FromRoot {
             root_path,
             root_removed,
+            root_suspended,
             retired_book,
             from_within: acc.from_within,
             files: acc.files,
@@ -568,6 +581,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/Volumes/sd", "/archive"]),
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -602,6 +616,7 @@ mod tests {
             &decisions,
             &extractions,
             &live,
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -610,6 +625,7 @@ mod tests {
             OriginLine::FromRoot {
                 root_path,
                 root_removed,
+                root_suspended: _,
                 retired_book: _,
                 from_within,
                 files,
@@ -647,6 +663,7 @@ mod tests {
             &decisions,
             &extractions,
             &live,
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -680,6 +697,7 @@ mod tests {
             &groups,
             &decisions,
             &HashMap::new(),
+            &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
             &view(),
@@ -783,6 +801,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -818,6 +837,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
+            &HashSet::new(),
             &HashMap::new(),
             &["/archive/2020".to_string()],
         );
@@ -844,6 +864,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
+            &HashSet::new(),
             &HashMap::new(),
             &["/archive/2020".to_string()],
         );
@@ -873,6 +894,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
+            &HashSet::new(),
             &HashMap::new(),
             &["/archive/2020".to_string()],
         );
@@ -922,6 +944,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a", "/vol/b", "/Volumes/sd", "/archive"]),
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -958,6 +981,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a", "/vol/b", "/Volumes/sd", "/archive"]),
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -999,6 +1023,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1019,6 +1044,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1037,6 +1063,7 @@ mod tests {
             &groups,
             &decisions,
             &HashMap::new(),
+            &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
             &view(),
@@ -1065,6 +1092,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1092,6 +1120,7 @@ mod tests {
             &groups,
             &decisions,
             &HashMap::new(),
+            &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
             &view(),
@@ -1127,6 +1156,7 @@ mod tests {
             &groups,
             &decisions,
             &HashMap::new(),
+            &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
             &view(),
@@ -1185,6 +1215,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive"]),
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1213,6 +1244,7 @@ mod tests {
             &groups,
             &decisions,
             &HashMap::new(),
+            &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
             &view(),
@@ -1254,6 +1286,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a"]),
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1299,6 +1332,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1321,6 +1355,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1340,6 +1375,7 @@ mod tests {
             &groups,
             &HashMap::new(),
             &HashMap::new(),
+            &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
             &view(),
@@ -1369,6 +1405,7 @@ mod tests {
             &decisions,
             &extractions,
             &live,
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1411,6 +1448,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashSet::new(),
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1439,6 +1477,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1465,6 +1504,7 @@ mod tests {
             &decisions,
             &extractions,
             &live,
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1484,6 +1524,7 @@ mod tests {
             &groups,
             &decisions,
             &extractions,
+            &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
             &view(),
@@ -1509,6 +1550,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a"]), // live under some other id now
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1538,6 +1580,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a"]),
+            &HashSet::new(),
             &HashMap::new(),
             &view(),
         );

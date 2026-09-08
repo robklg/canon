@@ -131,7 +131,7 @@ pub fn compile_book(
     let account = build_account(
         &story.present,
         &story.absent,
-        &story.archived,
+        &story.archive_copies,
         &story.archived_from_here,
         &story.extractions,
         &story.stamp_families,

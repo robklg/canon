@@ -1535,3 +1535,336 @@ fn an_apply_invitation_stands_where_the_door_is_not_its_own() {
         "the report invited an act that works"
     );
 }
+
+// ============================================================================
+// E — testifying: what a closed door does NOT stop
+// ============================================================================
+//
+// The registry's fourth permit. A parked root's copies still ground claims
+// about other places: custody stands, and redundancy points. What changes is
+// that every claim resting on them says so — **stated, never headlined**,
+// which is a rule about presentation and not about whether the evidence
+// counts.
+
+/// **E1 — coverage counts a parked archive's copies, and says what rests
+/// there.**
+///
+/// The count does not shrink: parking never un-archives, and a source whose
+/// only copy stands behind a door is covered. What is added is the one fact a
+/// user reading this before releasing a drive would otherwise have to open a
+/// door to find out.
+#[test]
+fn coverage_counts_parked_copies_and_says_what_rests_on_them() {
+    let fx = Fixture::new();
+    // `src/sub/c.jpg` has no copy in `arc`; give it one in a second archive,
+    // then close that archive's door.
+    std::fs::create_dir_all(fx.path("arc2")).unwrap();
+    write(fx.path("arc2/c.jpg"), "charlie");
+    fx.run(&["scan", "--add", "--role", "archive", &fx.path_str("arc2")])
+        .ok();
+    let parked = fx.path_str("arc2");
+    fx.park("arc2");
+
+    let run = fx.run(&["coverage", "--global"]);
+    run.ok();
+
+    let archived = run
+        .stdout
+        .lines()
+        .find(|l| l.contains("Archived:") && l.contains("only on suspended"))
+        .unwrap_or_else(|| panic!("no qualified archived line in:\n{}", run.stdout));
+    assert!(
+        archived.contains(&parked),
+        "the segment names the root the claim rests on: {archived}"
+    );
+    assert!(
+        !archived.contains("canon roots unsuspend"),
+        "testimony is stated, not offered as a way back: {archived}"
+    );
+}
+
+/// **E2 — a wholly open archive says nothing about doors.**
+///
+/// The segment is suppressed at zero. "0 only on suspended roots" is a
+/// sentence about a situation that is not happening, and a view that says it
+/// every time stops being read.
+#[test]
+fn an_open_world_never_mentions_a_door() {
+    let fx = Fixture::new();
+    let run = fx.run(&["coverage", "--global"]);
+    run.ok();
+    assert!(!run.stdout.contains("only on suspended"), "{}", run.stdout);
+}
+
+/// **E3 — a parked `--archive` is answered and marked, not refused.**
+///
+/// This was refused by name for as long as the outward side filtered those
+/// copies out, because an answer would have been a zero where content stands.
+/// The filter is gone, so the answer is owed.
+#[test]
+fn a_parked_archive_named_as_the_frame_is_answered() {
+    let fx = Fixture::new();
+    let parked = fx.path_str("arc");
+    fx.park("arc");
+
+    for args in [
+        vec!["coverage", "--global", "--archive"],
+        vec!["survey", "--archive"],
+    ] {
+        let mut argv = args.clone();
+        let spec = format!("path:{parked}");
+        argv.push(&spec);
+        let scope = fx.path_str("src");
+        if argv[0] == "survey" {
+            argv.insert(1, &scope);
+        }
+        let run = fx.run(&argv);
+        run.ok();
+        assert!(
+            run.stdout.contains("(suspended)"),
+            "the frame is marked ({argv:?}):\n{}",
+            run.stdout
+        );
+        assert!(
+            !run.stdout.contains("canon roots unsuspend"),
+            "and not refused ({argv:?}):\n{}",
+            run.stdout
+        );
+    }
+}
+
+/// **E4 — survey's outward side counts parked evidence, marks it, and never
+/// leads with it.**
+///
+/// The inversion this repairs: with `live` parked, the same content used to
+/// read `1 unique here` and `No related locations found.` — survey's answer
+/// changed by an act that changed only attention.
+#[test]
+fn survey_counts_parked_evidence_and_never_leads_with_it() {
+    let fx = Fixture::new();
+    // Give the root about to be parked a second shared file, so it carries a
+    // strictly stronger relation than the live location added below. A tie
+    // would let a sort that ignores standing pass this row by accident.
+    write(fx.path("live/b-copy.jpg"), "bravo");
+    fx.run(&["scan", &fx.path_str("live")]).ok();
+    let parked = fx.path_str("live");
+    fx.park("live");
+
+    let run = fx.run(&["survey", &fx.path_str("src")]);
+    run.ok();
+
+    assert!(
+        run.stdout.contains("Related locations:"),
+        "the parked copy is still a copy:\n{}",
+        run.stdout
+    );
+    let cited = run
+        .stdout
+        .lines()
+        .find(|l| l.contains(&parked))
+        .unwrap_or_else(|| panic!("no citation of {parked} in:\n{}", run.stdout));
+    assert!(
+        cited.contains("(suspended)"),
+        "and the citation says so: {cited}"
+    );
+    assert!(
+        !run.stdout.contains("0 unique here\n  1 unique"),
+        "sanity: {}",
+        run.stdout
+    );
+
+    // A second, live location carrying the *weaker* relation — one shared
+    // file against the parked location's two. It still leads, because
+    // standing orders ahead of the relation. Built here rather than assumed:
+    // the base fixture yields one related location, so the assertion below
+    // would otherwise never run at all.
+    std::fs::create_dir_all(fx.path("live2")).unwrap();
+    write(fx.path("live2/a-copy.jpg"), "alpha");
+    fx.run(&["scan", "--add", "--role", "source", &fx.path_str("live2")])
+        .ok();
+    let live2 = fx.path_str("live2");
+
+    let run = fx.run(&["survey", &fx.path_str("src")]);
+    run.ok();
+    let order: Vec<&str> = run
+        .stdout
+        .lines()
+        .skip_while(|l| !l.contains("Related locations:"))
+        .filter(|l| l.contains("overlap ("))
+        .collect();
+    assert!(
+        order.len() > 1,
+        "the fixture must offer a choice to order:\n{}",
+        run.stdout
+    );
+    assert!(
+        order[0].contains(&live2),
+        "the live location leads even carrying the weaker relation: {order:?}"
+    );
+    assert!(
+        order[0].contains(" 1 of 3 overlap"),
+        "sanity: the leading location is the weaker one: {order:?}"
+    );
+    assert!(
+        order.last().unwrap().contains("(suspended)")
+            && order.last().unwrap().contains(" 2 of 3 overlap"),
+        "and the parked one trails despite the stronger relation: {order:?}"
+    );
+}
+
+/// **E7 — a detail view answers about a place the way the summary just did.**
+///
+/// The same run must not mark a location in its summary and leave it bare a
+/// few lines down, nor let it lead one list while trailing the other. Before
+/// the outward side counted parked evidence a parked archive could not reach
+/// these views at all, so this is the widening's own conformance row.
+#[test]
+fn a_detail_view_marks_and_orders_the_places_the_summary_named() {
+    let fx = Fixture::new();
+    // The parked archive holds all three; the live one holds two, so the
+    // parked place carries the strictly stronger relation and must still
+    // trail. A tie would let a stable count-sort pass this by accident.
+    std::fs::create_dir_all(fx.path("arc2")).unwrap();
+    write(fx.path("arc2/a.jpg"), "alpha");
+    write(fx.path("arc2/b.jpg"), "bravo");
+    write(fx.path("arc2/c.jpg"), "charlie");
+    fx.run(&["scan", "--add", "--role", "archive", &fx.path_str("arc2")])
+        .ok();
+    let parked = fx.path_str("arc2");
+    fx.park("arc2");
+
+    let run = fx.run(&["survey", &fx.path_str("src"), "--detail", "archived"]);
+    run.ok();
+
+    let cited: Vec<&str> = run
+        .stdout
+        .lines()
+        .filter(|l| l.trim_start().starts_with("Archived at "))
+        .collect();
+    assert!(cited.len() > 1, "no choice to order:\n{}", run.stdout);
+    assert!(
+        !cited[0].contains(&parked),
+        "a parked location never leads a detail view either: {cited:?}"
+    );
+    let parked_line = cited
+        .iter()
+        .find(|l| l.contains(&parked))
+        .unwrap_or_else(|| panic!("the parked archive is not cited:\n{}", run.stdout));
+    assert!(
+        parked_line.contains("(suspended)"),
+        "and it carries the same mark the summary gave it: {parked_line}"
+    );
+}
+
+/// **E5 — the story and the readiness review say what a claim rests on, from
+/// one account.**
+///
+/// Both are lenses over the same fetch, so the number they print cannot
+/// disagree; and the where-line marks the place it names.
+#[test]
+fn the_story_and_the_review_state_the_evidence_behind_a_door() {
+    let fx = Fixture::new();
+    std::fs::create_dir_all(fx.path("arc2")).unwrap();
+    write(fx.path("arc2/c.jpg"), "charlie");
+    fx.run(&["scan", "--add", "--role", "archive", &fx.path_str("arc2")])
+        .ok();
+    let parked = fx.path_str("arc2");
+    fx.park("arc2");
+    let subject = format!("path:{}", fx.path_str("src"));
+
+    let story = fx.run(&["roots", "story", &subject]);
+    story.ok();
+    let where_line = story
+        .stdout
+        .lines()
+        .find(|l| l.contains("copies stand in") && l.contains(&parked))
+        .unwrap_or_else(|| panic!("no covered-where line naming {parked}:\n{}", story.stdout));
+    assert!(
+        where_line.contains("(suspended)"),
+        "the where-line marks the place it names: {where_line}"
+    );
+    assert!(
+        story
+            .stdout
+            .lines()
+            .any(|l| l.starts_with("Standing:") && l.contains("only on suspended")),
+        "the closing totals carry it too:\n{}",
+        story.stdout
+    );
+
+    let review = fx.run(&["roots", "retire", &subject, "--dry-run"]);
+    let covered = review
+        .stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("covered"))
+        .unwrap_or_else(|| panic!("no covered line in:\n{}", review.stdout));
+    assert!(
+        covered.contains("only on suspended") && covered.contains(&parked),
+        "the review reads the same account: {covered}"
+    );
+}
+
+/// **E6 — the composition card marks a parked origin; the history beside it
+/// does not.**
+///
+/// The card states what stands here *now*, so a door in front of an origin is
+/// what a reader about to go looking needs. The act line above it records what
+/// happened *then*, and a standing true only now is not true of the past.
+#[test]
+fn the_card_marks_a_parked_origin_and_the_history_does_not() {
+    let fx = Fixture::new();
+    let manifest = fx.manifest();
+    fx.run(&["apply", &manifest.to_string_lossy(), "--yes"])
+        .ok();
+    let origin = fx.path_str("live");
+    fx.park("live");
+
+    let run = fx.run(&["trail", &format!("{}/out", fx.path_str("arc"))]);
+    run.ok();
+
+    let card_line = run
+        .stdout
+        .lines()
+        .position(|l| l.contains("Standing here"))
+        .unwrap_or_else(|| panic!("no composition card in:\n{}", run.stdout));
+    let card: Vec<&str> = run.stdout.lines().skip(card_line).collect();
+    assert!(
+        card.iter().any(|l| l.contains("(suspended)")),
+        "the card marks the parked origin:\n{}",
+        card.join("\n")
+    );
+
+    let history: Vec<&str> = run.stdout.lines().take(card_line).collect();
+    assert!(
+        history.iter().any(|l| l.contains(&origin)),
+        "the act line still names the origin:\n{}",
+        history.join("\n")
+    );
+    assert!(
+        !history.iter().any(|l| l.contains("(suspended)")),
+        "but says nothing about a door that closed afterwards:\n{}",
+        history.join("\n")
+    );
+
+    // The `drew from:` block is the other past-tense surface, and the one
+    // that shares the marker's own spelling — so it is the one that would
+    // actually change if the rule were dropped.
+    let apply_id = history
+        .iter()
+        .find(|l| l.contains("archived"))
+        .and_then(|l| l.split_whitespace().next())
+        .map(|chip| chip.trim_start_matches('#').to_string())
+        .unwrap_or_else(|| panic!("no apply row in:\n{}", history.join("\n")));
+    let show = fx.run(&["trail", "show", &apply_id]);
+    show.ok();
+    let drew: Vec<&str> = show
+        .stdout
+        .lines()
+        .filter(|l| l.contains(&origin))
+        .collect();
+    assert!(!drew.is_empty(), "no origin lines in:\n{}", show.stdout);
+    assert!(
+        !drew.iter().any(|l| l.contains("(suspended)")),
+        "a record of what happened then carries no standing from now: {drew:?}"
+    );
+}

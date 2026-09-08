@@ -12,7 +12,7 @@ done, `locations.rs` answers *where*, `place.rs` holds the node, its standing an
 Sealed behind a barrel of `story` (the command, reached by `main.rs`) plus what `retire` composes
 the book through: `ActDecision`, `ActGroup`, `ReasonSummary`, `aggregate_locations`,
 `LocationAggregate`, `LocationCount`, `PlaceStanding`, `StoryParams`, `StoryPlace`, `file_noun`,
-`fmt_locations`, `reference_place_lines`, `report_over`, `StoryReport`.
+`fmt_locations`, `reference_place_lines`, `Voicing`, `report_over`, `StoryReport`.
 
 ## The walk
 
@@ -73,6 +73,20 @@ groups fit the cap whole); destinations keep the coarse answer — the arrow sta
 scatter is what nobody chose. **Two wordings at the interface, never mixed**: `→` = recorded
 destination (the user chose it); `copies stand in` = observed coverage (nobody chose it).
 
+**A where-line says which of its places is behind a closed door**: `LocationCount.suspended`,
+true when every copy the entry accounts for stands on a parked root. The mark belongs to the
+**entry**, not the line — a line naming two places marks only the one that needs a door opened
+(`a_covered_place_carries_the_standing_of_the_archive_it_cites`,
+`each_covered_location_speaks_for_its_own_copies`, and
+`a_where_line_marks_only_the_entries_behind_a_door` at the render). Aggregation merges
+directories, so the flag rides the walk as a parked-file sum against the total rather than being
+read off any one directory. **A merged entry can span roots of different standing** — the walk
+splits at the first branching node, which may sit *above* two archive roots, so one entry can
+account for copies on a live root and a parked one at once. It is unmarked there, and that case
+is reachable and pinned (`a_merged_entry_spanning_two_standings_is_unmarked`), not hypothetical. The closing totals qualify the covered and
+archived-from-here counts the same way, from the account's own `ParkedEvidence`, so the story and
+the readiness review cannot name different roots for one fact.
+
 **Act aggregation** (`group_acts`): by (transition, posture, destination aggregate) — the what
 compresses, the whys never disappear (`reason_summary` enumerates distinct reasons with ids, cited
 ids on one bare line, reasonless counted, buckets never conflated), the where never blurs. Bytes
@@ -113,7 +127,10 @@ one) — wordings differ *by voicing* at match sites, never by consumer accident
 lines (`N files, S · chosen for the archive → dest`), plain diction (*let go* = excluded,
 *preserved by copies in the archive* = covered, *no known copy in the archive* = unresolved), no
 bind-time claims, no standing vocabulary, no handoffs, no moved/copied split (the dossier keeps
-it). The archived-standing line, `no decision here` and `nothing stands here now` are judgment
+it), **and no door markers**: `fmt_locations` takes the voicing and marks only under `Judgment`,
+because which doors were closed on a given afternoon is precisely a bind-time claim, and a book
+is never rewritten — the marker would outlive the pause it describes
+(`the_bound_reading_never_marks_a_door`). The archived-standing line, `no decision here` and `nothing stands here now` are judgment
 furniture — **dropped, never re-worded**: "still standing here" is exactly the bind-time claim the
 ever-axis forswears. Always full: the place cap is structurally unreachable in a book.
 

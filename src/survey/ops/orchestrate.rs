@@ -129,29 +129,28 @@ pub fn run_survey(
         }
     }
 
+    // A parked `--archive` is measured against and **marked**, never
+    // refused. Its copies testify like any other, and the outward side now
+    // counts them — the interim refusal existed only because, while the
+    // index filtered them out, an answer here would have been a zero where
+    // content stands.
     let archive_root_id = match orchestration.archive {
         Some(ref spec) => {
             match crate::core::ops::scope::parse_root_spec(&all_roots, spec, Some("archive"))? {
                 crate::core::ops::scope::RootLookup::Found(id) => Some(id),
-                // The archive this survey was told to measure against is behind a
-                // closed door. Its copies still testify — but survey's outward
-                // side cannot see them yet, so answering would report zero
-                // overlap with content that is standing there. The door is named
-                // instead of a false count.
-                crate::core::ops::scope::RootLookup::Parked(parked) => {
-                    return Err(crate::core::domain::root::DoorRefused::at(
-                        &parked,
-                        crate::core::domain::root::DoorVerb::Refused,
-                    )
-                    .into())
-                }
+                crate::core::ops::scope::RootLookup::Parked(parked) => Some(parked.root_id),
             }
         }
         None => None,
     };
     let archive_label = archive_root_id.map(|id| {
         let root = all_roots.iter().find(|r| r.id == id).unwrap();
-        format!("in {}", root.path)
+        let marker = if root.is_suspended() {
+            " (suspended)"
+        } else {
+            ""
+        };
+        format!("in {}{marker}", root.path)
     });
 
     let root_ids: Vec<i64> = all_roots.iter().map(|r| r.id).collect();

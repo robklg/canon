@@ -26,6 +26,8 @@ use std::collections::{HashMap, HashSet};
 
 use super::extraction::{DecisionExtraction, OriginDisposition};
 use super::fate::DecisionFamily;
+use crate::core::domain::object::ArchiveCopy;
+use crate::core::domain::root::{only_on_suspended_segment, Root};
 use crate::core::domain::source::Source;
 
 /// The two-register resolution account of a root.
@@ -61,6 +63,22 @@ pub struct ResolutionAccount {
     /// Subset of `unresolved`: present, non-excluded, never hashed — they
     /// cannot be verified covered, which is exactly why they block.
     pub unhashed_unresolved: i64,
+    /// What the `covered` claim rests on, where it rests solely behind
+    /// closed doors.
+    ///
+    /// Not a sixth standing and not a doubt about the evidence — parking
+    /// never un-archives, and these rows are covered. It is what the claim
+    /// **rests on**, said out loud, because the reader of this account is
+    /// usually deciding whether a drive can go.
+    pub covered_only_parked: ParkedEvidence,
+    /// The same question asked of `archived_standing`, where the claim is
+    /// custody rather than coverage: this root's own act put the content in
+    /// the archive, and every surviving copy of it is behind a door.
+    ///
+    /// Kept apart from the covered evidence rather than pooled, because each
+    /// line names the roots **its own** claim rests on — a union would let
+    /// the covered line name a root only the custody claim stands behind.
+    pub archived_standing_only_parked: ParkedEvidence,
 }
 
 impl ResolutionAccount {
@@ -161,6 +179,72 @@ pub fn unresolved_remainder(present: &[&Source], archived: &HashSet<i64>) -> i64
         .count() as i64
 }
 
+/// A claim's dependence on places behind closed doors: how many rows rest
+/// solely there, and which parked roots hold the copies.
+///
+/// The count and the roots travel together because they are one statement —
+/// separate fields drift, and a line naming roots its own count does not
+/// rest on is exactly the false testimony this carries evidence to prevent.
+/// Roots are ids: the account knows no paths, and every surface that names
+/// them already holds the fleet.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ParkedEvidence {
+    pub count: i64,
+    /// Ascending and deduped once [`ParkedEvidence::settle`] has run.
+    pub roots: Vec<i64>,
+}
+
+impl ParkedEvidence {
+    /// Record one claim grounded on these copies, if it rests solely behind
+    /// doors; returns whether it did.
+    ///
+    /// The one accumulation site, so `only_on_suspended` is consulted here
+    /// and not re-spelled beside every counter.
+    pub fn observe(&mut self, copies: &[ArchiveCopy]) -> bool {
+        if !only_on_suspended(copies) {
+            return false;
+        }
+        self.count += 1;
+        self.roots.extend(copies.iter().map(|copy| copy.root_id));
+        true
+    }
+
+    /// Order and dedupe the roots — called once the last claim is in.
+    pub fn settle(&mut self) {
+        self.roots.sort_unstable();
+        self.roots.dedup();
+    }
+
+    /// The trailing qualifier this evidence earns, naming its roots against
+    /// the fleet the caller holds — `None` when the claim rests on nothing
+    /// closed.
+    pub fn segment(&self, roots: &[Root]) -> Option<String> {
+        let paths: Vec<String> = self
+            .roots
+            .iter()
+            .filter_map(|id| roots.iter().find(|root| root.id == *id))
+            .map(|root| root.path.clone())
+            .collect();
+        only_on_suspended_segment(self.count, &paths)
+    }
+}
+
+/// Whether a claim grounded on these archive copies rests **solely** behind
+/// closed doors: there is at least one copy, and the user has closed the
+/// door on every root holding one.
+///
+/// The one owner of the all-parked test (the account's two counts and
+/// coverage's segment). Both halves are load-bearing. **Non-empty**: no
+/// copies is no claim at all, and "only on suspended roots" said of nothing
+/// is a claim about an absence. **Every**: one copy on an open root means
+/// the claim stands without opening anything, so saying so would raise a
+/// question the evidence does not pose — the registry's "stated, never
+/// headlined" cuts both ways, and a marker that fires on mixed evidence is
+/// a headline.
+pub fn only_on_suspended(copies: &[ArchiveCopy]) -> bool {
+    !copies.is_empty() && copies.iter().all(|copy| copy.root_suspended)
+}
+
 /// Deleted iff the stamp is Observe-family — the trail's presence-axis rule:
 /// "deleted reads only the absent bucket of Observe-family decisions".
 pub fn classify_absent(family: Option<DecisionFamily>) -> AbsentBucket {
@@ -177,7 +261,7 @@ pub fn classify_absent(family: Option<DecisionFamily>) -> AbsentBucket {
 pub fn build_account(
     present: &[Source],
     absent: &[Source],
-    archived: &HashSet<i64>,
+    archive_copies: &HashMap<i64, Vec<ArchiveCopy>>,
     archived_from_here: &HashSet<i64>,
     extractions: &[DecisionExtraction],
     stamp_families: &HashMap<i64, DecisionFamily>,
@@ -187,10 +271,31 @@ pub fn build_account(
         ..Default::default()
     };
 
+    // The archive-membership question and the where-does-it-stand question
+    // are answered from **one** input. A set of ids cannot say whether the
+    // evidence is all behind doors, so passing one alongside the copies
+    // would be passing a pre-computed answer that could disagree with them.
+    let archived: HashSet<i64> = archive_copies.keys().copied().collect();
+    let copies_of = |source: &Source| {
+        source
+            .object_id
+            .and_then(|id| archive_copies.get(&id))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    };
+
     for source in present {
-        match classify_present(source, archived, archived_from_here) {
-            StandingBucket::Archived => account.archived_standing += 1,
-            StandingBucket::Covered => account.covered += 1,
+        match classify_present(source, &archived, archived_from_here) {
+            StandingBucket::Archived => {
+                account.archived_standing += 1;
+                account
+                    .archived_standing_only_parked
+                    .observe(copies_of(source));
+            }
+            StandingBucket::Covered => {
+                account.covered += 1;
+                account.covered_only_parked.observe(copies_of(source));
+            }
             StandingBucket::Excluded => account.excluded += 1,
             StandingBucket::Contentless => account.contentless += 1,
             StandingBucket::Unresolved { unhashed } => {
@@ -227,6 +332,9 @@ pub fn build_account(
     if account.archived_files == 0 {
         account.archived_bytes = Some(0);
     }
+
+    account.covered_only_parked.settle();
+    account.archived_standing_only_parked.settle();
 
     account
 }
@@ -308,6 +416,28 @@ mod tests {
         ids.iter().copied().collect()
     }
 
+    /// Archive copies of these objects, every one on a root whose door
+    /// stands open — the ordinary shape, and the one that leaves both
+    /// only-parked counts at zero.
+    fn copies_of(ids: &[i64]) -> HashMap<i64, Vec<ArchiveCopy>> {
+        copies_behind(ids, false)
+    }
+
+    /// The same, with every copy behind a closed door.
+    fn copies_behind(ids: &[i64], suspended: bool) -> HashMap<i64, Vec<ArchiveCopy>> {
+        ids.iter()
+            .map(|id| {
+                (
+                    *id,
+                    vec![ArchiveCopy {
+                        root_id: 9,
+                        root_suspended: suspended,
+                    }],
+                )
+            })
+            .collect()
+    }
+
     fn mixed_account() -> ResolutionAccount {
         let present = vec![
             source(1, Some(10), false, false), // covered
@@ -332,7 +462,7 @@ mod tests {
         build_account(
             &present,
             &absent,
-            &archived_set(&[10, 11]),
+            &copies_of(&[10, 11]),
             &archived_set(&[]),
             &extractions,
             &families,
@@ -514,7 +644,7 @@ mod tests {
         let account = build_account(
             &present,
             &[],
-            &archived,
+            &copies_of(&[10, 11, 12, 13]),
             &archived_set(&[11]),
             &[],
             &HashMap::new(),
@@ -594,7 +724,7 @@ mod tests {
         let a = build_account(
             &[],
             &[],
-            &archived_set(&[]),
+            &copies_of(&[]),
             &archived_set(&[]),
             &extractions,
             &HashMap::new(),
@@ -613,11 +743,101 @@ mod tests {
         let a = build_account(
             &[],
             &[],
-            &archived_set(&[]),
+            &copies_of(&[]),
             &archived_set(&[]),
             &extractions,
             &HashMap::new(),
         );
         assert_eq!(a.archived_bytes, None);
+    }
+
+    // ========================================================================
+    // only_on_suspended — the all-parked test, spoken once
+    // ========================================================================
+
+    fn copy(root_id: i64, suspended: bool) -> ArchiveCopy {
+        ArchiveCopy {
+            root_id,
+            root_suspended: suspended,
+        }
+    }
+
+    #[test]
+    fn only_on_suspended_needs_every_copy_parked() {
+        assert!(only_on_suspended(&[copy(1, true)]));
+        assert!(only_on_suspended(&[copy(1, true), copy(2, true)]));
+        assert!(
+            !only_on_suspended(&[copy(1, true), copy(2, false)]),
+            "one open door means nothing needs opening"
+        );
+        assert!(!only_on_suspended(&[copy(1, false)]));
+    }
+
+    #[test]
+    fn only_on_suspended_says_nothing_about_no_copies() {
+        // No copies is no claim at all; "only on suspended roots" said of
+        // nothing would be a claim about an absence.
+        assert!(!only_on_suspended(&[]));
+    }
+
+    #[test]
+    fn the_account_counts_what_each_claim_rests_on() {
+        // Two rows covered and one archived from here. Of them, one covered
+        // row and the archived row stand only behind closed doors.
+        let present = vec![
+            source(1, Some(10), false, false), // covered, evidence live
+            source(2, Some(11), false, false), // covered, evidence all parked
+            source(3, Some(12), false, false), // archived from here, parked
+        ];
+        let mut copies = HashMap::new();
+        copies.insert(10, vec![copy(1, false), copy(2, true)]);
+        copies.insert(11, vec![copy(2, true)]);
+        copies.insert(12, vec![copy(2, true)]);
+
+        let account = build_account(
+            &present,
+            &[],
+            &copies,
+            &archived_set(&[12]),
+            &[],
+            &HashMap::new(),
+        );
+
+        assert_eq!(account.covered, 2);
+        assert_eq!(account.covered_only_parked.count, 1);
+        assert_eq!(account.archived_standing, 1);
+        assert_eq!(account.archived_standing_only_parked.count, 1);
+        assert_eq!(
+            account.standing(),
+            3,
+            "the counts qualify the buckets, they do not add a sixth"
+        );
+    }
+
+    #[test]
+    fn an_excluded_or_empty_row_never_reaches_the_only_parked_counts() {
+        // Precedence is unchanged: exclusion and contentless are decided
+        // before any identity test, so a row that never lands in covered or
+        // archived cannot be counted as resting on parked evidence.
+        let mut empty = source(2, Some(11), false, false);
+        empty.size = 0;
+        let present = vec![source(1, Some(10), true, false), empty];
+        let mut copies = HashMap::new();
+        copies.insert(10, vec![copy(2, true)]);
+        copies.insert(11, vec![copy(2, true)]);
+
+        let account = build_account(
+            &present,
+            &[],
+            &copies,
+            &archived_set(&[]),
+            &[],
+            &HashMap::new(),
+        );
+
+        assert_eq!(account.excluded, 1);
+        assert_eq!(account.contentless, 1);
+        assert_eq!(account.covered_only_parked.count, 0);
+        assert_eq!(account.archived_standing_only_parked.count, 0);
     }
 }

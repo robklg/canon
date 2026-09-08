@@ -12,6 +12,15 @@ use crate::core::domain::path::path_is_under;
 pub struct LocationCount {
     pub path: String,
     pub files: i64,
+    /// Every copy this entry accounts for stands behind a closed door.
+    ///
+    /// The all-or-nothing shape is `only_on_suspended`'s, at location grain,
+    /// and it is what makes the marker mean something a reader can act on:
+    /// *reaching content here means opening a door*. An entry with one live
+    /// copy needs no door opened, so marking it would raise a question the
+    /// place does not pose. Aggregation merges directories, so the flag is
+    /// carried up the walk rather than read off any one of them.
+    pub suspended: bool,
 }
 
 /// A set of locations aggregated to the fewest legible prefixes, capped with
@@ -48,8 +57,13 @@ impl LocationAggregate {
 /// not information). Otherwise emit its branch groups, each chain-collapsed
 /// to where it first branches or holds files, ordered by weight then path,
 /// capped with a counted remainder.
+/// The plain form, for callers whose locations carry no standing: an act's
+/// recorded destinations, which are a past-tense line about where content
+/// went, and the comparison keys built from them. Every entry comes back
+/// unmarked.
 pub fn aggregate_locations(dirs: &[(&str, i64)], bases: &[&str], cap: usize) -> LocationAggregate {
-    aggregate_impl(dirs, bases, cap, false)
+    let with_standing: Vec<(&str, i64, bool)> = dirs.iter().map(|(d, f)| (*d, *f, false)).collect();
+    aggregate_impl(&with_standing, bases, cap, false)
 }
 
 /// The observed-scatter variant ("copies stand in"): a legible one-line
@@ -57,8 +71,11 @@ pub fn aggregate_locations(dirs: &[(&str, i64)], bases: &[&str], cap: usize) -> 
 /// hub node ("Archive/Media") can hide a short, far more informative list.
 /// One step, never recursion. Chosen destinations keep the one-line answer
 /// (the arrow states a choice; the scatter is what nobody chose).
+///
+/// Each directory carries whether the archive root it stands on is parked;
+/// an entry is marked when every copy under it is.
 pub fn aggregate_locations_expanded(
-    dirs: &[(&str, i64)],
+    dirs: &[(&str, i64, bool)],
     bases: &[&str],
     cap: usize,
 ) -> LocationAggregate {
@@ -66,7 +83,7 @@ pub fn aggregate_locations_expanded(
 }
 
 fn aggregate_impl(
-    dirs: &[(&str, i64)],
+    dirs: &[(&str, i64, bool)],
     bases: &[&str],
     cap: usize,
     expand: bool,
@@ -77,22 +94,34 @@ fn aggregate_impl(
 
     let mut tree = FolderTree::new();
     let mut direct: Vec<i64> = Vec::new();
-    for (dir, files) in dirs {
+    let mut direct_parked: Vec<i64> = Vec::new();
+    for (dir, files, parked) in dirs {
         let fid = tree.intern(dir) as usize;
         if direct.len() < tree.len() {
             direct.resize(tree.len(), 0);
+            direct_parked.resize(tree.len(), 0);
         }
         direct[fid] += files;
+        if *parked {
+            direct_parked[fid] += files;
+        }
     }
     direct.resize(tree.len(), 0);
+    direct_parked.resize(tree.len(), 0);
 
     // Subtree sums: ids are parents-first, so one reverse pass suffices.
+    // The parked sum rides along so an entry can say whether *all* of what
+    // it accounts for stands behind a door — a question no single directory
+    // can answer once directories have been merged.
     let mut sub = direct.clone();
+    let mut sub_parked = direct_parked.clone();
     for fid in (0..tree.len() as u32).rev() {
         if let Some(parent) = tree.parent(fid) {
             sub[parent as usize] += sub[fid as usize];
+            sub_parked[parent as usize] += sub_parked[fid as usize];
         }
     }
+    let all_parked = |files: i64, parked: i64| files > 0 && files == parked;
 
     let collapse = |mut fid: u32| -> u32 {
         while direct[fid as usize] == 0 && tree.children(fid).len() == 1 {
@@ -109,6 +138,7 @@ fn aggregate_impl(
             groups.push(LocationCount {
                 path: tree.path(top).to_string(),
                 files: direct[top as usize],
+                suspended: all_parked(direct[top as usize], direct_parked[top as usize]),
             });
         }
         for &child in tree.children(top) {
@@ -116,6 +146,7 @@ fn aggregate_impl(
             groups.push(LocationCount {
                 path: tree.path(group).to_string(),
                 files: sub[child as usize],
+                suspended: all_parked(sub[child as usize], sub_parked[child as usize]),
             });
         }
         groups.sort_by(|a, b| b.files.cmp(&a.files).then_with(|| a.path.cmp(&b.path)));
@@ -142,6 +173,7 @@ fn aggregate_impl(
             locations: vec![LocationCount {
                 path: top_path.to_string(),
                 files: sub[top as usize],
+                suspended: all_parked(sub[top as usize], sub_parked[top as usize]),
             }],
             omitted_locations: 0,
         };
@@ -162,6 +194,12 @@ fn aggregate_impl(
 mod tests {
     use super::*;
 
+    /// Every directory on a root whose door stands open — the shape almost
+    /// every case here is about.
+    fn live<'a>(dirs: &[(&'a str, i64)]) -> Vec<(&'a str, i64, bool)> {
+        dirs.iter().map(|(d, f)| (*d, *f, false)).collect()
+    }
+
     fn agg(dirs: &[(&str, i64)], bases: &[&str]) -> LocationAggregate {
         aggregate_locations(dirs, bases, 3)
     }
@@ -180,7 +218,8 @@ mod tests {
             out.locations,
             vec![LocationCount {
                 path: "/archive/media/2016".into(),
-                files: 640
+                files: 640,
+                suspended: false,
             }]
         );
     }
@@ -198,7 +237,8 @@ mod tests {
             out.locations,
             vec![LocationCount {
                 path: "/archive/media/2016".into(),
-                files: 120
+                files: 120,
+                suspended: false,
             }]
         );
         assert_eq!(out.omitted_locations, 0);
@@ -220,11 +260,13 @@ mod tests {
             vec![
                 LocationCount {
                     path: "/archive/staging-2019/worlds".into(),
-                    files: 3401
+                    files: 3401,
+                    suspended: false,
                 },
                 LocationCount {
                     path: "/archive/games".into(),
-                    files: 11
+                    files: 11,
+                    suspended: false,
                 },
             ]
         );
@@ -278,17 +320,19 @@ mod tests {
         assert_eq!(plain.locations[0].path, "/archive/media");
         assert_eq!(plain.locations.len(), 1);
 
-        let expanded = aggregate_locations_expanded(&dirs, &["/archive"], 3);
+        let expanded = aggregate_locations_expanded(&live(&dirs), &["/archive"], 3);
         assert_eq!(
             expanded.locations,
             vec![
                 LocationCount {
                     path: "/archive/media/2011".into(),
-                    files: 360
+                    files: 360,
+                    suspended: false,
                 },
                 LocationCount {
                     path: "/archive/media/2010/june".into(),
-                    files: 280
+                    files: 280,
+                    suspended: false,
                 },
             ]
         );
@@ -301,12 +345,13 @@ mod tests {
             .map(|i| (format!("/archive/media/{}", 2010 + i), 10))
             .collect();
         let refs: Vec<(&str, i64)> = dirs.iter().map(|(d, f)| (d.as_str(), *f)).collect();
-        let expanded = aggregate_locations_expanded(&refs, &["/archive"], 3);
+        let expanded = aggregate_locations_expanded(&live(&refs), &["/archive"], 3);
         assert_eq!(
             expanded.locations,
             vec![LocationCount {
                 path: "/archive/media".into(),
-                files: 50
+                files: 50,
+                suspended: false,
             }],
             "five branches never truncate to three — the hub stays the one honest line"
         );
@@ -317,5 +362,54 @@ mod tests {
         let out = agg(&[("/archive", 7), ("/archive/media", 5)], &["/archive"]);
         let paths: Vec<&str> = out.locations.iter().map(|l| l.path.as_str()).collect();
         assert_eq!(paths, vec!["/archive", "/archive/media"]);
+    }
+
+    #[test]
+    fn a_merged_entry_spanning_two_standings_is_unmarked() {
+        // The walk splits at the first branching node, which can sit *above*
+        // two archive roots — so one entry accounts for copies on a live root
+        // and a parked one at once. Reaching that content needs no door
+        // opened, so the entry says nothing about one.
+        let out = aggregate_locations_expanded(
+            &[
+                ("/arc/live1/media", 2, false),
+                ("/arc/parked1/media", 3, true),
+                ("/other/media", 1, false),
+            ],
+            &["/arc", "/other"],
+            3,
+        );
+        let merged = out
+            .locations
+            .iter()
+            .find(|l| l.path == "/arc")
+            .expect("the two archive roots merge into one entry");
+        assert_eq!(merged.files, 5);
+        assert!(
+            !merged.suspended,
+            "a live copy under the entry means nothing needs opening"
+        );
+    }
+
+    #[test]
+    fn a_merged_entry_wholly_behind_doors_is_marked() {
+        // The same shape with both roots parked: now every copy the entry
+        // accounts for is behind a door, and it says so.
+        let out = aggregate_locations_expanded(
+            &[
+                ("/arc/parked1/media", 2, true),
+                ("/arc/parked2/media", 3, true),
+                ("/other/media", 1, false),
+            ],
+            &["/arc", "/other"],
+            3,
+        );
+        let merged = out
+            .locations
+            .iter()
+            .find(|l| l.path == "/arc")
+            .expect("the two archive roots merge into one entry");
+        assert_eq!(merged.files, 5);
+        assert!(merged.suspended);
     }
 }

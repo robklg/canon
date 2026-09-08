@@ -42,6 +42,13 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   other or no stamp, a record-quality fact) and *standing here now* (present rows partitioned
   **excluded > contentless > archived > covered > unresolved**, the archived/covered split resting
   on extraction-linked evidence). Copies overlap the registers deliberately.
+- **The covered and archived-from-here lines say what they rest on**: the account's
+  `ParkedEvidence` per claim, rendered as `; N only on suspended <roots>`. The review is what a
+  user reads before releasing the storage a root sits on, so a claim whose only surviving copies
+  stand behind a door they closed is exactly what they need before saying yes. Each line names
+  the roots **its own** claim rests on, never the union — the evidence is carried per claim for
+  that reason. Stated, never a way back: this qualifies the verdict, it does not gate it
+  (`the_review_and_the_story_share_the_account_count`).
 - **Sum invariants are derived methods, test-enforced**: `standing() = covered + excluded +
   unresolved`; `ever_indexed() = standing + deleted + unexplained + moved` — `None` when any
   extraction row lacks a disposition (the moved count is unsupported; omitted, never guessed).

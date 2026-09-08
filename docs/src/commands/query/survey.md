@@ -62,7 +62,23 @@ canon survey --global
 
 A scope on a [suspended](../roots/roots.md#suspending-roots) root is stated rather than surveyed: the pause and the way back, nothing listed, exit code 1. A scope naming a suspended path beside a live one narrows to the live one and says what it set aside.
 
-`--other` and `--archive` name locations the question rests on, so a suspended one refuses the whole ask rather than answering about a smaller world.
+`--other` names a location the question rests on, so a suspended one refuses the whole ask rather than answering about a smaller world.
+
+A suspended `--archive` is measured against, and the header says so:
+
+```
+Archived (in /archive/photos (suspended)): 412 of 1,100 (37.5%)
+```
+
+Copies on suspended roots count on the outward side. A survey answers the same whether the roots holding your content are suspended or not: what changes is that every location carrying only suspended copies is marked, and never leads the list.
+
+```
+Related locations:
+  /path/to/backup2/2019    318 of 1,100 overlap (402 total)
+  /path/to/backup3/photos   47 of 1,100 overlap (51 total) (suspended)
+```
+
+A location with any copy on a live root is not marked: nothing there needs opening. Ordering puts live locations first, then the relation, so the marked ones sit at the end of the list.
 
 ## Surveying an archive location
 

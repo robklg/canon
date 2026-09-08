@@ -14,6 +14,7 @@ use rusqlite::Connection;
 use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::fate::{decision_family, DecisionFamily};
+use crate::core::domain::object::ArchiveCopy;
 use crate::core::domain::root::Root;
 use crate::core::domain::source::Source;
 use crate::core::repo;
@@ -32,7 +33,13 @@ pub struct RootStory {
     pub roots: Vec<Root>,
     pub present: Vec<Source>,
     pub absent: Vec<Source>,
-    /// Object ids among the present rows verified present in the archive.
+    /// Every archive-side copy of the present rows' objects, each with the
+    /// standing of the root it stands on. The account's evidence: what a
+    /// coverage or custody claim about this root actually rests on.
+    pub archive_copies: HashMap<i64, Vec<ArchiveCopy>>,
+    /// Object ids among the present rows verified present in the archive —
+    /// the key set of `archive_copies`, derived here rather than asked for
+    /// again, for the membership questions that need no standing.
     pub archived: HashSet<i64>,
     /// Subset archived *from this root*: an archive copy stands stamped by a
     /// decision whose extraction rows draw from here (object-grain, DB
@@ -73,7 +80,8 @@ pub fn fetch_root_story(conn: &Connection, root_id: i64) -> Result<RootStory> {
     let absent = repo::source::fetch_absent_by_roots(conn, &[root_id])?;
 
     let present_object_ids: Vec<i64> = present.iter().filter_map(|s| s.object_id).collect();
-    let archived = repo::object::batch_check_archived(conn, &present_object_ids, None)?;
+    let archive_copies = repo::object::batch_archive_copies(conn, &present_object_ids, None)?;
+    let archived: HashSet<i64> = archive_copies.keys().copied().collect();
     let archived_from_here =
         repo::object::batch_check_archived_from_root(conn, &present_object_ids, root_id)?;
 
@@ -105,6 +113,7 @@ pub fn fetch_root_story(conn: &Connection, root_id: i64) -> Result<RootStory> {
         roots,
         present,
         absent,
+        archive_copies,
         archived,
         archived_from_here,
         extractions,

@@ -448,6 +448,13 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
     let n = tree.len();
     let mut direct = vec![Counts::default(); n];
     let mut direct_locs: Vec<HashMap<&str, i64>> = vec![HashMap::new(); n];
+    // Directories whose archive root the user has closed. A directory sits
+    // in exactly one root (roots never nest), so its standing is the root's
+    // and one set answers for every place that cites it. Kept beside the
+    // counts rather than inside them: the aggregate is what merges
+    // directories, and it is the aggregate that decides what a merged entry
+    // may claim.
+    let mut parked_locs: HashSet<&str> = HashSet::new();
     for (source, &fid) in inputs.present.iter().zip(&present_fids) {
         let counts = &mut direct[fid as usize];
         counts.files_present += 1;
@@ -461,13 +468,16 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
                 }
                 // Both standings have copies in the archive; both feed the
                 // covered-where answer.
-                if let Some(paths) = source
+                if let Some(locations) = source
                     .object_id
                     .and_then(|obj| inputs.archive_locations.get(&obj))
                 {
                     let mut seen: HashSet<&str> = HashSet::new();
-                    for path in paths {
-                        let dir = dir_of(path);
+                    for location in locations {
+                        let dir = dir_of(&location.path);
+                        if location.root.root_suspended {
+                            parked_locs.insert(dir);
+                        }
                         if seen.insert(dir) {
                             *direct_locs[fid as usize].entry(dir).or_insert(0) += 1;
                         }
@@ -767,8 +777,12 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         let accum = accums.remove(&fid).expect("accumulated place");
         let mut notes = accum.notes;
         notes.sort_by_key(|note| (note.created_at, note.id));
-        let loc_dirs: Vec<(&str, i64)> = {
-            let mut dirs: Vec<(&str, i64)> = accum.locs.iter().map(|(d, f)| (*d, *f)).collect();
+        let loc_dirs: Vec<(&str, i64, bool)> = {
+            let mut dirs: Vec<(&str, i64, bool)> = accum
+                .locs
+                .iter()
+                .map(|(d, f)| (*d, *f, parked_locs.contains(*d)))
+                .collect();
             dirs.sort();
             dirs
         };

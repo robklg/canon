@@ -12,7 +12,8 @@ use crate::core::repo::{self, Connection};
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 use crate::expr::{Filter, UsedStatus};
 
-use crate::core::domain::root::{DoorRefused, DoorVerb};
+use crate::core::domain::resolution::ParkedEvidence;
+use crate::core::domain::root::ParkedRoot;
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::ops::scope::{parse_root_spec, RootLookup};
 
@@ -29,6 +30,22 @@ pub struct CoverageStats {
     /// about them (the contentless law), so they leave both the archivable
     /// denominator and the unarchived remainder.
     pub contentless_sources: i64,
+    /// What the archived count rests on, where it rests solely on copies
+    /// behind doors the user closed — and **zero whenever an `--archive`
+    /// frame is in force**, that frame being unable to support an
+    /// exclusivity claim (see `compute_stats`). A reader must not take 0
+    /// here as "nothing rests behind a door" without knowing which frame
+    /// produced it.
+    ///
+    /// A qualifier on the archived count, never a deduction from it: parking
+    /// never un-archives, and these sources are covered. Coverage is the view
+    /// a user reads before deciding a drive can go, so what the number rests
+    /// on is worth knowing — a wide view may nudge about content hidden
+    /// behind a door: marked, never leading.
+    pub archived_only_parked: ParkedEvidence,
+    /// The fleet the roots are named against — kept beside the evidence so
+    /// the display layer resolves nothing.
+    archive_roots: Vec<Root>,
 }
 
 impl CoverageStats {
@@ -42,6 +59,8 @@ impl CoverageStats {
             hashed_sources: 0,
             archived_sources: 0,
             contentless_sources: 0,
+            archived_only_parked: ParkedEvidence::default(),
+            archive_roots: Vec::new(),
         }
     }
 
@@ -80,6 +99,12 @@ impl CoverageStats {
     pub fn unarchived(&self) -> i64 {
         self.coverable_sources() - self.archived_sources
     }
+
+    /// The archived line's trailing qualifier, or `None` when nothing here
+    /// rests solely behind a door.
+    pub fn only_parked_segment(&self) -> Option<String> {
+        self.archived_only_parked.segment(&self.archive_roots)
+    }
 }
 
 /// Resolve an `--archive` spec to a root id, refusing a root that is not an
@@ -88,19 +113,40 @@ impl CoverageStats {
 /// The fetch belongs here rather than at the command: which root a spec names
 /// is a question about the world, and the interface has no business asking the
 /// database it. Survey resolves its own the same way.
-pub fn resolve_archive_root(conn: &Connection, spec: Option<&str>) -> Result<Option<i64>> {
+/// The archive a run was told to measure against, and how its door stands.
+#[derive(Debug)]
+pub struct ArchiveTarget {
+    pub root_id: i64,
+    /// `Some` when the user has closed the door on it — the citation carries
+    /// the standing, and the view marks it.
+    pub parked: Option<ParkedRoot>,
+}
+
+/// Resolve an `--archive` spec to the archive it names, refusing a root that
+/// is not an archive.
+///
+/// A **parked** archive is answered, not refused. Its copies still ground
+/// coverage claims — testifying is what a closed door permits — and the
+/// projection behind this view never filtered them out; what was missing was
+/// a way to say so, which the standing beside the id now provides. Until it
+/// did, an answer here would have been a zero where content stands, and the
+/// door was named instead.
+pub fn resolve_archive_root(
+    conn: &Connection,
+    spec: Option<&str>,
+) -> Result<Option<ArchiveTarget>> {
     match spec {
         Some(spec) => {
             let roots = repo::root::fetch_all(conn)?;
             match parse_root_spec(&roots, spec, Some("archive"))? {
-                RootLookup::Found(id) => Ok(Some(id)),
-                // The one archive this view was told to measure against
-                // stands behind a closed door. Its copies still testify —
-                // but nothing here can see them yet, so answering would put
-                // a zero where content stands. The door is named instead.
-                RootLookup::Parked(parked) => {
-                    Err(DoorRefused::at(&parked, DoorVerb::Refused).into())
-                }
+                RootLookup::Found(root_id) => Ok(Some(ArchiveTarget {
+                    root_id,
+                    parked: None,
+                })),
+                RootLookup::Parked(parked) => Ok(Some(ArchiveTarget {
+                    root_id: parked.root_id,
+                    parked: Some(parked),
+                })),
             }
         }
         None => Ok(None),
@@ -113,6 +159,7 @@ pub fn compute_stats(
     conn: &mut Connection,
     sources: &[&Source],
     archive_root_id: Option<i64>,
+    roots: &[Root],
 ) -> Result<CoverageStats> {
     let mut stats = CoverageStats::new();
 
@@ -132,14 +179,32 @@ pub fn compute_stats(
     // Archived sources — use batch archive detection
     if stats.hashed_sources > 0 {
         let object_ids: Vec<i64> = hashed_sources.iter().filter_map(|s| s.object_id).collect();
-        let archived_set = repo::object::batch_check_archived(conn, &object_ids, archive_root_id)?;
+        let copies = repo::object::batch_archive_copies(conn, &object_ids, archive_root_id)?;
 
-        // Count sources whose object_id is in the archived set
-        // (not unique objects — multiple sources can have the same object)
-        stats.archived_sources = hashed_sources
-            .iter()
-            .filter(|s| s.object_id.is_some_and(|oid| archived_set.contains(&oid)))
-            .count() as i64;
+        // Count sources whose object has an archive copy (not unique objects
+        // — multiple sources can have the same object), and, of those, the
+        // ones whose every copy stands behind a closed door.
+        //
+        // **Only when the frame is the whole archive world.** Under
+        // `--archive`, the copies fetched are that one archive's, so if its
+        // door is closed then *every* copy in hand is parked and the test is
+        // true by construction — it would say "N only on suspended X" of
+        // content that also stands in a live archive the frame cannot see.
+        // An exclusivity claim needs to have looked everywhere, and this
+        // frame has not. The header already marks the archive as suspended,
+        // so nothing about the door goes unsaid.
+        let frame_can_answer_exclusivity = archive_root_id.is_none();
+        for source in &hashed_sources {
+            let Some(object_copies) = source.object_id.and_then(|oid| copies.get(&oid)) else {
+                continue;
+            };
+            stats.archived_sources += 1;
+            if frame_can_answer_exclusivity {
+                stats.archived_only_parked.observe(object_copies);
+            }
+        }
+        stats.archived_only_parked.settle();
+        stats.archive_roots = roots.to_vec();
     }
 
     Ok(stats)
@@ -163,7 +228,8 @@ pub fn compute_scoped(
     let used_status = sel.used_status.clone();
     let excluded_count = sel.excluded_count;
     let refs: Vec<&Source> = sel.sources.iter().collect();
-    let stats = compute_stats(conn, &refs, archive_root_id)?;
+    let all_roots = repo::root::fetch_all(conn)?;
+    let stats = compute_stats(conn, &refs, archive_root_id, &all_roots)?;
     Ok((stats, used_status, excluded_count))
 }
 
@@ -199,7 +265,7 @@ pub fn compute_per_root(
             .filter(|s| s.root_id == root.id)
             .collect();
 
-        let mut stats = compute_stats(conn, &root_sources, archive_root_id)?;
+        let mut stats = compute_stats(conn, &root_sources, archive_root_id, &all_roots)?;
         stats.root_id = Some(root.id);
         stats.root_path = Some(root.path.clone());
         stats.root_role = Some(root.role.clone());
@@ -209,9 +275,17 @@ pub fn compute_per_root(
         overall.hashed_sources += stats.hashed_sources;
         overall.archived_sources += stats.archived_sources;
         overall.contentless_sources += stats.contentless_sources;
+        overall.archived_only_parked.count += stats.archived_only_parked.count;
+        overall
+            .archived_only_parked
+            .roots
+            .extend(stats.archived_only_parked.roots.iter().copied());
 
         per_root_stats.push(stats);
     }
+
+    overall.archived_only_parked.settle();
+    overall.archive_roots = all_roots.clone();
 
     Ok((
         per_root_stats,
@@ -251,7 +325,8 @@ mod tests {
 
         let sources = repo::source::batch_fetch_by_roots(&conn, &[source_root]).unwrap();
         let refs: Vec<&Source> = sources.iter().collect();
-        let stats = compute_stats(&mut conn, &refs, None).unwrap();
+        let roots = repo::root::fetch_all(&conn).unwrap();
+        let stats = compute_stats(&mut conn, &refs, None, &roots).unwrap();
 
         assert_eq!(
             stats.archived_sources, 3,
@@ -280,7 +355,8 @@ mod tests {
 
         let sources = repo::source::batch_fetch_by_roots(&conn, &[source_root]).unwrap();
         let refs: Vec<&Source> = sources.iter().collect();
-        let stats = compute_stats(&mut conn, &refs, None).unwrap();
+        let roots = repo::root::fetch_all(&conn).unwrap();
+        let stats = compute_stats(&mut conn, &refs, None, &roots).unwrap();
 
         assert_eq!(stats.hashed_sources, 2);
         assert_eq!(stats.contentless_sources, 1);
@@ -296,11 +372,12 @@ mod tests {
         let source = insert_root(&conn, "/photos", "source", false);
         let archive = insert_root(&conn, "/archive", "archive", false);
 
-        assert_eq!(resolve_archive_root(&conn, None).unwrap(), None);
-        assert_eq!(
-            resolve_archive_root(&conn, Some(&format!("id:{archive}"))).unwrap(),
-            Some(archive)
-        );
+        assert!(resolve_archive_root(&conn, None).unwrap().is_none());
+        let target = resolve_archive_root(&conn, Some(&format!("id:{archive}")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.root_id, archive);
+        assert!(target.parked.is_none());
 
         let err = resolve_archive_root(&conn, Some(&format!("id:{source}"))).unwrap_err();
         assert!(err.to_string().contains("expected 'archive'"), "{err}");
@@ -354,7 +431,7 @@ mod tests {
     #[test]
     fn coverage_stats_empty() {
         let mut conn = setup_test_db();
-        let stats = compute_stats(&mut conn, &[], None).unwrap();
+        let stats = compute_stats(&mut conn, &[], None, &[]).unwrap();
         assert_eq!(stats.total_sources, 0);
         assert_eq!(stats.hashed_sources, 0);
         assert_eq!(stats.archived_sources, 0);
@@ -374,10 +451,135 @@ mod tests {
 
         let sources = repo::source::batch_fetch_by_roots(&conn, &[root]).unwrap();
         let refs: Vec<&Source> = sources.iter().collect();
-        let stats = compute_stats(&mut conn, &refs, None).unwrap();
+        let roots = repo::root::fetch_all(&conn).unwrap();
+        let stats = compute_stats(&mut conn, &refs, None, &roots).unwrap();
 
         assert_eq!(stats.total_sources, 2);
         assert_eq!(stats.excluded_sources, 1);
         assert_eq!(stats.hashed_sources, 1); // excluded sources don't count as hashed
+    }
+
+    // ========================================================================
+    // Testimony: what the archived count rests on
+    // ========================================================================
+
+    #[test]
+    fn coverage_counts_only_parked_beside_archived() {
+        let mut conn = setup_test_db();
+        let src_root = insert_root(&conn, "/photos", "source", false);
+        let live = insert_root(&conn, "/arc-live", "archive", false);
+        let parked = insert_root(&conn, "/arc-parked", "archive", true);
+
+        // One object covered from both archives, one only from the parked
+        // one, one covered nowhere.
+        let both = insert_object(&conn, "both", false);
+        let only_parked = insert_object(&conn, "onlyparked", false);
+        let uncovered = insert_object(&conn, "uncovered", false);
+        insert_source(&conn, src_root, "a.jpg", Some(both));
+        insert_source(&conn, src_root, "b.jpg", Some(only_parked));
+        insert_source(&conn, src_root, "c.jpg", Some(uncovered));
+        insert_source(&conn, live, "a.jpg", Some(both));
+        insert_source(&conn, parked, "a.jpg", Some(both));
+        insert_source(&conn, parked, "b.jpg", Some(only_parked));
+
+        let all = crate::core::repo::source::batch_fetch_by_roots(&conn, &[src_root]).unwrap();
+        let refs: Vec<&Source> = all.iter().collect();
+        let roots = repo::root::fetch_all(&conn).unwrap();
+        let stats = compute_stats(&mut conn, &refs, None, &roots).unwrap();
+
+        assert_eq!(
+            stats.archived_sources, 2,
+            "a parked copy is still coverage — the count does not shrink"
+        );
+        assert_eq!(stats.archived_only_parked.count, 1);
+        assert_eq!(
+            stats.only_parked_segment().unwrap(),
+            "1 only on suspended /arc-parked"
+        );
+    }
+
+    #[test]
+    fn a_wholly_open_archive_says_nothing_about_doors() {
+        // The segment is suppressed at zero: "0 only on suspended roots" is
+        // a sentence about a situation that is not happening.
+        let mut conn = setup_test_db();
+        let src_root = insert_root(&conn, "/photos", "source", false);
+        let live = insert_root(&conn, "/arc-live", "archive", false);
+        let obj = insert_object(&conn, "abc", false);
+        insert_source(&conn, src_root, "a.jpg", Some(obj));
+        insert_source(&conn, live, "a.jpg", Some(obj));
+
+        let all = crate::core::repo::source::batch_fetch_by_roots(&conn, &[src_root]).unwrap();
+        let refs: Vec<&Source> = all.iter().collect();
+        let roots = repo::root::fetch_all(&conn).unwrap();
+        let stats = compute_stats(&mut conn, &refs, None, &roots).unwrap();
+
+        assert_eq!(stats.archived_sources, 1);
+        assert_eq!(stats.archived_only_parked.count, 0);
+        assert!(stats.only_parked_segment().is_none());
+    }
+
+    #[test]
+    fn a_parked_archive_spec_is_answered_and_marked_not_refused() {
+        // The interim refusal is retired: the projection never filtered
+        // these copies out, and the standing beside the id is what lets the
+        // view say so instead of putting a zero where content stands.
+        let mut conn = setup_test_db();
+        let src_root = insert_root(&conn, "/photos", "source", false);
+        let parked = insert_root(&conn, "/arc-parked", "archive", true);
+        let obj = insert_object(&conn, "abc", false);
+        insert_source(&conn, src_root, "a.jpg", Some(obj));
+        insert_source(&conn, parked, "a.jpg", Some(obj));
+
+        let target = resolve_archive_root(&conn, Some(&format!("id:{parked}")))
+            .unwrap()
+            .expect("a parked archive resolves");
+        assert_eq!(target.root_id, parked);
+        assert_eq!(
+            target.parked.as_ref().map(|p| p.root_path.as_str()),
+            Some("/arc-parked")
+        );
+
+        let all = crate::core::repo::source::batch_fetch_by_roots(&conn, &[src_root]).unwrap();
+        let refs: Vec<&Source> = all.iter().collect();
+        let roots = repo::root::fetch_all(&conn).unwrap();
+        let stats = compute_stats(&mut conn, &refs, Some(target.root_id), &roots).unwrap();
+        assert_eq!(stats.archived_sources, 1, "the parked archive testifies");
+        assert_eq!(
+            stats.archived_only_parked.count, 0,
+            "and the frame makes no exclusivity claim it cannot support"
+        );
+    }
+
+    #[test]
+    fn a_single_archive_frame_makes_no_exclusivity_claim() {
+        // Under `--archive`, only that archive's copies are in hand, so
+        // "every copy is parked" is true by construction whenever its door
+        // is closed — and false of the world, whenever the content also
+        // stands in a live archive the frame cannot see.
+        let mut conn = setup_test_db();
+        let src_root = insert_root(&conn, "/photos", "source", false);
+        let live = insert_root(&conn, "/arc-live", "archive", false);
+        let parked = insert_root(&conn, "/arc-parked", "archive", true);
+        let obj = insert_object(&conn, "abc", false);
+        insert_source(&conn, src_root, "a.jpg", Some(obj));
+        insert_source(&conn, live, "a.jpg", Some(obj));
+        insert_source(&conn, parked, "a.jpg", Some(obj));
+
+        let all = crate::core::repo::source::batch_fetch_by_roots(&conn, &[src_root]).unwrap();
+        let refs: Vec<&Source> = all.iter().collect();
+        let roots = repo::root::fetch_all(&conn).unwrap();
+
+        let framed = compute_stats(&mut conn, &refs, Some(parked), &roots).unwrap();
+        assert_eq!(framed.archived_sources, 1);
+        assert_eq!(
+            framed.archived_only_parked.count, 0,
+            "the frame has not looked everywhere, so it claims nothing"
+        );
+        assert!(framed.only_parked_segment().is_none());
+
+        // Unframed, the same world answers — truthfully, with a live copy.
+        let whole = compute_stats(&mut conn, &refs, None, &roots).unwrap();
+        assert_eq!(whole.archived_only_parked.count, 0);
     }
 }

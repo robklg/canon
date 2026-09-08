@@ -9,7 +9,7 @@ use anyhow::{bail, Result};
 
 use crate::core::domain::format::{format_count, format_date, format_size};
 use crate::story::{
-    fmt_locations, reference_place_lines, LocationAggregate, StoryParams, StoryReport,
+    fmt_locations, reference_place_lines, LocationAggregate, StoryParams, StoryReport, Voicing,
 };
 
 /// What the frame needs beyond the report: the ceremony's own facts.
@@ -314,7 +314,8 @@ fn tally_lines(
         let mut desc = vec!["chosen for the archive".to_string()];
         if !archived_destinations.is_empty() {
             desc[0].push_str(" — they live on under");
-            desc.push(fmt_locations(archived_destinations));
+            // The bound reading: no bind-time claims, so no door markers.
+            desc.push(fmt_locations(archived_destinations, Voicing::Reference));
         }
         cells.push((cell, desc));
     }
@@ -443,6 +444,7 @@ mod tests {
                 .map(|(path, files)| LocationCount {
                     path: path.to_string(),
                     files: *files,
+                    suspended: false,
                 })
                 .collect(),
             omitted_locations: 0,
@@ -488,6 +490,9 @@ mod tests {
             contentless: 0,
             unresolved: 0,
             unhashed_unresolved: 0,
+            covered_only_parked: crate::core::domain::resolution::ParkedEvidence::default(),
+            archived_standing_only_parked: crate::core::domain::resolution::ParkedEvidence::default(
+            ),
         }
     }
 
@@ -509,6 +514,7 @@ mod tests {
             reachable: true,
             places,
             account,
+            roots: Vec::new(),
         }
     }
 
@@ -527,6 +533,9 @@ mod tests {
             contentless: 1,
             unresolved: 1,
             unhashed_unresolved: 0,
+            covered_only_parked: crate::core::domain::resolution::ParkedEvidence::default(),
+            archived_standing_only_parked: crate::core::domain::resolution::ParkedEvidence::default(
+            ),
         }
     }
 

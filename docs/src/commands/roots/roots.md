@@ -68,6 +68,15 @@ The sentence names the root, the verb, how the command reached it, and the way b
 
 `roots comment` is permitted while a root is suspended: a comment labels the root, it does not reach inside it.
 
+**A suspended root's copies still count as evidence.** Suspending changes what you are asking about, not what is where: content in a suspended root is still indexed, still archived if it was archived, and still grounds claims about other places. Every surface that cites such a copy marks it, and none of them lead with it:
+
+- [`coverage`](../archive/coverage.md) counts it, and says how much of the archived total rests only on suspended roots
+- [`survey`](../query/survey.md) counts it on the outward side, marks the location `(suspended)`, and orders live locations first
+- [`roots story`](story.md) and the [`roots retire`](retire.md) review mark the location and count it in their totals
+- [`trail`](../query/trail.md)'s composition card marks a suspended origin
+
+A location is marked only when every copy Canon knows there is on a suspended root. One copy on a live root and there is nothing to open.
+
 Two acts state a count rather than refusing, because a refusal would be wrong. [`import-facts`](../enrich/import-facts.md) sets aside the records naming a suspended source and counts them in its summary, so one suspended root never breaks a batch. And an object exclusion reaches every copy of the content, suspended roots included, since the judgment is about the content everywhere; the ceremony says how many of the copies it reaches stand on suspended roots.
 
 Suspending and unsuspending are themselves recorded [decisions](../../concepts/decisions.md), and both take `--reason`:

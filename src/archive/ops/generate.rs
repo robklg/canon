@@ -134,11 +134,15 @@ pub fn plan_generate(
             .map(|obj| (Some(obj.hash_type.clone()), Some(obj.hash_value.clone())))
             .unwrap_or((None, None));
 
+        // The skip set wants a path to name in the "already archived"
+        // report; where the copy stands is not this decision's question —
+        // `apply` is where a parked destination is met, and the skip is
+        // about content identity either way.
         let archive_path = source
             .object_id
             .and_then(|oid| archive_paths.get(&oid))
             .and_then(|paths| paths.first())
-            .cloned();
+            .map(|loc| loc.path.clone());
 
         let lock_entry = LockEntry::from_source(source, hash_type, hash_value);
 

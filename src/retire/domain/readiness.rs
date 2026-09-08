@@ -114,6 +114,31 @@ mod tests {
         ids.iter().copied().collect()
     }
 
+    /// Archive copies of these objects, every one on a root whose door
+    /// stands open — the ordinary shape, and the one that leaves both
+    /// only-parked counts at zero.
+    fn copies_of(ids: &[i64]) -> HashMap<i64, Vec<crate::core::domain::object::ArchiveCopy>> {
+        copies_behind(ids, false)
+    }
+
+    /// The same, with every copy behind a closed door.
+    fn copies_behind(
+        ids: &[i64],
+        suspended: bool,
+    ) -> HashMap<i64, Vec<crate::core::domain::object::ArchiveCopy>> {
+        ids.iter()
+            .map(|id| {
+                (
+                    *id,
+                    vec![crate::core::domain::object::ArchiveCopy {
+                        root_id: 9,
+                        root_suspended: suspended,
+                    }],
+                )
+            })
+            .collect()
+    }
+
     // classify_present, classify_absent, build_account are now tested in
     // core/domain/resolution.rs, alongside their definitions — these
     // fixtures stay here (duplicated, deliberately: no cross-subsystem test
@@ -147,7 +172,7 @@ mod tests {
         build_account(
             &present,
             &absent,
-            &archived_set(&[10, 11]),
+            &copies_of(&[10, 11]),
             &archived_set(&[]),
             &extractions,
             &families,
@@ -171,7 +196,7 @@ mod tests {
         let a = build_account(
             &present,
             &[],
-            &archived_set(&[10, 11]),
+            &copies_of(&[10, 11]),
             &archived_set(&[10]),
             &[],
             &HashMap::new(),
@@ -203,7 +228,7 @@ mod tests {
         let a = build_account(
             &[e1, e2],
             &[],
-            &archived_set(&[]),
+            &copies_of(&[]),
             &archived_set(&[]),
             &[],
             &HashMap::new(),
@@ -218,7 +243,7 @@ mod tests {
         let a = build_account(
             &[],
             &[],
-            &archived_set(&[]),
+            &copies_of(&[]),
             &archived_set(&[]),
             &[],
             &HashMap::new(),
@@ -250,7 +275,7 @@ mod tests {
         let a = build_account(
             &present,
             &[],
-            &archived_set(&[10]),
+            &copies_of(&[10]),
             &archived_set(&[]),
             &[],
             &HashMap::new(),
@@ -265,7 +290,7 @@ mod tests {
         let a = build_account(
             &present,
             &[],
-            &archived_set(&[]),
+            &copies_of(&[]),
             &archived_set(&[]),
             &[],
             &HashMap::new(),
@@ -309,7 +334,7 @@ mod tests {
         let account = build_account(
             &rows,
             &[],
-            &archived,
+            &copies_of(&[10]),
             &archived_set(&[]),
             &[],
             &HashMap::new(),
@@ -323,7 +348,7 @@ mod tests {
         let account = build_account(
             &rows,
             &[],
-            &archived,
+            &copies_of(&[10]),
             &archived_set(&[]),
             &[],
             &HashMap::new(),

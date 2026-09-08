@@ -444,6 +444,24 @@ fn prepare_telling(
     }
 }
 
+/// What a standing line adds when its claim rests solely on copies behind
+/// closed doors — nothing when it does not.
+///
+/// This is the surface the whole count exists for: the review is what a user
+/// reads before releasing the storage a root sits on, and a claim whose only
+/// surviving evidence is behind a door they closed is exactly what they need
+/// to see before saying yes. Each line names the roots **its own** claim
+/// rests on; the evidence is carried per claim so it cannot name another's.
+fn rests_behind_a_door(
+    evidence: &crate::core::domain::resolution::ParkedEvidence,
+    roots: &[Root],
+) -> String {
+    evidence
+        .segment(roots)
+        .map(|segment| format!("; {segment}"))
+        .unwrap_or_default()
+}
+
 fn print_review(review: &super::ops::ReadinessReview) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -532,13 +550,15 @@ fn print_review(review: &super::ops::ReadinessReview) {
     );
     if account.archived_standing > 0 {
         println!(
-            "    archived from here   {}   (this copy still stands; the archive holds it)",
-            format_count(account.archived_standing)
+            "    archived from here   {}   (this copy still stands; the archive holds it{})",
+            format_count(account.archived_standing),
+            rests_behind_a_door(&account.archived_standing_only_parked, &review.roots),
         );
     }
     println!(
-        "    covered              {}   (content verified present in the archive)",
-        format_count(account.covered)
+        "    covered              {}   (content verified present in the archive{})",
+        format_count(account.covered),
+        rests_behind_a_door(&account.covered_only_parked, &review.roots),
     );
     println!(
         "    excluded             {}",

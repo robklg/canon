@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::core::domain::extraction::OriginDisposition;
 use crate::core::domain::fate::{fate_transition, DecisionFamily, FateAspect};
+use crate::core::domain::object::ArchiveLocation;
 use crate::core::domain::resolution::{
     classify_absent, classify_present, AbsentBucket, StandingBucket,
 };
@@ -189,8 +190,16 @@ pub struct FateContext<'a> {
     pub stamp_reasons: &'a HashMap<i64, String>,
     /// `object_id` → `"sha256:<hex>"`.
     pub object_hashes: &'a HashMap<i64, String>,
-    /// `object_id` → current archive locations (absolute paths).
-    pub archive_locations: &'a HashMap<i64, Vec<String>>,
+    /// `object_id` → current archive locations, each with the standing of
+    /// the root it stands on.
+    ///
+    /// The compile consumes `path` alone. Whether a bound book should mark a
+    /// citation that stands behind a closed door is /vision's question, not
+    /// the engine's — so the standing is carried to this door and no
+    /// further. Carrying it costs nothing and is what lets that question be
+    /// answered later without a second fetch; a book once bound is never
+    /// rewritten, so the door must not be closed here by accident.
+    pub archive_locations: &'a HashMap<i64, Vec<ArchiveLocation>>,
     /// `rel_path` → the apply-origin claim for that path.
     pub origins: &'a HashMap<String, ApplyOrigin>,
 }
@@ -334,7 +343,8 @@ fn locations_for(source: &Source, ctx: &FateContext) -> Vec<String> {
     // archive while answering nothing about *this* file).
     source
         .object_id
-        .and_then(|id| ctx.archive_locations.get(&id).cloned())
+        .and_then(|id| ctx.archive_locations.get(&id))
+        .map(|locs| locs.iter().map(|l| l.path.clone()).collect())
         .unwrap_or_default()
 }
 
@@ -450,6 +460,21 @@ mod tests {
         ids.iter().copied().collect()
     }
 
+    /// Archive copies of these objects, all on a root whose door is open.
+    fn copies_of(ids: &[i64]) -> HashMap<i64, Vec<crate::core::domain::object::ArchiveCopy>> {
+        ids.iter()
+            .map(|id| {
+                (
+                    *id,
+                    vec![crate::core::domain::object::ArchiveCopy {
+                        root_id: 9,
+                        root_suspended: false,
+                    }],
+                )
+            })
+            .collect()
+    }
+
     // build_book_entries — the fate truth table
 
     #[derive(Default)]
@@ -459,8 +484,24 @@ mod tests {
         families: HashMap<i64, DecisionFamily>,
         reasons: HashMap<i64, String>,
         hashes: HashMap<i64, String>,
-        locations: HashMap<i64, Vec<String>>,
+        locations: HashMap<i64, Vec<ArchiveLocation>>,
         origins: HashMap<String, ApplyOrigin>,
+    }
+
+    /// Archive locations on an open root — the compile reads `path` alone,
+    /// so every case here says the same thing whichever way the door stands.
+    fn at_archive(paths: &[&str]) -> Vec<ArchiveLocation> {
+        use crate::core::domain::object::ArchiveCopy;
+        paths
+            .iter()
+            .map(|p| ArchiveLocation {
+                path: p.to_string(),
+                root: ArchiveCopy {
+                    root_id: 9,
+                    root_suspended: false,
+                },
+            })
+            .collect()
     }
 
     impl Ctx {
@@ -505,7 +546,7 @@ mod tests {
         cx.archived.insert(10);
         cx.reasons.insert(5, "duplicate of archive".to_string());
         cx.hashes.insert(10, "sha256:abc".to_string());
-        cx.locations.insert(10, vec!["/archive/a.jpg".to_string()]);
+        cx.locations.insert(10, at_archive(&["/archive/a.jpg"]));
         let present = vec![stamped(source(1, Some(10), true, false), 5)];
 
         let entries = build_book_entries(&present, &[], &cx.context());
@@ -557,7 +598,7 @@ mod tests {
         cx.archived.insert(10);
         cx.hashes.insert(10, "sha256:empty".to_string());
         cx.locations
-            .insert(10, vec!["/archive/a/.DS_Store".to_string()]);
+            .insert(10, at_archive(&["/archive/a/.DS_Store"]));
         let mut empty = source(1, Some(10), false, false);
         empty.size = 0;
 
@@ -612,8 +653,7 @@ mod tests {
         cx.archived.insert(10);
         // Live locations come from the archive-location map, not the origin:
         // the map is compile-time truth, the origin the recorded claim.
-        cx.locations
-            .insert(10, vec!["/archive/live.jpg".to_string()]);
+        cx.locations.insert(10, at_archive(&["/archive/live.jpg"]));
         add_origin(&mut cx, origin("f1.jpg", Some(OriginDisposition::Retained)));
         let present = vec![source(1, Some(10), false, false)];
 
@@ -640,7 +680,7 @@ mod tests {
     fn covered_present_without_origin_is_covered() {
         let mut cx = Ctx::default();
         cx.archived.insert(10);
-        cx.locations.insert(10, vec!["/archive/a.jpg".to_string()]);
+        cx.locations.insert(10, at_archive(&["/archive/a.jpg"]));
         let present = vec![source(1, Some(10), false, false)];
 
         let entries = build_book_entries(&present, &[], &cx.context());
@@ -803,7 +843,7 @@ mod tests {
         let account = build_account(
             &present,
             &absent,
-            &archived,
+            &copies_of(&[10, 11]),
             &archived_set(&[]),
             &[],
             &families,

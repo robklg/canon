@@ -15,7 +15,7 @@ Canon distinguishes two root roles:
 - Roots may not overlap (one root cannot be inside another)
 - A root can be any directory, not just a drive or mount point
 - You can have multiple roots of each type
-- Roots can be [suspended](../commands/roots/roots.md): closing the door on a root, keeping everything in it safe and set aside until you open it again
+- Roots can be [suspended](../commands/roots/roots.md): closing the door on a root, keeping everything in it safe and set aside until you open it again. What is inside keeps the standing it had, so its copies still count as evidence about content elsewhere; surfaces that cite them mark them.
 
 ## Typical Setup
 

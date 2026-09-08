@@ -80,8 +80,8 @@ fn test_basic_summary() {
             assert_eq!(result.total_hashed, 4);
             assert_eq!(result.archived_source_count, 2);
             assert_eq!(result.archive_scopes.len(), 1);
-            assert_eq!(result.archive_scopes[0].0, "/archive/photos/2024");
-            assert_eq!(result.archive_scopes[0].1, 2);
+            assert_eq!(result.archive_scopes[0].path, "/archive/photos/2024");
+            assert_eq!(result.archive_scopes[0].count, 2);
             assert_eq!(result.location_results.len(), 1);
             assert_eq!(result.location_results[0].path, "/mnt/backup/vacation");
             assert_eq!(result.location_results[0].shared_count, 2);
@@ -204,8 +204,15 @@ fn test_multiple_scope_paths() {
     }
 }
 
+/// The outward side counts copies on parked roots, and says where they are.
+///
+/// This replaces `test_suspended_root_excluded`, which pinned the inversion:
+/// with the same fixture it asserted `1 unique` and no related locations,
+/// so the same content read one way while the neighbouring root was live and
+/// the opposite way once it was parked — survey's answer changed by an act
+/// that changed only attention. Testifying is what a closed door permits.
 #[test]
-fn test_suspended_root_excluded() {
+fn survey_counts_parked_evidence_on_the_outward_side() {
     let mut conn = setup_test_db();
     let root = insert_root(&conn, "/mnt/drive", "source", false);
     let suspended = insert_root(&conn, "/mnt/suspended", "source", true);
@@ -222,9 +229,107 @@ fn test_suspended_root_excluded() {
 
     match outcome {
         SurveyOutcome::Result(result) => {
+            assert_eq!(result.total_count, 1, "the selection is unchanged");
+            assert_eq!(
+                result.unique_count, 0,
+                "a copy behind a door is still a copy"
+            );
+            assert_eq!(result.location_results.len(), 1);
+            let location = &result.location_results[0];
+            assert_eq!(location.path, "/mnt/suspended");
+            assert_eq!(location.shared_count, 1);
+            assert!(location.suspended, "and the citation says so");
+        }
+        _ => panic!("Expected SurveyOutcome::Result"),
+    }
+}
+
+/// The selection side keeps its own door: what you survey is what you can
+/// see, and a scope wholly behind a door is the spine's statement, not an
+/// empty result.
+#[test]
+fn the_selection_side_still_sets_parked_sources_aside() {
+    let mut conn = setup_test_db();
+    let live = insert_root(&conn, "/mnt/drive", "source", false);
+    let suspended = insert_root(&conn, "/mnt/suspended", "source", true);
+
+    let obj1 = insert_object(&conn, "hash_001", false);
+    let obj2 = insert_object(&conn, "hash_002", false);
+    insert_source(&conn, live, "a.jpg", Some(obj1));
+    insert_source(&conn, suspended, "b.jpg", Some(obj2));
+
+    // A global survey selects only the live root's row, even though the
+    // parked root's row is visible to the outward side.
+    let params = test_params();
+    let outcome = run_compute(&mut conn, &[], &params, &[], &[], None);
+
+    match outcome {
+        SurveyOutcome::Result(result) => {
             assert_eq!(result.total_count, 1);
-            assert!(result.location_results.is_empty());
-            assert_eq!(result.unique_count, 1);
+            assert_eq!(result.unique_count, 1, "the live row stands alone");
+        }
+        _ => panic!("Expected SurveyOutcome::Result"),
+    }
+}
+
+/// A location with one copy on an open root is not marked: nothing there
+/// needs a door opened, so the mark would raise a question it does not pose.
+#[test]
+fn survey_never_marks_a_location_with_an_open_copy() {
+    let mut conn = setup_test_db();
+    let root = insert_root(&conn, "/mnt/drive", "source", false);
+    let mixed = insert_root(&conn, "/mnt/other", "source", false);
+
+    let obj1 = insert_object(&conn, "hash_001", false);
+    insert_source(&conn, root, "a.jpg", Some(obj1));
+    insert_source(&conn, mixed, "b.jpg", Some(obj1));
+
+    let params = test_params();
+    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+
+    match outcome {
+        SurveyOutcome::Result(result) => {
+            assert_eq!(result.location_results.len(), 1);
+            assert!(!result.location_results[0].suspended);
+        }
+        _ => panic!("Expected SurveyOutcome::Result"),
+    }
+}
+
+/// A parked location never leads: standing is the ordering's primary key,
+/// ahead of the relation itself.
+#[test]
+fn survey_never_leads_with_a_parked_location() {
+    let mut conn = setup_test_db();
+    let root = insert_root(&conn, "/mnt/drive", "source", false);
+    let parked = insert_root(&conn, "/mnt/parked", "source", true);
+    let live = insert_root(&conn, "/mnt/live", "source", false);
+
+    let obj1 = insert_object(&conn, "hash_001", false);
+    let obj2 = insert_object(&conn, "hash_002", false);
+    insert_source(&conn, root, "a.jpg", Some(obj1));
+    insert_source(&conn, root, "b.jpg", Some(obj2));
+    // The parked place carries the stronger relation — both files — and the
+    // live one carries only half of it.
+    insert_source(&conn, parked, "a.jpg", Some(obj1));
+    insert_source(&conn, parked, "b.jpg", Some(obj2));
+    insert_source(&conn, live, "a.jpg", Some(obj1));
+
+    let params = test_params();
+    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+
+    match outcome {
+        SurveyOutcome::Result(result) => {
+            let paths: Vec<&str> = result
+                .location_results
+                .iter()
+                .map(|l| l.path.as_str())
+                .collect();
+            assert_eq!(
+                paths,
+                vec!["/mnt/live", "/mnt/parked"],
+                "the weaker live relation still leads"
+            );
         }
         _ => panic!("Expected SurveyOutcome::Result"),
     }
@@ -303,10 +408,10 @@ fn test_archive_scope_grouping() {
         SurveyOutcome::Result(result) => {
             assert_eq!(result.archived_source_count, 3);
             assert_eq!(result.archive_scopes.len(), 2);
-            assert_eq!(result.archive_scopes[0].0, "/archive/a/2024");
-            assert_eq!(result.archive_scopes[0].1, 2);
-            assert_eq!(result.archive_scopes[1].0, "/archive/b/backup");
-            assert_eq!(result.archive_scopes[1].1, 1);
+            assert_eq!(result.archive_scopes[0].path, "/archive/a/2024");
+            assert_eq!(result.archive_scopes[0].count, 2);
+            assert_eq!(result.archive_scopes[1].path, "/archive/b/backup");
+            assert_eq!(result.archive_scopes[1].count, 1);
         }
         _ => panic!("Expected SurveyOutcome::Result"),
     }
@@ -1462,8 +1567,8 @@ fn test_archive_filter_specific_root() {
         SurveyOutcome::Result(result) => {
             assert_eq!(result.archived_source_count, 2);
             assert_eq!(result.archive_scopes.len(), 1);
-            assert_eq!(result.archive_scopes[0].0, "/archive/a/2024");
-            assert_eq!(result.archive_scopes[0].1, 2);
+            assert_eq!(result.archive_scopes[0].path, "/archive/a/2024");
+            assert_eq!(result.archive_scopes[0].count, 2);
         }
         _ => panic!("Expected SurveyOutcome::Result"),
     }
@@ -2520,5 +2625,83 @@ fn the_selection_side_stays_source_roots_whatever_the_include_set_says() {
             matches!(outcome, SurveyOutcome::Empty),
             "archive sources must never enter the selection (archived = {archived})"
         );
+    }
+}
+
+/// A `--other` location is a path the user chose, so it can contain several
+/// roots — which is where "every copy is behind a door" and "any copy is"
+/// part company. Reaching content here needs no door opened, so the location
+/// says nothing about one.
+#[test]
+fn an_other_location_spanning_two_standings_is_unmarked() {
+    let mut conn = setup_test_db();
+    let root = insert_root(&conn, "/mnt/drive", "source", false);
+    // Two roots under one directory the user can name.
+    let live = insert_root(&conn, "/mnt/shelf/live", "source", false);
+    let parked = insert_root(&conn, "/mnt/shelf/parked", "source", true);
+
+    let obj1 = insert_object(&conn, "hash_001", false);
+    let obj2 = insert_object(&conn, "hash_002", false);
+    insert_source(&conn, root, "a.jpg", Some(obj1));
+    insert_source(&conn, root, "b.jpg", Some(obj2));
+    insert_source(&conn, live, "a.jpg", Some(obj1));
+    insert_source(&conn, parked, "b.jpg", Some(obj2));
+
+    let params = test_params();
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &[],
+        &["/mnt/shelf"],
+        None,
+    );
+
+    match outcome {
+        SurveyOutcome::Result(result) => {
+            assert_eq!(result.location_results.len(), 1);
+            let location = &result.location_results[0];
+            assert_eq!(location.path, "/mnt/shelf");
+            assert_eq!(location.shared_count, 2, "both copies count");
+            assert!(
+                !location.suspended,
+                "a live copy under the location means nothing needs opening"
+            );
+        }
+        _ => panic!("Expected SurveyOutcome::Result"),
+    }
+}
+
+/// The same shape with both roots parked: every copy is behind a door, and
+/// the location says so.
+#[test]
+fn an_other_location_wholly_behind_doors_is_marked() {
+    let mut conn = setup_test_db();
+    let root = insert_root(&conn, "/mnt/drive", "source", false);
+    let parked_a = insert_root(&conn, "/mnt/shelf/a", "source", true);
+    let parked_b = insert_root(&conn, "/mnt/shelf/b", "source", true);
+
+    let obj1 = insert_object(&conn, "hash_001", false);
+    let obj2 = insert_object(&conn, "hash_002", false);
+    insert_source(&conn, root, "a.jpg", Some(obj1));
+    insert_source(&conn, root, "b.jpg", Some(obj2));
+    insert_source(&conn, parked_a, "a.jpg", Some(obj1));
+    insert_source(&conn, parked_b, "b.jpg", Some(obj2));
+
+    let params = test_params();
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &[],
+        &["/mnt/shelf"],
+        None,
+    );
+
+    match outcome {
+        SurveyOutcome::Result(result) => {
+            assert!(result.location_results[0].suspended);
+        }
+        _ => panic!("Expected SurveyOutcome::Result"),
     }
 }

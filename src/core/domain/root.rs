@@ -170,6 +170,46 @@ impl ParkedRoot {
     }
 }
 
+/// Above this many named roots a testimony segment collapses to a count.
+/// The door statement's cap, reused for the same reason: a qualifier that
+/// names twenty roots stops qualifying and starts shouting.
+const TESTIMONY_ROOTS_NAMED_CAP: usize = 3;
+
+/// What a claim says about resting **solely** on copies behind closed doors:
+/// `<count> only on suspended <roots>`.
+///
+/// Three surfaces state it — coverage's archived line, the readiness
+/// review's covered line, the story's footer — over one derivation
+/// (`only_on_suspended`). Composed in the domain for the reason
+/// [`ParkedRoot::door_line`] is: the story's footer is written from
+/// operations, being the book's text as well as the terminal's, so an
+/// interface-only spelling could not serve it.
+///
+/// **No way back is offered.** The registry's testifying clause is *stated,
+/// never headlined*: this is a qualifier on a claim the surface is otherwise
+/// making, not a refusal the user must get past, and a runnable command
+/// beside it would turn a footnote into an instruction. The way back to any
+/// of these roots is one `canon roots list --suspended` away, and every
+/// surface that actually blocks on a door prints it.
+///
+/// `None` when nothing rests only behind a door — the segment is suppressed
+/// at zero rather than printed as `0`, because "0 only on suspended roots"
+/// is a sentence about a situation that is not happening.
+pub fn only_on_suspended_segment(count: i64, root_paths: &[String]) -> Option<String> {
+    if count <= 0 || root_paths.is_empty() {
+        return None;
+    }
+    let mut paths: Vec<&str> = root_paths.iter().map(String::as_str).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    let where_ = if paths.len() > TESTIMONY_ROOTS_NAMED_CAP {
+        format!("{} suspended roots", paths.len())
+    } else {
+        format!("suspended {}", paths.join(", "))
+    };
+    Some(format!("{count} only on {where_}"))
+}
+
 /// A place that was asked about — by naming it or by standing in it — which
 /// turns out to stand on a closed root.
 ///
@@ -703,5 +743,63 @@ mod tests {
         assert!(!root.matches_scope("/a/bc"));
         // The real shape of the mistake: a backup drive beside the one named.
         assert!(!root.matches_scope("/a/b-backup"));
+    }
+
+    // ========================================================================
+    // The testimony segment
+    // ========================================================================
+
+    fn paths(n: usize) -> Vec<String> {
+        (1..=n).map(|i| format!("/arc{i}")).collect()
+    }
+
+    #[test]
+    fn the_testimony_segment_names_its_roots_up_to_the_cap() {
+        assert_eq!(
+            only_on_suspended_segment(1, &paths(1)).unwrap(),
+            "1 only on suspended /arc1"
+        );
+        assert_eq!(
+            only_on_suspended_segment(37, &paths(3)).unwrap(),
+            "37 only on suspended /arc1, /arc2, /arc3"
+        );
+    }
+
+    #[test]
+    fn above_the_cap_the_testimony_segment_counts_its_roots() {
+        assert_eq!(
+            only_on_suspended_segment(37, &paths(4)).unwrap(),
+            "37 only on 4 suspended roots"
+        );
+    }
+
+    #[test]
+    fn the_testimony_segment_offers_no_way_back() {
+        // It qualifies a claim the surface is otherwise making; a runnable
+        // command beside it would turn a footnote into an instruction.
+        let segment = only_on_suspended_segment(2, &paths(1)).unwrap();
+        assert!(!segment.contains("canon roots"), "{segment}");
+    }
+
+    #[test]
+    fn nothing_behind_a_door_says_nothing() {
+        // Suppressed at zero on either axis: "0 only on suspended roots" is
+        // a sentence about a situation that is not happening, and a count
+        // with no roots to name has nothing to say.
+        assert!(only_on_suspended_segment(0, &paths(2)).is_none());
+        assert!(only_on_suspended_segment(5, &[]).is_none());
+    }
+
+    #[test]
+    fn the_testimony_segment_sorts_and_dedupes_its_roots() {
+        let noisy = vec![
+            "/arc2".to_string(),
+            "/arc1".to_string(),
+            "/arc2".to_string(),
+        ];
+        assert_eq!(
+            only_on_suspended_segment(4, &noisy).unwrap(),
+            "4 only on suspended /arc1, /arc2"
+        );
     }
 }

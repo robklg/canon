@@ -3579,6 +3579,7 @@ mod source {
                 "file_noun",
                 "fmt_locations",
                 "reference_place_lines",
+                "Voicing",
                 "report_over",
                 "StoryReport",
             ],

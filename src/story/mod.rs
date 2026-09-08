@@ -18,5 +18,5 @@ pub use cli::story;
 pub use domain::acts::{ActDecision, ActGroup, ReasonSummary};
 pub use domain::locations::{aggregate_locations, LocationAggregate, LocationCount};
 pub use domain::place::{PlaceStanding, StoryParams, StoryPlace};
-pub use ops::render::{file_noun, fmt_locations, reference_place_lines};
+pub use ops::render::{file_noun, fmt_locations, reference_place_lines, Voicing};
 pub use ops::report::{report_over, StoryReport};

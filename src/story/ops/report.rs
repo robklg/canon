@@ -35,6 +35,9 @@ pub struct StoryReport {
     /// The readiness account over the same fetch — the closing totals. The
     /// place sums fold to it (the agreement law).
     pub account: ResolutionAccount,
+    /// The fleet at read time, so the closing totals can name the parked
+    /// roots a claim rests on. Same fetch, no second lookup.
+    pub roots: Vec<Root>,
 }
 
 /// Compute a source root's story: one `RootStory` fetch, the compile's two
@@ -113,7 +116,7 @@ pub fn report_over(
     let account = build_account(
         &story.present,
         &story.absent,
-        &story.archived,
+        &story.archive_copies,
         &story.archived_from_here,
         &story.extractions,
         &story.stamp_families,
@@ -125,6 +128,7 @@ pub fn report_over(
         reachable: story.reachable,
         places,
         account,
+        roots: story.roots.clone(),
     })
 }
 
@@ -513,7 +517,8 @@ mod tests {
             report.places.covered_where.locations,
             vec![crate::story::domain::locations::LocationCount {
                 path: "/archive/media".into(),
-                files: 1100
+                files: 1100,
+                suspended: false,
             }]
         );
     }

@@ -5,10 +5,27 @@ use std::collections::{HashMap, HashSet};
 
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::core::domain::fate::DecisionFamily;
+use crate::core::domain::object::{ArchiveCopy, ArchiveLocation};
 use crate::core::domain::source::Source;
 use crate::notes::Note;
 use crate::story::domain::place::{DecisionInfo, StoryInputs, StoryParams, StoryPlace};
 use crate::story::domain::splitter::build_places;
+
+/// Archive locations all standing on one root, open or closed. The root id
+/// is a constant: nothing in the story lens reads it — the standing beside
+/// it is the whole point.
+pub(super) fn to_locations(paths: &[&str], suspended: bool) -> Vec<ArchiveLocation> {
+    paths
+        .iter()
+        .map(|p| ArchiveLocation {
+            path: p.to_string(),
+            root: ArchiveCopy {
+                root_id: 9,
+                root_suspended: suspended,
+            },
+        })
+        .collect()
+}
 
 pub(super) fn src(id: i64, rel: &str, object_id: Option<i64>) -> Source {
     Source {
@@ -94,11 +111,12 @@ pub(super) struct Fixture {
     pub(super) present: Vec<Source>,
     pub(super) absent: Vec<Source>,
     pub(super) archived: HashSet<i64>,
+    pub(super) archive_copies: HashMap<i64, Vec<ArchiveCopy>>,
     pub(super) archived_from_here: HashSet<i64>,
     pub(super) extractions: Vec<DecisionExtraction>,
     pub(super) decisions: HashMap<i64, DecisionInfo>,
     pub(super) notes: Vec<Note>,
-    pub(super) archive_locations: HashMap<i64, Vec<String>>,
+    pub(super) archive_locations: HashMap<i64, Vec<ArchiveLocation>>,
     pub(super) bases: Vec<String>,
 }
 
@@ -108,6 +126,7 @@ impl Fixture {
             present: vec![],
             absent: vec![],
             archived: HashSet::new(),
+            archive_copies: HashMap::new(),
             archived_from_here: HashSet::new(),
             extractions: vec![],
             decisions: HashMap::new(),
@@ -118,13 +137,23 @@ impl Fixture {
     }
 
     /// A covered present source: hashed, archived, standing at one or
-    /// more archive locations.
+    /// more archive locations, every one of them on an open root.
     pub(super) fn covered(&mut self, id: i64, rel: &str, locations: &[&str]) {
+        self.covered_at(id, rel, &to_locations(locations, false));
+    }
+
+    /// The same, with every copy standing behind a closed door.
+    pub(super) fn covered_behind_a_door(&mut self, id: i64, rel: &str, locations: &[&str]) {
+        self.covered_at(id, rel, &to_locations(locations, true));
+    }
+
+    pub(super) fn covered_at(&mut self, id: i64, rel: &str, locations: &[ArchiveLocation]) {
         let obj = 1000 + id;
         self.present.push(src(id, rel, Some(obj)));
         self.archived.insert(obj);
-        self.archive_locations
-            .insert(obj, locations.iter().map(|l| l.to_string()).collect());
+        self.archive_copies
+            .insert(obj, locations.iter().map(|l| l.root).collect());
+        self.archive_locations.insert(obj, locations.to_vec());
     }
 
     pub(super) fn build(&self, params: &StoryParams) -> StoryPlace {

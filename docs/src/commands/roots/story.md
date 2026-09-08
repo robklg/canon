@@ -141,3 +141,15 @@ no handoffs, and a beginning and a last page around it.
   [`canon trail`](../query/trail.md) and its composition card.
 - A suspended or unreachable root reads fine — the story as last observed, stated
   in the header.
+- Where content is covered only by archive copies on
+  [suspended](roots.md#suspending-roots) roots, the location carries `(suspended)`
+  and the closing totals count it:
+
+  ```
+    3,412 covered — copies stand in /archive-b/staging-2019 (3,401) (suspended), /archive/games (11)
+
+  Standing: 20,911 sources — 3,980 covered (3,401 only on suspended /archive-b) · 16,896 excluded · 35 unresolved (19 never hashed)
+  ```
+
+  Each location speaks for its own copies. A location holding any copy on a
+  live root is not marked.

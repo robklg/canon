@@ -15,7 +15,7 @@ use crate::core::ops::scope::classify_all;
 use crate::expr::{apply_filters, Filter, UsedStatus};
 use crate::survey::domain::analysis::{
     classify_location, count_only_here, discover_scopes_by_root, find_unique_object_ids,
-    LocationKind,
+    standing_first, LocationKind, ScopeLocation,
 };
 use crate::survey::domain::object_index::{ArchivePresence, ObjectIndex};
 
@@ -75,7 +75,7 @@ pub struct SurveyResult {
     pub unhashed_count: usize,
     pub total_hashed: usize,
     pub archived_source_count: usize,
-    pub archive_scopes: Vec<(String, usize)>,
+    pub archive_scopes: Vec<ScopeLocation>,
     pub location_results: Vec<LocationResult>,
     pub unique_count: usize,
     pub unique_paths: Vec<String>,
@@ -110,12 +110,24 @@ pub struct OverlapPair {
 pub struct ArchivedLocationDetail {
     /// Archive scope path (absolute).
     pub path: String,
+    /// Every copy here stands behind a closed door — same rule and same
+    /// source as the summary's archive breakdown, so the detail view cannot
+    /// answer differently about the place the summary just named.
+    pub suspended: bool,
     /// Selection-side paths paired with archive-side counterparts.
     pub pairs: Vec<OverlapPair>,
 }
 
 pub struct LocationResult {
     pub path: String,
+    /// Everything Canon knows at this location stands on roots whose door
+    /// the user has closed.
+    ///
+    /// The same all-or-nothing shape the resolution account uses: one copy
+    /// on an open root and reaching this place needs no door opened, so the
+    /// mark would raise a question the place does not pose. It orders the
+    /// list as well as marking it — a parked location never leads.
+    pub suspended: bool,
     pub shared_count: usize,
     /// Total hashed sources at this location (always computed).
     pub total_count: usize,
@@ -216,15 +228,23 @@ pub fn compute_survey(
         .collect();
     let sel_source_ids: HashSet<i64> = selection.iter().map(|s| s.id).collect();
 
-    // Build object index from ALL active, non-excluded sources.
-    // The outward side never widens with --include excluded: what a survey
-    // compares against is the visible world, so an excluded copy elsewhere is
-    // not evidence that selection content exists elsewhere.
-    let index = ObjectIndex::build(
-        all_sources
-            .iter()
-            .filter(|s| s.is_active() && !s.is_excluded()),
-    );
+    // Build the object index from ALL non-excluded sources, **whatever the
+    // standing of the root they sit on**.
+    //
+    // The outward side answers "where else does this content live?", and a
+    // copy on a root the user has parked is still a copy: testifying is what
+    // a closed door permits, and custody stands whether or not attention has
+    // moved. Filtering here inverted survey's own answer — the same content
+    // read `0 unique` while its archive root was live and `3 unique`, `No
+    // related locations found.` once it was parked, which is a claim about
+    // the world changed by an act that changed only attention.
+    //
+    // Exclusion is a different question and still filters: it is a judgment
+    // about the content, and an excluded copy elsewhere is not evidence that
+    // selection content exists elsewhere. The selection side keeps its own
+    // `is_active()` for the same reason it always had one — what you are
+    // surveying is what you can see.
+    let index = ObjectIndex::build(all_sources.iter().filter(|s| !s.is_excluded()));
 
     // Archive status: find selection content that exists on archive roots
     // (--archive restricts to that archive root)
@@ -241,7 +261,7 @@ pub fn compute_survey(
 
     // Scope discovery on archive sources for grouped display
     let mut archive_scopes = discover_scopes_by_root(&archive_sources);
-    archive_scopes.sort_by(|a, b| a.0.cmp(&b.0));
+    archive_scopes.sort_by(|a, b| a.path.cmp(&b.path));
 
     // Overlap: find selection content that exists on other source roots
     let mut overlap_sources: Vec<&Source> = Vec::new();
@@ -255,9 +275,18 @@ pub fn compute_survey(
 
     // Location discovery
     let is_other_mode = !other_paths.is_empty();
-    let location_scopes: Vec<(String, usize)> = if is_other_mode {
-        // --other: user paths directly
-        other_paths.iter().map(|p| (p.clone(), 0)).collect()
+    let location_scopes: Vec<ScopeLocation> = if is_other_mode {
+        // --other: user paths directly. The standing is filled in below,
+        // from what actually stands at the named place — a user path is not
+        // a root, so there is no root to read it off.
+        other_paths
+            .iter()
+            .map(|p| ScopeLocation {
+                path: p.clone(),
+                count: 0,
+                suspended: false,
+            })
+            .collect()
     } else {
         // Default: scope discovery from overlap sources
         discover_scopes_by_root(&overlap_sources)
@@ -266,7 +295,8 @@ pub fn compute_survey(
     // Per-location: shared count + affinity
     let mut location_results: Vec<LocationResult> = Vec::new();
 
-    for (scope_path, _overlap_count) in &location_scopes {
+    for location in &location_scopes {
+        let scope_path = &location.path;
         let loc_scope = vec![ScopeMatch::UnderDirectory(scope_path.clone())];
 
         // Object IDs at this location — used for shared_count and detail views.
@@ -274,7 +304,6 @@ pub fn compute_survey(
         let loc_oids: HashSet<i64> = if is_other_mode {
             all_sources
                 .iter()
-                .filter(|s| s.is_active())
                 .filter(|s| !s.is_excluded())
                 // Direct read past the index — re-apply its contentless
                 // refusal, or an empty file here reads as shared content.
@@ -305,28 +334,35 @@ pub fn compute_survey(
         // filter. Contentless sources are out (coverage's own denominator
         // precedent): a subset ratio is an identity claim, and empty files
         // can neither be shared nor make a location less of a subset.
-        let total_count: usize = all_sources
+        let at_location: Vec<&Source> = all_sources
             .iter()
-            .filter(|s| s.is_active())
             .filter(|s| !s.is_excluded())
             .filter(|s| !s.is_contentless())
             .filter(|s| s.object_id.is_some())
             .filter(|s| s.matches_scope(&loc_scope))
             .filter(|s| is_other_mode || s.is_from_role("source"))
-            .count();
+            .collect();
+        let total_count: usize = at_location.len();
+
+        // Whether going to look here means opening a door. Read from what
+        // stands at the place rather than from the discovered scope's root,
+        // so a `--other` location the user named answers the same way a
+        // discovered one does.
+        let location_is_parked =
+            !at_location.is_empty() && at_location.iter().all(|s| s.root_suspended);
 
         // Complementary content and classification (only with affinity enabled)
         let (complementary_count, only_here_count, kind, complementary_paths) = if params
             .compute_affinity
         {
             // Step 1: Get ALL sources within this location
-            // Active, non-excluded, not in selection. Direct read past the
+            // Non-excluded, not in selection, whatever the standing of the
+            // root — the outward side. Direct read past the
             // index — re-apply its contentless refusal, or an empty file
             // here reads as complementary content (and, absent from the
             // index, as vacuously "only here").
             let loc_sources: Vec<&Source> = all_sources
                 .iter()
-                .filter(|s| s.is_active())
                 .filter(|s| !s.is_excluded())
                 .filter(|s| !s.is_contentless())
                 .filter(|s| s.matches_scope(&loc_scope))
@@ -455,6 +491,7 @@ pub fn compute_survey(
 
         location_results.push(LocationResult {
             path: scope_path.clone(),
+            suspended: location_is_parked,
             shared_count,
             total_count,
             complementary_count,
@@ -466,23 +503,34 @@ pub fn compute_survey(
         });
     }
 
-    // Sort locations
+    // Sort locations. **Standing is the primary key**, ahead of the relation
+    // itself: a place behind a door the user closed may be perfectly good
+    // evidence and must still never headline a list of places to go. The
+    // registry's testifying clause is "stated, never headlined", and a
+    // list's first line is its headline — so the relation orders within
+    // standing, not across it.
     if is_other_mode {
-        // --other: preserve user-specified order (no sort)
+        // --other: preserve user-specified order. The user named these
+        // places and the order is theirs; the marker still states each one.
     } else if params.compute_affinity {
         // Classification: supersets first, then leads, then mirrors
         // Within each group: complementary desc, then shared desc
         location_results.sort_by(|a, b| {
             let kind_a = a.kind.as_ref().unwrap();
             let kind_b = b.kind.as_ref().unwrap();
-            kind_a
-                .cmp(kind_b)
+            standing_first(a.suspended, b.suspended)
+                .then(kind_a.cmp(kind_b))
                 .then(b.complementary_count.cmp(&a.complementary_count))
                 .then(b.shared_count.cmp(&a.shared_count))
+                .then(a.path.cmp(&b.path))
         });
     } else {
-        // No affinity data: sort by shared count descending
-        location_results.sort_by(|a, b| b.shared_count.cmp(&a.shared_count));
+        // No affinity data: shared count descending, within standing.
+        location_results.sort_by(|a, b| {
+            standing_first(a.suspended, b.suspended)
+                .then(b.shared_count.cmp(&a.shared_count))
+                .then(a.path.cmp(&b.path))
+        });
     }
 
     // Unique: selection content that exists nowhere else
@@ -510,7 +558,8 @@ pub fn compute_survey(
         let mut details: Vec<ArchivedLocationDetail> = Vec::new();
 
         // For each archive scope, find the selection sources whose content is archived there
-        for (scope_path, _count) in &archive_scopes {
+        for location in &archive_scopes {
+            let scope_path = &location.path;
             let mut pairs: Vec<OverlapPair> = Vec::new();
 
             // Find archive sources under this scope
@@ -553,13 +602,23 @@ pub fn compute_survey(
             if !pairs.is_empty() {
                 details.push(ArchivedLocationDetail {
                     path: scope_path.clone(),
+                    suspended: location.suspended,
                     pairs,
                 });
             }
         }
 
-        // Sort by file count descending
-        details.sort_by(|a, b| b.pairs.len().cmp(&a.pairs.len()));
+        // Standing first, then file count. Standing is the key this shares
+        // with the summary's breakdown: below it the two measure different
+        // things (that list counts archive-side sources at the location,
+        // this one counts selection-side sources archived there), so they may
+        // order live places differently — but a parked place must not lead
+        // one while trailing the other.
+        details.sort_by(|a, b| {
+            standing_first(a.suspended, b.suspended)
+                .then(b.pairs.len().cmp(&a.pairs.len()))
+                .then(a.path.cmp(&b.path))
+        });
         details
     } else {
         Vec::new()

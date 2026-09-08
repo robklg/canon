@@ -326,11 +326,18 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   `all_uncaps_the_places_beneath_a_delivery`. **`trail show`'s `drew from:` caps identically and is
   not fixed here** — it belongs to its own change.
 
-- **`render::origin_marker` is the one spelling of what an origin's line says about its root** — the
-  book wins over `(root removed)`, a live root gets neither. Three surfaces render it:
-  `drew_from_lines`, the card's origin lines, and `crossings`' counterparts; without one spelling
-  they drift, one door pointing at the book while its neighbour, naming the same root, says only
-  `(root removed)`. The card's book pointer is a **DB projection and makes no stat call**,
+- **`render::origin_marker` is the one spelling of what an origin's line says about its root** —
+  the book wins over `(root removed)`, which wins over `(suspended)`, and a live open root gets
+  none. Three surfaces render it: `drew_from_lines`, the card's origin lines, and `crossings`'
+  counterparts; without one spelling they drift, one door pointing at the book while its
+  neighbour, naming the same root, says only `(root removed)`. **Only a present-tense line takes
+  a standing**, which the `RootStanding` argument says by name rather than by a `false` that
+  would read like an assertion: the card states what stands here *now*, so a door in front of an
+  origin is what a reader about to go looking needs; `drew from:` and `crossings` record what
+  happened *then*, and a door closed since is not true of the past
+  (`the_card_marks_a_parked_origin`, `a_historical_line_says_nothing_about_a_door`). Precedence
+  is the two absences first: a root the index no longer knows has no door, and a retired one is
+  answered better by its book (`a_removed_or_retired_origin_outranks_the_door`). The card's book pointer is a **DB projection and makes no stat call**,
   deliberately unlike `show`'s `relocate_pointer`, which redirects and therefore must observe — the
   card states the recorded path and claims nothing about what stands at it
   (`the_card_states_a_book_path_it_never_observes`). Gated on removal, so the retirement lookup's

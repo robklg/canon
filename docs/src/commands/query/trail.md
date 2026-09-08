@@ -419,6 +419,17 @@ A directory inside a [suspended](../roots/roots.md#suspending-roots) root is not
 
 The trail reads at a suspended place whether it is named alone or beside a live one, and states the door once in its header. Unlike the query commands, it sets nothing aside there: what Canon already recorded still reads.
 
+On the composition card, an origin whose root is suspended is marked:
+
+```
+Standing here: 47 files (2.1 GB)
+  arrived from /mnt/old-disk/photos
+      (suspended)
+      47 files (2.1 GB) · decision #128 · 2024-03-11
+```
+
+The card states what stands here now, so the mark is about reaching that origin today. The timeline above it, and `trail show`'s `drew from:` lines, record what happened at the time and carry no such mark.
+
 When `--global` names both, the boundary is the deeper of the two where one contains the other, and the origin otherwise. Where the two paths do not nest, both choices select the same records and only the section header differs. Where one contains the other they select differently, and the deeper path is the one that reads the movement between them as a crossing rather than as a rearrangement inside the wider place.
 
 ### Exits, caps and machine output
