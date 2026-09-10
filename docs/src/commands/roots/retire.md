@@ -252,7 +252,7 @@ command's deliverable rather than a provenance side-channel.
   A real run refuses before anything is bound, and records nothing:
 
   ```
-  /Volumes/Old suspended — refused: /Volumes/Old · canon roots unsuspend path:/Volumes/Old
+  /Volumes/Old suspended — refused · canon roots unsuspend path:/Volumes/Old
   ```
 
   The same holds for the shelf: with every archive root suspended there is nowhere to

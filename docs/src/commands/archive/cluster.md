@@ -172,7 +172,7 @@ A refresh refuses when the manifest's own `meta.scope` names a suspended root, w
 neither file:
 
 ```
-/path/to/photos suspended — refused: /path/to/photos · canon roots unsuspend path:/path/to/photos
+/path/to/photos suspended — refused · canon roots unsuspend path:/path/to/photos
 Refresh aborted — manifest.toml and its lock file are unchanged.
 ```
 

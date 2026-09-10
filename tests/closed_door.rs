@@ -204,11 +204,14 @@ fn write(path: PathBuf, body: &str) {
 
 /// The one grammar, checked structurally: the door names its root, says
 /// `suspended`, carries the surface's verb, and ends in a way back that runs.
+/// The `<what>` slot follows the verb where the place is below the root and
+/// is dropped where the place is the root itself, so the root is never named
+/// a third time between the door and the way back.
 fn assert_door_line(line: &str, root: &str, verb: &str) {
     assert!(line.contains(root), "the door names its root: {line}");
     assert!(line.contains("suspended"), "and says so: {line}");
     assert!(
-        line.contains(&format!("— {verb}:")),
+        line.contains(&format!("— {verb}:")) || line.contains(&format!("— {verb} ·")),
         "with the surface's own verb ({verb}): {line}"
     );
     assert!(
@@ -842,7 +845,7 @@ fn a_machine_survey_states_its_set_asides_even_when_nothing_matched() {
     );
     assert!(
         run.stderr
-            .contains(&format!("{root} suspended — set aside:")),
+            .contains(&format!("{root} suspended — set aside ·")),
         "an empty result is not a reason to go silent: {:?}",
         run.stderr
     );

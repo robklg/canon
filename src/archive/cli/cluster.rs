@@ -1884,10 +1884,7 @@ mod tests {
 
         assert_eq!(
             doors,
-            vec![
-                "/photos suspended — refused: /photos · canon roots unsuspend path:/photos"
-                    .to_string()
-            ]
+            vec!["/photos suspended — refused · canon roots unsuspend path:/photos".to_string()]
         );
         assert!(
             !refresh_must_refuse(&scope),
@@ -1947,7 +1944,7 @@ mod tests {
         assert_eq!(
             manifest_door_lines(&status),
             vec![
-                "/photos suspended — cluster refresh and apply would refuse: /photos · \
+                "/photos suspended — cluster refresh and apply would refuse · \
                   canon roots unsuspend path:/photos"
                     .to_string()
             ]
@@ -2009,7 +2006,7 @@ mod tests {
         let mut lines = said.lines();
         assert_eq!(
             lines.next().unwrap(),
-            "/photos suspended — refused: /photos · canon roots unsuspend path:/photos"
+            "/photos suspended — refused · canon roots unsuspend path:/photos"
         );
         assert!(
             lines.next().unwrap().starts_with("no known root at"),

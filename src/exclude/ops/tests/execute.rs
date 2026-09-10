@@ -241,7 +241,7 @@ fn an_exclude_execute_refuses_a_root_parked_since_the_plan() {
     // The one sentence, raised from inside an operation — the way back, and
     // no `Error:` (the front door states it as it stands).
     let said = err.to_string();
-    assert!(said.contains("/photos suspended — refused:"), "{said}");
+    assert!(said.contains("/photos suspended — refused ·"), "{said}");
     assert!(
         said.contains("canon roots unsuspend path:/photos"),
         "{said}"

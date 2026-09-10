@@ -150,6 +150,19 @@ impl ParkedRoot {
     /// Terminal shaping (grouping several doors, capping the list, choosing a
     /// channel) stays in the interface, where a screen is.
     pub fn door_line(&self, verb: DoorVerb, what: &str) -> String {
+        // The place asked about is the root itself: the sentence already
+        // names it at the door and again in the way back, so a third naming
+        // in the `<what>` slot degenerates into `/r suspended — refused: /r ·
+        // canon roots unsuspend path:/r`. The slot is dropped, here in the
+        // one spelling, so every door that reaches a root top reads the same.
+        if what == self.root_path {
+            return format!(
+                "{} suspended — {} · {}",
+                self.root_path,
+                verb.label(),
+                self.way_back().display(),
+            );
+        }
         format!(
             "{} suspended — {}: {what} · {}",
             self.root_path,
@@ -779,6 +792,29 @@ mod tests {
         // command beside it would turn a footnote into an instruction.
         let segment = only_on_suspended_segment(2, &paths(1)).unwrap();
         assert!(!segment.contains("canon roots"), "{segment}");
+    }
+
+    #[test]
+    fn a_door_at_the_root_itself_names_the_root_once_beside_the_way_back() {
+        let root = ParkedRoot {
+            root_id: 7,
+            root_path: "/vol/photos".to_string(),
+        };
+        let at_root = root.door_line(DoorVerb::Refused, "/vol/photos");
+        assert_eq!(
+            at_root, "/vol/photos suspended — refused · canon roots unsuspend path:/vol/photos",
+            "the `<what>` slot is dropped when the place is the root itself"
+        );
+        assert_eq!(
+            at_root.matches("/vol/photos").count(),
+            2,
+            "the root is named at the door and in the way back, never a third time"
+        );
+        let below = root.door_line(DoorVerb::Refused, "/vol/photos/2019");
+        assert!(
+            below.contains("— refused: /vol/photos/2019 ·"),
+            "a place below the root keeps the slot: {below}"
+        );
     }
 
     #[test]
