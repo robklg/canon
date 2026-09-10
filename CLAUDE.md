@@ -222,7 +222,7 @@ The load-bearing rules. Violating them causes subtle bugs that the test suite is
 
 **Test co-location — the fixture-sharing criterion**: tests live in-file with the code they exercise; test files externalize into a stratum's `tests/` directory with a shared `fixtures.rs` exactly when multiple files share test machinery — DB builders and pure helpers alike; **layer is never the criterion**. A self-contained corpus stays in-file even beside externalized siblings (`story/domain/place.rs` beside `splitter.rs`'s externalized corpus).
 
-**A pin asserts the chartered claim, never the observed output**: a guard test's expected value is derived from the spec's claim, not captured from the run; and a guard or anti-drift test is **red-smoked against the defect it names** — deliberately plant the defect and watch the test fail — because an assertion that cannot fail against its own defect is not a defense. A pin keyed to output the code cannot even produce is the specimen this rule exists to prevent.
+**A pin asserts the chartered claim, never the observed output**: a guard test's expected value is derived from the spec's claim, not captured from the run; and a guard or anti-drift test is **red-smoked against the defect it names** — deliberately plant the defect and watch the test fail — because an assertion that cannot fail against its own defect is not a defense. A pin keyed to output the code cannot even produce is the specimen this rule exists to prevent. **A story that changes a spelled-once rule re-smokes every pin naming a defect of that rule and lists them in its record**, because a rule change can hollow a pin without touching it: it stays green, keeps the name of a defect it can no longer catch, and nothing in the build sees the class.
 
 **Subsystem barrels are pinned**: the architecture test's `SUBSYSTEM_BARREL_ITEMS` table asserts each subsystem's exact `pub use` surface and seals every stratum `mod` (bare-private at a front door, where `super` is the crate root; `pub(super)` at most below it), deny-by-default both directions — a subsystem directory without a pin row fails the build, so a new subsystem cannot arrive unsealed, and a stale pin fails with it. Changing a barrel means editing its pin in the same commit. **What a pinned barrel carries — the parameter-type rule** (this is the domain name code comments cite): items consumers name, plus **parameter types of exported items** (a caller cannot factor a helper without naming them) — never return-type-only courtesies, because inference lets a caller leave those unnamed, so carrying them records demand that doesn't exist; when real demand arrives, re-adding is one pin edit with the consumer as evidence.
 
@@ -316,7 +316,7 @@ Three unified flags:
 
 Provenance flags:
 - **`--no-receipt`** (global): suppresses receipt file generation for this invocation (DB recording still happens per `RecordingMode`). Per-invocation opt-out.
-- **`--reason`** (effectful `exclude set/clear/duplicates/set-object`, `apply`, `scan`, `roots rm`): attaches user reasoning to the decision record. Optional, no prompting; empty = no reason.
+- **`--reason`** (effectful `exclude set/clear/duplicates/set-object`, `apply`, `scan`, `roots rm`, `roots suspend/unsuspend`, `roots retire`): attaches user reasoning to the decision record. Optional, no prompting; empty = no reason.
 
 **Recording modes** (`$CANON_HOME/config.toml`, `ledger.recording`): `Full` (DB + receipt files), `Records` (DB only), `Off` (nothing).
 

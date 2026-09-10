@@ -14,9 +14,11 @@
 //!
 //! Both are ceilings, not targets. Shrinking is free and needs no edit here.
 //! Growing means raising a number in this table, in the same commit, where a
-//! reviewer sees the raise beside the prose that needed it. Each is set at the
-//! file's size when it landed plus a tenth, so one added sentence never trips
-//! it and sustained growth always does.
+//! reviewer sees the raise beside the prose that needed it — every CLAUDE.md
+//! is tracked, so the raise is in the diff a chartered review reads. Each
+//! ceiling is the file's **measured** size: exact, no headroom, so every added
+//! sentence is a raise that says what the prose bought. The root file's row is
+//! the requester's to raise, under the root-file rule.
 //!
 //! Matched **both directions**: a register the tree owes with no row fails,
 //! and a row naming a register the tree does not owe fails. Both directions
@@ -82,7 +84,7 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "src/facts/CLAUDE.md",
-        words: 422,
+        words: 497,
         verifiers: 0,
     },
     Ceiling {

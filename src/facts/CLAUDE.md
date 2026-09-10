@@ -44,3 +44,10 @@ fails the build. Repairing one call site deletes that file's entry, never both.
 `report`/`maintain`/`import` the same way, so nothing below the front door is reachable
 from outside it. No repo-tier item is on the barrel: nothing outside `main.rs` reaches
 facts at all.
+
+**The prunes consult no door.** `prune-stale`, `prune-orphaned-objects` and `prune-excluded-facts`
+read no `Door`, `RootLookup` or `ParkedRoot`, by design: pruning is index maintenance over rows
+that are already absent or excluded, never an act on content, and a source no longer present is
+no longer part of its root whether that root is parked or not. A prune that stopped at a closed
+door would keep dead rows alive for a root the user has set aside.
+
