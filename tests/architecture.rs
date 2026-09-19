@@ -1859,6 +1859,171 @@ fn every_decompose_caller_names_its_redeemer() {
 }
 
 // ----------------------------------------------------------------------------
+// The empty-remainder caller census
+// ----------------------------------------------------------------------------
+
+/// Why one production caller of `path_at_or_under_sql`/`path_strictly_under_sql`
+/// may pass an argument the helpers themselves answer wrong on.
+///
+/// Both helpers are spelled for a non-empty prefix. Their SQL never matches a
+/// real `rel_path`/`rel_prefix` column on an empty one: a real remainder
+/// never starts with `/`, so `path_strictly_under_sql`'s clause is false for
+/// every row, and `path_at_or_under_sql`'s exact-match arm only ever catches
+/// a column that is itself stored empty. Conjugating the empty case inside
+/// the projection — so a caller cannot forget the branch — is the pair's own
+/// repair and does not live here; until it does, every production caller
+/// conjugates the case in its own place, and a new caller passing text owes
+/// one of the two reasons below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyRemainderGuard {
+    /// The call site itself branches on `rel_path`/`rel_prefix`.is_empty()
+    /// and only ever reaches the helper on the non-empty arm; the empty case
+    /// is answered by a hand-written whole-scope query instead (no boundary
+    /// predicate at all, since none is needed to mean "everything").
+    BranchesAtTheCallSite,
+    /// Reached only through `trail::ops::place::history_evidence_at`'s
+    /// ordered evidence chain — presence, then notes, both correct on an
+    /// empty remainder, asked first — so these two SQL calls go unreached
+    /// whenever the root carries any source or note history at all. One of
+    /// the chain's two callers, `trail::cli::run`'s scope-evidence gate,
+    /// excludes every root's own top before reaching the chain, closing the
+    /// gap for it entirely. The other, `trail::ops::crossings::counterpart_is_known`,
+    /// does not: a root named as a counterpart that has never held a source
+    /// or a note, yet carries a decision or an extraction scoped at its own
+    /// top, can still reach here empty and read as an unknown counterpart.
+    /// Named, not closed — the same interim standing as the helpers' own gap
+    /// above. The third call this file makes binds `destination_path`,
+    /// always an absolute filesystem path and never empty by construction,
+    /// so it carries no gap of its own.
+    EvidenceOrderedWithOneNamedGap,
+}
+
+impl EmptyRemainderGuard {
+    fn as_str(self) -> &'static str {
+        match self {
+            EmptyRemainderGuard::BranchesAtTheCallSite => {
+                "branches on the empty remainder at the call site"
+            }
+            EmptyRemainderGuard::EvidenceOrderedWithOneNamedGap => {
+                "guarded by history_evidence_at's evidence order, with one named gap \
+                 through counterpart_is_known"
+            }
+        }
+    }
+}
+
+/// The census: every production call site of either spelling, with the count
+/// of calls in each file, and the guard that answers for them.
+///
+/// The count is part of the row for the same reason the `decompose` census
+/// above keeps one: a second call added to a file that already has a row
+/// would otherwise inherit its reason silently, and a reason is about a
+/// specific argument a specific caller passes, not about a file.
+const EMPTY_REMAINDER_CALLERS: &[(&str, usize, EmptyRemainderGuard)] = &[
+    (
+        "core/repo/source.rs",
+        1,
+        EmptyRemainderGuard::BranchesAtTheCallSite,
+    ),
+    (
+        "notes/repo.rs",
+        6,
+        EmptyRemainderGuard::BranchesAtTheCallSite,
+    ),
+    (
+        "scan/repo.rs",
+        3,
+        EmptyRemainderGuard::BranchesAtTheCallSite,
+    ),
+    (
+        "trail/repo.rs",
+        3,
+        EmptyRemainderGuard::EvidenceOrderedWithOneNamedGap,
+    ),
+];
+
+/// Every production call of either spelling, by file. Matching on the
+/// argument-opening quote (`path_at_or_under_sql("`/`path_strictly_under_sql("`)
+/// catches every caller, which always passes a string-literal column name,
+/// while leaving the two definitions — `pub fn path_at_or_under_sql(column:
+/// &str)` — unmatched.
+fn path_boundary_call_sites(src_root: &Path) -> Vec<(String, usize)> {
+    let mut found = Vec::new();
+    for path in collect_rs_files(src_root) {
+        let rel = path
+            .strip_prefix(src_root)
+            .expect("file under src")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_externalised_test_file(&rel) {
+            continue;
+        }
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+        let production = production_text(&rel, &text);
+        let calls = production.matches("path_at_or_under_sql(\"").count()
+            + production.matches("path_strictly_under_sql(\"").count();
+        if calls > 0 {
+            found.push((rel, calls));
+        }
+    }
+    found
+}
+
+/// Both directions over supplied evidence: a call site the census does not
+/// carry, a row the tree no longer produces, a count that has moved.
+fn empty_remainder_census_violations(
+    found: &[(String, usize)],
+    rows: &[(&str, usize, EmptyRemainderGuard)],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (file, calls) in found {
+        match rows.iter().find(|(f, _, _)| f == file) {
+            None => violations.push(format!(
+                "{file} calls the boundary helpers {calls}× and holds no row — add one \
+                 naming how it guards the empty remainder",
+            )),
+            Some((_, pinned, guard)) if pinned != calls => violations.push(format!(
+                "{file} calls the boundary helpers {calls}× and its row pins {pinned} — \
+                 the new call needs its own guard named, not `{}`",
+                guard.as_str(),
+            )),
+            Some(_) => {}
+        }
+    }
+    for (file, _, _) in rows {
+        if !found.iter().any(|(f, _)| f == file) {
+            violations.push(format!(
+                "the census carries `{file}`, which no longer calls the boundary helpers \
+                 — delete the row with the call",
+            ));
+        }
+    }
+    violations
+}
+
+#[test]
+fn every_path_boundary_caller_names_its_empty_remainder_guard() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let src_root = Path::new(&manifest_dir).join("src");
+    let violations = empty_remainder_census_violations(
+        &path_boundary_call_sites(&src_root),
+        EMPTY_REMAINDER_CALLERS,
+    );
+    assert!(
+        violations.is_empty(),
+        "\n  `path_at_or_under_sql`/`path_strictly_under_sql` answer wrong on an empty \
+         prefix. Every production caller states how it keeps that prefix from reaching \
+         them:\n{}\n",
+        violations
+            .iter()
+            .map(|v| format!("  {v}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+}
+
+// ----------------------------------------------------------------------------
 // The reachability-claim census
 // ----------------------------------------------------------------------------
 
@@ -3378,6 +3543,49 @@ mod source {
         let v = decompose_census_violations(&[], rows);
         assert_eq!(v.len(), 1, "{v:?}");
         assert!(v[0].contains("no longer calls the funnel"), "{v:?}");
+    }
+
+    #[test]
+    fn the_empty_remainder_census_refuses_a_new_caller_and_a_stale_row() {
+        let rows = &[(
+            "core/repo/source.rs",
+            1,
+            EmptyRemainderGuard::BranchesAtTheCallSite,
+        )];
+
+        // Whole: the tree produces exactly what the census carries.
+        assert!(
+            empty_remainder_census_violations(&[("core/repo/source.rs".into(), 1)], rows)
+                .is_empty()
+        );
+
+        // A caller nobody vouched for.
+        let v = empty_remainder_census_violations(
+            &[
+                ("core/repo/source.rs".into(), 1),
+                ("survey/ops/compute.rs".into(), 1),
+            ],
+            rows,
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(
+            v[0].contains("survey/ops/compute.rs") && v[0].contains("holds no row"),
+            "{v:?}"
+        );
+
+        // A second call in a file that already had one: the existing reason
+        // answers for the first call, never for a call it has not seen.
+        let v = empty_remainder_census_violations(&[("core/repo/source.rs".into(), 2)], rows);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].contains("pins 1"), "{v:?}");
+
+        // The other direction: the caller is gone and the row outlived it.
+        let v = empty_remainder_census_violations(&[], rows);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(
+            v[0].contains("no longer calls the boundary helpers"),
+            "{v:?}"
+        );
     }
 
     #[test]

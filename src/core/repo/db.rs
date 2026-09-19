@@ -455,12 +455,24 @@ pub fn populate_temp_sources(conn: &mut Connection, source_ids: &[i64]) -> Resul
 ///
 /// This is the one place the boundary is spelled; every path-scoped SQL query
 /// routes through it or its strictly-under sibling.
+///
+/// **Precondition: `prefix` is never empty.** A real `rel_path`/`rel_prefix`
+/// column never starts with `/`, so an empty prefix answers false for every
+/// ordinary row here — the "whole root" case this clause is sometimes asked
+/// to mean must be handled before the prefix reaches it. Every production
+/// caller of this function and [`path_strictly_under_sql`] conjugates that
+/// case itself; `tests/architecture.rs`'s
+/// `every_path_boundary_caller_names_its_empty_remainder_guard` is the
+/// build-enforced census of how each one does.
 pub fn path_at_or_under_sql(column: &str) -> String {
     format!("({column} = ? OR substr({column}, 1, length(?) + 1) = ? || '/')")
 }
 
 /// Strictly-under variant of [`path_at_or_under_sql`]: anything under
 /// "{path}/", the path itself excluded. Binds the prefix TWICE.
+///
+/// Same precondition as its sibling, for the same reason: `prefix` is never
+/// empty.
 pub fn path_strictly_under_sql(column: &str) -> String {
     format!("substr({column}, 1, length(?) + 1) = ? || '/'")
 }
