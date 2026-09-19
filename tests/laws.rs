@@ -476,8 +476,9 @@ struct Law {
     /// Where the meaning is spoken once — a module path or a repo-relative
     /// file path, resolved against the tree.
     owner: &'static str,
-    /// The test that verifies it. `fn <verifier>` must exist under `src/` or
-    /// `tests/`. Where a law is verified by a whole module, this names one
+    /// The test that verifies it. A `#[test] fn <verifier>` must exist under
+    /// `src/` or `tests/` — a verifier that is not a test verifies nothing.
+    /// Where a law is verified by a whole module, this names one
     /// representative test in it.
     verifier: &'static str,
     /// Where the rule binds. The default is the unit that recognised it;
@@ -852,40 +853,6 @@ fn carrier_violations(
     violations
 }
 
-/// Every `fn <name>` spelled anywhere under `src/` or `tests/`. A verifier is
-/// checked by existence only: whether the test is a good one is the reviewer's
-/// question, not the build's.
-fn function_names(root: &Path) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for dir in ["src", "tests"] {
-        for file in common::collect_rs_files(&root.join(dir)) {
-            let text = fs::read_to_string(&file)
-                .unwrap_or_else(|e| panic!("failed to read {}: {}", file.display(), e));
-            names.extend(declared_fn_names(&text));
-        }
-    }
-    names
-}
-
-fn declared_fn_names(text: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    let bytes = text.as_bytes();
-    for (i, _) in text.match_indices("fn ") {
-        // `fn` must be its own word: `xfn ` is not a declaration.
-        if i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
-            continue;
-        }
-        let name: String = text[i + 3..]
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        if !name.is_empty() {
-            names.push(name);
-        }
-    }
-    names
-}
-
 /// The directories under `src/` a `Reach::Unit` may name.
 fn unit_names(root: &Path) -> BTreeSet<String> {
     let mut units = BTreeSet::new();
@@ -1035,7 +1002,7 @@ fn every_law_row_has_a_living_carrier() {
     let violations = carrier_violations(
         LAWS,
         &Universe::build(&root),
-        &function_names(&root),
+        &common::test_fn_names(&root),
         &unit_names(&root),
     );
     assert!(

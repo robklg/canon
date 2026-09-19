@@ -14,7 +14,7 @@
 
 #![allow(dead_code)] // each binary declaring this module uses a different part.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -318,6 +318,57 @@ fn collect_rs_files_inner(dir: &Path, out: &mut Vec<PathBuf>) {
         }
     }
 }
+
+/// Every `fn` declared under a `#[test]` attribute, anywhere under `src/` or
+/// `tests/`. The attribute is what distinguishes a verifier from an ordinary
+/// function: prose citing a helper by name is citing an implementation
+/// detail, which the citation guard already holds to resolving. This is the
+/// one answer to "what counts as a verifier" — a law's verifier
+/// (`laws.rs`'s carrier check) and a register's verifier-name cap
+/// (`registers.rs`'s ceiling) both read from here, because a verifier that is
+/// not a test verifies nothing.
+pub fn test_fn_names(root: &Path) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for dir in ["src", "tests"] {
+        for file in collect_rs_files(&root.join(dir)) {
+            let text = fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("failed to read {}: {}", file.display(), e));
+            let mut pending = false;
+            for line in text.lines() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("#[test]") {
+                    pending = true;
+                    continue;
+                }
+                if !pending {
+                    continue;
+                }
+                if let Some(after) = trimmed.split("fn ").nth(1) {
+                    let name: String = after
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    if !name.is_empty() {
+                        names.insert(name);
+                        pending = false;
+                    }
+                } else if !trimmed.starts_with('#') && !trimmed.is_empty() {
+                    pending = false; // the attribute was on something else.
+                }
+            }
+        }
+    }
+    names
+}
+
+/// The register file the domain vocabulary lives in. Tracked like the
+/// CLAUDE.md files, imported by the root one, and read by more than one
+/// guard — the register ceiling (`registers.rs`) and the citation walk
+/// (`citations.rs`) — so it is named here once rather than twice. It is not
+/// a CLAUDE.md and so is not returned by `claude_md_paths` below; it carries
+/// code pointers by design (its `realized-by:` lines), which is exactly what
+/// the citation walk exists to keep honest.
+pub const LANGUAGE_REGISTER: &str = "docs/LANGUAGE.md";
 
 /// Every CLAUDE.md the guards read: the root file, then one per `src/`
 /// subdirectory. These files are tracked, and every `src/` subdirectory owes

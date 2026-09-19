@@ -33,11 +33,7 @@ use std::path::Path;
 
 mod common;
 
-/// The register file the domain vocabulary lives in. Tracked like the
-/// CLAUDE.md files and imported by the root one, so it is under the same
-/// ratchet; it is named here because it is the one register that is not a
-/// CLAUDE.md and so is not enumerated by the walk.
-const LANGUAGE_REGISTER: &str = "docs/LANGUAGE.md";
+use common::LANGUAGE_REGISTER;
 
 struct Ceiling {
     path: &'static str,
@@ -181,44 +177,6 @@ fn verifier_names(text: &str, test_fns: &BTreeSet<String>) -> BTreeSet<String> {
     found
 }
 
-/// Every `fn` declared under a `#[test]` attribute, anywhere under `src/` or
-/// `tests/`. The attribute is what distinguishes a verifier from an ordinary
-/// function: prose citing a helper by name is citing an implementation detail,
-/// which the citation guard next door already holds to resolving.
-fn test_fn_names(root: &Path) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for dir in ["src", "tests"] {
-        for file in common::collect_rs_files(&root.join(dir)) {
-            let text = fs::read_to_string(&file)
-                .unwrap_or_else(|e| panic!("failed to read {}: {}", file.display(), e));
-            let mut pending = false;
-            for line in text.lines() {
-                let trimmed = line.trim_start();
-                if trimmed.starts_with("#[test]") {
-                    pending = true;
-                    continue;
-                }
-                if !pending {
-                    continue;
-                }
-                if let Some(after) = trimmed.split("fn ").nth(1) {
-                    let name: String = after
-                        .chars()
-                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                        .collect();
-                    if !name.is_empty() {
-                        names.insert(name);
-                        pending = false;
-                    }
-                } else if !trimmed.starts_with('#') && !trimmed.is_empty() {
-                    pending = false; // the attribute was on something else.
-                }
-            }
-        }
-    }
-    names
-}
-
 /// Every register this table must carry a row for: the CLAUDE.md files the
 /// prose guards read, plus the language register.
 fn tracked_registers(root: &Path) -> Vec<String> {
@@ -294,7 +252,7 @@ fn table_mismatches(expected: &[String], table: &[Ceiling]) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 fn measure_all(root: &Path) -> Vec<Measured> {
-    let test_fns = test_fn_names(root);
+    let test_fns = common::test_fn_names(root);
     tracked_registers(root)
         .into_iter()
         .filter_map(|path| {
@@ -343,6 +301,64 @@ fn every_src_subdirectory_carries_its_register() {
          CLAUDE.md, because a subsystem that documents nothing is one no \
          reader can find their way into:\n  {}",
         missing.join("\n  "),
+    );
+}
+
+/// Every `CLAUDE.md` that exists strictly below the ratchet's own reach:
+/// not the root file, and not one directly inside a `src/*` subsystem
+/// directory (`claude_md_paths`'s own depth), but nested deeper still. That
+/// walk stops at depth one, so a register any deeper is invisible to every
+/// ceiling and citation check — a register no guard can see must not exist.
+fn claude_md_paths_below_depth_one(root: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    if let Ok(entries) = fs::read_dir(root.join("src")) {
+        for entry in entries.flatten() {
+            let subsystem = entry.path();
+            if !subsystem.is_dir() {
+                continue;
+            }
+            // The subsystem's own `CLAUDE.md` here, at depth one, is exactly
+            // what the ratchet expects — only its subdirectories are walked.
+            let Ok(nested) = fs::read_dir(&subsystem) else {
+                continue;
+            };
+            for entry in nested.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk_for_claude_md(&path, root, &mut found);
+                }
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+fn walk_for_claude_md(dir: &Path, root: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_for_claude_md(&path, root, out);
+        } else if path.file_name().and_then(|n| n.to_str()) == Some("CLAUDE.md") {
+            out.push(common::relative_slash_path(root, &path));
+        }
+    }
+}
+
+#[test]
+fn no_claude_md_exists_below_the_ratchets_reach() {
+    let root = common::repo_root();
+    let deep = claude_md_paths_below_depth_one(&root);
+    assert!(
+        deep.is_empty(),
+        "a CLAUDE.md exists where the ratchet's walk never looks — the guards \
+         read the root file and one per src/*/, so a register here is \
+         invisible to every ceiling and citation check; move it up to its \
+         subsystem's own file, or fold it into one the walk already reads:\n  {}",
+        deep.join("\n  "),
     );
 }
 
@@ -450,10 +466,29 @@ mod self_tests {
     #[test]
     fn a_test_fn_is_read_from_its_attribute_not_its_name() {
         let root = common::repo_root();
-        let names = test_fn_names(&root);
+        let names = common::test_fn_names(&root);
         // This very function, found by its own attribute.
         assert!(names.contains("a_test_fn_is_read_from_its_attribute_not_its_name"));
         // A `#[test]`-less helper in this same file is not a verifier.
         assert!(!names.contains("measured"));
+    }
+
+    #[test]
+    fn a_claude_md_below_depth_one_is_named_and_a_depth_one_one_is_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src/widget")).expect("mkdir");
+        fs::write(root.join("src/widget/CLAUDE.md"), "# depth one, expected").expect("write");
+        // The ratchet's own depth is silent.
+        assert!(claude_md_paths_below_depth_one(root).is_empty());
+
+        fs::create_dir_all(root.join("src/widget/ops")).expect("mkdir");
+        fs::write(root.join("src/widget/ops/CLAUDE.md"), "# too deep").expect("write");
+        let found = claude_md_paths_below_depth_one(root);
+        assert_eq!(
+            found,
+            vec!["src/widget/ops/CLAUDE.md".to_string()],
+            "{found:?}"
+        );
     }
 }

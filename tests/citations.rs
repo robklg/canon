@@ -148,6 +148,50 @@ fn split_runs(text: &str, is_run_char: impl Fn(char) -> bool) -> Vec<String> {
     runs
 }
 
+/// The citation violations spelled in one span of text (a comment's body, or
+/// — for a register, which has no `//` to mark a comment off from code — a
+/// whole line), shared by `check_comment_citations` and the register prose
+/// check below it: one rule, checked the same way wherever a file's prose is
+/// allowed to name a module path or a file.
+fn citation_violations_in(
+    display_path: &str,
+    line_no: usize,
+    span: &str,
+    universe: &Universe,
+    cites_as: &str,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for segments in module_citations(span) {
+        if starts_uppercase(&segments[0]) {
+            continue; // Type::method / Type::VARIANT — not a module path.
+        }
+        if segments[0] == "self" || segments[0] == "super" {
+            continue; // relative; not resolvable from here.
+        }
+        if universe.external_roots.contains(&segments[0]) {
+            continue;
+        }
+        if !universe.resolves_module_path(&segments) {
+            violations.push(format!(
+                "{}:{}: {} cites `{}`, which does not resolve",
+                display_path,
+                line_no,
+                cites_as,
+                segments.join("::"),
+            ));
+        }
+    }
+    for file in file_citations(span) {
+        if !universe.resolves_file_citation(&file) {
+            violations.push(format!(
+                "{}:{}: {} cites `{}`, but no such file exists",
+                display_path, line_no, cites_as, file,
+            ));
+        }
+    }
+    violations
+}
+
 /// All citation violations in one file's text, as human-readable lines.
 fn check_comment_citations(display_path: &str, text: &str, universe: &Universe) -> Vec<String> {
     let mut violations = Vec::new();
@@ -155,35 +199,37 @@ fn check_comment_citations(display_path: &str, text: &str, universe: &Universe) 
         let Some(comment) = comment_text(line) else {
             continue;
         };
-        for segments in module_citations(comment) {
-            if starts_uppercase(&segments[0]) {
-                continue; // Type::method / Type::VARIANT — not a module path.
-            }
-            if segments[0] == "self" || segments[0] == "super" {
-                continue; // relative; not resolvable from here.
-            }
-            if universe.external_roots.contains(&segments[0]) {
-                continue;
-            }
-            if !universe.resolves_module_path(&segments) {
-                violations.push(format!(
-                    "{}:{}: comment cites `{}`, which does not resolve",
-                    display_path,
-                    idx + 1,
-                    segments.join("::"),
-                ));
-            }
-        }
-        for file in file_citations(comment) {
-            if !universe.resolves_file_citation(&file) {
-                violations.push(format!(
-                    "{}:{}: comment cites `{}`, but no such file exists",
-                    display_path,
-                    idx + 1,
-                    file,
-                ));
-            }
-        }
+        violations.extend(citation_violations_in(
+            display_path,
+            idx + 1,
+            comment,
+            universe,
+            "comment",
+        ));
+    }
+    violations
+}
+
+/// The same citation shapes, read from a register's own prose rather than
+/// from a code comment — a register has no `//` to isolate a comment from
+/// code, so every line is candidate text. `docs/LANGUAGE.md` is the one
+/// register that carries this shape by design (its `realized-by:` pointers),
+/// which is why this check exists rather than folding registers into
+/// `check_comment_citations`'s corpus of `.rs` files.
+fn check_register_prose_citations(
+    display_path: &str,
+    text: &str,
+    universe: &Universe,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        violations.extend(citation_violations_in(
+            display_path,
+            idx + 1,
+            line,
+            universe,
+            "register",
+        ));
     }
     violations
 }
@@ -474,6 +520,26 @@ fn comment_citations_resolve() {
     );
 }
 
+/// `docs/LANGUAGE.md` is a register like the CLAUDE.md files, and it carries
+/// the same kind of citation (its `realized-by:` pointers) even though it
+/// carries no `//` comment marker to isolate it with. Widened onto the
+/// citation walk rather than left to age with no staleness check at all.
+#[test]
+fn language_register_citations_resolve() {
+    let root = repo_root();
+    let universe = Universe::build(&root);
+    let path = root.join(common::LANGUAGE_REGISTER);
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+    let violations = check_register_prose_citations(common::LANGUAGE_REGISTER, &text, &universe);
+    assert!(
+        violations.is_empty(),
+        "the domain register cites code that no longer exists — update the prose \
+         (or fix the scan's tolerance if a citation is genuinely legitimate):\n{}",
+        violations.join("\n"),
+    );
+}
+
 #[test]
 fn claude_md_inventories_resolve() {
     let root = repo_root();
@@ -636,6 +702,20 @@ mod self_tests {
         let text = "let x = ghost::path::to_thing();\n// but comments are: ghost::path\n";
         let v = check_comment_citations("x.rs", text, &universe());
         assert_eq!(v.len(), 1, "code is not scanned, comments are: {:?}", v);
+    }
+
+    #[test]
+    fn register_prose_is_scanned_without_a_comment_marker() {
+        // A register has no `//`, so a citation must be found in a plain
+        // prose line — the shape `docs/LANGUAGE.md`'s `realized-by:` lines
+        // take — or the widened walk is a no-op.
+        let text = "realized-by: `archive::ops::plan`.\n";
+        let v = check_register_prose_citations("LANGUAGE.md", text, &universe());
+        assert!(v.is_empty(), "a real path must resolve: {:?}", v);
+
+        let text = "realized-by: `ghost::path::to_thing`.\n";
+        let v = check_register_prose_citations("LANGUAGE.md", text, &universe());
+        assert_eq!(v.len(), 1, "a moved or renamed owner must flag: {:?}", v);
     }
 
     #[test]

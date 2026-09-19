@@ -220,6 +220,21 @@ fn assert_door_line(line: &str, root: &str, verb: &str) {
     );
 }
 
+/// The pause line's structural shape — `assert_door_line`'s verbless sibling.
+/// Remembering states this alone, carrying no verb, because nothing was set
+/// aside or refused: the root is named, `suspended` is said, and the same way
+/// back closes it. Takes any text the pause is asserted to appear in, not
+/// only a single extracted line — every call site so far has checked
+/// `contains`, never position.
+fn assert_pause_line(text: &str, root: &str) {
+    assert!(text.contains(root), "the pause names its root: {text}");
+    assert!(text.contains("suspended"), "and says so: {text}");
+    assert!(
+        text.contains(&format!("canon roots unsuspend path:{root}")),
+        "and the way back: {text}"
+    );
+}
+
 /// **S1 — standing in a closed root, no path argument.**
 ///
 /// Every one of these used to answer about the whole universe, silently. The
@@ -382,11 +397,7 @@ fn remembering_reads_at_a_parked_root_with_the_pause_stated() {
         !header.contains("all roots"),
         "never the universe: {header}"
     );
-    assert!(header.contains(&format!("{root} suspended · ")), "{header}");
-    assert!(
-        header.contains(&format!("canon roots unsuspend path:{root}")),
-        "{header}"
-    );
+    assert_pause_line(header, &root);
 
     // `crossings` used to be the one surface that noticed — and it refused,
     // answering differently from the same place named on the command line.
@@ -585,11 +596,7 @@ fn a_place_with_no_history_behind_a_door_is_stated_not_rendered() {
     );
     let line = run.stderr.lines().next().unwrap_or_default();
     assert!(line.starts_with("No history known at "), "{line}");
-    assert!(line.contains(&format!("{root} suspended · ")), "{line}");
-    assert!(
-        line.contains(&format!("canon roots unsuspend path:{root}")),
-        "{line}"
-    );
+    assert_pause_line(line, &root);
 
     // A place that does hold history reads, as remembering must.
     fx.run(&["trail", &fx.path_str("src/sub")]).ok();
@@ -623,14 +630,8 @@ fn a_reading_behind_two_doors_names_both() {
     let run = fx.run(&["trail", &fx.path_str("src"), &fx.path_str("live")]);
     run.ok();
     let header = run.stdout.lines().next().unwrap_or_default();
-    assert!(
-        header.contains(&format!("{} suspended · ", fx.path_str("src"))),
-        "{header}"
-    );
-    assert!(
-        header.contains(&format!("{} suspended · ", fx.path_str("live"))),
-        "{header}"
-    );
+    assert_pause_line(header, &fx.path_str("src"));
+    assert_pause_line(header, &fx.path_str("live"));
 }
 
 /// **A destination inside a parked archive names the door.** This was the last
@@ -706,11 +707,8 @@ fn a_parked_place_named_beside_a_live_one_is_read_on_both_branches() {
             human.stdout
         );
     }
-    assert!(
-        human.stdout.contains(&format!("{parked} suspended · ")),
-        "with the pause in the header, not a set-aside line:\n{}",
-        human.stdout
-    );
+    // The pause is in the header, not a set-aside line.
+    assert_pause_line(&human.stdout, &parked);
     assert!(
         !human.stdout.contains("— set aside:") && !human.stderr.contains("— set aside:"),
         "a place the trail reads is never also announced as skipped"
@@ -725,11 +723,8 @@ fn a_parked_place_named_beside_a_live_one_is_read_on_both_branches() {
         "the parked place's own decisions reach the stream:\n{}",
         machine.stdout
     );
-    assert!(
-        machine.stderr.contains(&format!("{parked} suspended · ")),
-        "and the pause is on stderr:\n{}",
-        machine.stderr
-    );
+    // And the pause is on stderr.
+    assert_pause_line(&machine.stderr, &parked);
 
     // `crossings` reaches the same door through the same `open_scope`, and it
     // is the one surface in this subsystem whose own suspended arm was retired
@@ -737,16 +732,8 @@ fn a_parked_place_named_beside_a_live_one_is_read_on_both_branches() {
     // and named-alone ones.
     let crossings = fx.run(&["trail", "crossings", &parked, &fx.path_str("live")]);
     crossings.ok();
-    assert!(
-        crossings
-            .stdout
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .contains(&format!("{parked} suspended · ")),
-        "crossings states the door it reads behind:\n{}",
-        crossings.stdout
-    );
+    // crossings states the door it reads behind.
+    assert_pause_line(crossings.stdout.lines().next().unwrap_or_default(), &parked);
     assert!(
         !crossings.stdout.contains("— set aside:") && !crossings.stderr.contains("— set aside:"),
         "and never announces as skipped a place it reads"
@@ -782,11 +769,8 @@ fn a_parked_root_top_beside_a_live_path_keeps_its_exemption() {
     alone.ok();
     beside.ok();
     for run in [&alone, &beside] {
-        assert!(
-            run.stdout.contains(&format!("{bare} suspended · ")),
-            "the root top is in the view and states its door:\n{}",
-            run.stdout
-        );
+        // The root top is in the view and states its door.
+        assert_pause_line(&run.stdout, &bare);
     }
 }
 
@@ -1335,13 +1319,8 @@ fn retire_dry_run_reads_a_parked_root_and_a_real_run_refuses() {
         "remembering reads: {}",
         review.stdout
     );
-    assert!(
-        review.stdout.contains(&format!(
-            "{root} suspended · canon roots unsuspend path:{root}"
-        )),
-        "and closes with the pause, in the verbless form: {}",
-        review.stdout
-    );
+    // And closes with the pause, in the verbless form.
+    assert_pause_line(&review.stdout, &root);
     assert!(
         !review.stdout.contains("To retire anyway:"),
         "the hint names an act the door turns away: {}",

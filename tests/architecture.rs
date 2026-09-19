@@ -16,6 +16,10 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{Attribute, ItemUse, Macro, Meta, Path as SynPath, UseTree};
 
+mod common;
+
+use common::collect_rs_files;
+
 // ============================================================================
 // Layers
 // ============================================================================
@@ -974,32 +978,6 @@ fn scan_file(
     }
 }
 
-// ============================================================================
-// File collection
-// ============================================================================
-
-fn collect_rs_files(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    collect_rs_files_inner(root, &mut out);
-    out.sort();
-    out
-}
-
-fn collect_rs_files_inner(dir: &Path, out: &mut Vec<PathBuf>) {
-    let mut entries: Vec<PathBuf> = fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("failed to read dir {}: {}", dir.display(), e))
-        .map(|e| e.expect("dir entry read failed").path())
-        .collect();
-    entries.sort();
-    for path in entries {
-        if path.is_dir() {
-            collect_rs_files_inner(&path, out);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
-}
-
 fn interface_module_names(src_root: &Path) -> Vec<String> {
     let mut names = Vec::new();
     let mut entries: Vec<PathBuf> = fs::read_dir(src_root)
@@ -1385,27 +1363,12 @@ fn the_context_supplied_set_is_spelled_only_inside_expr() {
     ];
 
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-    let src_root = Path::new(&manifest_dir).join("src");
+    let base = Path::new(&manifest_dir);
 
-    let mut found: Vec<(String, usize)> = Vec::new();
-    for path in collect_rs_files(&src_root) {
-        let rel = path
-            .strip_prefix(&manifest_dir)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        // The facility is where the set is allowed to be spelled.
-        if rel.starts_with("src/expr/") || rel == "src/expr.rs" {
-            continue;
-        }
-        let text = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
-        let count: usize = SPELLINGS.iter().map(|s| text.matches(s).count()).sum();
-        if count > 0 {
-            found.push((rel, count));
-        }
-    }
-    found.sort();
+    // The facility is where the set is allowed to be spelled.
+    let found = spelled_only_here(base, &["src/expr/", "src/expr.rs"], |text| {
+        SPELLINGS.iter().map(|s| text.matches(s).count()).sum()
+    });
 
     let expected: Vec<(String, usize)> =
         EXEMPT.iter().map(|(f, n)| ((*f).to_string(), *n)).collect();
@@ -1519,6 +1482,51 @@ fn positional_probes(text: &str) -> usize {
 /// cause and then deletes the lock it was refusing to touch.
 const DOOR_TYPES: &[&str] = &["Door", "RootLookup", "PrefixOutcome"];
 
+/// A "spelled only here" census, the shared shape behind three guards that
+/// each pin a rule to one owner: every file outside `homes` where `count_in`
+/// finds the watched pattern, path paired with its count, sorted.
+///
+/// `homes` are path prefixes exempt from the count entirely — matched by
+/// `starts_with`, so a whole file (`"tests/architecture.rs"`) and a directory
+/// (`"src/expr/"`) are the same kind of entry: the rule's own owner, and —
+/// for a guard whose self-tests plant the defect it names — the guard's own
+/// file. Anything a caller still expects to find *outside* the homes (a
+/// different verb spelling the same bytes for its own reason) is not this
+/// function's business: it reports every hit past the homes and leaves
+/// matching that against an exemption table to the caller.
+///
+/// The walk covers `src/` and `tests/` alike, at every call site: a
+/// hand-rolled second spelling of a rule inside a test is still a second
+/// spelling of it, and admitting one should need the same deliberate act as
+/// admitting a production one.
+fn spelled_only_here(
+    manifest_dir: &Path,
+    homes: &[&str],
+    count_in: impl Fn(&str) -> usize,
+) -> Vec<(String, usize)> {
+    let mut found: Vec<(String, usize)> = Vec::new();
+    for dir in ["src", "tests"] {
+        for path in collect_rs_files(&manifest_dir.join(dir)) {
+            let rel = path
+                .strip_prefix(manifest_dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if homes.iter().any(|home| rel.starts_with(home)) {
+                continue;
+            }
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+            let count = count_in(&text);
+            if count > 0 {
+                found.push((rel, count));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 /// How many `match` blocks in `text` name a door type in one arm and carry a
 /// wildcard arm beside it.
 ///
@@ -1611,26 +1619,12 @@ fn the_door_types_are_consumed_by_name() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let base = Path::new(&manifest_dir);
 
-    let mut found: Vec<(String, usize)> = Vec::new();
-    for dir in ["src", "tests"] {
-        for path in collect_rs_files(&base.join(dir)) {
-            let rel = path
-                .strip_prefix(base)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            if rel == "tests/architecture.rs" {
-                continue;
-            }
-            let text = fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
-            let count = wildcard_arms_on_door_types(&text);
-            if count > 0 {
-                found.push((rel, count));
-            }
-        }
-    }
-    found.sort();
+    // This file is exempt wholesale so the self-tests below can plant probes.
+    let found = spelled_only_here(
+        base,
+        &["tests/architecture.rs"],
+        wildcard_arms_on_door_types,
+    );
 
     assert!(
         found.is_empty(),
@@ -1647,26 +1641,7 @@ fn the_containment_probe_is_spelled_only_inside_the_path_law() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let base = Path::new(&manifest_dir);
 
-    let mut found: Vec<(String, usize)> = Vec::new();
-    for dir in ["src", "tests"] {
-        for path in collect_rs_files(&base.join(dir)) {
-            let rel = path
-                .strip_prefix(base)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            if PROBE_HOMES.contains(&rel.as_str()) {
-                continue;
-            }
-            let text = fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
-            let count = positional_probes(&text);
-            if count > 0 {
-                found.push((rel, count));
-            }
-        }
-    }
-    found.sort();
+    let found = spelled_only_here(base, PROBE_HOMES, positional_probes);
 
     let expected: Vec<(String, usize)> = PROBE_EXEMPT
         .iter()
