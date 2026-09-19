@@ -12,7 +12,7 @@ use serde::Serialize;
 use super::fs::{finalize_file, write_file_incomplete};
 use crate::core::domain::config::{LedgerConfig, ReceiptLayout};
 use crate::core::domain::extraction::OriginDisposition;
-use crate::core::domain::fate::{DecisionFamily, FateAspect};
+use crate::core::domain::fate::RegisteredFate;
 use crate::core::domain::root::Root;
 
 /// Reference to a receipt file on disk, stored in the decision record.
@@ -65,10 +65,11 @@ impl ReceiptPlacement {
 }
 
 /// What a receipt records — the single authority mapping a writer to the inputs
-/// of the shared what-derivation. Each variant maps to a `(DecisionFamily,
-/// FateAspect)` pair (fed to `fate_transition`/`fate_posture`) and, for apply,
-/// to an origin disposition. No writer emits a transition/posture/origin literal:
-/// they name their `ReceiptKind` and the recorder derives the words.
+/// of the shared what-derivation. Each variant maps to a `RegisteredFate` (fed
+/// to `fate_transition`/`fate_posture` via its own `transition()`/`posture()`)
+/// and, for apply, to an origin disposition. No writer emits a
+/// transition/posture/origin literal: they name their `ReceiptKind` and the
+/// recorder derives the words.
 ///
 /// The variant→family mapping must agree with `decision_family(command)` for the
 /// corresponding command; the integrity test enforces that agreement.
@@ -83,19 +84,20 @@ pub enum ReceiptKind {
 }
 
 impl ReceiptKind {
-    /// The `(family, aspect)` the shared derivation keys on. Wider than the
-    /// command: a scan's deletion receipt is `(Observe, Absent)`, the discriminant
-    /// the command identifier alone can't supply.
-    pub fn family_aspect(&self) -> (DecisionFamily, FateAspect) {
-        use DecisionFamily::*;
-        use FateAspect::*;
+    /// The registered fate the shared derivation keys on — a pair
+    /// `fate_transition` is proven to answer `Some` for, named directly
+    /// rather than built from `DecisionFamily`/`FateAspect` and `expect`-ed
+    /// past the wider `Option`. Wider than the command: a scan's deletion
+    /// receipt is `ObserveAbsent`, the discriminant the command identifier
+    /// alone can't supply.
+    pub fn family_aspect(&self) -> RegisteredFate {
         match self {
-            ReceiptKind::Apply(_) => (Archive, Present),
+            ReceiptKind::Apply(_) => RegisteredFate::ArchivePresent,
             ReceiptKind::ExcludeSet
             | ReceiptKind::ExcludeDuplicates
-            | ReceiptKind::ExcludeObject => (Exclude, Present),
-            ReceiptKind::Restore | ReceiptKind::RestoreObject => (Restore, Present),
-            ReceiptKind::Deletion => (Observe, Absent),
+            | ReceiptKind::ExcludeObject => RegisteredFate::ExcludePresent,
+            ReceiptKind::Restore | ReceiptKind::RestoreObject => RegisteredFate::RestorePresent,
+            ReceiptKind::Deletion => RegisteredFate::ObserveAbsent,
         }
     }
 
@@ -760,7 +762,7 @@ mod tests {
                 ReceiptKind::RestoreObject => ("exclude_clear_object", "restored", "performed"),
                 ReceiptKind::Deletion => ("scan", "deleted", "observed"),
             };
-            let (family, aspect) = kind.family_aspect();
+            let (family, aspect) = kind.family_aspect().parts();
             // The receipt's family agrees with the trail's command→family map.
             assert_eq!(
                 family,

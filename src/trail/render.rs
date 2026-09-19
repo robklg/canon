@@ -7,7 +7,7 @@ use chrono::{Local, TimeZone};
 
 use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
-use crate::core::domain::fate::{fate_transition, DecisionFamily, FateAspect};
+use crate::core::domain::fate::RegisteredFate;
 use crate::core::domain::format::{cap_path, format_count, format_size};
 use crate::core::domain::root::Root;
 use crate::core::ops::scope::ResolvedScope;
@@ -1864,19 +1864,19 @@ fn format_rollup(rollup: &DayRollup) -> String {
     let mut parts = Vec::new();
     if rollup.deleted.files > 0 {
         parts.push(fate_part(
-            fate_word(DecisionFamily::Observe, FateAspect::Absent),
+            fate_word(RegisteredFate::ObserveAbsent),
             &rollup.deleted,
         ));
     }
     if rollup.archived.files > 0 {
         parts.push(fate_part(
-            fate_word(DecisionFamily::Archive, FateAspect::Present),
+            fate_word(RegisteredFate::ArchivePresent),
             &rollup.archived,
         ));
     }
     if rollup.excluded.files > 0 {
         parts.push(fate_part(
-            fate_word(DecisionFamily::Exclude, FateAspect::Present),
+            fate_word(RegisteredFate::ExcludePresent),
             &rollup.excluded,
         ));
     }
@@ -1893,13 +1893,11 @@ fn format_rollup(rollup: &DayRollup) -> String {
     line
 }
 
-/// The registered word for a rollup fate line. Each of the three lines maps to
-/// a fixed (family, aspect) that `fate_transition` is proven to resolve (its
-/// totality test); `expect` documents that invariant rather than guessing.
-fn fate_word(family: DecisionFamily, aspect: FateAspect) -> &'static str {
-    fate_transition(family, aspect)
-        .expect("rollup fate line must map to a transition")
-        .as_str()
+/// The registered word for a rollup fate line. Each of the three lines names
+/// its `RegisteredFate` directly rather than building a (family, aspect) pair
+/// and `expect`-ing past `fate_transition`'s wider `Option`.
+fn fate_word(fate: RegisteredFate) -> &'static str {
+    fate.transition().as_str()
 }
 
 fn fate_part(verb: &str, fate: &FateLine) -> String {

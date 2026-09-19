@@ -315,8 +315,13 @@ pub fn run(
                         canonical.display()
                     );
                     }
-                    // role is guaranteed to be Some when add_root is true (validated in main.rs)
-                    let new_role = role.expect("--role is required with --add");
+                    // role is guaranteed to be Some when add_root is true — the
+                    // CLI parser's own invariant (`#[arg(requires = "role")]` on
+                    // `--add`), not a check re-derived here.
+                    let new_role = match role {
+                        Some(r) => r,
+                        None => unreachable!("clap's `--add requires role` makes this Some"),
+                    };
                     crate::scan::domain::check_not_filesystem_root(&canonical)?;
                     crate::scan::domain::check_no_overlap(&roots, &canonical)?;
                     let new_root = create_root(conn, &canonical, new_role, comment)?;

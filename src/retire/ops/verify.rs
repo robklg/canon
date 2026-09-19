@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use crate::core::domain::fate::{fate_transition, DecisionFamily, FateAspect};
+use crate::core::domain::fate::RegisteredFate;
 use crate::retire::domain::{
     STANDING_CONTENTLESS, STANDING_COVERED, STANDING_MISSING_UNEXPLAINED, STANDING_PRESENT,
 };
@@ -80,15 +80,9 @@ pub fn verify_book(dir: &Path) -> Result<BookVerification> {
     };
     // The same word derivations the writer used — the never-literal law
     // holds on the read side too.
-    let archived = fate_transition(DecisionFamily::Archive, FateAspect::Present)
-        .expect("Archive+Present is a registered transition")
-        .as_str();
-    let excluded = fate_transition(DecisionFamily::Exclude, FateAspect::Present)
-        .expect("Exclude is a registered transition")
-        .as_str();
-    let deleted = fate_transition(DecisionFamily::Observe, FateAspect::Absent)
-        .expect("Observe+Absent is a registered transition")
-        .as_str();
+    let archived = RegisteredFate::ArchivePresent.transition().as_str();
+    let excluded = RegisteredFate::ExcludePresent.transition().as_str();
+    let deleted = RegisteredFate::ObserveAbsent.transition().as_str();
     for (index, line) in std::io::BufRead::lines(reader).enumerate() {
         let line = line?;
         if line.trim().is_empty() {

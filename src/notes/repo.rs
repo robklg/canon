@@ -4,10 +4,10 @@
 //! Multiple notes can exist per scope. Clearing is explicit.
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 
+use crate::core::domain::time::now_epoch_secs;
 use crate::core::repo::db::Connection;
 use crate::notes::domain::{LocationEntry, Note};
 
@@ -27,10 +27,7 @@ fn note_from_row(row: &rusqlite::Row) -> rusqlite::Result<Note> {
 
 /// Insert a note and return the created Note.
 pub fn insert(conn: &Connection, root_id: i64, rel_path: &str, text: &str) -> Result<Note> {
-    let created_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64;
+    let created_at = now_epoch_secs();
 
     conn.execute(
         "INSERT INTO notes (root_id, rel_path, text, created_at) VALUES (?, ?, ?, ?)",

@@ -44,7 +44,10 @@ Every subsystem speaks these; nothing here knows about any subsystem. Beside the
 shape the nouns need to be handled at all — `domain::{path, scope, format, include, config}`:
 path manipulation and offline resolution, `ScopeMatch` and `DecisionScope`, display
 formatting, the visibility set, ledger-config parsing. Same purity rule throughout: no I/O, so
-path matching and scope resolution are testable with known inputs.
+path matching and scope resolution are testable with known inputs. One sanctioned exception:
+`domain::time::now_epoch_secs`, the tree's single `SystemTime::now()` read — every other
+spelling of it is a duplicate re-derivation; test-only `with_test_now` pins it for a fixture
+needing a controlled timestamp.
 
 `ArchiveCopy`/`ArchiveLocation` are what the archived-ness projections answer with: one
 archive-side copy, its path where a path is wanted, and **the standing of its root beside it**.
@@ -111,7 +114,9 @@ two consumers were counted. The membership criteria below apply to everything el
   `(family, aspect)`. Shared between the trail rollup (which has the presence axis) and
   receipt writing (which supplies the aspect by receipt kind); neither owns it. The posture
   half is the *happening* warrant's limit, which is why it sits with the transition
-  vocabulary rather than in the recorder.
+  vocabulary rather than in the recorder. `RegisteredFate` names the six pairs the totality
+  pin proves `fate_transition` never answers `None` for, so a caller already holding one of
+  them asks its `transition()`/`posture()` rather than `expect`-ing past the wider `Option`.
 - **`domain::extraction`** — `OriginDisposition`/`DecisionExtraction`/`ExtractionItem`/
   `build_extraction_rows`. Shared between apply's forward recording and `ledger reindex`'s
   backfill. The extraction round-trip law — a backfilled row structurally indistinguishable from a

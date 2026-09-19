@@ -15,10 +15,10 @@
 //! is its `[meta]` table.
 
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use crate::core::domain::time::now_epoch_secs;
 use crate::core::ops::receipt::ReceiptMeta;
 use crate::scan::domain::StandingDebt;
 
@@ -427,11 +427,11 @@ pub trait ScanProgress {
     fn on_process_error(&self, path: &str, error: &str);
 }
 
+/// The shared timestamp helper the other four stratum files call — a thin
+/// name kept local to this module for the citation in `scan/CLAUDE.md`;
+/// `core::domain::time::now_epoch_secs` is the actual owner.
 pub fn current_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64
+    now_epoch_secs()
 }
 
 #[cfg(test)]

@@ -10,7 +10,8 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(not(unix))]
+use std::time::UNIX_EPOCH;
 
 use anyhow::{bail, Context, Result};
 
@@ -18,6 +19,7 @@ use crate::core::domain::decision::DecisionStatus;
 use crate::core::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
 use crate::core::domain::format::first_chars;
 use crate::core::domain::source::NewSource;
+use crate::core::domain::time::now_epoch_secs;
 use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::core::ops::fs::{compute_partial_hash, copy_file, move_file, rename_file, MoveOutcome};
 use crate::core::ops::receipt::{ReceiptKind, ReceiptPlacement};
@@ -790,10 +792,7 @@ fn relocate_source(
     rel_path: &str,
     decision_id: Option<i64>,
 ) -> Result<()> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64;
+    let now = now_epoch_secs();
     crate::archive::repo::update_location(
         conn,
         source_id,
@@ -813,10 +812,7 @@ fn mark_source_not_present(
     source_id: i64,
     decision_id: Option<i64>,
 ) -> Result<()> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64;
+    let now = now_epoch_secs();
     repo::source::mark_missing(conn, &[source_id], now, decision_id)?;
     Ok(())
 }

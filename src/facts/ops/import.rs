@@ -8,12 +8,12 @@
 //! No stdout/stderr/stdin — the interface reads stdin and displays outcomes.
 
 use std::collections::{BTreeSet, HashMap};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::core::domain::time::now_epoch_secs;
 use crate::core::repo::{self, Connection};
 use crate::facts::domain::{is_content_fact, normalize_fact_key, FactValueType};
 use crate::facts::repo as facts_repo;
@@ -29,7 +29,7 @@ use crate::facts::repo as facts_repo;
 pub struct ImportRecord {
     pub source_id: i64,
     pub basis_rev: i64,
-    #[serde(default = "current_timestamp")]
+    #[serde(default = "now_epoch_secs")]
     pub observed_at: i64,
     pub facts: HashMap<String, Value>,
     // Optional fields from worklist pass-through (allowed but ignored)
@@ -313,13 +313,6 @@ pub fn process_record(
 // ============================================================================
 // Private helpers
 // ============================================================================
-
-fn current_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64
-}
 
 /// A fact value with optional type hint.
 enum TypedValue {

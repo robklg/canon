@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::ops::Deref;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+
+use crate::core::domain::time::now_epoch_secs;
 
 /// Query record for profiling
 #[derive(Clone)]
@@ -51,7 +53,7 @@ impl Db {
         match last_analyze {
             None => Ok(true), // Never analyzed
             Some(timestamp) => {
-                let now = current_timestamp();
+                let now = now_epoch_secs();
                 Ok(now - timestamp > ANALYZE_TIME_THRESHOLD_SECS)
             }
         }
@@ -61,7 +63,7 @@ impl Db {
     pub fn run_analyze(&self) -> Result<()> {
         self.conn.execute("ANALYZE", [])?;
 
-        let now = current_timestamp();
+        let now = now_epoch_secs();
         self.conn.execute(
             "INSERT OR REPLACE INTO _meta (key, value_int) VALUES ('last_analyze_at', ?)",
             [now],
@@ -69,13 +71,6 @@ impl Db {
 
         Ok(())
     }
-}
-
-fn current_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64
 }
 
 impl Deref for Db {

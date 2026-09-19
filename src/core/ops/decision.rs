@@ -1,12 +1,11 @@
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
 use crate::core::domain::config::LedgerConfig;
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
-use crate::core::domain::fate::{fate_posture, fate_transition};
 use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::time::now_epoch_secs;
 use crate::core::ops::receipt::{
     compute_ledger_root_receipt_rel_path, compute_targeted_receipt_rel_path, finalize_receipt,
     write_receipt, ReceiptKind, ReceiptLocus, ReceiptMeta, ReceiptPlacement, ReceiptRef,
@@ -34,12 +33,12 @@ pub struct DecisionParams {
 impl DecisionParams {
     /// Build the shared receipt `[meta]` block from these params.
     ///
-    /// The what (`transition`), its `posture`, and the apply-only
-    /// `origin_disposition` are all *derived* here from `kind` via the shared
-    /// `fate_transition`/`fate_posture` functions — the single derivation site,
-    /// so no writer emits a vocabulary literal. `locus` is the receipt's where,
-    /// taken from its placement (`(root_id, root_path)`). `manifest` is `Some`
-    /// only for apply receipts; other commands pass `None`.
+    /// The what (`transition`) and its `posture`, and the apply-only
+    /// `origin_disposition`, are all *derived* here from `kind` via its
+    /// `RegisteredFate` — the single derivation site, so no writer emits a
+    /// vocabulary literal. `locus` is the receipt's where, taken from its
+    /// placement (`(root_id, root_path)`). `manifest` is `Some` only for
+    /// apply receipts; other commands pass `None`.
     pub fn receipt_meta(
         &self,
         decision_id: i64,
@@ -49,16 +48,10 @@ impl DecisionParams {
         kind: ReceiptKind,
         manifest: Option<String>,
     ) -> ReceiptMeta {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let (family, aspect) = kind.family_aspect();
-        let transition = fate_transition(family, aspect)
-            .expect("every receipt kind maps to a transition")
-            .as_str()
-            .to_string();
-        let posture = fate_posture(family, aspect).as_str().to_string();
+        let timestamp = now_epoch_secs();
+        let registered = kind.family_aspect();
+        let transition = registered.transition().as_str().to_string();
+        let posture = registered.posture().as_str().to_string();
         ReceiptMeta {
             receipt_version: 1,
             decision_id,

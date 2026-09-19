@@ -1913,17 +1913,7 @@ struct ReachabilityClaims {
 /// until the row is lowered in the same commit (a repair cannot land quietly).
 const REACHABILITY_CLAIMS: &[ReachabilityClaims] = &[
     ReachabilityClaims {
-        file: "archive/ops/execute.rs",
-        expects: 2,
-        unwraps: 0,
-    },
-    ReachabilityClaims {
         file: "compare/ops.rs",
-        expects: 1,
-        unwraps: 0,
-    },
-    ReachabilityClaims {
-        file: "core/ops/decision.rs",
         expects: 1,
         unwraps: 0,
     },
@@ -1938,32 +1928,12 @@ const REACHABILITY_CLAIMS: &[ReachabilityClaims] = &[
         unwraps: 3,
     },
     ReachabilityClaims {
-        file: "facts/ops/import.rs",
-        expects: 1,
-        unwraps: 0,
-    },
-    ReachabilityClaims {
-        file: "retire/ops/verify.rs",
-        expects: 3,
-        unwraps: 0,
-    },
-    ReachabilityClaims {
         file: "roots/cli.rs",
         expects: 0,
         unwraps: 2,
     },
     ReachabilityClaims {
-        file: "scan/cli.rs",
-        expects: 1,
-        unwraps: 0,
-    },
-    ReachabilityClaims {
         file: "scan/ops/receipt.rs",
-        expects: 1,
-        unwraps: 0,
-    },
-    ReachabilityClaims {
-        file: "scan/ops/types.rs",
         expects: 1,
         unwraps: 0,
     },
@@ -1976,11 +1946,6 @@ const REACHABILITY_CLAIMS: &[ReachabilityClaims] = &[
         file: "survey/ops/orchestrate.rs",
         expects: 0,
         unwraps: 2,
-    },
-    ReachabilityClaims {
-        file: "trail/render.rs",
-        expects: 1,
-        unwraps: 0,
     },
     ReachabilityClaims {
         file: "trail/ops/compute.rs",

@@ -64,7 +64,7 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "src/core/CLAUDE.md",
-        words: 5947,
+        words: 6009,
         verifiers: 14,
     },
     Ceiling {

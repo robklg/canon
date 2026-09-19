@@ -10,6 +10,7 @@ use anyhow::Result;
 use rusqlite::OptionalExtension;
 
 use crate::core::domain::source::{NewSource, Source};
+use crate::core::domain::time::now_epoch_secs;
 use crate::core::repo::source::{fetch_by_path, BATCH_SIZE};
 use crate::core::repo::Connection;
 
@@ -139,12 +140,7 @@ pub fn batch_check_paths_exist(
 /// println!("Created source {} at {}", created.id, created.path());
 /// ```
 pub fn insert_destination(conn: &Connection, new: &NewSource) -> Result<Source> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64;
+    let now = now_epoch_secs();
 
     // First try to update any existing record at this path (present=0 or present=1).
     // This preserves the row and increments basis_rev to reflect new content at this path.

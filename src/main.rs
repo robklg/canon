@@ -128,7 +128,7 @@ enum Commands {
         #[arg(long)]
         role: Option<String>,
         /// Add path as a new root (required when path is not inside an existing root)
-        #[arg(long)]
+        #[arg(long, requires = "role")]
         add: bool,
         /// Comment for the new root (only with --add)
         #[arg(short = 'c', long)]
@@ -942,9 +942,8 @@ fn run() -> Result<()> {
                 }
                 return Ok(());
             }
-            if add && role.is_none() {
-                anyhow::bail!("--role is required when using --add");
-            }
+            // --role's presence with --add is the parser's own invariant now
+            // (`#[arg(requires = "role")]` on `add`), never re-checked here.
             if comment.is_some() && !add {
                 anyhow::bail!("--comment requires --add");
             }

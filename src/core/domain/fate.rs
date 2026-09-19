@@ -93,6 +93,65 @@ pub fn fate_transition(family: DecisionFamily, aspect: FateAspect) -> Option<Tra
     }
 }
 
+/// A `(family, aspect)` pair named directly, for a caller that already knows
+/// which terminal fate it means rather than building the pair at its own call
+/// site and `expect`-ing past the wider, partly-`None` `fate_transition`
+/// `Option`. Exhausts the six pairs the totality pin
+/// (`fate_transition_covers_family_aspect_matrix`) proves `fate_transition`
+/// answers `Some` for: the `Option` those pairs return is a false affordance
+/// for a caller whose own domain never leaves the registered set, so the
+/// registered pairs are named values instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisteredFate {
+    ArchivePresent,
+    ExcludePresent,
+    // No production caller constructs the two `Absent` object-exclusion/restore
+    // pairs directly today (they reach `fate_transition` only through the wider
+    // matrix, via `set_decision_id_by_object`'s stamping); kept for the type to
+    // stay total over the six pairs the totality pin proves, not partial over
+    // whichever pairs happen to have a named caller yet.
+    #[allow(dead_code)]
+    ExcludeAbsent,
+    RestorePresent,
+    #[allow(dead_code)]
+    RestoreAbsent,
+    ObserveAbsent,
+}
+
+impl RegisteredFate {
+    /// The `(family, aspect)` pair this value names.
+    pub fn parts(self) -> (DecisionFamily, FateAspect) {
+        use DecisionFamily::*;
+        use FateAspect::*;
+        match self {
+            RegisteredFate::ArchivePresent => (Archive, Present),
+            RegisteredFate::ExcludePresent => (Exclude, Present),
+            RegisteredFate::ExcludeAbsent => (Exclude, Absent),
+            RegisteredFate::RestorePresent => (Restore, Present),
+            RegisteredFate::RestoreAbsent => (Restore, Absent),
+            RegisteredFate::ObserveAbsent => (Observe, Absent),
+        }
+    }
+
+    /// The transition this pair always names. Total, never `None` — every
+    /// variant's pair is one the totality pin proves `fate_transition` maps
+    /// to `Some`; this is the vocabulary's own single place that `expect`s
+    /// it, so no other caller repeats the same `expect` at its own site.
+    pub fn transition(self) -> Transition {
+        let (family, aspect) = self.parts();
+        fate_transition(family, aspect)
+            .expect("RegisteredFate is defined to hold only pairs fate_transition maps to Some")
+    }
+
+    /// The posture this pair always carries. Already total on `fate_posture`,
+    /// carried here so a caller holding a `RegisteredFate` need not rebuild
+    /// the pair to ask for it.
+    pub fn posture(self) -> Posture {
+        let (family, aspect) = self.parts();
+        fate_posture(family, aspect)
+    }
+}
+
 /// The posture of a transition: Canon performing a change vs. observing one the
 /// world made (registered vocabulary, orthogonal to the transition word).
 ///
@@ -194,6 +253,30 @@ mod tests {
                 want,
                 "{family:?} / {aspect:?}"
             );
+        }
+    }
+
+    // RegisteredFate — the registered pairs named as values
+
+    #[test]
+    fn registered_fate_transition_matches_fate_transition() {
+        use RegisteredFate::*;
+        let all = [
+            ArchivePresent,
+            ExcludePresent,
+            ExcludeAbsent,
+            RestorePresent,
+            RestoreAbsent,
+            ObserveAbsent,
+        ];
+        for fate in all {
+            let (family, aspect) = fate.parts();
+            assert_eq!(
+                Some(fate.transition()),
+                fate_transition(family, aspect),
+                "{fate:?}"
+            );
+            assert_eq!(fate.posture(), fate_posture(family, aspect), "{fate:?}");
         }
     }
 

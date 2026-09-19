@@ -1,11 +1,11 @@
 use anyhow::Result;
 use rusqlite::OptionalExtension;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::db::Connection;
 use super::source::BATCH_SIZE;
 use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
+use crate::core::domain::time::now_epoch_secs;
 
 /// Insert the initial "started" decision record. Returns the row ID.
 #[allow(clippy::too_many_arguments)]
@@ -20,10 +20,7 @@ pub fn insert_started(
     receipt_rel_path: Option<&str>,
 ) -> Result<i64> {
     let scope_json = scope.map(|s| serde_json::to_string(s).unwrap());
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs() as i64;
+    let now = now_epoch_secs();
 
     conn.execute(
         "INSERT INTO decisions (command, scope, command_line, reason, status, canon_version, created_at,
