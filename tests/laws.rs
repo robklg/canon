@@ -633,9 +633,9 @@ const LAWS: &[Law] = &[
         name: "never-literal",
         owner: "retire/domain/book.rs",
         verifier: "the_book_never_spells_a_fate_word_as_a_literal",
-        reach: Reach::Unit("retire"),
-        authority: Authority::Recognised,
-        record: "2026-09-03",
+        reach: Reach::Canon,
+        authority: Authority::Searched,
+        record: "2026-09-09",
     },
     Law {
         name: "one-fetch",

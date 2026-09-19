@@ -365,8 +365,9 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   fate lines through it, and receipt `[meta]` stamps `transition` through it via `ReceiptKind`.
   `fate_posture` is its orthogonal `performed`/`observed` half (Observed iff a scan-observed
   deletion), stamped as receipt `posture`. Never emit a transition or posture word as a literal —
-  derive it. The receipt↔trail agreement is enforced by the compiler and by test, the integrity test walking
-  every `ReceiptKind`.
+  derive it, guarded canon-wide by the never-literal law
+  (`the_book_never_spells_a_fate_word_as_a_literal`). The receipt↔trail agreement is enforced by
+  the compiler and by test, the integrity test walking every `ReceiptKind`.
 - **Two matching modes, two named predicates — the two-claims placement law** (`domain/placement.rs`): a
   **declared scope** (`decision_scopes` rows, note paths — "I acted on this subtree") matches
   **bidirectionally** via `scopes_touch`; an **observed placement** (an extraction row's

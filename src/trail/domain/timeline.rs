@@ -146,7 +146,7 @@ impl DayRollup {
 /// Compute a rollup over decisions using the presence-split stamp aggregates.
 ///
 /// deleted  = absent bucket of Observe-family decisions (a scan's deletions;
-///            tombstone stamps from object exclusions stay out of "deleted")
+///            tombstone stamps from object exclusions stay out of `deleted`)
 /// archived = present bucket of Archive-family decisions
 /// excluded = structured completed count (stamp count as fallback); bytes only
 ///            when the stamp supports them

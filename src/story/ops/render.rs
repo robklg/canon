@@ -9,6 +9,7 @@
 //! over this same composition; structure is computed once here so the two
 //! can never drift.
 
+use crate::core::domain::fate::Transition;
 use crate::core::domain::format::{
     format_count, format_date, format_size, format_time_ago, shell_quote,
 };
@@ -319,13 +320,19 @@ fn act_lines(group: &ActGroup, indent: &str, voicing: Voicing, lines: &mut Vec<S
             // The reference derivation over the registered transition words
             // (the never-literal law's voicing site: registered word in,
             // plain fate phrase out). An unrecognized word renders raw —
-            // stated, never dropped.
-            let phrase = match group.transition {
-                "archived" => "chosen for the archive",
-                "excluded" => "let go",
-                "restored" => "returned to consideration",
-                "deleted" if group.observed => "deleted — a scan observed the loss",
-                other => other,
+            // stated, never dropped. Compared against `Transition::as_str()`
+            // rather than spelled here, so the never-literal law — now
+            // canon-wide — reaches this match too.
+            let phrase = if group.transition == Transition::Archived.as_str() {
+                "chosen for the archive"
+            } else if group.transition == Transition::Excluded.as_str() {
+                "let go"
+            } else if group.transition == Transition::Restored.as_str() {
+                "returned to consideration"
+            } else if group.transition == Transition::Deleted.as_str() && group.observed {
+                "deleted — a scan observed the loss"
+            } else {
+                group.transition
             };
             line.push_str(&format!(" · {phrase}"));
         }

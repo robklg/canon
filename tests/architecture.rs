@@ -2298,14 +2298,50 @@ fn fate_vocabulary_words(src_root: &Path) -> Vec<String> {
     words
 }
 
+/// The vocabulary's own home: the `as_str` arms this test reads the six
+/// words out of. Spelling them there is the definition, not a violation of
+/// the rule the definition makes possible.
+const FATE_VOCABULARY_OWNER: &str = "core/domain/fate.rs";
+
+/// Where a fate-vocabulary word is legitimately spelled outside its owner —
+/// a different, unrelated vocabulary that happens to share one of the six
+/// words. `(file, word, count)`, exact-match both directions like
+/// `PROBE_EXEMPT`: a new coincidence needs the same deliberate row a widened
+/// census needs anywhere else, and a resolved one is caught if its row
+/// outlives the fix.
+const FATE_WORD_EXEMPT: &[(&str, &str, usize)] = &[
+    // the `--allow` manifest vocabulary (`archived`/`duplicates`)
+    ("archive/cli/cluster.rs", "archived", 1),
+    ("archive/domain.rs", "archived", 1),
+    // the archived-ness *standing* a coverage query answers, never a
+    // decision's *transition* — the carve-out the retire prose already
+    // names for `covered`/`present`/`contentless` applies to this word too
+    ("core/repo/object.rs", "archived", 1),
+    // the `--include` vocabulary (`excluded`/`archived`/`all`)
+    ("coverage/cli.rs", "archived", 1),
+    ("coverage/cli.rs", "excluded", 1),
+    // the `--where` status-predicate vocabulary (`archived?`/`excluded?`)
+    ("expr/domain/filter.rs", "archived", 1),
+    ("expr/domain/filter.rs", "excluded", 1),
+    // the standing word (`archived`/`present` — a counterpart's or a
+    // member's standing), never a decision's transition
+    ("sweep/cli.rs", "archived", 2),
+];
+
 /// The never-literal law: a transition or posture word is derived, never
 /// written down.
 ///
-/// The book is where it bites hardest — a retired root's story is read forever
-/// and cannot be rewritten — and it is the reason the law's correct scope is
+/// The book bites hardest — a retired root's story is read forever and
+/// cannot be rewritten — but the reach is canon-wide: the trail states the
+/// same rule for receipt words over the same owner, and any reader deriving
+/// a transition or posture is bound by it. The law's correct scope is
 /// *transitions*: the standings beside them (`covered`, `present`,
 /// `missing_unexplained`, `contentless`) are present-tense facts with no
-/// derivation to come from, so they are named constants in one place instead.
+/// derivation to come from, so they are named constants in one place instead
+/// — which is also why a word spelling a *standing* rather than a
+/// *transition* (`FATE_WORD_EXEMPT`'s `core/repo/object.rs` and `sweep/cli.rs`
+/// rows) is not this law's business even though it shares the six words'
+/// spelling.
 ///
 /// Only a spelling check settles this. A test comparing a derived word to the
 /// vocabulary's own answer passes just as happily when the word was typed in,
@@ -2322,14 +2358,14 @@ fn the_book_never_spells_a_fate_word_as_a_literal() {
     let src_root = Path::new(&manifest_dir).join("src");
     let words = fate_vocabulary_words(&src_root);
 
-    let mut violations = Vec::new();
-    for path in collect_rs_files(&src_root.join("retire")) {
+    let mut hits: Vec<(String, usize, String)> = Vec::new();
+    for path in collect_rs_files(&src_root) {
         let rel = path
             .strip_prefix(&src_root)
             .expect("file under src")
             .to_string_lossy()
             .replace('\\', "/");
-        if is_externalised_test_file(&rel) {
+        if is_externalised_test_file(&rel) || rel == FATE_VOCABULARY_OWNER {
             continue;
         }
         let text = fs::read_to_string(&path)
@@ -2338,19 +2374,43 @@ fn the_book_never_spells_a_fate_word_as_a_literal() {
         for (line_no, line) in production.lines().enumerate() {
             for word in &words {
                 if line.contains(&format!("\"{word}\"")) {
-                    violations.push(format!("{rel}:{}: spells `\"{word}\"`", line_no + 1));
+                    hits.push((rel.clone(), line_no + 1, word.clone()));
                 }
             }
         }
     }
-    assert!(
-        violations.is_empty(),
+
+    let mut by_file_word: Vec<(String, String)> = hits
+        .iter()
+        .map(|(f, _, w)| (f.clone(), w.clone()))
+        .collect();
+    by_file_word.sort();
+    let mut found: Vec<(String, String, usize)> = Vec::new();
+    for (f, w) in by_file_word {
+        match found.last_mut() {
+            Some(last) if last.0 == f && last.1 == w => last.2 += 1,
+            _ => found.push((f, w, 1)),
+        }
+    }
+
+    let expected: Vec<(String, String, usize)> = FATE_WORD_EXEMPT
+        .iter()
+        .map(|(f, w, n)| ((*f).to_string(), (*w).to_string(), *n))
+        .collect();
+
+    assert_eq!(
+        found,
+        expected,
         "\n  A fate word written down is a fate word that stops agreeing with the \
          vocabulary the day the vocabulary moves — in a book that is never \
-         rewritten. Derive it through `fate_transition`:\n{}\n",
-        violations
-            .iter()
-            .map(|v| format!("  {v}"))
+         rewritten, and the law now reaches every file. Derive it through \
+         `fate_transition`/`fate_posture` (or `Transition::as_str`/`Posture::as_str`):\n{}\n\n  \
+         Found: {found:?}\n  Exempt: {expected:?}\n  \
+         If a new site genuinely spells a *different* vocabulary that happens to share \
+         one of these six words, add it to `FATE_WORD_EXEMPT` with its exact count; if \
+         an exemption is genuinely gone, delete its row in the same commit.",
+        hits.iter()
+            .map(|(f, l, w)| format!("  {f}:{l}: spells `\"{w}\"`"))
             .collect::<Vec<_>>()
             .join("\n"),
     );

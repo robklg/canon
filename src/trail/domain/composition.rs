@@ -297,7 +297,7 @@ pub fn build_card(
     let mut from_roots: HashMap<String, FromRootAcc> = HashMap::new();
     let mut origins: Vec<OriginLine> = Vec::new();
     // Standings merge on their label — the card states what stands here, and
-    // "excluded" is one fact however many decisions produced it. Gaps stay
+    // `excluded` is one fact however many decisions produced it. Gaps stay
     // per-decision: naming the one decision is what makes a gap
     // self-explaining rather than a shrug.
     let mut standings: HashMap<String, BucketCount> = HashMap::new();
@@ -370,7 +370,7 @@ pub fn build_card(
                         origin_roots.dedup();
                         match origin_roots.len() {
                             0 => {
-                                // The stamp says "archived", but no extraction
+                                // The stamp says `archived`, but no extraction
                                 // row exists to say from where — a gap must
                                 // read as a gap, not be silently folded into
                                 // another bucket or dropped.

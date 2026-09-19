@@ -96,10 +96,11 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   through `fate_transition()`; *covered*/*present*/*missing_unexplained* are **standings, not
   transitions** — named `STANDING_*` constants, the never-literal law's correct scope. The law
   is carried by `the_book_never_spells_a_fate_word_as_a_literal`, which reads the vocabulary out
-  of its owner and refuses those words as quoted literals anywhere in this subsystem's
-  production code: a literal that is currently correct reads identically to a derivation at run
-  time, so only a spelling check sees it. It does **not** reach the standings beside them, which
-  have no derivation to come from.
+  of its owner and refuses those words as quoted literals anywhere in Canon's production code —
+  reach `Canon`, since the trail states the same rule for receipt words over the same owner: a
+  literal that is currently correct reads identically to a derivation at run time, so only a
+  spelling check sees it. It does **not** reach the standings beside them, which have no
+  derivation to come from.
   `ArchivedFromHere` carries `Option<OriginDisposition>` (pre-vocabulary receipts omit
   moved/copied rather than guess; reader-facing words via `disposition_word`).
   `BookEntry::verification()` is a method from hash presence, so an unhashed entry can
