@@ -791,13 +791,53 @@ fn check_old_path(candidate: &Source) -> OldPathCheck {
     match fs::metadata(root.join(&candidate.rel_path)) {
         Ok(_) => OldPathCheck::Present,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            match fs::metadata(root).map(|meta| meta.dev() as i64) {
-                Ok(device) if device == candidate.device => OldPathCheck::Vacated,
-                _ => OldPathCheck::Unverifiable,
+            if recorded_storage_answers(
+                get_dir_device(Path::new(&candidate.root_path)),
+                Some(candidate.device),
+            ) {
+                OldPathCheck::Vacated
+            } else {
+                OldPathCheck::Unverifiable
             }
         }
         Err(_) => OldPathCheck::Unverifiable,
     }
+}
+
+/// Whether the storage a row was recorded on is the storage answering at its
+/// root right now.
+///
+/// This is device doing its one sanctioned job under the physical-identity
+/// law — mount-presence evidence, never identity, and nothing about a file is
+/// decided by it. The question it answers is the one existence cannot: a
+/// root's path is a directory, and a directory whose volume is not mounted is
+/// still a directory. It is there, it is readable, it is empty, and every row
+/// ever recorded under it reads as gone. Asking `Path::exists` gets `true`
+/// from that shell; asking which storage answers is what tells a mountpoint
+/// with nothing behind it apart from a folder somebody emptied.
+///
+/// Unknown, either side, is not agreement. A root that cannot be read and a
+/// row carrying no device both leave Canon without the evidence, and both
+/// consumers — the move check and the `--missing` suggestion — want the
+/// conservative reading of that. The two are not equally reachable: an
+/// unreadable root is ordinary, a `NULL` device is not written by anything
+/// here, and the move check cannot deliver one at all. The arm stands because
+/// the column permits it and `None == None` would otherwise read as agreement.
+///
+/// **Which directory answered is the caller's to choose, and it is
+/// load-bearing** — this compares, it does not decide what to compare against.
+/// Both callers anchor on the **root**: the move check because that is the
+/// storage the row records, the suggestion because the path it was asked about
+/// is by then gone from disk and can answer nothing. A stored `0` is read as a
+/// device like any other and will not match; `apply --resume` registers rows
+/// that way, so such content is not pointed at until a scan refreshes it.
+/// Takes the answering device rather than a path to read it from: the read is
+/// one syscall and the comparison is per row, so a caller with many rows reads
+/// once and asks many times. What is spoken once here is the agreement rule,
+/// which is the load-bearing half; reading a directory's device is
+/// `get_dir_device`, spoken once beside it.
+fn recorded_storage_answers(answering: Option<i64>, stored_device: Option<i64>) -> bool {
+    stored_device.is_some() && answering == stored_device
 }
 
 /// Reconcile a single file: read DB state, determine outcome, compute partial hash if needed.
@@ -1212,6 +1252,87 @@ pub fn resolve_missing_target(
     })
 }
 
+/// Whether `--missing` is worth suggesting for this path.
+///
+/// Nothing here infers absence. A path the disk cannot answer for may be
+/// deleted, unmounted, or mistyped, and one look cannot tell those apart — so
+/// recording a deletion stays the user's own explicit assertion, and this only
+/// says where making it would be sound.
+///
+/// **Which is exactly why it is not offered everywhere the disk goes quiet.**
+/// `--missing` marks every source at or under the path it is given, lexically,
+/// without asking whether the storage is there — taking the user's word is the
+/// whole point of it. So a hint on a path Canon cannot reach is Canon
+/// recommending a deletion over the one storage least able to contradict it,
+/// and the cost is not recoverable: the rows revive on the next real scan, but
+/// the decision row and the source-local receipt asserting a deletion that
+/// never happened do not, and writing that receipt recreates the root's own
+/// directory on disk — into the mountpoint shell, where it can stand between
+/// the volume and its own mount.
+///
+/// Two questions, and the suggestion needs both answered:
+///
+/// 1. **Would the act be accepted?** Asked of [`resolve_missing_target`],
+///    which is the act's own precondition check, so a suggestion can never
+///    name something Canon would refuse. Never re-derived — two spellings of
+///    one rule drift silently, because nothing fails when a hint and a refusal
+///    disagree.
+/// 2. **Is the storage there to have lost anything?** The act does not ask
+///    this and should not; the suggestion must. The evidence is the one the
+///    move check reads before believing a file is gone: whether the storage
+///    each row under the target was recorded on is the storage answering **at
+///    the root** right now ([`recorded_storage_answers`], whose doc has the
+///    reach of that and what it does not cover). **Existence is not that
+///    evidence** — an unmounted mountpoint is a directory that answers, is
+///    empty, and reads as though everything under it vanished, which is
+///    precisely the case where obeying the hint writes a durable deletion
+///    receipt for content sitting untouched on an unplugged disk.
+///
+/// One disagreeing row withholds the suggestion, and so does no row at all.
+/// The bar is positive evidence rather than the absence of contradiction,
+/// because the two mistakes cost different amounts: a suggestion not made
+/// costs the user typing the command out themselves, and a suggestion wrongly
+/// made costs a durable record that outlives the drive it lied about. A target
+/// holding no rows carries no evidence of which storage recorded it, and has
+/// nothing for the act to mark either — `--missing` on it reports that it
+/// found nothing.
+///
+/// The root's own top is withheld for both reasons at once: if the storage is
+/// not the one that recorded it the storage is the likelier story, and if it
+/// is, nothing about the root is missing.
+pub fn missing_is_worth_suggesting(
+    conn: &Connection,
+    path: &Path,
+    roots: &[crate::core::domain::root::Root],
+    cwd: &Path,
+) -> bool {
+    let Ok(target) = resolve_missing_target(path, roots, cwd) else {
+        return false;
+    };
+    if target.rel_prefix.is_empty() {
+        return false;
+    }
+    let Ok(devices) = scan_repo::source::distinct_devices_for_root(
+        conn,
+        target.root_id,
+        Some(target.rel_prefix.as_str()),
+    ) else {
+        return false;
+    };
+    // **The root** is the anchor, and it is not interchangeable with the path
+    // asked about: that path failed to canonicalize, which is why anyone is
+    // asking, so it answers with no device at all. Anchoring there would
+    // withhold the suggestion always. One read, because the root's device does
+    // not change while this runs, then one comparison per *distinct* storage
+    // the rows name — the question is about the set of storages, not about how
+    // many rows sit on each.
+    let answering = get_dir_device(Path::new(&target.root_path));
+    !devices.is_empty()
+        && devices
+            .iter()
+            .all(|stored| recorded_storage_answers(answering, *stored))
+}
+
 /// [`write_deletion_receipts`]: super::receipt::write_deletion_receipts
 pub fn mark_missing_path(
     conn: &Connection,
@@ -1318,6 +1439,156 @@ mod tests {
     use tempfile::TempDir;
 
     use super::super::types::current_timestamp;
+
+    /// Which storage a fixture row claims it was recorded on.
+    ///
+    /// Three states, because the suggestion's evidence has exactly three
+    /// answers — and two of them are states no scan can reach without
+    /// mounting a volume, so the fixture states them rather than staging them.
+    #[derive(Clone, Copy)]
+    enum RecordedOn {
+        /// The storage the root actually answers on: an ordinary indexed row.
+        ThisStorage,
+        /// Other storage — what a mountpoint shell leaves behind.
+        OtherStorage,
+        /// No storage named at all: SQL NULL in a nullable column.
+        Nothing,
+    }
+
+    /// A root on disk holding one file, registered, with one row indexed
+    /// claiming the given storage.
+    fn root_with_row(
+        conn: &Connection,
+        temp: &TempDir,
+        name: &str,
+        recorded_on: RecordedOn,
+    ) -> PathBuf {
+        let dir = temp.path().join(name);
+        std::fs::create_dir_all(dir.join("inbox")).unwrap();
+        std::fs::write(dir.join("inbox/photo.jpg"), "photo bytes").unwrap();
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        let root_id = repo::insert_test_root(conn, canonical.to_str().unwrap(), "source", false);
+        let here = get_dir_device(&canonical).unwrap();
+        let device = match recorded_on {
+            RecordedOn::ThisStorage => here,
+            RecordedOn::OtherStorage | RecordedOn::Nothing => here + 1,
+        };
+        let id = repo::insert_test_source(conn, root_id, "inbox/photo.jpg", device, 11, 5, 0);
+        if matches!(recorded_on, RecordedOn::Nothing) {
+            // The insert helper takes an `i64`, so the row that names no
+            // storage is staged by clearing the column after it.
+            conn.execute("UPDATE sources SET device = NULL WHERE id = ?", [id])
+                .unwrap();
+        }
+        canonical
+    }
+
+    /// The suggestion names the one command that marks sources deleted without
+    /// asking the storage anything, so where it is offered is load-bearing.
+    /// Withheld wherever taking it would be wrong or useless; offered for the
+    /// case it exists for.
+    ///
+    /// **Two properties every control here has to keep.** Each carries a row
+    /// recorded on some storage, because that is the evidence read — a control
+    /// with no rows passes whichever way the comparison runs, which is how this
+    /// battery's first version asserted nothing at all. And each asks about a
+    /// path that is **gone from disk**, because the caller only asks after
+    /// canonicalization failed. A control asking about a path that still exists
+    /// can be satisfied by reading the wrong directory's device, so an anchor
+    /// planted at the target rather than the root would pass it.
+    #[test]
+    fn the_missing_hint_is_withheld_where_asserting_would_be_wrong() {
+        let temp = TempDir::new().unwrap();
+        let conn = crate::core::repo::open_in_memory_for_test();
+        let cwd = temp.path();
+
+        let live = root_with_row(&conn, &temp, "library", RecordedOn::ThisStorage);
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+        let ask = |p: &Path, roots: &[crate::core::domain::root::Root]| {
+            missing_is_worth_suggesting(&conn, p, roots, cwd)
+        };
+
+        // The permitting control: a named place inside a live root, gone from
+        // disk — the state the caller is in when it asks at all.
+        std::fs::remove_file(live.join("inbox/photo.jpg")).unwrap();
+        assert!(
+            ask(&live.join("inbox/photo.jpg"), &roots),
+            "the case the suggestion is for"
+        );
+
+        // A root's own top. An unplugged drive and a deleted folder look
+        // identical here, and the blast radius is every source in the root.
+        assert!(
+            !ask(&live, &roots),
+            "never suggest asserting a whole root gone"
+        );
+
+        // A place Canon has indexed nothing under: the act would mark nothing,
+        // and no row says which storage ever held it.
+        assert!(
+            !ask(&live.join("outbox/photo.jpg"), &roots),
+            "no rows, no evidence, and nothing to lose"
+        );
+
+        // A mountpoint with nothing behind it: the root answers, on storage
+        // other than the one its rows name, and everything under it reads as
+        // gone. Existence says yes here, which is the whole defect — obeying
+        // the suggestion would receipt a deletion of untouched content.
+        let shell = root_with_row(&conn, &temp, "shell", RecordedOn::OtherStorage);
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+        std::fs::remove_dir_all(shell.join("inbox")).unwrap();
+        assert!(shell.exists(), "the shell answers");
+        assert!(
+            fs::canonicalize(shell.join("inbox/photo.jpg")).is_err(),
+            "and everything under it reads as gone"
+        );
+        assert!(
+            !ask(&shell.join("inbox/photo.jpg"), &roots),
+            "the storage that recorded it is not the storage answering"
+        );
+
+        // Storage that is not there at all. Canonicalization fails identically
+        // for every path below an absent root, so a rule keyed on the root's
+        // top alone would still recommend a whole-library deletion when the
+        // user names the library.
+        let gone = root_with_row(&conn, &temp, "gone", RecordedOn::ThisStorage);
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+        std::fs::remove_dir_all(gone.join("inbox")).unwrap();
+        assert!(
+            ask(&gone.join("inbox"), &roots),
+            "the control: a subtree of a root whose storage answers"
+        );
+        std::fs::remove_dir_all(&gone).unwrap();
+        assert!(
+            !ask(&gone.join("inbox"), &roots),
+            "the root cannot be reached, so nothing below it is evidence"
+        );
+
+        // The same unreachable root, with a row naming no storage either.
+        // Both sides unknown, and two unknowns compare equal — what separates
+        // "no evidence" from "agreement" is the predicate's `is_some()`, and
+        // this is the only assertion that reaches it: with the root readable
+        // the devices differ anyway, and the move check cannot deliver an
+        // unknown at all.
+        let blank = root_with_row(&conn, &temp, "blank", RecordedOn::Nothing);
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+        std::fs::remove_dir_all(&blank).unwrap();
+        assert!(
+            !ask(&blank.join("inbox"), &roots),
+            "unknown on both sides is not agreement"
+        );
+
+        // A path under no known root, and a suspended root: `--missing`
+        // refuses both, so neither is suggested. Asked of the act's own
+        // precondition check, never re-derived here.
+        assert!(!ask(&temp.path().join("elsewhere/x.jpg"), &roots));
+        conn.execute("UPDATE roots SET suspended = 1", []).unwrap();
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+        assert!(
+            !ask(&live.join("inbox/photo.jpg"), &roots),
+            "the closed door refuses the act, so it is not suggested"
+        );
+    }
 
     /// No-op progress implementation for tests.
     struct NoopProgress;

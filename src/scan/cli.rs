@@ -239,7 +239,7 @@ pub fn run(
                     // not report a walk of nothing.
                     let cwd = cwd_for(std::slice::from_ref(&path.as_path()))?;
                     eprintln!("Warning: skipping {}: {}", path.display(), e);
-                    if let Some(hint) = missing_hint(path, &roots, &cwd) {
+                    if let Some(hint) = missing_hint(conn, path, &roots, &cwd) {
                         eprintln!("{hint}");
                     }
                     continue;
@@ -600,61 +600,27 @@ pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Where to make the assertion a scan cannot make for itself — offered only
-/// where making it would be sound.
+/// Where to make the assertion a scan cannot make for itself.
 ///
-/// Nothing here infers absence. A path the disk cannot answer for may be
-/// deleted, unmounted, or mistyped, and one look cannot tell those apart — so
-/// recording a deletion stays the user's own explicit assertion, and this only
-/// says where to make it.
-///
-/// **Which is exactly why it is not offered everywhere the disk goes quiet.**
-/// `--missing` marks every source at or under the path it is given, lexically,
-/// without asking whether the storage is there — taking the user's word is the
-/// whole point of it. So a hint on a path Canon cannot reach is Canon
-/// recommending a deletion over the one storage least able to contradict it,
-/// and the cost is not recoverable: the rows revive on the next real scan, but
-/// the decision row and the source-local receipt asserting a deletion that
-/// never happened do not, and writing that receipt recreates the root's own
-/// directory on disk — into the mountpoint shell, where it can stand between
-/// the volume and its own mount.
-///
-/// Two questions, and the hint needs both answered:
-///
-/// 1. **Would the act be accepted?** Asked of `resolve_missing_target`, which
-///    is the act's own precondition check, so a suggestion can never name
-///    something Canon would refuse. Never re-derived here — two spellings of
-///    one rule drift silently, because nothing fails when a hint and a refusal
-///    disagree.
-/// 2. **Is the storage there to have lost anything?** The act does not ask
-///    this and should not; the suggestion must. The evidence is whether the
-///    **root's own path** resolves — mount-presence evidence, device's one
-///    sanctioned job under the physical-identity law, and the same question the
-///    move check asks before believing a file is gone. An unreachable root
-///    reads as though everything under it vanished, and a named subtree under
-///    absent storage fails to resolve exactly as a deleted one does. A root
-///    that answers, with something missing below it, is the case the hint is
-///    for.
-///
-/// The root's own top is withheld for both reasons at once: if the root path
-/// does not resolve the storage is the likelier story, and if it does resolve
-/// then nothing about it is missing.
+/// The sentence only; **whether** to say it is
+/// `ops::pipeline::missing_is_worth_suggesting`, which is where the reasons
+/// are written down. They are two — would the act be accepted, and is the
+/// storage there to have lost anything — and the second reads the database,
+/// so neither can be asked from a screen. A hint that names an act Canon
+/// would refuse, or one it would perform and should not, is worse than no
+/// hint at all.
 fn missing_hint(
+    conn: &Connection,
     path: &Path,
     roots: &[crate::core::domain::root::Root],
     cwd: &Path,
 ) -> Option<String> {
-    let target = crate::scan::ops::pipeline::resolve_missing_target(path, roots, cwd).ok()?;
-    if target.rel_prefix.is_empty() {
-        return None;
-    }
-    if !Path::new(&target.root_path).exists() {
-        return None;
-    }
-    Some(format!(
-        "  If it is gone for good, record it with: canon scan --missing {}",
-        shell_quote(&path.display().to_string())
-    ))
+    crate::scan::ops::pipeline::missing_is_worth_suggesting(conn, path, roots, cwd).then(|| {
+        format!(
+            "  If it is gone for good, record it with: canon scan --missing {}",
+            shell_quote(&path.display().to_string())
+        )
+    })
 }
 
 /// The scan's directory walker. The `.canon-ledger` filter here is the only
@@ -992,8 +958,12 @@ mod tests {
         )
     }
 
-    /// A source root on disk, registered, with one file already indexed.
-    fn indexed_root(temp: &TempDir, suspended: bool) -> (Db, i64, PathBuf) {
+    /// A source root on disk with one file in it, registered — and **nothing
+    /// indexed**: the database holds the root and no sources until a caller
+    /// scans. A test whose assertion depends on a row existing must run a scan
+    /// first, or it asserts over an empty table and passes whatever the code
+    /// does.
+    fn registered_root(temp: &TempDir, suspended: bool) -> (Db, i64, PathBuf) {
         let dir = temp.path().join("library");
         std::fs::create_dir_all(dir.join("inbox")).unwrap();
         std::fs::write(dir.join("inbox/photo.jpg"), "photo bytes").unwrap();
@@ -1010,7 +980,7 @@ mod tests {
     #[test]
     fn a_file_scan_records_one_decision_scoped_to_the_named_paths() {
         let temp = TempDir::new().unwrap();
-        let (db, root_id, dir) = indexed_root(&temp, false);
+        let (db, root_id, dir) = registered_root(&temp, false);
 
         run_scan_on(
             &db,
@@ -1050,7 +1020,7 @@ mod tests {
     #[test]
     fn a_named_file_is_hashed_like_any_other_observation() {
         let temp = TempDir::new().unwrap();
-        let (db, root_id, dir) = indexed_root(&temp, false);
+        let (db, root_id, dir) = registered_root(&temp, false);
         let file = dir.join("inbox/photo.jpg");
         let object_of = |db: &Db| -> Option<i64> {
             db.conn()
@@ -1101,7 +1071,7 @@ mod tests {
     #[test]
     fn a_scanned_file_on_a_suspended_root_is_refused_by_name() {
         let temp = TempDir::new().unwrap();
-        let (db, _root_id, dir) = indexed_root(&temp, true);
+        let (db, _root_id, dir) = registered_root(&temp, true);
 
         let err = run_scan_on(
             &db,
@@ -1214,7 +1184,7 @@ mod tests {
     #[test]
     fn a_scanned_file_never_infers_deletion() {
         let temp = TempDir::new().unwrap();
-        let (db, root_id, dir) = indexed_root(&temp, false);
+        let (db, root_id, dir) = registered_root(&temp, false);
         let file = dir.join("inbox/photo.jpg");
         run_scan_on(
             &db,
@@ -1249,7 +1219,7 @@ mod tests {
             .unwrap();
         assert_eq!(present, 1, "nothing inferred the deletion");
         let roots = repo::root::fetch_all(db.conn()).unwrap();
-        let hint = missing_hint(&file, &roots, temp.path())
+        let hint = missing_hint(db.conn(), &file, &roots, temp.path())
             .expect("a named file inside a live root is hinted");
         assert!(hint.contains("--missing"), "the way to assert it: {hint}");
         assert!(hint.contains("photo.jpg"));
@@ -1273,77 +1243,13 @@ mod tests {
         );
     }
 
-    /// The hint names the one command that marks sources deleted without
-    /// asking the storage anything, so where it is offered is load-bearing.
-    /// Withheld wherever taking it would be wrong or useless; offered for the
-    /// case it exists for.
-    #[test]
-    fn the_missing_hint_is_withheld_where_asserting_would_be_wrong() {
-        let temp = TempDir::new().unwrap();
-        let (db, root_id, dir) = indexed_root(&temp, false);
-        let roots = repo::root::fetch_all(db.conn()).unwrap();
-
-        // The permitting control: a named place inside a live root.
-        assert!(
-            missing_hint(&dir.join("inbox/photo.jpg"), &roots, temp.path()).is_some(),
-            "the case the hint is for"
-        );
-
-        // A root's own top. An unplugged drive and a deleted folder look
-        // identical here, and the blast radius is every source in the root.
-        assert_eq!(
-            missing_hint(&dir, &roots, temp.path()),
-            None,
-            "never suggest asserting a whole root gone"
-        );
-
-        // A named place under storage that is not there. This is the shape the
-        // hint's first repair missed: canonicalization fails identically for
-        // every path below an absent root, so keying only on the root's top
-        // left the natural gesture — naming the library, not the volume —
-        // still recommending a whole-library deletion.
-        let parked = temp.path().join("parked");
-        std::fs::create_dir_all(parked.join("inbox")).unwrap();
-        let parked_root = std::fs::canonicalize(&parked).unwrap();
-        repo::insert_test_root(db.conn(), parked_root.to_str().unwrap(), "source", false);
-        let roots_with_parked = repo::root::fetch_all(db.conn()).unwrap();
-        assert!(
-            missing_hint(&parked_root.join("inbox"), &roots_with_parked, temp.path()).is_some(),
-            "the control: a subtree of a root whose storage answers"
-        );
-        std::fs::remove_dir_all(&parked_root).unwrap();
-        assert_eq!(
-            missing_hint(&parked_root.join("inbox"), &roots_with_parked, temp.path()),
-            None,
-            "the root itself cannot be reached, so nothing below it is evidence of anything"
-        );
-
-        // A path under no known root: --missing refuses it, so the hint would
-        // send the user into a dead end.
-        assert_eq!(
-            missing_hint(&temp.path().join("elsewhere/x.jpg"), &roots, temp.path()),
-            None
-        );
-
-        // A suspended root: --missing refuses that too.
-        db.conn()
-            .execute("UPDATE roots SET suspended = 1 WHERE id = ?", [root_id])
-            .unwrap();
-        let roots = repo::root::fetch_all(db.conn()).unwrap();
-        assert_eq!(
-            missing_hint(&dir.join("inbox/photo.jpg"), &roots, temp.path()),
-            None,
-            "the closed door refuses the act, so it is not suggested"
-        );
-    }
-
     /// A root whose own path is no longer a folder is a fact about that root.
     /// It is said and skipped, like every other per-path trouble in the loop —
     /// a run over several roots must not end because one of them broke.
     #[test]
     fn a_file_shaped_root_is_skipped_not_fatal() {
         let temp = TempDir::new().unwrap();
-        let (db, _root_id, dir) = indexed_root(&temp, false);
+        let (db, _root_id, dir) = registered_root(&temp, false);
         // A second root that is a file on disk. Registered directly: the CLI
         // now refuses to create one, which is the other half of this pair.
         let broken = temp.path().join("broken-root");

@@ -91,7 +91,7 @@ Warning: skipping /Volumes/Photos/2024/img_0042.jpg: No such file or directory (
   If it is gone for good, record it with: canon scan --missing /Volumes/Photos/2024/img_0042.jpg
 ```
 
-The pointer to `--missing` appears only where asserting a deletion would be sound: inside a live root, below its top, and with the root's own path answering on disk. Storage that is not currently there makes everything under it read as gone, at every depth, so a path Canon cannot reach gets the warning alone. `--missing` works at file grain with the same recording as a folder, described below.
+The pointer to `--missing` appears only where asserting a deletion would be sound: inside a live root, below its top, over content Canon has indexed, and where the storage those records name is the storage answering at the root now. That last check is what withholds the pointer over an unmounted volume: a mount point is still a folder — it is there, it is readable, and it is empty — so everything under it reads as gone at every depth, and whether the path exists cannot tell that apart from a deletion. Such a path gets the warning alone. The check is made against the root's own storage, so if you keep a separate drive mounted *inside* a scanned folder, the pointer stays absent for content deleted on that drive even while it is attached — the warning is still shown, and `--missing` still works when you run it yourself. `--missing` works at file grain with the same recording as a folder, described below.
 
 A root is a folder, so `--add` and `--candidates` refuse a file argument and name the directory to use instead. It is also a folder you chose: `/` is refused, because every path would lie inside it and no scope could then mean less than everything.
 

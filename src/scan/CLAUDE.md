@@ -47,7 +47,13 @@ consulted at all, so the precedence is a shape rather than a convention held by 
 refused). It also confirms **which storage answered**: a `NotFound` is absence only when the root
 directory's current device equals the row's stored device, because a mountpoint with nothing
 behind it is a readable, empty directory under which everything reads as gone
-(`pipeline::a_root_whose_storage_is_not_mounted_never_claims_a_move`). **Corroboration** is
+(`pipeline::a_root_whose_storage_is_not_mounted_never_claims_a_move`). That comparison is
+`pipeline::recorded_storage_answers`, one spelling with a second consumer — the `--missing`
+suggestion below. A **third** asker sits in this file, `classify_sources_in_empty_dir`, whose
+shape now matches the predicate's and whose unknown-device arm deliberately answers the other
+way (it reads unknown as *missing*); it is left spelling its own comparison until that
+divergence is settled rather than unified into a shared owner that would have to carry both
+readings. **Corroboration** is
 `same_physical_file` at `Relocation` grade. The **re-check** re-reads the row inside the write
 transaction, because a check outside one answers a question about the past
 (`pipeline::a_candidate_mutated_before_resolution_degrades_to_new`). Anything that fails a gate is
@@ -191,9 +197,13 @@ select list, and the no-join shape exists so the ordinary zero-error path stays 
   screen), and both the act and the interface's hint ask it. Two spellings of one rule
   drift silently, because nothing fails when a suggestion and a refusal disagree — and the
   drift runs toward recommending an act Canon would refuse, or accept and should not. The hint
-  adds one question the act deliberately does not ask, whether the root's own path resolves on
-  disk: `--missing` takes the user's word by design, but Canon offering the advice is a
-  different act from Canon obeying it.
+  adds one question the act deliberately does not ask, whether the storage the rows name is the
+  storage answering (`recorded_storage_answers`): `--missing` takes the user's word by design,
+  but Canon offering the advice is a different act from Canon obeying it. **The whole decision
+  lives in `ops::pipeline::missing_is_worth_suggesting`, and its battery with it** — half a
+  policy at the interface is how the evidence went out of reach, and a battery there would have
+  to speak to the database from a file that exists to print. `cli::missing_hint` composes the
+  sentence and nothing else.
 - **`use crate::scan::repo as scan_repo;`** resolves the collision between `crate::core::repo` and
   `crate::scan::repo`, both needed in `ops/pipeline.rs`/`ops/hash.rs`.
 - **The deletion receipt's document shape lives in `ops/types.rs`, not `ops/receipt.rs`** —
@@ -208,7 +218,7 @@ select list, and the no-join shape exists so the ordinary zero-error path stays 
   read together — `hash.rs` already depends on this stratum, so the pairing costs no edge against
   the grain), `pipeline.rs` (the walk: `scan_root`, `reconcile_file`, `persist_file`,
   `flush_unchanged`, `mark_missing_sources`, `capture_deletion_items`, `mark_missing_path`,
-  `resolve_missing_target`, empty-dir classification — and beside the walk, `observe_file`, the
+  `resolve_missing_target`, `missing_is_worth_suggesting`, empty-dir classification — and beside the walk, `observe_file`, the
   file-grain entry: the same reconcile/persist helpers, no walk and no missing detection),
   `receipt.rs` (`coalesce_by_root` + `write_deletion_receipts`), `candidates.rs` (root-candidate
   discovery, pure filesystem, no DB), `hash.rs` (the hash pass itself, and the scope-bounded count
@@ -244,7 +254,7 @@ select list, and the no-join shape exists so the ordinary zero-error path stays 
   | A named file is observed singly and never walked (`ops::pipeline::observe_file`), and the file-grain path **infers no absence at all**: it takes no `capture_deletions` parameter, returns an always-empty `deleted_items`, and has no arm that could mark a row missing. Deletion by difference needs a walk to differ from; recording one stays `--missing`'s explicit assertion | `cli::a_scanned_file_never_infers_deletion` (two-sided: the gone path leaves the row standing, `--missing` on it marks, stamps and receipts it) |
   | A move **into** a named path is followed under the same three gates — pairing runs over a set of one through `resolve_moves`, and `persist_resolution` still re-checks the claim inside its own transaction | `pipeline::a_move_into_a_named_file_path_is_followed` |
   | The hash gate is asked at file grain exactly as it is asked in the walk. Without it a modified file loses its `object_id` to the `Modified` arm and the refreshed lock drops it as unhashed — a re-observation would strip the identity it was run to restore | `cli::a_named_file_is_hashed_like_any_other_observation` (end to end, over the `Modified` arm) |
-  | The `--missing` hint is offered **only where the act would be both accepted and sound**: the acceptance half is asked of `ops::pipeline::resolve_missing_target`, the act's own precondition check, never re-derived at the interface; the soundness half asks whether the **root's own path** resolves on disk. `--missing` marks everything at or under what it is given, lexically, without asking whether the storage is there — and canonicalization fails identically at *every* depth under an absent volume, so a hint keyed on the root's top alone still recommends deleting a whole library when the user names the library, and writing that receipt recreates the root's directory into a mountpoint shell | `cli::the_missing_hint_is_withheld_where_asserting_would_be_wrong` (root top, no root, suspended root, absent storage below a live root — each with its permitting control) |
+  | The `--missing` hint is offered **only where the act would be both accepted and sound** (acceptance: the bullet above). Soundness asks the rows the act would flip whether the storage that recorded them is the storage answering **at the root** now — `recorded_storage_answers`, the move check's own spelling. **Existence is not that evidence**: a mountpoint with nothing behind it answers yes and reads as though everything under it vanished, which is where obeying the hint receipts a deletion of untouched content. The bar is positive evidence — at least one row, none disagreeing, an unknown device counting as disagreement. Anchored at the root, so a row on storage mounted *inside* its root never agrees: a withheld pointer, never a wrong one | `pipeline::the_missing_hint_is_withheld_where_asserting_would_be_wrong` (root top, mountpoint shell, no root, suspended root, absent storage, unknown storage, nothing indexed — each with its permitting control). It sits with the decision in `ops`, not at the interface the sentence is printed from: the fixture states storages a scan cannot reach, and a battery written at the interface would need the database spoken to from there |
   | A root is a folder: `--add` and `--candidates` refuse a file argument naming both it and the directory to use instead, and a file outside every root is refused the same way. A root whose own path is a file is **skipped with a warning, never fatal, and before its scope is recorded** — a per-path fact must not end a run over several paths, nor leave a claim behind it | `cli::a_file_shaped_root_is_skipped_not_fatal` |
   | **Every error inside the wrapped body** completes its own decision row as `interrupted` with the error as summary — the fallible work between `start()` and the summary runs inside one closure with a single failure exit, because a dangling `started` row misreads as a scan killed mid-walk. What sits **outside** the closure stays out: the `unexpected_hash_changes` bail and `run_analyze()` both fire *after* `complete(Completed)`, and routing either through the interrupted exit would double-complete a finished decision | `cli::a_scan_that_errors_after_start_completes_its_decision_as_interrupted` |
   | Mount-stability skip is **counted**, reaching the durable summary | `pipeline::scan_root_unstable_mount_records_no_deletion` |

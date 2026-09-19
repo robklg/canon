@@ -287,6 +287,47 @@ pub(crate) mod source {
         Ok(())
     }
 
+    /// The rows a path-bounded scan covers, as a statement and its parameters.
+    ///
+    /// Present rows of this root, at or under the prefix. It must stop at the
+    /// path separator: a scan scoped to "vacation" must never sweep a sibling
+    /// like "vacation-2023" into deletion. The shared boundary predicate
+    /// spells that law once — the path itself, or anything under "{prefix}/",
+    /// with '_'/'%' in the path matched literally.
+    ///
+    /// One spelling, two select lists, because two questions are asked about
+    /// this exact row set and asking them of different sets would be worse
+    /// than asking one of them wrong: which rows a walk expects to see, and
+    /// what the rows a `--missing` assertion would flip say about the storage
+    /// that recorded them.
+    fn present_rows_at_or_under(
+        select: &str,
+        root_id: i64,
+        scan_prefix: Option<&str>,
+    ) -> (String, Vec<rusqlite::types::Value>) {
+        match scan_prefix {
+            Some(prefix) => (
+                format!(
+                    "SELECT {select} FROM sources WHERE root_id = ? AND present = 1 AND {}",
+                    crate::core::repo::db::path_at_or_under_sql("rel_path")
+                ),
+                {
+                    let prefix = prefix.trim_end_matches('/').to_string();
+                    vec![
+                        root_id.into(),
+                        prefix.clone().into(),
+                        prefix.clone().into(),
+                        prefix.into(),
+                    ]
+                },
+            ),
+            None => (
+                format!("SELECT {select} FROM sources WHERE root_id = ? AND present = 1"),
+                vec![root_id.into()],
+            ),
+        }
+    }
+
     /// Fetch source IDs for a given root (for missing detection).
     ///
     /// Returns the set of present source IDs for the specified root.
@@ -302,31 +343,41 @@ pub(crate) mod source {
         root_id: i64,
         scan_prefix: Option<&str>,
     ) -> Result<Vec<i64>> {
-        let ids: Vec<i64> = match scan_prefix {
-            Some(prefix) => {
-                // The expected set feeds missing detection, so it must stop at the
-                // path separator: a scan scoped to "vacation" must never sweep a
-                // sibling like "vacation-2023" into deletion. The shared boundary
-                // predicate spells that law once — the path itself, or anything
-                // under "{prefix}/", with '_'/'%' in the path matched literally.
-                let prefix = prefix.trim_end_matches('/');
-                let sql = format!(
-                    "SELECT id FROM sources WHERE root_id = ? AND present = 1 AND {}",
-                    crate::core::repo::db::path_at_or_under_sql("rel_path")
-                );
-                conn.prepare(&sql)?
-                    .query_map(rusqlite::params![root_id, prefix, prefix, prefix], |row| {
-                        row.get(0)
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?
-            }
-            None => conn
-                .prepare("SELECT id FROM sources WHERE root_id = ? AND present = 1")?
-                .query_map(rusqlite::params![root_id], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?,
-        };
+        let (sql, params) = present_rows_at_or_under("id", root_id, scan_prefix);
+        let ids = conn
+            .prepare(&sql)?
+            .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(ids)
+    }
+
+    /// Which storages the rows a `--missing` assertion would flip say they
+    /// were recorded on.
+    ///
+    /// Same row set as [`fetch_source_ids_for_root`], same boundary: the
+    /// suggestion's evidence has to be read from exactly the rows the act
+    /// would mark, or it answers for a set other than the one at risk. The
+    /// device is nullable, and unknown is its own answer — never folded into
+    /// a default here, and `DISTINCT` keeps `NULL` as one of the answers
+    /// rather than dropping it.
+    ///
+    /// **Distinct, because the question is about storages and not rows.** The
+    /// caller asks whether every storage named agrees with the one answering,
+    /// so a folder of a hundred thousand files on one volume is one answer,
+    /// not a hundred thousand copies of it.
+    pub fn distinct_devices_for_root(
+        conn: &Connection,
+        root_id: i64,
+        scan_prefix: Option<&str>,
+    ) -> Result<Vec<Option<i64>>> {
+        let (sql, params) = present_rows_at_or_under("DISTINCT device", root_id, scan_prefix);
+        let devices = conn
+            .prepare(&sql)?
+            .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(devices)
     }
 
     /// Count present sources here that hold no content identity — the standing
