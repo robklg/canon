@@ -153,6 +153,21 @@ pub fn scan_root(
                     &full_path.display().to_string(),
                     &format!("Failed to stat: {e}"),
                 );
+                stats.skipped += 1;
+                // The walk listed this path, which is positive evidence it
+                // exists — a failed read afterwards says only that Canon could
+                // not look, never that the file is gone. Accounted for here so
+                // missing detection never reads ignorance as absence.
+                if !account_row_at_path_if_standing(
+                    conn,
+                    root_id,
+                    rel_path_str,
+                    &mut seen_source_ids,
+                    &mut outcomes,
+                    &mut warnings,
+                ) {
+                    stats.lookup_failures += 1;
+                }
                 continue;
             }
         };
@@ -179,6 +194,19 @@ pub fn scan_root(
             Err(e) => {
                 progress.on_process_error(&full_path.display().to_string(), &e.to_string());
                 stats.skipped += 1;
+                // Reconciliation failed before any move candidate was settled,
+                // so the only row that could be at risk is the one standing at
+                // this path — account for it the same way a failed read is.
+                if !account_row_at_path_if_standing(
+                    conn,
+                    root_id,
+                    rel_path_str,
+                    &mut seen_source_ids,
+                    &mut outcomes,
+                    &mut warnings,
+                ) {
+                    stats.lookup_failures += 1;
+                }
                 continue;
             }
         };
@@ -238,6 +266,13 @@ pub fn scan_root(
                     Err(e) => {
                         progress.on_process_error(&full_path.display().to_string(), &e.to_string());
                         stats.skipped += 1;
+                        // A write that failed is not evidence the row's file is
+                        // gone — the reconciliation already named the row it
+                        // would have rewritten, so it is accounted for directly,
+                        // the same shape as the move write-failure arm below.
+                        if let Some(standing) = reconciliation.source_id() {
+                            account_as_seen(&mut seen_source_ids, &mut outcomes, standing);
+                        }
                         continue;
                     }
                 };
@@ -272,8 +307,7 @@ pub fn scan_root(
         progress.on_file(rel_path_str, &action);
 
         // Track seen sources
-        seen_source_ids.insert(source_id);
-        outcomes.push((source_id, SourceOutcome::Seen));
+        account_as_seen(&mut seen_source_ids, &mut outcomes, source_id);
 
         match action {
             FileAction::New => stats.new += 1,
@@ -326,16 +360,14 @@ pub fn scan_root(
                     // absent and write a deletion receipt for content this very
                     // walk observed on disk.
                     if let Some(donor) = claimed {
-                        seen_source_ids.insert(donor);
-                        outcomes.push((donor, SourceOutcome::Seen));
+                        account_as_seen(&mut seen_source_ids, &mut outcomes, donor);
                     }
                     continue;
                 }
             };
 
         progress.on_file(&rel_path, &action);
-        seen_source_ids.insert(source_id);
-        outcomes.push((source_id, SourceOutcome::Seen));
+        account_as_seen(&mut seen_source_ids, &mut outcomes, source_id);
 
         match action {
             FileAction::New => stats.new += 1,
@@ -372,7 +404,7 @@ pub fn scan_root(
         && post_walk_device.is_some()
         && pre_walk_device == post_walk_device;
 
-    if mount_stable && stats.walk_errors == 0 {
+    if mount_stable && stats.walk_errors == 0 && stats.lookup_failures == 0 {
         // Identify sources that are truly missing using pure domain function
         // Sources not seen during walk AND not handled by empty-dir logic are missing
         let all_accounted: HashSet<i64> = seen_source_ids.union(&handled_ids).copied().collect();
@@ -401,10 +433,24 @@ pub fn scan_root(
             warnings.push(format!(
                 "{detail} — skipping missing detection to avoid data loss"
             ));
-        } else {
+        } else if stats.walk_errors > 0 {
             warnings.push(format!(
                 "{} walk errors — skipping missing detection to avoid data loss",
                 stats.walk_errors
+            ));
+        } else {
+            // A failed stat or reconcile is nameable (walk-trust accounts for
+            // it directly, above); a failed *recovery lookup* after one is
+            // not — Canon cannot tell whether a row even exists at that path,
+            // so it cannot be excluded from the subtraction by name the way
+            // an ordinary per-path failure is. That un-nameability is exactly
+            // `walk_errors`'s own criterion, so a lookup failure joins it in
+            // suppressing the whole root's conclusion rather than risking a
+            // persistent lookup defect reading the same row as deleted on
+            // every subsequent scan.
+            warnings.push(format!(
+                "{} row lookups failed after a per-path failure — skipping missing detection to avoid data loss",
+                stats.lookup_failures
             ));
         }
     }
@@ -699,6 +745,84 @@ fn old_object_link(reconciliation: &Reconciliation) -> Option<i64> {
         Reconciliation::New | Reconciliation::Unchanged { .. } => None,
         Reconciliation::Modified { old_object_id, .. }
         | Reconciliation::Moved { old_object_id, .. } => *old_object_id,
+    }
+}
+
+/// Account a row as observed — the walk-trust law's per-path half.
+///
+/// Absence is concluded by subtraction: every expected row, minus every
+/// accounted row, is gone. That is sound only over a complete observation, so
+/// each failure inside the walk has to answer one question — can Canon name
+/// what it missed?
+///
+/// A failure to *list* a directory cannot: an unknown set of paths went
+/// unseen, so `walk_errors` gates the whole conclusion at the end of the walk.
+/// A failure to *read one named file* can, and this is that half. The walk
+/// listed the path, which is positive evidence it exists; whatever went wrong
+/// afterwards, Canon learned nothing that bears on absence. The row standing
+/// there is therefore accounted for, and the conclusion stands for every other
+/// path in the root.
+///
+/// `Seen` is deliberately the strongest claim in the outcome vocabulary —
+/// `mark_missing_sources` subtracts the seen set before it reads any other
+/// outcome, so observation outranks inference. That is what is wanted here.
+fn account_as_seen(
+    seen: &mut HashSet<i64>,
+    outcomes: &mut Vec<(i64, SourceOutcome)>,
+    source_id: i64,
+) {
+    seen.insert(source_id);
+    outcomes.push((source_id, SourceOutcome::Seen));
+}
+
+/// Look up the row standing at `rel_path` and account for it if there is one —
+/// the shared recovery step for a failure that has nothing but a path to go
+/// on (no `Reconciliation` was ever produced). Both per-path failure arms that
+/// reach this — a failed stat, a failed reconcile — were already non-fatal
+/// before the walk-trust law existed, and asking whether a row exists here
+/// must never turn out to be a sharper failure than the question that
+/// prompted it, so a failed lookup never propagates as an error.
+///
+/// Returns whether the question was answered. A failed lookup answers *no* —
+/// Canon cannot name what it missed at this path, which is the law's own
+/// suppress-the-conclusion case (`account_as_seen`'s doc comment), not its
+/// account-the-row case: unlike a plain read failure, which still knows the
+/// row that stood there, a lookup failure means Canon does not even know
+/// whether a row exists to protect. The caller counts a `false` return into
+/// `stats.lookup_failures`, which joins `walk_errors` in gating missing
+/// detection for the whole root — because the realistic trigger for a lookup
+/// failing here (a row-mapping defect, a disk I/O error) is persistent, not
+/// transient, so a single warn-and-continue would risk the same row reading
+/// as deleted on every subsequent scan rather than once.
+///
+/// Deliberately unpinned by a dedicated test: reaching the `Err` arm needs a
+/// forced repository failure this tree has no fault-injection idiom for, and
+/// forcing one (a second connection holding an exclusive lock, as the
+/// write-failure arm's own census entry notes) would break the rest of the
+/// scan and make the test's meaning unclear — the same call the seen-set
+/// census made about the write-failure arm. The exhaustive `match` and the
+/// `bool` return stand on their own shape instead: a future change to either
+/// arm's meaning fails at the call site, not silently.
+fn account_row_at_path_if_standing(
+    conn: &Connection,
+    root_id: i64,
+    rel_path: &str,
+    seen: &mut HashSet<i64>,
+    outcomes: &mut Vec<(i64, SourceOutcome)>,
+    warnings: &mut Vec<String>,
+) -> bool {
+    match repo::source::fetch_by_path(conn, root_id, rel_path) {
+        Ok(Some(standing)) => {
+            account_as_seen(seen, outcomes, standing.id);
+            true
+        }
+        Ok(None) => true,
+        Err(e) => {
+            warnings.push(format!(
+                "could not confirm whether {rel_path} still holds a row after a per-path failure: {e}"
+            ));
+            false
+        }
     }
 }
 
@@ -4045,6 +4169,182 @@ mod tests {
             })
             .unwrap();
         assert_eq!(present, 1);
+    }
+
+    // =========================================================================
+    // Walk-trust: a failed read is not an absence
+    //
+    // The walk-error gate above protects the whole conclusion when Canon
+    // cannot say *what* went unseen. These protect one row at a time, when
+    // Canon can name exactly the path it failed to read.
+    // =========================================================================
+
+    #[test]
+    fn a_path_the_walk_could_not_read_keeps_its_row() {
+        // The walk listed the path — positive evidence it exists. A failed
+        // read afterwards says only that Canon could not look, never that the
+        // file is gone.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let unreadable = write_at(temp.path(), "a.txt", "a");
+        write_at(temp.path(), "b.txt", "b");
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let source_id = row(&conn, root_id, "a.txt").unwrap().id;
+
+        // Collect the real listing, then invalidate it — the walker already
+        // saw the path, the disk changes after.
+        let entries: Vec<_> = walk(temp.path()).collect();
+        std::fs::remove_file(&unreadable).unwrap();
+
+        let result = scan_root(
+            &conn,
+            root_id,
+            temp.path().to_str().unwrap(),
+            None,
+            entries.into_iter(),
+            &no_hash_options(),
+            &NoopProgress,
+            current_timestamp(),
+            Some(2),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(result.stats.missing, 0, "a failed read is not a deletion");
+        assert!(result.deleted_items.is_empty());
+        assert_eq!(result.stats.skipped, 1);
+        let after = row(&conn, root_id, "a.txt");
+        assert_eq!(
+            after.map(|s| s.id),
+            Some(source_id),
+            "the row stands, present, unchanged"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_path_does_not_shield_the_roots_real_deletions() {
+        // The law's verifier. Protecting one unreadable path must not silence
+        // the conclusion for the rest of the root — that would trade a
+        // false-deletion defect for a quieter missed-deletion one. This test
+        // fails against both wrong designs: no fix at all (the unreadable row
+        // is deleted too), and the rejected design of counting a read failure
+        // as a walk error (nothing is deleted, the real deletion is missed).
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let unreadable = write_at(temp.path(), "a.txt", "a");
+        write_at(temp.path(), "b.txt", "b");
+        let gone = write_at(temp.path(), "c.txt", "c");
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+
+        // The listing is stale in two different ways at once: one entry it
+        // still names but the disk will refuse to read, one entry it drops
+        // entirely — exactly what a real walk reports for a file removed
+        // before the walk reached it.
+        let entries: Vec<_> = walk(temp.path())
+            .filter(|e| e.as_ref().map(|entry| entry.path() != gone).unwrap_or(true))
+            .collect();
+        std::fs::remove_file(&unreadable).unwrap();
+        std::fs::remove_file(&gone).unwrap();
+
+        let result = scan_root(
+            &conn,
+            root_id,
+            temp.path().to_str().unwrap(),
+            None,
+            entries.into_iter(),
+            &no_hash_options(),
+            &NoopProgress,
+            current_timestamp(),
+            Some(2),
+            true,
+        )
+        .unwrap();
+
+        assert!(
+            row(&conn, root_id, "a.txt").is_some(),
+            "the unreadable row stands"
+        );
+        assert!(
+            row(&conn, root_id, "c.txt").is_none(),
+            "the real deletion is still caught"
+        );
+        assert_eq!(result.stats.missing, 1);
+        assert_eq!(result.deleted_items.len(), 1);
+        assert_eq!(result.deleted_items[0].rel_path, "c.txt");
+        assert_eq!(result.stats.skipped, 1);
+    }
+
+    #[test]
+    fn a_reconcile_failure_keeps_the_row() {
+        // A directory replaces the file at the same path between listing and
+        // read. The entry still says "file" (cached at listing time) so the
+        // walk proceeds; the metadata read succeeds (a directory answers
+        // `stat` too), the inode disagrees with the stored one, and deciding
+        // what that means demands a content read — which fails on a
+        // directory. Only the row standing at this path could be at risk, and
+        // it is accounted for.
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let root_id = repo::insert_test_root(&conn, temp.path().to_str().unwrap(), "source", false);
+        let target = write_at(temp.path(), "a.txt", "a");
+        scan_pass(&conn, root_id, temp.path(), Some(1));
+        let source_id = row(&conn, root_id, "a.txt").unwrap().id;
+
+        let entries: Vec<_> = walk(temp.path()).collect();
+        std::fs::remove_file(&target).unwrap();
+        std::fs::create_dir(&target).unwrap();
+
+        let result = scan_root(
+            &conn,
+            root_id,
+            temp.path().to_str().unwrap(),
+            None,
+            entries.into_iter(),
+            &no_hash_options(),
+            &NoopProgress,
+            current_timestamp(),
+            Some(2),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(result.stats.missing, 0);
+        assert!(result.deleted_items.is_empty());
+        assert_eq!(result.stats.skipped, 1);
+        assert_eq!(row(&conn, root_id, "a.txt").map(|s| s.id), Some(source_id));
+    }
+
+    #[test]
+    fn the_seen_set_has_one_writer() {
+        // account_as_seen is the seen set's one writer — every call site
+        // routes through it rather than inserting directly. A direct insert
+        // bypassing the walk-trust accounting would compile and pass every
+        // behavioral test here while quietly reintroducing an unaccounted
+        // path. Red-smoked: plant a direct insert on `seen_source_ids`
+        // anywhere in this file and this fails.
+        //
+        // The matcher's aperture is a literal text scan, stated here rather
+        // than left as a silence: it catches the one idiom it names — the
+        // seen set's own variable name immediately followed by an insert
+        // call, written contiguously — and nothing shaped differently. A
+        // `.extend(...)`, a `&mut` alias bound to a new local name, a second
+        // HashSet used in its place, or the same call split across a line
+        // break all pass it silently. Widening it to catch those was weighed
+        // and declined, the same call the path law's own guard makes: a text
+        // scan that tried to catch every differently-shaped insert would
+        // have to parse Rust to do it honestly, at which point it is not a
+        // text scan any more.
+        let source = include_str!("pipeline.rs");
+        // Assembled rather than written out, so this test's own text is not
+        // one of the occurrences it counts.
+        let direct_write = ["seen_source_ids", ".insert("].concat();
+        assert_eq!(
+            source.matches(&direct_write).count(),
+            0,
+            "insert into the seen set through account_as_seen, never directly"
+        );
     }
 
     // =========================================================================

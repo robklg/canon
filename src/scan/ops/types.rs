@@ -75,6 +75,13 @@ pub struct ScanStats {
     pub unchanged: u64,
     pub missing: u64,
     pub disconnected: u64,
+    /// Per-path failures: a failed stat, a failed reconcile, or a failed
+    /// write (both the plain walk and the move-resolution write). Each of
+    /// these leaves the row it endangers accounted for rather than deleted
+    /// (the walk-trust law) — this counter is what makes the failure land in
+    /// the durable summary as `skipped (read errors)`, distinct from
+    /// `walk_errors` above, which is a failure to list a directory rather
+    /// than to read one already-listed path.
     pub skipped: u64,
     pub hashed: u64,
     pub unexpected_hash_changes: u64,
@@ -108,11 +115,25 @@ pub struct ScanStats {
     /// file — a file can make at most one move — and the root is named, so
     /// ignorance is stated rather than passing for "not moved".
     pub moves_unverified: u64,
-    /// Number of walk entries that could not be read (permissions, I/O). A
-    /// non-zero count gates missing detection for the affected root — part of
-    /// the tree went unseen, and unseen must never read as deleted — and lands
-    /// in the durable decision summary like the mount-guard skip.
+    /// Number of directory *listings* the walk itself could not complete
+    /// (permissions, I/O) — never a failure to read a regular file the walk
+    /// already listed, which is `skipped` below. The distinction is the
+    /// walk-trust law's whole content: a listing failure cannot name what it
+    /// missed, so a non-zero count here gates missing detection for the
+    /// affected root — part of the tree went unseen, and unseen must never
+    /// read as deleted — and lands in the durable decision summary like the
+    /// mount-guard skip.
     pub walk_errors: u64,
+    /// Recovery lookups, made after a per-path failure to find the row it may
+    /// endanger, that failed themselves — Canon then holds a path but cannot
+    /// say whether a row stands there at all, which is `walk_errors`' own
+    /// "cannot name what it missed" case rather than the ordinary per-path
+    /// one, so a non-zero count here joins `walk_errors` in gating missing
+    /// detection for the whole root. The realistic trigger is a persistent
+    /// repository defect rather than a transient lock, so the alternative —
+    /// counting it and continuing — would risk the same row reading as
+    /// deleted on every subsequent scan rather than gating once.
+    pub lookup_failures: u64,
     /// Symlinks the walk saw and did not index. Canon indexes what a path
     /// holds, and a symlink holds a reference rather than content: following
     /// one would index the target twice, once under each path, and claim
@@ -164,6 +185,7 @@ impl ScanStats {
         self.hardlink_companions += root.hardlink_companions;
         self.moves_unverified += root.moves_unverified;
         self.walk_errors += root.walk_errors;
+        self.lookup_failures += root.lookup_failures;
         self.symlinks_skipped += root.symlinks_skipped;
         self.special_skipped += root.special_skipped;
     }
@@ -238,6 +260,12 @@ impl ScanStats {
             summary.push_str(&format!(
                 ", {} walk errors (missing detection skipped)",
                 self.walk_errors
+            ));
+        }
+        if self.lookup_failures > 0 {
+            summary.push_str(&format!(
+                ", {} row lookups failed (missing detection skipped)",
+                self.lookup_failures
             ));
         }
         if self.skipped > 0 {
@@ -547,6 +575,7 @@ mod tests {
             hardlink_companions: 11,
             moves_unverified: 12,
             walk_errors: 10,
+            lookup_failures: 16,
             hash_backlog: 13,
             symlinks_skipped: 14,
             special_skipped: 15,
@@ -573,6 +602,7 @@ mod tests {
             hardlink_companions,
             moves_unverified,
             walk_errors,
+            lookup_failures,
             hash_backlog,
             symlinks_skipped,
             special_skipped,
@@ -596,10 +626,11 @@ mod tests {
                 hardlink_companions,
                 moves_unverified,
                 walk_errors,
+                lookup_failures,
                 symlinks_skipped,
                 special_skipped
             ],
-            [2, 4, 6, 8, 10, 12, 14, 16, 18, 22, 24, 20, 28, 30]
+            [2, 4, 6, 8, 10, 12, 14, 16, 18, 22, 24, 20, 32, 28, 30]
         );
         // Set once from the hash pass after every root — what it did, how much
         // of that was debt, and what it left standing — never folded per root.

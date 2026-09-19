@@ -99,13 +99,11 @@ impl Reconciliation {
         matches!(self, Reconciliation::New | Reconciliation::Modified { .. })
     }
 
-    /// The source ID affected by this reconciliation, if any.
-    ///
-    /// Returns None for New files (no existing source ID yet).
-    ///
-    /// Note: Currently unused but kept as part of the complete domain API.
-    /// Provides a convenient accessor without pattern matching.
-    #[allow(dead_code)]
+    /// The present row this reconciliation would rewrite, if any. `New` has
+    /// none by construction — a path holding a row is never `New`. Used by the
+    /// walk-trust law's failed-write arm (`ops::pipeline::scan_root`) to name
+    /// the row a failed write endangers, since the reconciliation already
+    /// carries it and no lookup is owed.
     pub fn source_id(&self) -> Option<i64> {
         match self {
             Reconciliation::New => None,

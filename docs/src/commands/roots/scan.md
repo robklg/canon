@@ -109,6 +109,8 @@ The sources are marked as not present but remain in the database with their hash
 
 The decision is recorded against the folder it was aimed at, so [`canon trail`](../query/trail.md) shows it at that location rather than as a global decision.
 
+**A scan never concludes a file was deleted just because it could not read it.** A locked file, a permission change, or a brief network drop stops a scan from reading a path it already indexed, but that is not evidence the file is gone: the source keeps its record exactly as it stood, counted in the summary as `skipped (read errors)`, and is reported again on the next scan that can read it. Only a path genuinely absent from a directory the walk could fully list is ever marked missing.
+
 **Deletions are recorded.** Whether Canon infers a deletion by re-scanning a parent (files that were present but weren't seen this time) or you mark one directly with `--missing`, the disappearance is captured as [decision provenance](../../concepts/decisions.md): each vanished source is linked to the scan decision, and a **source-local receipt** listing exactly what was lost is written to `.canon-ledger/` on the affected storage. Add `--reason` to say why; the reason travels into both the record and the receipt:
 
 ```bash
@@ -179,7 +181,7 @@ Hashed 2 files (2 from backlog)
 1 sources remain unhashed (1 could not be read)
 ```
 
-The qualifier counts what is still in debt when the scan ends, so it is always part of the number in front of it, and it covers only files that hold no hash at all. Two neighbouring cases are reported elsewhere: a file that cannot be read during the walk never becomes a source, and appears as `skipped (read errors)` on the first line; and a file that `--verify` cannot re-read keeps the hash it already had, so it is not in debt and is reported only as a warning.
+The qualifier counts what is still in debt when the scan ends, so it is always part of the number in front of it, and it covers only files that hold no hash at all. Two neighbouring cases are reported elsewhere: a file that cannot be read during the walk never becomes a source, and appears as `skipped (read errors)` on the first line (see "Deletions are recorded" below for what happens to a file already indexed); and a file that `--verify` cannot re-read keeps the hash it already had, so it is not in debt and is reported only as a warning.
 
 Files that could not be read do not change the exit status: the non-zero exit is reserved for hash mismatches, which say something about the content rather than about access to it.
 

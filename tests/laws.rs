@@ -757,6 +757,14 @@ const LAWS: &[Law] = &[
         authority: Authority::Searched,
         record: "2026-08-29",
     },
+    Law {
+        name: "walk-trust",
+        owner: "scan/ops/pipeline.rs",
+        verifier: "an_unreadable_path_does_not_shield_the_roots_real_deletions",
+        reach: Reach::Unit("scan"),
+        authority: Authority::Recognised,
+        record: "2026-09-19",
+    },
 ];
 
 /// Names the matcher reads out of the prose that resolve to no row, each with
